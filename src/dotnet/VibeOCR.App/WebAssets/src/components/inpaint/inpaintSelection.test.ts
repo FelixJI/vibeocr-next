@@ -75,6 +75,18 @@ describe("selectionToNaturalRect", () => {
 });
 
 describe("preflightSelection", () => {
+  it("R7 checks the selected count rather than treating a mask ROI as solid", () => {
+    const rect = { x: 0, y: 0, width: 64, height: 48 };
+    expect(preflightSelection(rect, imageOf(64, 48), 64 * 48 - 100)).toEqual({
+      ok: true,
+      rect,
+    });
+    expect(preflightSelection(rect, imageOf(64, 48))).toMatchObject({
+      ok: false,
+      code: "mask-covers-image",
+    });
+  });
+
   it("rejects empty selections, whole-image masks, and budget overruns", () => {
     const image = imageOf(80, 40);
     expect(

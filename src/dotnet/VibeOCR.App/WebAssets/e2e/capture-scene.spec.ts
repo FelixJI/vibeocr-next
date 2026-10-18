@@ -403,12 +403,18 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
 
   // 马赛克弱/强：同一区域不同强度必须产生不同的真实导出字节。
   await page.getByRole("button", { name: "马赛克", exact: true }).click();
-  await page.getByLabel("马赛克与模糊强度").selectOption("1");
+  await page.getByLabel("马赛克与模糊强度").press("Home");
+  await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("1");
+  await page.getByLabel("马赛克与模糊强度").press("ArrowRight");
+  await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("1.1");
+  await page.getByLabel("马赛克与模糊强度").press("ArrowLeft");
+  await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("1");
   await mosaicRegion();
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(2);
   await page.getByRole("button", { name: "撤销" }).click();
-  await page.getByLabel("马赛克与模糊强度").selectOption("3");
+  await page.getByLabel("马赛克与模糊强度").press("End");
+  await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("3");
   await mosaicRegion();
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(3);

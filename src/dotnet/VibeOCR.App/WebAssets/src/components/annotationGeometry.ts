@@ -15,7 +15,10 @@ export type AnnotationTool =
    * store（强引用，不进历史/桥），旋转/镜像走局部变换。 */
   | "image"
   /** 识别排除区：只影响识别输入与显式屏蔽副本，不写入普通导出。 */
-  | "exclude";
+  | "exclude"
+  /** 纯色不透明遮挡：写入普通导出与识别输入的真实不透明像素，
+   * 与 exclude（仅识别语义）明确分离。 */
+  | "solid";
 
 export interface Point {
   readonly x: number;
@@ -40,8 +43,11 @@ export interface AnnotationStyle extends AnnotationTextStyle {
   readonly color?: string;
   readonly strokeWidth?: number;
   readonly fontSize?: number;
-  /** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强；决定块尺寸/滤波半径。 */
+  /** 马赛克/模糊强度：连续值 [1,3]，旧档位 1=弱、2=中（缺省）、3=强
+   * 为兼容锚点；决定块尺寸/滤波半径，创建时冻结、选中后可调。 */
   readonly intensity?: number;
+  /** 自由笔刷效果（马赛克/模糊）的笔刷直径（显示单位 px）。 */
+  readonly brushSize?: number;
   /** 边框/线条不透明度百分比 [0,100]；缺省 100（旧标记渲染完全不变）。
    * 荧光笔复用该值与自身 35% 透明相乘，不覆盖原透明语义。 */
   readonly strokeOpacity?: number;

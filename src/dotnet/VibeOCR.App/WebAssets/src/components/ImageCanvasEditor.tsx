@@ -10,6 +10,7 @@ import {
   Textarea,
   Toolbar,
   ToolbarButton,
+  useFocusableGroup,
 } from "@fluentui/react-components";
 import {
   useCallback,
@@ -112,13 +113,36 @@ import type {
 } from "./ResultImageTextOverlay";
 import { ToolbarIcon } from "./ToolbarIcon";
 import type { ToolbarIconName } from "./toolbarIconData";
-import type { InpaintRect, InpaintResponse } from "./inpaint/inpaint";
+import type {
+  InpaintMaskRequest,
+  InpaintRect,
+  InpaintResponse,
+} from "./inpaint/inpaint";
+import { INPAINT_MAX_TOTAL_PATCH_PIXELS } from "./inpaint/inpaint";
+import {
+  INPAINT_MAX_MASK_PIXELS,
+  INPAINT_MAX_ROI_PIXELS,
+} from "./inpaint/inpaint";
 import {
   describeInpaintFailure,
   naturalRectToDisplay,
   preflightSelection,
   selectionToNaturalRect,
 } from "./inpaint/inpaintSelection";
+import {
+  applyMaskBrush,
+  applyMaskRect,
+  maskBounds,
+  maskCount,
+  totalDistinctPatchPixels,
+  type InpaintMaskOpResult,
+  type InpaintMaskState,
+} from "./inpaint/inpaintMaskState";
+import type {
+  DuplicateCandidate,
+  DuplicateResponse,
+} from "./duplicate/duplicateMatch";
+import { DUPLICATE_MAX_IMAGE_PIXELS } from "./duplicate/duplicateMatch";
 
 /** 宿主回发的原位文字层状态（recognition.textLayer 投影）。 */
 export interface ScreenshotTextLayerState {
@@ -148,7 +172,13 @@ export interface ScreenshotTextLayerState {
 }
 
 type Tool =
-  "select" | "hand" | "textSelect" | AnnotationTool | "crop" | "inpaint";
+  | "select"
+  | "hand"
+  | "textSelect"
+  | AnnotationTool
+  | "crop"
+  | "inpaint"
+  | "dupmatch";
 
 /** 属性排样式变更：判别联合保证每个 kind 携带对应类型，无需盲转换。 */
 type StyleChange =
@@ -184,8 +214,10 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   numbering: "序号",
   image: "图片",
   exclude: "屏蔽",
+  solid: "遮挡",
   crop: "裁剪",
   inpaint: "去水印",
+  dupmatch: "重复匹配",
 };
 
 /** 图标语义需用户确认后才新增：直线/折线暂无矢量图标，用清晰文字按钮，
@@ -207,6 +239,7 @@ const TOOL_ICONS: Readonly<Partial<Record<Tool, ToolbarIconName>>> = {
   crop: "crop",
   inpaint: "inpaint",
 };
+// 遮挡/重复匹配为新增工具：未确认新图标，仅用清晰文字按钮。
 
 /** 下排属性 gating：仅当前工具真正消费的设置才展示（选择/手形/裁剪等
  * 无关设置不出现）。 */
@@ -224,6 +257,7 @@ const COLOR_TOOLS: readonly Tool[] = [
   "text",
   "numbering",
   "callout",
+  "solid",
 ];
 /** 线型（实/虚/点）属性适用的描边工具。 */
 const LINE_STYLE_TOOLS: readonly Tool[] = [
@@ -250,12 +284,14 @@ const TOOL_ORDER: readonly Tool[] = [
   "callout",
   "mosaic",
   "blur",
+  "solid",
   "pen",
   "highlighter",
   "numbering",
   "exclude",
   "crop",
   "inpaint",
+  "dupmatch",
 ];
 
 /** 编辑器用途：full=完整图片编辑（原工具集全量保留）；recognition=单次
@@ -301,6 +337,14 @@ interface ToolAttributes {
   readonly textStyle: AnnotationTextStyle;
   readonly numberStart: number;
   readonly intensity: number;
+  /** 马赛克/模糊绘制方式：矩形拖拽或自由笔刷。 */
+  readonly effectMode: "rect" | "brush";
+  /** 马赛克/模糊笔刷直径（px）；仅自由笔刷模式消费。 */
+  readonly brushSize: number;
+  /** 修补掩膜笔刷直径（px）；仅笔刷增/减模式消费。 */
+  readonly inpaintBrushSize: number;
+  /** 修补掩膜绘制方式：矩形/笔刷的增减。 */
+  readonly maskMode: InpaintMaskMode;
 }
 
 /** 工具属性默认值：与旧标记缺省渲染一致（实线/直角/开放单向箭头/空心）。 */
@@ -319,18 +363,72 @@ const DEFAULT_TOOL_ATTRIBUTES: ToolAttributes = {
   textStyle: { fontBold: false },
   numberStart: 1,
   intensity: 2,
+  effectMode: "rect",
+  brushSize: 24,
+  inpaintBrushSize: 20,
+  maskMode: "rect-add",
 };
 
-/** 马赛克/模糊强度档位：1=弱、2=中（缺省）、3=强。 */
-const EFFECT_INTENSITIES = [1, 2, 3] as const;
-const MOSAIC_CELLS: Readonly<Record<number, number>> = { 1: 8, 2: 14, 3: 26 };
-const BLUR_RADII: Readonly<Record<number, number>> = { 1: 5, 2: 10, 3: 20 };
+/** 马赛克/模糊强度：连续值 [1,3]，旧档位 1=弱、2=中（缺省）、3=强为
+ * 兼容锚点；非有限值回退默认 2。 */
+const EFFECT_INTENSITY_MIN = 1;
+const EFFECT_INTENSITY_MAX = 3;
+const EFFECT_INTENSITY_STEP = 0.1;
+/** 连续强度锚点间的分段线性插值：预览/导出/强度显示同一函数，
+ * 保证显示与像素一致；旧 1/2/3 档位渲染不变。 */
+function interpolateAnchor(
+  value: number,
+  stops: readonly [number, number, number],
+): number {
+  if (value <= 1) return stops[0]!;
+  if (value >= 3) return stops[2]!;
+  if (value <= 2) return stops[0]! + (value - 1) * (stops[1]! - stops[0]!);
+  return stops[1]! + (value - 2) * (stops[2]! - stops[1]!);
+}
 
-/** 标记携带的强度档位：非 1/3 的历史值一律回退到默认 2。 */
+/** 连续强度 → 马赛克块尺寸：1→8、2→14、3→26，中间分段线性。 */
+function mosaicCellSize(intensity: number): number {
+  return interpolateAnchor(intensity, [8, 14, 26]);
+}
+
+/** 连续强度 → 模糊半径：1→5、2→10、3→20，中间分段线性。 */
+function blurRadius(intensity: number): number {
+  return interpolateAnchor(intensity, [5, 10, 20]);
+}
+
+/** 标记携带的强度：夹到 [1,3] 并保留一位小数；非法值回退默认 2。 */
 function markEffectIntensity(mark: Mark): number {
   const value = mark.style?.intensity;
-  return value === 1 || value === 3 ? value : 2;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 2;
+  return Math.round(Math.min(3, Math.max(1, value)) * 10) / 10;
 }
+
+/** 强度显示标签：锚点用旧档位名，中间值显示数值，与像素同源。 */
+function intensityLabel(value: number): string {
+  if (value === 1) return "1.0 弱";
+  if (value === 2) return "2.0 中";
+  if (value === 3) return "3.0 强";
+  return value.toFixed(1);
+}
+
+/** 笔刷直径档位（px）。 */
+const EFFECT_BRUSH_SIZES = [12, 24, 40, 64] as const;
+/** 修补掩膜笔刷直径档位（px）：与效果笔刷独立记忆。 */
+const INPAINT_BRUSH_SIZES = [10, 20, 36, 60] as const;
+const DEFAULT_SOLID_COLOR = "#000000";
+
+/** 修补掩膜绘制方式：矩形/笔刷 × 添加/移除。 */
+type InpaintMaskMode =
+  "rect-add" | "rect-remove" | "brush-add" | "brush-remove";
+const INPAINT_MASK_MODES: readonly {
+  readonly value: InpaintMaskMode;
+  readonly label: string;
+}[] = [
+  { value: "rect-add", label: "框选添加" },
+  { value: "rect-remove", label: "框选移除" },
+  { value: "brush-add", label: "笔刷添加" },
+  { value: "brush-remove", label: "笔刷移除" },
+];
 
 /** 数值输入提交：仅 0-100 整数生效；空/越界/非整数丢弃，不意外写 0。 */
 function commitOpacityInput(
@@ -427,6 +525,17 @@ export interface InpaintDrawLayer {
     readonly canvas: HTMLCanvasElement;
   };
   readonly selection?: { readonly start: Point; readonly end: Point };
+  /** 未提交修补掩膜叠加层（原图空间，绿色提示）：仅编辑预览，不入导出。 */
+  readonly maskOverlay?: {
+    readonly rect: InpaintRect;
+    readonly canvas: HTMLCanvasElement;
+  };
+  /** 重复匹配候选叠加层（原图空间）：仅编辑预览，不入导出。 */
+  readonly duplicateOverlay?: readonly {
+    readonly rect: InpaintRect;
+    readonly accepted: boolean;
+    readonly label: string;
+  }[];
 }
 
 /** 编辑器发出的会话/导出命令 scope：同一命令形状在两个宿主 feature 上
@@ -1081,7 +1190,14 @@ export function ImageCanvasEditor({
   /** 任意工具的属性记忆（含默认回退）：选中标记按其所属工具恢复，
    * 不受当前选择工具影响。 */
   function attributesOfTool(name: Tool): ToolAttributes {
-    return { ...DEFAULT_TOOL_ATTRIBUTES, ...toolAttributes[name] };
+    return {
+      ...DEFAULT_TOOL_ATTRIBUTES,
+      // 遮挡默认黑色（不透明遮挡敏感内容），其余工具保持旧默认色。
+      ...(name === "solid" && !toolAttributes[name]?.color
+        ? { color: DEFAULT_SOLID_COLOR }
+        : {}),
+      ...toolAttributes[name],
+    };
   }
   const activeToolAttributes = attributesOfTool(tool);
   const toolAttributesRef = useRef(toolAttributes);
@@ -1134,6 +1250,8 @@ export function ImageCanvasEditor({
         image: HTMLImageElement | undefined;
         crop: EditorState["crop"];
         preview: InpaintDrawLayer["preview"];
+        maskOverlay: InpaintDrawLayer["maskOverlay"];
+        duplicateOverlay: InpaintDrawLayer["duplicateOverlay"];
         format: OutputImageFormat;
         markCount: number;
       }
@@ -1208,6 +1326,67 @@ export function ImageCanvasEditor({
   const inpaintGenerationRef = useRef(0);
   const inpaintPatchStore = useRef(new Map<number, HTMLCanvasElement>());
   const inpaintPatchIdRef = useRef(0);
+  // 修补二值掩膜（原图空间）：矩形/笔刷增减共同维护；掩膜像素量
+  // ≤1MP，仅“预览修补→应用”链路消费，不入历史。
+  const [inpaintMask, setInpaintMask] = useState<
+    InpaintMaskState | undefined
+  >();
+  // 同步基线供同一事件中的取消、批量涂抹和预览消费。
+  const inpaintMaskRef = useRef<InpaintMaskState | undefined>(undefined);
+  const pendingMaskFrame = useRef<number | undefined>(undefined);
+  // 掩膜叠加层（绿色提示画布，尺寸 = ROI）：随掩膜变化重建。
+  const inpaintMaskOverlay = useMemo(() => {
+    if (!inpaintMask) return undefined;
+    const canvas = document.createElement("canvas");
+    canvas.width = inpaintMask.rect.width;
+    canvas.height = inpaintMask.rect.height;
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    // 环境（如测试 stub）可能不提供 ImageData：叠加层只是预览提示，
+    // 拿不到像素缓冲就跳过，不影响掩膜/修补未提交语义。
+    const image = context.createImageData(canvas.width, canvas.height);
+    if (!image || !image.data) return undefined;
+    for (let i = 0; i < inpaintMask.data.length; i += 1) {
+      if ((inpaintMask.data[i] ?? 0) === 0) continue;
+      image.data[i * 4] = 18;
+      image.data[i * 4 + 1] = 161;
+      image.data[i * 4 + 2] = 80;
+      image.data[i * 4 + 3] = 96;
+    }
+    context.putImageData(image, 0, 0);
+    return { rect: inpaintMask.rect, canvas };
+  }, [inpaintMask]);
+  // 掩膜笔刷拖拽中的采样点（显示空间→操作时映射原图）：不入历史。
+  const inpaintBrushPoints = useRef<Point[]>([]);
+  // 重复内容匹配（AC3）：候选仅存在于组件状态，确认前不修改内容。
+  const dupmatchDraft = useRef<{ start: Point; end: Point } | undefined>(
+    undefined,
+  );
+  const [dupmatchSelection, setDupmatchSelection] = useState<
+    { start: Point; end: Point } | undefined
+  >();
+  // 与掩膜相同：异步导入消费同步选区，不能读解码开始时的闭包。
+  const dupmatchSelectionRef = useRef<typeof dupmatchSelection>(undefined);
+  const [dupmatchBusy, setDupmatchBusy] = useState(false);
+  const [dupmatchCandidates, setDupmatchCandidates] = useState<
+    readonly DuplicateCandidate[] | undefined
+  >();
+  const [dupmatchAccepted, setDupmatchAccepted] = useState<
+    readonly boolean[] | undefined
+  >(undefined);
+  const dupmatchWorkerRef = useRef<Worker | undefined>(undefined);
+  const dupmatchGenerationRef = useRef(0);
+  const dupmatchFrozenRef = useRef<
+    | {
+        readonly key: string;
+        readonly sessionId: string | undefined;
+        readonly contentVersion: number;
+        readonly image: HTMLImageElement;
+        readonly selection?: { readonly start: Point; readonly end: Point };
+        readonly generation?: number;
+      }
+    | undefined
+  >(undefined);
   // 对象拖拽预览覆盖：按 id 覆盖拖动中的对象（缩放/端点/整选区平移共用），
   // 记录开始修订，提交前校验防止串入过期状态。
   const objectDraftRef = useRef<
@@ -1278,6 +1457,23 @@ export function ImageCanvasEditor({
     setInpaintSelection(undefined);
     setInpaintPreview(undefined);
     setInpaintBusy(false);
+    inpaintMaskRef.current = undefined;
+    setInpaintMask(undefined);
+    inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
+    // 重复匹配状态同样绑定源与会话：一并作废。
+    dupmatchGenerationRef.current += 1;
+    dupmatchWorkerRef.current?.terminate();
+    dupmatchWorkerRef.current = undefined;
+    dupmatchFrozenRef.current = undefined;
+    dupmatchDraft.current = undefined;
+    dupmatchSelectionRef.current = undefined;
+    setDupmatchSelection(undefined);
+    setDupmatchCandidates(undefined);
+    setDupmatchAccepted(undefined);
+    setDupmatchBusy(false);
   }
   const resetResourcesKey = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
@@ -1365,7 +1561,11 @@ export function ImageCanvasEditor({
 
   // 同会话内宿主回显修订时单调对齐本地计数，避免回退。
   useEffect(() => {
-    if (session && sessionIdRef.current === session.sessionId) {
+    if (
+      session &&
+      sessionIdRef.current === session.sessionId &&
+      typeof session.revision === "number"
+    ) {
       contentRevisionRef.current = Math.max(
         contentRevisionRef.current,
         session.revision,
@@ -1467,12 +1667,55 @@ export function ImageCanvasEditor({
         );
       }
     }
+    // 重复匹配叠加层：拖拽/源选区 + 候选框（原图空间，随旋转变换）。
+    let duplicateOverlay: InpaintDrawLayer["duplicateOverlay"];
+    if (
+      tool === "dupmatch" &&
+      imageForLayer &&
+      displayCanvas &&
+      imageForLayer.naturalWidth > 0 &&
+      imageForLayer.naturalHeight > 0
+    ) {
+      const displaySize = canvasSize(displayCanvas);
+      const entries: {
+        rect: InpaintRect;
+        accepted: boolean;
+        label: string;
+      }[] = [];
+      const pending = dupmatchDraft.current ?? dupmatchSelection;
+      if (pending) {
+        const rect = selectionToNaturalRect(
+          pending.start,
+          pending.end,
+          imageForLayer,
+          state.rotation,
+          displaySize,
+        );
+        if (rect.width > 0 && rect.height > 0) {
+          entries.push({
+            rect,
+            accepted: true,
+            label: dupmatchCandidates ? "源" : "",
+          });
+        }
+      }
+      dupmatchCandidates?.forEach((candidate, index) => {
+        entries.push({
+          rect: candidate,
+          accepted: dupmatchAccepted?.[index] ?? true,
+          label: `候选${index + 1}`,
+        });
+      });
+      duplicateOverlay = entries.length > 0 ? entries : undefined;
+    }
     return {
       patches: appliedInpaintPatches(),
       preview: preview
         ? { rect: preview.naturalRect, canvas: preview.canvas }
         : undefined,
       selection,
+      maskOverlay: inpaintPreview ? undefined : inpaintMaskOverlay,
+      duplicateOverlay,
     };
   }
 
@@ -1481,6 +1724,10 @@ export function ImageCanvasEditor({
       if (pendingDraw.current !== undefined)
         cancelAnimationFrame(pendingDraw.current);
       pendingDraw.current = undefined;
+      if (pendingMaskFrame.current !== undefined)
+        cancelAnimationFrame(pendingMaskFrame.current);
+      pendingMaskFrame.current = undefined;
+      inpaintBrushPoints.current = [];
       previewCache.current = undefined;
       delete canvasRef.current?.dataset.frameReady;
     },
@@ -1489,146 +1736,174 @@ export function ImageCanvasEditor({
   useLayoutEffect(() => {
     // 保留已排队的帧，只替换绘制内容，避免连续 pointermove 饿死绘制。
     latestDraw.current = () => {
-      const canvas = canvasRef.current;
-      if (!canvas || layerReady) return;
-      if (captureScene && !canvas.getContext("2d")) {
-        presentation.current?.fail("draw");
-        return;
-      }
-      const image = imageRef.current;
-      const offscreen = new Set(
-        state.marks
-          .filter((mark) =>
-            markOffscreen(
-              mark,
-              canvasSize(canvas),
-              canvas.getContext("2d") ?? undefined,
-            ),
-          )
-          .map((mark) => mark.id),
-      );
-      setOffscreenIds((current) =>
-        current.size === offscreen.size &&
-        [...current].every((id) => offscreen.has(id))
-          ? current
-          : offscreen,
-      );
-      const layer = currentInpaintLayer();
-      const crop = cropDraft.current ? undefined : state.crop;
-      const renderedState = crop === state.crop ? state : { ...state, crop };
-      // Only the unchanged prefix is cached: moving a mark must also recompute
-      // all later mosaic/blur marks that sample its pixels. Never cache exports.
-      const draftIds = objectDraftRef.current?.byId.keys() ?? [];
-      let markCount = state.marks.length;
-      for (const id of [...selectedIds, ...draftIds]) {
-        const index = state.marks.findIndex((mark) => mark.id === id);
-        if (index >= 0 && index < markCount) markCount = index;
-      }
-      let cached = previewCache.current;
-      if (canvas.width * canvas.height <= 16_000_000) {
-        if (
-          !cached ||
-          cached.state !== state ||
-          cached.image !== image ||
-          cached.crop !== crop ||
-          cached.preview?.canvas !== layer.preview?.canvas ||
-          cached.format !== outputFormat ||
-          cached.markCount !== markCount ||
-          cached.canvas.width !== canvas.width ||
-          cached.canvas.height !== canvas.height
-        ) {
-          const base = cached?.canvas ?? document.createElement("canvas");
-          base.width = canvas.width;
-          base.height = canvas.height;
-          Object.assign(base.dataset, canvas.dataset);
-          draw(
-            base,
-            image,
-            renderedState,
-            undefined,
-            state.marks.slice(0, markCount),
-            true,
-            1,
-            outputFormat === "image/jpeg" ? "#ffffff" : undefined,
-            false,
-            { patches: layer.patches, preview: layer.preview },
-            undefined,
-            false,
-            importAssetsRef.current,
-          );
-          cached = {
-            canvas: base,
-            state,
-            image,
-            crop,
-            preview: layer.preview,
-            format: outputFormat,
-            markCount,
-          };
-          previewCache.current = cached;
-        }
-      } else {
-        cached = undefined;
-        previewCache.current = undefined;
-      }
-      draw(
-        canvasRef.current,
-        imageRef.current,
-        // 拖动裁剪时保留完整画面，只更新遮罩；松开后提交实际裁剪。
-        renderedState,
-        selectedIds,
-        objectDraftRef.current
-          ? state.marks.map(
-              (mark) => objectDraftRef.current!.byId.get(mark.id) ?? mark,
-            )
-          : textEdit
-            ? state.marks.map((mark) =>
-                mark.id === textEdit.id ? textEdit.mark : mark,
-              )
-            : draftMark.current
-              ? [...state.marks, draftMark.current]
-              : state.marks,
-        true,
-        1,
-        // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
-        // 工作区 CSS 背景衬托，不把深色烧进图像内容。
-        outputFormat === "image/jpeg" ? "#ffffff" : undefined,
-        false,
-        layer,
-        cached,
-        true,
-        importAssetsRef.current,
-      );
-      if (cropDraft.current) {
-        drawCropPreview(canvas, cropDraft.current);
-      } else if (captureGeometry && !layerReady) {
-        // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
-        drawSceneCropHandles(canvas, state.crop);
-      }
-      if (marqueeRef.current) {
-        // 空白框选草稿：蓝色虚线实时反馈包含范围。
-        const marqueeContext = canvas.getContext("2d");
-        const area = clampRect(
-          normalizedRect(marqueeRef.current),
-          canvasSize(canvas),
+      try {
+        validateBrushBudget(
+          imageRef.current,
+          canvasRef.current,
+          draftMark.current
+            ? { ...state, marks: [...state.marks, draftMark.current] }
+            : state,
         );
-        if (marqueeContext && (area.width > 0 || area.height > 0)) {
-          marqueeContext.save();
-          marqueeContext.setLineDash([6, 4]);
-          marqueeContext.lineWidth = 1.5;
-          marqueeContext.strokeStyle = "#1f6feb";
-          marqueeContext.strokeRect(area.x, area.y, area.width, area.height);
-          marqueeContext.restore();
+
+        const canvas = canvasRef.current;
+        if (!canvas || layerReady) return;
+        if (captureScene && !canvas.getContext("2d")) {
+          presentation.current?.fail("draw");
+          return;
         }
-      }
-      if (
-        image &&
-        image.naturalWidth > 0 &&
-        image.naturalHeight > 0 &&
-        canvas.getContext("2d")
-      ) {
-        canvas.dataset.frameReady = "true";
-        presentation.current?.sourceDrawn();
+        const image = imageRef.current;
+        const offscreen = new Set(
+          state.marks
+            .filter((mark) =>
+              markOffscreen(
+                mark,
+                canvasSize(canvas),
+                canvas.getContext("2d") ?? undefined,
+              ),
+            )
+            .map((mark) => mark.id),
+        );
+        setOffscreenIds((current) =>
+          current.size === offscreen.size &&
+          [...current].every((id) => offscreen.has(id))
+            ? current
+            : offscreen,
+        );
+        const layer = currentInpaintLayer();
+        const crop = cropDraft.current ? undefined : state.crop;
+        const renderedState = crop === state.crop ? state : { ...state, crop };
+        // Only the unchanged prefix is cached: moving a mark must also recompute
+        // all later mosaic/blur marks that sample its pixels. Never cache exports.
+        const draftIds = objectDraftRef.current?.byId.keys() ?? [];
+        let markCount = state.marks.length;
+        for (const id of [...selectedIds, ...draftIds]) {
+          const index = state.marks.findIndex((mark) => mark.id === id);
+          if (index >= 0 && index < markCount) markCount = index;
+        }
+        let cached = previewCache.current;
+        if (canvas.width * canvas.height <= 16_000_000) {
+          if (
+            !cached ||
+            cached.state !== state ||
+            cached.image !== image ||
+            cached.crop !== crop ||
+            cached.preview?.canvas !== layer.preview?.canvas ||
+            cached.maskOverlay?.canvas !== layer.maskOverlay?.canvas ||
+            cached.duplicateOverlay !== layer.duplicateOverlay ||
+            cached.format !== outputFormat ||
+            cached.markCount !== markCount ||
+            cached.canvas.width !== canvas.width ||
+            cached.canvas.height !== canvas.height
+          ) {
+            const base = cached?.canvas ?? document.createElement("canvas");
+            base.width = canvas.width;
+            base.height = canvas.height;
+            Object.assign(base.dataset, canvas.dataset);
+            draw(
+              base,
+              image,
+              renderedState,
+              undefined,
+              state.marks.slice(0, markCount),
+              true,
+              1,
+              outputFormat === "image/jpeg" ? "#ffffff" : undefined,
+              false,
+              {
+                patches: layer.patches,
+                preview: layer.preview,
+                maskOverlay: layer.maskOverlay,
+                duplicateOverlay: layer.duplicateOverlay,
+              },
+              undefined,
+              false,
+              importAssetsRef.current,
+            );
+            cached = {
+              canvas: base,
+              state,
+              image,
+              crop,
+              preview: layer.preview,
+              maskOverlay: layer.maskOverlay,
+              duplicateOverlay: layer.duplicateOverlay,
+              format: outputFormat,
+              markCount,
+            };
+            previewCache.current = cached;
+          }
+        } else {
+          cached = undefined;
+          previewCache.current = undefined;
+        }
+        draw(
+          canvasRef.current,
+          imageRef.current,
+          // 拖动裁剪时保留完整画面，只更新遮罩；松开后提交实际裁剪。
+          renderedState,
+          selectedIds,
+          objectDraftRef.current
+            ? state.marks.map(
+                (mark) => objectDraftRef.current!.byId.get(mark.id) ?? mark,
+              )
+            : textEdit
+              ? state.marks.map((mark) =>
+                  mark.id === textEdit.id ? textEdit.mark : mark,
+                )
+              : draftMark.current
+                ? [...state.marks, draftMark.current]
+                : state.marks,
+          true,
+          1,
+          // 预览与导出一致：JPEG 显式白底合成；PNG 不填底色，透明由
+          // 工作区 CSS 背景衬托，不把深色烧进图像内容。
+          outputFormat === "image/jpeg" ? "#ffffff" : undefined,
+          false,
+          layer,
+          cached,
+          true,
+          importAssetsRef.current,
+        );
+        if (cropDraft.current) {
+          drawCropPreview(canvas, cropDraft.current);
+        } else if (captureGeometry && !layerReady) {
+          // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
+          drawSceneCropHandles(canvas, state.crop);
+        }
+        if (marqueeRef.current) {
+          // 空白框选草稿：蓝色虚线实时反馈包含范围。
+          const marqueeContext = canvas.getContext("2d");
+          const area = clampRect(
+            normalizedRect(marqueeRef.current),
+            canvasSize(canvas),
+          );
+          if (marqueeContext && (area.width > 0 || area.height > 0)) {
+            marqueeContext.save();
+            marqueeContext.setLineDash([6, 4]);
+            marqueeContext.lineWidth = 1.5;
+            marqueeContext.strokeStyle = "#1f6feb";
+            marqueeContext.strokeRect(area.x, area.y, area.width, area.height);
+            marqueeContext.restore();
+          }
+        }
+        if (
+          image &&
+          image.naturalWidth > 0 &&
+          image.naturalHeight > 0 &&
+          canvas.getContext("2d")
+        ) {
+          canvas.dataset.frameReady = "true";
+          presentation.current?.sourceDrawn();
+        }
+      } catch (error) {
+        previewCache.current = undefined;
+        if (presentation.current) presentation.current.fail("draw");
+        else
+          setOperationMessage(
+            error instanceof Error
+              ? error.message
+              : "图片预览失败，请减小笔刷范围后重试。",
+          );
       }
     };
     if (!layerReady) scheduleDraw();
@@ -1827,6 +2102,11 @@ export function ImageCanvasEditor({
           draftMark.current ||
           cropDraft.current ||
           inpaintDraft.current ||
+          inpaintMaskRef.current ||
+          inpaintBrushPoints.current.length > 0 ||
+          dupmatchDraft.current ||
+          dupmatchSelectionRef.current ||
+          dupmatchFrozenRef.current ||
           moveDragRef.current ||
           markDragRef.current ||
           objectDraftRef.current ||
@@ -1904,11 +2184,22 @@ export function ImageCanvasEditor({
               descriptor2.resourceUri,
             );
         }
+        if (
+          !commitRef.current({
+            ...state,
+            marks: [...state.marks, ...imported],
+          })
+        ) {
+          // 未写入历史的资产仍归暂存批次：撤销本地登记，由 rejectImport
+          // 精确回收宿主资源；不能 ack 或用成功反馈覆盖预算错误。
+          for (const decoded of decodedImages) {
+            importAssetsRef.current.delete(decoded.assetId);
+            importAssetUrlsRef.current.delete(decoded.assetId);
+          }
+          rejectImport();
+          return;
+        }
         cancelDrawingRef.current();
-        commitRef.current({
-          ...state,
-          marks: [...state.marks, ...imported],
-        });
         setObjectSelection({
           ids: new Set(imported.map((mark) => mark.id)),
           primary: imported[imported.length - 1]?.id,
@@ -1958,6 +2249,7 @@ export function ImageCanvasEditor({
     importMountedRef.current = true;
     const store = inpaintPatchStore.current;
     const workerRef = inpaintWorkerRef;
+    const dupWorkerRef = dupmatchWorkerRef;
     return () => {
       importMountedRef.current = false;
       // StrictMode 的探测卸载会立即重新挂载；仅真实退役才释放宿主资源。
@@ -1967,6 +2259,9 @@ export function ImageCanvasEditor({
       inpaintGenerationRef.current += 1;
       workerRef.current?.terminate();
       workerRef.current = undefined;
+      dupmatchGenerationRef.current += 1;
+      dupWorkerRef.current?.terminate();
+      dupWorkerRef.current = undefined;
       store.clear();
     };
   }, []);
@@ -2103,12 +2398,21 @@ export function ImageCanvasEditor({
     currentLayerKey,
   ]);
 
-  function commit(next: EditorState) {
+  function commit(next: EditorState): boolean {
+    try {
+      validateBrushBudget(imageRef.current, canvasRef.current, next);
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "笔刷效果预算检查失败",
+      );
+      return false;
+    }
     setHistory((current) => [...current.slice(0, historyIndex + 1), next]);
     setHistoryIndex((current) => current + 1);
     // 提交后剔除已不存在对象的选择；主选失效时回退到剩余集合的顶层。
     pruneSelection(next.marks);
     notifyContentRevision();
+    return true;
   }
 
   /** 按存活 id 裁剪选择：撤销/删除/清除后的悬空 id 不再命中任何对象。 */
@@ -2136,6 +2440,7 @@ export function ImageCanvasEditor({
     // 任何内容变化（含应用修补本身）都作废未提交的去水印预览/选区与
     // 在途请求：迟到结果绝不追认提交。
     cancelInpaintPending();
+    cancelDupmatchPending();
     const currentSession = sessionIdRef.current;
     if (!currentSession) return;
     void actions.run({
@@ -2145,7 +2450,7 @@ export function ImageCanvasEditor({
     });
   }
 
-  /** 作废未提交的去水印工作状态：终止 Worker、推进代数、清空预览/选区。 */
+  /** 作废未提交的去水印工作状态：终止 Worker、推进代数、清空预览/选区/掩膜。 */
   function cancelInpaintPending(message?: string) {
     inpaintGenerationRef.current += 1;
     if (inpaintWorkerRef.current) {
@@ -2156,60 +2461,185 @@ export function ImageCanvasEditor({
     setInpaintSelection(undefined);
     setInpaintPreview(undefined);
     setInpaintBusy(false);
+    inpaintMaskRef.current = undefined;
+    setInpaintMask(undefined);
+    inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
     if (message) setOperationMessage(message);
   }
 
-  /** 用当前基线（原图 + 已应用补丁）发起 CPU Worker 修补预览。 */
-  function startInpaintPreview() {
-    if (inpaintBusy || inpaintPreview) return;
+  /** 基线合成（原图 + 已应用补丁）到原图尺寸离屏画布：修补/重复匹配
+   * 共用同一输入；透明/已修补像素一起作为基线。 */
+  function composeBaseline(
+    image: HTMLImageElement,
+  ):
+    | { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D }
+    | undefined {
+    const base = document.createElement("canvas");
+    base.width = image.naturalWidth;
+    base.height = image.naturalHeight;
+    const context = base.getContext("2d", { willReadFrequently: true });
+    if (!context) return undefined;
+    context.drawImage(image, 0, 0);
+    for (const patch of state.patches ?? []) {
+      const stored = inpaintPatchStore.current.get(patch.id);
+      if (!stored) continue;
+      // 替换式叠加：先清除该矩形再写入补丁像素，二次修补的输入不含
+      // 旧像素残留，补丁自身的半透明 alpha 也原样保留。
+      context.clearRect(patch.x, patch.y, patch.width, patch.height);
+      context.drawImage(stored, patch.x, patch.y);
+    }
+    return { canvas: base, context };
+  }
+
+  /** 掩膜增/减统一入口：越预算时显式提示并保留原掩膜。 */
+  function runMaskOperation(
+    result: InpaintMaskOpResult,
+    successMessage?: string,
+  ): void {
+    if (!result.ok) {
+      const message =
+        result.reason === "roi-budget"
+          ? `修补掩膜工作区超过 ${(INPAINT_MAX_ROI_PIXELS / 1_000_000).toFixed(0)}MP 上限，请分多次修补较小区域。`
+          : result.reason === "mask-budget"
+            ? `修补掩膜有效像素超过 ${(INPAINT_MAX_MASK_PIXELS / 1_000_000).toFixed(0)}MP 上限，请分多次修补较小区域。`
+            : "笔刷轨迹过长，超出修补掩膜工作量预算；请分段涂抹。";
+      setOperationMessage(message);
+      return;
+    }
+    inpaintMaskRef.current = result.state;
+    setInpaintMask(result.state);
+    if (successMessage) setOperationMessage(successMessage);
+  }
+
+  /** 显示空间拖拽/选区 → 原图空间矩形掩膜操作。 */
+  function applySelectionToMask(
+    selection: { start: Point; end: Point },
+    add: boolean,
+  ): void {
     const image = imageRef.current;
     const canvas = canvasRef.current;
-    const selection = inpaintSelection;
     if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
-      setOperationMessage("图片尚未解码完成，无法修补；请稍后重试。");
+      setOperationMessage("图片尚未解码完成，无法编辑修补掩膜。");
       return;
     }
-    if (!selection) {
-      setOperationMessage("请先拖拽框选要去水印的区域。");
-      return;
-    }
-    if (typeof Worker !== "function") {
-      setOperationMessage("当前环境不支持本地修补，当前图片未被修改。");
-      return;
-    }
-    const displaySize = canvasSize(canvas);
     const rect = selectionToNaturalRect(
       selection.start,
       selection.end,
       image,
       state.rotation,
-      displaySize,
+      canvasSize(canvas),
     );
-    const preflight = preflightSelection(rect, image);
+    runMaskOperation(
+      applyMaskRect(
+        inpaintMaskRef.current,
+        rect,
+        { width: image.naturalWidth, height: image.naturalHeight },
+        add,
+      ),
+      add
+        ? "已框选修补区域；可继续增减掩膜，或点击“预览修补”查看效果。"
+        : "已从修补掩膜移除框选区域。",
+    );
+  }
+
+  /** 掩膜笔刷拖拽：显示空间点列按当前旋转变换到原图空间后 stamp。 */
+  function paintMaskBrush(points: readonly Point[], add: boolean): void {
+    if (points.length === 0) return;
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      setOperationMessage("图片尚未解码完成，无法编辑修补掩膜。");
+      return;
+    }
+    const displaySize = canvasSize(canvas);
+    const naturalPoints = points.map((at) =>
+      projectPoint(at, image, state.rotation, displaySize, 0, {
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      }),
+    );
+    runMaskOperation(
+      applyMaskBrush(
+        inpaintMaskRef.current,
+        naturalPoints,
+        activeToolAttributes.inpaintBrushSize /
+          2 /
+          imageTransform(image, state.rotation, displaySize).scale,
+        {
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        },
+        add,
+      ),
+    );
+  }
+
+  /** 帧内保留全部轨迹点，仅在帧边界复制 ROI、计数及重建叠加层。 */
+  function flushMaskBrush(): void {
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
+    const points = inpaintBrushPoints.current;
+    if (!points.length) return;
+    inpaintBrushPoints.current = [points[points.length - 1]!];
+    paintMaskBrush(points, activeToolAttributes.maskMode === "brush-add");
+  }
+
+  function queueMaskBrush(at: Point): void {
+    inpaintBrushPoints.current.push(at);
+    if (pendingMaskFrame.current !== undefined) return;
+    pendingMaskFrame.current = requestAnimationFrame(() => {
+      pendingMaskFrame.current = undefined;
+      flushMaskBrush();
+    });
+  }
+
+  /** 用当前基线（原图 + 已应用补丁）与二值掩膜发起 CPU Worker 修补预览。 */
+  function startInpaintPreview() {
+    if (inpaintBusy || inpaintPreview) return;
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      setOperationMessage("图片尚未解码完成，无法修补；请稍后重试。");
+      return;
+    }
+    // 只有成功添加的有效掩膜可预览；拖拽移除区不是待修补区域。
+    flushMaskBrush();
+    const maskState = inpaintMaskRef.current;
+    if (!maskState) {
+      setOperationMessage("修补掩膜为空，请先添加要修补的区域。");
+      return;
+    }
+    const preflight = preflightSelection(
+      maskState.rect,
+      image,
+      maskCount(maskState),
+    );
     if (!preflight.ok) {
       setOperationMessage(
         describeInpaintFailure(preflight.code, preflight.message),
       );
       return;
     }
+    const rect = maskBounds(maskState);
+    if (!rect) {
+      setOperationMessage("修补掩膜为空，请先框选或涂抹要修补的区域。");
+      return;
+    }
+    if (typeof Worker !== "function") {
+      setOperationMessage("当前环境不支持本地修补，当前图片未被修改。");
+      return;
+    }
     // 基线合成到原图尺寸离屏画布：透明/已修补像素一起作为修补输入。
-    const base = document.createElement("canvas");
-    base.width = image.naturalWidth;
-    base.height = image.naturalHeight;
-    const baseContext = base.getContext("2d", { willReadFrequently: true });
-    if (!baseContext) {
+    const composed = composeBaseline(image);
+    if (!composed) {
       setOperationMessage("无法读取画布像素，修补未开始。");
       return;
     }
-    baseContext.drawImage(image, 0, 0);
-    for (const patch of state.patches ?? []) {
-      const stored = inpaintPatchStore.current.get(patch.id);
-      if (!stored) continue;
-      // 替换式叠加：先清除该矩形再写入补丁像素，二次修补的输入不含
-      // 旧像素残留，补丁自身的半透明 alpha 也原样保留。
-      baseContext.clearRect(patch.x, patch.y, patch.width, patch.height);
-      baseContext.drawImage(stored, patch.x, patch.y);
-    }
+    const { canvas: base, context: baseContext } = composed;
     const pixels = baseContext.getImageData(0, 0, base.width, base.height);
     const generation = inpaintGenerationRef.current + 1;
     inpaintGenerationRef.current = generation;
@@ -2227,12 +2657,30 @@ export function ImageCanvasEditor({
       return;
     }
     inpaintWorkerRef.current = worker;
+    // 掩膜收敛到紧致包围盒：请求 ROI 即补丁矩形，掩膜数据重建为紧致
+    // 拷贝后 transfer；本地掩膜保留供继续增减，迟到响应按代数丢弃。
+    const roiMask = new Uint8Array(rect.width * rect.height);
+    for (let y = 0; y < rect.height; y += 1) {
+      for (let x = 0; x < rect.width; x += 1) {
+        const sx = rect.x - maskState.rect.x + x;
+        const sy = rect.y - maskState.rect.y + y;
+        if (
+          sx < 0 ||
+          sy < 0 ||
+          sx >= maskState.rect.width ||
+          sy >= maskState.rect.height
+        )
+          continue;
+        roiMask[y * rect.width + x] =
+          maskState.data[sy * maskState.rect.width + sx] ?? 0;
+      }
+    }
     const frozen = {
       key: currentKeyRef.current,
       sessionId: sessionIdRef.current,
       contentVersion: contentRevisionRef.current,
       image,
-      selection,
+      mask: maskState,
       generation,
     };
     worker.onmessage = (event: MessageEvent<InpaintResponse>) => {
@@ -2250,9 +2698,9 @@ export function ImageCanvasEditor({
         );
         return;
       }
-      if (frozen.selection !== inpaintSelectionRef.current) {
+      if (frozen.mask !== inpaintMaskRef.current) {
         setInpaintBusy(false);
-        setOperationMessage("选区已变化，本次修补结果已丢弃；请重新预览。");
+        setOperationMessage("掩膜已变化，本次修补结果已丢弃；请重新预览。");
         return;
       }
       if (!response.ok) {
@@ -2315,31 +2763,311 @@ export function ImageCanvasEditor({
       "正在本地修补选中区域……期间可取消，当前图片不会被修改。",
     );
     const buffer = pixels.data.buffer;
+    const maskCopy = new Uint8Array(roiMask);
+    const request: InpaintMaskRequest = {
+      generation,
+      rgba: buffer,
+      width: base.width,
+      height: base.height,
+      rect,
+      mask: maskCopy.buffer,
+    };
+    worker.postMessage(request, [buffer, maskCopy.buffer]);
+  }
+
+  /** 新提交后仍保留的唯一补丁像素数；被截断的重做分支不计入。 */
+  function totalPatchPixels(): number {
+    return totalDistinctPatchPixels(history, historyIndex);
+  }
+
+  /** 明确应用预览：恰好一次 commit 追加补丁，随历史可撤销/重做；历史
+   * 补丁聚合预算超限时显式拒绝，绝不静默丢弃撤销条目。 */
+  function applyInpaintPreview() {
+    const preview = inpaintPreview;
+    if (!preview) return;
+    const addition = preview.naturalRect.width * preview.naturalRect.height;
+    if (totalPatchPixels() + addition > INPAINT_MAX_TOTAL_PATCH_PIXELS) {
+      setOperationMessage(
+        `历史修补总量将超出 ${INPAINT_MAX_TOTAL_PATCH_PIXELS / 1_000_000}MP 预算；请先撤销部分修补后再应用。`,
+      );
+      return;
+    }
+    const id = inpaintPatchIdRef.current + 1;
+    inpaintPatchIdRef.current = id;
+    inpaintPatchStore.current.set(id, preview.canvas);
+    if (
+      !commit({
+        ...state,
+        patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
+      })
+    ) {
+      inpaintPatchStore.current.delete(id);
+      return;
+    }
+    setOperationMessage(
+      "已应用修补；可用撤销恢复原图，复制/保存/识别使用修补后的画面。",
+    );
+  }
+
+  /** 作废重复匹配在途/候选状态：候选绑定源与修订，过期即丢弃。 */
+  function cancelDupmatchPending(message?: string) {
+    dupmatchGenerationRef.current += 1;
+    if (dupmatchWorkerRef.current) {
+      dupmatchWorkerRef.current.terminate();
+      dupmatchWorkerRef.current = undefined;
+    }
+    dupmatchFrozenRef.current = undefined;
+    dupmatchDraft.current = undefined;
+    dupmatchSelectionRef.current = undefined;
+    setDupmatchSelection(undefined);
+    setDupmatchCandidates(undefined);
+    setDupmatchAccepted(undefined);
+    setDupmatchBusy(false);
+    if (message) setOperationMessage(message);
+  }
+
+  /** 发起重复内容匹配：同尺度平移、有界搜索；候选仅预览不入历史。 */
+  function startDuplicateSearch() {
+    if (dupmatchBusy) return;
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    const selection = dupmatchSelection;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      setOperationMessage("图片尚未解码完成，无法匹配；请稍后重试。");
+      return;
+    }
+    if (!selection) {
+      setOperationMessage("请先拖拽框选要匹配的重复内容（如一处水印）。");
+      return;
+    }
+    if (typeof Worker !== "function") {
+      setOperationMessage("当前环境不支持本地匹配，当前图片未被修改。");
+      return;
+    }
+    const rect = selectionToNaturalRect(
+      selection.start,
+      selection.end,
+      image,
+      state.rotation,
+      canvasSize(canvas),
+    );
+    if (rect.width <= 0 || rect.height <= 0) {
+      setOperationMessage("选区不在图片内，请重新框选要匹配的内容。");
+      return;
+    }
+    if (image.naturalWidth * image.naturalHeight > DUPLICATE_MAX_IMAGE_PIXELS) {
+      setOperationMessage(
+        `图片 ${(image.naturalWidth * image.naturalHeight) / 1_000_000}MP 超过重复匹配上限 8MP，请先缩小图片。`,
+      );
+      return;
+    }
+    const composed = composeBaseline(image);
+    if (!composed) {
+      setOperationMessage("无法读取画布像素，匹配未开始。");
+      return;
+    }
+    const pixels = composed.context.getImageData(
+      0,
+      0,
+      composed.canvas.width,
+      composed.canvas.height,
+    );
+    const generation = dupmatchGenerationRef.current + 1;
+    dupmatchGenerationRef.current = generation;
+    dupmatchWorkerRef.current?.terminate();
+    let worker: Worker;
+    try {
+      worker = new Worker(
+        new URL("./duplicate/duplicateMatch.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+    } catch {
+      dupmatchWorkerRef.current = undefined;
+      setOperationMessage("无法启动本地匹配，当前图片未被修改；请重试。");
+      return;
+    }
+    dupmatchWorkerRef.current = worker;
+    const frozen = {
+      key: currentKeyRef.current,
+      sessionId: sessionIdRef.current,
+      contentVersion: contentRevisionRef.current,
+      image,
+      selection,
+      generation,
+    };
+    dupmatchFrozenRef.current = frozen;
+    worker.onmessage = (event: MessageEvent<DuplicateResponse>) => {
+      const response = event.data;
+      if (response.generation !== dupmatchGenerationRef.current) return;
+      if (
+        frozen.key !== currentKeyRef.current ||
+        frozen.sessionId !== sessionIdRef.current ||
+        frozen.contentVersion !== contentRevisionRef.current ||
+        frozen.image !== imageRef.current ||
+        frozen.selection !== dupmatchSelection
+      ) {
+        setDupmatchBusy(false);
+        cancelDupmatchPending(
+          "内容或选区已变化，本次匹配结果已丢弃；请重新搜索。",
+        );
+        return;
+      }
+      setDupmatchBusy(false);
+      if (!response.ok) {
+        setOperationMessage(response.error.message);
+        return;
+      }
+      setDupmatchCandidates(response.candidates);
+      setDupmatchAccepted(response.candidates.map(() => true));
+      setOperationMessage(
+        `找到 ${response.candidates.length} 处重复内容；可逐项增删候选，确认后才写入图片。`,
+      );
+    };
+    worker.onerror = () => {
+      if (generation !== dupmatchGenerationRef.current) return;
+      setDupmatchBusy(false);
+      setOperationMessage("本地匹配意外失败，当前图片未被修改；请重试。");
+    };
+    setDupmatchBusy(true);
+    setDupmatchCandidates(undefined);
+    setDupmatchAccepted(undefined);
+    setOperationMessage(
+      "正在本地搜索重复内容……期间可取消，当前图片不会被修改。",
+    );
+    const buffer = pixels.data.buffer;
     worker.postMessage(
       {
         generation,
         rgba: buffer,
-        width: base.width,
-        height: base.height,
+        width: composed.canvas.width,
+        height: composed.canvas.height,
         rect,
       },
       [buffer],
     );
   }
 
-  /** 明确应用预览：恰好一次 commit 追加补丁，随历史可撤销/重做。 */
-  function applyInpaintPreview() {
-    const preview = inpaintPreview;
-    if (!preview) return;
-    const id = inpaintPatchIdRef.current + 1;
-    inpaintPatchIdRef.current = id;
-    inpaintPatchStore.current.set(id, preview.canvas);
-    commit({
-      ...state,
-      patches: [...(state.patches ?? []), { id, ...preview.naturalRect }],
-    });
+  /** 确认应用候选：每个接受候选写入不透明纯色补丁（取自周边环境色），
+   * 恰好一次 commit；源/修订已变化时拒绝迟到确认。 */
+  function applyDuplicateCandidates() {
+    const candidates = dupmatchCandidates;
+    const accepted = dupmatchAccepted;
+    const frozen = dupmatchFrozenRef.current;
+    if (!candidates || !accepted || !frozen) return;
+    const image = imageRef.current;
+    if (
+      !image ||
+      frozen.key !== currentKeyRef.current ||
+      frozen.sessionId !== sessionIdRef.current ||
+      frozen.contentVersion !== contentRevisionRef.current ||
+      frozen.image !== image
+    ) {
+      cancelDupmatchPending("内容或会话已变化，候选已失效；请重新框选并搜索。");
+      return;
+    }
+    const chosen = candidates.filter((_, index) => accepted[index] === true);
+    if (chosen.length === 0) {
+      setOperationMessage("未勾选任何候选；请至少保留一个候选或放弃匹配。");
+      return;
+    }
+    const addition = chosen.reduce(
+      (total, candidate) => total + candidate.width * candidate.height,
+      0,
+    );
+    if (totalPatchPixels() + addition > INPAINT_MAX_TOTAL_PATCH_PIXELS) {
+      setOperationMessage(
+        `候选遮挡总量将超出 ${INPAINT_MAX_TOTAL_PATCH_PIXELS / 1_000_000}MP 补丁预算；请减少候选或先撤销部分修补。`,
+      );
+      return;
+    }
+    const composed = composeBaseline(image);
+    if (!composed) {
+      setOperationMessage("无法读取画布像素，本次应用已取消。");
+      return;
+    }
+    const baseline = composed.context.getImageData(
+      0,
+      0,
+      composed.canvas.width,
+      composed.canvas.height,
+    ).data;
+    const patches = [...(state.patches ?? [])];
+    // 先完整暂存本批补丁：任一候选构造失败则丢弃整批（未写入 store/
+    // 历史，画布引用即刻释放），不遗留已建补丁的孤儿像素。
+    const staged: {
+      readonly id: number;
+      readonly rect: DuplicateCandidate;
+      readonly canvas: HTMLCanvasElement;
+    }[] = [];
+    for (const candidate of chosen) {
+      // 候选周边 2px 环境平均色：纯色遮挡与背景衔接；无有效采样时黑色。
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let n = 0;
+      for (
+        let y = candidate.y - 2;
+        y <= candidate.y + candidate.height + 1;
+        y += 1
+      ) {
+        for (
+          let x = candidate.x - 2;
+          x <= candidate.x + candidate.width + 1;
+          x += 1
+        ) {
+          const inside =
+            x >= candidate.x &&
+            x < candidate.x + candidate.width &&
+            y >= candidate.y &&
+            y < candidate.y + candidate.height;
+          if (inside) continue;
+          if (
+            x < 0 ||
+            y < 0 ||
+            x >= image.naturalWidth ||
+            y >= image.naturalHeight
+          )
+            continue;
+          const p = (y * image.naturalWidth + x) * 4;
+          if ((baseline[p + 3] ?? 0) === 0) continue;
+          r += baseline[p] ?? 0;
+          g += baseline[p + 1] ?? 0;
+          b += baseline[p + 2] ?? 0;
+          n += 1;
+        }
+      }
+      const color =
+        n > 0
+          ? `rgb(${Math.round(r / n)},${Math.round(g / n)},${Math.round(b / n)})`
+          : "#000000";
+      const patch = document.createElement("canvas");
+      patch.width = candidate.width;
+      patch.height = candidate.height;
+      const context = patch.getContext("2d");
+      if (!context) {
+        setOperationMessage(
+          "无法生成遮挡补丁，本次应用已整体取消；图片未被修改。",
+        );
+        return;
+      }
+      context.fillStyle = color;
+      context.fillRect(0, 0, patch.width, patch.height);
+      const id = inpaintPatchIdRef.current + staged.length + 1;
+      staged.push({ id, rect: candidate, canvas: patch });
+    }
+    // 全部成功后一次性移交：store 写入与历史提交要么整体发生要么不发生。
+    inpaintPatchIdRef.current += staged.length;
+    for (const entry of staged) {
+      inpaintPatchStore.current.set(entry.id, entry.canvas);
+      patches.push({ id: entry.id, ...entry.rect });
+    }
+    if (!commit({ ...state, patches })) {
+      for (const entry of staged) inpaintPatchStore.current.delete(entry.id);
+      return;
+    }
+    cancelDupmatchPending();
     setOperationMessage(
-      "已应用修补；可用撤销恢复原图，复制/保存/识别使用修补后的画面。",
+      `已应用 ${chosen.length} 处重复内容遮挡；可用撤销恢复，复制/保存/识别使用真实像素。`,
     );
   }
 
@@ -2400,7 +3128,8 @@ export function ImageCanvasEditor({
       : undefined;
   const styleEditing = !!editingMark;
   const activeStyleColor = editingMark
-    ? (editingMark.style?.color ?? DEFAULT_COLOR)
+    ? (editingMark.style?.color ??
+      (editingMark.tool === "solid" ? DEFAULT_SOLID_COLOR : DEFAULT_COLOR))
     : activeToolAttributes.color;
   const activeStrokeWidth = editingMark
     ? (editingMark.style?.strokeWidth ?? 3)
@@ -2520,13 +3249,15 @@ export function ImageCanvasEditor({
       if (JSON.stringify(style) === JSON.stringify(next)) return;
       if (textEdit?.id === mark.id)
         setTextEdit({ id: mark.id, mark: { ...mark, style: next } });
-      else
-        commit({
+      else if (
+        !commit({
           ...state,
           marks: state.marks.map((entry) =>
             entry.id === mark.id ? { ...entry, style: next } : entry,
           ),
-        });
+        })
+      )
+        return;
       return;
     }
     // 未选中标记：更新当前工具的属性记忆（不影响其他工具，可重置）。
@@ -2612,9 +3343,12 @@ export function ImageCanvasEditor({
       ...(["text", "numbering", "callout"].includes(tool)
         ? attributes.textStyle
         : {}),
-      // 马赛克/模糊创建时冻结当前强度档位，撤销/重做回放当时效果。
+      // 马赛克/模糊创建时冻结当前强度与笔刷尺寸，撤销/重做回放当时效果。
       ...(tool === "mosaic" || tool === "blur"
-        ? { intensity: attributes.intensity }
+        ? {
+            intensity: attributes.intensity,
+            brushSize: attributes.brushSize,
+          }
         : {}),
       // 描边类工具冻结边框不透明度；形状工具另冻结填充样式。
       ...(STROKE_TOOLS.includes(tool)
@@ -2705,6 +3439,9 @@ export function ImageCanvasEditor({
       outputFormat === "image/jpeg" ? "#ffffff" : undefined,
       false,
       { patches: currentInpaintLayer().patches },
+      undefined,
+      true,
+      importAssetsRef.current,
     );
     const context = clean.getContext("2d", { willReadFrequently: true });
     const pixel = context?.getImageData(
@@ -2750,7 +3487,7 @@ export function ImageCanvasEditor({
       );
       return;
     }
-    commit({ ...state, resize: next });
+    if (!commit({ ...state, resize: next })) return;
     setOperationMessage(
       next
         ? `已设置输出尺寸 ${next.width}×${next.height}（${label}）；可用撤销恢复。`
@@ -2825,6 +3562,11 @@ export function ImageCanvasEditor({
     setCropDraft(undefined);
     setDraftMark(undefined);
     setInpaintDraft(undefined);
+    dupmatchDraft.current = undefined;
+    inpaintBrushPoints.current = [];
+    if (pendingMaskFrame.current !== undefined)
+      cancelAnimationFrame(pendingMaskFrame.current);
+    pendingMaskFrame.current = undefined;
   }
 
   // 滚轮调线宽：仅描边类工具且未在就地编辑选中标记时生效；监听只挂画布
@@ -2936,9 +3678,22 @@ export function ImageCanvasEditor({
     }
     if (tool === "inpaint") {
       const at = point(event);
+      const mode = activeToolAttributes.maskMode;
+      if (mode === "brush-add" || mode === "brush-remove") {
+        queueMaskBrush(at);
+        return;
+      }
       setInpaintDraft((current) =>
         current ? { ...current, end: at } : current,
       );
+      return;
+    }
+    if (tool === "dupmatch") {
+      const at = point(event);
+      if (dupmatchDraft.current) {
+        dupmatchDraft.current = { ...dupmatchDraft.current, end: at };
+        scheduleDraw();
+      }
       return;
     }
     if (markDragRef.current) {
@@ -3008,7 +3763,12 @@ export function ImageCanvasEditor({
     }
     setDraftMark((current) => {
       if (!current) return current;
-      if (tool === "pen" || tool === "highlighter") {
+      if (
+        tool === "pen" ||
+        tool === "highlighter" ||
+        ((tool === "mosaic" || tool === "blur") &&
+          activeToolAttributes.effectMode === "brush")
+      ) {
         const points = draftPoints.current;
         const last = points[points.length - 1];
         if (last && Math.hypot(at.x - last.x, at.y - last.y) < 2) {
@@ -3126,14 +3886,30 @@ export function ImageCanvasEditor({
         }
       }
     } else if (tool === "inpaint") {
-      // 重新框选即作废上一轮预览与在途请求；新选区在松开时确定。
+      const mode = activeToolAttributes.maskMode;
+      // 重新绘制即作废上一轮预览与在途请求；新掩膜在松开/涂抹时确定。
       if (inpaintPreview || inpaintBusy) {
-        cancelInpaintPending("已放弃上一次修补，请重新框选并预览。");
-      } else {
+        cancelInpaintPending("已放弃上一次修补，请重新编辑掩膜并预览。");
+      } else if (mode === "rect-add" || mode === "rect-remove") {
         setInpaintDraft(undefined);
         setInpaintSelection(undefined);
       }
-      setInpaintDraft({ start, end: start });
+      if (mode === "brush-add" || mode === "brush-remove") {
+        inpaintBrushPoints.current = [];
+        queueMaskBrush(start);
+      } else {
+        setInpaintDraft({ start, end: start });
+      }
+    } else if (tool === "dupmatch") {
+      if (dupmatchCandidates || dupmatchBusy) {
+        cancelDupmatchPending("已放弃上一次重复匹配，请重新框选。");
+      } else {
+        dupmatchDraft.current = undefined;
+        dupmatchSelectionRef.current = undefined;
+        setDupmatchSelection(undefined);
+      }
+      dupmatchDraft.current = { start, end: start };
+      scheduleDraw();
     } else if (tool === "crop") {
       setCropDraft({ start, end: start });
     } else if (tool === "polyline") {
@@ -3163,7 +3939,10 @@ export function ImageCanvasEditor({
         tool,
         start,
         end: start,
-        ...(tool === "pen" || tool === "highlighter"
+        ...(tool === "pen" ||
+        tool === "highlighter" ||
+        ((tool === "mosaic" || tool === "blur") &&
+          activeToolAttributes.effectMode === "brush")
           ? { points: draftPoints.current }
           : {}),
         style: currentStyle(),
@@ -3261,10 +4040,15 @@ export function ImageCanvasEditor({
           next.end.y - drag.origin.end.y,
         ) >= 1;
       if (moved) {
-        commit({
-          ...state,
-          marks: state.marks.map((mark) => (mark.id === drag.id ? next : mark)),
-        });
+        if (
+          !commit({
+            ...state,
+            marks: state.marks.map((mark) =>
+              mark.id === drag.id ? next : mark,
+            ),
+          })
+        )
+          return;
       }
       return;
     }
@@ -3291,13 +4075,16 @@ export function ImageCanvasEditor({
         Math.abs(next.width - before.width) >= 1 ||
         Math.abs(next.height - before.height) >= 1
       ) {
-        commit({
-          ...state,
-          crop: {
-            start: { x: next.x, y: next.y },
-            end: { x: next.x + next.width, y: next.y + next.height },
-          },
-        });
+        if (
+          !commit({
+            ...state,
+            crop: {
+              start: { x: next.x, y: next.y },
+              end: { x: next.x + next.width, y: next.y + next.height },
+            },
+          })
+        )
+          return;
       }
       return;
     }
@@ -3314,10 +4101,13 @@ export function ImageCanvasEditor({
         setOperationMessage("内容已变化，本次拖动已放弃；请重试。");
         return;
       }
-      commit({
-        ...state,
-        marks: moveMarkIds(state.marks, new Set(drag.ids), delta),
-      });
+      if (
+        !commit({
+          ...state,
+          marks: moveMarkIds(state.marks, new Set(drag.ids), delta),
+        })
+      )
+        return;
       return;
     }
     if (tool === "polyline") {
@@ -3338,7 +4128,12 @@ export function ImageCanvasEditor({
       }
       return;
     }
-    if (tool === "pen" || tool === "highlighter") {
+    if (
+      tool === "pen" ||
+      tool === "highlighter" ||
+      ((tool === "mosaic" || tool === "blur") &&
+        activeToolAttributes.effectMode === "brush")
+    ) {
       setDraftMark(undefined);
       const sampled = draft?.points ?? [start];
       const last = sampled[sampled.length - 1];
@@ -3352,48 +4147,67 @@ export function ImageCanvasEditor({
           ? total + Math.hypot(at.x - previous.x, at.y - previous.y)
           : total;
       }, 0);
-      if (length >= 4) {
-        commit({
+      if (length >= 4 || tool === "mosaic" || tool === "blur") {
+        if (
+          !commit({
+            ...state,
+            marks: [
+              ...state.marks,
+              {
+                id: draft?.id ?? nextMarkId(),
+                tool,
+                start: points[0] ?? start,
+                end: points[points.length - 1] ?? end,
+                points,
+                style: draft?.style ?? currentStyle(),
+              },
+            ],
+          })
+        )
+          return;
+      }
+      return;
+    }
+    if (tool === "numbering") {
+      // 序号支持单击放置，不要求拖拽距离。
+      if (
+        !commit({
           ...state,
           marks: [
             ...state.marks,
             {
               id: draft?.id ?? nextMarkId(),
               tool,
-              start: points[0] ?? start,
-              end: points[points.length - 1] ?? end,
-              points,
+              start,
+              end,
+              ordinal:
+                draft?.ordinal ??
+                nextNumberOrdinal(
+                  state.marks,
+                  activeToolAttributes.numberStart,
+                ),
               style: draft?.style ?? currentStyle(),
             },
           ],
-        });
-      }
-      return;
-    }
-    if (tool === "numbering") {
-      // 序号支持单击放置，不要求拖拽距离。
-      commit({
-        ...state,
-        marks: [
-          ...state.marks,
-          {
-            id: draft?.id ?? nextMarkId(),
-            tool,
-            start,
-            end,
-            ordinal:
-              draft?.ordinal ??
-              nextNumberOrdinal(state.marks, activeToolAttributes.numberStart),
-            style: draft?.style ?? currentStyle(),
-          },
-        ],
-      });
+        })
+      )
+        return;
       return;
     }
     if (tool === "inpaint") {
       setInpaintDraft(undefined);
+      const mode = activeToolAttributes.maskMode;
+      if (mode === "brush-add" || mode === "brush-remove") {
+        queueMaskBrush(end);
+        flushMaskBrush();
+        inpaintBrushPoints.current = [];
+        if (pendingMaskFrame.current !== undefined)
+          cancelAnimationFrame(pendingMaskFrame.current);
+        pendingMaskFrame.current = undefined;
+        return;
+      }
       if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
-        setInpaintSelection({
+        const selection = {
           start: {
             x: Math.min(start.x, end.x),
             y: Math.min(start.y, end.y),
@@ -3402,10 +4216,32 @@ export function ImageCanvasEditor({
             x: Math.max(start.x, end.x),
             y: Math.max(start.y, end.y),
           },
-        });
+        };
+        setInpaintSelection(selection);
         setInpaintCompare("after");
+        applySelectionToMask(selection, mode !== "rect-remove");
+      }
+      return;
+    }
+    if (tool === "dupmatch") {
+      const draft = dupmatchDraft.current;
+      dupmatchDraft.current = undefined;
+      scheduleDraw();
+      if (draft && Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+        const selection = {
+          start: {
+            x: Math.min(start.x, end.x),
+            y: Math.min(start.y, end.y),
+          },
+          end: {
+            x: Math.max(start.x, end.x),
+            y: Math.max(start.y, end.y),
+          },
+        };
+        dupmatchSelectionRef.current = selection;
+        setDupmatchSelection(selection);
         setOperationMessage(
-          "已框选修补区域；可重新框选，或点击“预览修补”查看效果。",
+          "已框选重复内容源区域；点击“查找重复”搜索同尺度平移副本。",
         );
       }
       return;
@@ -3413,7 +4249,7 @@ export function ImageCanvasEditor({
     if (tool === "text" || Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
       let createdId: string | undefined;
       if (tool === "crop") {
-        commit({ ...state, crop: { start, end } });
+        if (!commit({ ...state, crop: { start, end } })) return;
       } else if (
         tool === "exclude" &&
         state.marks.filter(isExclusionMark).length >= MAX_EXCLUSION_MARKS
@@ -3436,25 +4272,28 @@ export function ImageCanvasEditor({
             ? constrainLineDrag(start, end, event.shiftKey)
             : end;
         createdId = draft?.id ?? nextMarkId();
-        commit({
-          ...state,
-          marks: [
-            ...state.marks,
-            {
-              id: createdId,
-              tool,
-              start: box ? box.start : start,
-              end: box ? box.end : lineEnd,
-              style: draft?.style ?? currentStyle(),
-              ...(tool === "text"
-                ? { textWidth: Math.abs(end.x - start.x) }
-                : {}),
-              ...(["text", "callout"].includes(tool)
-                ? { text: draft?.text ?? (annotationText.trim() || "文本") }
-                : {}),
-            },
-          ],
-        });
+        if (
+          !commit({
+            ...state,
+            marks: [
+              ...state.marks,
+              {
+                id: createdId,
+                tool,
+                start: box ? box.start : start,
+                end: box ? box.end : lineEnd,
+                style: draft?.style ?? currentStyle(),
+                ...(tool === "text"
+                  ? { textWidth: Math.abs(end.x - start.x) }
+                  : {}),
+                ...(["text", "callout"].includes(tool)
+                  ? { text: draft?.text ?? (annotationText.trim() || "文本") }
+                  : {}),
+              },
+            ],
+          })
+        )
+          return;
       }
       if (tool === "text" || tool === "callout") {
         setTool("select");
@@ -3482,20 +4321,23 @@ export function ImageCanvasEditor({
         : total;
     }, 0);
     if (deduped.length >= 2 && length >= 4) {
-      commit({
-        ...state,
-        marks: [
-          ...state.marks,
-          {
-            id: draft.id,
-            tool: "polyline",
-            start: deduped[0]!,
-            end: deduped[deduped.length - 1]!,
-            points: deduped,
-            style: draft.style,
-          },
-        ],
-      });
+      if (
+        !commit({
+          ...state,
+          marks: [
+            ...state.marks,
+            {
+              id: draft.id,
+              tool: "polyline",
+              start: deduped[0]!,
+              end: deduped[deduped.length - 1]!,
+              points: deduped,
+              style: draft.style,
+            },
+          ],
+        })
+      )
+        return;
     } else {
       setOperationMessage("折线至少需要两个不同位置的点；已放弃本次草稿。");
     }
@@ -3775,30 +4617,35 @@ export function ImageCanvasEditor({
   };
   const contentMark =
     fontMark && isContentMark(fontMark) ? fontMark : undefined;
-  function updateFontMark(patch: Partial<Mark>): void {
+  function updateFontMark(patch: Partial<Mark>): boolean {
     if (
       !fontMark ||
       selectedMark === undefined ||
       !selectionModifiable(effectiveSelection())
     )
-      return;
+      return false;
     const next = { ...fontMark, ...patch };
     if (textEdit?.id === selectedMark)
       setTextEdit({ id: selectedMark, mark: next });
-    else
-      commit({
+    else if (
+      !commit({
         ...state,
         marks: state.marks.map((mark) =>
           mark.id === selectedMark ? next : mark,
         ),
-      });
+      })
+    )
+      return false;
+    return true;
   }
-  function applyTextStyle(patch: Partial<AnnotationTextStyle>): void {
-    if (fontMark) updateFontMark({ style: { ...fontMark.style, ...patch } });
+  function applyTextStyle(patch: Partial<AnnotationTextStyle>): boolean {
+    if (fontMark)
+      return updateFontMark({ style: { ...fontMark.style, ...patch } });
     else
       updateToolAttribute({
         textStyle: { ...activeToolAttributes.textStyle, ...patch },
       });
+    return true;
   }
   function beginTextEdit(id: string): void {
     const mark = state.marks.find((entry) => entry.id === id);
@@ -3824,12 +4671,15 @@ export function ImageCanvasEditor({
       JSON.stringify(textEdit.mark) !==
       JSON.stringify(state.marks.find((mark) => mark.id === textEdit.id))
     )
-      commit({
-        ...state,
-        marks: state.marks.map((mark) =>
-          mark.id === textEdit.id ? textEdit.mark : mark,
-        ),
-      });
+      if (
+        !commit({
+          ...state,
+          marks: state.marks.map((mark) =>
+            mark.id === textEdit.id ? textEdit.mark : mark,
+          ),
+        })
+      )
+        return;
     setTextEdit(undefined);
     setOperationMessage("已完成文字编辑。");
   }
@@ -3838,8 +4688,11 @@ export function ImageCanvasEditor({
       canvasRef.current?.getContext("2d") ?? null,
       requested || "system-ui",
     );
-    if (resolved.family !== (activeTextStyle.fontFamily ?? "system-ui"))
-      applyTextStyle({ fontFamily: resolved.family });
+    if (
+      resolved.family !== (activeTextStyle.fontFamily ?? "system-ui") &&
+      !applyTextStyle({ fontFamily: resolved.family })
+    )
+      return activeTextStyle.fontFamily ?? "system-ui";
     if (!resolved.available)
       setOperationMessage("字体“" + requested + "”不可用，已回退到系统字体。");
     else setOperationMessage("已使用字体“" + resolved.family + "”。");
@@ -3850,12 +4703,15 @@ export function ImageCanvasEditor({
       return;
     const start = attributesOfTool("numbering").numberStart;
     let next = start;
-    commit({
-      ...state,
-      marks: state.marks.map((mark) =>
-        mark.tool === "numbering" ? { ...mark, ordinal: next++ } : mark,
-      ),
-    });
+    if (
+      !commit({
+        ...state,
+        marks: state.marks.map((mark) =>
+          mark.tool === "numbering" ? { ...mark, ordinal: next++ } : mark,
+        ),
+      })
+    )
+      return;
     setOperationMessage("已从 " + start + " 重新编号；可撤销。");
   }
   // —— 对象批量操作：每次恰好一条历史，按稳定 id 定位；含锁选区禁改 ——
@@ -3885,7 +4741,7 @@ export function ImageCanvasEditor({
     )
       return;
     cancelDrawing();
-    commit({ ...state, marks });
+    if (!commit({ ...state, marks })) return;
     const primary = selectionRef.current.primary;
     setObjectSelection({
       ids,
@@ -3898,14 +4754,15 @@ export function ImageCanvasEditor({
     cancelDrawing();
     const ids = effectiveSelection();
     if (!ids.size || !selectionModifiable(ids)) return;
-    commit({ ...state, marks: moveMarkIds(state.marks, ids, delta) });
+    if (!commit({ ...state, marks: moveMarkIds(state.marks, ids, delta) }))
+      return;
   }
 
   function deleteSelection(): void {
     const ids = effectiveSelection();
     if (!ids.size || !selectionModifiable(ids)) return;
     cancelDrawing();
-    commit({ ...state, marks: deleteMarkIds(state.marks, ids) });
+    if (!commit({ ...state, marks: deleteMarkIds(state.marks, ids) })) return;
     setObjectSelection(NO_SELECTION);
     setOperationMessage(`已删除 ${ids.size} 个对象；可用撤销恢复。`);
   }
@@ -4055,7 +4912,7 @@ export function ImageCanvasEditor({
     );
     if (!canAppendObjects(clones)) return;
     cancelDrawing();
-    commit({ ...state, marks: [...state.marks, ...clones] });
+    if (!commit({ ...state, marks: [...state.marks, ...clones] })) return;
     setObjectSelection({
       ids: new Set(clones.map((mark) => mark.id)),
       primary: clones[clones.length - 1]?.id,
@@ -4077,7 +4934,7 @@ export function ImageCanvasEditor({
     );
     if (!canAppendObjects(clones)) return;
     cancelDrawing();
-    commit({ ...state, marks: [...state.marks, ...clones] });
+    if (!commit({ ...state, marks: [...state.marks, ...clones] })) return;
     setObjectSelection({
       ids: new Set(clones.map((mark) => mark.id)),
       primary: clones[clones.length - 1]?.id,
@@ -4107,13 +4964,16 @@ export function ImageCanvasEditor({
     if (!selectionModifiable(ids)) return;
     const bounds = markBoundsOf(mark, objectActionContext());
     cancelDrawing();
-    commit({
-      ...state,
-      marks: moveMarkIds(state.marks, ids, {
-        x: size.width / 2 - bounds.x - bounds.width / 2,
-        y: size.height / 2 - bounds.y - bounds.height / 2,
-      }),
-    });
+    if (
+      !commit({
+        ...state,
+        marks: moveMarkIds(state.marks, ids, {
+          x: size.width / 2 - bounds.x - bounds.width / 2,
+          y: size.height / 2 - bounds.y - bounds.height / 2,
+        }),
+      })
+    )
+      return;
     select(id);
     setOperationMessage("已将离屏对象移回画布中心；可撤销。");
   }
@@ -4562,26 +5422,212 @@ export function ImageCanvasEditor({
         {captureStyle ? undefined : "重置属性"}
       </ToolbarButton>
     );
+  // 已绘马赛克/模糊区域的强度就地编辑：选择工具选中该类标记时，
+  // 属性排直接调其强度并逐次入历史（可撤销）；显示与像素同一函数。
+  const effectMarkCandidate =
+    tool === "select" && selectedMark !== undefined
+      ? textEdit?.id === selectedMark
+        ? textEdit.mark
+        : state.marks.find((mark) => mark.id === selectedMark)
+      : undefined;
+  const editingEffectMark =
+    effectMarkCandidate &&
+    (effectMarkCandidate.tool === "mosaic" ||
+      effectMarkCandidate.tool === "blur")
+      ? effectMarkCandidate
+      : undefined;
+  const effectIntensityTarget = editingEffectMark
+    ? markEffectIntensity(editingEffectMark)
+    : tool === "mosaic" || tool === "blur"
+      ? Math.round(
+          Math.min(
+            EFFECT_INTENSITY_MAX,
+            Math.max(EFFECT_INTENSITY_MIN, activeToolAttributes.intensity),
+          ) * 10,
+        ) / 10
+      : undefined;
+  const effectIntensityLocked =
+    !!editingEffectMark &&
+    state.marks.some(
+      (mark) =>
+        mark.locked &&
+        expandGroupSelection(state.marks, new Set([editingEffectMark.id])).has(
+          mark.id,
+        ),
+    );
+  function commitEffectIntensity(value: number): void {
+    if (editingEffectMark && selectedMark !== undefined) {
+      if (
+        !selectionModifiable(
+          expandGroupSelection(state.marks, new Set([editingEffectMark.id])),
+        )
+      )
+        return;
+      if (
+        !commit({
+          ...state,
+          marks: state.marks.map((entry) =>
+            entry.id === selectedMark
+              ? { ...entry, style: { ...entry.style, intensity: value } }
+              : entry,
+          ),
+        })
+      )
+        return;
+      setOperationMessage("已调整该区域强度；可用撤销恢复。");
+      return;
+    }
+    updateToolAttribute({ intensity: value });
+  }
+  const effectIntensityFocus = useFocusableGroup({
+    ignoreDefaultKeydown: {
+      ArrowLeft: true,
+      ArrowRight: true,
+      ArrowUp: true,
+      ArrowDown: true,
+      Home: true,
+      End: true,
+    },
+  });
   const effectIntensityControl = toolset === "full" &&
-    (tool === "mosaic" || tool === "blur") && (
+    effectIntensityTarget !== undefined && (
       <label className="editor-style-control">
         <span aria-hidden="true">强度</span>
-        <Select
+        <input
+          {...effectIntensityFocus}
           aria-label="马赛克与模糊强度"
+          disabled={effectIntensityLocked}
+          max={EFFECT_INTENSITY_MAX}
+          min={EFFECT_INTENSITY_MIN}
+          step={EFFECT_INTENSITY_STEP}
+          type="range"
+          value={effectIntensityTarget}
+          onChange={(event) => {
+            const value =
+              Math.round(Number(event.currentTarget.value) * 10) / 10;
+            if (Number.isFinite(value)) commitEffectIntensity(value);
+          }}
+        />
+        <span aria-hidden="true">{intensityLabel(effectIntensityTarget)}</span>
+      </label>
+    );
+  // 马赛克/模糊绘制方式：矩形拖拽或自由笔刷；笔刷大小同排可选。
+  const effectModeControl = toolset === "full" &&
+    (tool === "mosaic" || tool === "blur") && (
+      <label className="editor-style-control">
+        <span aria-hidden="true">方式</span>
+        <Select
+          aria-label="马赛克与模糊绘制方式"
           size="small"
-          value={String(activeToolAttributes.intensity)}
+          value={activeToolAttributes.effectMode}
           onChange={(_, data) =>
-            updateToolAttribute({ intensity: Number(data.value) })
+            updateToolAttribute({
+              effectMode: data.value === "brush" ? "brush" : "rect",
+            })
           }
         >
-          {EFFECT_INTENSITIES.map((level) => (
-            <option key={level} value={String(level)}>
-              {level === 1 ? "弱" : level === 2 ? "中" : "强"}
+          <option value="rect">矩形</option>
+          <option value="brush">笔刷</option>
+        </Select>
+      </label>
+    );
+  const effectBrushSizeControl = toolset === "full" &&
+    (tool === "mosaic" || tool === "blur") &&
+    activeToolAttributes.effectMode === "brush" && (
+      <label className="editor-style-control">
+        <span aria-hidden="true">笔刷</span>
+        <Select
+          aria-label="马赛克与模糊笔刷大小"
+          size="small"
+          value={String(activeToolAttributes.brushSize)}
+          onChange={(_, data) =>
+            updateToolAttribute({ brushSize: Number(data.value) })
+          }
+        >
+          {EFFECT_BRUSH_SIZES.map((size) => (
+            <option key={size} value={String(size)}>
+              {size}px
             </option>
           ))}
         </Select>
       </label>
     );
+  // 修补掩膜绘制方式：矩形/笔刷 × 添加/移除；笔刷大小同排可选。
+  const inpaintMaskModeControl = tool === "inpaint" && (
+    <label className="editor-style-control">
+      <span aria-hidden="true">掩膜</span>
+      <Select
+        aria-label="修补掩膜绘制方式"
+        size="small"
+        value={activeToolAttributes.maskMode}
+        onChange={(_, data) => {
+          const value = data.value as ToolAttributes["maskMode"];
+          if (INPAINT_MASK_MODES.some((mode) => mode.value === value)) {
+            updateToolAttribute({ maskMode: value });
+          }
+        }}
+      >
+        {INPAINT_MASK_MODES.map((mode) => (
+          <option key={mode.value} value={mode.value}>
+            {mode.label}
+          </option>
+        ))}
+      </Select>
+    </label>
+  );
+  const inpaintBrushSizeControl = tool === "inpaint" &&
+    (activeToolAttributes.maskMode === "brush-add" ||
+      activeToolAttributes.maskMode === "brush-remove") && (
+      <label className="editor-style-control">
+        <span aria-hidden="true">笔刷</span>
+        <Select
+          aria-label="修补掩膜笔刷大小"
+          size="small"
+          value={String(activeToolAttributes.inpaintBrushSize)}
+          onChange={(_, data) =>
+            updateToolAttribute({ inpaintBrushSize: Number(data.value) })
+          }
+        >
+          {INPAINT_BRUSH_SIZES.map((size) => (
+            <option key={size} value={String(size)}>
+              {size}px
+            </option>
+          ))}
+        </Select>
+      </label>
+    );
+  // 重复匹配候选逐项增删：勾选状态仅存在于此，确认前不修改内容。
+  const dupmatchCandidateControls =
+    tool === "dupmatch" && dupmatchCandidates ? (
+      <div
+        aria-label="重复匹配候选"
+        className="editor-style-control"
+        role="group"
+      >
+        {dupmatchCandidates.map((candidate, index) => (
+          <label key={index}>
+            <input
+              aria-label={`候选 ${index + 1}`}
+              checked={dupmatchAccepted?.[index] ?? true}
+              type="checkbox"
+              onChange={(event) =>
+                setDupmatchAccepted((current) =>
+                  (current ?? dupmatchCandidates.map(() => true)).map(
+                    (value, entryIndex) =>
+                      entryIndex === index ? event.target.checked : value,
+                  ),
+                )
+              }
+            />
+            <span aria-hidden="true">
+              候选{index + 1}（{Math.round(candidate.x)},
+              {Math.round(candidate.y)}，误差
+              {candidate.error.toFixed(1)}）
+            </span>
+          </label>
+        ))}
+      </div>
+    ) : undefined;
 
   const activeFontSize = activeTextStyle.fontSize ?? 24;
   const fontSizeControl = fontTool && (
@@ -4690,12 +5736,19 @@ export function ImageCanvasEditor({
     </>
   );
 
+  // 掩膜有效像素计数（仅随掩膜变化重算）：预览按钮与清除入口的可用性。
+  const inpaintMaskPixelCount = useMemo(
+    () => maskCount(inpaintMask),
+    [inpaintMask],
+  );
   const inpaintOperations = tool === "inpaint" && (
     <>
       <ToolbarButton
         appearance="primary"
         aria-label="预览修补"
-        disabled={!inpaintSelection || inpaintBusy || !!inpaintPreview}
+        disabled={
+          inpaintMaskPixelCount === 0 || inpaintBusy || !!inpaintPreview
+        }
         icon={<ToolbarIcon name="preview" />}
         title="预览修补"
         onClick={startInpaintPreview}
@@ -4733,13 +5786,13 @@ export function ImageCanvasEditor({
             {captureStyle ? undefined : "放弃预览"}
           </ToolbarButton>
         </>
-      ) : inpaintSelection ? (
+      ) : inpaintSelection || inpaintMaskPixelCount > 0 ? (
         <ToolbarButton
           aria-label="清除修补选区"
           icon={<ToolbarIcon name="exit" />}
           title="清除修补选区"
           onClick={() =>
-            cancelInpaintPending("已清除修补选区；当前图片未被修改。")
+            cancelInpaintPending("已清除修补掩膜与选区；当前图片未被修改。")
           }
         >
           {captureStyle ? undefined : "清除选区"}
@@ -4766,6 +5819,53 @@ export function ImageCanvasEditor({
     </label>
   );
 
+  // 重复匹配主排操作（新动作用文字按钮，不新增图标）。
+  const dupmatchOperations = tool === "dupmatch" && (
+    <>
+      {dupmatchCandidates ? (
+        <>
+          <ToolbarButton
+            appearance="primary"
+            aria-label="确认应用重复遮挡"
+            title="确认应用重复遮挡"
+            onClick={applyDuplicateCandidates}
+          >
+            确认应用
+          </ToolbarButton>
+          <ToolbarButton
+            aria-label="放弃重复匹配"
+            title="放弃重复匹配"
+            onClick={() =>
+              cancelDupmatchPending("已放弃重复匹配；当前图片未被修改。")
+            }
+          >
+            放弃匹配
+          </ToolbarButton>
+        </>
+      ) : (
+        <ToolbarButton
+          appearance="primary"
+          aria-label="查找重复"
+          title="查找重复"
+          disabled={!dupmatchSelection || dupmatchBusy}
+          onClick={startDuplicateSearch}
+        >
+          {dupmatchBusy ? "匹配中…" : "查找重复"}
+        </ToolbarButton>
+      )}
+      {dupmatchBusy && (
+        <ToolbarButton
+          aria-label="取消重复匹配"
+          title="取消重复匹配"
+          onClick={() =>
+            cancelDupmatchPending("已取消重复匹配；当前图片未被修改。")
+          }
+        >
+          取消匹配
+        </ToolbarButton>
+      )}
+    </>
+  );
   // 对象动作（上排）：选择工具下可见；含锁选区时修改类禁用，避免部分
   // 修改锁定对象/锁组。纯文字按钮，不新增图标语义。
   const objectActionControls = toolset === "full" &&
@@ -4984,11 +6084,14 @@ export function ImageCanvasEditor({
       return;
     }
     cancelDrawing();
+    if (
+      !commit({
+        ...state,
+        marks: state.marks.filter((mark) => !isExclusionMark(mark)),
+      })
+    )
+      return;
     select(undefined);
-    commit({
-      ...state,
-      marks: state.marks.filter((mark) => !isExclusionMark(mark)),
-    });
     setOperationMessage("已清空全部屏蔽区；可用撤销恢复。");
   }
 
@@ -5006,11 +6109,19 @@ export function ImageCanvasEditor({
         const image = imageRef.current;
         const canvas = canvasRef.current;
         const nextRotation = (state.rotation + 90) % 360;
-        commit(
-          image && canvas
-            ? rotateEditorState(state, image, canvasSize(canvas), nextRotation)
-            : { ...state, rotation: nextRotation },
-        );
+        if (
+          !commit(
+            image && canvas
+              ? rotateEditorState(
+                  state,
+                  image,
+                  canvasSize(canvas),
+                  nextRotation,
+                )
+              : { ...state, rotation: nextRotation },
+          )
+        )
+          return;
       }}
     >
       {captureStyle ? undefined : "旋转 90°"}
@@ -5070,8 +6181,8 @@ export function ImageCanvasEditor({
       return;
     }
     cancelDrawing();
+    if (!commit(EMPTY)) return;
     select(undefined);
-    commit(EMPTY);
   }
 
   const copyAnnotatedButton = (
@@ -5281,6 +6392,10 @@ export function ImageCanvasEditor({
     (toolset === "full" &&
       (COLOR_TOOLS.includes(tool) || tool === "mosaic" || tool === "blur")) ||
     !!inpaintCompareControl ||
+    !!effectModeControl ||
+    !!effectIntensityControl ||
+    !!inpaintMaskModeControl ||
+    !!dupmatchCandidateControls ||
     !!autoTextControl;
 
   return (
@@ -5359,6 +6474,7 @@ export function ImageCanvasEditor({
           {toolButtons}
           {textLayerControls}
           {inpaintOperations}
+          {dupmatchOperations}
           {objectActionControls}
           {rotateControl}
           {resetAttributesControl}
@@ -5453,9 +6569,14 @@ export function ImageCanvasEditor({
                 }}
               />
             )}
+            {effectModeControl}
+            {effectBrushSizeControl}
             {effectIntensityControl}
             {autoTextControl}
+            {inpaintMaskModeControl}
+            {inpaintBrushSizeControl}
             {inpaintCompareControl}
+            {dupmatchCandidateControls}
           </Toolbar>
         ) : null}
       </div>
@@ -5568,14 +6689,21 @@ export function ImageCanvasEditor({
       <p className="editor-guidance">
         {toolset === "full"
           ? captureStyle
-            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
-            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。选择工具下可 Ctrl+点击增减选择、空白拖动框选（完整包含）、Ctrl+A 全选，上排提供复制/粘贴/重复、层级、对齐等距、组合/锁定与旋转/镜像/缩放；方向键微移、Delete 删除。马赛克/模糊强度可在工具栏选择，写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。选择工具下可 Ctrl+点击增减选择、空白拖动框选（完整包含）、Ctrl+A 全选，上排提供复制/粘贴/重复、层级、对齐等距、组合/锁定与旋转/镜像/缩放；方向键微移、Delete 删除。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
           : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
         <p className="editor-guidance">
           去水印（Beta）：拖拽框选要去水印的区域，先“预览修补”对比前后效果，确认后“应用修补”才写入编辑历史（可撤销，原图始终保留）；应用前可随时取消。
+          掩膜支持矩形/笔刷的添加与移除：掩膜内的洞与掩膜外每字节（含透明度）原样保留；整图≤8MP、单次掩膜≤1MP，历史修补总量另有预算，超限会明确提示而不是丢弃撤销。
           本地修补基于周边颜色扩散，复杂纹理或大面积覆盖效果有限，不是无损还原。
+        </p>
+      )}
+      {tool === "dupmatch" && (
+        <p className="editor-guidance">
+          重复匹配：拖拽框选一处重复内容（如水印），点击“查找重复”在同尺度平移下搜索其他副本（低纹理或超大图会明确拒绝）；候选可逐项勾选增删，
+          “确认应用”才一次性写入遮挡补丁（取候选周边环境色、不透明真实像素，可撤销）；确认前不修改内容，换图/编辑/选区变化会作废候选。
         </p>
       )}
       <p className="editor-guidance">
@@ -6171,6 +7299,41 @@ function draw(
       if (inpaintLayer?.preview) {
         drawPatch(inpaintLayer.preview.canvas, inpaintLayer.preview.rect);
       }
+      // 未提交掩膜/重复候选叠加层与补丁同坐标系（原图空间随旋转变换）；
+      // 仅编辑预览，exportCanvas 只传 patches，绝不进入导出像素。
+      if (inpaintLayer?.maskOverlay) {
+        const overlay = inpaintLayer.maskOverlay;
+        context.drawImage(
+          overlay.canvas,
+          (-image.naturalWidth * scale) / 2 + overlay.rect.x * scale,
+          (-image.naturalHeight * scale) / 2 + overlay.rect.y * scale,
+          overlay.rect.width * scale,
+          overlay.rect.height * scale,
+        );
+      }
+      if (inpaintLayer?.duplicateOverlay?.length) {
+        context.save();
+        context.lineWidth = 2;
+        context.font = "12px sans-serif";
+        for (const entry of inpaintLayer.duplicateOverlay) {
+          const dx = (-image.naturalWidth * scale) / 2 + entry.rect.x * scale;
+          const dy = (-image.naturalHeight * scale) / 2 + entry.rect.y * scale;
+          context.setLineDash(entry.accepted ? [] : [5, 4]);
+          context.strokeStyle = entry.accepted ? "#12a150" : "#8a8886";
+          context.strokeRect(
+            dx,
+            dy,
+            entry.rect.width * scale,
+            entry.rect.height * scale,
+          );
+          if (entry.label) {
+            context.setLineDash([]);
+            context.fillStyle = entry.accepted ? "#12a150" : "#8a8886";
+            context.fillText(entry.label, dx + 4, dy + 14);
+          }
+        }
+        context.restore();
+      }
       context.restore();
     }
     context.restore();
@@ -6413,6 +7576,22 @@ function draw(
         );
       }
       // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/贴图像素。
+    } else if (mark.tool === "solid") {
+      // 纯色不透明遮挡：预览与导出同像素，写入普通导出与识别输入；
+      // 与 exclude（仅识别语义、不改导出像素）明确分离。
+      const area = normalizedRect(mark);
+      if (area.width > 0 && area.height > 0) {
+        context.setLineDash([]);
+        context.fillStyle = normalizeHexColor(
+          mark.style?.color ?? DEFAULT_SOLID_COLOR,
+        );
+        context.fillRect(
+          Math.floor(area.x),
+          Math.floor(area.y),
+          Math.ceil(area.x + area.width) - Math.floor(area.x),
+          Math.ceil(area.y + area.height) - Math.floor(area.y),
+        );
+      }
     } else if (mark.tool === "numbering") {
       drawTextAnnotation(context, mark, markScale);
     }
@@ -6432,7 +7611,9 @@ function draw(
       if (
         selectedIds?.size === 1 &&
         !mark.locked &&
-        (mark.tool === "rectangle" || mark.tool === "ellipse") &&
+        (mark.tool === "rectangle" ||
+          mark.tool === "ellipse" ||
+          mark.tool === "solid") &&
         !isExclusionMark(mark)
       ) {
         drawHandleSquares(context, normalizedRect(mark), "#f38b35");
@@ -6617,11 +7798,12 @@ function resizeRectPoints(
   };
 }
 
-/** 矩形对角类标记（矩形/椭圆/屏蔽）支持八点缩放。 */
+/** 矩形对角类标记（矩形/椭圆/遮挡/屏蔽）支持八点缩放。 */
 function isBoxResizableMark(mark: Mark): boolean {
   return (
     mark.tool === "rectangle" ||
     mark.tool === "ellipse" ||
+    mark.tool === "solid" ||
     isExclusionMark(mark)
   );
 }
@@ -6734,23 +7916,119 @@ function normalizedRect(mark: Pick<Mark, "start" | "end">) {
   };
 }
 
-const effectSurfaces = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
+const effectSurfaces = new WeakMap<
+  HTMLCanvasElement,
+  Map<string, HTMLCanvasElement>
+>();
 function effectSurface(
   canvas: HTMLCanvasElement,
   width: number,
   height: number,
+  key = "default",
 ) {
-  let scratch = effectSurfaces.get(canvas);
+  let surfaces = effectSurfaces.get(canvas);
+  if (!surfaces) {
+    surfaces = new Map();
+    effectSurfaces.set(canvas, surfaces);
+  }
+  let scratch = surfaces.get(key);
   if (!scratch) {
     scratch = document.createElement("canvas");
-    effectSurfaces.set(canvas, scratch);
+    surfaces.set(key, scratch);
   }
   const w = Math.max(1, Math.ceil(width)),
     h = Math.max(1, Math.ceil(height));
   if (scratch.width !== w) scratch.width = w;
   if (scratch.height !== h) scratch.height = h;
-  scratch.getContext("2d")?.clearRect(0, 0, w, h);
+  const context = scratch.getContext("2d");
+  context?.setTransform(1, 0, 0, 1, 0, 0);
+  context?.clearRect(0, 0, w, h);
   return scratch;
+}
+
+/** 笔刷轨迹（含笔宽）在画布内的包围盒，用于笔刷马赛克/模糊的采样范围。 */
+function strokeArea(
+  points: readonly Point[],
+  pad: number,
+  size: CanvasSize,
+): ReturnType<typeof normalizedRect> {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const at of points) {
+    minX = Math.min(minX, at.x);
+    minY = Math.min(minY, at.y);
+    maxX = Math.max(maxX, at.x);
+    maxY = Math.max(maxY, at.y);
+  }
+  if (!Number.isFinite(minX)) return { x: 0, y: 0, width: 0, height: 0 };
+  return clampRect(
+    {
+      x: minX - pad,
+      y: minY - pad,
+      width: maxX - minX + pad * 2,
+      height: maxY - minY + pad * 2,
+    },
+    size,
+  );
+}
+
+/** 笔刷轨迹 → 单色掩膜画布（尺寸 = area）：供 destination-in 裁剪效果。 */
+function strokeMaskSurface(
+  canvas: HTMLCanvasElement,
+  area: ReturnType<typeof normalizedRect>,
+  points: readonly Point[],
+  brush: number,
+): HTMLCanvasElement | undefined {
+  const mask = effectSurface(canvas, area.width, area.height, "brush-mask");
+  const context = mask.getContext("2d");
+  if (!context) throw new Error("笔刷掩膜画布分配失败");
+  context.lineWidth = brush;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.strokeStyle = "#000000";
+  context.setLineDash([]);
+  context.beginPath();
+  points.forEach((at, index) => {
+    const x = at.x - area.x;
+    const y = at.y - area.y;
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  if (points.length === 1) {
+    const only = points[0]!;
+    context.lineTo(only.x - area.x + 0.1, only.y - area.y);
+  }
+  context.stroke();
+  return mask;
+}
+
+/** 掩膜裁剪后把效果像素写回主画布：仅笔刷覆盖处被替换。 */
+function compositeThroughMask(
+  context: CanvasRenderingContext2D,
+  effect: HTMLCanvasElement,
+  mask: HTMLCanvasElement,
+  area: ReturnType<typeof normalizedRect>,
+): void {
+  const composited = effectSurface(
+    effect,
+    area.width,
+    area.height,
+    "brush-composited",
+  );
+  const compositor = composited.getContext("2d");
+  if (!compositor) throw new Error("笔刷合成画布分配失败");
+  compositor.drawImage(effect, 0, 0);
+  compositor.globalCompositeOperation = "destination-in";
+  compositor.drawImage(mask, 0, 0);
+  compositor.globalCompositeOperation = "source-over";
+  context.save();
+  context.imageSmoothingEnabled = false;
+  // 效果仅重绘已有像素的颜色，透明度沿用原图。
+  context.globalCompositeOperation = "source-atop";
+  context.drawImage(composited, area.x, area.y, area.width, area.height);
+  context.restore();
 }
 
 function applyMosaic(
@@ -6759,16 +8037,16 @@ function applyMosaic(
   mark: Mark,
   scale = 1,
 ) {
+  if (mark.points?.length) {
+    applyBrushTiles(context, canvas, mark, scale);
+    return;
+  }
   const size = canvasSize(canvas);
   const area = clampRect(normalizedRect(mark), size);
   if (area.width <= 0 || area.height <= 0) return;
-  // 强度决定马赛克块尺寸：弱=8px、中=14px、强=26px，预览与导出同源。
-  const cell = MOSAIC_CELLS[markEffectIntensity(mark)] ?? 14;
-  const scratch = effectSurface(
-    canvas,
-    area.width / (cell * scale),
-    area.height / (cell * scale),
-  );
+  // 强度决定马赛克块尺寸：1→8、2→14、3→26，中间连续插值，预览与导出同源。
+  const cell = mosaicCellSize(markEffectIntensity(mark)) * scale;
+  const scratch = effectSurface(canvas, area.width / cell, area.height / cell);
   const scratchContext = scratch.getContext("2d");
   if (!scratchContext) return;
   scratchContext.filter = "none";
@@ -6799,6 +8077,10 @@ function applyBlur(
   mark: Mark,
   scale = 1,
 ) {
+  if (mark.points?.length) {
+    applyBrushTiles(context, canvas, mark, scale);
+    return;
+  }
   const size = canvasSize(canvas);
   const area = clampRect(normalizedRect(mark), size);
   if (area.width <= 0 || area.height <= 0) return;
@@ -6816,8 +8098,8 @@ function applyBlur(
   );
   const sx = canvas.width / size.width,
     sy = canvas.height / size.height;
-  // 强度决定滤波半径：弱=5px、中=10px、强=20px，预览与导出同源。
-  const radius = BLUR_RADII[markEffectIntensity(mark)] ?? 10;
+  // 强度决定滤波半径：1→5、2→10、3→20，中间连续插值，预览与导出同源。
+  const radius = blurRadius(markEffectIntensity(mark));
   const scratch = effectSurface(canvas, sample.width * sx, sample.height * sy);
   const scratchContext = scratch.getContext("2d");
   if (!scratchContext) return;
@@ -6841,6 +8123,327 @@ function applyBlur(
   context.clearRect(area.x, area.y, area.width, area.height);
   context.drawImage(scratch, sample.x, sample.y, sample.width, sample.height);
   context.restore();
+}
+
+function validateBrushBudget(
+  image: HTMLImageElement | undefined,
+  canvas: HTMLCanvasElement | null,
+  next: EditorState,
+) {
+  if (!image || !canvas) return;
+  const size = outputSize(image, next.rotation),
+    display = canvasSize(canvas);
+  const scale = 1 / imageTransform(image, next.rotation, display).scale;
+  for (const mark of next.marks) {
+    if (
+      (mark.tool !== "mosaic" && mark.tool !== "blur") ||
+      !mark.points?.length
+    )
+      continue;
+    brushTiles(
+      {
+        ...mark,
+        points: mark.points.map((at) =>
+          projectPoint(at, image, next.rotation, display, next.rotation, size),
+        ),
+      },
+      scale,
+      size,
+    );
+  }
+}
+
+const BRUSH_TILE_PIXELS = 512;
+const BRUSH_STAGED_PIXELS = 8_000_000;
+const BRUSH_SAMPLE_PIXELS = 4_000_000;
+
+function brushTiles(
+  mark: Mark,
+  scale: number,
+  size: CanvasSize,
+  pixelScale = 1,
+) {
+  const points = mark.points ?? [mark.start, mark.end];
+  const radius = Math.max(2, (mark.style?.brushSize ?? 24) * scale) / 2 + 1;
+  const side = BRUSH_TILE_PIXELS / Math.max(1, pixelScale);
+  const area = strokeArea(points, radius, size);
+  const tiles: ReturnType<typeof normalizedRect>[] = [];
+  let pixels = 0;
+  const halo =
+    mark.tool === "blur"
+      ? blurRadius(markEffectIntensity(mark)) * 3 * scale
+      : 0;
+  for (
+    let y = Math.floor(area.y / side) * side;
+    y < area.y + area.height;
+    y += side
+  ) {
+    for (
+      let x = Math.floor(area.x / side) * side;
+      x < area.x + area.width;
+      x += side
+    ) {
+      const outer = clampRect({ x, y, width: side, height: side }, size);
+      const tx = Math.max(outer.x, area.x),
+        ty = Math.max(outer.y, area.y);
+      const tile = {
+        x: tx,
+        y: ty,
+        width: Math.min(outer.x + outer.width, area.x + area.width) - tx,
+        height: Math.min(outer.y + outer.height, area.y + area.height) - ty,
+      };
+      const cx = tile.x + tile.width / 2,
+        cy = tile.y + tile.height / 2;
+      const reach = radius + Math.hypot(tile.width, tile.height) / 2;
+      const touches = points.some((a, i) => {
+        const b = points[i + 1] ?? a,
+          dx = b.x - a.x,
+          dy = b.y - a.y;
+        const t =
+          dx || dy
+            ? Math.max(
+                0,
+                Math.min(
+                  1,
+                  ((cx - a.x) * dx + (cy - a.y) * dy) / (dx * dx + dy * dy),
+                ),
+              )
+            : 0;
+        return Math.hypot(cx - a.x - t * dx, cy - a.y - t * dy) <= reach;
+      });
+      if (!touches) continue;
+      pixels +=
+        Math.ceil(tile.width * pixelScale) *
+        Math.ceil(tile.height * pixelScale);
+      if (
+        pixels > BRUSH_STAGED_PIXELS ||
+        (Math.ceil((tile.width + halo * 2) * pixelScale) + 2) *
+          (Math.ceil((tile.height + halo * 2) * pixelScale) + 2) >
+          BRUSH_SAMPLE_PIXELS
+      )
+        throw new Error(
+          "笔刷效果超出8MP暂存或4MP单块采样预算，请缩短轨迹或减小笔刷/强度。",
+        );
+      tiles.push(tile);
+    }
+  }
+  return tiles;
+}
+
+function applyBrushTiles(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  mark: Mark,
+  scale: number,
+) {
+  const size = canvasSize(canvas),
+    sx = canvas.width / size.width,
+    sy = canvas.height / size.height;
+  const tiles = brushTiles(mark, scale, size, Math.max(sx, sy));
+  const staged: {
+    area: ReturnType<typeof normalizedRect>;
+    canvas: HTMLCanvasElement;
+    x: number;
+    y: number;
+  }[] = [];
+  // 全部读取原始画布后才提交，halo 不会读取已模糊的相邻块。
+  try {
+    for (const planned of tiles) {
+      const x = Math.round(planned.x * sx),
+        y = Math.round(planned.y * sy);
+      const right = Math.round((planned.x + planned.width) * sx),
+        bottom = Math.round((planned.y + planned.height) * sy);
+      if (right <= x || bottom <= y) continue;
+      const area = {
+        x: x / sx,
+        y: y / sy,
+        width: (right - x) / sx,
+        height: (bottom - y) / sy,
+      };
+      const tile = document.createElement("canvas");
+      tile.width = right - x;
+      tile.height = bottom - y;
+      const target = tile.getContext("2d");
+      if (!target) throw new Error("笔刷效果画布分配失败");
+      target.drawImage(
+        canvas,
+        x,
+        y,
+        tile.width,
+        tile.height,
+        0,
+        0,
+        tile.width,
+        tile.height,
+      );
+      target.setTransform(sx, 0, 0, sy, -x, -y);
+      staged.push({ area, canvas: tile, x, y });
+      if (mark.tool === "mosaic")
+        applyMosaicBrush(target, canvas, mark, scale, area);
+      else applyBlurBrush(target, canvas, mark, scale, area);
+    }
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    for (const tile of staged) {
+      context.clearRect(tile.x, tile.y, tile.canvas.width, tile.canvas.height);
+      context.drawImage(tile.canvas, tile.x, tile.y);
+    }
+    context.restore();
+  } finally {
+    for (const tile of staged) {
+      tile.canvas.width = 1;
+      tile.canvas.height = 1;
+    }
+  }
+}
+
+/** 自由笔刷马赛克：轨迹包围盒内按块尺寸降采样，再经笔刷掩膜裁剪写回。 */
+function applyMosaicBrush(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  mark: Mark,
+  scale = 1,
+  tileArea?: ReturnType<typeof normalizedRect>,
+) {
+  const size = canvasSize(canvas);
+  const points = mark.points ?? [mark.start, mark.end];
+  const brush = Math.max(2, (mark.style?.brushSize ?? 24) * scale);
+  const fullArea = strokeArea(points, brush / 2 + 1, size);
+  const area = tileArea ?? fullArea;
+  if (area.width <= 2 || area.height <= 2) return;
+  const cell = Math.max(2, mosaicCellSize(markEffectIntensity(mark)) * scale);
+  const mask = strokeMaskSurface(canvas, area, points, brush);
+  if (!mask) return;
+  const cellWidth = fullArea.width / Math.ceil(fullArea.width / cell),
+    cellHeight = fullArea.height / Math.ceil(fullArea.height / cell);
+  const gx = Math.floor((area.x - fullArea.x) / cellWidth),
+    gy = Math.floor((area.y - fullArea.y) / cellHeight);
+  const right = Math.ceil((area.x + area.width - fullArea.x) / cellWidth),
+    bottom = Math.ceil((area.y + area.height - fullArea.y) / cellHeight);
+  // 保留裁剪前的格子映射；drawImage 会同步裁剪源与目标，不能拉伸剩余源区域。
+  const sample = {
+    x: fullArea.x + gx * cellWidth,
+    y: fullArea.y + gy * cellHeight,
+    width: (right - gx) * cellWidth,
+    height: (bottom - gy) * cellHeight,
+  };
+  const down = effectSurface(
+    canvas,
+    right - gx,
+    bottom - gy,
+    "brush-mosaic-down",
+  );
+  const downContext = down.getContext("2d");
+  if (!downContext) throw new Error("笔刷效果画布分配失败");
+  downContext.imageSmoothingEnabled = true;
+  downContext.imageSmoothingQuality = "high";
+  const sx = canvas.width / size.width,
+    sy = canvas.height / size.height;
+  downContext.drawImage(
+    canvas,
+    sample.x * sx,
+    sample.y * sy,
+    sample.width * sx,
+    sample.height * sy,
+    0,
+    0,
+    down.width,
+    down.height,
+  );
+  const up = effectSurface(canvas, area.width, area.height, "brush-mosaic-up");
+  const upContext = up.getContext("2d");
+  if (!upContext) throw new Error("笔刷效果画布分配失败");
+  upContext.imageSmoothingEnabled = false;
+  upContext.drawImage(
+    down,
+    (area.x - sample.x) / cellWidth,
+    (area.y - sample.y) / cellHeight,
+    area.width / cellWidth,
+    area.height / cellHeight,
+    0,
+    0,
+    up.width,
+    up.height,
+  );
+  compositeThroughMask(context, up, mask, area);
+}
+
+/** 自由笔刷模糊：带边距采样模糊后经笔刷掩膜裁剪写回，只替换覆盖像素。 */
+function applyBlurBrush(
+  context: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  mark: Mark,
+  scale = 1,
+  tileArea?: ReturnType<typeof normalizedRect>,
+) {
+  const size = canvasSize(canvas);
+  const points = mark.points ?? [mark.start, mark.end];
+  const brush = Math.max(2, (mark.style?.brushSize ?? 24) * scale);
+  const fullArea = strokeArea(points, brush / 2 + 1, size);
+  const area = tileArea ?? fullArea;
+  if (area.width <= 0 || area.height <= 0) return;
+  const radius = blurRadius(markEffectIntensity(mark));
+  const mask = strokeMaskSurface(canvas, area, points, brush);
+  if (!mask) return;
+  let sample = clampRect(
+    {
+      x: area.x - radius * 3 * scale,
+      y: area.y - radius * 3 * scale,
+      width: area.width + radius * 6 * scale,
+      height: area.height + radius * 6 * scale,
+    },
+    size,
+  );
+  const sx = canvas.width / size.width,
+    sy = canvas.height / size.height;
+  const px = Math.floor(sample.x * sx),
+    py = Math.floor(sample.y * sy);
+  sample = clampRect(
+    {
+      x: px / sx,
+      y: py / sy,
+      width: (Math.ceil((sample.x + sample.width) * sx) - px) / sx,
+      height: (Math.ceil((sample.y + sample.height) * sy) - py) / sy,
+    },
+    size,
+  );
+  const blurred = effectSurface(
+    canvas,
+    sample.width * sx,
+    sample.height * sy,
+    "brush-blur-sample",
+  );
+  const blurContext = blurred.getContext("2d");
+  if (!blurContext) throw new Error("笔刷效果画布分配失败");
+  blurContext.imageSmoothingEnabled = true;
+  blurContext.filter = `blur(${radius * scale * sx}px)`;
+  blurContext.drawImage(
+    canvas,
+    sample.x * sx,
+    sample.y * sy,
+    sample.width * sx,
+    sample.height * sy,
+    0,
+    0,
+    blurred.width,
+    blurred.height,
+  );
+  // 裁出 area 尺寸的效果层，再经掩膜写回。
+  const cut = effectSurface(canvas, area.width, area.height, "brush-blur-cut");
+  const cutContext = cut.getContext("2d");
+  if (!cutContext) throw new Error("笔刷效果画布分配失败");
+  cutContext.drawImage(
+    blurred,
+    (area.x - sample.x) * sx,
+    (area.y - sample.y) * sy,
+    area.width * sx,
+    area.height * sy,
+    0,
+    0,
+    cut.width,
+    cut.height,
+  );
+  compositeThroughMask(context, cut, mask, area);
 }
 
 function clampRect(rect: ReturnType<typeof normalizedRect>, size: CanvasSize) {
@@ -7020,20 +8623,24 @@ function findMark(
         return mark.id;
       continue;
     }
-    // 直线/箭头/折线：按到线段的最短距离命中，避免包络盒内误选；
-    // 其余工具沿用包络盒（±10px 容差）；透明对象按几何命中。
+    // 直线/箭头/折线/画笔：按到线段的最短距离命中，避免包络盒内误选；
+    // 笔刷马赛克/模糊同样按轨迹+笔刷半径精确命中；其余工具沿用包络盒
+    // （±10px 容差）；透明对象按几何命中。
     if (
       mark.tool === "line" ||
       mark.tool === "arrow" ||
       mark.tool === "polyline" ||
       mark.tool === "pen" ||
-      mark.tool === "highlighter"
+      mark.tool === "highlighter" ||
+      ((mark.tool === "mosaic" || mark.tool === "blur") && mark.points?.length)
     ) {
       if (
         hitStrokePaths(
           annotationPaths(mark),
           point,
-          annotationStrokeWidth(mark),
+          mark.tool === "mosaic" || mark.tool === "blur"
+            ? Math.max(2, mark.style?.brushSize ?? 24)
+            : annotationStrokeWidth(mark),
         )
       )
         return mark.id;

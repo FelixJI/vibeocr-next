@@ -472,3 +472,163 @@ test("图片编辑离开设置再返回释放满额资源并可再次导入", as
     path: info.outputPath("route-retirement-reimport.png"),
   });
 });
+
+test("merge integration imported pixels survive cached preview, brush sampling and canvas color picking", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(() =>
+    Object.defineProperty(window, "EyeDropper", {
+      value: undefined,
+      configurable: true,
+    }),
+  );
+  const sessionId = "33333333333333333333333333333333";
+  const baseUrl = "https://app.vibeocr/__resource/merge-base";
+  const imageUrl = "https://app.vibeocr/__resource/merge-alpha";
+  const pngs = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 600;
+    const base = canvas.toDataURL("image/png").split(",")[1]!;
+    canvas.width = 160;
+    canvas.height = 80;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "rgba(255,0,0,0.5)";
+    context.fillRect(0, 0, 160, 80);
+    return { base, image: canvas.toDataURL("image/png").split(",")[1]! };
+  });
+  await page.route("https://app.vibeocr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await page.request.get(
+      "http://127.0.0.1:4174" + url.pathname + url.search,
+    );
+    await route.fulfill({ response });
+  });
+  const base = Buffer.from(pngs.base, "base64"),
+    image = Buffer.from(pngs.image, "base64");
+  await page.route(baseUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: base }),
+  );
+  await page.route(imageUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: image }),
+  );
+  const uploads: Buffer[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push(route.request().postDataBuffer()!);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    });
+  });
+  const state = {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: { url: baseUrl, mediaType: "image/png", byteLength: base.length },
+    screenshotSession: { sessionId, revision: 0, sceneEditing: false },
+  };
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: ["recognition.results", "recognition.annotation"],
+      features: { imageEdit: state },
+    },
+    "https://app.vibeocr/",
+  );
+  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: {
+      requestId: "merge-pixels",
+      sessionId,
+      revision: 0,
+      items: [
+        {
+          kind: "image",
+          assetId: "merge-alpha",
+          resourceUri: imageUrl,
+          byteLength: image.length,
+          pixelWidth: 160,
+          pixelHeight: 80,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: { sessionId, revision: 0, requestId: "merge-pixels" },
+  });
+  const canvas = page.getByLabel("图片检查画布");
+  const clickAt = async (x: number, y: number) => {
+    const box = (await canvas.boundingBox())!;
+    await canvas.click({
+      position: { x: (x * box.width) / 900, y: (y * box.height) / 600 },
+    });
+  };
+  await action(page, "选择");
+  await clickAt(10, 10);
+  await expect
+    .poll(() =>
+      canvas.evaluate((element) => {
+        const canvas = element as HTMLCanvasElement;
+        return Array.from(
+          canvas
+            .getContext("2d")!
+            .getImageData(
+              Math.floor((450 * canvas.width) / 900),
+              Math.floor((300 * canvas.height) / 600),
+              1,
+              1,
+            ).data,
+        );
+      }),
+    )
+    .toEqual([255, 0, 0, 128]);
+  const save = async () => {
+    const index = uploads.length;
+    await action(page, "保存标注图");
+    await expect.poll(() => uploads.length).toBe(index + 1);
+    return uploads[index]!;
+  };
+  const baseline = await save();
+  await action(page, "矩形");
+  await action(page, "屏幕取色");
+  await clickAt(450, 300);
+  await expect(
+    page.getByText("已从画布取色 #ff0000。", { exact: true }),
+  ).toBeVisible();
+  for (const tool of ["马赛克", "模糊"]) {
+    await action(page, tool);
+    await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(
+      box.x + (420 * box.width) / 900,
+      box.y + (300 * box.height) / 600,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      box.x + (480 * box.width) / 900,
+      box.y + (300 * box.height) / 600,
+    );
+    await page.mouse.up();
+    const effected = await save();
+    expect(
+      await pngPixels(page, effected, [
+        [450, 300],
+        [390, 280],
+      ]),
+    ).toEqual([
+      [255, 0, 0, 128],
+      [255, 0, 0, 128],
+    ]);
+    await action(page, "撤销");
+    expect(await save()).toEqual(baseline);
+  }
+});
