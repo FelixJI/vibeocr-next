@@ -24,6 +24,41 @@ public sealed partial class App
       var store = new CapturePreferencesStore(layout);
       switch (scenario)
       {
+        case "ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame":
+          await ScrollCaptureSession.Session.VerifyCorrectionAuthorizationSelfCheckAsync();
+          break;
+        case "ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection":
+          await ScrollCaptureSession.Session.VerifyAmbiguousCorrectionsSelfCheckAsync();
+          break;
+        case "ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection":
+          await ScrollCaptureSession.Session.VerifyNoOverlapStopsSelfCheckAsync();
+          break;
+        case "ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops":
+          await ScrollCaptureSession.Session.VerifyFirstFailureSelfCheckAsync();
+          break;
+        case "ScrollCaptureAllowsNarrowHorizontalSelectionAndEnforcesAxisLimits":
+          ScrollCaptureSession.Session.VerifySelectionGeometrySelfCheck();
+          break;
+        case "ScrollCaptureReverseFrameCanBeDiscardedBeforeForwardResume":
+          await ScrollCaptureSession.Session.VerifyReverseRecoverySelfCheckAsync();
+          break;
+        case "ScrollCapturePendingPreviewBoundsBothDimensionsWithoutUpscaling":
+          await ScrollCaptureSession.Session.VerifyPendingPreviewBoundsSelfCheckAsync();
+          break;
+        case "ScrollCaptureAcceptedPreviewSkipsBusyRendererAndBoundsAllocation":
+          await ScrollCaptureSession.Session.VerifyAcceptedPreviewAllocationSelfCheckAsync();
+          break;
+        case "ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets":
+          await ScrollCaptureSession.Session.VerifyPreviewResumeStableWindowSelfCheckAsync();
+          break;
+        case "ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure":
+          await ScrollCaptureSession.Session.VerifyPreviewGateSelfCheckAsync();
+          break;
+        case "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment":
+        case "ScrollCaptureCancellationDiscardsFramesAndClosesController":
+        case "ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame":
+          await VerifyScrollCaptureUiAsync(scenario);
+          break;
         case "OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion":
           VerifyCaptureOptionsMerge(store);
           break;
@@ -55,6 +90,137 @@ public sealed partial class App
     }
   }
 
+  private static async Task VerifyScrollCaptureUiAsync(string scenario)
+  {
+    var rows = new Microsoft.UI.Xaml.Controls.StackPanel();
+    for (int index = 0; index < 50; index++)
+      rows.Children.Add(new Microsoft.UI.Xaml.Controls.Border
+      {
+        Height = 24,
+        Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+            Windows.UI.Color.FromArgb(255, (byte)(index * 5), (byte)(255 - index * 3), (byte)(index * 2))),
+        Child = new Microsoft.UI.Xaml.Controls.TextBlock { Text = $"synthetic scroll row {index:D3}" },
+      });
+    var viewer = new Microsoft.UI.Xaml.Controls.ScrollViewer
+    {
+      Content = rows,
+      VerticalScrollBarVisibility = Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Hidden,
+      HorizontalScrollBarVisibility = Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Disabled,
+    };
+    int wheelEvents = 0;
+    viewer.AddHandler(UIElement.PointerWheelChangedEvent,
+        new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) => wheelEvents++), handledEventsToo: true);
+    var source = new Window { Title = "Owned synthetic scroll source", Content = viewer };
+    var owner = new Window { Content = new Microsoft.UI.Xaml.Controls.Grid() };
+    nint sourceHandle = WinRT.Interop.WindowNative.GetWindowHandle(source);
+    nint ownerHandle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
+    bool sourceClosed = false;
+    using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+    Task<CapturedFrame?>? capture = null;
+    try
+    {
+      PhysicalRectangle monitor = DesktopScreenQuery.GetPrimaryMonitor();
+      source.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(monitor.X + 80, monitor.Y + 80, 360, 320));
+      await ActivateAndWaitForegroundAsync(source, sourceHandle);
+      await Task.Delay(150, cancellation.Token);
+      PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(sourceHandle)
+          ?? throw new InvalidOperationException("Owned scroll source has no client bounds.");
+      var bounds = new PhysicalRectangle(client.X + 16, client.Y + 16, client.Width - 32, client.Height - 32);
+      var session = new ScrollCaptureSession.Session(ownerHandle, bounds, cancellation.Token);
+      capture = session.RunAsync();
+      nint controllerHandle = WinRT.Interop.WindowNative.GetWindowHandle(session.ControlWindow);
+      await Task.Delay(150, cancellation.Token);
+      var root = (DependencyObject)session.ControlWindow.Content;
+      Microsoft.UI.Xaml.Controls.Button Button(string id) =>
+          FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Button>(root, id);
+      void Invoke(string id)
+      {
+        var peer = new ButtonAutomationPeer(Button(id));
+        ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
+      }
+      bool success = scenario == "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment";
+      FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.CheckBox>(root, "scroll-capture-automatic").IsChecked = success;
+      Invoke("scroll-capture-start");
+      var confirm = Button("scroll-capture-confirm");
+      await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled, cancellation.Token);
+      Check(viewer.VerticalOffset == 0 && !capture.IsCompleted, "Initial preview must precede scrolling/output.");
+      if (scenario == "ScrollCaptureCancellationDiscardsFramesAndClosesController")
+      {
+        Invoke("scroll-capture-cancel");
+        Check(await capture is null, "Cancellation after the first accepted frame must not return a partial image.");
+      }
+      else
+      {
+        if (!success)
+        {
+          source.Close();
+          sourceClosed = true;
+          await WaitForScrollUiAsync(() => !Button("scroll-capture-finish").IsEnabled && confirm.Visibility == Visibility.Collapsed,
+              cancellation.Token);
+          Invoke("scroll-capture-cancel");
+          try { await capture; throw new InvalidOperationException("Vanished source returned a partial image."); }
+          catch (InvalidOperationException error)
+          {
+            Check(error.Message.Contains("源窗口", StringComparison.Ordinal), "Failure must identify the source window.");
+          }
+        }
+        else
+        {
+          Invoke("scroll-capture-confirm");
+          try { await WaitForScrollUiAsync(() => viewer.VerticalOffset >= 32, cancellation.Token); }
+          catch (InvalidOperationException error)
+          {
+            throw new InvalidOperationException(
+                $"{error.Message} offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
+          }
+          Check(wheelEvents > 0, "Automatic scrolling must enter the real XAML pointer wheel input pipeline.");
+          await Task.Delay(1400, cancellation.Token);
+          Invoke("scroll-capture-finish");
+          await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled &&
+              Equals(confirm.Content, "确认选段并送入编辑器"), cancellation.Token);
+          Check(!capture.IsCompleted, "Final preview must require explicit user confirmation.");
+          Invoke("scroll-capture-confirm");
+          CapturedFrame? output = await capture;
+          Check(output is not null && output.Width == bounds.Width && output.Height > bounds.Height,
+              "Automatic standard scrolling must return the confirmed multi-frame segment.");
+        }
+      }
+      Check(session.HasReleasedCaptureResources, "The capture loop and retained frames must be released before returning.");
+      Check(!IsWindowVisible(controllerHandle),
+          "Capture controller must be closed before returning.");
+    }
+    finally
+    {
+      cancellation.Cancel();
+      if (capture is not null) { try { await capture; } catch (Exception) { } }
+      if (!sourceClosed) source.Close();
+      ScreenRegionPicker.RestoreOwnerState(ownerHandle, visible: true, minimized: false, foreground: 0);
+      Check(IsWindowVisible(ownerHandle), "Owner must be restorable after success, cancellation or failure.");
+      owner.Close();
+    }
+  }
+
+  private static T FindScrollSmokeControl<T>(DependencyObject root, string id) where T : FrameworkElement
+  {
+    if (root is T found && Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(found) == id) return found;
+    for (int index = 0; index < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root); index++)
+    {
+      try { return FindScrollSmokeControl<T>(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, index), id); }
+      catch (KeyNotFoundException) { }
+    }
+    throw new KeyNotFoundException($"Owned scroll control was not found: {id}");
+  }
+
+  private static async Task WaitForScrollUiAsync(Func<bool> ready, CancellationToken cancellationToken)
+  {
+    for (int attempt = 0; attempt < 120; attempt++)
+    {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (ready()) return;
+      await Task.Delay(50, cancellationToken);
+    }
+    throw new InvalidOperationException("Owned scroll UI did not reach the expected state within 6 seconds.");
+  }
   private static void VerifyCaptureOptionsMerge(CapturePreferencesStore store)
   {
     store.SaveLastRegion(new PhysicalRectangle(5, 6, 100, 80));

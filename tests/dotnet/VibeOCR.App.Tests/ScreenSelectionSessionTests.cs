@@ -131,6 +131,51 @@ public sealed class ScreenSelectionSessionTests
     Assert.Equal(Enumerable.Range(0, 40).Select(i => (byte)i), input.Data.Skip(54));
   }
 
+  [Theory]
+  [InlineData(ScrollCaptureDirection.Right)]
+  [InlineData(ScrollCaptureDirection.Left)]
+  public async Task HorizontalStitchCrossesPickerAndInputEncodingWithActualPixelWidth(ScrollCaptureDirection direction)
+  {
+    const int frameWidth = 96, documentWidth = 136, height = 64;
+    byte[] document = new byte[documentWidth * height * 4];
+    for (int y = 0; y < height; y++)
+      for (int x = 0; x < documentWidth; x++)
+      {
+        int index = (y * documentWidth + x) * 4;
+        document[index] = (byte)x;
+        document[index + 1] = (byte)y;
+        document[index + 2] = (byte)(x ^ y);
+        document[index + 3] = 255;
+      }
+    CapturedFrame Frame(int left)
+    {
+      byte[] pixels = new byte[frameWidth * height * 4];
+      for (int y = 0; y < height; y++)
+        document.AsSpan((y * documentWidth + left) * 4, frameWidth * 4)
+          .CopyTo(pixels.AsSpan(y * frameWidth * 4));
+      return new(pixels, frameWidth, height, frameWidth * 4, "BGRA8");
+    }
+    bool reverse = direction == ScrollCaptureDirection.Left;
+    var stitcher = new VerticalScrollStitcher(Frame(reverse ? 40 : 0), direction);
+    Assert.Equal(ScrollAppendStatus.Added,
+      stitcher.Append(Frame(reverse ? 0 : 40), TestContext.Current.CancellationToken).Status);
+    CapturedFrame output = stitcher.BuildFrame(TestContext.Current.CancellationToken);
+    var physicalBounds = new PhysicalRectangle(10, 20, frameWidth, height);
+    var picker = new FrameRegionPicker(physicalBounds, output);
+    var service = new InputService(static () => 0, scrollingRegionPicker: picker);
+    RecognitionInput input = Assert.IsType<RecognitionInput>(
+      await service.CaptureScrollingScreenAsync(TestContext.Current.CancellationToken));
+    Assert.Equal(physicalBounds, input.CaptureBounds);
+    Assert.Equal(documentWidth, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(input.Data.AsSpan(18)));
+    Assert.Equal(-height, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(input.Data.AsSpan(22)));
+    Assert.Equal(document, input.Data.AsSpan(54).ToArray());
+  }
+
+  private sealed class FrameRegionPicker(PhysicalRectangle bounds, CapturedFrame frame) : IScreenRegionPicker
+  {
+    public Task<ScreenRegionSelection?> PickAsync(CancellationToken cancellationToken) =>
+      Task.FromResult<ScreenRegionSelection?>(ScreenRegionPicker.CreateScrollingSelection(bounds, frame));
+  }
   [Fact]
   public void ReleaseKeepsSelectionForConfirmationAndBackAllowsReselectionBeforeExit()
   {
