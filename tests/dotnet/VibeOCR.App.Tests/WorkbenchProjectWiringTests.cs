@@ -523,6 +523,109 @@ public sealed class WorkbenchProjectWiringTests
   /// 解码前拒绝这些样本，无效 IHDR 编码仍由平台解码拒绝。</summary>
 
   [Fact]
+  public async Task RestoredAssetsRetireWhenAckDocumentCancels()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "retire.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      // 直接构造含 image 资产的包（保存链路由其他测试覆盖）。
+      byte[] source = PngBytes(64, 48);
+      byte[] assetPng = PngBytes(8, 6);
+      string assetId = new string('a', 32);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [new VibpAssetResource
+        {
+          Id = assetId, Width = 8, Height = 6, Length = assetPng.Length,
+        }],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks = [new VibpMark
+          {
+            Id = "mark-1",
+            Tool = "image",
+            Start = new VibpPoint { X = 1, Y = 1 },
+            End = new VibpPoint { X = 16, Y = 12 },
+            AssetId = assetId,
+          }],
+          Patches = [],
+        },
+      };
+      VibpProjectFile.Write(projectPath, manifest,
+      [
+        new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source)),
+        new VibpProjectEntry($"asset-{assetId}.png", assetPng.Length,
+          () => new MemoryStream(assetPng)),
+      ]);
+
+      var openPicker = new PickerStub { OpenPath = projectPath };
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      Assert.Null((await opener.ExecuteAsync(
+        new OpenImageEditProjectCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor? pending = opener.CurrentProjectOpen;
+      Assert.NotNull(pending);
+      // ack 携带受控文档 token（宿主路由）：恢复资产绑定该身份。
+      using var document = CancellationTokenSource.CreateLinkedTokenSource(
+        TestContext.Current.CancellationToken);
+      Assert.Null((await opener.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
+          pending.Binding.Generation),
+        document.Token)).Error);
+      Assert.NotEmpty(pending.Assets);
+      string assetUrl = pending.Assets.Values.First().Url;
+      Assert.True(await ResourceExistsAsync(broker, assetUrl));
+
+      // 文档取消（导航/恢复/重载）：既有 RetireDocumentImports 精确回收
+      // 恢复资产租约与文件。
+      document.Cancel();
+      await Assert.ThrowsAnyAsync<Exception>(async () => await broker.OpenAsync(
+        new Uri(assetUrl), TestContext.Current.CancellationToken));
+      string? assetFile = Directory.GetFiles(Path.Combine(root, "session"))
+        .FirstOrDefault();
+      if (assetFile is not null)
+      {
+        Assert.NotEqual(assetPng, await File.ReadAllBytesAsync(
+          assetFile, TestContext.Current.CancellationToken));
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  private static async Task<bool> ResourceExistsAsync(
+    WorkbenchResourceBroker broker, string url)
+  {
+    try
+    {
+      await using WorkbenchResourceResponse response = await broker.OpenAsync(
+        new Uri(url), TestContext.Current.CancellationToken);
+      return true;
+    }
+    catch (WorkbenchResourceAccessException)
+    {
+      return false;
+    }
+  }
+
+  [Fact]
   public async Task OpenProjectPublishesPendingAndAckSwitchesSession()
   {
     string root = TemporaryRoot();

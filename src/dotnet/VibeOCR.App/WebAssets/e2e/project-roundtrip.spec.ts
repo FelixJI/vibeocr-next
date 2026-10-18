@@ -14,6 +14,11 @@ import {
  * 已准备数据，不重取）、真实补丁保存、保存→打开→导出像素一致、失败/
  * 取消保画布、截图通道（recognition 作用域）保存与非默认逻辑帧。 */
 
+// 等待导航触发的资源代理结束，避免 teardown 提前释放 APIResponse。
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 async function canvasClient(
   page: Page,
   x: number,

@@ -65,10 +65,18 @@ public sealed class WorkbenchProjectStore : IDisposable
   private readonly object gate = new();
   private readonly TimeProvider timeProvider;
   private readonly TimeSpan lifetime;
-  private StagedContribution? staged;
-  private long generation;
+  /// <summary>按宿主/文档身份分槽：任一时刻每槽最多一份未消费贡献；
+  /// 匿名调用共享一个槽，保存单宿主/既有测试语义。</summary>
+  private readonly Dictionary<object, Slot> slots =
+    new(System.Collections.Generic.ReferenceEqualityComparer.Instance);
   private bool disposed;
-  private ITimer? expiryTimer;
+
+  private sealed class Slot
+  {
+    public StagedContribution? Staged;
+    public long Generation;
+    public ITimer? ExpiryTimer;
+  }
 
   internal (int Count, Guid? Id) Staged
   {
@@ -76,7 +84,11 @@ public sealed class WorkbenchProjectStore : IDisposable
     {
       lock (gate)
       {
-        return (staged is null ? 0 : 1, staged?.Lease.ContributeId);
+        StagedContribution? first = slots.Values
+          .Select(slot => slot.Staged)
+          .FirstOrDefault(staged => staged is not null);
+        int count = slots.Values.Count(slot => slot.Staged is not null);
+        return (count, first?.Lease.ContributeId);
       }
     }
   }
@@ -87,7 +99,7 @@ public sealed class WorkbenchProjectStore : IDisposable
     {
       lock (gate)
       {
-        return expiryTimer is null ? 0 : 1;
+        return slots.Values.Count(slot => slot.ExpiryTimer is not null);
       }
     }
   }
@@ -104,72 +116,104 @@ public sealed class WorkbenchProjectStore : IDisposable
     }
   }
 
-  /// <summary>接收并暂存一次保存贡献；结构/预算违规抛
-  /// WorkbenchProjectUploadException。读取期间发生 RevokeAll/Dispose 时以
-  /// 代际拒绝提交（不暂存旧文档贡献）；已有未消费贡献被替换（旧贡献丢弃）。</summary>
+  /// <summary>接收并暂存一次保存贡献（匿名槽，兼容单宿主/既有测试）。</summary>
+  public Task<WorkbenchProjectContributionLease> UploadAsync(
+    Stream content,
+    CancellationToken cancellationToken = default) =>
+    UploadAsync(content, AnonymousCaller, cancellationToken);
+
+  /// <summary>按宿主身份接收贡献：多宿主（主窗口/独立编辑窗）各自槽位
+  /// 互不替换，导航/重置仅撤销该宿主槽位；同槽已有未消费贡献被替换。</summary>
   public async Task<WorkbenchProjectContributionLease> UploadAsync(
     Stream content,
+    object caller,
     CancellationToken cancellationToken = default)
   {
-    ArgumentNullException.ThrowIfNull(content);
+    ArgumentNullException.ThrowIfNull(caller);
     cancellationToken.ThrowIfCancellationRequested();
-    long uploadGeneration = Volatile.Read(ref generation);
+    Slot slot;
+    long uploadGeneration;
+    lock (gate)
+    {
+      ThrowIfDisposed();
+      slot = SlotFor(caller);
+      uploadGeneration = slot.Generation;
+    }
     byte[] body = await ReadBoundedAsync(content, MaximumUploadBytes, cancellationToken);
     WorkbenchProjectContribution contribution = ParseContribution(body);
 
     lock (gate)
     {
       ThrowIfDisposed();
-      if (Volatile.Read(ref generation) != uploadGeneration)
+      if (slot.Generation != uploadGeneration)
       {
         throw new WorkbenchProjectUploadException(
           "Project contribution upload was superseded by a document reset.");
       }
       SweepExpired(timeProvider.GetUtcNow());
-      staged = new StagedContribution(
+      slot.Staged = new StagedContribution(
         new WorkbenchProjectContributionLease(Guid.NewGuid(), timeProvider.GetUtcNow() + lifetime),
         contribution);
       // 主动到期回收：无人再上传/消费时也按时释放补丁字节强引用。
-      // 回调精确匹配当前代际+id：迟到触发不得清除替换后的新贡献。
-      long stagedGeneration = Volatile.Read(ref generation);
-      Guid stagedId = staged.Lease.ContributeId;
-      expiryTimer?.Dispose();
-      DateTimeOffset dueAt = staged.Lease.ExpiresAt;
-      expiryTimer = timeProvider.CreateTimer(
-        _ => ExpireStaged(stagedGeneration, stagedId),
+      // 回调精确匹配当前槽内代际+id：迟到触发不得清除替换后的新贡献。
+      long stagedGeneration = slot.Generation;
+      Guid stagedId = slot.Staged.Lease.ContributeId;
+      slot.ExpiryTimer?.Dispose();
+      DateTimeOffset dueAt = slot.Staged.Lease.ExpiresAt;
+      slot.ExpiryTimer = timeProvider.CreateTimer(
+        _ => ExpireStaged(slot, stagedGeneration, stagedId),
         null,
         dueAt - timeProvider.GetUtcNow(),
         Timeout.InfiniteTimeSpan);
-      return staged.Lease;
+      return slot.Staged.Lease;
     }
   }
 
-  /// <summary>保存命令一次性取走贡献：id 未知/已消费/已过期均返回 null。</summary>
+  /// <summary>保存命令一次性取走贡献：id 未知/已消费/已过期均返回 null。
+  /// 扫描全部槽位：任一宿主上传的贡献都可被保存命令按 id 消费。</summary>
   public WorkbenchProjectContribution? TryTake(Guid contributeId)
   {
     lock (gate)
     {
       ThrowIfDisposed();
       SweepExpired(timeProvider.GetUtcNow());
-      if (staged is { } current && current.Lease.ContributeId == contributeId)
+      foreach (Slot slot in slots.Values)
       {
-        staged = null;
-        CancelExpiryTimer();
-        return current.Contribution;
+        if (slot.Staged is { } current && current.Lease.ContributeId == contributeId)
+        {
+          slot.Staged = null;
+          CancelExpiryTimer(slot);
+          return current.Contribution;
+        }
       }
       return null;
     }
   }
 
-  /// <summary>丢弃当前未消费贡献并推进代际（文档重置/销毁/保存取消）；
-  /// 使在途上传在提交点失败；幂等。</summary>
+  /// <summary>撤销全部槽（应用销毁/全局重置）。</summary>
   public void RevokeAll()
   {
     lock (gate)
     {
-      staged = null;
-      generation++;
-      CancelExpiryTimer();
+      foreach (Slot slot in slots.Values)
+      {
+        RevokeSlot(slot);
+      }
+    }
+  }
+
+  /// <summary>仅撤销指定宿主槽位（该宿主文档重置）：先推进槽内代际使在途
+  /// 上传不能提交，再安全移除槽位（宿主销毁后不再被 store 强持有）；其他
+  /// 宿主的贡献与在途上传不受影响；幂等。</summary>
+  public void RevokeAll(object caller)
+  {
+    ArgumentNullException.ThrowIfNull(caller);
+    lock (gate)
+    {
+      if (slots.Remove(caller, out Slot? slot))
+      {
+        RevokeSlot(slot);
+      }
     }
   }
 
@@ -178,33 +222,54 @@ public sealed class WorkbenchProjectStore : IDisposable
     lock (gate)
     {
       disposed = true;
-      staged = null;
-      generation++;
-      CancelExpiryTimer();
+      foreach (Slot slot in slots.Values)
+      {
+        RevokeSlot(slot);
+      }
+      slots.Clear();
     }
   }
 
-  /// <summary>到期回调：仅当仍是自己代际内的同一贡献且已过期时清除。</summary>
-  private void ExpireStaged(long stagedGeneration, Guid stagedId)
+  private static void RevokeSlot(Slot slot)
+  {
+    slot.Staged = null;
+    slot.Generation++;
+    CancelExpiryTimer(slot);
+  }
+
+  /// <summary>到期回调：仅当仍是自己槽内代际的同一贡献且已过期时清除。</summary>
+  private void ExpireStaged(Slot slot, long stagedGeneration, Guid stagedId)
   {
     lock (gate)
     {
-      if (Volatile.Read(ref generation) != stagedGeneration)
+      if (slot.Generation != stagedGeneration)
       {
         return;
       }
-      if (staged is { Lease.ContributeId: var id } && id == stagedId)
+      if (slot.Staged is { Lease.ContributeId: var id } && id == stagedId)
       {
-        staged = null;
-        CancelExpiryTimer();
+        slot.Staged = null;
+        CancelExpiryTimer(slot);
       }
     }
   }
 
-  private void CancelExpiryTimer()
+  private static void CancelExpiryTimer(Slot slot)
   {
-    expiryTimer?.Dispose();
-    expiryTimer = null;
+    slot.ExpiryTimer?.Dispose();
+    slot.ExpiryTimer = null;
+  }
+
+  private static readonly object AnonymousCaller = new();
+
+  private Slot SlotFor(object caller)
+  {
+    if (!slots.TryGetValue(caller, out Slot? slot))
+    {
+      slot = new Slot();
+      slots[caller] = slot;
+    }
+    return slot;
   }
 
   /// <summary>根/子对象均为严格 typed DTO（未知字段/重复键/缺字段拒绝）。</summary>
@@ -360,11 +425,14 @@ public sealed class WorkbenchProjectStore : IDisposable
 
   private void SweepExpired(DateTimeOffset utcNow)
   {
-    if (staged is { Lease.ExpiresAt: var expiresAt } current && expiresAt <= utcNow)
+    foreach (Slot slot in slots.Values)
     {
-      staged = null;
-      CancelExpiryTimer();
-      _ = current;
+      if (slot.Staged is { Lease.ExpiresAt: var expiresAt } current && expiresAt <= utcNow)
+      {
+        slot.Staged = null;
+        CancelExpiryTimer(slot);
+        _ = current;
+      }
     }
   }
 

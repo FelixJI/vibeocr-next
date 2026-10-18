@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text.Json;
 using Windows.Graphics.Imaging;
@@ -176,6 +177,11 @@ public static class VibpProjectFile
         throw new VibpProjectFormatException(
           "Project file exceeds the 192 MiB package budget.");
       }
+      // 中央目录有界预检：在 ZipArchive 物化全部 entry 对象前，用固定
+      // 46 字节记录头+流式寻位实际计数（≤128），不信任 EOCD 16 位 count
+      // （可伪造）；拒绝 ZIP64/多盘/越界结构，防止数百万空 entry 驱动
+      // 巨量对象分配。仍由标准库完成实际解压。
+      ValidateCentralDirectoryBudget(file, VibpProjectLimits.MaximumEntries);
       using var archive = new ZipArchive(file, ZipArchiveMode.Read);
       if (archive.Entries.Count > VibpProjectLimits.MaximumEntries)
       {
@@ -476,6 +482,149 @@ public static class VibpProjectFile
     {
       throw new VibpProjectFormatException(
         $"Project {field} is {actualWidth}x{actualHeight} but the manifest declares {declaredWidth}x{declaredHeight}.");
+    }
+  }
+
+  private const uint EndOfCentralDirectorySignature = 0x06054b50;
+  private const uint CentralDirectoryHeaderSignature = 0x02014b50;
+  private const uint Zip64EndOfCentralDirectoryLocatorSignature = 0x07064b50;
+  private const int EndOfCentralDirectoryFixedBytes = 22;
+  private const int Zip64LocatorBytes = 20;
+  private const int CentralDirectoryHeaderFixedBytes = 46;
+
+  /// <summary>中央目录有界预检（ZipArchive 物化 entry 对象前）：
+  /// 尾部有界扫描最后一个 EOCD（后 64KiB+22），完整解析盘号/entry 数/
+  /// 目录大小/偏移/注释长度；拒绝多盘、任何 ZIP64 哨兵或 locator（v1
+  /// 预算 ≤192MiB/≤128 entry 不需要 ZIP64）、注释长度不闭合到文件尾
+  /// （防止伪造前位 EOCD）、目录偏移/大小越界。随后按 EOCD 偏移寻位
+  /// 中央目录逐记录读 46 字节固定头（名称/额外/注释仅寻位不读入）真实
+  /// 计数——不信任 EOCD 16 位 count（可伪造）；超限在物化前拒绝。
+  /// 闭合校验：真实记录数与 EOCD totalEntries 一致、扫描终点落在
+  /// EOCD 声明的目录大小范围内、每记录本地头偏移在文件内。</summary>
+  private static void ValidateCentralDirectoryBudget(FileStream file, int maximumEntries)
+  {
+    long fileLength = file.Length;
+    long searchFloor = Math.Max(0, fileLength - 64 * 1024 - EndOfCentralDirectoryFixedBytes);
+    byte[] tail = new byte[fileLength - searchFloor];
+    file.Position = searchFloor;
+    file.ReadExactly(tail, 0, tail.Length);
+
+    // 从尾到头找 EOCD 签名（最后一次出现）。
+    int eocdOffset = -1;
+    for (int index = tail.Length - EndOfCentralDirectoryFixedBytes; index >= 0; index--)
+    {
+      if (BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(index, 4)) ==
+        EndOfCentralDirectorySignature)
+      {
+        eocdOffset = index;
+        break;
+      }
+    }
+    if (eocdOffset < 0)
+    {
+      throw new VibpProjectFormatException(
+        "Project package is missing its zip end-of-central-directory.");
+    }
+    ReadOnlySpan<byte> eocd = tail.AsSpan(eocdOffset, EndOfCentralDirectoryFixedBytes);
+    ushort thisDisk = BinaryPrimitives.ReadUInt16LittleEndian(eocd.Slice(4, 2));
+    ushort startDisk = BinaryPrimitives.ReadUInt16LittleEndian(eocd.Slice(6, 2));
+    ushort diskEntries = BinaryPrimitives.ReadUInt16LittleEndian(eocd.Slice(8, 2));
+    ushort totalEntries = BinaryPrimitives.ReadUInt16LittleEndian(eocd.Slice(10, 2));
+    uint directorySize = BinaryPrimitives.ReadUInt32LittleEndian(eocd.Slice(12, 4));
+    uint directoryOffset = BinaryPrimitives.ReadUInt32LittleEndian(eocd.Slice(16, 4));
+    ushort commentLength = BinaryPrimitives.ReadUInt16LittleEndian(eocd.Slice(20, 2));
+    if (thisDisk != 0 || startDisk != 0)
+    {
+      throw new VibpProjectFormatException(
+        "Project package spans multiple disks.");
+    }
+    // 注释长度必须闭合到文件尾：确认这确实是最后一个 EOCD，防止标准库
+    // 向前选到另一个伪造 EOCD 绕过预算。
+    long eocdAbsolute = searchFloor + eocdOffset;
+    if (eocdAbsolute + EndOfCentralDirectoryFixedBytes + commentLength != fileLength)
+    {
+      throw new VibpProjectFormatException(
+        "Project package end-of-central-directory comment length is invalid.");
+    }
+    // v1 不支持 ZIP64：任何哨兵值（16/32 位 0xFFFF/0xFFFFFFFF）即拒绝。
+    if (diskEntries == 0xFFFF || totalEntries == 0xFFFF ||
+      directorySize == 0xFFFFFFFF || directoryOffset == 0xFFFFFFFF)
+    {
+      throw new VibpProjectFormatException(
+        "Project package uses unsupported ZIP64 extensions.");
+    }
+    // EOCD 前紧邻 20 字节若为 ZIP64 locator 同样拒绝（无哨兵变体）。
+    if (eocdOffset >= Zip64LocatorBytes &&
+      BinaryPrimitives.ReadUInt32LittleEndian(
+        tail.AsSpan(eocdOffset - Zip64LocatorBytes, 4)) ==
+        Zip64EndOfCentralDirectoryLocatorSignature)
+    {
+      throw new VibpProjectFormatException(
+        "Project package uses unsupported ZIP64 extensions.");
+    }
+    if (directoryOffset >= fileLength ||
+      (long)directoryOffset + directorySize > eocdAbsolute)
+    {
+      throw new VibpProjectFormatException(
+        "Project package central directory offset or size is out of bounds.");
+    }
+
+    // 真实计数：逐记录固定头寻位（名称/额外/注释不读入），超限在
+    // ZipArchive 物化前拒绝；越界/本地头偏移越界同样拒绝。
+    file.Position = directoryOffset;
+    byte[] header = new byte[CentralDirectoryHeaderFixedBytes];
+    int records = 0;
+    long position = directoryOffset;
+    long directoryEnd = (long)directoryOffset + directorySize;
+    while (position + CentralDirectoryHeaderFixedBytes <= fileLength)
+    {
+      file.Position = position;
+      file.ReadExactly(header, 0, header.Length);
+      if (BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(0, 4)) !=
+        CentralDirectoryHeaderSignature)
+      {
+        break;
+      }
+      records++;
+      if (records > maximumEntries)
+      {
+        throw new VibpProjectFormatException(
+          $"Project package has more than {maximumEntries} entries.");
+      }
+      ushort nameLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(28, 2));
+      ushort extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(30, 2));
+      ushort recordCommentLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(32, 2));
+      uint localHeaderOffset = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(42, 4));
+      if (localHeaderOffset >= fileLength)
+      {
+        throw new VibpProjectFormatException(
+          "Project package central directory record points outside the file.");
+      }
+      long advance = CentralDirectoryHeaderFixedBytes +
+        (long)nameLength + extraLength + recordCommentLength;
+      if (position + advance > fileLength)
+      {
+        throw new VibpProjectFormatException(
+          "Project package central directory record is truncated.");
+      }
+      position += advance;
+    }
+    if (records == 0)
+    {
+      throw new VibpProjectFormatException(
+        "Project package central directory is empty.");
+    }
+    // 闭合：真实计数与 EOCD totalEntries 一致；扫描终点落在声明目录范围
+    // 内（多余目录字节或提前终止均拒绝）。
+    if (records != totalEntries)
+    {
+      throw new VibpProjectFormatException(
+        "Project package central directory entry count does not match its declaration.");
+    }
+    if (position != directoryEnd)
+    {
+      throw new VibpProjectFormatException(
+        "Project package central directory size does not match its records.");
     }
   }
 }

@@ -451,7 +451,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
-        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand
+        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
+          AckImageEditProjectOpenCommand
           ? importDocumentCancellation.Token : lifetime.Token);
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。
       if (bridge is { } deliver && OwnsCurrentBridgeDocument(sender, document))
@@ -644,8 +645,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     subscriptionCancellation?.Cancel();
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
-    // 文档身份推进后旧文档的未消费保存贡献不再可被新文档消费。
-    projectStore?.RevokeAll();
+    // 文档身份推进后仅撤销本宿主槽位：其他宿主的在途贡献不受影响。
+    projectStore?.RevokeAll(this);
   }
 
   private void Recover(CoreWebView2? sender)
@@ -690,12 +691,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         }
         using Stream upload = args.Request.Content.AsStreamForRead();
         WorkbenchProjectContributionLease lease = await projectStore.UploadAsync(
-          upload, lifetime.Token);
+          upload, this, lifetime.Token);
         if (disposed)
         {
           // 与 /__annotation 对称的销毁竞态守卫：不向已分离 core 构造响应；
-          // store 代际已使在途贡献不可提交，此处再整体回收兜底。
-          projectStore.RevokeAll();
+          // 本槽代际已使在途贡献不可提交，此处再撤销本槽兜底。
+          projectStore.RevokeAll(this);
           return;
         }
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
@@ -840,7 +841,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     disposed = true;
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
-    projectStore?.RevokeAll();
+    projectStore?.RevokeAll(this);
     CaptureBackground = null;
     lifetime.Cancel();
     importDocumentCancellation.Dispose();

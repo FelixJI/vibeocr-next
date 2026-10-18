@@ -163,6 +163,58 @@ public sealed class WorkbenchProjectStoreTests
   }
 
   [Fact]
+  public async Task HostSlotsIsolateContributionsAndRevokeRemovesSlot()
+  {
+    // 主窗/独立编辑窗两宿主身份互不干扰：并发上传各自保留；一宿主重置
+    // 仅撤销本槽，另一槽贡献仍可被保存命令消费；槽位移除后宿主不被
+    // store 强持有（同宿主新上传进入新槽）。
+    using var store = new WorkbenchProjectStore();
+    object mainHost = new();
+    object editorHost = new();
+
+    WorkbenchProjectContributionLease mainLease = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null), mainHost,
+      TestContext.Current.CancellationToken);
+    WorkbenchProjectContributionLease editorLease = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 9, Height = 9 }, null), editorHost,
+      TestContext.Current.CancellationToken);
+    Assert.Equal((2, (Guid?)mainLease.ContributeId), store.Staged);
+
+    // 编辑窗重置：仅撤销编辑窗槽。
+    store.RevokeAll(editorHost);
+    Assert.Equal((1, (Guid?)mainLease.ContributeId), store.Staged);
+    Assert.Null(store.TryTake(editorLease.ContributeId));
+    // 主窗贡献仍可被保存命令消费（TryTake 扫描全部槽）。
+    Assert.NotNull(store.TryTake(mainLease.ContributeId));
+    Assert.Equal((0, null), store.Staged);
+
+    // 槽位移除后同宿主再上传：新槽正常工作。
+    WorkbenchProjectContributionLease reopened = await store.UploadAsync(
+      Body(new VibpCanvas { Width = 8, Height = 8 }, null), editorHost,
+      TestContext.Current.CancellationToken);
+    Assert.NotNull(store.TryTake(reopened.ContributeId));
+  }
+
+  [Fact]
+  public async Task InFlightUploadFailsAfterItsHostSlotRemoved()
+  {
+    using var store = new WorkbenchProjectStore();
+    object host = new();
+    GatedJsonStream stream = new(
+      "{\"canvas\":{\"width\":8,\"height\":8},\"state\":{\"rotation\":0,\"marks\":[]},\"patches\":[]}");
+    Task upload = Task.Run(() => store.UploadAsync(
+      stream, host, TestContext.Current.CancellationToken));
+    await stream.ReadStarted.WaitAsync(
+      TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+    store.RevokeAll(host);
+    stream.Unblock();
+
+    await Assert.ThrowsAnyAsync<Exception>(() => upload);
+    Assert.Equal((0, null), store.Staged);
+  }
+
+  [Fact]
   public async Task ExpiredContributionIsNotConsumed()
   {
     AdjustableTimeProvider clock = new();

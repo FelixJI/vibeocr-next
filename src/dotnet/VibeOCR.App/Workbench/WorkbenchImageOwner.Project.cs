@@ -374,7 +374,9 @@ internal sealed partial class WorkbenchImageOwner
     }
   }
 
-  private WorkbenchState? AcknowledgeProjectOpen(AckImageEditProjectOpenCommand ack)
+  private WorkbenchState? AcknowledgeProjectOpen(
+    AckImageEditProjectOpenCommand ack,
+    CancellationToken documentToken)
   {
     ProjectOpenDescriptor? descriptor = Volatile.Read(ref currentProjectOpen);
     if (descriptor is null || descriptor.PendingId != ack.PendingId)
@@ -396,6 +398,15 @@ internal sealed partial class WorkbenchImageOwner
       throw new WorkbenchProjectOpenConflictException(
         "Project open acknowledgement no longer matches the current session.");
     }
+    // ack 所属文档已取消（导航/恢复/重载后迟到 ack）：拒绝切换，旧会话
+    // 与既有导入保持；不向已死文档插入恢复资产（同步 Register 竞态）。
+    if (documentToken.IsCancellationRequested)
+    {
+      ReleaseDescriptorResources(descriptor);
+      Volatile.Write(ref currentProjectOpen, null);
+      throw new WorkbenchProjectOpenConflictException(
+        "Project open acknowledgement arrived for a cancelled document.");
+    }
     // 原子切换：释放旧会话/导入并安装恢复基准与资产（逻辑 frame 随
     // manifest/state 携带，不做坐标重投影）。
     AdvanceImageGeneration(target);
@@ -407,13 +418,21 @@ internal sealed partial class WorkbenchImageOwner
     Dictionary<string, (int Width, int Height)> assetDims = archiveAssetDims(descriptor);
     lock (imageEditImport)
     {
+      // 恢复资产绑定 ack 所属 Web 文档取消身份：导航/恢复/重载时由既有
+      // RetireDocumentImports 精确回收，不随新文档重建泄漏到会话替换。
+      if (documentToken.CanBeCanceled &&
+        !imageEditImport.Documents.ContainsKey(documentToken))
+      {
+        imageEditImport.Documents[documentToken] = documentToken.Register(() =>
+          RetireDocumentImports(imageEditChannel, imageEditImport, documentToken));
+      }
       foreach ((string assetId, WorkbenchResourceReference reference) in descriptor.Assets)
       {
         (int width, int height) = assetDims.TryGetValue(assetId, out (int, int) dims)
           ? dims
           : (0, 0);
         imageEditImport.Adopted[reference.Url] = new StagedImportAsset(
-          reference, assetId, (long)width * height, width, height, default);
+          reference, assetId, (long)width * height, width, height, documentToken);
       }
     }
     // patch 与 manifest 在 ack 前提下已被 Web fetch/decode，宿主侧字节是死

@@ -175,7 +175,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       recognitionChannel, recognitionImport, saveProject.ContributeId, saveProject.SessionId,
       saveProject.Revision, cancellationToken),
     OpenImageEditProjectCommand => await OpenProjectAsync(cancellationToken),
-    AckImageEditProjectOpenCommand ackProject => AcknowledgeProjectOpen(ackProject),
+    AckImageEditProjectOpenCommand ackProject => AcknowledgeProjectOpen(ackProject, cancellationToken),
     RejectImageEditProjectOpenCommand rejectProject => RejectProjectOpen(rejectProject),
     _ => throw new InvalidOperationException("Unsupported Image workbench command."),
   };

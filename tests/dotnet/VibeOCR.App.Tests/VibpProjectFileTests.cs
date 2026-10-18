@@ -258,6 +258,154 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
+  public async Task RejectsMaliciousCentralDirectoryEntryFloodBeforeMaterialization()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      // 200 个空 entry（小文件）：EOCD 16 位 count 真实（200），但 >128，
+      // 预检在 ZipArchive 物化前以格式异常拒绝。
+      string packagePath = Path.Combine(directory, "flood.vibp");
+      using (var built = new MemoryStream())
+      {
+        using (var archive = new ZipArchive(built, ZipArchiveMode.Create, leaveOpen: true))
+        {
+          for (int index = 0; index < 200; index++)
+          {
+            archive.CreateEntry($"e{index}");
+          }
+        }
+        File.WriteAllBytes(packagePath, built.ToArray());
+      }
+      VibpProjectFormatException error = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("more than 128", error.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RejectsForgedEocdEntryCountAndOutOfBoundsOffsets()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      // 零 entry 包：真实中央目录为空，预检拒绝。
+      string packagePath = Path.Combine(directory, "empty.vibp");
+      using (var built = new MemoryStream())
+      {
+        using (var archive = new ZipArchive(built, ZipArchiveMode.Create, leaveOpen: true))
+        {
+          _ = archive;
+        }
+        File.WriteAllBytes(packagePath, built.ToArray());
+      }
+      VibpProjectFormatException empty = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open1"),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("empty", empty.Message);
+
+      // 伪造 count：200 真实 entry 的包把 EOCD count 改写为 5，
+      // 预检仍按真实扫描计数拒绝（不信任 16 位声明）。
+      using (var flood = new MemoryStream())
+      {
+        using (var archive = new ZipArchive(flood, ZipArchiveMode.Create, leaveOpen: true))
+        {
+          for (int index = 0; index < 200; index++) archive.CreateEntry($"e{index}");
+        }
+        File.WriteAllBytes(packagePath, ForgeEocd(flood.ToArray(), entryCount: 5, directoryOffset: null));
+      }
+      VibpProjectFormatException forged = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open2"),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("more than 128", forged.Message);
+
+      // 越界中央目录偏移。
+      byte[] valid = BuildSingleEntryPackage();
+      File.WriteAllBytes(packagePath, ForgeEocd(valid, entryCount: 1, directoryOffset: (uint)(valid.Length + 100)));
+      VibpProjectFormatException outOfBounds = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open3"),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("out of bounds", outOfBounds.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RejectsZip64Locator()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] valid = BuildSingleEntryPackage();
+      string packagePath = Path.Combine(directory, "zip64.vibp");
+      // 在 EOCD 前插入 ZIP64 locator 签名且 EOCD count 置 0xFFFF。
+      int eocdIndex = FindEocd(valid);
+      byte[] mutated = [.. valid];
+      BinaryPrimitives.WriteUInt16LittleEndian(mutated.AsSpan(eocdIndex + 8, 2), 0xFFFF);
+      BinaryPrimitives.WriteUInt32LittleEndian(mutated.AsSpan(eocdIndex - 20, 4), 0x07064b50);
+      File.WriteAllBytes(packagePath, mutated);
+
+      VibpProjectFormatException error = await Assert.ThrowsAsync<VibpProjectFormatException>(
+        () => VibpProjectFile.ReadAsync(
+          packagePath, Path.Combine(directory, "open"),
+          TestContext.Current.CancellationToken));
+      Assert.Contains("ZIP64", error.Message);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  private static byte[] BuildSingleEntryPackage()
+  {
+    using var built = new MemoryStream();
+    using (var archive = new ZipArchive(built, ZipArchiveMode.Create, leaveOpen: true))
+    {
+      archive.CreateEntry("only");
+    }
+    return built.ToArray();
+  }
+
+  private static int FindEocd(byte[] package)
+  {
+    for (int index = package.Length - EndOfCentralDirectorySearchSpan; index >= 0; index--)
+    {
+      if (BinaryPrimitives.ReadUInt32LittleEndian(package.AsSpan(index, 4)) == 0x06054b50)
+      {
+        return index;
+      }
+    }
+    throw new InvalidOperationException("fixture has no EOCD");
+  }
+
+  private const int EndOfCentralDirectorySearchSpan = 22;
+
+  private static byte[] ForgeEocd(byte[] package, ushort entryCount, uint? directoryOffset)
+  {
+    byte[] mutated = [.. package];
+    int eocdIndex = FindEocd(mutated);
+    BinaryPrimitives.WriteUInt16LittleEndian(mutated.AsSpan(eocdIndex + 10, 2), entryCount);
+    if (directoryOffset is { } offset)
+    {
+      BinaryPrimitives.WriteUInt32LittleEndian(mutated.AsSpan(eocdIndex + 16, 4), offset);
+    }
+    return mutated;
+  }
+
+  [Fact]
   public void CanvasTotalPixelBudgetIsEnforcedOnMetadataOnly()
   {
     string directory = NewTempDirectory();
