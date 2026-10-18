@@ -162,6 +162,15 @@ public sealed record VibpMark
   public double? TextWidth { get; init; }
   public VibpMarkStyle? Style { get; init; }
   public IReadOnlyList<VibpPoint>? Points { get; init; }
+  /// <summary>#235 聚光灯孔洞区域：仅 tool=spotlight 携带（1..16 个）；
+  /// 显示空间矩形，与 web 侧 Rect 同形。null 时省略字段：旧对象写出的
+  /// manifest 与旧版本字节等价，不因新增可空字段把旧 app 拒之门外。</summary>
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public IReadOnlyList<VibpRegion>? Regions { get; init; }
+  /// <summary>#235 放大镜倍率：仅 tool=magnifier 携带，界 [1.5,8]；
+  /// null 时省略字段（同上，旧工程不变）。</summary>
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public double? Zoom { get; init; }
   public int? Ordinal { get; init; }
   public string? GroupId { get; init; }
   public bool? Locked { get; init; }
@@ -169,6 +178,15 @@ public sealed record VibpMark
   public bool? FlipX { get; init; }
   public bool? FlipY { get; init; }
   public double? ObjectScale { get; init; }
+}
+
+/// <summary>聚光灯孔洞区域（显示空间轴对齐矩形）。</summary>
+public sealed record VibpRegion
+{
+  public required double X { get; init; }
+  public required double Y { get; init; }
+  public required double Width { get; init; }
+  public required double Height { get; init; }
 }
 
 /// <summary>编辑器持久状态：当前 rotation/crop/resize/marks/applied patches。</summary>
@@ -214,8 +232,12 @@ internal static class VibpProjectRules
   [
     "rectangle", "ellipse", "arrow", "line", "polyline", "text", "callout",
     "mosaic", "blur", "pen", "highlighter", "numbering", "image", "exclude",
-    "solid",
+    "solid", "spotlight", "magnifier",
   ];
+  /// <summary>#235 新增对象边界（与 web projectWire 同界）：不弱化既有预算。</summary>
+  internal const int MaximumSpotlightRegions = 16;
+  internal const double MinimumMagnifierZoom = 1.5;
+  internal const double MaximumMagnifierZoom = 8.0;
   private static readonly HashSet<string> PointTools = ["pen", "highlighter", "polyline"];
   private static readonly HashSet<string> TextTools = ["text", "callout"];
   private static readonly HashSet<string> LineStyles = ["solid", "dashed", "dotted"];
@@ -552,6 +574,58 @@ internal static class VibpProjectRules
     {
       throw new VibpProjectFormatException(
         $"Project mark {mark.Id} carries trace points for tool {mark.Tool}.");
+    }
+
+    // #235 聚光灯区域：仅 spotlight 携带；数量/尺寸越界 fail closed。
+    if (mark.Tool == "spotlight")
+    {
+      if (mark.Regions is null || mark.Regions.Count < 1 ||
+          mark.Regions.Count > MaximumSpotlightRegions)
+      {
+        throw new VibpProjectFormatException(
+          $"Project spotlight mark {mark.Id} must carry 1..{MaximumSpotlightRegions} regions.");
+      }
+      foreach (VibpRegion region in mark.Regions)
+      {
+        if (region is null)
+        {
+          throw new VibpProjectFormatException(
+            $"Project spotlight mark {mark.Id} contains a null region.");
+        }
+        ValidatePoint($"spotlight mark {mark.Id} region corner",
+          new VibpPoint { X = region.X, Y = region.Y });
+        if (!double.IsFinite(region.Width) || !double.IsFinite(region.Height) ||
+            // 零尺寸区域加载后会压暗全图且无孔洞：严格 > 0（合法小正数可读）。
+            region.Width <= 0 || region.Height <= 0 ||
+            region.Width > VibpProjectLimits.MaximumCoordinateMagnitude ||
+            region.Height > VibpProjectLimits.MaximumCoordinateMagnitude)
+        {
+          throw new VibpProjectFormatException(
+            $"Project spotlight mark {mark.Id} region size is out of range.");
+        }
+      }
+    }
+    else if (mark.Regions is not null)
+    {
+      throw new VibpProjectFormatException(
+        $"Project mark {mark.Id} carries regions for tool {mark.Tool}.");
+    }
+
+    // #235 放大镜倍率：仅 magnifier 携带；越界 fail closed。
+    if (mark.Tool == "magnifier")
+    {
+      if (mark.Zoom is null || !double.IsFinite(mark.Zoom.Value) ||
+          mark.Zoom < MinimumMagnifierZoom || mark.Zoom > MaximumMagnifierZoom)
+      {
+        throw new VibpProjectFormatException(
+          $"Project magnifier mark {mark.Id} zoom must be within " +
+          $"[{MinimumMagnifierZoom},{MaximumMagnifierZoom}].");
+      }
+    }
+    else if (mark.Zoom is not null)
+    {
+      throw new VibpProjectFormatException(
+        $"Project mark {mark.Id} carries zoom for tool {mark.Tool}.");
     }
 
     if (mark.Tool == "numbering")

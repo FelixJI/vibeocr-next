@@ -18,7 +18,13 @@ export type AnnotationTool =
   | "exclude"
   /** 纯色不透明遮挡：写入普通导出与识别输入的真实不透明像素，
    * 与 exclude（仅识别语义）明确分离。 */
-  | "solid";
+  | "solid"
+  /** #235 聚光灯强调：一个对象承载多区域，遮罩按区域并集一次性
+   * 绘制（重叠孔洞不加深），孔洞外底图整体压暗；仅覆盖底图范围。 */
+  | "spotlight"
+  /** #235 画面内放大镜：可移动普通标注对象；采样底图+已应用修补，
+   * 不递归采样自己或其它标注；区别于截图取色放大镜。 */
+  | "magnifier";
 
 export interface Point {
   readonly x: number;
@@ -96,6 +102,11 @@ export interface Mark {
   readonly style?: AnnotationStyle;
   /** 画笔/荧光笔的采样点（含 start/end）；其他工具为空。 */
   readonly points?: readonly Point[];
+  /** 聚光灯孔洞区域列表（显示空间矩形，≥1 个）：并集一次性裁切，
+   * start/end 同步为区域联合包围盒（命中/移动/对齐共用）。 */
+  readonly regions?: readonly Rect[];
+  /** 放大镜倍率（有界 [MAGNIFIER_ZOOM_MIN, MAX]）：采样与绘制同源。 */
+  readonly zoom?: number;
   /** 序号标记的自动编号（绘制时重建）。 */
   readonly ordinal?: number;
   /** 最小平面对象组：同组成员整体选择/变换；不嵌套。 */
@@ -251,6 +262,42 @@ export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
 }
 
+/** 放大镜倍率边界：创建/编辑/序列化共用同一夹取，越界值拒绝而不是
+ * 静默钳制（与宿主 VibpProjectRules 同界）。 */
+export const MAGNIFIER_ZOOM_MIN = 1.5;
+export const MAGNIFIER_ZOOM_MAX = 8;
+export const MAGNIFIER_ZOOMS = [1.5, 2, 3, 4, 6, 8] as const;
+
+/** 放大镜有效倍率：缺省 2；非有限回退缺省，越界夹取到边界——仅为
+ * 渲染容错，编辑入口与工程序列化侧均按档位/边界拒绝越界值。 */
+export function magnifierZoomOf(mark: Mark): number {
+  const value = mark.zoom;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 2;
+  return Math.min(MAGNIFIER_ZOOM_MAX, Math.max(MAGNIFIER_ZOOM_MIN, value));
+}
+
+/** 聚光灯孔洞区域：缺省回退 start/end 矩形（旧/异常数据容错）。 */
+export function spotlightRegionsOf(mark: Mark): readonly Rect[] {
+  if (mark.regions?.length) return mark.regions;
+  const width = Math.abs(mark.end.x - mark.start.x);
+  const height = Math.abs(mark.end.y - mark.start.y);
+  return [
+    {
+      x: Math.min(mark.start.x, mark.end.x),
+      y: Math.min(mark.start.y, mark.end.y),
+      width,
+      height,
+    },
+  ];
+}
+
+/** 聚光灯遮罩暗度（0-100）：复用通用 fill.opacity 语义，缺省 55。 */
+export function spotlightDarkness(mark: Mark): number {
+  const value = mark.style?.fill?.opacity;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 55;
+  return Math.min(100, Math.max(0, value));
+}
+
 /** [0,100] 百分比夹取；非法/缺省值回退 fallback。 */
 function clampPercent(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -373,8 +420,37 @@ export function rotateEditorState(
           : {}),
         start: rotatePoint(mark.start),
         end: rotatePoint(mark.end),
-        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
+        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位；聚光灯区域
+        // 是显示空间矩形，旋转烘入坐标（顶点旋转后重取轴对齐包围盒）。
         ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
+        ...(mark.regions
+          ? {
+              regions: mark.regions.map((region) => {
+                const corners = [
+                  rotatePoint({ x: region.x, y: region.y }),
+                  rotatePoint({
+                    x: region.x + region.width,
+                    y: region.y,
+                  }),
+                  rotatePoint({ x: region.x, y: region.y + region.height }),
+                  rotatePoint({
+                    x: region.x + region.width,
+                    y: region.y + region.height,
+                  }),
+                ];
+                const left = Math.min(...corners.map((at) => at.x));
+                const top = Math.min(...corners.map((at) => at.y));
+                const right = Math.max(...corners.map((at) => at.x));
+                const bottom = Math.max(...corners.map((at) => at.y));
+                return {
+                  x: left,
+                  y: top,
+                  width: right - left,
+                  height: bottom - top,
+                };
+              }),
+            }
+          : {}),
       };
       // 图片保持局部长宽比例，整图旋转只投影中心、缩放局部矩形并累加朝向。
       if (mark.tool === "image") {
@@ -615,18 +691,81 @@ export function exclusionOutputRects(
 }
 
 /** 屏蔽矩形投影到最终输出的 [0,1000] 归一化坐标，与文字层行框同参考系。 */
+/** 自然空间矩形 → 裁剪内剩余区间 → [0,1000] 归一化端点（base 与
+ * 镜泄露区共用尾段）：端点夹取保证 0≤x,y、x+width/y+height≤1000、
+ * width,height>0，无 epsilon、不缩小遮挡。 */
+function cropClippedNormalizedBoxes(
+  rects: readonly Rect[],
+  crop: Rect,
+): Rect[] {
+  const boxes: Rect[] = [];
+  for (const rect of rects) {
+    const left = Math.max(rect.x, crop.x);
+    const top = Math.max(rect.y, crop.y);
+    const right = Math.min(rect.x + rect.width, crop.x + crop.width);
+    const bottom = Math.min(rect.y + rect.height, crop.y + crop.height);
+    if (right <= left || bottom <= top) continue;
+    const x0 = Math.max(0, ((left - crop.x) / crop.width) * 1000);
+    const y0 = Math.max(0, ((top - crop.y) / crop.height) * 1000);
+    const x1 = Math.min(1000, ((right - crop.x) / crop.width) * 1000);
+    const y1 = Math.min(1000, ((bottom - crop.y) / crop.height) * 1000);
+    if (x1 <= x0 || y1 <= y0) continue;
+    boxes.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  }
+  return boxes;
+}
+
 export function exclusionNormalizedRects(
   image: HTMLImageElement,
   state: EditorState,
   displaySize: CanvasSize,
 ): readonly Rect[] {
-  const output = finalOutputSize(image, state, displaySize);
-  return exclusionOutputRects(image, state, displaySize).map((rect) => ({
-    x: (rect.x / output.width) * 1000,
-    y: (rect.y / output.height) * 1000,
-    width: (rect.width / output.width) * 1000,
-    height: (rect.height / output.height) * 1000,
-  }));
+  // base 生产链改为权威 snapped 自然矩形 + 共用端点归一化尾段：绕开
+  // exclusionOutputRects 的“先乘 output 缩放再除 output”浮点路径
+  // （比值恒等：scale/output ≡ 1/crop 尺寸），避免 1000.0000000000002
+  // 越界被 C# codec 拒绝；exclusionOutputRects 其余消费者不变。
+  const crop = mappedCropRect(image, state, displaySize);
+  if (crop.width <= 0 || crop.height <= 0) return [];
+  return cropClippedNormalizedBoxes(
+    exclusionNaturalRects(image, state, displaySize),
+    crop,
+  );
+}
+
+/** 任意显示空间矩形 → 最终输出 [0,1000] 归一化框：与
+ * exclusionNormalizedRects 同一裁剪/缩放映射（旋转→裁剪→指定尺寸），
+ * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界与同一端点
+ * 归一化尾段（契约同上，不用 epsilon）。 */
+export function displayRectsToNormalizedRects(
+  rects: readonly Rect[],
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): Rect[] {
+  const crop = mappedCropRect(image, state, displaySize);
+  if (crop.width <= 0 || crop.height <= 0) return [];
+  const naturalSize = outputSize(image, state.rotation);
+  const mapPoint = (point: Point) =>
+    projectPoint(
+      point,
+      image,
+      state.rotation,
+      displaySize,
+      state.rotation,
+      naturalSize,
+    );
+  const naturalRects: Rect[] = [];
+  for (const rect of rects) {
+    const start = mapPoint({ x: rect.x, y: rect.y });
+    const end = mapPoint({ x: rect.x + rect.width, y: rect.y + rect.height });
+    naturalRects.push({
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    });
+  }
+  return cropClippedNormalizedBoxes(naturalRects, crop);
 }
 
 /** 归一化 [0,1000] 排除框回投到当前显示空间：exclusionNormalizedRects
