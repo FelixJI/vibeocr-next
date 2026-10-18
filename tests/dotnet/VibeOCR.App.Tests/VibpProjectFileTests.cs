@@ -170,6 +170,218 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
+  public async Task OldMarksSerializeWithoutNewFieldsSoLegacyAppsStillAccept()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks =
+          [
+            // 仅旧工具：Regions/Zoom 均 null。
+            new VibpMark
+            {
+              Id = "mark-1",
+              Tool = "rectangle",
+              Start = new VibpPoint { X = 1, Y = 2 },
+              End = new VibpPoint { X = 30, Y = 20 },
+            },
+          ],
+        },
+      };
+      byte[] manifestJson = JsonSerializer.SerializeToUtf8Bytes(
+        manifest, VibpProjectRules.ManifestJson);
+      string text = System.Text.Encoding.UTF8.GetString(manifestJson);
+      // 新增可空字段为 null 时不写出：旧 app（无 Regions/Zoom DTO）读
+      // 新格式不被未知字段拒绝；旧工程语义字节不变。
+      Assert.DoesNotContain("\"regions\"", text, StringComparison.Ordinal);
+      Assert.DoesNotContain("\"zoom\"", text, StringComparison.Ordinal);
+
+      string packagePath = Path.Combine(directory, "legacy.vibp");
+      VibpProjectFile.Write(packagePath, manifest,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      VibpMark mark = Assert.Single(archive.Manifest.State.Marks);
+      Assert.Null(mark.Regions);
+      Assert.Null(mark.Zoom);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task RoundTripsSpotlightRegionsAndMagnifierZoomWithFailClosedBounds()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      VibpRegion[] regions =
+      [
+        new VibpRegion { X = 4, Y = 6, Width = 20, Height = 12 },
+        new VibpRegion { X = 10, Y = 8, Width = 8, Height = 8 },
+      ];
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks =
+          [
+            new VibpMark
+            {
+              Id = "mark-1",
+              Tool = "spotlight",
+              Start = new VibpPoint { X = 4, Y = 6 },
+              End = new VibpPoint { X = 30, Y = 20 },
+              Regions = regions,
+              Style = new VibpMarkStyle
+              {
+                Fill = new VibpFillStyle { Color = "#000000", Opacity = 55 },
+              },
+            },
+            new VibpMark
+            {
+              Id = "mark-2",
+              Tool = "magnifier",
+              Start = new VibpPoint { X = 8, Y = 8 },
+              End = new VibpPoint { X = 48, Y = 40 },
+              Zoom = 4,
+            },
+          ],
+        },
+      };
+      string packagePath = Path.Combine(directory, "emphasis.vibp");
+      VibpProjectFile.Write(packagePath, manifest,
+        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
+
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+
+      Assert.Equal(2, archive.Manifest.State.Marks.Count);
+      VibpMark spotlight = archive.Manifest.State.Marks[0]!;
+      Assert.Equal("spotlight", spotlight.Tool);
+      Assert.NotNull(spotlight.Regions);
+      Assert.Equal(2, spotlight.Regions.Count);
+      Assert.Equal(20, spotlight.Regions[0]!.Width);
+      VibpMark magnifier = archive.Manifest.State.Marks[1]!;
+      Assert.Equal("magnifier", magnifier.Tool);
+      Assert.Equal(4, magnifier.Zoom);
+
+      // fail closed：区域/倍率被非对应工具携带、空区域集、超界区域尺寸、
+      // 倍率越界均拒绝（写与读共用 ValidateManifest）。
+      VibpProjectEntry SourceEntry() =>
+        new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-tool.vibp"),
+        manifest with
+        {
+          State = manifest.State with { Marks = [spotlight with { Tool = "rectangle" }] },
+        }, [SourceEntry()]));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-empty.vibp"),
+        manifest with
+        {
+          State = manifest.State with { Marks = [spotlight with { Regions = [] }] },
+        }, [SourceEntry()]));
+      // 零尺寸区域（Width/Height = 0）：加载后会压暗全图且无孔洞，
+      // 双侧严格 > 0 拒绝；合法小正数可读。
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-region-zero-width.vibp"),
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 0, Height = 12 }] }],
+          },
+        }, [SourceEntry()]));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-region-zero-height.vibp"),
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 12, Height = 0 }] }],
+          },
+        }, [SourceEntry()]));
+      // 合法小正数区域可写可读。
+      string tinyPath = Path.Combine(directory, "tiny-region.vibp");
+      VibpProjectFile.Write(tinyPath,
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 0.25, Height = 0.5 }] }],
+          },
+        }, [SourceEntry()]);
+      VibpProjectArchive tiny = await VibpProjectFile.ReadAsync(
+        tinyPath, Path.Combine(directory, "open-tiny"), TestContext.Current.CancellationToken);
+      Assert.Equal(0.25, tiny.Manifest.State.Marks[0]!.Regions![0]!.Width);
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-zoom-tool.vibp"),
+        manifest with
+        {
+          State = manifest.State with { Marks = [magnifier with { Tool = "rectangle" }] },
+        }, [SourceEntry()]));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-zoom-range.vibp"),
+        manifest with
+        {
+          State = manifest.State with { Marks = [magnifier with { Zoom = 12 }] },
+        }, [SourceEntry()]));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-region-count.vibp"),
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks =
+            [
+              spotlight with
+              {
+                Regions = Enumerable.Range(0, 17)
+                  .Select(index => new VibpRegion { X = index, Y = 0, Width = 2, Height = 2 })
+                  .ToList(),
+              },
+            ],
+          },
+        }, [SourceEntry()]));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task ExtractEntryAsyncObservesMidChunkCancellationDeterministically()
   {
     string directory = NewTempDirectory();

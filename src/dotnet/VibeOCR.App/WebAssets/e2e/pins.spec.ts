@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   mountHost,
   snapshot,
+  sendState,
   expectCommand,
   requestPinSnapshot,
   readPinReports,
@@ -9,6 +10,7 @@ import {
   releaseCommand,
   rejectNextCommand,
 } from "./workbench-host";
+import type { ProjectContributionBody } from "../src/components/project/projectWire";
 
 const sourceSession = "a".repeat(32);
 const sourceUrl = "https://app.vibeocr/__resource/pin-image";
@@ -17,14 +19,17 @@ const png = Buffer.from(
   "base64",
 );
 
-async function pinEditor(page: Page) {
+async function pinEditor(page: Page, image = png) {
+  const projects: ProjectContributionBody[] = [];
+  const uploads: Buffer[] = [];
   await page.route("https://app.vibeocr/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/__resource/pin-image") {
-      await route.fulfill({ contentType: "image/png", body: png });
+      await route.fulfill({ contentType: "image/png", body: image });
       return;
     }
     if (url.pathname === "/__project") {
+      projects.push(route.request().postDataJSON() as ProjectContributionBody);
       await route.fulfill({
         status: 201,
         json: { contributeId: "b".repeat(32) },
@@ -32,6 +37,7 @@ async function pinEditor(page: Page) {
       return;
     }
     if (url.pathname === "/__annotation") {
+      uploads.push(route.request().postDataBuffer()!);
       await route.fulfill({
         status: 201,
         json: {
@@ -64,7 +70,7 @@ async function pinEditor(page: Page) {
           input: {
             url: sourceUrl,
             mediaType: "image/png",
-            byteLength: png.length,
+            byteLength: image.length,
           },
           screenshotSession: { sessionId: sourceSession, revision: 0 },
         },
@@ -75,6 +81,7 @@ async function pinEditor(page: Page) {
   await expect(
     page.getByRole("button", { name: "完成贴图", exact: true }),
   ).toBeEnabled();
+  return { projects, uploads };
 }
 
 test.afterEach(async ({ page }) => {
@@ -195,6 +202,150 @@ test("pin keyboard save uses the owned transaction and cancel keeps a dirty pin"
       (await readPinReports(page)).some((report) => report.payload.ok === true),
     )
     .toBe(true);
+});
+
+test("pin owned save and restore retain spotlight and magnifier geometry and pixels", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const base = Buffer.from(
+    await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 900;
+      canvas.height = 600;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#e02020";
+      context.fillRect(0, 0, 450, 600);
+      context.fillStyle = "#12a150";
+      context.fillRect(450, 0, 450, 600);
+      return canvas.toDataURL("image/png").split(",")[1]!;
+    }),
+    "base64",
+  );
+  const { projects, uploads } = await pinEditor(page, base);
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  async function draw(
+    tool: string,
+    x: number,
+    y: number,
+    endX: number,
+    endY: number,
+  ) {
+    await page.getByRole("button", { name: tool, exact: true }).click();
+    const canvas = page.getByLabel("图片检查画布");
+    await canvas.scrollIntoViewIfNeeded();
+    const bounds = (await canvas.boundingBox())!;
+    await page.mouse.move(
+      bounds.x + (bounds.width * x) / 900,
+      bounds.y + (bounds.height * y) / 600,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      bounds.x + (bounds.width * endX) / 900,
+      bounds.y + (bounds.height * endY) / 600,
+    );
+    await page.mouse.up();
+  }
+  await draw("聚光灯", 100, 100, 300, 280);
+  await draw("放大镜", 500, 100, 700, 280);
+  await requestPinSnapshot(page, sourceSession);
+  await expect.poll(() => projects.length).toBe(1);
+  await expect.poll(() => uploads.length).toBe(1);
+  await expect
+    .poll(async () =>
+      (await readPinReports(page)).some((report) => report.payload.ok === true),
+    )
+    .toBe(true);
+  expect(projects[0]!.state.marks.map((mark) => mark.tool)).toEqual([
+    "spotlight",
+    "magnifier",
+  ]);
+  expect(projects[0]!.state.marks[0]!.regions).toHaveLength(1);
+  expect(projects[0]!.state.marks[1]!.zoom).toBe(2);
+  const manifest = {
+    schemaVersion: 1,
+    canvas: projects[0]!.canvas,
+    source: {
+      mediaType: "image/png",
+      width: 900,
+      height: 600,
+      length: base.length,
+    },
+    assets: [],
+    state: projects[0]!.state,
+  };
+  const manifestUrl = "https://app.vibeocr/__resource/pin-restored-manifest";
+  await page.route(manifestUrl, (route) =>
+    route.fulfill({
+      contentType: "application/json; charset=utf-8",
+      json: manifest,
+    }),
+  );
+  const restoredSession = "d".repeat(32);
+  await sendState(page, "pinEdit", {
+    isBusy: false,
+    statusCode: "pinEdit.session",
+    input: { url: sourceUrl, mediaType: "image/png", byteLength: base.length },
+    screenshotSession: { sessionId: restoredSession, revision: 0 },
+    projectRestore: {
+      pendingId: "f".repeat(32),
+      sessionId: restoredSession,
+      revision: 0,
+      generation: 3,
+      manifest: {
+        url: manifestUrl,
+        mediaType: "application/json; charset=utf-8",
+        byteLength: JSON.stringify(manifest).length,
+      },
+      source: {
+        url: sourceUrl,
+        mediaType: "image/png",
+        byteLength: base.length,
+      },
+      assets: [],
+      patches: [],
+    },
+  });
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  await requestPinSnapshot(page, restoredSession);
+  await expect.poll(() => projects.length).toBe(2);
+  await expect.poll(() => uploads.length).toBe(2);
+  expect(projects[1]!.state).toEqual(projects[0]!.state);
+  const differences = await page.evaluate(
+    async (encoded) => {
+      const frames = await Promise.all(
+        encoded.map(async (value) => {
+          const bitmap = await createImageBitmap(
+            new Blob(
+              [Uint8Array.from(atob(value), (char) => char.charCodeAt(0))],
+              { type: "image/png" },
+            ),
+          );
+          const canvas = document.createElement("canvas");
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const context = canvas.getContext("2d")!;
+          context.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          return context.getImageData(0, 0, canvas.width, canvas.height).data;
+        }),
+      );
+      if (frames[0]!.length !== frames[1]!.length)
+        throw new Error("Restored dimensions changed");
+      return frames[0]!.reduce(
+        (count, value, index) => count + (value === frames[1]![index] ? 0 : 1),
+        0,
+      );
+    },
+    uploads.map((image) => image.toString("base64")),
+  );
+  expect(differences).toBe(0);
+  const scopes = await page.evaluate(() =>
+    (
+      window as Window & { __testHost: { commands: { scope: string }[] } }
+    ).__testHost.commands.map((command) => command.scope),
+  );
+  expect(scopes.every((scope) => scope === "pinEdit")).toBe(true);
 });
 
 test("history is manageable without a session while recording is off", async ({

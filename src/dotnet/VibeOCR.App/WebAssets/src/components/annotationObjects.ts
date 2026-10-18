@@ -4,6 +4,7 @@ import {
   rotatePointQuarter,
   scalePointAround,
   rotatedBoundingBox,
+  spotlightRegionsOf,
   type CanvasSize,
   type Mark,
   type Point,
@@ -134,6 +135,24 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
       height: rotated.height,
     };
   }
+  // 聚光灯：真实边界 = 全部孔洞区域的并集包围盒（选中框/命中/对齐/
+  // 框选同源）；无 regions 时回退 start/end 矩形。放大镜/其余矩形类沿
+  // 用下方通用分支。
+  if (mark.tool === "spotlight") {
+    const regions = spotlightRegionsOf(mark);
+    const left = Math.min(...regions.map((region) => region.x));
+    const top = Math.min(...regions.map((region) => region.y));
+    const right = Math.max(...regions.map((region) => region.x + region.width));
+    const bottom = Math.max(
+      ...regions.map((region) => region.y + region.height),
+    );
+    return {
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
+    };
+  }
   const padding =
     mark.tool === "rectangle" || mark.tool === "ellipse"
       ? annotationStrokeWidth(mark) / 2
@@ -202,6 +221,24 @@ function mapMarkPoints(mark: Mark, move: (at: Point) => Point): Mark {
     start: move(mark.start),
     end: move(mark.end),
     ...(mark.points ? { points: mark.points.map(move) } : {}),
+    // 聚光灯区域随同一映射平移/缩放/旋转，区域不漂移。
+    ...(mark.regions
+      ? {
+          regions: mark.regions.map((region) => {
+            const cornerA = move({ x: region.x, y: region.y });
+            const cornerB = move({
+              x: region.x + region.width,
+              y: region.y + region.height,
+            });
+            return {
+              x: Math.min(cornerA.x, cornerB.x),
+              y: Math.min(cornerA.y, cornerB.y),
+              width: Math.abs(cornerB.x - cornerA.x),
+              height: Math.abs(cornerB.y - cornerA.y),
+            };
+          }),
+        }
+      : {}),
   };
 }
 
@@ -531,6 +568,7 @@ function cloneMark(
     ...moved,
     id: newId,
     style,
+    // 区域与倍率随 moved 携带（含偏移后区域）：副本与原件完全独立可编辑。
 
     ...(groupId !== undefined ? { groupId } : { groupId: undefined }),
     // 副本解锁：锁定是对象自身状态，粘贴不应继承导致画布不可点。

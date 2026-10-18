@@ -574,3 +574,88 @@ describe("导入图片局部变换锚点", () => {
     },
   );
 });
+
+// #235 聚光灯多区域对象：联合边界/平移/缩放/旋转/克隆，区域不漂移；
+// 放大镜为普通对象（矩形几何 + 不变倍率）。
+describe("spotlight multi-region object", () => {
+  const spotlight: Mark = {
+    id: "mark-1",
+    tool: "spotlight",
+    start: { x: 10, y: 20 },
+    end: { x: 120, y: 90 },
+    regions: [
+      { x: 10, y: 20, width: 40, height: 30 },
+      { x: 80, y: 60, width: 40, height: 30 },
+    ],
+    style: { fill: { color: "#000000", opacity: 55 } },
+  };
+
+  it("bounds are the union of regions (not start/end)", () => {
+    expect(markBoundsOf(spotlight, undefined)).toEqual({
+      x: 10,
+      y: 20,
+      width: 110,
+      height: 70,
+    });
+  });
+
+  it("moving translates every region exactly once", () => {
+    const moved = moveMarkIds([spotlight], new Set(["mark-1"]), {
+      x: 5,
+      y: -7,
+    });
+    expect(moved[0]!.regions).toEqual([
+      { x: 15, y: 13, width: 40, height: 30 },
+      { x: 85, y: 53, width: 40, height: 30 },
+    ]);
+  });
+
+  it("scaling scales regions and keeps fill opacity percent intact", () => {
+    const scaled = scaleMarkIds([spotlight], new Set(["mark-1"]), 2, {
+      x: 0,
+      y: 0,
+    });
+    expect(scaled[0]!.regions).toEqual([
+      { x: 20, y: 40, width: 80, height: 60 },
+      { x: 160, y: 120, width: 80, height: 60 },
+    ]);
+    // 暗度是百分比语义：不随几何缩放（55 保持 55）。
+    expect(scaled[0]!.style?.fill?.opacity).toBe(55);
+  });
+
+  it("quarter rotation bakes rotated region boxes", () => {
+    const rotated = rotateMarkIds([spotlight], new Set(["mark-1"]), {
+      x: 200,
+      y: 200,
+    });
+    // 两区域都绕同一中心旋转：仍为轴对齐矩形，联合边界随动（90° 交换宽高）。
+    const bounds = markBoundsOf(rotated[0]!, undefined);
+    expect(bounds.width).toBe(70);
+    expect(bounds.height).toBe(110);
+  });
+
+  it("clone deep-copies regions and zoom survives magnifier clone", () => {
+    const clones = cloneMarks(
+      [
+        spotlight,
+        {
+          id: "mark-2",
+          tool: "magnifier",
+          start: { x: 0, y: 0 },
+          end: { x: 60, y: 40 },
+          zoom: 4,
+        },
+      ],
+      new Set(["mark-1", "mark-2"]),
+      { x: 1, y: 1 },
+      () => "mark-new-1",
+      () => "group-new-1",
+    );
+    expect(clones[0]!.regions).toEqual([
+      { x: 11, y: 21, width: 40, height: 30 },
+      { x: 81, y: 61, width: 40, height: 30 },
+    ]);
+    expect(clones[0]!.regions).not.toBe(spotlight.regions);
+    expect(clones[1]!.zoom).toBe(4);
+  });
+});
