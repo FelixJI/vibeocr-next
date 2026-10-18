@@ -1,3 +1,4 @@
+import { FormulaRenderPage } from "../features/FormulaRenderPage";
 import {
   FluentProvider,
   MessageBar,
@@ -160,7 +161,11 @@ function RouteSync({ viewState }: { readonly viewState: AppViewState }) {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!viewState.connected || window.location.hash.includes("?scene=1"))
+    if (
+      !viewState.connected ||
+      window.location.hash.includes("?scene=1") ||
+      window.location.hash.includes("?pin=1")
+    )
       return;
     // 关于与诊断合并后，宿主仍可能持久化旧 about 路由：与重定向目标对齐，
     // 避免 RouteSync 把 #/about 拉回造成与 #/diagnostics 重定向循环。
@@ -201,6 +206,7 @@ export function App({
 
   const effectiveDark =
     viewState.theme === "dark" || (viewState.theme === "system" && systemDark);
+  if (window.location.hash.includes("?formula=1")) return <FormulaRenderPage />;
 
   return (
     <FluentProvider
@@ -212,7 +218,8 @@ export function App({
         <Routes>
           <Route
             element={
-              window.location.hash.includes("?scene=1") ? (
+              window.location.hash.includes("?scene=1") ||
+              window.location.hash.includes("?pin=1") ? (
                 <SceneOutlet />
               ) : (
                 <AppShell
@@ -390,6 +397,7 @@ function commandProblemLabel(messageKey: string): string {
       "本次导入被拒绝；已有画布保持不变，请调整内容后重试。",
     "workbench.error.imageImportUnavailable":
       "当前环境暂不支持读取系统内容导入。",
+    "workbench.error.pinLimitReached": "最多同时打开四张贴图，请先关闭一张。",
   };
   return messages[messageKey] ?? "当前操作被原生宿主拒绝，请检查状态后重试。";
 }

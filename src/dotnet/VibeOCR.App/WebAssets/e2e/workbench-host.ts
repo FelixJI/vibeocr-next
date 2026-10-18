@@ -18,6 +18,7 @@ export async function mountHost(
     const listeners = new Set<(event: { data: unknown }) => void>();
     const commands: HostCommand[] = [];
     const captureReports: BridgeEnvelope[] = [];
+    const pinReports: BridgeEnvelope[] = [];
     let rejectNext = false;
     let deferredAction: string | undefined;
     let deferredResponse: (() => void) | undefined;
@@ -42,6 +43,15 @@ export async function mountHost(
       __testHost: {
         commands,
         captureReports,
+        pinReports,
+        requestPinSnapshot: (sourceSession: string) =>
+          emit({
+            version: 2,
+            kind: "request",
+            id: crypto.randomUUID(),
+            type: "pinEdit.requestSnapshot",
+            payload: { sessionId: sourceSession },
+          }),
         state,
         deferCommand: (action: string) => {
           deferredAction = action;
@@ -76,6 +86,13 @@ export async function mountHost(
                 request.type === "capture.pixelFailed"
               ) {
                 captureReports.push(request);
+                return;
+              }
+              if (
+                request.type === "pinEdit.snapshotResult" ||
+                request.type.startsWith("formula.")
+              ) {
+                pinReports.push(request);
                 return;
               }
               const command = request.payload.command as unknown as HostCommand;
@@ -129,12 +146,29 @@ export async function mountHost(
 type TestHostWindow = Window & {
   __testHost: {
     commands: HostCommand[];
+    pinReports: BridgeEnvelope[];
+    requestPinSnapshot(sourceSession: string): void;
     rejectNext(): void;
     deferCommand(action: string): void;
     releaseCommand(): void;
     state(scope: string, value: unknown): void;
   };
 };
+
+export async function requestPinSnapshot(
+  page: Page,
+  sourceSession: string,
+): Promise<void> {
+  await page.evaluate(
+    (source) =>
+      (window as TestHostWindow).__testHost.requestPinSnapshot(source),
+    sourceSession,
+  );
+}
+
+export async function readPinReports(page: Page): Promise<BridgeEnvelope[]> {
+  return page.evaluate(() => (window as TestHostWindow).__testHost.pinReports);
+}
 
 export async function deferCommand(page: Page, action: string): Promise<void> {
   await page.evaluate(

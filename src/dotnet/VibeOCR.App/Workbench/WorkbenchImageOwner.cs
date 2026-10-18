@@ -17,7 +17,7 @@ using Windows.ApplicationModel.DataTransfer;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode, ISystemImportReader? systemImportReader, WorkbenchProjectStore? projectStore = null, Func<CancellationToken, Task<string?>>? projectSavePicker = null, Func<CancellationToken, Task<string?>>? projectOpenPicker = null)
+internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode, ISystemImportReader? systemImportReader, WorkbenchProjectStore? projectStore = null, Func<CancellationToken, Task<string?>>? projectSavePicker = null, Func<CancellationToken, Task<string?>>? projectOpenPicker = null, IPinSnapshotWriter? pinSnapshotWriter = null, IPinHistoryRecorder? pinHistory = null)
 {
   internal event Action? ScreenshotSelectionSettingsRequested;
   internal event Action? ScreenshotSelectionRecognized;
@@ -28,7 +28,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -168,6 +168,38 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       imageEditChannel, imageEditImport, release.SessionId, release.ResourceUris),
     ReleaseScreenshotAssetsCommand release => ReleaseImportAssets(
       recognitionChannel, recognitionImport, release.SessionId, release.ResourceUris),
+    NotifyPinEditRevisionCommand notifyPin => NotifyScreenshotRevision(
+      pinEditChannel, notifyPin),
+    ClosePinEditSessionCommand => ClosePinEditSession(),
+    CopyPinEditImageCommand copyPin => await CopyScreenshotImageAsync(
+      pinEditChannel,
+      copyPin,
+      cancellationToken),
+    SavePinEditImageCommand savePin => await SaveScreenshotImageAsync(
+      pinEditChannel,
+      savePin,
+      cancellationToken),
+    CopyPinEditAnnotatedImageCommand copyPinAnnotated => await CopyPinEditAnnotatedImageAsync(
+      copyPinAnnotated,
+      cancellationToken),
+    SavePinEditAnnotatedImageCommand savePinAnnotated => await SavePinEditAnnotatedImageAsync(
+      savePinAnnotated,
+      cancellationToken),
+    ApplyPinEditSnapshotCommand applyPin => await ApplyPinSnapshotAsync(
+      applyPin,
+      cancellationToken),
+    AckPinEditImportCommand ackPinImport => AcknowledgeImport(pinEditChannel, pinEditImport, ackPinImport),
+    RejectPinEditImportCommand rejectPinImport => RejectImport(pinEditChannel, pinEditImport, rejectPinImport),
+    ReleasePinEditAssetsCommand releasePinAssets => ReleaseImportAssets(
+      pinEditChannel, pinEditImport, releasePinAssets.SessionId, releasePinAssets.ResourceUris),
+    SetPinHistoryEnabledCommand setHistory => SetPinHistoryEnabled(setHistory),
+    ListPinHistoryCommand listHistory => ListPinHistory(listHistory),
+    ReopenPinHistoryEntryCommand reopenHistory => await ReopenPinHistoryEntryAsync(
+      reopenHistory,
+      cancellationToken),
+    DeletePinHistoryEntryCommand deleteHistory => DeletePinHistoryEntry(deleteHistory),
+    ClearPinHistoryCommand => ClearPinHistory(),
+    ShowPinManagerCommand => ShowPinManager(),
     SaveImageEditProjectCommand saveProject => await SaveProjectAsync(
       imageEditChannel, imageEditImport, saveProject.ContributeId, saveProject.SessionId,
       saveProject.Revision, cancellationToken),
@@ -185,6 +217,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     public RecognitionViewModel? ViewModel;
     public long Generation;
     public Guid? SessionId;
+    public string? HistoryCaptureKey;
     public long Revision;
     public bool TextSelectionRequested;
     public bool SceneEditing;
@@ -203,6 +236,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
 
   private readonly ImageSessionChannel recognitionChannel = new();
   private readonly ImageSessionChannel imageEditChannel = new();
+  /// <summary>#238 pinEdit 通道：贴图内编辑单槽会话；与另两通道完全隔离。</summary>
+  private readonly ImageSessionChannel pinEditChannel = new();
   private ResultActions? resultActions;
   /// <summary>当前结果最近发布的结构化资源 URL；与新发布/失效同步维护。</summary>
   private WorkbenchResourceReference? latestStructuredResult;
@@ -316,6 +351,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
+    RecordHistorySnapshot(recognitionChannel, annotation.Path);
     return CurrentRecognitionState();
   }
 
@@ -329,6 +365,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       throw new AnnotatedImageOperationCancelledException();
     }
+    RecordHistorySnapshot(recognitionChannel, annotation.Path);
     return CurrentRecognitionState();
   }
 
@@ -339,6 +376,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
+    RecordHistorySnapshot(imageEditChannel, annotation.Path);
     return CurrentImageEditState();
   }
 
@@ -352,6 +390,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       throw new AnnotatedImageOperationCancelledException();
     }
+    RecordHistorySnapshot(imageEditChannel, annotation.Path);
     return CurrentImageEditState();
   }
 
@@ -374,9 +413,18 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       ? ImageEditState(false, SessionStatusCode(imageEditChannel))
       : ImageEditState(false, "recognition.ready");
 
+  /// <summary>pinEdit 通道当前投影（命令出口回显）：有会话回会话状态，无会话
+  /// 只回历史管理投影，不携带任何 recognition/imageEdit 字段。</summary>
+  private PinEditWorkbenchState CurrentPinEditState() =>
+    pinEditChannel.SessionId is not null
+      ? PinEditState(false, SessionStatusCode(pinEditChannel))
+      : PinEditState(false, "pinEdit.ready");
+
   /// <summary>通道当前投影（命令出口回显）：按通道目标 scope 发布。</summary>
   private WorkbenchState CurrentChannelState(ImageSessionChannel channel) =>
-    channel == imageEditChannel ? CurrentImageEditState() : CurrentRecognitionState();
+    channel == imageEditChannel ? CurrentImageEditState()
+    : channel == pinEditChannel ? CurrentPinEditState()
+    : CurrentRecognitionState();
 
   /// <summary>
   /// 严格模式合同的终态：显式选择的模式不可用时保留引擎目录、用户选择与
@@ -416,6 +464,18 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection),
     ProjectOpen: ProjectOpenProjection());
 
+  /// <summary>pinEdit 通道状态（#238）：仅贴图编辑会话/导入/历史投影；
+  /// 不携带识别模式、文字层或工程打开字段。</summary>
+  internal PinEditWorkbenchState PinEditState(
+    bool isBusy,
+    string statusCode) => new(
+    isBusy,
+    statusCode,
+    pinEditChannel.SessionInput,
+    CurrentScreenshotSession(pinEditChannel),
+    Import: Volatile.Read(ref pinEditImport.PendingDescriptor),
+    History: PinHistoryProjection(), ProjectRestore: pinProjectRestore);
+
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
   private RecognitionWorkbenchState SessionRecognitionState(
     bool isBusy,
@@ -435,12 +495,14 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       Import: Volatile.Read(ref recognitionImport.PendingDescriptor),
       RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
 
-  /// <summary>通道会话状态：按通道目标 scope 发布（recognition/imageEdit）。</summary>
+  /// <summary>通道会话状态：按通道目标 scope 发布（recognition/imageEdit/pinEdit）。</summary>
   private WorkbenchState SessionState(
     ImageSessionChannel channel, bool isBusy, string statusCode) =>
     channel == imageEditChannel
       ? ImageEditState(isBusy, statusCode)
-      : SessionRecognitionState(isBusy, statusCode);
+      : channel == pinEditChannel
+        ? PinEditState(isBusy, statusCode)
+        : SessionRecognitionState(isBusy, statusCode);
 
   private void ValidateScreenshotSession(
     ImageSessionChannel channel, Guid sessionId, long revision)
@@ -522,12 +584,18 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
 
   private readonly ImportChannelState imageEditImport = new();
   private readonly ImportChannelState recognitionImport = new();
+  /// <summary>#238 pinEdit 通道的导入状态（文件预览内容收编）。</summary>
+  private readonly ImportChannelState pinEditImport = new();
+  /// <summary>#238 pin owned 快照写入器与截图历史记录器（无则贴图编辑/历史不可用）。</summary>
+  private readonly IPinSnapshotWriter? pinSnapshotWriter = pinSnapshotWriter;
+  private readonly IPinHistoryRecorder? pinHistory = pinHistory;
 
   // 受控并发测试观察点：注册完成且仍持有通道锁，生产默认不设置。
   internal Action<CancellationToken>? ImportDocumentRegistered { get; set; }
 
   private ImportChannelState ImportStateFor(ImageSessionChannel channel) =>
-    ReferenceEquals(channel, imageEditChannel) ? imageEditImport : recognitionImport;
+    ReferenceEquals(channel, imageEditChannel) ? imageEditImport :
+    ReferenceEquals(channel, pinEditChannel) ? pinEditImport : recognitionImport;
 
   private void ReleaseChannelImports(ImportChannelState import)
   {
@@ -1201,6 +1269,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           recognitionChannel.ExcludeBoxes = [];
           publishedSession = true;
           ReleaseCaptureGuard();
+          // #238 截图历史：会话确立即录入（含未钉图；未启用为 no-op）。
+          recognitionChannel.HistoryCaptureKey = recognitionChannel.SessionId!.Value.ToString("N");
+          RecordPinHistory(recognitionChannel.HistoryCaptureKey, captured.Data);
           operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.session"));
         }
         else
@@ -1482,6 +1553,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       recognitionChannel.ExcludeBoxes = [];
       Guid sessionId = recognitionChannel.SessionId.Value;
       string resourceUri = lease.ResourceUri.AbsoluteUri;
+      recognitionChannel.HistoryCaptureKey = sessionId.ToString("N");
       switch (action)
       {
         case ScreenshotSelectionAction.Copy:
@@ -1538,6 +1610,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     IScreenshotSessionTarget command)
   {
     RecognitionViewModel viewModel = channel.ViewModel ??= recognitionFactory();
+    if (channel == pinEditChannel && Volatile.Read(ref pinSnapshotInFlight) != 0)
+      throw new ImageImportInProgressException();
     if (channel.SessionId != command.SessionId ||
       command.Revision <= channel.Revision)
     {
@@ -1574,6 +1648,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
+    RecordHistorySnapshot(channel, annotation.Path);
     return CurrentChannelState(channel);
   }
 
@@ -1590,6 +1665,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       throw new AnnotatedImageOperationCancelledException();
     }
+    RecordHistorySnapshot(channel, annotation.Path);
     return CurrentChannelState(channel);
   }
 
@@ -1614,7 +1690,10 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         ready.ServiceInstance == (supervisorInstanceId() ?? string.Empty)
           ? FilterLayerLines(ready, command.ExcludeBoxes)
           : null;
+      // Retain the successful output bytes before the annotation owner moves to the pin.
+      byte[]? historyPng = channel.HistoryCaptureKey is not null ? File.ReadAllBytes(image.Path) : null;
       pinScreenshot(image, command.SessionId, command.Revision, layer, command.ExcludeBoxes);
+      if (historyPng is not null) RecordPinHistory(channel.HistoryCaptureKey!, historyPng);
     }
     catch
     {
@@ -2005,6 +2084,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         SetResultImage(image, response, viewModel.ResultInput);
         recognitionChannel.SessionResult = result;
         recognitionChannel.SessionStructuredResult = structured;
+        if (response is not null) EnrichHistoryText(recognitionChannel, response.RawText ?? response.Text);
         operations.PublishTerminal(SessionRecognitionState(
           false,
           RecognitionStatusCode(viewModel)));
@@ -2175,6 +2255,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     ImageSessionChannel channel =
       recognitionChannel.SessionId == sessionId ? recognitionChannel :
       imageEditChannel.SessionId == sessionId ? imageEditChannel :
+      pinEditChannel.SessionId == sessionId ? pinEditChannel :
       recognitionChannel;
     if (channel.SessionId == sessionId && channel.Revision == revision)
     {
@@ -2321,6 +2402,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         serviceInstance,
         image,
         lines);
+      EnrichHistoryText(channel, string.Join("\n", lines.Select(line => line.Text)));
       ScreenshotTextLayerChanged?.Invoke(channel.TextLayer);
       operations.PublishTerminal(SessionState(channel, false, SessionStatusCode(channel)));
     }
@@ -2541,6 +2623,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     if (channel.SessionStructuredResult is { } structured) resources.ReleaseResource(structured);
     channel.SessionStructuredResult = null;
     channel.SessionId = null;
+    channel.HistoryCaptureKey = null;
     channel.Revision = 0;
     channel.TextSelectionRequested = false;
     channel.SceneEditing = false;
@@ -2636,6 +2719,14 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         // 代际在 adoption 内部先行校验：结果发布 await 期间被取消/新输入
         // 取代时不建会话、不覆盖新状态。
         state = AdoptSessionForRecognitionInput(state, generation);
+        if (screenCapture && generation == Volatile.Read(ref recognitionChannel.Generation) &&
+          recognitionChannel.SessionId is { } captureSession && RecognitionVm.CurrentInput is { } captured)
+        {
+          recognitionChannel.HistoryCaptureKey = captureSession.ToString("N");
+          RecordPinHistory(recognitionChannel.HistoryCaptureKey, captured.Data);
+          if (RecognitionVm.Result is { } recognized)
+            EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
+        }
         if (deferredSelection)
         {
           // The run started before the Supervisor attached; its submit already
@@ -3359,7 +3450,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   internal void InvalidateScreenshotSessionRecognitionOnMaintenance()
   {
     foreach (ImageSessionChannel channel in (ImageSessionChannel[])
-      [recognitionChannel, imageEditChannel])
+      [recognitionChannel, imageEditChannel, pinEditChannel])
     {
       if (channel.RecognitionDemand is null &&
         (channel.SessionId is null ||
@@ -3400,11 +3491,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   internal void Stop()
   {
     AdvanceImageGeneration(recognitionChannel); AdvanceImageGeneration(imageEditChannel);
-    foreach (ImageSessionChannel channel in new[] { recognitionChannel, imageEditChannel })
+    foreach (ImageSessionChannel channel in new[] { recognitionChannel, imageEditChannel, pinEditChannel })
     {
       channel.ViewModel?.Cancel(); channel.TextPreparation?.Cancel(); channel.CaptureDemand?.Cancel();
       channel.TextLayerViewModel?.Cancel();
     }
+    AdvanceImageGeneration(pinEditChannel);
+    ClearPinProjectRestore();
     ReleaseProjectOpen();
   }
 }

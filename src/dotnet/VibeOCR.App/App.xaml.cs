@@ -91,6 +91,12 @@ public sealed partial class App : Application
     private const int TrayMenuCommandBase = 1000;
     private const int TrayMenuToggleToolbar = 1004;
     private const int TrayMenuQuit = 1005;
+    /// <summary>#238 贴图管理入口：穿透贴图恢复的始终可达路径。</summary>
+    private const int TrayMenuPinManager = 1007;
+    private const int TrayMenuNewTextPin = 1008;
+    private const int TrayMenuNewColorPin = 1009;
+    private const int TrayMenuNewFilePin = 1010;
+    private const int TrayMenuNewFormulaPin = 0x268;
     private const int TrayMenuScreenshotModes = 1006;
     /// <summary>#236 截图选项与上次区域持久化（DataRoot 原子写入）。</summary>
     private CapturePreferencesStore? _capturePreferences;
@@ -367,6 +373,7 @@ public sealed partial class App : Application
           systemImportReader: InputService.CreateImportReader());
         _window.AppWindow.Closing += OnAppWindowClosing;
         _window.Closed += OnWindowClosedFallback;
+        _window.ExitRequested += () => _ = RequestAppExitAsync(_window.AppWindow);
         _window.Activate();
         InitializeDesktopShell(layout);
         RecordMilestone(diagnostics, "T2", _startup.Elapsed);
@@ -588,6 +595,27 @@ public sealed partial class App : Application
                 MenuFlagString,
                 (nuint)TrayMenuToggleToolbar,
                 ToolbarToggleMenuLabel());
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuPinManager,
+                "贴图管理…");
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuNewTextPin,
+                "新建文字贴图…");
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuNewColorPin,
+                "新建颜色贴图…");
+            AppendMenuW(
+                menu,
+                MenuFlagString,
+                (nuint)TrayMenuNewFilePin,
+                "文件预览贴图…");
+            AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuNewFormulaPin, "新建公式贴图…");
             AppendMenuW(menu, MenuFlagSeparator, 0, null);
             AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuQuit, "退出 VibeOCR");
 
@@ -613,6 +641,38 @@ public sealed partial class App : Application
             if (selected == TrayMenuToggleToolbar)
             {
                 _actionDispatcher?.TryDispatch(HotkeyActionCatalog.ToggleToolbar);
+                return;
+            }
+
+            if (selected == TrayMenuPinManager)
+            {
+                _window?.ShowPinManagerFromTray();
+                return;
+            }
+
+            if (selected == TrayMenuNewTextPin)
+            {
+                _window?.CreateTypedPinFromTray(
+                    VibeOCR.App.Features.Pins.TypedPinWindow.ContentKind.Text);
+                return;
+            }
+
+            if (selected == TrayMenuNewColorPin)
+            {
+                _window?.CreateTypedPinFromTray(
+                    VibeOCR.App.Features.Pins.TypedPinWindow.ContentKind.Color);
+                return;
+            }
+
+            if (selected == TrayMenuNewFormulaPin)
+            {
+                _window?.CreateTypedPinFromTray(VibeOCR.App.Features.Pins.TypedPinWindow.ContentKind.Formula);
+                return;
+            }
+            if (selected == TrayMenuNewFilePin)
+            {
+                _window?.CreateTypedPinFromTray(
+                    VibeOCR.App.Features.Pins.TypedPinWindow.ContentKind.FilePreview);
                 return;
             }
 
@@ -1324,23 +1384,25 @@ public sealed partial class App : Application
     private bool _pdfCloseReview;
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (_shutdownStarted)
-        {
-            return;
-        }
-
+        if (_shutdownStarted) return;
         args.Cancel = true;
-        if (_pdfCloseReview) return;
+        await RequestAppExitAsync(sender);
+    }
+
+    private async Task RequestAppExitAsync(AppWindow sender)
+    {
+        if (_shutdownStarted || _pdfCloseReview) return;
         _pdfCloseReview = true;
         try
         {
             if (_window is not null && !await _window.PreparePdfExitAsync()) return;
+            if (_window is not null && !await _window.PreparePinsExitAsync()) return;
             _actionDispatcher?.EndHotkeyRecording();
             _shutdownStarted = true;
             _applicationShutdown.Cancel();
             await ShutdownAndExitAsync(sender);
         }
-        catch (Exception error) { AppLog.Error("PDF exit coordination failed", error); }
+        catch (Exception error) { AppLog.Error("Application exit coordination failed", error); }
         finally { _pdfCloseReview = false; }
     }
 
@@ -1369,7 +1431,7 @@ public sealed partial class App : Application
         {
             _applicationShutdown.Dispose();
             appWindow.Closing -= OnAppWindowClosing;
-            _window?.Close();
+            _window?.CloseAfterPreparation();
             if (_window is not null) await _window.ShutdownCompletion;
             Exit();
         }

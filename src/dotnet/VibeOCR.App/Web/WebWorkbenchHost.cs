@@ -5,6 +5,8 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Workbench;
 using Windows.Storage.Streams;
+using Windows.Graphics.Imaging;
+using VibeOCR.App.Features.Pins;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace VibeOCR.App.Web;
@@ -59,6 +61,11 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly WorkbenchRoute? fixedRoute;
   private static readonly IReadOnlySet<string> SceneScopes = new HashSet<string>(StringComparer.Ordinal)
   { "shell", "recognition", "settings" };
+  /// <summary>#238 pinEdit 投影集：贴图编辑窗只接收 shell/pinEdit/settings。</summary>
+  private static readonly IReadOnlySet<string> PinScopes = new HashSet<string>(StringComparer.Ordinal)
+  { "shell", "pinEdit", "settings" };
+  private readonly IReadOnlySet<string> projectionScopes;
+  private readonly bool pinEditRoute;
   private readonly WorkbenchDispatcherDelivery stateDelivery = new();
   internal byte[]? CaptureBackground { get; set; }
   internal CaptureSceneConfiguration? CaptureScene { get; set; }
@@ -182,13 +189,110 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
   private void AbandonPdfPreviewFlush() => pendingPdfPreviewFlush?.Completion.TrySetResult(false);
 
+  private TaskCompletionSource<JsonElement>? formulaRender;
+  private Guid formulaRenderId;
+  internal async Task<byte[]> RenderFormulaAsync(string latex)
+  {
+    if (Encoding.UTF8.GetByteCount(latex) is < 1 or > 4096 || formulaRender is not null || core is not { } current)
+      throw new InvalidOperationException("Formula source is empty, oversized, or already rendering.");
+    formulaRenderId = Guid.NewGuid();
+    formulaRender = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    try
+    {
+      string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(latex)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+      string page = new Uri(current.Source).AbsolutePath == "/index.html" ? "/" : "/index.html";
+      current.Navigate($"https://{VirtualHost}{page}#/imageEdit?formula=1&render={formulaRenderId:N}&src={encoded}");
+      JsonElement payload = await formulaRender.Task.WaitAsync(TimeSpan.FromSeconds(15), lifetime.Token);
+      using var capture = new InMemoryRandomAccessStream();
+      await current.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
+      capture.Seek(0);
+      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(capture);
+      JsonElement rect = payload.GetProperty("rect");
+      BitmapBounds bounds = FormulaCaptureBounds.Compute(rect.GetProperty("x").GetDouble(),
+        rect.GetProperty("y").GetDouble(), rect.GetProperty("width").GetDouble(), rect.GetProperty("height").GetDouble(),
+        payload.GetProperty("viewportWidth").GetDouble(), payload.GetProperty("viewportHeight").GetDouble(),
+        payload.GetProperty("devicePixelRatio").GetDouble(), decoder.PixelWidth, decoder.PixelHeight);
+      PixelDataProvider pixels = await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        new BitmapTransform { Bounds = bounds }, ExifOrientationMode.IgnoreExifOrientation,
+        ColorManagementMode.DoNotColorManage);
+      using var output = new InMemoryRandomAccessStream();
+      BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, output);
+      encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, bounds.Width, bounds.Height,
+        96, 96, pixels.DetachPixelData());
+      await encoder.FlushAsync();
+      output.Seek(0);
+      using var reader = new DataReader(output.GetInputStreamAt(0));
+      await reader.LoadAsync(checked((uint)output.Size));
+      byte[] png = new byte[checked((int)output.Size)];
+      reader.ReadBytes(png);
+      return png;
+    }
+    finally { formulaRender = null; }
+  }
+
+  private void AcceptFormulaReport(JsonElement message)
+  {
+    if (formulaRender is null || message.GetProperty("kind").GetString() != "event" ||
+      message.GetProperty("version").GetInt32() != WorkbenchProtocol.Version) return;
+    JsonElement payload = message.GetProperty("payload");
+    if (!Guid.TryParseExact(payload.GetProperty("id").GetString(), "N", out Guid id) || id != formulaRenderId) return;
+    if (message.GetProperty("type").GetString() == "formula.rendered")
+      formulaRender.TrySetResult(payload.Clone());
+    else formulaRender.TrySetException(new InvalidOperationException("公式无法渲染；请修正 LaTeX 后重试。"));
+  }
+
+  private TaskCompletionSource<bool>? pinSnapshotFlush;
+  private Guid? committedPinSnapshot;
+  private Guid? requestedPinSnapshot;
+  internal bool PinSnapshotInFlight { get; private set; }
+  internal event Func<Task>? PinSnapshotAcknowledged;
+
+  internal async Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
+  {
+    if (pinSnapshotFlush is { } existing) return await existing.Task;
+    if (!pinEditRoute || core is not { } current || disposed) return false;
+    var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    pinSnapshotFlush = completion;
+    requestedPinSnapshot = sourceSession;
+    try
+    {
+      current.PostWebMessageAsJson(JsonSerializer.Serialize(new
+      {
+        version = WorkbenchProtocol.Version,
+        kind = "request", id = Guid.NewGuid().ToString("N"), type = "pinEdit.requestSnapshot",
+        payload = new { sessionId = sourceSession.ToString("N") },
+      }));
+      return await completion.Task.WaitAsync(TimeSpan.FromSeconds(60));
+    }
+    catch (Exception error) when (error is TimeoutException or OperationCanceledException) { return false; }
+    finally { if (ReferenceEquals(pinSnapshotFlush, completion)) { pinSnapshotFlush = null; requestedPinSnapshot = null; } }
+  }
+
+  private async Task AcceptPinSnapshotResultAsync(JsonElement message)
+  {
+    if (!pinEditRoute || message.GetProperty("kind").GetString() != "event" ||
+      message.GetProperty("version").GetInt32() != WorkbenchProtocol.Version) return;
+    JsonElement payload = message.GetProperty("payload");
+    if (payload.EnumerateObject().Count() != 2 ||
+      !Guid.TryParseExact(payload.GetProperty("sessionId").GetString(), "N", out Guid sourceSession)) return;
+    bool ok = payload.GetProperty("ok").GetBoolean();
+    if (ok ? committedPinSnapshot != sourceSession : requestedPinSnapshot != sourceSession) return;
+    if (ok)
+    {
+      committedPinSnapshot = null;
+      if (PinSnapshotAcknowledged is { } acknowledged) await acknowledged();
+    }
+    pinSnapshotFlush?.TrySetResult(ok);
+  }
+
   public WebWorkbenchHost(
     IWorkbenchApplication application,
     WorkbenchResourceBroker resourceBroker,
     WorkbenchAnnotationStore annotationStore,
     bool applicationOwner = true,
     WorkbenchRoute? fixedRoute = null,
-    WorkbenchProjectStore? projectStore = null)
+    WorkbenchProjectStore? projectStore = null,
+    bool pinEditHost = false)
   {
     this.application = application ?? throw new ArgumentNullException(nameof(application));
     this.resourceBroker = resourceBroker ?? throw new ArgumentNullException(nameof(resourceBroker));
@@ -196,6 +300,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     this.projectStore = projectStore;
     this.applicationOwner = applicationOwner;
     this.fixedRoute = fixedRoute;
+    pinEditRoute = pinEditHost;
+    projectionScopes = pinEditHost ? PinScopes : SceneScopes;
     importDocumentCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
   }
 
@@ -314,7 +420,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.WebResourceRequested += OnWebResourceRequested;
     core = next;
     RegisterBridge(next, next.PostWebMessageAsJson);
-    next.Navigate(fixedRoute is null ? StartUri.AbsoluteUri : StartUri.AbsoluteUri + "#/imageEdit?scene=1");
+    next.Navigate(fixedRoute is null ? StartUri.AbsoluteUri
+      : pinEditRoute ? StartUri.AbsoluteUri + "#/imageEdit?pin=1"
+      : StartUri.AbsoluteUri + "#/imageEdit?scene=1");
   }
 
   public void Reload()
@@ -413,6 +521,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (message.Length > WorkbenchBridgeCodec.MaxMessageBytes) throw new WorkbenchBridgeProtocolException("Bridge message exceeds the size limit.");
       using (JsonDocument incoming = JsonDocument.Parse(message))
       {
+        if (incoming.RootElement.TryGetProperty("type", out JsonElement formulaType) &&
+          formulaType.GetString() is "formula.rendered" or "formula.renderFailed")
+        { AcceptFormulaReport(incoming.RootElement); return; }
+        if (incoming.RootElement.TryGetProperty("type", out JsonElement pinType) &&
+          pinType.GetString() == "pinEdit.snapshotResult")
+        { await AcceptPinSnapshotResultAsync(incoming.RootElement); return; }
         if (IsPdfPreviewFlushResponse(incoming.RootElement))
         { AcceptPdfPreviewFlushResponse(message); return; }
         if (CaptureSceneMessages.IsReport(incoming.RootElement))
@@ -449,11 +563,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         activeSession);
       if (fixedRoute is not null && envelope.Command is NavigateWorkbenchCommand)
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
+      if (pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand) PinSnapshotInFlight = true;
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
         envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
           AckImageEditProjectOpenCommand
           ? importDocumentCancellation.Token : lifetime.Token);
+      if (pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand) PinSnapshotInFlight = false;
+      if (pinEditRoute && receipt.Ok && envelope.Command is ApplyPinEditSnapshotCommand snapshot)
+        committedPinSnapshot = snapshot.SessionId;
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。
       if (bridge is { } deliver && OwnsCurrentBridgeDocument(sender, document))
         deliver.Post(WorkbenchBridgeCodec.SerializeReceipt(receipt));
@@ -486,7 +604,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
 
   internal WorkbenchBootstrap ProjectBootstrap(WorkbenchBootstrap bootstrap) => fixedRoute is { } route
-    ? bootstrap with { Route = route, States = bootstrap.States.Where(state => SceneScopes.Contains(state.Scope)).Select(ProjectState).ToArray() }
+    ? bootstrap with { Route = route, States = bootstrap.States.Where(state => projectionScopes.Contains(state.Scope)).Select(ProjectState).ToArray() }
     : bootstrap;
 
   internal WorkbenchStateEnvelope ProjectState(WorkbenchStateEnvelope state) =>
@@ -559,7 +677,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       await foreach (WorkbenchStateEnvelope state in application.SubscribeAsync(
         afterRevision,
         cancellationToken,
-        fixedRoute is null ? null : SceneScopes))
+        fixedRoute is null ? null : projectionScopes))
       {
         ObserveCaptureState(state);
         if (cancellationToken.IsCancellationRequested) return;
@@ -645,6 +763,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     subscriptionCancellation?.Cancel();
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
+    committedPinSnapshot = null;
+    pinSnapshotFlush?.TrySetResult(false);
     // 文档身份推进后仅撤销本宿主槽位：其他宿主的在途贡献不受影响。
     projectStore?.RevokeAll(this);
   }

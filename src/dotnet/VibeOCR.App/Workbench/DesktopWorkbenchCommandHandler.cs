@@ -99,7 +99,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     ISystemImportReader? systemImportReader = null,
     VibeOCR.App.Web.WorkbenchProjectStore? projectStore = null,
     Func<CancellationToken, Task<string?>>? projectSavePicker = null,
-    Func<CancellationToken, Task<string?>>? projectOpenPicker = null)
+    Func<CancellationToken, Task<string?>>? projectOpenPicker = null,
+    IPinSnapshotWriter? pinSnapshotWriter = null,
+    IPinHistoryRecorder? pinHistory = null)
   {
 
     recognitionFactory = recognitionFactory ??
@@ -132,7 +134,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
     Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
-    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker);
+    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker, pinSnapshotWriter, pinHistory);
     // 工程打开事务终止（取消/超时/替换）经既有状态邮箱发布终态，不触碰 UI 线程。
     Image.ProjectOpenTerminated += Image.OnProjectOpenTerminated;
     Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
@@ -148,6 +150,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   [
     Image.RecognitionState(false, "recognition.ready"),
     Image.ImageEditState(false, "recognition.ready"),
+    Image.PinEditState(false, "pinEdit.ready"),
     Batch.CurrentBatchState(),
     Pdf.EmptyPdfState(),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
@@ -260,6 +263,17 @@ public sealed class DesktopWorkbenchCommandHandler :
           WorkbenchProblemCategory.Conflict,
           false,
           "workbench.error.screenshotSessionStale"));
+    }
+    catch (PinLimitReachedException)
+    {
+      // #238 C6：4 张贴图上限专属回执文案（宿主仍防竞态，预检只是前置 UX）。
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "pin_limit_reached",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.pinLimitReached"));
     }
     catch (WorkbenchImageOwner.CaptureInProgressException)
     {
@@ -402,6 +416,26 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal ScreenshotCaptureScene? PendingScreenshotCaptureScene => Image.PendingScreenshotCaptureScene;
   internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) => Image.TakeScreenshotCaptureScene(sessionId);
   public Task<RecognitionTextLayerState?> PreparePinnedTextLayerAsync(Guid sessionId, long revision, string imagePath, CancellationToken cancellationToken = default) => Image.PreparePinnedTextLayerAsync(sessionId, revision, imagePath, cancellationToken);
+  /// <summary>#238 pinEdit：单编辑槽会话建立与宿主事件转发。</summary>
+  internal Task<Guid?> TryOpenPinEditSessionAsync(Guid pinId, byte[] png, CancellationToken cancellationToken = default) => Image.TryOpenPinEditSessionAsync(pinId, png, cancellationToken);
+  internal event Action<Guid, long, Guid>? PinSnapshotApplied
+  {
+    add => Image.PinSnapshotApplied += value;
+    remove => Image.PinSnapshotApplied -= value;
+  }
+  internal event Action<Guid>? PinEditSessionClosed
+  {
+    add => Image.PinEditSessionClosed += value;
+    remove => Image.PinEditSessionClosed -= value;
+  }
+  internal event Action? PinManagerRequested
+  { add => Image.PinManagerRequested += value; remove => Image.PinManagerRequested -= value; }
+
+  internal event Func<PinHistoryImage, Task>? PinHistoryReopenRequested
+  {
+    add => Image.PinHistoryReopenRequested += value;
+    remove => Image.PinHistoryReopenRequested -= value;
+  }
   internal static IReadOnlyList<ScreenshotRecognitionModeEntry> BuildSelectionModeEntries(RecognitionSelectionSnapshot? selection) => WorkbenchImageOwner.BuildSelectionModeEntries(selection);
   internal static string? EffectiveModeIdOrDefault(RecognitionSelectionSnapshot? snapshot, string? taskEngine, bool requireUsable) => WorkbenchSelectionOwner.EffectiveModeIdOrDefault(snapshot, taskEngine, requireUsable);
   public Task<bool> RequestCloseAllPdfAsync() => Pdf.RequestCloseAllPdfAsync();
@@ -411,3 +445,9 @@ public sealed class DesktopWorkbenchCommandHandler :
 
 
 internal sealed class PinnedTextPreparationException(string message) : Exception(message);
+
+/// <summary>#238 4 张贴图同时上限：专属 problem（C6 用户可见文案）。</summary>
+internal sealed class PinLimitReachedException : InvalidOperationException
+{
+  public PinLimitReachedException() : base("最多同时打开四张贴图，请先关闭一张。") { }
+}

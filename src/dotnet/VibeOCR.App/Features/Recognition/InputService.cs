@@ -567,7 +567,7 @@ public sealed class InputService : IInputService, ISystemImportReader
 
     /// <summary>硬截止读取并真实解码一张导入图片：先按头部长度拒绝，再按
     /// 实际读流/解码结果拒绝；解码成功才返回，杜绝伪造扩展名。</summary>
-    private static async Task<SystemImportImageItem> ReadImportImageAsync(
+    internal static async Task<SystemImportImageItem> ReadImportImageAsync(
         IRandomAccessStreamWithContentType stream,
         CancellationToken cancellationToken,
         long remainingPixels = MaximumImportBatchPixels,
