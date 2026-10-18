@@ -112,6 +112,12 @@ public static class WorkbenchBridgeCodec
     ["sessionId", "revision"];
   private static readonly HashSet<string> ImportRequestArgumentFields =
     ["sessionId", "revision", "requestId"];
+  private static readonly HashSet<string> SaveProjectArgumentFields =
+    ["contributeId", "sessionId", "revision"];
+  private static readonly HashSet<string> RejectProjectOpenArgumentFields =
+    ["pendingId", "sessionId", "revision"];
+  private static readonly HashSet<string> AckProjectOpenArgumentFields =
+    ["pendingId", "sessionId", "revision", "generation"];
   private static readonly HashSet<string> ReleaseAssetsArgumentFields =
     ["sessionId", "resourceUris"];
   private const int MaxImportRequestIdLength = 64;
@@ -465,6 +471,12 @@ public static class WorkbenchBridgeCodec
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
           ParseImportRequestId(arguments));
+      case ("imageEdit", "rejectProjectOpen"):
+        EnsureObjectWithFields(arguments, RejectProjectOpenArgumentFields, "command arguments");
+        return new RejectImageEditProjectOpenCommand(
+          ParseGuidArgument(arguments, "pendingId"),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
       case ("imageEdit", "rejectImport"):
         EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
         return new RejectImageEditImportCommand(
@@ -476,6 +488,25 @@ public static class WorkbenchBridgeCodec
         return new ReleaseImageEditAssetsCommand(
           ParseGuidArgument(arguments, "sessionId"),
           ParseReleasedImportAssets(arguments));
+      case ("imageEdit", "saveProject"):
+        EnsureObjectWithFields(arguments, SaveProjectArgumentFields, "command arguments");
+        return new SaveImageEditProjectCommand(
+          ParseProjectContributionId(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("imageEdit", "openProject"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new OpenImageEditProjectCommand();
+      case ("imageEdit", "ackProjectOpen"):
+        EnsureObjectWithFields(arguments, AckProjectOpenArgumentFields, "command arguments");
+        long openGeneration = arguments.GetProperty("generation").GetInt64();
+        if (openGeneration is < 0 or > 1_000_000_000)
+          throw new WorkbenchBridgeProtocolException("Project open generation is invalid.");
+        return new AckImageEditProjectOpenCommand(
+          ParseGuidArgument(arguments, "pendingId"),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          openGeneration);
       case ("recognition", "pasteSystemContent"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PasteScreenshotSystemContentCommand();
@@ -496,6 +527,12 @@ public static class WorkbenchBridgeCodec
         return new ReleaseScreenshotAssetsCommand(
           ParseGuidArgument(arguments, "sessionId"),
           ParseReleasedImportAssets(arguments));
+      case ("recognition", "saveProject"):
+        EnsureObjectWithFields(arguments, SaveProjectArgumentFields, "command arguments");
+        return new SaveScreenshotProjectCommand(
+          ParseProjectContributionId(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
       case ("recognition", "selectImage"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new SelectRecognitionImageCommand();
@@ -1909,6 +1946,17 @@ public static class WorkbenchBridgeCodec
     {
       throw new WorkbenchBridgeProtocolException(
         $"Workbench {name} is invalid.");
+    }
+    return value;
+  }
+
+  /// <summary>/__project 保存贡献令牌：严格 32 位小写十六进制（宿主生成）。</summary>
+  private static Guid ParseProjectContributionId(JsonElement arguments)
+  {
+    string? token = arguments.GetProperty("contributeId").GetString();
+    if (!Guid.TryParseExact(token, "N", out Guid value))
+    {
+      throw new WorkbenchBridgeProtocolException("Project contribution id is invalid.");
     }
     return value;
   }

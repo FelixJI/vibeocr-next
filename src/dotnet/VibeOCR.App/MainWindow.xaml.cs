@@ -59,6 +59,7 @@ public sealed partial class MainWindow : Window
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
   private readonly WorkbenchAnnotationStore annotationStore;
+  private readonly VibeOCR.App.Web.WorkbenchProjectStore projectStore;
   private ImageEditWindow? imageEditor;
   private WorkbenchTheme workbenchTheme = WorkbenchTheme.System;
   private readonly Microsoft.UI.System.ThemeSettings themeSettings;
@@ -148,6 +149,11 @@ public sealed partial class MainWindow : Window
       paddleSmokePriorResourceFiles.UnionWith(Directory.GetFiles(resourceRoot, "*", SearchOption.AllDirectories));
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+    // #233 同一 store 同时供命令（保存消费）与 /__project 上传（暂存）共享。
+    projectStore = new VibeOCR.App.Web.WorkbenchProjectStore();
+    Func<nint> activeWindowHandle = () => imageEditor is { } editor ? editor.Handle : pendingImageEditor?.Scene is { } scene ?
+      WindowNative.GetWindowHandle(scene.Window) : WindowNative.GetWindowHandle(this);
+    var projectPicker = new VibeOCR.App.Features.Recognition.ProjectFilePicker(activeWindowHandle);
     commandHandler = new DesktopWorkbenchCommandHandler(
       recognitionFactory,
       batchFactory,
@@ -169,7 +175,10 @@ public sealed partial class MainWindow : Window
       optionsLayout: layout, confirmPdfClose: ConfirmPdfCloseAsync,
       flushPdfPreview: FlushPdfPreviewAsync,
       ensureRuntimeReady: ensureRuntimeReady,
-      systemImportReader: systemImportReader);
+      systemImportReader: systemImportReader,
+      projectStore: projectStore,
+      projectSavePicker: projectPicker.PickSavePathAsync,
+      projectOpenPicker: projectPicker.PickOpenPathAsync);
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
     commandHandler.ScreenshotCaptureStarting += OnScreenshotCaptureStarting;
     commandHandler.ScreenshotCaptureFinished += OnScreenshotCaptureFinished;
@@ -257,7 +266,8 @@ public sealed partial class MainWindow : Window
     webHost = new WebWorkbenchHost(
       application,
       resourceBroker,
-      annotationStore);
+      annotationStore,
+      projectStore: projectStore);
     webHost.ProtocolViolation += OnProtocolViolation;
     webHost.RecoveryRequired += OnRecoveryRequired;
     webHost.StateChanged += OnHostStateChanged;

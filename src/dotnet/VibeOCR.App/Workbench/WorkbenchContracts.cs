@@ -298,6 +298,38 @@ public sealed record ReleaseScreenshotAssetsCommand(
     Guid SessionId,
     IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
 
+// ---- #233 工程保存/打开：宿主 picker 授权 + 会话持有资源 + pending 确认事务 ----
+
+/// <summary>保存当前通道会话为 .vibp 工程：ContributeId 为 /__project 上传令牌，
+/// 绑定会话/修订，异步边界后宿主再核验；字节全部来自会话持有文件。</summary>
+public sealed record SaveImageEditProjectCommand(
+    Guid ContributeId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+public sealed record SaveScreenshotProjectCommand(
+    Guid ContributeId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+/// <summary>打开 .vibp 工程：宿主 picker 授权选择文件，完整有界解析验证后
+/// 发布 pending 资源并登记确认事务；旧会话在 ack 前不变。</summary>
+public sealed record OpenImageEditProjectCommand : WorkbenchCommand;
+
+/// <summary>Web 全部 decode 后的确认：绑定 pending 身份与旧会话身份
+/// （含宿主通道代际），验证通过才原子切换 imageEdit 会话。</summary>
+public sealed record AckImageEditProjectOpenCommand(
+    Guid PendingId,
+    Guid SessionId,
+    long Revision,
+    long Generation) : WorkbenchCommand;
+
+/// <summary>Web 拒收 pending（取消/部分资源失败）：精确回收，旧工程保留；幂等。</summary>
+public sealed record RejectImageEditProjectOpenCommand(
+    Guid PendingId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
 /// <summary>
 /// 一次成功导入的描述符集合：只携带有界元数据与 opaque 资源引用，
 /// 图片/文本体一律经资源获取，永不内联进 64KiB 桥状态。

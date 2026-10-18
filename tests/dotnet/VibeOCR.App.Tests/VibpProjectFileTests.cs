@@ -1372,6 +1372,14 @@ public sealed class VibpProjectFileTests
   /// <summary>真实 PNG（8bit RGB，完整 zlib/Adler32/CRC32，平台可解码）。</summary>
   private static byte[] PngBytes(int width, int height)
   {
+    return BuildPngCore(width, height);
+  }
+
+  /// <summary>供同仓其他接线测试复用的真实 PNG 构造。</summary>
+  internal static byte[] BuildPng(int width, int height) => BuildPngCore(width, height);
+
+  private static byte[] BuildPngCore(int width, int height)
+  {
     byte[] scanlines = new byte[height * (1 + width * 3)];
     for (int index = 0; index < scanlines.Length; index++)
     {
