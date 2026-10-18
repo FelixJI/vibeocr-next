@@ -439,6 +439,183 @@ public sealed class WorkbenchProjectWiringTests
     Assert.Equal((0, null), store.Staged);
   }
 
+  [Fact]
+  public async Task ProjectOpenStateCarriesReferencesAndBindingOnly()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "projected.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = projectPath };
+      await using var saver = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(saver, WorkbenchRoute.ImageEdit);
+      (Guid contributeId, _) = await ContributeAsync(store);
+      Assert.Null((await saver.ExecuteAsync(
+        new SaveImageEditProjectCommand(contributeId, session, 0),
+        TestContext.Current.CancellationToken)).Error);
+
+      var openPicker = new PickerStub { OpenPath = projectPath };
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      var opened = await opener.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+      WorkbenchProjectOpenState projection = Assert.IsType<ImageEditWorkbenchState>(
+        Assert.Single(opened.States.OfType<ImageEditWorkbenchState>())).ProjectOpen!;
+
+      // 绑定：空会话（全零 id）+ 当前代际；状态仅携带受控引用，不内联 manifest。
+      Assert.Equal("00000000000000000000000000000000", projection.SessionId);
+      Assert.Equal(0, projection.Revision);
+      // 绑定与 descriptor 真源一致（空通道代际合法为 0）。
+      Assert.Equal(opener.CurrentProjectOpen!.Binding.Generation, projection.Generation);
+      Assert.Equal(opener.CurrentProjectOpen.PendingId.ToString("N"), projection.PendingId);
+      Assert.All(
+        [projection.Manifest.Url, projection.Source.Url, projection.Patches.Single().Resource.Url],
+        url => Assert.StartsWith("https://app.vibeocr/__resource/", url));
+      // 状态帧有界：携带引用+绑定时始终满足 64KiB 桥限额。
+      string frame = WorkbenchBridgeCodec.SerializeState(
+        Guid.NewGuid(),
+        new WorkbenchStateEnvelope(1, "imageEdit", WorkbenchStateChange.Replace,
+          new ImageEditWorkbenchState(false, "recognition.session", ProjectOpen: projection)));
+      Assert.True(System.Text.Encoding.UTF8.GetByteCount(frame) <= WorkbenchBridgeCodec.MaxMessageBytes);
+
+      // manifest 经受控 GET 可读且为同一严格 v1 语义（非第二真源）。
+      byte[] manifestBytes;
+      await using (WorkbenchResourceResponse response = await broker.OpenAsync(
+        new Uri(projection.Manifest.Url), TestContext.Current.CancellationToken))
+      {
+        using var buffered = new MemoryStream();
+        await response.Content.CopyToAsync(buffered, TestContext.Current.CancellationToken);
+        manifestBytes = buffered.ToArray();
+      }
+      VibpProjectManifest manifest = System.Text.Json.JsonSerializer.Deserialize<VibpProjectManifest>(
+        manifestBytes, VibpProjectRules.ManifestJson)!;
+      Assert.Equal(64, manifest.Canvas.Width);
+      Assert.Equal("image/png", manifest.Source.MediaType);
+      Assert.Equal((2, 3, 4, 3), (manifest.State.Patches[0].X, manifest.State.Patches[0].Y,
+        manifest.State.Patches[0].Width, manifest.State.Patches[0].Height));
+
+      // ack 成功：投影置空，manifest/patch 释放（Web 已 fetch/decode 并持有），
+      // source 接管为新会话输入。
+      var ack = await opener.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          Guid.ParseExact(projection.PendingId, "N"), Guid.Empty, 0, projection.Generation),
+        TestContext.Current.CancellationToken);
+      Assert.Null(ack.Error);
+      Assert.Null(Assert.IsType<ImageEditWorkbenchState>(
+        Assert.Single(ack.States.OfType<ImageEditWorkbenchState>())).ProjectOpen);
+      Assert.False(File.Exists(ManifestFileFor(root, manifestBytes)));
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(
+        async () => await broker.OpenAsync(
+          new Uri(projection.Manifest.Url), TestContext.Current.CancellationToken));
+      Assert.NotNull(Assert.IsType<ImageEditWorkbenchState>(
+        Assert.Single(ack.States.OfType<ImageEditWorkbenchState>())).Input);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task LegalOversizeStateManifestTravelsByControlledResource()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "large.vibp");
+    try
+    {
+      // 合去 ≤128 entry：source+manifest+1 patch；state >64KiB 且 ≤256KiB。
+      VibpMark[] marks = [.. Enumerable.Range(1, 28).Select(index => new VibpMark
+      {
+        Id = $"mark-{index}",
+        Tool = "text",
+        Start = new VibpPoint { X = 1, Y = 1 },
+        End = new VibpPoint { X = 2, Y = 2 },
+        Text = new string('a', VibpProjectLimits.MaximumMarkTextLength),
+        TextWidth = 100,
+      })];
+      byte[] source = VibpProjectFileTests.BuildPng(64, 48);
+      byte[] patch = VibpProjectFileTests.BuildPng(4, 3);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = marks, Patches =
+        [
+          new VibpPatch { Id = 1, X = 2, Y = 3, Width = 4, Height = 3, Length = patch.Length },
+        ] },
+      };
+      VibpProjectFile.Write(projectPath, manifest,
+      [
+        new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source)),
+        new VibpProjectEntry("patch-1.png", patch.Length, () => new MemoryStream(patch)),
+      ]);
+
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var openPicker = new PickerStub { OpenPath = projectPath };
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+
+      var opened = await opener.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
+
+      // 不因 >64KiB 的合法 state 拒绝：状态帧仅引用+绑定，manifest 走受控 GET。
+      Assert.Null(opened.Error);
+      WorkbenchProjectOpenState projection = Assert.IsType<ImageEditWorkbenchState>(
+        Assert.Single(opened.States.OfType<ImageEditWorkbenchState>())).ProjectOpen!;
+      string frame = WorkbenchBridgeCodec.SerializeState(
+        Guid.NewGuid(),
+        new WorkbenchStateEnvelope(1, "imageEdit", WorkbenchStateChange.Replace,
+          new ImageEditWorkbenchState(false, "recognition.session", ProjectOpen: projection)));
+      Assert.True(System.Text.Encoding.UTF8.GetByteCount(frame) <= WorkbenchBridgeCodec.MaxMessageBytes);
+
+      byte[] manifestBytes;
+      await using (WorkbenchResourceResponse response = await broker.OpenAsync(
+        new Uri(projection.Manifest.Url), TestContext.Current.CancellationToken))
+      {
+        using var buffered = new MemoryStream();
+        await response.Content.CopyToAsync(buffered, TestContext.Current.CancellationToken);
+        manifestBytes = buffered.ToArray();
+      }
+      VibpProjectManifest parsed = System.Text.Json.JsonSerializer.Deserialize<VibpProjectManifest>(
+        manifestBytes, VibpProjectRules.ManifestJson)!;
+      Assert.Equal(28, parsed.State.Marks.Count);
+      Assert.All(parsed.State.Marks, mark => Assert.Equal(8192, mark.Text!.Length));
+
+      // ack 后 manifest 与 patch 均回收（文件与租约），不降低工程能力。
+      var ack = await opener.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          Guid.ParseExact(projection.PendingId, "N"), Guid.Empty, 0, projection.Generation),
+        TestContext.Current.CancellationToken);
+      Assert.Null(ack.Error);
+      Assert.False(File.Exists(ManifestFileFor(root, manifestBytes)));
+      Assert.Empty(PatchSessionFiles(root));
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(
+        async () => await broker.OpenAsync(
+          new Uri(projection.Manifest.Url), TestContext.Current.CancellationToken));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  /// <summary>会话资源目录中与指定 manifest 字节一致的文件路径（无则 null）。</summary>
+  private static string? ManifestFileFor(string root, byte[] manifestBytes)
+  {
+    string directory = Path.Combine(root, "session");
+    if (!Directory.Exists(directory)) return null;
+    return Directory.GetFiles(directory)
+      .SingleOrDefault(file => File.ReadAllBytes(file).SequenceEqual(manifestBytes));
+  }
+
   /// <summary>会话资源目录中与补丁内容一致的字节数。</summary>
   private static string[] PatchSessionFiles(string root)
   {

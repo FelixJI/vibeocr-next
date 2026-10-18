@@ -331,6 +331,35 @@ public sealed record RejectImageEditProjectOpenCommand(
     long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
 
 /// <summary>
+/// #233 pending 工程打开的 imageEdit 状态投影（一次性）：只携带旧会话绑定
+/// （sessionId/revision/generation）与受控资源引用——manifest 本体经
+/// /__resource/ 以 application/json 发布（同一解析真源的重序列化，非第二
+/// 真源），语义（canvas/source/assets/state/补丁矩形）由 Web GET manifest
+/// 获得；引用均为 opaque /__resource/ URL。补丁/manifest 引用仅供 ack 前
+/// fetch+decode：ack 成功后宿主释放补丁与 manifest 字节，Web 持有已 decode
+/// 的 prepared 数据，不得重新 fetch 已失效 URL。
+/// </summary>
+public sealed record WorkbenchProjectOpenState(
+    string PendingId,
+    string SessionId,
+    long Revision,
+    long Generation,
+    WorkbenchResourceReference Manifest,
+    WorkbenchResourceReference Source,
+    IReadOnlyList<WorkbenchProjectOpenAsset> Assets,
+    IReadOnlyList<WorkbenchProjectOpenPatch> Patches);
+
+/// <summary>投影内单资产引用（语义见 manifest；此处仅 opaque 资源事实）。</summary>
+public sealed record WorkbenchProjectOpenAsset(
+    string Id,
+    WorkbenchResourceReference Resource);
+
+/// <summary>投影内单补丁引用：仅供 ack 前一次性 decode。</summary>
+public sealed record WorkbenchProjectOpenPatch(
+    int Id,
+    WorkbenchResourceReference Resource);
+
+/// <summary>
 /// 一次成功导入的描述符集合：只携带有界元数据与 opaque 资源引用，
 /// 图片/文本体一律经资源获取，永不内联进 64KiB 桥状态。
 /// </summary>
@@ -729,7 +758,8 @@ public sealed record ImageEditWorkbenchState(
   RecognitionTextLayerState? TextLayer = null,
   ImageEditImportState? Import = null,
   string? ImportError = null,
-  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null) : WorkbenchState
+  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null,
+  WorkbenchProjectOpenState? ProjectOpen = null) : WorkbenchState
 {
   public override string Scope => "imageEdit";
 }

@@ -65,7 +65,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     WorkbenchAnnotationStore annotations,
     string assetFolder,
     PhysicalRectangle? captureBounds,
-    ScreenshotCaptureScene? captureScene = null)
+    ScreenshotCaptureScene? captureScene = null,
+    VibeOCR.App.Web.WorkbenchProjectStore? projectStore = null)
   {
     SessionId = sessionId;
     this.application = application;
@@ -74,7 +75,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     if (captureScene is not null) webView.Opacity = 0;
     window = captureScene?.Window ?? new Window();
     host = new WebWorkbenchHost(application, broker, annotations,
-      applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit);
+      applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit,
+      projectStore: projectStore);
     host.CaptureBackground = captureScene?.TakeBackground();
     if (captureScene is { } geometry)
       host.CaptureScene = new(Guid.NewGuid(), sessionId, geometry.Bounds.X - geometry.Desktop.X,

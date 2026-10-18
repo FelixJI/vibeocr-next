@@ -402,7 +402,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         channel.ExcludeBoxes)
       : null;
 
-  /// <summary>imageEdit 通道状态：会话独立，三类识别共用权威目录投影。</summary>
+  /// <summary>imageEdit 通道状态：会话独立，三类识别共用权威目录投影；
+  /// ProjectOpen 携带 pending 工程打开投影（仅打开事务期间非空）。</summary>
   internal ImageEditWorkbenchState ImageEditState(
     bool isBusy,
     string statusCode) => new(
@@ -412,7 +413,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     CurrentScreenshotSession(imageEditChannel),
     imageEditChannel.TextLayer,
     Import: Volatile.Read(ref imageEditImport.PendingDescriptor),
-    RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
+    RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection),
+    ProjectOpen: ProjectOpenProjection());
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
   private RecognitionWorkbenchState SessionRecognitionState(

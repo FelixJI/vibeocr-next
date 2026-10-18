@@ -447,7 +447,8 @@ public sealed partial class MainWindow : Window
       pending.DetachClosed?.Invoke();
       pending.DetachClosed = null;
       var editor = new ImageEditWindow(pending.SessionId, application, resourceBroker, annotationStore,
-        layout.WebAssetsRoot, pending.Bounds, pending.Scene);
+        layout.WebAssetsRoot, pending.Bounds, pending.Scene,
+        projectStore: projectStore);
       claimed = true;
       pendingImageEditor = null;
       imageEditor = editor;

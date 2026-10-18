@@ -22,6 +22,7 @@ internal sealed partial class WorkbenchImageOwner
     Guid PendingId,
     WorkbenchProjectOpenBinding Binding,
     VibpProjectManifest Manifest,
+    WorkbenchResourceReference ManifestResource,
     WorkbenchResourceReference Source,
     IReadOnlyDictionary<string, WorkbenchResourceReference> Assets,
     IReadOnlyDictionary<int, WorkbenchResourceReference> Patches);
@@ -31,6 +32,26 @@ internal sealed partial class WorkbenchImageOwner
     add => projectOpen.PendingTerminated += value;
     remove => projectOpen.PendingTerminated -= value;
   }
+
+  /// <summary>pending 投影：仅绑定与受控资源引用（manifest 语义由 Web GET
+  /// manifest 获得）；ack 成功后置空，Web 持有已 decode 数据。</summary>
+  private WorkbenchProjectOpenState? ProjectOpenProjection() =>
+    Volatile.Read(ref currentProjectOpen) is { } pending
+      ? BuildProjectOpenProjection(pending)
+      : null;
+
+  private static WorkbenchProjectOpenState BuildProjectOpenProjection(
+    ProjectOpenDescriptor descriptor) => new(
+    descriptor.PendingId.ToString("N"),
+    descriptor.Binding.SessionId.ToString("N"),
+    descriptor.Binding.Revision,
+    descriptor.Binding.Generation,
+    descriptor.ManifestResource,
+    descriptor.Source,
+    [.. descriptor.Manifest.Assets.Select(asset => new WorkbenchProjectOpenAsset(
+      asset.Id, descriptor.Assets[asset.Id]))],
+    [.. descriptor.Manifest.State.Patches.Select(patch => new WorkbenchProjectOpenPatch(
+      patch.Id, descriptor.Patches[patch.Id]))]);
 
   /// <summary>事务终止（取消/超时/替换）回调：清理描述符并经既有状态邮箱发布
   /// 终态（可能来自计时器线程，不直接触碰 UI 状态）。</summary>
@@ -256,6 +277,14 @@ internal sealed partial class WorkbenchImageOwner
       }
       TryDeleteProjectDirectory(extractDirectory);
 
+      // manifest 本体经既有受控资源路径发布（application/json，/__resource/
+      // 同源 GET）：合法 ≤256KiB state 不受 64KiB 桥限制；同一解析真源的重
+      // 序列化，非第二真源。生命周期随 pending，ack 成功后与补丁一并释放。
+      WorkbenchResourceReference manifestResource = (await resources.PublishFileAsync(
+        System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(archive.Manifest, VibpProjectRules.ManifestJson),
+        "application/json; charset=utf-8", ".json", cancellationToken)).Reference;
+      published.Add(manifestResource);
+
       // pending 登记：release 恰好回收全部已发布资源；ack 前旧会话不动。
       WorkbenchProjectPendingOpen open = projectOpen.Begin(binding, () =>
       {
@@ -265,7 +294,7 @@ internal sealed partial class WorkbenchImageOwner
         }
       });
       Volatile.Write(ref currentProjectOpen, new ProjectOpenDescriptor(
-        open.PendingId, binding, archive.Manifest, source, assets, patches));
+        open.PendingId, binding, archive.Manifest, manifestResource, source, assets, patches));
       return ImageEditState(
         false,
         target.SessionId is null ? "recognition.ready" : SessionStatusCode(target));
@@ -322,13 +351,14 @@ internal sealed partial class WorkbenchImageOwner
           reference, assetId, (long)width * height, width, height, default);
       }
     }
-    // patch 在 ack 前提下已被 Web 全部 decode，宿主侧字节是死数据（合同：
-    // 确认后不重新依赖 TTL 读取已准备位图）：成功切换即释放文件与租约，
-    // 避免反复打开积累；source（新会话输入）与 assets 所有权不受影响。
+    // patch 与 manifest 在 ack 前提下已被 Web fetch/decode，宿主侧字节是死
+    // 数据（合同：确认后不重新依赖 TTL 读取已准备位图/清单）：成功切换即
+    // 释放文件与租约；source（新会话输入）与 assets 所有权不受影响。
     foreach (WorkbenchResourceReference patch in descriptor.Patches.Values)
     {
       resources.ReleaseResource(patch);
     }
+    resources.ReleaseResource(descriptor.ManifestResource);
     Volatile.Write(ref currentProjectOpen, null);
     return ImageEditState(false, "recognition.session");
   }
@@ -355,7 +385,8 @@ internal sealed partial class WorkbenchImageOwner
   {
     foreach (WorkbenchResourceReference reference in descriptor.Patches.Values
       .Concat(descriptor.Assets.Values)
-      .Append(descriptor.Source))
+      .Append(descriptor.Source)
+      .Append(descriptor.ManifestResource))
     {
       resources.ReleaseResource(reference);
     }
