@@ -18,7 +18,13 @@ export type AnnotationTool =
   | "exclude"
   /** 纯色不透明遮挡：写入普通导出与识别输入的真实不透明像素，
    * 与 exclude（仅识别语义）明确分离。 */
-  | "solid";
+  | "solid"
+  /** #235 聚光灯强调：一个对象承载多区域，遮罩按区域并集一次性
+   * 绘制（重叠孔洞不加深），孔洞外底图整体压暗；仅覆盖底图范围。 */
+  | "spotlight"
+  /** #235 画面内放大镜：可移动普通标注对象；采样底图+已应用修补，
+   * 不递归采样自己或其它标注；区别于截图取色放大镜。 */
+  | "magnifier";
 
 export interface Point {
   readonly x: number;
@@ -96,6 +102,11 @@ export interface Mark {
   readonly style?: AnnotationStyle;
   /** 画笔/荧光笔的采样点（含 start/end）；其他工具为空。 */
   readonly points?: readonly Point[];
+  /** 聚光灯孔洞区域列表（显示空间矩形，≥1 个）：并集一次性裁切，
+   * start/end 同步为区域联合包围盒（命中/移动/对齐共用）。 */
+  readonly regions?: readonly Rect[];
+  /** 放大镜倍率（有界 [MAGNIFIER_ZOOM_MIN, MAX]）：采样与绘制同源。 */
+  readonly zoom?: number;
   /** 序号标记的自动编号（绘制时重建）。 */
   readonly ordinal?: number;
   /** 最小平面对象组：同组成员整体选择/变换；不嵌套。 */
@@ -251,6 +262,42 @@ export function isExclusionMark(mark: Mark): boolean {
   return mark.tool === "exclude";
 }
 
+/** 放大镜倍率边界：创建/编辑/序列化共用同一夹取，越界值拒绝而不是
+ * 静默钳制（与宿主 VibpProjectRules 同界）。 */
+export const MAGNIFIER_ZOOM_MIN = 1.5;
+export const MAGNIFIER_ZOOM_MAX = 8;
+export const MAGNIFIER_ZOOMS = [1.5, 2, 3, 4, 6, 8] as const;
+
+/** 放大镜有效倍率：缺省 2；非有限回退缺省，越界夹取到边界——仅为
+ * 渲染容错，编辑入口与工程序列化侧均按档位/边界拒绝越界值。 */
+export function magnifierZoomOf(mark: Mark): number {
+  const value = mark.zoom;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 2;
+  return Math.min(MAGNIFIER_ZOOM_MAX, Math.max(MAGNIFIER_ZOOM_MIN, value));
+}
+
+/** 聚光灯孔洞区域：缺省回退 start/end 矩形（旧/异常数据容错）。 */
+export function spotlightRegionsOf(mark: Mark): readonly Rect[] {
+  if (mark.regions?.length) return mark.regions;
+  const width = Math.abs(mark.end.x - mark.start.x);
+  const height = Math.abs(mark.end.y - mark.start.y);
+  return [
+    {
+      x: Math.min(mark.start.x, mark.end.x),
+      y: Math.min(mark.start.y, mark.end.y),
+      width,
+      height,
+    },
+  ];
+}
+
+/** 聚光灯遮罩暗度（0-100）：复用通用 fill.opacity 语义，缺省 55。 */
+export function spotlightDarkness(mark: Mark): number {
+  const value = mark.style?.fill?.opacity;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 55;
+  return Math.min(100, Math.max(0, value));
+}
+
 /** [0,100] 百分比夹取；非法/缺省值回退 fallback。 */
 function clampPercent(value: number | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
@@ -373,8 +420,37 @@ export function rotateEditorState(
           : {}),
         start: rotatePoint(mark.start),
         end: rotatePoint(mark.end),
-        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位。
+        // 画笔/荧光笔轨迹点同映射，旋转后实际轨迹不错位；聚光灯区域
+        // 是显示空间矩形，旋转烘入坐标（顶点旋转后重取轴对齐包围盒）。
         ...(mark.points ? { points: mark.points.map(rotatePoint) } : {}),
+        ...(mark.regions
+          ? {
+              regions: mark.regions.map((region) => {
+                const corners = [
+                  rotatePoint({ x: region.x, y: region.y }),
+                  rotatePoint({
+                    x: region.x + region.width,
+                    y: region.y,
+                  }),
+                  rotatePoint({ x: region.x, y: region.y + region.height }),
+                  rotatePoint({
+                    x: region.x + region.width,
+                    y: region.y + region.height,
+                  }),
+                ];
+                const left = Math.min(...corners.map((at) => at.x));
+                const top = Math.min(...corners.map((at) => at.y));
+                const right = Math.max(...corners.map((at) => at.x));
+                const bottom = Math.max(...corners.map((at) => at.y));
+                return {
+                  x: left,
+                  y: top,
+                  width: right - left,
+                  height: bottom - top,
+                };
+              }),
+            }
+          : {}),
       };
       // 图片保持局部长宽比例，整图旋转只投影中心、缩放局部矩形并累加朝向。
       if (mark.tool === "image") {
