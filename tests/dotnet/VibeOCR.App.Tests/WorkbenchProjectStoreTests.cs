@@ -104,14 +104,19 @@ public sealed class WorkbenchProjectStoreTests
     WorkbenchProjectContributionLease first = await store.UploadAsync(
       Body(new VibpCanvas { Width = 8, Height = 8 }, null),
       TestContext.Current.CancellationToken);
-    // 替换为第二份贡献：旧计时器被取消，即使迟到触发也不清新贡献。
+    // 替换为第二份贡献：旧计时器被取消，新贡献到期时间更晚。
+    clock.Advance(TimeSpan.FromMinutes(1));
     WorkbenchProjectContributionLease second = await store.UploadAsync(
       Body(new VibpCanvas { Width = 9, Height = 9 }, null),
       TestContext.Current.CancellationToken);
 
-    clock.Advance(WorkbenchProjectStore.DefaultLifetime + TimeSpan.FromSeconds(1));
+    // 旧计时器标称到期时刻（第二份尚未到期）：即使迟到回调触发，
+    // generation 保护不得清除第二份贡献。
+    clock.Advance(WorkbenchProjectStore.DefaultLifetime - TimeSpan.FromMinutes(1));
+    Assert.Equal((1, (Guid?)second.ContributeId), store.Staged);
 
-    // 只剩第二份到期：第一份的迟到回调已被取消（无交叉清除）。
+    // 第二份真正到期：正常清除。
+    clock.Advance(TimeSpan.FromMinutes(2));
     Assert.Equal((0, null), store.Staged);
   }
 
@@ -655,14 +660,16 @@ public sealed class WorkbenchProjectStoreTests
       return timer;
     }
 
-    /// <summary>推进时钟并触发所有到期未取消的计时器（同步、确定性）。</summary>
+    /// <summary>推进时钟并触发所有到期计时器（同步、确定性）。
+    /// 已 Dispose 的计时器仍可触发：建模真实 System.TimeProvider 的
+    /// 迟到回调（Dispose 后在途回调仍可执行一次），验证 generation 保护。</summary>
     public void Advance(TimeSpan duration)
     {
       utcNow += duration;
       List<ManualTimer> due = [];
       lock (timers)
       {
-        due.AddRange(timers.Where(timer => !timer.Disposed && timer.Due <= utcNow));
+        due.AddRange(timers.Where(timer => timer.Due <= utcNow));
       }
       foreach (ManualTimer timer in due)
       {

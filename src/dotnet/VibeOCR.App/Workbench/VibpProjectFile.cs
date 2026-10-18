@@ -392,7 +392,7 @@ public static class VibpProjectFile
   /// 且每个 chunk 读完、写盘前即检测累计总量与该 entry 声明长度；
   /// 声明长度已在 manifest 校验 ≤ 单 entry 上限，不信任 ZIP 元数据的长度。
   /// 异步 chunk 读写并逐 chunk 响应取消：不在 UI 线程持续同步解压。</summary>
-  private static async Task<(string Path, long DecompressedTotal)> ExtractEntryAsync(
+  internal static async Task<(string Path, long DecompressedTotal)> ExtractEntryAsync(
     ZipArchiveEntry entry,
     string destinationPath,
     long declaredLength,

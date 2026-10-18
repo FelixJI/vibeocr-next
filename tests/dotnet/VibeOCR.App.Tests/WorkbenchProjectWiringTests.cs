@@ -726,17 +726,22 @@ public sealed class WorkbenchProjectWiringTests
     {
       VibpMark mark = new()
       {
-        Id = "mark-1", Tool = "image", AssetId = assetId,
-        Start = new() { X = 2, Y = 3 }, End = new() { X = 20, Y = 18 },
+        Id = "mark-1",
+        Tool = "image",
+        AssetId = assetId,
+        Start = new() { X = 2, Y = 3 },
+        End = new() { X = 20, Y = 18 },
       };
       var manifest = new VibpProjectManifest
       {
-        SchemaVersion = 1, Canvas = new() { Width = 64, Height = 48 },
+        SchemaVersion = 1,
+        Canvas = new() { Width = 64, Height = 48 },
         Source = new() { MediaType = "image/png", Width = 64, Height = 48, Length = Source.Length },
         Assets = [new() { Id = assetId, Width = 8, Height = 6, Length = asset.Length }],
         State = new()
         {
-          Rotation = 0, Marks = [mark],
+          Rotation = 0,
+          Marks = [mark],
           Patches = [new() { Id = 1, X = 2, Y = 3, Width = 4, Height = 3, Length = Patch.Length }],
         },
       };
@@ -778,7 +783,8 @@ public sealed class WorkbenchProjectWiringTests
         .ScreenshotSession!.SessionId);
       using var body = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(new
       {
-        canvas = manifest.Canvas, state = new { rotation = 0, marks = new[] { mark }, patches = Array.Empty<object>() },
+        canvas = manifest.Canvas,
+        state = new { rotation = 0, marks = new[] { mark }, patches = Array.Empty<object>() },
         patches = new[] { new { id = 1, x = 2, y = 3, width = 4, height = 3, png = Convert.ToBase64String(Patch) } },
       }, VibpProjectRules.ManifestJson));
       WorkbenchProjectContributionLease lease = await store.UploadAsync(body, TestContext.Current.CancellationToken);
@@ -932,13 +938,21 @@ public sealed class WorkbenchProjectWiringTests
         Canvas = new VibpCanvas { Width = 64, Height = 48 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
         },
         Assets = [],
-        State = new VibpEditorState { Rotation = 0, Marks = marks, Patches =
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks = marks,
+          Patches =
         [
           new VibpPatch { Id = 1, X = 2, Y = 3, Width = 4, Height = 3, Length = patch.Length },
-        ] },
+        ]
+        },
       };
       VibpProjectFile.Write(projectPath, manifest,
       [

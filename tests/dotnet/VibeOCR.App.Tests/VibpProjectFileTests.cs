@@ -29,7 +29,7 @@ public sealed class VibpProjectFileTests
     if (!HasWebPDecoder())
     {
       // 分支证据（本机/云各自标记，不声称双分支本地实测）：系统无 WebP
-      // decoder 时，真实 WebP 包的 ReadAsync 必须安全拒绝且清理解包目录。
+      // decoder 时，真实 WebP 包的 ReadAsync 必须安全拒绝。
       string absentDirectory = NewTempDirectory();
       try
       {
@@ -40,12 +40,9 @@ public sealed class VibpProjectFileTests
             Path.Combine(absentDirectory, "open"),
             TestContext.Current.CancellationToken));
         Assert.Contains("metadata cannot be read", rejected.Message);
-        // 解包目录不残留失败后的部分文件（源 entry 解包后 WIC 拒绝）。
-        string openDirectory = Path.Combine(absentDirectory, "open");
-        if (Directory.Exists(openDirectory))
-        {
-          Assert.Empty(Directory.GetFiles(openDirectory, "*", SearchOption.AllDirectories));
-        }
+        // 分层：source entry 解包后 WIC 元数据拒绝；解包目录清理由调用方
+        // （owner catch）负责——本测试 finally 删除临时目录，不断言底层
+        // 错误路径的目录状态。
       }
       finally
       {
@@ -67,7 +64,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/webp", Width = width, Height = height, Length = source.Length,
+          MediaType = "image/webp",
+          Width = width,
+          Height = height,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -100,7 +100,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState
@@ -159,40 +162,90 @@ public sealed class VibpProjectFileTests
   }
 
   [Fact]
-  public async Task ReadAsyncRespondsToCancellationDuringExtraction()
+  public async Task ExtractEntryAsyncObservesMidChunkCancellationDeterministically()
   {
     string directory = NewTempDirectory();
     try
     {
-      // 大 entry（8MB）：解包中途取消必须在后续 WIC await 前生效。
-      byte[] source = new byte[8 * 1024 * 1024];
-      Random.Shared.NextBytes(source);
-      var manifest = new VibpProjectManifest
+      // 内存生成标准 zip（NoCompression，数据 >2×CopyBuffer=64KiB，
+      // 循环至少三个 chunk）；底层流在首次真实异步读取后、返回前同步
+      // 取消——取消必然发生在第一个 chunk 边界，不依赖回调调度或概率。
+      byte[] data = new byte[150 * 1024];
+      for (int index = 0; index < data.Length; index++) data[index] = (byte)(index % 251);
+      using var built = new MemoryStream();
+      using (var archive = new ZipArchive(built, ZipArchiveMode.Create, leaveOpen: true))
       {
-        SchemaVersion = 1,
-        Canvas = new VibpCanvas { Width = 64, Height = 48 },
-        Source = new VibpSourceResource
+        ZipArchiveEntry entry = archive.CreateEntry("entry.bin", CompressionLevel.NoCompression);
+        using (Stream writer = entry.Open())
         {
-          // 真实 PNG 声明与字节长度（内容不可解码但取消先于 WIC）。
-          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
-        },
-        Assets = [],
-        State = new VibpEditorState { Rotation = 0, Marks = [] },
-      };
-      string packagePath = Path.Combine(directory, "cancel.vibp");
-      VibpProjectFile.Write(packagePath, manifest,
-        [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))]);
-
-      using var cancellation = new CancellationTokenSource();
-      cancellation.CancelAfter(TimeSpan.FromMilliseconds(20));
+          writer.Write(data, 0, data.Length);
+        }
+      }
+      using CancellingReadStream source = new(built.ToArray());
+      using var archiveRead = new ZipArchive(source, ZipArchiveMode.Read);
+      ZipArchiveEntry readEntry = archiveRead.GetEntry("entry.bin")!;
+      // GetEntry 后才 arm：目录/头部读取不触发，首次 entry 数据读取才取消。
+      source.Arm();
+      string destinationPath = Path.Combine(directory, "entry.bin");
 
       await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-        VibpProjectFile.ReadAsync(
-          packagePath, Path.Combine(directory, "open"), cancellation.Token));
+        VibpProjectFile.ExtractEntryAsync(
+          readEntry, destinationPath, data.Length,
+          VibpProjectLimits.MaximumDecompressedBytes, 0,
+          source.Token));
+
+      // 回调确实发生（非其他原因的 OCE）；目标文件未写入后续 chunk。
+      Assert.True(source.Triggered);
+      Assert.True(File.Exists(destinationPath));
+      Assert.True(new FileInfo(destinationPath).Length < data.Length);
     }
     finally
     {
       Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  /// <summary>仅在异步读取数据时取消，避免 entry.Open 的同步 ZIP 头部读取提前触发。</summary>
+  private sealed class CancellingReadStream(byte[] content) : MemoryStream(content)
+  {
+    private readonly CancellationTokenSource cancellation = new();
+    private bool armed;
+
+    public bool Triggered { get; private set; }
+
+    public CancellationToken Token => cancellation.Token;
+
+    public void Arm() => armed = true;
+
+    public override Task<int> ReadAsync(
+      byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+      Task<int> read = base.ReadAsync(buffer, offset, count, cancellationToken);
+      FireIfArmed();
+      return read;
+    }
+
+    public override ValueTask<int> ReadAsync(
+      Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+      ValueTask<int> read = base.ReadAsync(buffer, cancellationToken);
+      FireIfArmed();
+      return read;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+      if (disposing) cancellation.Dispose();
+      base.Dispose(disposing);
+    }
+
+    private void FireIfArmed()
+    {
+      if (armed && !Triggered)
+      {
+        Triggered = true;
+        cancellation.Cancel();
+      }
     }
   }
 
@@ -209,7 +262,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = width, Height = height },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 8, Height = 6, Length = source.Length,
+          MediaType = "image/png",
+          Width = 8,
+          Height = 6,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -246,7 +302,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 64, Height = 48 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 8, Height = 6, Length = source.Length,
+          MediaType = "image/png",
+          Width = 8,
+          Height = 6,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState
@@ -288,7 +347,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState
@@ -368,7 +430,8 @@ public sealed class VibpProjectFileTests
       byte[] source = PngBytes(64, 48);
       VibpMark mark = new()
       {
-        Id = "mark-1", Tool = tool,
+        Id = "mark-1",
+        Tool = tool,
         Start = new VibpPoint { X = 1, Y = 2 },
         End = new VibpPoint { X = 30, Y = 20 },
         Points = pointCount == 0 ? null : new VibpPoint[]
@@ -377,12 +440,17 @@ public sealed class VibpProjectFileTests
       };
       var manifest = new VibpProjectManifest
       {
-        SchemaVersion = 1, Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
         },
-        Assets = [], State = new VibpEditorState { Rotation = 0, Marks = [mark] },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = [mark] },
       };
       string path = Path.Combine(directory, "effect.vibp");
       VibpProjectEntry[] entries =
@@ -460,7 +528,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 4, Height = 3, Length = source.Length,
+          MediaType = "image/png",
+          Width = 4,
+          Height = 3,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -492,7 +563,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 4, Height = 3, Length = source.Length,
+          MediaType = "image/png",
+          Width = 4,
+          Height = 3,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -733,7 +807,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = mediaType, Width = 4, Height = 3, Length = source.Length,
+          MediaType = mediaType,
+          Width = 4,
+          Height = 3,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -816,7 +893,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 4, Height = 3, Length = jpeg.Length,
+          MediaType = "image/png",
+          Width = 4,
+          Height = 3,
+          Length = jpeg.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -1323,7 +1403,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 4, Height = 3, Length = source.Length - 1,
+          MediaType = "image/png",
+          Width = 4,
+          Height = 3,
+          Length = source.Length - 1,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -1353,7 +1436,10 @@ public sealed class VibpProjectFileTests
         Canvas = new VibpCanvas { Width = 900, Height = 600 },
         Source = new VibpSourceResource
         {
-          MediaType = "image/png", Width = 4, Height = 3, Length = source.Length,
+          MediaType = "image/png",
+          Width = 4,
+          Height = 3,
+          Length = source.Length,
         },
         Assets = [],
         State = new VibpEditorState { Rotation = 0, Marks = [] },
@@ -1381,30 +1467,33 @@ public sealed class VibpProjectFileTests
 
   private static VibpProjectManifest FullManifest(
     byte[] source, byte[] asset, byte[] patch1, byte[] patch2) => new()
-  {
-    SchemaVersion = 1,
-    Canvas = new VibpCanvas { Width = 900, Height = 600 },
-    Source = new VibpSourceResource
     {
-      MediaType = "image/png", Width = 6, Height = 4, Length = source.Length,
-    },
-    Assets =
+      SchemaVersion = 1,
+      Canvas = new VibpCanvas { Width = 900, Height = 600 },
+      Source = new VibpSourceResource
+      {
+        MediaType = "image/png",
+        Width = 6,
+        Height = 4,
+        Length = source.Length,
+      },
+      Assets =
     [
       new VibpAssetResource
       {
         Id = AssetId, Width = 2, Height = 2, Length = asset.Length,
       },
     ],
-    State = new VibpEditorState
-    {
-      Rotation = 90,
-      Crop = new VibpCrop
+      State = new VibpEditorState
       {
-        Start = new VibpPoint { X = 10, Y = 12 },
-        End = new VibpPoint { X = 400.5, Y = 300.25 },
-      },
-      Resize = new VibpSize { Width = 320, Height = 200 },
-      Marks =
+        Rotation = 90,
+        Crop = new VibpCrop
+        {
+          Start = new VibpPoint { X = 10, Y = 12 },
+          End = new VibpPoint { X = 400.5, Y = 300.25 },
+        },
+        Resize = new VibpSize { Width = 320, Height = 200 },
+        Marks =
       [
         new VibpMark
         {
@@ -1489,13 +1578,13 @@ public sealed class VibpProjectFileTests
           Style = new VibpMarkStyle { CalloutStyle = "arrow", ArrowStyle = "hollow", ArrowDouble = true },
         },
       ],
-      Patches =
+        Patches =
       [
         new VibpPatch { Id = 1, X = 0, Y = 0, Width = 3, Height = 1, Length = patch1.Length },
         new VibpPatch { Id = 2, X = 4, Y = 1, Width = 1, Height = 2, Length = patch2.Length },
       ],
-    },
-  };
+      },
+    };
 
   /// <summary>构造合法基础 manifest JSON（供负路径直接改写）。</summary>
   private static string ManifestJson(long? declaredSourceLength = null, string? assetId = null)
@@ -1686,7 +1775,10 @@ public sealed class VibpProjectFileTests
       Canvas = new VibpCanvas { Width = 4, Height = 3 },
       Source = new VibpSourceResource
       {
-        MediaType = "image/webp", Width = 4, Height = 3, Length = source.Length,
+        MediaType = "image/webp",
+        Width = 4,
+        Height = 3,
+        Length = source.Length,
       },
       Assets = [],
       State = new VibpEditorState { Rotation = 0, Marks = [] },
