@@ -152,6 +152,14 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
   {
     lock (gate) return structuredResourceFiles.TryGetValue(resourceUri, out path);
   }
+
+  /// <summary>#233 会话持有 source/assets 的直接文件路径读取：不经 broker
+  /// 租约/TTL 重新 GET，供保存命令在写入期间持有资源字节；租约过期不
+  /// 影响本查询，文件删除只随 ReleaseResource/Release 发生。</summary>
+  internal bool TryGetSessionFile(string resourceUri, [NotNullWhen(true)] out string? path)
+  {
+    lock (gate) return resourceFiles.TryGetValue(resourceUri, out path);
+  }
   internal void ReleaseResource(WorkbenchResourceReference resource)
   {
     lock (gate)
