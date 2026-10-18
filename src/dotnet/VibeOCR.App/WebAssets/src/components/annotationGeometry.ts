@@ -707,7 +707,10 @@ export function exclusionNormalizedRects(
 
 /** 任意显示空间矩形 → 最终输出 [0,1000] 归一化框：与
  * exclusionNormalizedRects 同一裁剪/缩放映射（旋转→裁剪→指定尺寸），
- * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界。 */
+ * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界。
+ * 端点映射后夹取到 [0,1000]：消除先乘 output 缩放再除 output 的冗余
+ * 运算及其浮点越界（right=1000.0000000000001 会被 C# codec 严格拒绝），
+ * 保证 x,y≥0、width,height>0、x+width/y+height≤1000，不用 epsilon。 */
 export function displayRectsToNormalizedRects(
   rects: readonly Rect[],
   image: HTMLImageElement,
@@ -716,7 +719,6 @@ export function displayRectsToNormalizedRects(
 ): Rect[] {
   const crop = mappedCropRect(image, state, displaySize);
   if (crop.width <= 0 || crop.height <= 0) return [];
-  const output = finalOutputSize(image, state, displaySize);
   const naturalSize = outputSize(image, state.rotation);
   const mapPoint = (point: Point) =>
     projectPoint(
@@ -727,22 +729,27 @@ export function displayRectsToNormalizedRects(
       state.rotation,
       naturalSize,
     );
-  const scaleX = output.width / crop.width;
-  const scaleY = output.height / crop.height;
   const boxes: Rect[] = [];
   for (const rect of rects) {
     const start = mapPoint({ x: rect.x, y: rect.y });
     const end = mapPoint({ x: rect.x + rect.width, y: rect.y + rect.height });
+    // 裁剪内剩余区间 → 归一化端点；无 resize 时 output==crop 尺寸，
+    // 端点比值与旧实现一致（scale/output 宽高比恰为 1/crop 尺寸）。
     const left = Math.max(Math.min(start.x, end.x), crop.x);
     const top = Math.max(Math.min(start.y, end.y), crop.y);
     const right = Math.min(Math.max(start.x, end.x), crop.x + crop.width);
     const bottom = Math.min(Math.max(start.y, end.y), crop.y + crop.height);
     if (right <= left || bottom <= top) continue;
+    const x0 = Math.max(0, ((left - crop.x) / crop.width) * 1000);
+    const y0 = Math.max(0, ((top - crop.y) / crop.height) * 1000);
+    const x1 = Math.min(1000, ((right - crop.x) / crop.width) * 1000);
+    const y1 = Math.min(1000, ((bottom - crop.y) / crop.height) * 1000);
+    if (x1 <= x0 || y1 <= y0) continue;
     boxes.push({
-      x: ((left - crop.x) * scaleX * 1000) / output.width,
-      y: ((top - crop.y) * scaleY * 1000) / output.height,
-      width: ((right - left) * scaleX * 1000) / output.width,
-      height: ((bottom - top) * scaleY * 1000) / output.height,
+      x: x0,
+      y: y0,
+      width: x1 - x0,
+      height: y1 - y0,
     });
   }
   return boxes;
