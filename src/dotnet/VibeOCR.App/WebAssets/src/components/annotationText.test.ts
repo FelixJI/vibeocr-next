@@ -13,6 +13,7 @@ import {
 } from "./annotationGeometry";
 function context() {
   return {
+    globalAlpha: 1,
     font: "",
     fillStyle: "",
     save: vi.fn(),
@@ -34,6 +35,22 @@ function context() {
   };
 }
 describe("annotationText", () => {
+  it.each([0, 0.3, 1])("文字背景透明度与外层水印透明度%s相乘", (opacity) => {
+    const ctx = context();
+    ctx.globalAlpha = opacity;
+    ctx.fillRect.mockImplementation(() => {
+      expect(ctx.globalAlpha).toBeCloseTo(opacity * 0.5);
+    });
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "watermark",
+      tool: "text",
+      start: { x: 10, y: 20 },
+      end: { x: 100, y: 50 },
+      text: "水印",
+      style: { textBackground: { color: "#ffffff", opacity: 50 } },
+    });
+    expect(ctx.fillRect).toHaveBeenCalledOnce();
+  });
   it("字母序号支持Z之后的AA和小写，默认保留数字", () => {
     expect(numberLabel(26, "upper")).toBe("Z");
     expect(numberLabel(27, "upper")).toBe("AA");

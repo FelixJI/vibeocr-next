@@ -32,6 +32,72 @@ function imported(x: number, y: number, width = 20, height = 10): Mark {
   };
 }
 describe("composition exclusion projection", () => {
+  it("shares magnifier leakage with plain and composed output, even when its source is cut away", () => {
+    const state: EditorState = {
+      rotation: 0,
+      marks: [
+        exclude(1, 42, 15, 4, 10),
+        {
+          id: "mark-2",
+          tool: "magnifier",
+          start: { x: 30, y: 10 },
+          end: { x: 70, y: 30 },
+          zoom: 2,
+        },
+      ],
+    };
+    expect(compositionExclusions(image, state, display).pixels).toEqual([
+      { x: 42, y: 15, width: 4, height: 10 },
+      { x: 34, y: 10, width: 8, height: 20 },
+    ]);
+    const composed = compositionExclusions(
+      image,
+      {
+        ...state,
+        marks: [...state.marks, imported(80, 0)],
+        composition: {
+          ...DEFAULT_COMPOSITION,
+          margin: 10,
+          stitch: "horizontal",
+          assetIds: [asset],
+          cut: { axis: "vertical", start: 50, end: 75 },
+        },
+      },
+      display,
+      assets,
+    );
+    expect(composed.size).toEqual({ width: 100, height: 60 });
+    expect(composed.pixels).toEqual([{ x: 44, y: 20, width: 6, height: 20 }]);
+    expect(composed.fullyMasked).toBe(false);
+    expect(composed.normalized[0]).toEqual({
+      x: 440,
+      y: 1000 / 3,
+      width: 60,
+      height: 1000 / 3,
+    });
+  });
+
+  it("refuses over-budget leakage before upload even without composition", () => {
+    const large = { naturalWidth: 800, naturalHeight: 400 } as HTMLImageElement;
+    const marks: Mark[] = Array.from({ length: 64 }, (_, i) =>
+      exclude(i + 1, i * 10, 0, 1, 400),
+    );
+    marks.push({
+      id: "mark-100",
+      tool: "magnifier",
+      start: { x: 0, y: 0 },
+      end: { x: 800, y: 400 },
+      zoom: 2,
+    });
+    expect(() =>
+      compositionExclusions(
+        large,
+        { rotation: 0, marks },
+        { width: 800, height: 400 },
+      ),
+    ).toThrow(/64/);
+  });
+
   it("compresses snapped source pixels through a middle cut and offsets margins", () => {
     const state: EditorState = {
       rotation: 0,

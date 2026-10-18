@@ -7,7 +7,7 @@ import {
   type Rect,
 } from "./annotationGeometry";
 import { markBoundsOf } from "./annotationObjects";
-import { compositionLayout } from "./canvasComposition";
+import { compositionLayout, DEFAULT_COMPOSITION } from "./canvasComposition";
 
 function snapClipped(rect: Rect, size: CanvasSize): Rect | undefined {
   const x = Math.max(0, Math.min(size.width, Math.floor(rect.x))),
@@ -55,16 +55,7 @@ export function compositionExclusions(
   assets?: ReadonlyMap<string, HTMLImageElement>,
 ) {
   const baseSize = finalOutputSize(image, state, display);
-  const settings = state.composition;
-  if (!settings) {
-    const pixels = exclusionOutputRects(image, state, display);
-    return {
-      size: baseSize,
-      pixels,
-      normalized: normalizeOutputRects(pixels, baseSize),
-      fullyMasked: rectsCoverArea(pixels, { x: 0, y: 0, ...baseSize }),
-    };
-  }
+  const settings = state.composition ?? DEFAULT_COMPOSITION;
   const layout = compositionLayout(baseSize, settings, assets),
     origin = layout.placements[0]!;
   const project = (value: number, axis: "horizontal" | "vertical") => {
@@ -137,7 +128,7 @@ export function compositionExclusions(
   );
   if (unique.length > 64)
     throw new Error(
-      "排版后的屏蔽区超过 64 个，请减少屏蔽区或复用图片后重试；本次未上传。",
+      "排版后的屏蔽区超过 64 个，请减少屏蔽区、放大镜或复用图片后重试；本次未上传。",
     );
   return {
     size: layout.size,

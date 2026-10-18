@@ -42,6 +42,35 @@ public sealed class EditorPreferencesTests : IDisposable
   }
 
   [Fact]
+  public void NewToolsAreConfigurableAndLegacyOrderIsLoadedWithoutLosingSettings()
+  {
+    PortableLayout layout = Layout();
+    string[] newTools = ["spotlight", "magnifier", "objectEraser"];
+    EditorPreferences customized = EditorPreferences.Default with
+    {
+      Hidden = newTools, Shortcuts = new Dictionary<string, string> { ["spotlight"] = "s", ["magnifier"] = "m", ["objectEraser"] = "e" },
+    };
+    EditorPreferencesStore.Save(layout, new(customized, root));
+    Assert.Equal(23, EditorPreferencesStore.Load(layout).Preferences.Order.Count);
+    EditorPreferences legacy = customized with
+    {
+      Order = EditorPreferences.Tools.Except(newTools).Reverse().ToArray(), Hidden = ["pen"],
+      Shortcuts = new Dictionary<string, string> { ["pen"] = "p" },
+    };
+    string content = JsonSerializer.Serialize(new { image_editor = new StoredEditorPreferences(legacy, root) }, EditorPreferencesStore.Json);
+    File.WriteAllText(layout.ConfigFile, content);
+    StoredEditorPreferences loaded = EditorPreferencesStore.Load(layout);
+    Assert.Equal(legacy.Order.Concat(newTools), loaded.Preferences.Order);
+    Assert.Equal(legacy.Hidden, loaded.Preferences.Hidden);
+    Assert.Equal("p", loaded.Preferences.Shortcuts["pen"]);
+    Assert.Equal(root, loaded.Directory);
+    Assert.Equal(content, File.ReadAllText(layout.ConfigFile));
+    // Missing arbitrary known tools is corruption, not a legacy schema.
+    File.WriteAllText(layout.ConfigFile, JsonSerializer.Serialize(new { image_editor = new StoredEditorPreferences(legacy with { Order = legacy.Order.Skip(1).ToArray() }, root) }, EditorPreferencesStore.Json));
+    Assert.Throws<InvalidDataException>(() => EditorPreferencesStore.Load(layout));
+  }
+
+  [Fact]
   public void RejectsDuplicateAndSystemStyleShortcutsAndInvalidOutputBounds()
   {
     EditorPreferences defaults = EditorPreferences.Default;

@@ -16,7 +16,7 @@ public sealed record EditorPreferences(
   IReadOnlyList<string> Hidden,
   IReadOnlyDictionary<string, string> Shortcuts)
 {
-  public static readonly string[] Tools = ["select", "hand", "textSelect", "rectangle", "ellipse", "arrow", "line", "polyline", "text", "callout", "mosaic", "blur", "solid", "pen", "highlighter", "numbering", "exclude", "crop", "inpaint", "dupmatch"];
+  public static readonly string[] Tools = ["select", "hand", "textSelect", "rectangle", "ellipse", "arrow", "line", "polyline", "text", "callout", "mosaic", "blur", "solid", "spotlight", "magnifier", "pen", "highlighter", "numbering", "objectEraser", "exclude", "crop", "inpaint", "dupmatch"];
   public static EditorPreferences Default => new(new(), Tools.ToArray(), [], new Dictionary<string, string>());
 
   public void Validate()
@@ -56,6 +56,11 @@ internal static class EditorPreferencesStore
     StoredEditorPreferences stored = node.Deserialize<StoredEditorPreferences>(Json)
       ?? throw new InvalidDataException("编辑器设置损坏，原文件已保留。");
     if (stored.Preferences is null) throw new InvalidDataException("编辑器设置损坏，原文件已保留。");
+    string[] addedTools = ["spotlight", "magnifier", "objectEraser"];
+    string[] legacyTools = EditorPreferences.Tools.Except(addedTools).ToArray();
+    if (stored.Preferences.Order is { } order && order.Count == legacyTools.Length &&
+      order.ToHashSet(StringComparer.Ordinal).SetEquals(legacyTools))
+      stored = stored with { Preferences = stored.Preferences with { Order = [.. order, .. addedTools] } };
     stored.Preferences.Validate();
     return stored;
   }

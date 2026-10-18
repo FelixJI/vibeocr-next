@@ -73,6 +73,10 @@ export interface WireMark {
   readonly textWidth?: number;
   readonly style?: WireStyle;
   readonly points?: readonly WirePoint[];
+  /** #235 聚光灯孔洞区域：仅 tool=spotlight 携带，与宿主 VibpRegion 同形。 */
+  readonly regions?: readonly WireRegion[];
+  /** #235 放大镜倍率：仅 tool=magnifier 携带，界 [1.5,8]。 */
+  readonly zoom?: number;
   readonly ordinal?: number;
   readonly groupId?: string;
   readonly locked?: boolean;
@@ -80,6 +84,14 @@ export interface WireMark {
   readonly flipX?: boolean;
   readonly flipY?: boolean;
   readonly objectScale?: number;
+}
+
+/** 聚光灯孔洞区域（显示空间矩形）：与宿主 VibpRegion 同形。 */
+export interface WireRegion {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 export interface WirePatch {
@@ -181,6 +193,10 @@ export function patchEntryBudget(referencedAssetCount: number): number {
 }
 export const PROJECT_PATCH_TOTAL_BYTES = 64 * 1024 * 1024;
 export const PROJECT_OPEN_DEADLINE_MS = 30_000;
+/** #235 新增对象边界：与宿主 VibpProjectRules 同界，不弱化既有预算。 */
+export const SPOTLIGHT_MAX_REGIONS = 16;
+export const WIRE_MAGNIFIER_ZOOM_MIN = 1.5;
+export const WIRE_MAGNIFIER_ZOOM_MAX = 8;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -336,6 +352,51 @@ function parseWireMark(value: unknown): WireMark | undefined {
     value.points.every((point) => parsePoint(point))
       ? (value.points as unknown[]).map((point) => parsePoint(point)!)
       : undefined;
+  // 聚光灯区域：fail closed——非 spotlight 工具携带即拒绝；区域数与
+  // 尺寸越界拒绝，不静默截断。
+  let regions: readonly WireRegion[] | undefined;
+  if (value.regions !== undefined) {
+    if (value.tool !== "spotlight" || !Array.isArray(value.regions))
+      return undefined;
+    if (
+      value.regions.length < 1 ||
+      value.regions.length > SPOTLIGHT_MAX_REGIONS
+    )
+      return undefined;
+    const parsed: WireRegion[] = [];
+    for (const region of value.regions) {
+      if (
+        !isRecord(region) ||
+        !finiteNumber(region.x) ||
+        !finiteNumber(region.y) ||
+        !finiteNumber(region.width) ||
+        !finiteNumber(region.height) ||
+        // 零尺寸区域加载后会压暗全图且无孔洞：严格 > 0（合法小正数可读）。
+        region.width <= 0 ||
+        region.height <= 0
+      )
+        return undefined;
+      parsed.push({
+        x: region.x,
+        y: region.y,
+        width: region.width,
+        height: region.height,
+      });
+    }
+    regions = parsed;
+  }
+  // 放大镜倍率：fail closed——非 magnifier 携带或越界即拒绝。
+  let zoom: number | undefined;
+  if (value.zoom !== undefined) {
+    if (
+      !finiteNumber(value.zoom) ||
+      value.tool !== "magnifier" ||
+      value.zoom < WIRE_MAGNIFIER_ZOOM_MIN ||
+      value.zoom > WIRE_MAGNIFIER_ZOOM_MAX
+    )
+      return undefined;
+    zoom = value.zoom;
+  }
   return {
     id: value.id,
     tool: value.tool,
@@ -346,6 +407,8 @@ function parseWireMark(value: unknown): WireMark | undefined {
     textWidth: optionalFinite(value.textWidth),
     style: value.style === undefined ? undefined : parseStyle(value.style),
     points,
+    regions,
+    zoom,
     ordinal:
       typeof value.ordinal === "number" && Number.isInteger(value.ordinal)
         ? value.ordinal
@@ -558,6 +621,10 @@ function markToWire(mark: Mark): WireMark {
     points: mark.points
       ? mark.points.map((point) => ({ ...point }))
       : undefined,
+    regions: mark.regions
+      ? mark.regions.map((region) => ({ ...region }))
+      : undefined,
+    zoom: mark.zoom,
     ordinal: mark.ordinal,
     groupId: mark.groupId,
     locked: mark.locked,
@@ -626,6 +693,23 @@ export function wireToMark(
         }
       : undefined,
     points: mark.points ? mark.points.map(map) : undefined,
+    // 区域是几何：与 points 同一映射；倍率是比例，不随缩放变化。
+    regions: mark.regions
+      ? mark.regions.map((region) => {
+          const cornerA = map({ x: region.x, y: region.y });
+          const cornerB = map({
+            x: region.x + region.width,
+            y: region.y + region.height,
+          });
+          return {
+            x: Math.min(cornerA.x, cornerB.x),
+            y: Math.min(cornerA.y, cornerB.y),
+            width: Math.abs(cornerB.x - cornerA.x),
+            height: Math.abs(cornerB.y - cornerA.y),
+          };
+        })
+      : undefined,
+    zoom: mark.zoom,
     ordinal: mark.ordinal,
     groupId: mark.groupId,
     locked: mark.locked,

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_COMPOSITION } from "../canvasComposition";
 import type { EditorState, Mark } from "../annotationGeometry";
 import { validateProjectRestore } from "../ImageCanvasEditor";
 import {
@@ -389,6 +390,270 @@ describe("wire editor state shape", () => {
       patches: [{ id: 9, x: 0, y: 0, width: 10, height: 5 }],
     };
     expect(wire.patches[0]!.width).toBe(10);
+  });
+});
+
+describe("#235 聚光灯/放大镜线形状", () => {
+  const baseManifest = {
+    schemaVersion: 1,
+    canvas: { width: 900, height: 600 },
+    source: {
+      mediaType: "image/png",
+      width: 900,
+      height: 600,
+      length: 4096,
+    },
+    assets: [],
+    state: {
+      rotation: 0,
+      marks: [
+        {
+          id: "mark-1",
+          tool: "spotlight",
+          start: { x: 4, y: 6 },
+          end: { x: 40, y: 30 },
+          regions: [
+            { x: 4, y: 6, width: 36, height: 24 },
+            { x: 100, y: 80, width: 20, height: 10 },
+          ],
+          style: { fill: { color: "#000000", opacity: 55 } },
+        },
+        {
+          id: "mark-2",
+          tool: "magnifier",
+          start: { x: 8, y: 8 },
+          end: { x: 88, y: 68 },
+          zoom: 4,
+        },
+      ],
+      patches: [],
+    },
+  } as const;
+
+  it("parses spotlight regions and magnifier zoom, and round-trips marks", () => {
+    const parsed = parseProjectManifest({
+      ...baseManifest,
+      state: {
+        ...baseManifest.state,
+        composition: {
+          ...DEFAULT_COMPOSITION,
+          margin: 10,
+          cut: { axis: "vertical", start: 25, end: 50 },
+        },
+      },
+    });
+    const spotlight = parsed.state.marks[0]!;
+    expect(spotlight.tool).toBe("spotlight");
+    expect(spotlight.regions).toHaveLength(2);
+    expect(spotlight.regions![1]).toEqual({
+      x: 100,
+      y: 80,
+      width: 20,
+      height: 10,
+    });
+    expect(parsed.state.marks[1]!.zoom).toBe(4);
+
+    // 保存采集与恢复映射：区域坐标原样、倍率不变（比例不随缩放变化）。
+    const contribution = buildContributionState(
+      { width: 900, height: 600 },
+      {
+        composition: parsed.state.composition,
+        rotation: 0,
+        marks: [
+          {
+            id: "mark-1",
+            tool: "spotlight",
+            start: { x: 4, y: 6 },
+            end: { x: 40, y: 30 },
+            regions: [
+              { x: 4, y: 6, width: 36, height: 24 },
+              { x: 100, y: 80, width: 20, height: 10 },
+            ],
+            style: { fill: { color: "#000000", opacity: 55 } },
+          },
+          {
+            id: "mark-2",
+            tool: "magnifier",
+            start: { x: 8, y: 8 },
+            end: { x: 88, y: 68 },
+            zoom: 4,
+          },
+        ],
+      },
+    );
+    expect(contribution.state.marks[0]!.regions).toEqual([
+      { x: 4, y: 6, width: 36, height: 24 },
+      { x: 100, y: 80, width: 20, height: 10 },
+    ]);
+    expect(contribution.state.marks[1]!.zoom).toBe(4);
+    const restored = restoreEditorState(contribution.state, {
+      naturalSize: { width: 900, height: 600 },
+      savedCanvas: { width: 900, height: 600 },
+      displayCanvas: { width: 900, height: 600 },
+      rotation: 0,
+    });
+    expect(restored.composition).toEqual(parsed.state.composition);
+    expect(restored.marks[0]!.regions).toEqual([
+      { x: 4, y: 6, width: 36, height: 24 },
+      { x: 100, y: 80, width: 20, height: 10 },
+    ]);
+    expect(restored.marks[1]!.zoom).toBe(4);
+  });
+
+  it("fails closed on misplaced or out-of-bound regions/zoom", () => {
+    // 区域被非 spotlight 工具携带：拒绝。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "rectangle",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              regions: [{ x: 0, y: 0, width: 5, height: 5 }],
+            },
+          ],
+        },
+      }),
+    ).toThrow("工程对象数据不完整");
+    // 空区域集/超过 16 个区域：拒绝。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "spotlight",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              regions: [],
+            },
+          ],
+        },
+      }),
+    ).toThrow("工程对象数据不完整");
+    // 零尺寸区域（width/height = 0）：加载后会压暗全图且无孔洞，
+    // 双侧（TS/C#）严格 > 0 拒绝；合法小正数可读（不把画布 8px 阈值
+    // 强加到自然像素工程）。
+    for (const degenerate of [
+      { x: 4, y: 6, width: 0, height: 12 },
+      { x: 4, y: 6, width: 12, height: 0 },
+    ]) {
+      expect(() =>
+        parseProjectManifest({
+          ...baseManifest,
+          state: {
+            ...baseManifest.state,
+            marks: [
+              {
+                id: "mark-1",
+                tool: "spotlight",
+                start: { x: 0, y: 0 },
+                end: { x: 9, y: 9 },
+                regions: [degenerate],
+              },
+            ],
+          },
+        }),
+      ).toThrow("工程对象数据不完整");
+    }
+    // 合法小正数区域可读。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "spotlight",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              regions: [{ x: 4, y: 6, width: 0.25, height: 0.5 }],
+            },
+          ],
+        },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "spotlight",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              regions: Array.from({ length: 17 }, (_, index) => ({
+                x: index,
+                y: 0,
+                width: 2,
+                height: 2,
+              })),
+            },
+          ],
+        },
+      }),
+    ).toThrow("工程对象数据不完整");
+    // 倍率越界/被非 magnifier 工具携带：拒绝。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-2",
+              tool: "magnifier",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              zoom: 12,
+            },
+          ],
+        },
+      }),
+    ).toThrow("工程对象数据不完整");
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-2",
+              tool: "ellipse",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              zoom: 2,
+            },
+          ],
+        },
+      }),
+    ).toThrow("工程对象数据不完整");
+    // 旧工程（无新字段）仍可解析。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-3",
+              tool: "rectangle",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+            },
+          ],
+        },
+      }),
+    ).not.toThrow();
   });
 });
 

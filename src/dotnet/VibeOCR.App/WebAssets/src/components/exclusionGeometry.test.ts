@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  displayRectsToNormalizedRects,
   exclusionCoversOutput,
   exclusionNaturalRects,
   exclusionNormalizedRects,
@@ -179,5 +180,140 @@ describe("line boundary intersection policy", () => {
     expect(
       rectIntersectsBox(rect, { x1: 350, y1: 200, x2: 500, y2: 300 }),
     ).toBe(false);
+  });
+});
+
+describe("displayRectsToNormalizedRects #235 H3e codec bounds", () => {
+  // Sol 独立复核的真实反例：900×600 原图/画布，resize 777×600，
+  // magnifier (44,100)-(900,500) zoom2 的泄露区 (44,100,856,400)。
+  // 旧实现 scale 后再除 output：x=48.888888888888886 与
+  // width=951.1111111111112 的浮点和 right=1000.0000000000001，
+  // C# codec（严格 <=1000）在上传完成后拒绝该命令。
+  const LOCAL_IMAGE = fakeImage(900, 600);
+  const LOCAL_DISPLAY = { width: 900, height: 600 };
+
+  it("maps the real leak counterexample exactly onto the 1000 edge", () => {
+    const leak: Rect = { x: 44, y: 100, width: 856, height: 400 };
+    const state: EditorState = {
+      rotation: 0,
+      marks: [],
+      resize: { width: 777, height: 600 },
+    };
+    const box = displayRectsToNormalizedRects(
+      [leak],
+      LOCAL_IMAGE,
+      state,
+      LOCAL_DISPLAY,
+    )[0]!;
+    // 端点值必须精确到位（防“缩小框凑边界”也能通过）：右端贴 1000，
+    // 左/上/下端等于几何反推值（裁剪为整幅 900×600，比值与 resize 无关）。
+    expect(box.x).toBeCloseTo((44 / 900) * 1000, 10);
+    expect(box.y).toBeCloseTo((100 / 600) * 1000, 10);
+    expect(box.x + box.width).toBe(1000);
+    expect(box.y + box.height).toBeCloseTo((500 / 600) * 1000, 10);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(1000);
+  });
+
+  // 贴边对称 case：右缘/下缘贴界的矩形在任意 resize 下端点恰为 1000，
+  // 不因缩放比值产生越界或收缩。
+  it.each([
+    {
+      name: "right edge",
+      rect: { x: 300, y: 100, width: 600, height: 200 } as Rect,
+      edge: (box: Rect) => box.x + box.width,
+    },
+    {
+      name: "bottom edge",
+      rect: { x: 100, y: 300, width: 300, height: 300 } as Rect,
+      edge: (box: Rect) => box.y + box.height,
+    },
+  ])("touched boundary maps exactly to 1000 ($name)", ({ rect, edge }) => {
+    const state: EditorState = {
+      rotation: 0,
+      marks: [],
+      resize: { width: 777, height: 600 },
+    };
+    const box = displayRectsToNormalizedRects(
+      [rect],
+      LOCAL_IMAGE,
+      state,
+      LOCAL_DISPLAY,
+    )[0]!;
+    expect(edge(box)).toBe(1000);
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(1000);
+    expect(box.y + box.height).toBeLessThanOrEqual(1000);
+  });
+
+  it("clamps rect straddling crop edges and drops empty remainders", () => {
+    const state: EditorState = {
+      rotation: 0,
+      marks: [],
+      crop: { start: { x: 100, y: 50 }, end: { x: 800, y: 550 } },
+      resize: { width: 500, height: 400 },
+    };
+    const boxes = displayRectsToNormalizedRects(
+      [
+        // 左/上越过裁剪线：端点映射后 x=0/y=0，剩余宽高为正。
+        { x: 40, y: 10, width: 200, height: 150 },
+        // 完全在裁剪外：不产生框。
+        { x: 0, y: 0, width: 50, height: 20 },
+      ],
+      LOCAL_IMAGE,
+      state,
+      LOCAL_DISPLAY,
+    );
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]!.x).toBe(0);
+    expect(boxes[0]!.y).toBe(0);
+    expect(boxes[0]!.width).toBeGreaterThan(0);
+    expect(boxes[0]!.height).toBeGreaterThan(0);
+    expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(1000);
+  });
+});
+
+describe("exclusionNormalizedRects #235 R8 codec bounds", () => {
+  // GLM fresh 复核反例：640×480 原图 rotation90，显示 480×640，
+  // resize 500×400，屏蔽 (240,0)-(480,640)。旧 base 生产链
+  // exclusionOutputRects→exclusionNormalizedRects 以 output 缩放再除
+  // output：x=500.0000000000001、right=1000.0000000000002，C# codec
+  // （严格 <=1000）在上传完成后拒绝该命令。
+  const R8_IMAGE = fakeImage(640, 480);
+  const R8_DISPLAY = { width: 480, height: 640 };
+  const state: EditorState = {
+    rotation: 90,
+    marks: [exclusionMark({ x: 240, y: 0 }, { x: 480, y: 640 })],
+    resize: { width: 500, height: 400 },
+  };
+
+  it("does not fully cover the output for the half-image exclusion", () => {
+    expect(exclusionCoversOutput(R8_IMAGE, state, R8_DISPLAY)).toBe(false);
+  });
+
+  it("keeps the base exclusion box within [0,1000] at the exact half position", () => {
+    const boxes = exclusionNormalizedRects(R8_IMAGE, state, R8_DISPLAY);
+    expect(boxes).toHaveLength(1);
+    const box = boxes[0]!;
+    // 半幅屏蔽：端点恰为 500 与 1000（或 0 与 500，取决于旋转方向），
+    // 不允许缩小遮挡或浮点越界。
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(1000);
+    expect(box.y + box.height).toBeLessThanOrEqual(1000);
+    expect([box.x, box.x + box.width].sort((a, b) => a - b)).toEqual([
+      500, 1000,
+    ]);
+    expect([box.y, box.y + box.height].sort((a, b) => a - b)).toEqual([
+      0, 1000,
+    ]);
   });
 });

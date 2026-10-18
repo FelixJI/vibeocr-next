@@ -670,3 +670,125 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   )!;
   expect(recognition.arguments.excludeBoxes).toEqual(boxes);
 });
+
+test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普通输出与文字层共用最终坐标", async ({
+  page,
+}, info) => {
+  const { uploads, state } = await setup(page);
+  const canvas = page.getByLabel("图片检查画布", { exact: true });
+  const drag = async (
+    tool: string,
+    x: number,
+    y: number,
+    right: number,
+    bottom: number,
+  ) => {
+    await page.getByRole("button", { name: tool, exact: true }).click();
+    await canvas.scrollIntoViewIfNeeded();
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("missing canvas");
+    const point = (x: number, y: number) => ({
+      x: box.x + ((x * 11.25) / 900) * box.width,
+      y: box.y + ((y * 11.25 + 75) / 600) * box.height,
+    });
+    const from = point(x, y),
+      to = point(right, bottom);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y);
+    await page.mouse.up();
+  };
+  await drag("屏蔽", 27, 10, 30, 30);
+  await drag("放大镜", 10, 5, 70, 35);
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  await page.getByLabel("中段裁除方向").selectOption("vertical");
+  await page.getByLabel("裁除起点", { exact: true }).fill("25");
+  await page.getByLabel("裁除终点", { exact: true }).fill("75");
+  await expect
+    .poll(() =>
+      page
+        .getByAltText("排版输出预览")
+        .evaluate((image: HTMLImageElement) => image.naturalWidth),
+    )
+    .toBe(60);
+  for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
+    await page.getByRole("button", { name, exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(index + 1);
+    if (index > 0) expect(uploads[index]!.bytes).toEqual(uploads[0]!.bytes);
+  }
+  const normal = await pixels(
+    page,
+    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+  );
+  expect([normal.width, normal.height]).toEqual([60, 60]);
+  expect(at(normal, 27, 30)).toEqual([0, 255, 0, 255]);
+  const pin = (await commands(page)).find(
+    (command) => command.action === "pinScreenshotImage",
+  )!;
+  const boxes = pin.arguments.excludeBoxes as {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }[];
+  expect(boxes.length).toBeGreaterThan(0);
+  expect(
+    boxes.some(
+      (rect) =>
+        rect.x <= 450 &&
+        rect.x + rect.width >= 450 &&
+        rect.y <= 500 &&
+        rect.y + rect.height >= 500,
+    ),
+  ).toBe(true);
+  for (const rect of boxes) {
+    expect(rect.x + rect.width).toBeLessThanOrEqual(1000);
+    expect(rect.y + rect.height).toBeLessThanOrEqual(1000);
+  }
+  await page.getByRole("button", { name: "取字", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(4);
+  const masked = await pixels(
+    page,
+    `data:image/png;base64,${uploads[3]!.bytes.toString("base64")}`,
+  );
+  expect(at(masked, 27, 30)).toEqual([255, 255, 255, 255]);
+  expect(at(masked, 15, 30)).toEqual(at(normal, 15, 30));
+  await page.route("**/lens-composition-layer.png", (route) =>
+    route.fulfill({ contentType: "image/png", body: uploads[3]!.bytes }),
+  );
+  const revision = (await commands(page))
+    .filter((command) => command.action === "notifyScreenshotRevision")
+    .at(-1)!.arguments.revision;
+  await sendState(page, "imageEdit", {
+    ...state,
+    screenshotSession: { sessionId: SESSION, revision },
+    textLayer: {
+      status: "textlayer.ready",
+      binding: { sessionId: SESSION, revision },
+      image: {
+        url: "https://app.vibeocr/lens-composition-layer.png",
+        mediaType: "image/png",
+        byteLength: uploads[3]!.bytes.length,
+      },
+      lines: [
+        { text: "lens-kept", x1: 200, y1: 400, x2: 250, y2: 600 },
+        { text: "lens-masked", x1: 440, y1: 400, x2: 470, y2: 600 },
+      ],
+    },
+  });
+  await expect(page.getByText("lens-kept", { exact: true })).toBeVisible();
+  await expect(page.getByText("lens-masked", { exact: true })).toHaveCount(0);
+  await page.screenshot({
+    path: info.outputPath("composition-magnifier-mask.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(5);
+  expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+  const recognition = (await commands(page)).find(
+    (command) => command.action === "recognizeScreenshotImage",
+  )!;
+  expect(recognition.arguments.excludeBoxes).toEqual(boxes);
+});

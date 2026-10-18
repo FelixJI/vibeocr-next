@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppActions } from "../app/types";
 import type { CaptureScene } from "../bridge/captureScene";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
+import { DEFAULT_EDITOR_PREFERENCES } from "./editorPreferences";
 
 afterEach(() => {
   cleanup();
@@ -154,6 +155,51 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     },
   );
 
+  it("new tools respect custom order, hidden menu and local shortcuts", () => {
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        editorSettings={{
+          editorPreferences: {
+            ...DEFAULT_EDITOR_PREFERENCES,
+            order: [
+              "magnifier",
+              ...DEFAULT_EDITOR_PREFERENCES.order.filter(
+                (tool) => tool !== "magnifier",
+              ),
+            ],
+            hidden: ["spotlight", "objectEraser"],
+            shortcuts: { spotlight: "s", magnifier: "m", objectEraser: "e" },
+          },
+        }}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const main = within(mainRow);
+    expect(main.getAllByRole("button")[0]).toHaveAccessibleName("放大镜");
+    expect(main.queryByRole("button", { name: "聚光灯" })).toBeNull();
+    expect(main.queryByRole("button", { name: "橡皮擦" })).toBeNull();
+    fireEvent.keyDown(mainRow, { key: "m" });
+    expect(main.getByRole("button", { name: "放大镜" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    fireEvent.keyDown(mainRow, { key: "s" });
+    expect(screen.getByLabelText("聚光灯暗度")).toBeInTheDocument();
+    fireEvent.keyDown(mainRow, { key: "e" });
+    expect(screen.getByText(/拖动擦除命中的未锁定对象/)).toBeInTheDocument();
+    fireEvent.click(main.getByRole("button", { name: "更多操作" }));
+    expect(
+      screen.getByRole("menuitem", { name: "聚光灯" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: "橡皮擦" }),
+    ).toBeInTheDocument();
+  });
+
   it("主排承载全部工具与操作；下排仅当前工具属性，无属性时收起", () => {
     const actions = createActions();
     render(
@@ -179,6 +225,9 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "画笔",
       "屏蔽",
       "遮挡",
+      "聚光灯",
+      "放大镜",
+      "橡皮擦",
       "去水印",
       "重复匹配",
       "旋转 90°",
