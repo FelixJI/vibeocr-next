@@ -487,6 +487,83 @@ async function waitForStroke(
 }
 
 describe("马赛克与模糊强度", () => {
+  it("R2 rectangle mosaic export scales its legacy cell width once", async () => {
+    stubCanvasStack({ width: 1800, height: 1200 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "马赛克" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 56, clientY: 150 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 784, clientY: 202 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 784, clientY: 202 });
+    harness.flush();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    });
+    const natural = allCalls().find(
+      (call) =>
+        call.op === "drawImage" &&
+        call.args[0] instanceof HTMLCanvasElement &&
+        call.args[1] === 112 &&
+        call.args[2] === 300 &&
+        call.args[3] === 1456,
+    );
+    expect(natural).toBeDefined();
+    expect((natural!.args[0] as HTMLCanvasElement).width).toBe(52);
+    unmount();
+  });
+
+  it.each([false, true])(
+    "R3 locked effects and locked groups cannot change intensity (group=%s)",
+    async (group) => {
+      stubCanvasStack();
+      const harness = stubAnimationFrames();
+      const { actions, unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      fireEvent.click(screen.getByRole("button", { name: "马赛克" }));
+      const drag = (x: number) => {
+        fireEvent.pointerDown(canvas, {
+          pointerId: 1,
+          clientX: x,
+          clientY: 100,
+        });
+        fireEvent.pointerMove(canvas, {
+          pointerId: 1,
+          clientX: x + 100,
+          clientY: 200,
+        });
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: x + 100,
+          clientY: 200,
+        });
+        harness.flush();
+      };
+      drag(100);
+      if (group) drag(350);
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      fireEvent.click(screen.getByRole("button", { name: "全选对象" }));
+      if (group) fireEvent.click(screen.getByRole("button", { name: "组合" }));
+      fireEvent.click(screen.getByRole("button", { name: "锁定" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      vi.mocked(actions.run).mockClear();
+      const slider = screen.getByLabelText("马赛克与模糊强度");
+      fireEvent.change(slider, { target: { value: "2.4" } });
+      expect(actions.run).not.toHaveBeenCalled();
+      expect(slider).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      fireEvent.change(screen.getByLabelText("选择标注对象"), {
+        target: { value: "0" },
+      });
+      expect(screen.getByRole("button", { name: "锁定" })).toBeEnabled();
+      unmount();
+    },
+  );
+
   it("马赛克强度改变块尺寸：弱块小、强块大", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();
@@ -1486,4 +1563,124 @@ describe("PR249 主对象恢复与连续样式", () => {
     expect(screen.getByLabelText("矩形圆角")).toHaveValue("7.5");
     unmount();
   });
+});
+
+describe("effect brush stamps", () => {
+  it.each(["马赛克", "模糊"])(
+    "%s commits a single click and permits one undo",
+    async (label) => {
+      stubCanvasStack({ width: 900, height: 600 });
+      const harness = stubAnimationFrames();
+      const { unmount } = await renderEditor();
+      const canvas = getEditorCanvas();
+      mockCanvasBox(canvas, 900, 600);
+      harness.flush();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+        target: { value: "brush" },
+      });
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 300,
+        clientY: 300,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 300 });
+      harness.flush();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      unmount();
+    },
+  );
+});
+
+it("rejects a natural-pixel oversized effect before history commit", async () => {
+  stubCanvasStack({ width: 8000, height: 8000 });
+  const harness = stubAnimationFrames();
+  const { unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.change(screen.getByLabelText("马赛克与模糊笔刷大小"), {
+    target: { value: "64" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 160, clientY: 10 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 740, clientY: 590 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 740, clientY: 590 });
+  harness.flush();
+  expect(screen.getByText(/笔刷效果超出8MP/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
+});
+
+it("R15 rejected intensity preserves the error, selected mark and history", async () => {
+  stubCanvasStack({ width: 16000, height: 4000 });
+  const harness = stubAnimationFrames();
+  const { actions, unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 410, clientY: 300 });
+  expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "选择" }));
+  fireEvent.change(screen.getByLabelText("选择标注对象"), {
+    target: { value: "0" },
+  });
+  vi.mocked(actions.run).mockClear();
+  fireEvent.change(screen.getByLabelText("马赛克与模糊强度"), {
+    target: { value: "3" },
+  });
+  expect(
+    screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
+  ).toBeVisible();
+  expect(screen.queryByText(/已调整该区域强度/)).toBeNull();
+  expect(screen.getByLabelText("马赛克与模糊强度")).toHaveValue("2");
+  expect(actions.run).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
+});
+
+it("R15 rejected enlargement keeps selection, revision and one undo entry", async () => {
+  stubCanvasStack({ width: 8000, height: 8000 });
+  const harness = stubAnimationFrames();
+  const { actions, unmount } = await renderEditor();
+  const canvas = getEditorCanvas();
+  mockCanvasBox(canvas, 900, 600);
+  harness.flush();
+  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+    target: { value: "brush" },
+  });
+  fireEvent.change(screen.getByLabelText("马赛克与模糊笔刷大小"), {
+    target: { value: "64" },
+  });
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 190, clientY: 300 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 710, clientY: 300 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 710, clientY: 300 });
+  expect(screen.getByRole("button", { name: "撤销" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "选择" }));
+  fireEvent.change(screen.getByLabelText("选择标注对象"), {
+    target: { value: "0" },
+  });
+  vi.mocked(actions.run).mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+  expect(
+    screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
+  ).toBeVisible();
+  expect(screen.queryByText(/已等比放大选区/)).toBeNull();
+  expect(screen.getByLabelText("选择标注对象")).toHaveValue("0");
+  expect(actions.run).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+  expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+  unmount();
 });

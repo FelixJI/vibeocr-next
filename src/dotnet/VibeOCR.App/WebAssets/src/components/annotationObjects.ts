@@ -18,6 +18,7 @@ import {
   transformTextPoint,
 } from "./annotationText";
 import {
+  annotationPaths,
   annotationPathBounds,
   strokePathsBounds,
 } from "./annotationStrokeGeometry";
@@ -104,6 +105,20 @@ export function markBoundsOf(mark: Mark, context: BoundsContext): Rect {
   }
   if (["line", "polyline", "pen", "highlighter", "arrow"].includes(mark.tool))
     return annotationPathBounds(mark);
+  // 笔刷马赛克/模糊：真实边界 = 轨迹路径 + 笔刷半径（选中框/命中/
+  // 对齐同源），不退化为空白弦线，也不用整块效果采样包围盒。
+  // strokeMaskSurface 固定 round cap/join 绘制：这里显式钉住 round 端帽，
+  // 不依赖 annotationPaths 对非虚线工具的默认回退；无 points 的矩形
+  // 模式与绘制侧一致走下方通用 start/end 矩形分支，不套笔刷半径。
+  if ((mark.tool === "mosaic" || mark.tool === "blur") && mark.points?.length) {
+    return strokePathsBounds(
+      annotationPaths(mark).map((path) => ({
+        ...path,
+        cap: "round" as const,
+      })),
+      Math.max(2, mark.style?.brushSize ?? 24),
+    );
+  }
   if (mark.tool === "image") {
     // 位图矩形 + 局部 90° 旋转/镜像后的轴对齐包围盒；无变换时退化为原矩形。
     const rect = imageMarkRect(mark);
@@ -214,6 +229,10 @@ function scaleMarkScalars(mark: Mark, factor: number): Mark {
         strokeWidth: (style.strokeWidth ?? 3) * factor,
         ...(style.cornerRadius
           ? { cornerRadius: Math.max(0, style.cornerRadius * factor) }
+          : {}),
+        // 笔刷效果直径随对象等比缩放一次，缩放后轨迹宽度与显示一致。
+        ...(style.brushSize
+          ? { brushSize: Math.max(2, style.brushSize * factor) }
           : {}),
         ...(isFontMark(mark)
           ? { fontSize: (style.fontSize ?? 24) * factor }

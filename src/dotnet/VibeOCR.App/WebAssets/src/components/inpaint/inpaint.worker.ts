@@ -1,6 +1,8 @@
 import {
   InpaintError,
+  inpaintMask,
   inpaintRectangle,
+  isInpaintMaskRequest,
   type InpaintRequest,
   type InpaintResponse,
 } from "./inpaint";
@@ -12,12 +14,14 @@ import {
  *     type: "module",
  *   });
  *
- * - rgba 以 transfer 传入，避免复制；调用方必须传像素副本，transfer
- *   后其原 buffer 被 detach。
- * - 结果 buffer 同样 transfer 回传；请求携带 generation，响应原样
- *   回带，迟到响应由 UI 丢弃。
- * - 取消由调用方 worker.terminate() 立即完成；worker 内不做任务
- *   调度，逐条处理消息。
+ * - rgba（及掩膜请求的 mask）以 transfer 传入，避免复制；调用方必须传
+ *   副本，transfer 后其原 buffer 被 detach。
+ * - 结果 buffer 同样 transfer 回传；请求携带 generation，响应原样回带，
+ *   迟到响应由 UI 丢弃。
+ * - 掩膜请求（含 mask: ArrayBuffer）走 inpaintMask：只改掩膜内 RGB，
+ *   洞与 ROI 外字节原样保留；矩形请求保持旧 inpaintRectangle 语义。
+ * - 取消由调用方 worker.terminate() 立即完成；worker 内不做任务调度，
+ *   逐条处理消息。
  */
 
 const scope = self as unknown as {
@@ -36,12 +40,15 @@ self.addEventListener("message", (event: MessageEvent<InpaintRequest>) => {
       );
     }
     const pixels = new Uint8ClampedArray(request.rgba);
-    const out = inpaintRectangle(
-      pixels,
-      request.width,
-      request.height,
-      request.rect,
-    );
+    const out = isInpaintMaskRequest(request)
+      ? inpaintMask(
+          pixels,
+          request.width,
+          request.height,
+          request.rect,
+          new Uint8Array(request.mask),
+        )
+      : inpaintRectangle(pixels, request.width, request.height, request.rect);
     const response: InpaintResponse = {
       generation,
       ok: true,

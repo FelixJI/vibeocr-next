@@ -106,6 +106,182 @@ function recordCanvasDrawImage(targets: unknown[]): () => void {
 }
 
 describe("image canvas editor system import", () => {
+  it("merge integration rejects an import when brush commit validation refuses, without adopting assets or history", async () => {
+    stubImageDecode("ok", { width: 16000, height: 4000 });
+    recordCanvasDrawImage([]);
+    const actions = createActions();
+    const props = {
+      actions,
+      canExport: true,
+      canRecognize: false,
+      source: "https://app.vibeocr/__resource/base.png",
+      session: SESSION_A,
+    };
+    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    await waitFor(() =>
+      expect(screen.getByText(/原图 16000×4000/)).toBeVisible(),
+    );
+    const canvas = screen.getByLabelText("图片检查画布") as HTMLCanvasElement;
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 900,
+      height: 600,
+    } as DOMRect);
+    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
+      target: { value: "brush" },
+    });
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 410, clientY: 300 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "0" },
+    });
+    actions.run.mockClear();
+    // A changed logical viewport makes the existing natural-pixel blur halo exceed 4MP.
+    // Import must consume the real commit(false) result, rather than acknowledge adoption.
+    canvas.dataset.coordinateWidth = "450";
+    const descriptor = imageDescriptor(
+      "budget-rejection",
+      SESSION_A.sessionId,
+      1,
+    );
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.rejectImport",
+        sessionId: SESSION_A.sessionId,
+        revision: 1,
+        requestId: descriptor.requestId,
+      }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.ackImport" }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.notifyScreenshotRevision" }),
+    );
+    expect(screen.getByLabelText("选择标注对象")).toHaveValue("0");
+    expect(
+      screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
+    ).toBeVisible();
+    expect(screen.queryByText(/已导入/)).toBeNull();
+    delete canvas.dataset.coordinateWidth;
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.releaseAssets" }),
+    );
+    actions.run.mockClear();
+    unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // rejectImport owns disposal of unacknowledged URIs; they must not remain in adopted GC.
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.releaseAssets" }),
+    );
+  });
+
+  it.each(["queued-mask", "finished-mask", "duplicate-draft"] as const)(
+    "merge integration preserves %s while rejecting an incoming batch",
+    async (draft) => {
+      stubImageDecode("ok", { width: 900, height: 600 });
+      recordCanvasDrawImage([]);
+      const frames = new Map<number, FrameRequestCallback>();
+      let frameId = 0;
+      vi.stubGlobal(
+        "requestAnimationFrame",
+        (callback: FrameRequestCallback) => {
+          frames.set(++frameId, callback);
+          return frameId;
+        },
+      );
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const actions = createActions();
+      const props = {
+        actions,
+        canExport: true,
+        canRecognize: false,
+        source: "https://app.vibeocr/__resource/base.png",
+        session: SESSION_A,
+      };
+      const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+      await waitFor(() =>
+        expect(screen.getByText(/原图 900×600/)).toBeVisible(),
+      );
+      const canvas = screen.getByLabelText("图片检查画布");
+      vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        width: 900,
+        height: 600,
+      } as DOMRect);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: draft === "duplicate-draft" ? "重复匹配" : "去水印",
+        }),
+      );
+      if (draft !== "duplicate-draft")
+        fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
+          target: { value: "brush-add" },
+        });
+      fireEvent.pointerDown(canvas, {
+        pointerId: 1,
+        clientX: 200,
+        clientY: 200,
+      });
+      if (draft === "finished-mask")
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: 240,
+          clientY: 220,
+        });
+      const descriptor = imageDescriptor("during-" + draft);
+      rerender(
+        <ImageCanvasEditor
+          {...props}
+          systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+        />,
+      );
+      await waitFor(() =>
+        expect(actions.run).toHaveBeenCalledWith({
+          type: "recognition.rejectImport",
+          sessionId: SESSION_A.sessionId,
+          revision: 0,
+          requestId: descriptor.requestId,
+        }),
+      );
+      expect(actions.run).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "recognition.ackImport" }),
+      );
+      expect(actions.run).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "recognition.notifyScreenshotRevision",
+        }),
+      );
+      if (draft !== "finished-mask")
+        fireEvent.pointerUp(canvas, {
+          pointerId: 1,
+          clientX: 240,
+          clientY: 220,
+        });
+      expect(
+        screen.getByRole("button", {
+          name: draft === "duplicate-draft" ? "查找重复" : "预览修补",
+        }),
+      ).toBeEnabled();
+      expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+      unmount();
+    },
+  );
+
   it("draws selection chrome around an adopted image", async () => {
     stubImageDecode();
     const rectangles: unknown[][] = [];
@@ -596,3 +772,116 @@ describe("image canvas editor system import", () => {
     unmount();
   });
 });
+
+it.each(["finished-duplicate", "finish-during-decode"] as const)(
+  "R16 rejects import and preserves the source selection: %s",
+  async (timing) => {
+    let finishDecode: (() => void) | undefined;
+    class ControlledImage {
+      naturalWidth = 900;
+      naturalHeight = 600;
+      decoding = "async";
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(value: string) {
+        if (value.includes("import-image"))
+          finishDecode = () => this.onload?.();
+        else queueMicrotask(() => this.onload?.());
+      }
+    }
+    vi.stubGlobal("Image", ControlledImage);
+    recordCanvasDrawImage([]);
+    const actions = createActions();
+    const props = {
+      actions,
+      canExport: true,
+      canRecognize: false,
+      source: "https://app.vibeocr/__resource/base.png",
+      session: SESSION_A,
+    };
+    const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    await waitFor(() => expect(screen.getByText(/原图 900×600/)).toBeVisible());
+    const canvas = screen.getByLabelText("图片检查画布");
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 900,
+      height: 600,
+    } as DOMRect);
+    fireEvent.click(screen.getByRole("button", { name: "重复匹配" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 200, clientY: 200 });
+    const finishSelection = () =>
+      fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 280, clientY: 260 });
+    if (timing === "finished-duplicate") {
+      finishSelection();
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    }
+    const descriptor = imageDescriptor("R16-" + timing);
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...descriptor, items: [descriptor.items[0]!] }}
+      />,
+    );
+    expect(finishDecode).toBeTypeOf("function");
+    if (timing === "finish-during-decode") {
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeDisabled();
+      finishSelection();
+      expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    }
+    await act(async () => finishDecode!());
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "recognition.rejectImport",
+        sessionId: SESSION_A.sessionId,
+        revision: 0,
+        requestId: descriptor.requestId,
+      }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.ackImport" }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.notifyScreenshotRevision" }),
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recognition.releaseAssets" }),
+    );
+    expect(screen.getByRole("button", { name: "查找重复" })).toBeEnabled();
+    expect(
+      screen.getByText(/导入期间画布已变化或存在未完成草稿/),
+    ).toBeVisible();
+    expect(screen.queryByText(/已导入/)).toBeNull();
+    expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清除编辑" })).toBeDisabled();
+    // A short replacement gesture explicitly clears the previous source selection.
+    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 200, clientY: 200 });
+    expect(screen.getByRole("button", { name: "查找重复" })).toBeDisabled();
+    actions.run.mockClear();
+    const next = {
+      ...descriptor,
+      requestId: descriptor.requestId + "-after-clear",
+    };
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        systemImport={{ ...next, items: [next.items[0]!] }}
+      />,
+    );
+    await act(async () => finishDecode!());
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.ackImport",
+      sessionId: SESSION_A.sessionId,
+      revision: 0,
+      requestId: next.requestId,
+    });
+    expect(actions.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "recognition.notifyScreenshotRevision",
+        revision: 1,
+      }),
+    );
+    unmount();
+  },
+);
