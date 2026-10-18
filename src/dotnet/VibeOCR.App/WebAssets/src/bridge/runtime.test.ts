@@ -7,6 +7,8 @@ import type {
   HostCommand,
   HostStateEvent,
 } from "./client";
+import type { EditorProjectInstall } from "../components/ImageCanvasEditor";
+import type { ProjectOpenWire } from "../components/project/projectWire";
 import type { AppViewState } from "../app/types";
 import { projectSnapshot, WorkbenchWebRuntime } from "./runtime";
 
@@ -549,4 +551,336 @@ it("runtime forwards only its committed capture bootstrap and stops on unmount",
   runtime.stop();
   runtime.actions.reportCapturePixels?.(scene);
   expect(reportCapturePixels).toHaveBeenCalledTimes(1);
+});
+
+async function projectHandoffFixture() {
+  const bridge = new FakeHostBridge();
+  const errors: Error[] = [];
+  const runtime = new WorkbenchWebRuntime(bridge, (error) =>
+    errors.push(error),
+  );
+  const states: AppViewState[] = [];
+  await runtime.start((state) => states.push(state));
+  let revision = 7;
+  const emit = (scope: string, state: unknown) =>
+    bridge.emit({
+      sessionId: "session-1",
+      revision: ++revision,
+      scope,
+      change: "replace",
+      state,
+    });
+  const descriptor: ProjectOpenWire = {
+    pendingId: "a".repeat(32),
+    sessionId: "1".repeat(32),
+    revision: 2,
+    generation: 4,
+    manifest: {
+      url: "/manifest",
+      mediaType: "application/json",
+      byteLength: 10,
+    },
+    source: { url: "/project-source", mediaType: "image/png", byteLength: 10 },
+    assets: [],
+    patches: [],
+  };
+  const oldState = {
+    input: { url: "/old-source" },
+    screenshotSession: { sessionId: descriptor.sessionId, revision: 2 },
+    projectOpen: descriptor,
+  };
+  const committedState = {
+    input: { url: descriptor.source.url },
+    screenshotSession: { sessionId: "2".repeat(32), revision: 0 },
+  };
+  emit("shell", { route: "imageEdit" });
+  emit("imageEdit", oldState);
+  let receipt!: (result: CommandResult) => void;
+  const pending = new Promise<CommandResult>((resolve) => {
+    receipt = resolve;
+  });
+  bridge.execute = async (command) => {
+    bridge.commands.push(command);
+    return command.action === "ackProjectOpen" ? pending : bridge.nextResult;
+  };
+  const install: EditorProjectInstall = {
+    token: descriptor.pendingId,
+    sourceUrl: descriptor.source.url,
+    sourceImage: new Image(),
+    savedCanvas: { width: 900, height: 600 },
+    state: { rotation: 0, marks: [], patches: [] },
+    assets: new Map(),
+    patches: new Map(),
+  };
+  return {
+    bridge,
+    runtime,
+    states,
+    emit,
+    descriptor,
+    oldState,
+    committedState,
+    install,
+    receipt,
+    errors,
+  };
+}
+
+describe("project open runtime ownership", () => {
+  for (const stateFirst of [false, true]) {
+    it(
+      "owns the prepared package across routes and consumes it once: " +
+        (stateFirst ? "state first" : "receipt first"),
+      async () => {
+        const f = await projectHandoffFixture();
+        expect(
+          f.runtime.actions.commitProjectOpen!(f.descriptor, f.install),
+        ).toBe(true);
+        expect(
+          await f.runtime.actions.run({ type: "imageEdit.selectImage" }),
+        ).toBe(false);
+        if (!stateFirst) {
+          f.receipt({ revision: 10, ok: true, problem: null });
+          await vi.waitFor(() =>
+            expect(f.states.at(-1)?.projectOpenHandoff?.phase).toBe(
+              "awaitingState",
+            ),
+          );
+        }
+        f.emit("shell", { route: "settings" });
+        f.emit("imageEdit", f.committedState);
+        expect(f.states.at(-1)?.route).toBe("settings");
+        expect(f.states.at(-1)?.projectOpenHandoff?.install).toBe(f.install);
+        const retiredEffect = vi.fn();
+        expect(
+          f.runtime.actions.consumeProjectOpen!(
+            f.install.token,
+            "2".repeat(32),
+            0,
+            retiredEffect,
+          ),
+        ).toBe(false);
+        expect(retiredEffect).not.toHaveBeenCalled();
+        f.emit("shell", { route: "imageEdit" });
+        expect(
+          f.runtime.actions.consumeProjectOpen!(
+            f.install.token,
+            "2".repeat(32),
+            1,
+            vi.fn(),
+          ),
+        ).toBe(false);
+        expect(
+          f.runtime.actions.consumeProjectOpen!(
+            f.install.token,
+            "2".repeat(32),
+            0,
+            vi.fn(),
+          ),
+        ).toBe(true);
+        expect(
+          f.runtime.actions.consumeProjectOpen!(
+            f.install.token,
+            "2".repeat(32),
+            0,
+            vi.fn(),
+          ),
+        ).toBe(false);
+        expect(f.states.at(-1)?.projectOpenHandoff).toBeUndefined();
+        if (stateFirst) {
+          f.receipt({ revision: 11, ok: true, problem: null });
+          await Promise.resolve();
+        }
+        expect(
+          await f.runtime.actions.run({ type: "imageEdit.selectImage" }),
+        ).toBe(true);
+        expect(f.states.at(-1)?.projectOpenHandoff).toBeUndefined();
+        f.runtime.stop();
+      },
+    );
+  }
+
+  it("consumes only after synchronous installation succeeds on the active route", async () => {
+    const f = await projectHandoffFixture();
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    f.emit("imageEdit", f.committedState);
+    expect(() =>
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "2".repeat(32),
+        0,
+        () => {
+          throw new Error("install failed");
+        },
+      ),
+    ).toThrow("install failed");
+    expect(f.states.at(-1)?.projectOpenHandoff?.install).toBe(f.install);
+    const apply = vi.fn();
+    expect(
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "2".repeat(32),
+        0,
+        apply,
+      ),
+    ).toBe(true);
+    expect(apply).toHaveBeenCalledOnce();
+    f.runtime.stop();
+    f.receipt({ revision: 10, ok: true, problem: null });
+    await Promise.resolve();
+  });
+  it("refuses an unsuccessful receipt before commit without replacing old content", async () => {
+    const f = await projectHandoffFixture();
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    f.receipt({ revision: 10, ok: false, problem: { messageKey: "refused" } });
+    await vi.waitFor(() =>
+      expect(f.states.at(-1)?.commandProblem).toBe("refused"),
+    );
+    expect(f.states.at(-1)?.projectOpenHandoff).toBeUndefined();
+    expect(f.states.at(-1)?.features.imageEdit).toBe(f.oldState);
+    f.runtime.stop();
+  });
+
+  it("keeps authoritative committed content when an unconsumed receipt conflicts", async () => {
+    const f = await projectHandoffFixture();
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    f.emit("imageEdit", f.committedState);
+    f.receipt({ revision: 10, ok: false, problem: { messageKey: "refused" } });
+    await vi.waitFor(() => expect(f.errors).toHaveLength(1));
+    expect(f.states.at(-1)?.commandProblem).toBe(
+      "workbench.error.stateSyncFailed",
+    );
+    expect(f.states.at(-1)?.projectOpenHandoff?.install).toBe(f.install);
+    expect(
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "2".repeat(32),
+        0,
+        vi.fn(),
+      ),
+    ).toBe(true);
+    f.runtime.stop();
+  });
+
+  for (const reason of ["timeout", "cancelled", "newInput", "revision"]) {
+    it(
+      "releases an unconsumed package on authoritative " + reason,
+      async () => {
+        const f = await projectHandoffFixture();
+        f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+        const changed =
+          reason === "newInput"
+            ? {
+                input: { url: "/other" },
+                screenshotSession: { sessionId: "3".repeat(32), revision: 0 },
+              }
+            : reason === "revision"
+              ? {
+                  ...f.oldState,
+                  screenshotSession: {
+                    sessionId: f.descriptor.sessionId,
+                    revision: 3,
+                  },
+                }
+              : {
+                  ...f.oldState,
+                  projectOpen: null,
+                  statusCode:
+                    reason === "timeout"
+                      ? "imageEdit.projectOpenTimeout"
+                      : "imageEdit.projectOpenCancelled",
+                };
+        f.emit("imageEdit", changed);
+        f.receipt({ revision: 10, ok: true, problem: null });
+        await Promise.resolve();
+        expect(f.states.at(-1)?.projectOpenHandoff).toBeUndefined();
+        expect(f.states.at(-1)?.features.imageEdit).toBe(changed);
+        expect(
+          f.runtime.actions.consumeProjectOpen!(
+            f.install.token,
+            "2".repeat(32),
+            0,
+            vi.fn(),
+          ),
+        ).toBe(false);
+        f.runtime.stop();
+      },
+    );
+  }
+
+  it("retains prepared content on transport failure until authoritative recovery", async () => {
+    const f = await projectHandoffFixture();
+    f.bridge.execute = async () => {
+      throw new Error("transport failed");
+    };
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    await vi.waitFor(() =>
+      expect(f.states.at(-1)?.projectOpenHandoff?.phase).toBe("uncertain"),
+    );
+    expect(f.states.at(-1)?.commandProblem).toBe(
+      "workbench.error.bridgeUnavailable",
+    );
+    expect(await f.runtime.actions.recoverFeatureAssets!()).toBe(false);
+    f.emit("imageEdit", f.committedState);
+    expect(f.states.at(-1)?.projectOpenHandoff?.install).toBe(f.install);
+    expect(
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "2".repeat(32),
+        0,
+        vi.fn(),
+      ),
+    ).toBe(true);
+    f.runtime.stop();
+  });
+
+  it("never rebinds a committed package to another host session at the same URL", async () => {
+    const f = await projectHandoffFixture();
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    f.emit("imageEdit", f.committedState);
+    f.emit("imageEdit", {
+      ...f.committedState,
+      screenshotSession: { sessionId: "3".repeat(32), revision: 0 },
+    });
+    expect(f.states.at(-1)?.projectOpenHandoff).toBeUndefined();
+    f.receipt({ revision: 10, ok: true, problem: null });
+    await Promise.resolve();
+    expect(
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "3".repeat(32),
+        0,
+        vi.fn(),
+      ),
+    ).toBe(false);
+    f.runtime.stop();
+  });
+
+  it("reconciles a retained handoff through bootstrap and clears it on stop", async () => {
+    const f = await projectHandoffFixture();
+    f.runtime.actions.commitProjectOpen!(f.descriptor, f.install);
+    f.bridge.deferBootstrap = true;
+    f.runtime.actions.recover?.();
+    // WorkbenchApplication.BootstrapAsync 每次生成新的桥 session Guid。
+    f.bridge.settleBootstrap({
+      sessionId: "bootstrap-2",
+      route: "settings",
+      features: { imageEdit: f.committedState },
+    });
+    await vi.waitFor(() =>
+      expect(f.states.at(-1)?.projectOpenHandoff?.phase).toBe("installing"),
+    );
+    expect(f.states.at(-1)?.projectOpenHandoff?.install).toBe(f.install);
+    f.runtime.stop();
+    expect(
+      f.runtime.actions.consumeProjectOpen!(
+        f.install.token,
+        "2".repeat(32),
+        0,
+        vi.fn(),
+      ),
+    ).toBe(false);
+    f.receipt({ revision: 10, ok: true, problem: null });
+    await Promise.resolve();
+  });
 });

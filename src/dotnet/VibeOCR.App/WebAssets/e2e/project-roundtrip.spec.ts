@@ -731,10 +731,18 @@ test("imageEdit: 打开工程先取全部资源再 ack，切换后安装且不�
   expect(patchReads).toBe(1);
 });
 
-for (const stateFirst of [false, true]) {
+for (const { stateFirst, leaveDuringAck } of [
+  { stateFirst: false, leaveDuringAck: false },
+  { stateFirst: true, leaveDuringAck: false },
+  { stateFirst: true, leaveDuringAck: true },
+]) {
   test(
     "imageEdit: " +
-      (stateFirst ? "新状态先于回执" : "回执先于新状态") +
+      (leaveDuringAck
+        ? "ack在途宿主路由卸载再返回"
+        : stateFirst
+          ? "新状态先到且继续编辑后回执迟到"
+          : "回执先于新状态") +
       "仍恢复对象/图片资产/修补并继续保存",
     async ({ page }) => {
       await page.setViewportSize({ width: 1280, height: 900 });
@@ -879,6 +887,15 @@ for (const stateFirst of [false, true]) {
         await expect(
           page.getByText("工程已确认", { exact: false }),
         ).toBeVisible();
+      if (leaveDuringAck) {
+        await sendState(page, "shell", { route: "recognition" });
+        await expect(
+          page.getByRole("heading", { name: "单次识别", exact: true }),
+        ).toBeVisible();
+        await expect(
+          page.getByRole("heading", { name: "图片编辑", exact: true }),
+        ).toHaveCount(0);
+      }
       const restoredSession = "44444444444444444444444444444444";
       await sendState(page, "imageEdit", {
         isBusy: false,
@@ -890,13 +907,11 @@ for (const stateFirst of [false, true]) {
         },
         screenshotSession: { sessionId: restoredSession, revision: 0 },
       });
-      // 确保 effect 已消费 pending 清空，再交付成功回执。
-      if (stateFirst) {
-        await expect(
-          page.getByText("原图 900×600", { exact: false }),
-        ).toBeVisible();
+      if (leaveDuringAck) {
         await releaseCommand(page);
+        await sendState(page, "shell", { route: "imageEdit" });
       }
+      // state-first 不先释放回执：权威提交即可恢复并开始真实编辑。
       await expect(
         page.getByText("工程已恢复", { exact: false }),
       ).toBeVisible();
@@ -942,6 +957,17 @@ for (const stateFirst of [false, true]) {
       expect(uploads[1]!.state.marks).toHaveLength(3);
       expect(uploads[1]!.state.marks.slice(0, 2)).toEqual(manifest.state.marks);
       expect(uploads[1]!.patches).toEqual(uploads[0]!.patches);
+      if (stateFirst && !leaveDuringAck) await releaseCommand(page);
+      await page.getByRole("button", { name: "撤销", exact: true }).click();
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(3);
+      expect(uploads[2]!.state.marks).toEqual(manifest.state.marks);
+      expect(uploads[2]!.patches).toEqual(uploads[0]!.patches);
+      await page.getByRole("button", { name: "重做", exact: true }).click();
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(4);
+      expect(uploads[3]!.state.marks).toEqual(uploads[1]!.state.marks);
+      expect(uploads[3]!.patches).toEqual(uploads[0]!.patches);
       expect(reads).toEqual({ patch: 1, asset: 1 });
       // 页面/编辑器卸载通过原有 releaseAssets 归还恢复资产。
       await page.getByRole("link", { name: "单次识别" }).click();

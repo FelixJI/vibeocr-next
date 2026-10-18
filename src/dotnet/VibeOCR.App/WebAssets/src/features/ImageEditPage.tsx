@@ -47,9 +47,7 @@ import { StatusLine } from "./FeaturePanels";
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const [autoTextPreference, setAutoTextPreference] = useState(true);
   const [projectMessage, setProjectMessage] = useState<string>();
-  const [projectInstall, setProjectInstall] = useState<
-    EditorProjectInstall & { previousSessionId: string }
-  >();
+
   const projectOpenGenerationRef = useRef(0);
   const mountedRef = useRef(false);
   useEffect(() => {
@@ -76,14 +74,15 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, scene ? "recognition" : "imageEdit");
   const input = resource(state.input);
   const session = screenshotSession(state.screenshotSession);
-  const busy = booleanValue(state.isBusy);
+  const handoff = scene ? undefined : viewState.projectOpenHandoff;
+  const busy = booleanValue(state.isBusy) || handoff !== undefined;
   // #233 打开工程：收到 projectOpen 投影 → 全部资源 fetch/decode 与全部
   // 可失败校验（预算/逻辑 frame/资产补丁一致）→ ack 旧绑定 → 确认宿主已
-  // 切换（回执 ok）→ 交付只含已 decode 强引用的安装包。任何失败/取消/
+  // 切换（权威 source/session/revision）→ 一次消费已 decode 安装包。准备失败/取消/
   // 代际变化拒收并保持旧画布；绝不重 fetch 已释放 URL。30 秒到期由宿主
   // 事务权威取消（迟到 ack 得冲突回执）。仅普通编辑页（scene 无）。
-  // descriptor 以原始 state.projectOpen 键控 memo：同 pending 不因渲染
-  // 重建而打断在途准备；卸载/换 pending 时 AbortSignal 使迟到结果失效。
+  // descriptor 按 pending 键控准备；发 ack 前所有权同步交给 runtime，
+  // 此后 route 卸载不撤销已提交内容，未移交的准备仍由页面取消。
   const projectOpen = useMemo(
     () => (scene ? undefined : parseProjectOpen(state.projectOpen)),
     [scene, state.projectOpen],
@@ -95,12 +94,14 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
     currentSessionRef.current = session;
   });
   const pendingId = projectOpen?.pendingId;
+  const handedOffId = handoff?.pendingId;
   useEffect(() => {
     if (!pendingId) return undefined;
     const descriptor = projectOpenRef.current;
-    if (!descriptor || !viewState.connected) return undefined;
+    if (!descriptor || !viewState.connected || handedOffId === pendingId)
+      return undefined;
     const controller = new AbortController();
-    let acknowledging = false;
+    let transferred = false;
     const generation = ++projectOpenGenerationRef.current;
     const reject = () =>
       void actions.run({
@@ -168,27 +169,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
         ) {
           throw new Error("会话已变化，本次打开未确认");
         }
-        setProjectMessage("资源就绪，正在确认切换……");
-        // ack 后 pending 清空是成功提交的一部分，不能取消已准备的安装包。
-        acknowledging = true;
-        const acked = await actions.run({
-          type: "imageEdit.ackProjectOpen",
-          pendingId: descriptor.pendingId,
-          sessionId: descriptor.sessionId,
-          revision: descriptor.revision,
-          generation: descriptor.generation,
-        });
-        if (generation !== projectOpenGenerationRef.current) return;
-        if (!acked) {
-          setProjectMessage(
-            "工程打开未完成：会话已变化或确认失败；当前画布保持不变。",
-          );
-          return;
-        }
-        // 宿主已切换：新会话/输入即将到位，安装包只携带已 decode 强引用
-        // （含 source 位图），安装不再触发任何网络读取。
-        setProjectInstall({
-          previousSessionId: descriptor.sessionId,
+        const install: EditorProjectInstall = {
           token: descriptor.pendingId,
           sourceUrl: descriptor.source.url,
           sourceImage,
@@ -196,8 +177,11 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           state: manifest.state,
           assets,
           patches,
-        });
-        setProjectMessage("工程已确认，正在恢复编辑内容……");
+        };
+        if (!actions.commitProjectOpen?.(descriptor, install))
+          throw new Error("会话已变化，本次打开未确认");
+        transferred = true;
+        setProjectMessage(undefined);
       } catch (error) {
         if (generation !== projectOpenGenerationRef.current) return;
         if (controller.signal.aborted) return;
@@ -211,26 +195,32 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
     })();
     return () => {
       controller.abort();
-      if (!acknowledging) {
+      if (!transferred) {
         projectOpenGenerationRef.current += 1;
+        reject();
         if (mountedRef.current)
           setProjectMessage("工程打开已取消或超时；当前画布与历史保持不变。");
       }
     };
-  }, [pendingId, viewState.connected, actions]);
+  }, [pendingId, handedOffId, viewState.connected, actions]);
 
   const pendingProjectInstall =
-    projectInstall &&
-    input?.url === projectInstall.sourceUrl &&
-    session?.sessionId !== projectInstall.previousSessionId
-      ? projectInstall
+    handoff?.sessionId === session?.sessionId &&
+    input?.url === handoff?.sourceUrl &&
+    session?.revision === 0
+      ? handoff?.install
       : undefined;
-  const projectInstalled = useCallback((token: string) => {
-    setProjectInstall((current) =>
-      current?.token === token ? undefined : current,
-    );
-    setProjectMessage(undefined);
-  }, []);
+  const installProject = useCallback(
+    (token: string, install: () => void) =>
+      session !== undefined &&
+      actions.consumeProjectOpen?.(
+        token,
+        session.sessionId,
+        session.revision,
+        install,
+      ) === true,
+    [actions, session],
+  );
   const openProject = useCallback(() => {
     setProjectMessage(undefined);
     void actions.run({ type: "imageEdit.openProject" });
@@ -337,15 +327,21 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           ? "工程打开超时；当前画布与历史保持不变。"
           : state.statusCode === "imageEdit.projectOpenCancelled"
             ? "工程打开已取消；当前画布与历史保持不变。"
-            : (projectMessage ??
-              importErrorLabel(state.importError) ??
-              (busy
-                ? "正在读取图片…"
-                : state.statusCode === "recognition.inputFailed"
-                  ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
-                  : input
-                    ? "原图保留；默认另存副本。"
-                    : "选择、粘贴或拖入图片。"))}
+            : handoff
+              ? handoff.phase === "uncertain"
+                ? "工程确认尚未完成，请检查连接后恢复；当前内容保持不变。"
+                : handoff.phase === "confirming"
+                  ? "资源就绪，正在确认切换……"
+                  : "工程已确认，正在恢复编辑内容……"
+              : (projectMessage ??
+                importErrorLabel(state.importError) ??
+                (busy
+                  ? "正在读取图片…"
+                  : state.statusCode === "recognition.inputFailed"
+                    ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
+                    : input
+                      ? "原图保留；默认另存副本。"
+                      : "选择、粘贴或拖入图片。"))}
       </StatusLine>
       {session?.sceneEditing && !scene ? (
         <EmptyStage
@@ -368,7 +364,8 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           textLayer={screenshotTextLayer(state.textLayer)}
           systemImport={imageEditImport(state.import)}
           projectInstall={pendingProjectInstall}
-          onProjectInstalled={projectInstalled}
+          installProject={installProject}
+          interactionLocked={handoff !== undefined}
           autoText={
             session?.textSelectionRequested === true && autoTextPreference
           }

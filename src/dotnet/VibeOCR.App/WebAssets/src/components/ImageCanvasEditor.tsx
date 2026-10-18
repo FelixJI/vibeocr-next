@@ -647,7 +647,8 @@ interface ImageCanvasEditorProps {
   readonly systemImport?: EditorImportDescriptor;
   /** #233 工程恢复安装包：宿主 ack 成功切换后安装已准备数据。 */
   readonly projectInstall?: EditorProjectInstall;
-  readonly onProjectInstalled?: (token: string) => void;
+  readonly installProject?: (token: string, install: () => void) => boolean;
+  readonly interactionLocked?: boolean;
   readonly autoText?: boolean;
   readonly showAutoTextPreference?: boolean;
   readonly onAutoTextChange?: (enabled: boolean) => void;
@@ -1049,7 +1050,8 @@ export function ImageCanvasEditor({
   textLayer,
   systemImport,
   projectInstall,
-  onProjectInstalled,
+  installProject,
+  interactionLocked = false,
   autoText: autoTextProp,
   showAutoTextPreference = true,
   onAutoTextChange,
@@ -1624,7 +1626,11 @@ export function ImageCanvasEditor({
 
   useEffect(() => {
     // 恢复安装已提供 decode 强引用的 source：不重 fetch 该 URL。
-    if (preparedSourceUrlsRef.current.has(source)) return;
+    if (
+      projectInstall?.sourceUrl === source ||
+      preparedSourceUrlsRef.current.has(source)
+    )
+      return;
     // 换图后立即失效旧解码结果：新图 decode 完成前不得导出旧 image。
     imageRef.current = undefined;
     const image = new Image();
@@ -1665,7 +1671,7 @@ export function ImageCanvasEditor({
       image.onerror = null;
       if (imageRef.current === image) imageRef.current = undefined;
     };
-  }, [source, captureScene]);
+  }, [source, captureScene, projectInstall?.sourceUrl]);
 
   // 去水印绘制层：应用补丁从存储解析；预览仅在对比为“修补后”时叠加；
   // 选区高亮按映射后的有效范围回投显示，用户看到的就是实际修改范围。
@@ -2305,7 +2311,7 @@ export function ImageCanvasEditor({
     }
     const image = install.sourceImage;
     if (!image.naturalWidth || !image.naturalHeight) return;
-    void (async () => {
+    const apply = () => {
       installedProjectTokensRef.current = new Set([
         ...installedProjectTokensRef.current,
         install.token,
@@ -2349,9 +2355,10 @@ export function ImageCanvasEditor({
       setOperationMessage(
         "工程已恢复：对象/样式/修补/裁剪/旋转全部就位，可继续编辑。",
       );
-      onProjectInstalled?.(install.token);
-    })();
-  }, [projectInstall, onProjectInstalled, NO_SELECTION]);
+    };
+    if (installProject) installProject(install.token, apply);
+    else apply();
+  }, [projectInstall, installProject, NO_SELECTION]);
 
   /** 恢复后的稳定 id 计数推进：新对象不与恢复对象撞 id（含组/补丁）。 */
   function advanceProjectIdCounters(restored: EditorState) {
@@ -5398,7 +5405,7 @@ export function ImageCanvasEditor({
       canExport,
       isExporting,
       hasSession: !!session,
-      suspended: proofreading,
+      suspended: proofreading || interactionLocked,
     };
   });
   useEffect(() => {
@@ -6646,6 +6653,7 @@ export function ImageCanvasEditor({
         captureStyle ? " capture-scene-editor" : ""
       }${proofreading ? " is-proofreading" : ""}`}
       style={captureStyle}
+      inert={interactionLocked}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
         if (textComposing.current || isImeCompositionEvent(event.nativeEvent))
