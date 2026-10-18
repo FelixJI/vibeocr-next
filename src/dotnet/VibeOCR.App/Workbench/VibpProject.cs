@@ -595,7 +595,8 @@ internal static class VibpProjectRules
         ValidatePoint($"spotlight mark {mark.Id} region corner",
           new VibpPoint { X = region.X, Y = region.Y });
         if (!double.IsFinite(region.Width) || !double.IsFinite(region.Height) ||
-            region.Width < 0 || region.Height < 0 ||
+            // 零尺寸区域加载后会压暗全图且无孔洞：严格 > 0（合法小正数可读）。
+            region.Width <= 0 || region.Height <= 0 ||
             region.Width > VibpProjectLimits.MaximumCoordinateMagnitude ||
             region.Height > VibpProjectLimits.MaximumCoordinateMagnitude)
         {

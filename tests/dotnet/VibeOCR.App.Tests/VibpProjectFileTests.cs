@@ -312,6 +312,39 @@ public sealed class VibpProjectFileTests
         {
           State = manifest.State with { Marks = [spotlight with { Regions = [] }] },
         }, [SourceEntry()]));
+      // 零尺寸区域（Width/Height = 0）：加载后会压暗全图且无孔洞，
+      // 双侧严格 > 0 拒绝；合法小正数可读。
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-region-zero-width.vibp"),
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 0, Height = 12 }] }],
+          },
+        }, [SourceEntry()]));
+      Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
+        Path.Combine(directory, "bad-region-zero-height.vibp"),
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 12, Height = 0 }] }],
+          },
+        }, [SourceEntry()]));
+      // 合法小正数区域可写可读。
+      string tinyPath = Path.Combine(directory, "tiny-region.vibp");
+      VibpProjectFile.Write(tinyPath,
+        manifest with
+        {
+          State = manifest.State with
+          {
+            Marks = [spotlight with { Regions = [new VibpRegion { X = 4, Y = 6, Width = 0.25, Height = 0.5 }] }],
+          },
+        }, [SourceEntry()]);
+      VibpProjectArchive tiny = await VibpProjectFile.ReadAsync(
+        tinyPath, Path.Combine(directory, "open-tiny"), TestContext.Current.CancellationToken);
+      Assert.Equal(0.25, tiny.Manifest.State.Marks[0]!.Regions![0]!.Width);
       Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
         Path.Combine(directory, "bad-zoom-tool.vibp"),
         manifest with

@@ -524,6 +524,49 @@ describe("#235 聚光灯/放大镜线形状", () => {
         },
       }),
     ).toThrow("工程对象数据不完整");
+    // 零尺寸区域（width/height = 0）：加载后会压暗全图且无孔洞，
+    // 双侧（TS/C#）严格 > 0 拒绝；合法小正数可读（不把画布 8px 阈值
+    // 强加到自然像素工程）。
+    for (const degenerate of [
+      { x: 4, y: 6, width: 0, height: 12 },
+      { x: 4, y: 6, width: 12, height: 0 },
+    ]) {
+      expect(() =>
+        parseProjectManifest({
+          ...baseManifest,
+          state: {
+            ...baseManifest.state,
+            marks: [
+              {
+                id: "mark-1",
+                tool: "spotlight",
+                start: { x: 0, y: 0 },
+                end: { x: 9, y: 9 },
+                regions: [degenerate],
+              },
+            ],
+          },
+        }),
+      ).toThrow("工程对象数据不完整");
+    }
+    // 合法小正数区域可读。
+    expect(() =>
+      parseProjectManifest({
+        ...baseManifest,
+        state: {
+          ...baseManifest.state,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "spotlight",
+              start: { x: 0, y: 0 },
+              end: { x: 9, y: 9 },
+              regions: [{ x: 4, y: 6, width: 0.25, height: 0.5 }],
+            },
+          ],
+        },
+      }),
+    ).not.toThrow();
     expect(() =>
       parseProjectManifest({
         ...baseManifest,

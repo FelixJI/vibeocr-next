@@ -2220,3 +2220,57 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
   await action(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
 });
+
+test("J2 source/session reset clears emphasis gesture drafts", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "聚光灯");
+  await drag(page, 200, 100, 360, 220);
+  await action(page, "选择");
+  await drag(page, 280, 160, 281, 161); // 选中聚光灯
+  await action(page, "添加区域"); // 进入加区模式（不拖拽，保持 target 待命）
+  // 同会话换源（resetKey 变化、编辑器不重挂）：旧 target/草稿必须清理。
+  await page.route("**/emphasis-source-2.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+        '<rect width="900" height="600" fill="#12a150"/></svg>',
+    }),
+  );
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: "/emphasis-source-2.svg",
+      mediaType: "image/png",
+      byteLength: 2048,
+    },
+    screenshotSession: { sessionId: SESSION, revision: 0 },
+  });
+  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  // 不切工具（切工具会合法取消加区模式）：加区 target 保持待命时换源，
+  // 新画布的第一个选择手势不得被旧分支吞掉（旧实现：按下即报“目标
+  // 聚光灯对象已不可用”、拖拽无框选效果）。
+  await drag(page, 150, 150, 300, 300);
+  await expect(page.getByText(/已不可用/)).toHaveCount(0);
+  await action(page, "聚光灯");
+  await drag(page, 150, 150, 300, 300);
+  await action(page, "选择");
+  await expect(page.getByLabel("选择标注对象")).toContainText("聚光灯");
+  // 加区模式随重置解除：新对象选中后按钮重新可用，正常新增区域。
+  await drag(page, 225, 225, 226, 226);
+  await action(page, "添加区域");
+  await drag(page, 400, 100, 520, 200);
+  const png = await save(page, uploads);
+  // 导出含两个孔洞：孔洞 1 原色，孔洞 2 原色，区域外压暗绿。
+  const sampled = await pixels(page, png, [
+    [200, 200],
+    [430, 130],
+    [700, 300],
+  ]);
+  expect(sampled[0]!.slice(0, 3)).toEqual([18, 161, 80]);
+  expect(sampled[1]!.slice(0, 3)).toEqual([18, 161, 80]);
+  expect(sampled[2]![1]).toBeLessThan(161);
+});

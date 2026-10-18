@@ -1624,6 +1624,12 @@ export function ImageCanvasEditor({
     setDupmatchCandidates(undefined);
     setDupmatchAccepted(undefined);
     setDupmatchBusy(false);
+    // 本 PR 新增手势草稿同样绑定源与会话：加区 target/拖拽草稿与橡皮擦
+    // 手势随重置作废，不吞新画布首个手势、不产生空历史提交（J2）。
+    setSpotlightRegionTarget(undefined);
+    setSpotlightRegionDraft(undefined);
+    objectEraserHits.current = undefined;
+    objectEraserLast.current = undefined;
   }
   const resetResourcesKey = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
@@ -1639,6 +1645,8 @@ export function ImageCanvasEditor({
     objectDraftRef.current = undefined;
     moveDragRef.current = undefined;
     marqueeRef.current = undefined;
+    objectEraserHits.current = undefined;
+    objectEraserLast.current = undefined;
     sessionIdRef.current = session?.sessionId;
     contentRevisionRef.current = session?.revision ?? 0;
     inpaintGenerationRef.current += 1;

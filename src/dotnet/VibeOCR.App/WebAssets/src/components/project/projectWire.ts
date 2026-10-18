@@ -369,8 +369,9 @@ function parseWireMark(value: unknown): WireMark | undefined {
         !finiteNumber(region.y) ||
         !finiteNumber(region.width) ||
         !finiteNumber(region.height) ||
-        region.width < 0 ||
-        region.height < 0
+        // 零尺寸区域加载后会压暗全图且无孔洞：严格 > 0（合法小正数可读）。
+        region.width <= 0 ||
+        region.height <= 0
       )
         return undefined;
       parsed.push({
