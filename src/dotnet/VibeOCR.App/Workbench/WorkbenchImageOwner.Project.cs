@@ -434,6 +434,14 @@ internal sealed partial class WorkbenchImageOwner
         imageEditImport.Adopted[reference.Url] = new StagedImportAsset(
           reference, assetId, (long)width * height, width, height, documentToken);
       }
+      // 提前检查与 Register 之间的取消竞态（与普通导入 StartSystemImport
+      // 的注册后取消处理同模式）：同步回调先回收了空集，此处再按刚插入
+      // 资产携带的同一文档 token 精确回收，并清理 Documents 注册（锁可
+      // 重入），不让已取消文档残留资产。
+      if (documentToken.IsCancellationRequested)
+      {
+        RetireDocumentImports(imageEditChannel, imageEditImport, documentToken);
+      }
     }
     // patch 与 manifest 在 ack 前提下已被 Web fetch/decode，宿主侧字节是死
     // 数据（合同：确认后不重新依赖 TTL 读取已准备位图/清单）：成功切换即

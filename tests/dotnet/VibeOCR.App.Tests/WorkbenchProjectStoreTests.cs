@@ -210,7 +210,7 @@ public sealed class WorkbenchProjectStoreTests
     store.RevokeAll(host);
     stream.Unblock();
 
-    await Assert.ThrowsAnyAsync<Exception>(() => upload);
+    await Assert.ThrowsAsync<WorkbenchProjectUploadException>(() => upload);
     Assert.Equal((0, null), store.Staged);
   }
 

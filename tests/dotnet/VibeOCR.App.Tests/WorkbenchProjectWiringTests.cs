@@ -594,15 +594,99 @@ public sealed class WorkbenchProjectWiringTests
       // 文档取消（导航/恢复/重载）：既有 RetireDocumentImports 精确回收
       // 恢复资产租约与文件。
       document.Cancel();
-      await Assert.ThrowsAnyAsync<Exception>(async () => await broker.OpenAsync(
-        new Uri(assetUrl), TestContext.Current.CancellationToken));
-      string? assetFile = Directory.GetFiles(Path.Combine(root, "session"))
-        .FirstOrDefault();
-      if (assetFile is not null)
+      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(assetUrl), TestContext.Current.CancellationToken));
+      // 具体核对目标资产文件（按内容匹配）已被删除，而非任意首个文件。
+      string sessionDirectory = Path.Combine(root, "session");
+      if (Directory.Exists(sessionDirectory))
       {
-        Assert.NotEqual(assetPng, await File.ReadAllBytesAsync(
-          assetFile, TestContext.Current.CancellationToken));
+        Assert.DoesNotContain(Directory.GetFiles(sessionDirectory), file =>
+          File.ReadAllBytes(file).SequenceEqual(assetPng));
       }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task AckDocumentCancelledDuringSwitchRetiresRestoredAssets()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "race.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      // 含 image 资产的真实包。
+      byte[] source = PngBytes(64, 48);
+      byte[] assetPng = PngBytes(8, 6);
+      string assetId = new string('b', 32);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [new VibpAssetResource
+        {
+          Id = assetId, Width = 8, Height = 6, Length = assetPng.Length,
+        }],
+        State = new VibpEditorState
+        {
+          Rotation = 0,
+          Marks = [new VibpMark
+          {
+            Id = "mark-1",
+            Tool = "image",
+            Start = new VibpPoint { X = 1, Y = 1 },
+            End = new VibpPoint { X = 16, Y = 12 },
+            AssetId = assetId,
+          }],
+          Patches = [],
+        },
+      };
+      VibpProjectFile.Write(projectPath, manifest,
+      [
+        new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source)),
+        new VibpProjectEntry($"asset-{assetId}.png", assetPng.Length,
+          () => new MemoryStream(assetPng)),
+      ]);
+
+      // 同一 handler 建立非空 imageEdit 旧会话：ack 切换时
+      // ClearScreenshotSession 同步触发 Detached 事件。
+      var openPicker = new PickerStub { OpenPath = projectPath };
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      Guid priorSession = await EstablishSessionAsync(opener, WorkbenchRoute.ImageEdit);
+      Assert.Null((await opener.ExecuteAsync(
+        new OpenImageEditProjectCommand(),
+        TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor? pending = opener.CurrentProjectOpen;
+      Assert.NotNull(pending);
+
+      using var document = CancellationTokenSource.CreateLinkedTokenSource(
+        TestContext.Current.CancellationToken);
+      // 确定性取消点：旧会话被切换清除时（ClearScreenshotSession 同步事件）
+      // 取消 ack 所属文档 token——落在提前检查之后、资产插入之前。
+      opener.ScreenshotSessionDetached += (_, _) => document.Cancel();
+
+      Assert.Null((await opener.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
+          pending.Binding.Generation),
+        document.Token)).Error);
+
+      // 已取消文档不得残留恢复资产：租约已回收（具体异常类型）。
+      string assetUrl = pending.Assets[assetId].Url;
+      await Assert.ThrowsAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(assetUrl), TestContext.Current.CancellationToken));
     }
     finally
     {
