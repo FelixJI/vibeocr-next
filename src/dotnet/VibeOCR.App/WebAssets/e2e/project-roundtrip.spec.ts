@@ -2,6 +2,8 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 import {
   expectCommand,
+  deferCommand,
+  releaseCommand,
   mountHost,
   sendState,
   snapshot,
@@ -729,6 +731,228 @@ test("imageEdit: 打开工程先取全部资源再 ack，切换后安装且不�
   expect(patchReads).toBe(1);
 });
 
+for (const stateFirst of [false, true]) {
+  test(
+    "imageEdit: " +
+      (stateFirst ? "新状态先于回执" : "回执先于新状态") +
+      "仍恢复对象/图片资产/修补并继续保存",
+    async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await proxyProductionAssets(page);
+      const source = await makePng(page, 900, 600, "#101010");
+      const patch = await makePng(page, 8, 8, "#00ff00");
+      const asset = await makePng(page, 16, 12, "#ff0000");
+      const assetId = "0123456789abcdef0123456789abcdef";
+      const sourceUrl = "https://app.vibeocr/__resource/open-source";
+      const patchUrl = "https://app.vibeocr/__resource/open-patch";
+      const assetUrl = "https://app.vibeocr/__resource/open-asset";
+      const manifestUrl = "https://app.vibeocr/__resource/open-manifest";
+      const reads = { patch: 0, asset: 0 };
+      await page.route(sourceUrl, (route) =>
+        route.fulfill({ contentType: "image/png", body: source }),
+      );
+      await page.route(patchUrl, (route) => {
+        reads.patch++;
+        return route.fulfill({ contentType: "image/png", body: patch });
+      });
+      await page.route(assetUrl, (route) => {
+        reads.asset++;
+        return route.fulfill({ contentType: "image/png", body: asset });
+      });
+      const manifest = {
+        schemaVersion: 1,
+        canvas: { width: 900, height: 600 },
+        source: {
+          mediaType: "image/png",
+          width: 900,
+          height: 600,
+          length: source.length,
+        },
+        assets: [{ id: assetId, width: 16, height: 12, length: asset.length }],
+        state: {
+          rotation: 0,
+          marks: [
+            {
+              id: "mark-1",
+              tool: "text",
+              start: { x: 120, y: 140 },
+              end: { x: 360, y: 200 },
+              text: "恢复对象",
+              textWidth: 200,
+            },
+            {
+              id: "mark-2",
+              tool: "image",
+              assetId,
+              start: { x: 400, y: 240 },
+              end: { x: 560, y: 360 },
+            },
+          ],
+          patches: [{ id: 1, x: 10, y: 12, width: 8, height: 8 }],
+        },
+      };
+      await page.route(manifestUrl, (route) =>
+        route.fulfill({
+          contentType: "application/json; charset=utf-8",
+          body: JSON.stringify(manifest),
+        }),
+      );
+      const uploads: ContributionPayload[] = [];
+      await page.route("**/__project", contractProjectRoute(uploads));
+      const exports: Buffer[] = [];
+      await page.route("**/__annotation", async (route) => {
+        exports.push(route.request().postDataBuffer()!);
+        await route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({
+            resourceUri:
+              "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+          }),
+        });
+      });
+      await mountHost(
+        page,
+        {
+          ...snapshot,
+          route: "imageEdit",
+          capabilities: ["recognition.annotation"],
+          features: {
+            imageEdit: { isBusy: false, statusCode: "recognition.ready" },
+          },
+        },
+        "https://app.vibeocr/",
+      );
+      await action(page, "打开工程");
+      if (stateFirst) await deferCommand(page, "ackProjectOpen");
+      await sendState(page, "imageEdit", {
+        isBusy: false,
+        statusCode: "recognition.ready",
+        projectOpen: {
+          pendingId: "c".repeat(32),
+          sessionId: "0".repeat(32),
+          revision: 0,
+          generation: 5,
+          manifest: {
+            url: manifestUrl,
+            mediaType: "application/json; charset=utf-8",
+            byteLength: JSON.stringify(manifest).length,
+          },
+          source: {
+            url: sourceUrl,
+            mediaType: "image/png",
+            byteLength: source.length,
+          },
+          assets: [
+            {
+              id: assetId,
+              resource: {
+                url: assetUrl,
+                mediaType: "image/png",
+                byteLength: asset.length,
+              },
+            },
+          ],
+          patches: [
+            {
+              id: 1,
+              resource: {
+                url: patchUrl,
+                mediaType: "image/png",
+                byteLength: patch.length,
+              },
+            },
+          ],
+        },
+      });
+      await expectCommand(page, {
+        scope: "imageEdit",
+        action: "ackProjectOpen",
+        arguments: {
+          pendingId: "c".repeat(32),
+          sessionId: "0".repeat(32),
+          revision: 0,
+          generation: 5,
+        },
+      });
+      if (!stateFirst)
+        await expect(
+          page.getByText("工程已确认", { exact: false }),
+        ).toBeVisible();
+      const restoredSession = "44444444444444444444444444444444";
+      await sendState(page, "imageEdit", {
+        isBusy: false,
+        statusCode: "recognition.session",
+        input: {
+          url: sourceUrl,
+          mediaType: "image/png",
+          byteLength: source.length,
+        },
+        screenshotSession: { sessionId: restoredSession, revision: 0 },
+      });
+      // 确保 effect 已消费 pending 清空，再交付成功回执。
+      if (stateFirst) {
+        await expect(
+          page.getByText("原图 900×600", { exact: false }),
+        ).toBeVisible();
+        await releaseCommand(page);
+      }
+      await expect(
+        page.getByText("工程已恢复", { exact: false }),
+      ).toBeVisible();
+      await page.screenshot({
+        path: test.info().outputPath("project-restored.png"),
+      });
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(1);
+      expect(uploads[0]!.state.marks).toEqual(manifest.state.marks);
+      expect(uploads[0]!.patches).toHaveLength(1);
+      await action(page, "保存标注图");
+      await expect.poll(() => exports.length).toBe(1);
+      const samples = await page.evaluate(async (png) => {
+        const bitmap = await createImageBitmap(
+          new Blob([Uint8Array.from(atob(png), (char) => char.charCodeAt(0))], {
+            type: "image/png",
+          }),
+        );
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        return [
+          Array.from(context.getImageData(12, 14, 1, 1).data),
+          Array.from(context.getImageData(480, 300, 1, 1).data),
+        ];
+      }, exports[0]!.toString("base64"));
+      expect(samples).toEqual([
+        [0, 255, 0, 255],
+        [255, 0, 0, 255],
+      ]);
+      await action(page, "矩形");
+      await dragOnCanvas(page, { x: 600, y: 400 }, { x: 800, y: 500 });
+      await expectCommand(page, {
+        scope: "imageEdit",
+        action: "notifyScreenshotRevision",
+        arguments: { sessionId: restoredSession, revision: 1 },
+      });
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(2);
+      expect(uploads[1]!.state.marks).toHaveLength(3);
+      expect(uploads[1]!.state.marks.slice(0, 2)).toEqual(manifest.state.marks);
+      expect(uploads[1]!.patches).toEqual(uploads[0]!.patches);
+      expect(reads).toEqual({ patch: 1, asset: 1 });
+      // 页面/编辑器卸载通过原有 releaseAssets 归还恢复资产。
+      await page.getByRole("link", { name: "单次识别" }).click();
+      await expectCommand(page, {
+        scope: "imageEdit",
+        action: "releaseAssets",
+        arguments: { sessionId: restoredSession, resourceUris: [assetUrl] },
+      });
+    },
+  );
+}
 test("imageEdit: 准备中离开页面不得 ack 切换宿主", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await proxyProductionAssets(page);
@@ -886,3 +1110,132 @@ test("imageEdit: 不支持的工程版本被拒收且旧画布保持", async ({ 
   // 旧画布保持：原会话/对象仍在（无新修订、无安装）。
   await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
 });
+
+for (const timeout of [false, true]) {
+  test(
+    "imageEdit: pending " +
+      (timeout ? "超时" : "撤销") +
+      "明确结束读取且旧对象与撤销历史保留",
+    async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await proxyProductionAssets(page);
+      const source = await makePng(page, 900, 600, "#dddddd");
+      const sourceUrl = "https://app.vibeocr/__resource/timeout-source";
+      await page.route(sourceUrl, (route) =>
+        route.fulfill({ contentType: "image/png", body: source }),
+      );
+      const uploads: ContributionPayload[] = [];
+      await page.route("**/__project", contractProjectRoute(uploads));
+      const state = {
+        isBusy: false,
+        statusCode: "recognition.session",
+        input: {
+          url: sourceUrl,
+          mediaType: "image/png",
+          byteLength: source.length,
+        },
+        screenshotSession: { sessionId: SESSION, revision: 0 },
+      };
+      await mountHost(
+        page,
+        {
+          ...snapshot,
+          route: "imageEdit",
+          capabilities: ["recognition.annotation"],
+          features: { imageEdit: state },
+        },
+        "https://app.vibeocr/",
+      );
+      await expect(
+        page.getByText("原图 900×600", { exact: false }),
+      ).toBeVisible();
+      await action(page, "矩形");
+      await dragOnCanvas(page, { x: 150, y: 150 }, { x: 420, y: 320 });
+      await expectCommand(page, {
+        scope: "imageEdit",
+        action: "notifyScreenshotRevision",
+        arguments: { sessionId: SESSION, revision: 1 },
+      });
+      let releaseManifest!: () => void;
+      const manifestGate = new Promise<void>((resolve) => {
+        releaseManifest = resolve;
+      });
+      let manifestStarted = false;
+      await page.route(
+        "https://app.vibeocr/__resource/timeout-manifest",
+        async (route) => {
+          manifestStarted = true;
+          await manifestGate;
+          await route.fulfill({ contentType: "application/json", body: "{}" });
+        },
+      );
+      await sendState(page, "imageEdit", {
+        ...state,
+        screenshotSession: { sessionId: SESSION, revision: 1 },
+        projectOpen: {
+          pendingId: "9".repeat(32),
+          sessionId: SESSION,
+          revision: 1,
+          generation: 2,
+          manifest: {
+            url: "https://app.vibeocr/__resource/timeout-manifest",
+            mediaType: "application/json",
+            byteLength: 2,
+          },
+          source: {
+            url: sourceUrl,
+            mediaType: "image/png",
+            byteLength: source.length,
+          },
+          assets: [],
+          patches: [],
+        },
+      });
+      await expect.poll(() => manifestStarted).toBe(true);
+      await expect(
+        page.getByText("正在读取工程清单与资源", { exact: false }),
+      ).toBeVisible();
+      // 宿主是30秒计时权威；这里驱动实际到期/取消终态，测试浏览器在途撤销。
+      await sendState(page, "imageEdit", {
+        ...state,
+        screenshotSession: { sessionId: SESSION, revision: 1 },
+        statusCode: timeout
+          ? "imageEdit.projectOpenTimeout"
+          : "imageEdit.projectOpenCancelled",
+      });
+      await expect(
+        page.getByText(timeout ? "工程打开超时；" : "工程打开已取消；", {
+          exact: false,
+        }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("正在读取工程清单与资源", { exact: false }),
+      ).toHaveCount(0);
+      releaseManifest();
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(1);
+      expect(uploads[0]!.state.marks).toHaveLength(1);
+      await page.getByLabel("图片检查画布").focus();
+      await page.keyboard.press("Control+z");
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(2);
+      expect(uploads[1]!.state.marks).toEqual([]);
+      await page.getByLabel("图片检查画布").focus();
+      await page.keyboard.press("Control+y");
+      await action(page, "保存工程");
+      await expect.poll(() => uploads.length).toBe(3);
+      expect(uploads[2]!.state.marks).toEqual(uploads[0]!.state.marks);
+      const commands = await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __testHost: { commands: { action: string }[] };
+            }
+          ).__testHost.commands,
+      );
+      expect(
+        commands.some((command) => command.action === "ackProjectOpen"),
+      ).toBe(false);
+    },
+  );
+}

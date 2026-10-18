@@ -520,12 +520,13 @@ internal static class VibpProjectRules
         $"Project mark {mark.Id} carries textWidth for tool {mark.Tool}.");
     }
 
-    if (PointTools.Contains(mark.Tool))
+    if (PointTools.Contains(mark.Tool) || (mark.Tool is "mosaic" or "blur" && mark.Points is not null))
     {
-      if (mark.Points is null || mark.Points.Count < 2)
+      int minimumPoints = PointTools.Contains(mark.Tool) ? 2 : 1;
+      if (mark.Points is null || mark.Points.Count < minimumPoints)
       {
         throw new VibpProjectFormatException(
-          $"Project mark {mark.Id} requires at least two trace points.");
+          $"Project mark {mark.Id} requires at least {minimumPoints} trace points.");
       }
       totalPoints += mark.Points.Count;
       if (totalPoints > VibpProjectLimits.MaximumMarkPoints)

@@ -346,6 +346,57 @@ public sealed class WorkbenchProjectWiringTests
   }
 
   [Fact]
+  public async Task AckAfterOldCanvasEditConflictsAndReclaimsPending()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = Path.Combine(root, "conflict.vibp") };
+      await using var handler = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(handler, WorkbenchRoute.ImageEdit);
+      (Guid contribution, _) = await ContributeAsync(store);
+      Assert.Null((await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(contribution, session, 0),
+        TestContext.Current.CancellationToken)).Error);
+      picker.OpenPath = picker.SavePath;
+      Assert.Null((await handler.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor pending = handler.CurrentProjectOpen!;
+      Assert.Equal(2, SourceSessionFiles(root).Length);
+      WorkbenchCommandOutcome edit = await handler.ExecuteAsync(
+        new NotifyImageEditRevisionCommand(session, 1), TestContext.Current.CancellationToken);
+      ImageEditWorkbenchState edited = Assert.Single(edit.States.OfType<ImageEditWorkbenchState>());
+      WorkbenchCommandOutcome ack = await handler.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          pending.PendingId, session, 0, pending.Binding.Generation),
+        TestContext.Current.CancellationToken);
+      Assert.Equal("project_open_conflict", ack.Error?.Code);
+      Assert.Empty(ack.States);
+      Assert.Null(handler.CurrentProjectOpen);
+      Assert.Single(SourceSessionFiles(root));
+      Assert.Empty(PatchSessionFiles(root));
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(pending.Source.Url), TestContext.Current.CancellationToken));
+      // 原会话/修订仍可保存，输入不曾被打开工程覆盖。
+      (Guid second, _) = await ContributeAsync(store);
+      WorkbenchCommandOutcome saved = await handler.ExecuteAsync(
+        new SaveImageEditProjectCommand(second, session, 1),
+        TestContext.Current.CancellationToken);
+      Assert.Null(saved.Error);
+      ImageEditWorkbenchState current = Assert.Single(saved.States.OfType<ImageEditWorkbenchState>());
+      Assert.Equal(edited.Input, current.Input);
+      Assert.Equal(edited.ScreenshotSession, current.ScreenshotSession);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
   public async Task OpenProjectRefusesCorruptPackageAndKeepsPendingEmpty()
   {
     string root = TemporaryRoot();
@@ -376,43 +427,81 @@ public sealed class WorkbenchProjectWiringTests
   {
     string root = TemporaryRoot();
     string projectPath = Path.Combine(root, "patched.vibp");
+    const string assetId = "0123456789abcdef0123456789abcdef";
+    byte[] asset = PngBytes(8, 6);
     try
     {
+      VibpMark mark = new()
+      {
+        Id = "mark-1", Tool = "image", AssetId = assetId,
+        Start = new() { X = 2, Y = 3 }, End = new() { X = 20, Y = 18 },
+      };
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1, Canvas = new() { Width = 64, Height = 48 },
+        Source = new() { MediaType = "image/png", Width = 64, Height = 48, Length = Source.Length },
+        Assets = [new() { Id = assetId, Width = 8, Height = 6, Length = asset.Length }],
+        State = new()
+        {
+          Rotation = 0, Marks = [mark],
+          Patches = [new() { Id = 1, X = 2, Y = 3, Width = 4, Height = 3, Length = Patch.Length }],
+        },
+      };
+      VibpProjectFile.Write(projectPath, manifest,
+      [
+        new("source.png", Source.Length, () => new MemoryStream(Source)),
+        new($"asset-{assetId}.png", asset.Length, () => new MemoryStream(asset)),
+        new("patch-1.png", Patch.Length, () => new MemoryStream(Patch)),
+      ]);
       using var broker = new WorkbenchResourceBroker(root);
       using var annotations = new WorkbenchAnnotationStore(root);
       using var store = new WorkbenchProjectStore();
-      var picker = new PickerStub { SavePath = projectPath };
-      await using var saver = CreateHandler(broker, annotations, store, root, picker);
-      Guid session = await EstablishSessionAsync(saver, WorkbenchRoute.ImageEdit);
-      (Guid contributeId, _) = await ContributeAsync(store);
-      Assert.Null((await saver.ExecuteAsync(
-        new SaveImageEditProjectCommand(contributeId, session, 0),
-        TestContext.Current.CancellationToken)).Error);
-
-      var openPicker = new PickerStub { OpenPath = projectPath };
-      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      var picker = new PickerStub { OpenPath = projectPath, SavePath = Path.Combine(root, "resaved.vibp") };
+      await using var opener = CreateHandler(broker, annotations, store, root, picker);
       Assert.Null((await opener.ExecuteAsync(
         new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken)).Error);
       WorkbenchImageOwner.ProjectOpenDescriptor pending = opener.CurrentProjectOpen!;
-      // ack 前：opener 发布的 patch PNG 在会话资源目录中恰一份。
       Assert.Single(PatchSessionFiles(root));
-      Assert.Equal(2, SourceSessionFiles(root).Length);
+      Assert.Single(pending.Assets);
 
       WorkbenchCommandOutcome ack = await opener.ExecuteAsync(
         new AckImageEditProjectOpenCommand(
           pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
-          pending.Binding.Generation),
-        TestContext.Current.CancellationToken);
-
+          pending.Binding.Generation), TestContext.Current.CancellationToken);
       Assert.Null(ack.Error);
-      // Web 已全部 decode 后 ack：补丁字节对宿主是死数据，成功切换后必须
-      // 回收；source（新会话输入）与 saver 输入不受影响。
       Assert.Empty(PatchSessionFiles(root));
-      Assert.Equal(2, SourceSessionFiles(root).Length);
-      // 已释放租约不可再经 broker 取回。
-      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(
-        async () => await broker.OpenAsync(
-          new Uri(pending.Patches[1].Url), TestContext.Current.CancellationToken));
+      Assert.Single(SourceSessionFiles(root));
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(pending.Patches[1].Url), TestContext.Current.CancellationToken));
+      await using (WorkbenchResourceResponse response = await broker.OpenAsync(
+        new Uri(pending.Assets[assetId].Url), TestContext.Current.CancellationToken))
+      {
+        using var bytes = new MemoryStream();
+        await response.Content.CopyToAsync(bytes, TestContext.Current.CancellationToken);
+        Assert.Equal(asset, bytes.ToArray());
+      }
+
+      Guid session = Guid.Parse(Assert.Single(ack.States.OfType<ImageEditWorkbenchState>())
+        .ScreenshotSession!.SessionId);
+      using var body = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(new
+      {
+        canvas = manifest.Canvas, state = new { rotation = 0, marks = new[] { mark }, patches = Array.Empty<object>() },
+        patches = new[] { new { id = 1, x = 2, y = 3, width = 4, height = 3, png = Convert.ToBase64String(Patch) } },
+      }, VibpProjectRules.ManifestJson));
+      WorkbenchProjectContributionLease lease = await store.UploadAsync(body, TestContext.Current.CancellationToken);
+      Assert.Null((await opener.ExecuteAsync(
+        new SaveImageEditProjectCommand(lease.ContributeId, session, 0),
+        TestContext.Current.CancellationToken)).Error);
+      VibpProjectArchive reopened = await VibpProjectFile.ReadAsync(
+        picker.SavePath!, Path.Combine(root, "reopened"), TestContext.Current.CancellationToken);
+      Assert.Equal(assetId, Assert.Single(reopened.Manifest.State.Marks).AssetId);
+      Assert.Equal(asset, File.ReadAllBytes(reopened.AssetPaths[assetId]));
+      Assert.Equal(Patch, File.ReadAllBytes(reopened.PatchPaths[1]));
+      Assert.Null((await opener.ExecuteAsync(
+        new CloseImageEditSessionCommand(), TestContext.Current.CancellationToken)).Error);
+      Assert.Empty(SourceSessionFiles(root));
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(async () =>
+        await broker.OpenAsync(new Uri(pending.Assets[assetId].Url), TestContext.Current.CancellationToken));
     }
     finally
     {

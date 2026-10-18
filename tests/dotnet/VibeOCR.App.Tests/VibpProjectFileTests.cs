@@ -129,6 +129,76 @@ public sealed class VibpProjectFileTests
     }
   }
 
+  [Theory]
+  [InlineData("mosaic", 0)]
+  [InlineData("mosaic", 1)]
+  [InlineData("mosaic", 2)]
+  [InlineData("blur", 0)]
+  [InlineData("blur", 1)]
+  [InlineData("blur", 2)]
+  public async Task RoundTripsRectangleAndBrushEffects(string tool, int pointCount)
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      VibpMark mark = new()
+      {
+        Id = "mark-1", Tool = tool,
+        Start = new VibpPoint { X = 1, Y = 2 },
+        End = new VibpPoint { X = 30, Y = 20 },
+        Points = pointCount == 0 ? null : new VibpPoint[]
+          { new() { X = 1, Y = 2 }, new() { X = 30, Y = 20 } }.Take(pointCount).ToArray(),
+        Style = new VibpMarkStyle { Intensity = 1.7, BrushSize = 42.5 },
+      };
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1, Canvas = new VibpCanvas { Width = 900, Height = 600 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png", Width = 64, Height = 48, Length = source.Length,
+        },
+        Assets = [], State = new VibpEditorState { Rotation = 0, Marks = [mark] },
+      };
+      string path = Path.Combine(directory, "effect.vibp");
+      VibpProjectEntry[] entries =
+        [new("source.png", source.Length, () => new MemoryStream(source))];
+      VibpProjectFile.Write(path, manifest, entries);
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        path, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      VibpMark restored = Assert.Single(archive.Manifest.State.Marks);
+      Assert.Equal(tool, restored.Tool);
+      Assert.Equal(mark.Style, restored.Style);
+      Assert.Equal(mark.Points, restored.Points);
+
+      if (pointCount > 0)
+      {
+        foreach (IReadOnlyList<VibpPoint> points in new IReadOnlyList<VibpPoint>[]
+        {
+          [],
+          [new() { X = double.NaN, Y = 2 }, new() { X = 3, Y = 4 }],
+          Enumerable.Repeat(new VibpPoint { X = 1, Y = 2 },
+            VibpProjectLimits.MaximumMarkPoints / 2 + 1).ToArray(),
+        })
+        {
+          var invalid = manifest with
+          {
+            State = manifest.State with
+            {
+              Marks = [mark with { Points = points }, mark with { Id = "mark-2", Points = points }],
+            },
+          };
+          Assert.Throws<VibpProjectFormatException>(() =>
+            VibpProjectFile.Write(path, invalid, entries));
+        }
+      }
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
   [Fact]
   public async Task RejectsGlobalDecompressedBudgetAcrossEntries()
   {

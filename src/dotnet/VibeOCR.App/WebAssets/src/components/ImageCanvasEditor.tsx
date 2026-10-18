@@ -647,6 +647,7 @@ interface ImageCanvasEditorProps {
   readonly systemImport?: EditorImportDescriptor;
   /** #233 工程恢复安装包：宿主 ack 成功切换后安装已准备数据。 */
   readonly projectInstall?: EditorProjectInstall;
+  readonly onProjectInstalled?: (token: string) => void;
   readonly autoText?: boolean;
   readonly showAutoTextPreference?: boolean;
   readonly onAutoTextChange?: (enabled: boolean) => void;
@@ -1048,6 +1049,7 @@ export function ImageCanvasEditor({
   textLayer,
   systemImport,
   projectInstall,
+  onProjectInstalled,
   autoText: autoTextProp,
   showAutoTextPreference = true,
   onAutoTextChange,
@@ -2347,8 +2349,9 @@ export function ImageCanvasEditor({
       setOperationMessage(
         "工程已恢复：对象/样式/修补/裁剪/旋转全部就位，可继续编辑。",
       );
+      onProjectInstalled?.(install.token);
     })();
-  }, [projectInstall, NO_SELECTION]);
+  }, [projectInstall, onProjectInstalled, NO_SELECTION]);
 
   /** 恢复后的稳定 id 计数推进：新对象不与恢复对象撞 id（含组/补丁）。 */
   function advanceProjectIdCounters(restored: EditorState) {

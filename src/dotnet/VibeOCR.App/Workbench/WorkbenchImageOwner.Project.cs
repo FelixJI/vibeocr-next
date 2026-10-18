@@ -63,7 +63,7 @@ internal sealed partial class WorkbenchImageOwner
     }
     operations.PublishTerminal(ImageEditState(
       false,
-      imageEditChannel.SessionId is null ? "recognition.ready" : SessionStatusCode(imageEditChannel)));
+      reason == "timeout" ? "imageEdit.projectOpenTimeout" : "imageEdit.projectOpenCancelled"));
   }
 
   /// <summary>Stop/销毁路径：取消 pending 并释放其资源（旧会话已由通道回收）。</summary>
@@ -329,7 +329,8 @@ internal sealed partial class WorkbenchImageOwner
       // 提交后通道已被替换：回收已承诺资源，当前通道语义保持。
       ReleaseDescriptorResources(descriptor);
       Volatile.Write(ref currentProjectOpen, null);
-      return CurrentImageEditState();
+      throw new WorkbenchProjectOpenConflictException(
+        "Project open acknowledgement no longer matches the current session.");
     }
     // 原子切换：释放旧会话/导入并安装恢复基准与资产（逻辑 frame 随
     // manifest/state 携带，不做坐标重投影）。
