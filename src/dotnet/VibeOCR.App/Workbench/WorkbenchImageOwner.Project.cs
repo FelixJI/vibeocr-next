@@ -322,6 +322,13 @@ internal sealed partial class WorkbenchImageOwner
           reference, assetId, (long)width * height, width, height, default);
       }
     }
+    // patch 在 ack 前提下已被 Web 全部 decode，宿主侧字节是死数据（合同：
+    // 确认后不重新依赖 TTL 读取已准备位图）：成功切换即释放文件与租约，
+    // 避免反复打开积累；source（新会话输入）与 assets 所有权不受影响。
+    foreach (WorkbenchResourceReference patch in descriptor.Patches.Values)
+    {
+      resources.ReleaseResource(patch);
+    }
     Volatile.Write(ref currentProjectOpen, null);
     return ImageEditState(false, "recognition.session");
   }

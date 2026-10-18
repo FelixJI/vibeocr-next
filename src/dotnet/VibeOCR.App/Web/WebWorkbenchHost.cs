@@ -691,6 +691,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         using Stream upload = args.Request.Content.AsStreamForRead();
         WorkbenchProjectContributionLease lease = await projectStore.UploadAsync(
           upload, lifetime.Token);
+        if (disposed)
+        {
+          // 与 /__annotation 对称的销毁竞态守卫：不向已分离 core 构造响应；
+          // store 代际已使在途贡献不可提交，此处再整体回收兜底。
+          projectStore.RevokeAll();
+          return;
+        }
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
           contributeId = lease.ContributeId.ToString("N"),

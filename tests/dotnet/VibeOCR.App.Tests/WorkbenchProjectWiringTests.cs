@@ -371,6 +371,84 @@ public sealed class WorkbenchProjectWiringTests
     }
   }
 
+  [Fact]
+  public async Task AckSuccessReleasesDecodedPatchResourcesButKeepsSourceAndAssets()
+  {
+    string root = TemporaryRoot();
+    string projectPath = Path.Combine(root, "patched.vibp");
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      using var store = new WorkbenchProjectStore();
+      var picker = new PickerStub { SavePath = projectPath };
+      await using var saver = CreateHandler(broker, annotations, store, root, picker);
+      Guid session = await EstablishSessionAsync(saver, WorkbenchRoute.ImageEdit);
+      (Guid contributeId, _) = await ContributeAsync(store);
+      Assert.Null((await saver.ExecuteAsync(
+        new SaveImageEditProjectCommand(contributeId, session, 0),
+        TestContext.Current.CancellationToken)).Error);
+
+      var openPicker = new PickerStub { OpenPath = projectPath };
+      await using var opener = CreateHandler(broker, annotations, store, root, openPicker);
+      Assert.Null((await opener.ExecuteAsync(
+        new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken)).Error);
+      WorkbenchImageOwner.ProjectOpenDescriptor pending = opener.CurrentProjectOpen!;
+      // ack 前：opener 发布的 patch PNG 在会话资源目录中恰一份。
+      Assert.Single(PatchSessionFiles(root));
+      Assert.Equal(2, SourceSessionFiles(root).Length);
+
+      WorkbenchCommandOutcome ack = await opener.ExecuteAsync(
+        new AckImageEditProjectOpenCommand(
+          pending.PendingId, pending.Binding.SessionId, pending.Binding.Revision,
+          pending.Binding.Generation),
+        TestContext.Current.CancellationToken);
+
+      Assert.Null(ack.Error);
+      // Web 已全部 decode 后 ack：补丁字节对宿主是死数据，成功切换后必须
+      // 回收；source（新会话输入）与 saver 输入不受影响。
+      Assert.Empty(PatchSessionFiles(root));
+      Assert.Equal(2, SourceSessionFiles(root).Length);
+      // 已释放租约不可再经 broker 取回。
+      await Assert.ThrowsAnyAsync<WorkbenchResourceAccessException>(
+        async () => await broker.OpenAsync(
+          new Uri(pending.Patches[1].Url), TestContext.Current.CancellationToken));
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task DisposeDuringInFlightProjectUploadLeavesNothingStaged()
+  {
+    // /__project 销毁竞态的定向风险测试：host DisposeAsync→store.RevokeAll
+    // 与在途上传的代际竞争不在销毁后残留贡献/响应（响应构造见 annotation
+    // 对称守卫，需 core，不在无 GUI 阶段驱动）。
+    using var store = new WorkbenchProjectStore();
+    GatedJsonStream stream = new(
+      "{\"canvas\":{\"width\":8,\"height\":8},\"state\":{\"rotation\":0,\"marks\":[]},\"patches\":[]}");
+    Task upload = Task.Run(() => store.UploadAsync(stream, TestContext.Current.CancellationToken));
+    await stream.ReadStarted.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+    store.Dispose();
+    stream.Unblock();
+
+    await Assert.ThrowsAnyAsync<Exception>(() => upload);
+    Assert.Equal((0, null), store.Staged);
+  }
+
+  /// <summary>会话资源目录中与补丁内容一致的字节数。</summary>
+  private static string[] PatchSessionFiles(string root)
+  {
+    string directory = Path.Combine(root, "session");
+    if (!Directory.Exists(directory)) return [];
+    return Directory.GetFiles(directory)
+      .Where(file => File.ReadAllBytes(file).SequenceEqual(Patch))
+      .ToArray();
+  }
+
   /// <summary>会话资源目录中与源图内容一致的字节数（内容比对，不依赖 token 命名）。</summary>
   private static string[] SourceSessionFiles(string root)
   {
@@ -379,6 +457,60 @@ public sealed class WorkbenchProjectWiringTests
     return Directory.GetFiles(directory)
       .Where(file => File.ReadAllBytes(file).SequenceEqual(Source))
       .ToArray();
+  }
+
+  /// <summary>首读阻塞的门控流：驱动销毁与在途上传的代际竞争。</summary>
+  private sealed class GatedJsonStream(string json) : Stream
+  {
+    private readonly TaskCompletionSource readStarted = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource unblock = new(
+      TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly byte[] content = System.Text.Encoding.UTF8.GetBytes(json);
+    private int position;
+
+    public Task ReadStarted => readStarted.Task;
+
+    public void Unblock() => unblock.TrySetResult();
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => content.LongLength;
+
+    public override long Position
+    {
+      get => position;
+      set => throw new NotSupportedException();
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override async ValueTask<int> ReadAsync(
+      Memory<byte> buffer,
+      CancellationToken cancellationToken = default)
+    {
+      readStarted.TrySetResult();
+      await unblock.Task.WaitAsync(cancellationToken);
+      int count = Math.Min(buffer.Length, content.Length - position);
+      content.AsSpan(position, count).CopyTo(buffer.Span);
+      position += count;
+      return count;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) =>
+      throw new NotSupportedException();
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
   }
 
   private static string TemporaryRoot()
