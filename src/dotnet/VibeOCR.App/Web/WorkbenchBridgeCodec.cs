@@ -1611,6 +1611,20 @@ public static class WorkbenchBridgeCodec
     }).ToArray(),
   };
 
+  /// <summary>#233 pending 工程打开投影：仅绑定与受控引用，与 bootstrap
+  /// 直接序列化 record 的线形状一致（camelCase 同策略）。</summary>
+  private static object SerializeProjectOpenState(WorkbenchProjectOpenState projectOpen) => new
+  {
+    projectOpen.PendingId,
+    projectOpen.SessionId,
+    projectOpen.Revision,
+    projectOpen.Generation,
+    manifest = projectOpen.Manifest,
+    source = projectOpen.Source,
+    assets = projectOpen.Assets ?? [],
+    patches = projectOpen.Patches ?? [],
+  };
+
   private static object? SerializeWorkbenchState(WorkbenchState? state) => state switch
   {
     ShellWorkbenchState shell => new { route = FormatRoute(shell.Route) },
@@ -1644,6 +1658,7 @@ public static class WorkbenchBridgeCodec
       },
       import = imageEdit.Import is null ? null : SerializeImportState(imageEdit.Import),
       importError = imageEdit.ImportError,
+      projectOpen = imageEdit.ProjectOpen is null ? null : SerializeProjectOpenState(imageEdit.ProjectOpen),
     },
     RecognitionWorkbenchState recognition => new
     {

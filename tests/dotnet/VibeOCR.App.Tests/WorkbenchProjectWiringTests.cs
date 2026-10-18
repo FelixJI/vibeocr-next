@@ -479,6 +479,13 @@ public sealed class WorkbenchProjectWiringTests
         new WorkbenchStateEnvelope(1, "imageEdit", WorkbenchStateChange.Replace,
           new ImageEditWorkbenchState(false, "recognition.session", ProjectOpen: projection)));
       Assert.True(System.Text.Encoding.UTF8.GetByteCount(frame) <= WorkbenchBridgeCodec.MaxMessageBytes);
+      // 事件帧必须真正携带 projectOpen（含绑定与全部受控引用，含 manifest URL）。
+      Assert.Contains("\"projectOpen\":{", frame);
+      Assert.Contains($"\"pendingId\":\"{projection.PendingId}\"", frame);
+      Assert.Contains($"\"sessionId\":\"{projection.SessionId}\"", frame);
+      Assert.Contains(projection.Manifest.Url, frame);
+      Assert.Contains(projection.Source.Url, frame);
+      Assert.Contains(projection.Patches.Single().Resource.Url, frame);
 
       // manifest 经受控 GET 可读且为同一严格 v1 语义（非第二真源）。
       byte[] manifestBytes;
@@ -575,6 +582,9 @@ public sealed class WorkbenchProjectWiringTests
         new WorkbenchStateEnvelope(1, "imageEdit", WorkbenchStateChange.Replace,
           new ImageEditWorkbenchState(false, "recognition.session", ProjectOpen: projection)));
       Assert.True(System.Text.Encoding.UTF8.GetByteCount(frame) <= WorkbenchBridgeCodec.MaxMessageBytes);
+      // 大清单工程的事件帧同样必须携带 projectOpen 与 manifest URL。
+      Assert.Contains("\"projectOpen\":{", frame);
+      Assert.Contains(projection.Manifest.Url, frame);
 
       byte[] manifestBytes;
       await using (WorkbenchResourceResponse response = await broker.OpenAsync(
