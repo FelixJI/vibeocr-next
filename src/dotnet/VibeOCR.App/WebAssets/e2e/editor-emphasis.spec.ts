@@ -1235,3 +1235,208 @@ test("F6 eraser: hit objects vanish from drag preview immediately", async ({
     3,
   );
 });
+
+test("G1 eraser Escape restores pixels before pointerup without switching tools", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "遮挡");
+  await drag(page, 100, 100, 180, 160);
+  await drag(page, 300, 100, 380, 160);
+  const before = await save(page, uploads);
+  await action(page, "橡皮擦");
+  const from = await at(page, 140, 130);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  const erased = await previewPixels(page, [[140, 130]]);
+  expect(erased[0]![0]).toBeGreaterThan(30);
+  await page.keyboard.press("Escape");
+  // 不切工具，不触发工具按钮里的 cancelDrawing。
+  const cancelled = await previewPixels(page, [[140, 130]]);
+  expect(cancelled[0]!.slice(0, 3)).toEqual([0, 0, 0]);
+  await page.mouse.up();
+  expect(await pixelDifference(page, before, await save(page, uploads))).toBe(
+    0,
+  );
+  await action(page, "撤销");
+  await expect(page.getByLabel("选择标注对象").locator("option")).toHaveCount(
+    2,
+  );
+});
+
+test("G1 spotlight Escape clears pending region and adds no history", async ({
+  page,
+}) => {
+  const { uploads, projects } = await setup(page);
+  await action(page, "聚光灯");
+  await drag(page, 100, 100, 200, 200);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "1 · 聚光灯" });
+  const before = await previewPixels(page, [
+    [500, 250],
+    [600, 300],
+  ]);
+  await action(page, "添加区域");
+  const from = await at(page, 500, 250);
+  const to = await at(page, 600, 350);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y);
+  await page.keyboard.press("Escape");
+  expect(
+    await previewPixels(page, [
+      [500, 250],
+      [600, 300],
+    ]),
+  ).toEqual(before);
+  await page.mouse.up();
+  // Esc 后继续在空白框选，旧“添加区域”目标也不能复活。
+  await drag(page, 500, 250, 600, 350);
+  await action(page, "保存工程");
+  await expect.poll(() => projects.length).toBe(1);
+  const body = projects[0] as { state: { marks: { regions?: unknown[] }[] } };
+  expect(body.state.marks[0]!.regions).toHaveLength(1);
+  await action(page, "撤销");
+  await action(page, "保存工程");
+  await expect.poll(() => projects.length).toBe(2);
+  expect(
+    (projects[1] as { state: { marks: unknown[] } }).state.marks,
+  ).toHaveLength(0);
+  const png = await save(page, uploads);
+  expect((await pixels(page, png, [[450, 300]]))[0]![0]).toBeGreaterThan(120);
+});
+
+test("G2 spotlight mask is bounded spatially and follows object z-order", async ({
+  page,
+}, info) => {
+  const { uploads } = await setup(page);
+  await action(page, "矩形");
+  await page.getByLabel("填充", { exact: true }).check();
+  await page.getByLabel("填充不透明度", { exact: true }).fill("100");
+  await page.getByLabel("填充不透明度", { exact: true }).press("Enter");
+  await drag(page, 100, 100, 250, 200);
+  const annotation = await pixels(page, await save(page, uploads), [
+    [150, 150],
+  ]);
+  await action(page, "聚光灯");
+  await drag(page, 600, 400, 700, 500);
+  await expect(
+    page.getByText("遮罩限定底图范围，按对象层级叠加", { exact: true }),
+  ).toBeVisible();
+  const over = await pixels(page, await save(page, uploads), [[150, 150]]);
+  for (let channel = 0; channel < 3; channel += 1)
+    expect(
+      Math.abs(over[0]![channel]! - annotation[0]![channel]! * 0.45),
+    ).toBeLessThanOrEqual(1);
+  await action(page, "选择");
+  await page.getByLabel("选择标注对象").selectOption({ label: "2 · 聚光灯" });
+  await action(page, "下移一层");
+  const below = await save(page, uploads);
+  expect((await pixels(page, below, [[150, 150]]))[0]).toEqual(annotation[0]);
+  await action(page, "撤销");
+  expect(
+    (await pixels(page, await save(page, uploads), [[150, 150]]))[0],
+  ).toEqual(over[0]);
+  await page.screenshot({ path: info.outputPath("spotlight-z-order.png") });
+});
+
+test("G3 watermark opacity typed then drawn directly controls the first text pixels", async ({
+  page,
+}) => {
+  const { uploads, projects } = await setup(page, {
+    svg: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600"><rect width="900" height="600" fill="#ffffff"/></svg>',
+  });
+  await action(page, "文字");
+  await page.getByLabel("水印不透明度").fill("37");
+  // 直接按画布开始首个文字；不手动 Enter、Tab 或 blur。
+  await drag(page, 100, 400, 420, 470);
+  const png = await save(page, uploads);
+  const probes: [number, number][] = [];
+  for (let y = 400; y < 500; y += 1)
+    for (let x = 100; x < 180; x += 1) probes.push([x, y]);
+  const glyph = await pixels(page, png, probes);
+  expect(
+    Math.abs(Math.min(...glyph.map((pixel) => pixel[1]!)) - 212),
+  ).toBeLessThanOrEqual(2);
+  expect(
+    Math.abs(Math.min(...glyph.map((pixel) => pixel[2]!)) - 180),
+  ).toBeLessThanOrEqual(2);
+  await action(page, "保存工程");
+  await expect.poll(() => projects.length).toBe(1);
+  expect(
+    (
+      projects[0] as {
+        state: { marks: { style: { strokeOpacity: number } }[] };
+      }
+    ).state.marks[0]!.style.strokeOpacity,
+  ).toBe(37);
+});
+
+for (const axis of ["horizontal", "vertical"] as const) {
+  const to = axis === "horizontal" ? [350, 300] : [300, 350];
+  test(`G4 ${axis} spotlight creation is ignored without history`, async ({
+    page,
+  }) => {
+    const { uploads, projects } = await setup(page);
+    const pristine = await save(page, uploads);
+    await action(page, "遮挡");
+    await drag(page, 100, 100, 180, 160);
+    await action(page, "聚光灯");
+    await drag(page, 300, 300, to[0]!, to[1]!);
+    await action(page, "保存工程");
+    await expect.poll(() => projects.length).toBe(1);
+    expect(
+      (projects[0] as { state: { marks: unknown[] } }).state.marks,
+    ).toHaveLength(1);
+    await action(page, "撤销");
+    expect(
+      await pixelDifference(page, pristine, await save(page, uploads)),
+    ).toBe(0);
+  });
+  test(`G4 ${axis} spotlight region adds no unchanged history`, async ({
+    page,
+  }) => {
+    const { projects } = await setup(page);
+    await action(page, "聚光灯");
+    await drag(page, 100, 100, 200, 200);
+    await action(page, "选择");
+    await page.getByLabel("选择标注对象").selectOption({ label: "1 · 聚光灯" });
+    await action(page, "添加区域");
+    await drag(page, 300, 300, to[0]!, to[1]!);
+    await action(page, "撤销");
+    await action(page, "保存工程");
+    await expect.poll(() => projects.length).toBe(1);
+    expect(
+      (projects[0] as { state: { marks: unknown[] } }).state.marks,
+    ).toHaveLength(0);
+  });
+}
+
+for (const zoom of [4, 8]) {
+  test(`F7 magnifier ${zoom}x draft and final sample identical off-center pixels`, async ({
+    page,
+  }) => {
+    const { uploads } = await setup(page);
+    await action(page, "放大镜");
+    await page.getByLabel("放大镜倍率").selectOption(String(zoom));
+    const from = await at(page, 300, 150);
+    const to = await at(page, 700, 350);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x, to.y);
+    const points: [number, number][] = [
+      [400, 250],
+      [650, 250],
+    ];
+    const draft = await previewPixels(page, points);
+    expect(Math.abs(draft[0]![0] - gray(500 - 100 / zoom))).toBeLessThanOrEqual(
+      2,
+    );
+    expect(Math.abs(draft[1]![0] - gray(500 + 150 / zoom))).toBeLessThanOrEqual(
+      2,
+    );
+    await page.mouse.up();
+    const exported = await pixels(page, await save(page, uploads), points);
+    expect(exported).toEqual(draft);
+  });
+}

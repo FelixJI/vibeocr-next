@@ -221,6 +221,8 @@ type StyleChange =
 const EMPTY: EditorState = { rotation: 0, marks: [] };
 const DEFAULT_COLOR = "#f38b35";
 
+// 沿用标注手势的8px阈值；聚光灯孔洞的两个维度都须有效。
+const MIN_DRAW_DISTANCE = 8;
 const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   select: "选择",
   hand: "手形",
@@ -4343,6 +4345,9 @@ export function ImageCanvasEditor({
           ? { points: draftPoints.current }
           : {}),
         style: currentStyle(),
+        ...(tool === "magnifier"
+          ? { zoom: activeToolAttributes.magnifierZoom }
+          : {}),
         ...(["text", "callout"].includes(tool)
           ? { text: annotationText.trim() || "文本" }
           : {}),
@@ -4392,13 +4397,14 @@ export function ImageCanvasEditor({
       updateSpotlightRegionDraft(undefined);
       const targetId = spotlightRegionTarget;
       setSpotlightRegionTarget(undefined);
+      const region = normalizedRect({ start: regionDraft.start, end });
       const target = state.marks.find((mark) => mark.id === targetId);
       if (
         target &&
         target.tool === "spotlight" &&
         !target.locked &&
-        Math.hypot(end.x - regionDraft.start.x, end.y - regionDraft.start.y) >=
-          8
+        region.width >= MIN_DRAW_DISTANCE &&
+        region.height >= MIN_DRAW_DISTANCE
       ) {
         const regions = spotlightRegionsOf(target);
         if (regions.length >= SPOTLIGHT_MAX_REGIONS) {
@@ -4407,10 +4413,7 @@ export function ImageCanvasEditor({
           );
           return;
         }
-        const next = withSpotlightRegions(target, [
-          ...regions,
-          normalizedRect(regionDraft),
-        ]);
+        const next = withSpotlightRegions(target, [...regions, region]);
         if (
           next &&
           commit({
@@ -4573,7 +4576,7 @@ export function ImageCanvasEditor({
         const points = [...(draft.points ?? [])];
         const last = points[points.length - 1];
         if (
-          Math.hypot(end.x - start.x, end.y - start.y) >= 8 &&
+          Math.hypot(end.x - start.x, end.y - start.y) >= MIN_DRAW_DISTANCE &&
           (!last || Math.hypot(end.x - last.x, end.y - last.y) >= 3)
         ) {
           points.push(end);
@@ -4662,7 +4665,7 @@ export function ImageCanvasEditor({
         pendingMaskFrame.current = undefined;
         return;
       }
-      if (Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+      if (Math.hypot(end.x - start.x, end.y - start.y) >= MIN_DRAW_DISTANCE) {
         const selection = {
           start: {
             x: Math.min(start.x, end.x),
@@ -4683,7 +4686,10 @@ export function ImageCanvasEditor({
       const draft = dupmatchDraft.current;
       dupmatchDraft.current = undefined;
       scheduleDraw();
-      if (draft && Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+      if (
+        draft &&
+        Math.hypot(end.x - start.x, end.y - start.y) >= MIN_DRAW_DISTANCE
+      ) {
         const selection = {
           start: {
             x: Math.min(start.x, end.x),
@@ -4702,7 +4708,18 @@ export function ImageCanvasEditor({
       }
       return;
     }
-    if (tool === "text" || Math.hypot(end.x - start.x, end.y - start.y) >= 8) {
+    if (
+      tool === "text" ||
+      Math.hypot(end.x - start.x, end.y - start.y) >= MIN_DRAW_DISTANCE
+    ) {
+      const spotlightBox =
+        tool === "spotlight" ? normalizedRect({ start, end }) : undefined;
+      if (
+        spotlightBox &&
+        (spotlightBox.width < MIN_DRAW_DISTANCE ||
+          spotlightBox.height < MIN_DRAW_DISTANCE)
+      )
+        return;
       let createdId: string | undefined;
       if (tool === "crop") {
         if (!commit({ ...state, crop: { start, end } })) return;
@@ -4728,9 +4745,7 @@ export function ImageCanvasEditor({
             ? constrainLineDrag(start, end, event.shiftKey)
             : end;
         createdId = draft?.id ?? nextMarkId();
-        // 聚光灯首个区域 = 归一化拖拽矩形；放大镜冻结当前倍率。
-        const spotlightBox =
-          tool === "spotlight" ? normalizedRect({ start, end }) : undefined;
+        // 聚光灯首个区域 = 有效二维矩形；放大镜沿用手势冻结的倍率。
         if (
           !commit({
             ...state,
@@ -4755,7 +4770,7 @@ export function ImageCanvasEditor({
                 style: draft?.style ?? currentStyle(),
                 ...(spotlightBox ? { regions: [spotlightBox] } : {}),
                 ...(tool === "magnifier"
-                  ? { zoom: activeToolAttributes.magnifierZoom }
+                  ? { zoom: draft?.zoom ?? activeToolAttributes.magnifierZoom }
                   : {}),
                 ...(tool === "text"
                   ? { textWidth: Math.abs(end.x - start.x) }
@@ -6201,7 +6216,7 @@ export function ImageCanvasEditor({
             </option>
           ))}
         </Select>
-        <span aria-hidden="true">遮罩仅底图；重叠不加深</span>
+        <span aria-hidden="true">遮罩限定底图范围，按对象层级叠加</span>
       </label>
     );
   // 聚光灯添加区域：下一次拖拽把新孔洞提交进选中对象（一次历史）。
@@ -7485,8 +7500,8 @@ export function ImageCanvasEditor({
       <p className="editor-guidance">
         {toolset === "full"
           ? captureStyle
-            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；聚光灯一对象多区域强调（选中后可添加区域、拖手柄编辑、Alt+点击删区域），放大镜采样底图与已应用的修补；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
-            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。选择工具下可 Ctrl+点击增减选择、空白拖动框选（完整包含）、Ctrl+A 全选，上排提供复制/粘贴/重复、层级、对齐等距、组合/锁定与旋转/镜像/缩放；方向键微移、Delete 删除。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；聚光灯拖拽创建多区域强调（选中后“添加区域”新增孔洞、拖八点手柄编辑单区域、Alt+点击删除区域，整对象可移动/撤销），放大镜为可移动导出对象（采样底图与已应用的修补，不采样标注），橡皮擦一次拖动擦除命中未锁定对象（整次一次撤销）；文字/图片对象可调不透明度作水印。效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            ? "拖拽绘制标注；拖动选区四边与四角可调整裁剪范围。矩形/椭圆选中后可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置。按住 Shift 约束正方形/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；聚光灯在底图范围内按对象层级叠加，一对象多区域强调（选中后可添加区域、拖手柄编辑、Alt+点击删区域），放大镜采样底图与已应用的修补；效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
+            : "拖拽绘制或裁剪；选择标注后可拖动，矩形/椭圆可拖八点手柄缩放，直线/箭头/说明可拖端点；文字可双击继续编辑，上排完成或取消。说明从指向位置拖到文字位置；已提交裁剪框的四边/四角可继续拖拽调整。按住 Shift 约束正方/正圆/45°，按住 Alt 以起点为中心绘制；折线单击加点、双击或 Enter 完成，Esc 放弃草稿。手形或按住 Space 可平移；滚轮可调线宽。选择工具下可 Ctrl+点击增减选择、空白拖动框选（完整包含）、Ctrl+A 全选，上排提供复制/粘贴/重复、层级、对齐等距、组合/锁定与旋转/镜像/缩放；方向键微移、Delete 删除。马赛克/模糊支持矩形与笔刷，强度连续可调（兼容旧弱/中/强档位），选中已绘区域可再调强度；遮挡为纯色不透明像素，与屏蔽区（仅识别输入）分开；聚光灯在底图范围内按对象层级叠加，拖拽创建多区域强调（选中后“添加区域”新增孔洞、拖八点手柄编辑单区域、Alt+点击删除区域，整对象可移动/撤销），放大镜为可移动导出对象（采样底图与已应用的修补，不采样标注），橡皮擦一次拖动擦除命中未锁定对象（整次一次撤销）；文字/图片对象可调不透明度作水印。效果写入复制、保存副本及显式识别输入；画面缩放不改变内容。"
           : "拖拽框选“屏蔽”区，识别时忽略其中内容；“去水印”先框选、预览修补再应用；旋转调整整图方向。按住 Space 可平移，画面缩放不改变内容。"}
       </p>
       {tool === "inpaint" && (
@@ -7764,16 +7779,8 @@ export function ImageCanvasEditor({
               event.preventDefault();
               deleteSelection();
             } else if (event.key === "Escape") {
-              dragStart.current = undefined;
-              setDraftMark(undefined);
-              setCropDraft(undefined);
-              setInpaintDraft(undefined);
+              cancelDrawing();
               select(undefined);
-              markDragRef.current = undefined;
-              cropResizeRef.current = undefined;
-              moveDragRef.current = undefined;
-              marqueeRef.current = undefined;
-              setObjectDraft(undefined);
               setTool("select");
             }
           }}
@@ -7797,7 +7804,7 @@ export function ImageCanvasEditor({
               input instanceof HTMLInputElement &&
               input.closest(".canvas-editor") ===
                 event.currentTarget.closest(".canvas-editor") &&
-              ["边框不透明度", "填充不透明度"].includes(
+              ["边框不透明度", "填充不透明度", "水印不透明度"].includes(
                 input.getAttribute("aria-label") ?? "",
               )
             ) {
