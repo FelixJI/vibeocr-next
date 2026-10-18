@@ -350,8 +350,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
+    string? historyKey = recognitionChannel.HistoryCaptureKey;
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
-    RecordHistorySnapshot(recognitionChannel, annotation.Path);
+    await RecordHistorySnapshotAsync(recognitionChannel, annotation, historyKey, cancellationToken);
     return CurrentRecognitionState();
   }
 
@@ -361,11 +362,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
+    string? historyKey = recognitionChannel.HistoryCaptureKey;
     if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
     }
-    RecordHistorySnapshot(recognitionChannel, annotation.Path);
+    await RecordHistorySnapshotAsync(recognitionChannel, annotation, historyKey, cancellationToken);
     return CurrentRecognitionState();
   }
 
@@ -375,8 +377,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
+    string? historyKey = imageEditChannel.HistoryCaptureKey;
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
-    RecordHistorySnapshot(imageEditChannel, annotation.Path);
+    await RecordHistorySnapshotAsync(imageEditChannel, annotation, historyKey, cancellationToken);
     return CurrentImageEditState();
   }
 
@@ -386,11 +389,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     using WorkbenchAnnotationFile annotation = annotationStore.Take(
       new Uri(command.ResourceUri));
+    string? historyKey = imageEditChannel.HistoryCaptureKey;
     if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
     }
-    RecordHistorySnapshot(imageEditChannel, annotation.Path);
+    await RecordHistorySnapshotAsync(imageEditChannel, annotation, historyKey, cancellationToken);
     return CurrentImageEditState();
   }
 
@@ -1257,10 +1261,16 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
             return;
           }
 
+          Guid captureSession = Guid.NewGuid();
+          if (!await RecordCapturedHistoryAsync(captureSession.ToString("N"), captured, generation, cancellationToken))
+          {
+            resources.ReleaseResource(input);
+            return;
+          }
           ClearScreenshotSession(recognitionChannel);
           InvalidateScreenshotTextLayer(recognitionChannel);
           ClearResultActions();
-          recognitionChannel.SessionId = Guid.NewGuid();
+          recognitionChannel.SessionId = captureSession;
           recognitionChannel.Revision = 0;
           recognitionChannel.TextSelectionRequested = textSelectionRequested;
           recognitionChannel.SceneEditing = true;
@@ -1270,8 +1280,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           publishedSession = true;
           ReleaseCaptureGuard();
           // #238 截图历史：会话确立即录入（含未钉图；未启用为 no-op）。
-          recognitionChannel.HistoryCaptureKey = recognitionChannel.SessionId!.Value.ToString("N");
-          RecordPinHistory(recognitionChannel.HistoryCaptureKey, captured.Data);
+          recognitionChannel.HistoryCaptureKey = captureSession.ToString("N");
           operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.session"));
         }
         else
@@ -1466,6 +1475,14 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         viewModel => viewModel.RecognizeCapturedInputAsync(input, cancellationToken),
         generation,
         cancellationToken);
+      // 动作栏直接识别不经过 CompleteRecognitionAsync，也须记录成功截图。
+      if (state.Result is not null && generation == Volatile.Read(ref recognitionChannel.Generation))
+      {
+        recognitionChannel.HistoryCaptureKey = Guid.NewGuid().ToString("N");
+        if (!await RecordCapturedHistoryAsync(recognitionChannel.HistoryCaptureKey, input, generation, cancellationToken)) return;
+        if (RecognitionVm.Result is { } recognized)
+          EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
+      }
       // typed 意图在显式识别链路中的终态由调用方按代际发布。
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
@@ -1647,8 +1664,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     // 不回写旧会话状态。
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+    string? historyKey = channel.HistoryCaptureKey;
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
-    RecordHistorySnapshot(channel, annotation.Path);
+    await RecordHistorySnapshotAsync(channel, annotation, historyKey, cancellationToken);
     return CurrentChannelState(channel);
   }
 
@@ -1661,11 +1679,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     // 出口只回报当前投影，不回写旧会话状态。
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
+    string? historyKey = channel.HistoryCaptureKey;
     if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
     {
       throw new AnnotatedImageOperationCancelledException();
     }
-    RecordHistorySnapshot(channel, annotation.Path);
+    await RecordHistorySnapshotAsync(channel, annotation, historyKey, cancellationToken);
     return CurrentChannelState(channel);
   }
 
@@ -2723,7 +2742,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           recognitionChannel.SessionId is { } captureSession && RecognitionVm.CurrentInput is { } captured)
         {
           recognitionChannel.HistoryCaptureKey = captureSession.ToString("N");
-          RecordPinHistory(recognitionChannel.HistoryCaptureKey, captured.Data);
+          if (!await RecordCapturedHistoryAsync(recognitionChannel.HistoryCaptureKey, captured, generation, cancellationToken)) return;
           if (RecognitionVm.Result is { } recognized)
             EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
         }

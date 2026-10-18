@@ -192,6 +192,11 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     }
   }
 
+  public void ReportRecordingFailure(string message)
+  {
+    lock (gate) lastError = message;
+  }
+
   public void EnrichRecognizedText(string captureKey, string text)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(captureKey);

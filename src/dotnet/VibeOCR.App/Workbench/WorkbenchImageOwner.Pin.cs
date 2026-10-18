@@ -1,4 +1,7 @@
 using System.Text.Json;
+using VibeOCR.App.Features.QrCode;
+using VibeOCR.App.Features.Recognition;
+using Windows.Graphics.Imaging;
 using VibeOCR.App.Web;
 
 namespace VibeOCR.App.Workbench;
@@ -45,6 +48,9 @@ internal interface IPinHistoryRecorder
 
   /// <summary>成功截图录入（best-effort：任何存储失败只丢条目不抛出）。</summary>
   void RecordSuccessfulCapture(string captureKey, byte[] png);
+
+  /// <summary>捕获图归一化失败：只更新历史提示，不回滚成功截图。</summary>
+  void ReportRecordingFailure(string message);
 
   /// <summary>用已有识别/取字文本充实条目（无自动 OCR；仅覆盖空文本）。</summary>
   void EnrichRecognizedText(string captureKey, string text);
@@ -371,15 +377,59 @@ internal sealed partial class WorkbenchImageOwner
     { VibeOCR.App.Services.AppLog.Warn($"History OCR text persistence failed: {error.Message}"); }
   }
 
-  private void RecordHistorySnapshot(ImageSessionChannel channel, string path)
+  private Task<bool> RecordCapturedHistoryAsync(
+    string captureKey, RecognitionInput input, long generation, CancellationToken cancellationToken) =>
+    RecordHistoryImageAsync(captureKey, input.Data, input.MediaType,
+      () => generation == Volatile.Read(ref recognitionChannel.Generation), cancellationToken);
+
+  private async Task<bool> RecordHistoryImageAsync(
+    string captureKey, byte[] data, string mediaType, Func<bool> isCurrent,
+    CancellationToken cancellationToken)
   {
-    if (channel.HistoryCaptureKey is not { } key || pinHistory?.IsEnabled != true) return;
-    try { RecordPinHistory(key, File.ReadAllBytes(path)); }
-    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-    { VibeOCR.App.Services.AppLog.Warn($"Screenshot history read failed: {error.Message}"); }
+    bool Current() => !cancellationToken.IsCancellationRequested && isCurrent();
+    if (!Current()) return false;
+    if (pinHistory?.IsEnabled != true) return true;
+    try
+    {
+      // 仅归一化历史副本；OCR/编辑保留原始捕获 BMP，普通复制/保存
+      // 保留用户选择的 JPEG 字节。
+      byte[] png = mediaType == "image/png" ? data :
+        await QrCodeSavePlatform.EncodeImageAsync(data, BitmapEncoder.PngEncoderId, cancellationToken);
+      if (!Current()) return false;
+      RecordPinHistory(captureKey, png);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return false; }
+    catch (Exception error)
+    {
+      if (!Current()) return false;
+      ReportHistoryFailure(error);
+    }
+    return Current();
   }
 
-  /// <summary>成功截图录入：两处捕获完成点调用（编辑会话/本地输出）。</summary>
+  private void ReportHistoryFailure(Exception error)
+  {
+    pinHistory?.ReportRecordingFailure($"截图已成功，但历史保存失败：{error.Message}");
+    operations.Publish(PinEditState(false, "pinEdit.historyUpdated"));
+    VibeOCR.App.Services.AppLog.Warn($"Screenshot history recording failed: {error.Message}");
+  }
+
+  private async Task RecordHistorySnapshotAsync(
+    ImageSessionChannel channel, WorkbenchAnnotationFile image, string? captureKey, CancellationToken cancellationToken)
+  {
+    bool Current() => captureKey is not null && channel.HistoryCaptureKey == captureKey;
+    if (!Current() || pinHistory?.IsEnabled != true) return;
+    try
+    {
+      byte[] data = await File.ReadAllBytesAsync(image.Path, cancellationToken);
+      await RecordHistoryImageAsync(captureKey!, data, image.MediaType, Current, cancellationToken);
+    }
+    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    { if (Current()) ReportHistoryFailure(error); }
+  }
+
+  /// <summary>统一 PNG 历史录入：捕获归一化与成功输出复用同一去重存储。</summary>
   private void RecordPinHistory(string captureKey, byte[] png)
   {
     if (pinHistory?.IsEnabled != true)
