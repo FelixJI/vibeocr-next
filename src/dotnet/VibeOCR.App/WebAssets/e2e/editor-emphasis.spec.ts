@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   expectCommand,
   mountHost,
+  readyImageRecognitionModes,
   sendState,
   snapshot,
 } from "./workbench-host";
@@ -1440,3 +1441,782 @@ for (const zoom of [4, 8]) {
     expect(exported).toEqual(draft);
   });
 }
+
+test("H1 spotlight drag preview moves regions in lockstep with commit", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "聚光灯");
+  await drag(page, 200, 100, 360, 220);
+  await action(page, "选择");
+  await drag(page, 280, 160, 281, 161);
+  await action(page, "添加区域");
+  await drag(page, 320, 140, 480, 260);
+  await action(page, "选择");
+  await drag(page, 280, 160, 281, 161);
+  // 按住对象整体拖动 (+80,+80)：拖拽中的预览孔洞必须与松开后提交一致。
+  const from = await at(page, 280, 160);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  const to = await at(page, 360, 240);
+  await page.mouse.move(to.x, to.y);
+  await page.waitForTimeout(200);
+  // 拖拽中在 (350,270)（平移后孔洞 1 内部、原并集外）必须透出原始渐变
+  // gray(350)=99；未修复时预览 regions 不动，此处仍被压暗（≈45）。
+  const midDrag = await previewPixels(page, [
+    [350, 270],
+    [280, 160],
+  ]);
+  expect(
+    Math.abs(midDrag[0]![0] - Math.round((350 / 900) * 255)),
+  ).toBeLessThanOrEqual(6);
+  // 原孔洞 1 中心随对象离开：拖拽中已压暗。
+  expect(midDrag[1]![0]).toBeLessThan(60);
+  await page.mouse.up();
+  // 提交后导出与拖拽预览同几何。
+  const png = await save(page, uploads);
+  const exported = await pixels(page, png, [
+    [350, 270],
+    [280, 160],
+  ]);
+  expect(
+    Math.abs(exported[0]![0] - Math.round((350 / 900) * 255)),
+  ).toBeLessThanOrEqual(6);
+  expect(exported[1]![0]).toBeLessThan(60);
+});
+
+test("H2 magnifier degenerate drag creates no object and no history", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "放大镜");
+  await drag(page, 200, 200, 400, 200); // 纯水平：欧氏 200 但高度 0
+  await action(page, "选择");
+  // 未修复：提交了不可见对象 → 对象列表出现“放大镜”并留下一条空历史。
+  await expect(page.getByLabel("选择标注对象")).toBeHidden();
+  await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
+  const pristine = await save(page, uploads);
+  // 纯垂直同样不产生对象。
+  await action(page, "放大镜");
+  await drag(page, 200, 200, 200, 400);
+  await action(page, "选择");
+  await expect(page.getByLabel("选择标注对象")).toBeHidden();
+  await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
+  const still = await save(page, uploads);
+  expect(still.equals(pristine)).toBe(true);
+});
+
+test("H3 masked copy keeps excluded content hidden even when sampled by magnifier", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page, {
+    svg:
+      '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+      '<rect width="900" height="600" fill="#f0f0f0"/>' +
+      '<rect x="455" y="275" width="90" height="50" fill="#e020f0"/></svg>',
+  });
+  // 屏蔽覆盖秘密洋红块；放大镜 2× 采样同一位置并在别处放大显示。
+  await action(page, "屏蔽");
+  await drag(page, 445, 245, 555, 355);
+  await action(page, "放大镜");
+  await drag(page, 400, 200, 600, 400);
+  const countMagenta = async (png: Buffer) =>
+    page.evaluate(async (base64) => {
+      const bitmap = await createImageBitmap(
+        new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+          type: "image/png",
+        }),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const data = canvas
+        .getContext("2d")!
+        .getImageData(0, 0, canvas.width, canvas.height).data;
+      let magenta = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        if (
+          data[index]! > 180 &&
+          data[index + 2]! > 180 &&
+          data[index + 1]! < 120
+        )
+          magenta += 1;
+      }
+      return magenta;
+    }, png.toString("base64"));
+  // 普通导出：镜头正常采样并显示秘密内容（普通像素语义保留）。
+  const normalCount = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(normalCount + 1);
+  const normalMagenta = await countMagenta(uploads[normalCount]!);
+  expect(normalMagenta).toBeGreaterThan(0);
+  // 屏蔽副本：任何位置都不得出现被屏蔽内容（含被镜采样搬运的位置）。
+  const maskedCount = uploads.length;
+  await action(page, "保存屏蔽副本");
+  await expect.poll(() => uploads.length).toBe(maskedCount + 1);
+  const maskedMagenta = await countMagenta(uploads[maskedCount]!);
+  expect(maskedMagenta).toBe(0);
+});
+
+test("H4 eraser removes stacked objects revealed during one gesture", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "遮挡");
+  await drag(page, 100, 100, 200, 180);
+  await action(page, "遮挡");
+  await drag(page, 110, 110, 190, 170); // 后画在上层
+  await action(page, "橡皮擦");
+  // 同一手势在同一位置反复扫过：上层擦除后必须继续命中被显露的下层。
+  const from = await at(page, 150, 140);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let step = 0; step <= 4; step += 1) {
+    await page.mouse.move(from.x + step * 6, from.y + step * 3);
+    await page.waitForTimeout(60);
+  }
+  await page.mouse.up();
+  await action(page, "选择");
+  // 未修复：顶层进入 hits 后 findMark 仍返回它，下层永远命中不到。
+  await expect(page.getByLabel("选择标注对象")).toBeHidden();
+  await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
+  await action(page, "撤销");
+  await expect
+    .poll(async () => page.getByLabel("选择标注对象").locator("option").count())
+    .toBe(3); // 未选 + 两个遮挡：一次撤销整组恢复
+});
+
+test("H5 selected magnifier renders shared eight-point resize handles", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page);
+  await action(page, "放大镜");
+  await drag(page, 400, 150, 600, 300);
+  await action(page, "选择");
+  await drag(page, 500, 225, 501, 226);
+  // 选中态四角必须是共用八点手柄（白底方块）；未修复时命中可用但手柄
+  // 渲染白名单缺 magnifier → 角点是黑镜框而非手柄。
+  const handles = await previewPixels(page, [
+    [400, 150],
+    [600, 150],
+    [400, 300],
+    [600, 300],
+  ]);
+  for (const handle of handles) {
+    expect(handle[0]).toBeGreaterThan(240);
+    expect(handle[1]).toBeGreaterThan(240);
+    expect(handle[2]).toBeGreaterThan(240);
+  }
+  // 手柄真实可拖：拖 SE 角 +40/+30 后选中手柄随新角点出现。
+  await drag(page, 600, 300, 640, 330);
+  const resized = await previewPixels(page, [
+    [640, 330],
+    [400, 150],
+  ]);
+  expect(resized[0]![0]).toBeGreaterThan(240);
+  expect(resized[0]![1]).toBeGreaterThan(240);
+  expect(resized[1]![0]).toBeGreaterThan(240);
+});
+
+test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text layer input stays baked", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { contentType: string; body: Buffer }[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push({
+      contentType: route.request().headers()["content-type"] ?? "",
+      body: route.request().postDataBuffer() ?? Buffer.alloc(0),
+    });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    });
+  });
+  await page.route("**/leak-source.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+        '<rect width="900" height="600" fill="#f0f0f0"/>' +
+        '<rect x="455" y="275" width="90" height="50" fill="#e020f0"/></svg>',
+    }),
+  );
+  await mountHost(page, {
+    ...snapshot,
+    route: "imageEdit",
+    capabilities: [
+      "recognition.results",
+      "recognition.annotation",
+      "recognition.screenshotSession",
+    ],
+    features: {
+      imageEdit: {
+        isBusy: false,
+        statusCode: "recognition.completed",
+        input: {
+          url: "/leak-source.svg",
+          mediaType: "image/png",
+          byteLength: 2048,
+        },
+        screenshotSession: { sessionId: SESSION, revision: 0 },
+        recognitionModes: readyImageRecognitionModes,
+      },
+    },
+  });
+  await expect(page.getByText("原图 900×600")).toBeVisible();
+  await action(page, "屏蔽");
+  await drag(page, 445, 245, 555, 355);
+  await action(page, "放大镜");
+  await drag(page, 400, 200, 600, 400);
+  // 贴图：pinScreenshotImage 同样携带基础屏蔽 + 镜内泄露区两个排除框。
+  await action(page, "贴图");
+  const pinHandle = await page.waitForFunction(() =>
+    (
+      window as unknown as {
+        __testHost: {
+          commands: {
+            action?: string;
+            arguments?: { excludeBoxes?: unknown[] };
+          }[];
+        };
+      }
+    ).__testHost.commands.find(
+      (command) => command.action === "pinScreenshotImage",
+    ),
+  );
+  const pin = (await pinHandle.jsonValue()) as {
+    arguments?: { excludeBoxes?: unknown[] };
+  };
+  expect(pin.arguments?.excludeBoxes?.length).toBe(2);
+  // 文字层输入：取字工具触发的 prepare 上传为烘焙像素（镜内无洋红）。
+  const prepareCount = uploads.length;
+  await action(page, "取字");
+  await expect.poll(() => uploads.length).toBeGreaterThan(prepareCount);
+  const textLayerMagenta = await page.evaluate(async (base64) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const data = canvas
+      .getContext("2d")!
+      .getImageData(0, 0, canvas.width, canvas.height).data;
+    let magenta = 0;
+    for (let index = 0; index < data.length; index += 4) {
+      if (
+        data[index]! > 180 &&
+        data[index + 2]! > 180 &&
+        data[index + 1]! < 120
+      )
+        magenta += 1;
+    }
+    return magenta;
+  }, uploads[prepareCount]!.body.toString("base64"));
+  expect(textLayerMagenta).toBe(0);
+  // 显式识别：上传普通像素 + excludeBoxes 必须包含镜内泄露区。
+  const recognizeCount = uploads.length;
+  await action(page, "文字识别");
+  await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
+  const commands = await page.evaluate(
+    () =>
+      (window as unknown as { __testHost: { commands: unknown[] } }).__testHost
+        .commands,
+  );
+  const recognize = commands.find(
+    (command) =>
+      (command as { action?: string }).action === "recognizeScreenshotImage",
+  ) as {
+    arguments?: {
+      excludeBoxes?: { x: number; y: number; width: number; height: number }[];
+    };
+  };
+  const recognizeBoxes = recognize?.arguments?.excludeBoxes;
+  expect(recognizeBoxes?.length).toBe(2);
+  // 基础屏蔽框 (445..555,245..355) 与镜内泄露区 (400..600,200..400) 的
+  // [0,1000] 归一化（900×600 无裁剪/缩放）。
+  const near = (
+    box: { x: number; y: number; width: number; height: number },
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ) =>
+    // 分数拖拽坐标经权威外扩取整（floor/ceil）后与理想整数矩形最多差
+    // 一个像素的归一化量级；仍远小于两个候选框之间的差异。
+    Math.abs(box.x - x) < 4 &&
+    Math.abs(box.y - y) < 4 &&
+    Math.abs(box.width - width) < 4 &&
+    Math.abs(box.height - height) < 4;
+  expect(recognizeBoxes!.some((box) => near(box, 494, 408, 122, 183))).toBe(
+    true,
+  );
+  expect(recognizeBoxes!.some((box) => near(box, 444, 333, 222, 333))).toBe(
+    true,
+  );
+  // 宿主等效遮罩：按上传的 excludeBoxes 白化上传普通像素后，全图无洋红
+  // （未修复时缺泄露框，镜内洋红残留在等效 OCR 输入中）。
+  const hostMasked = await page.evaluate(
+    async ({ base64, boxes }) => {
+      const bitmap = await createImageBitmap(
+        new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+          type: "image/png",
+        }),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#ffffff";
+      for (const box of boxes) {
+        context.fillRect(
+          (box.x / 1000) * canvas.width,
+          (box.y / 1000) * canvas.height,
+          (box.width / 1000) * canvas.width,
+          (box.height / 1000) * canvas.height,
+        );
+      }
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let magenta = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        if (
+          data[index]! > 180 &&
+          data[index + 2]! > 180 &&
+          data[index + 1]! < 120
+        )
+          magenta += 1;
+      }
+      return magenta;
+    },
+    {
+      base64: uploads[recognizeCount]!.body.toString("base64"),
+      boxes: recognizeBoxes!,
+    },
+  );
+  expect(hostMasked).toBe(0);
+});
+
+test("H3c lens straddling crop: out-of-crop exclusion source must not leak into output", async ({
+  page,
+}) => {
+  const { uploads } = await setup(page, {
+    svg:
+      '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+      '<rect width="900" height="600" fill="#f0f0f0"/>' +
+      '<rect x="270" y="250" width="25" height="100" fill="#e020f0"/></svg>',
+  });
+  // 屏蔽块在裁剪外（x<300）；镜中心 (250,300) 在裁剪线左侧，其采样源
+  // (200..300, 250..350) 覆盖裁剪外屏蔽块并映射到裁剪内 dest 290..340
+  // （可见泄露 300..340：真实跨裁剪泄露构型）。
+  await action(page, "屏蔽");
+  await drag(page, 265, 245, 298, 355);
+  await action(page, "放大镜");
+  await drag(page, 150, 200, 350, 400); // zoom=2 → source (200..300, 250..350)
+  await action(page, "裁剪");
+  await drag(page, 300, 0, 900, 600); // 输出 600×600
+  const countMagenta = async (png: Buffer) =>
+    page.evaluate(async (base64) => {
+      const bitmap = await createImageBitmap(
+        new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+          type: "image/png",
+        }),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const data = canvas
+        .getContext("2d")!
+        .getImageData(0, 0, canvas.width, canvas.height).data;
+      let magenta = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        if (
+          data[index]! > 180 &&
+          data[index + 2]! > 180 &&
+          data[index + 1]! < 120
+        )
+          magenta += 1;
+      }
+      return magenta;
+    }, png.toString("base64"));
+  // 普通导出：镜正常显示被采样内容（60×200 洋红在输出 x0..40 处可见）。
+  const normalCount = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(normalCount + 1);
+  expect(await countMagenta(uploads[normalCount]!)).toBeGreaterThan(0);
+  // 屏蔽副本（烘焙）：泄露区必须被镜采样基底的屏蔽白块覆盖，全图无洋红。
+  const maskedCount = uploads.length;
+  await action(page, "保存屏蔽副本");
+  await expect.poll(() => uploads.length).toBe(maskedCount + 1);
+  expect(await countMagenta(uploads[maskedCount]!)).toBe(0);
+});
+
+test("H3d leak boxes derive from snapped natural exclusion source (fractional drag)", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const uploads: { body: Buffer }[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push({ body: route.request().postDataBuffer() ?? Buffer.alloc(0) });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    });
+  });
+  await page.route("**/snap-source.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body:
+        '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">' +
+        '<rect width="900" height="600" fill="#f0f0f0"/>' +
+        '<rect x="619.6" y="210.4" width="25.4" height="29.6" fill="#e020f0"/></svg>',
+    }),
+  );
+  await mountHost(page, {
+    ...snapshot,
+    route: "imageEdit",
+    capabilities: [
+      "recognition.results",
+      "recognition.annotation",
+      "recognition.screenshotSession",
+    ],
+    features: {
+      imageEdit: {
+        isBusy: false,
+        statusCode: "recognition.completed",
+        input: {
+          url: "/snap-source.svg",
+          mediaType: "image/png",
+          byteLength: 2048,
+        },
+        screenshotSession: { sessionId: SESSION, revision: 0 },
+        recognitionModes: readyImageRecognitionModes,
+      },
+    },
+  });
+  await expect(page.getByText("原图 900×600")).toBeVisible();
+  // 分数坐标屏蔽块 raw (619.6..644.3, 210.4..239.7)：权威烘焙区域是外扩
+  // 取整后的自然矩形 (619..645, 210..240)；底图洋红 (619..650) 满覆盖
+  // snap 带 644.3..645，该带映射到镜内 688.6..690——raw 投影的排除框盖
+  // 不到，会留下洋红残列（snapped 权威源投影必须覆盖到 690）。
+  await action(page, "屏蔽");
+  await drag(page, 619.6, 210.4, 644.3, 239.7);
+  await action(page, "放大镜");
+  await drag(page, 500, 150, 700, 300); // zoom=2 → source (550..650, 187.5..262.5)
+  await action(page, "裁剪");
+  await drag(page, 650, 50, 900, 550); // 输出 250×500
+  // 普通导出：泄露可见（洋红在输出 x≈0..40 处放大显示）。
+  const normalCount = uploads.length;
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(normalCount + 1);
+  const normalMagenta = await page.evaluate(async (base64) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const data = canvas
+      .getContext("2d")!
+      .getImageData(0, 0, canvas.width, canvas.height).data;
+    let magenta = 0;
+    for (let index = 0; index < data.length; index += 4) {
+      if (
+        data[index]! > 180 &&
+        data[index + 2]! > 180 &&
+        data[index + 1]! < 120
+      )
+        magenta += 1;
+    }
+    return magenta;
+  }, uploads[normalCount]!.body.toString("base64"));
+  expect(normalMagenta).toBeGreaterThan(0);
+  // 显式识别：按上传的 excludeBoxes 做宿主等效白化后必须零洋红——
+  // raw 投影（未用权威 snapped 源）会留下 688.6..690 的洋红残列。
+  const recognizeCount = uploads.length;
+  await action(page, "文字识别");
+  await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
+  const boxes = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __testHost: {
+            commands: {
+              action?: string;
+              arguments?: {
+                excludeBoxes?: {
+                  x: number;
+                  y: number;
+                  width: number;
+                  height: number;
+                }[];
+              };
+            }[];
+          };
+        }
+      ).__testHost.commands.find(
+        (command) => command.action === "recognizeScreenshotImage",
+      )?.arguments?.excludeBoxes,
+  );
+  expect(boxes?.length).toBe(1);
+  const hostMasked = await page.evaluate(
+    async ({ base64, boxes }) => {
+      const bitmap = await createImageBitmap(
+        new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
+          type: "image/png",
+        }),
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#ffffff";
+      for (const box of boxes) {
+        context.fillRect(
+          (box.x / 1000) * canvas.width,
+          (box.y / 1000) * canvas.height,
+          (box.width / 1000) * canvas.width,
+          (box.height / 1000) * canvas.height,
+        );
+      }
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let magenta = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        if (
+          data[index]! > 180 &&
+          data[index + 2]! > 180 &&
+          data[index + 1]! < 120
+        )
+          magenta += 1;
+      }
+      return magenta;
+    },
+    { base64: uploads[recognizeCount]!.body.toString("base64"), boxes },
+  );
+  expect(hostMasked).toBe(0);
+});
+
+test("H7 exclusion box budget: over-budget lens projections reject recognition/pin without upload or command", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const base64 = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 900;
+    canvas.height = 600;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = "#f0f0f0";
+    context.fillRect(0, 0, 900, 600);
+    return canvas.toDataURL("image/png").split(",")[1]!;
+  });
+  const sourceBytes = Buffer.from(base64, "base64");
+  await page.route("https://app.vibeocr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await page.request.get(
+      `http://127.0.0.1:4174${url.pathname}${url.search}`,
+    );
+    await route.fulfill({ response });
+  });
+  await page.route("**/budget-source.png", (route) =>
+    route.fulfill({ contentType: "image/png", body: sourceBytes }),
+  );
+  // 计数探针必须后于通配代理注册：Playwright 后注册优先，否则
+  // /__annotation 被代理转给本地静态服务，保存上传永远不可见。
+  const uploads: { body: Buffer }[] = [];
+  await page.route("**/__annotation", async (route) => {
+    uploads.push({ body: route.request().postDataBuffer() ?? Buffer.alloc(0) });
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    });
+  });
+
+  // 工程恢复种子：64 个合法屏蔽 + 1 个放大镜（source 覆盖 4 个屏蔽块
+  // → 4 个泄露框）：基础 64 + 泄露 4 = 68 > 桥上限 64，避免 64 次 UI 拖拽。
+  const marks: unknown[] = [];
+  for (let index = 0; index < 64; index += 1) {
+    const col = index % 8;
+    const row = Math.floor(index / 8);
+    const x = 20 + col * 100;
+    const y = 40 + row * 65;
+    marks.push({
+      id: `mark-e${index + 1}`,
+      tool: "exclude",
+      start: { x, y },
+      end: { x: x + 30, y: y + 40 },
+    });
+  }
+  marks.push({
+    id: "mark-m1",
+    tool: "magnifier",
+    start: { x: 400, y: 200 },
+    end: { x: 700, y: 400 },
+    zoom: 2, // source (450..650, 250..350) 与 2×2 网格屏蔽相交 → 4 泄露框
+  });
+  const manifest = {
+    schemaVersion: 1,
+    canvas: { width: 900, height: 600 },
+    source: {
+      mediaType: "image/png",
+      width: 900,
+      height: 600,
+      length: sourceBytes.length,
+    },
+    assets: [],
+    state: { rotation: 0, marks, patches: [] },
+  };
+  const manifestUrl = "https://app.vibeocr/__resource/budget-manifest";
+  await page.route(manifestUrl, (route) =>
+    route.fulfill({
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(manifest),
+    }),
+  );
+  const secondSession = "55555555555555555555555555555555";
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: [
+        "recognition.results",
+        "recognition.annotation",
+        "recognition.screenshotSession",
+      ],
+      features: {
+        imageEdit: {
+          isBusy: false,
+          statusCode: "recognition.completed",
+          input: {
+            url: "https://app.vibeocr/budget-source.png",
+            mediaType: "image/png",
+            byteLength: sourceBytes.length,
+          },
+          screenshotSession: { sessionId: SESSION, revision: 0 },
+          recognitionModes: readyImageRecognitionModes,
+        },
+      },
+    },
+    "https://app.vibeocr/",
+  );
+  await expect(page.getByText("原图 900×600")).toBeVisible();
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: "https://app.vibeocr/budget-source.png",
+      mediaType: "image/png",
+      byteLength: sourceBytes.length,
+    },
+    screenshotSession: { sessionId: secondSession, revision: 0 },
+    projectOpen: {
+      pendingId: "c".repeat(32),
+      sessionId: secondSession,
+      revision: 0,
+      generation: 5,
+      manifest: {
+        url: manifestUrl,
+        mediaType: "application/json; charset=utf-8",
+        byteLength: JSON.stringify(manifest).length,
+      },
+      source: {
+        url: "https://app.vibeocr/budget-source.png",
+        mediaType: "image/png",
+        byteLength: sourceBytes.length,
+      },
+      assets: [],
+      patches: [],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackProjectOpen",
+    arguments: {
+      pendingId: "c".repeat(32),
+      sessionId: secondSession,
+      revision: 0,
+      generation: 5,
+    },
+  });
+  // ack 后宿主切换到新会话（≠ descriptor 会话）才安装，与真实宿主握手
+  // 一致（同 F5c）；不盲目放宽超时。
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.completed",
+    input: {
+      url: "https://app.vibeocr/budget-source.png",
+      mediaType: "image/png",
+      byteLength: sourceBytes.length,
+    },
+    screenshotSession: {
+      sessionId: "66666666666666666666666666666666",
+      revision: 0,
+    },
+    recognitionModes: readyImageRecognitionModes,
+  });
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  // 超额：识别明确拒绝——不上传、不发送命令、明确提示。
+  await action(page, "文字识别");
+  await expect
+    .poll(() => page.getByText("排除框数量超过宿主上限（64）").count())
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(600);
+  expect(uploads.length).toBe(0);
+  const commandsAfterRecognize = await page.evaluate(
+    () =>
+      (window as unknown as { __testHost: { commands: { action?: string }[] } })
+        .__testHost.commands,
+  );
+  expect(
+    commandsAfterRecognize.some(
+      (command) => command.action === "recognizeScreenshotImage",
+    ),
+  ).toBe(false);
+  // 贴图入口同样拒绝且不发送命令。
+  await action(page, "贴图");
+  await page.waitForTimeout(600);
+  expect(uploads.length).toBe(0);
+  const commandsAfterPin = await page.evaluate(
+    () =>
+      (window as unknown as { __testHost: { commands: { action?: string }[] } })
+        .__testHost.commands,
+  );
+  expect(
+    commandsAfterPin.some((command) => command.action === "pinScreenshotImage"),
+  ).toBe(false);
+  // 画布仍可用：对象列表含 65 个对象，普通导出正常工作。
+  await action(page, "选择");
+  await expect
+    .poll(async () => page.getByLabel("选择标注对象").locator("option").count())
+    .toBe(66); // 未选 + 64 屏蔽 + 1 放大镜
+  await action(page, "保存标注图");
+  await expect.poll(() => uploads.length).toBe(1);
+});

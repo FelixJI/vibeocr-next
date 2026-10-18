@@ -705,6 +705,49 @@ export function exclusionNormalizedRects(
   }));
 }
 
+/** 任意显示空间矩形 → 最终输出 [0,1000] 归一化框：与
+ * exclusionNormalizedRects 同一裁剪/缩放映射（旋转→裁剪→指定尺寸），
+ * 供非 mark 几何（如放大镜采样泄露区）复用同一信任边界。 */
+export function displayRectsToNormalizedRects(
+  rects: readonly Rect[],
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): Rect[] {
+  const crop = mappedCropRect(image, state, displaySize);
+  if (crop.width <= 0 || crop.height <= 0) return [];
+  const output = finalOutputSize(image, state, displaySize);
+  const naturalSize = outputSize(image, state.rotation);
+  const mapPoint = (point: Point) =>
+    projectPoint(
+      point,
+      image,
+      state.rotation,
+      displaySize,
+      state.rotation,
+      naturalSize,
+    );
+  const scaleX = output.width / crop.width;
+  const scaleY = output.height / crop.height;
+  const boxes: Rect[] = [];
+  for (const rect of rects) {
+    const start = mapPoint({ x: rect.x, y: rect.y });
+    const end = mapPoint({ x: rect.x + rect.width, y: rect.y + rect.height });
+    const left = Math.max(Math.min(start.x, end.x), crop.x);
+    const top = Math.max(Math.min(start.y, end.y), crop.y);
+    const right = Math.min(Math.max(start.x, end.x), crop.x + crop.width);
+    const bottom = Math.min(Math.max(start.y, end.y), crop.y + crop.height);
+    if (right <= left || bottom <= top) continue;
+    boxes.push({
+      x: ((left - crop.x) * scaleX * 1000) / output.width,
+      y: ((top - crop.y) * scaleY * 1000) / output.height,
+      width: ((right - left) * scaleX * 1000) / output.width,
+      height: ((bottom - top) * scaleY * 1000) / output.height,
+    });
+  }
+  return boxes;
+}
+
 /** 归一化 [0,1000] 排除框回投到当前显示空间：exclusionNormalizedRects
  * 的逆映射，供冻结基准初始屏蔽标记重建（坐标与手柄一致可编辑）。 */
 export function exclusionDisplayPoints(

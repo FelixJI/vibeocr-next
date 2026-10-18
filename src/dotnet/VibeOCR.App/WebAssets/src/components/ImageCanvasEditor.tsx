@@ -37,7 +37,9 @@ import {
   constrainLineDrag,
   exclusionCoversOutput,
   exclusionDisplayPoints,
+  exclusionNaturalRects,
   exclusionNormalizedRects,
+  displayRectsToNormalizedRects,
   finalOutputSize,
   imageTransform,
   isExclusionMark,
@@ -3832,14 +3834,19 @@ export function ImageCanvasEditor({
 
   /** #235 对象橡皮擦累积：按手势扫过的线段采样命中（约 6px 步长，覆盖
    * pointermove 事件稀疏时路径中间的小对象）；命中未锁定对象加入本次
-   * 手势集合（仅预览）；锁定对象由 findMark 跳过，底图/修补永不触及。 */
+   * 手势集合（仅预览）；锁定对象由 findMark 跳过，底图/修补永不触及。
+   * 已命中对象从命中候选中排除：同一手势内在重叠栈上继续命中被显露的
+   * 下层对象（H4），锁定对象仍不可擦除。 */
   function eraseObjectAt(at: Point, from: Point | undefined): void {
     const context = canvasRef.current?.getContext("2d") ?? undefined;
     const probe = (point: Point): void => {
-      const hitId = findMark(state.marks, point, context);
-      if (hitId === undefined) return;
       const hits = objectEraserHits.current;
-      if (!hits || hits.has(hitId)) return;
+      if (!hits) return;
+      const candidates = hits.size
+        ? state.marks.filter((mark) => !hits.has(mark.id))
+        : state.marks;
+      const hitId = findMark(candidates, point, context);
+      if (hitId === undefined) return;
       hits.add(hitId);
     };
     if (!from || (from.x === at.x && from.y === at.y)) {
@@ -4720,6 +4727,13 @@ export function ImageCanvasEditor({
           spotlightBox.height < MIN_DRAW_DISTANCE)
       )
         return;
+      // 放大镜同理：纯水平/垂直拖拽（欧氏达标但一维为 0）不产生不可见
+      // 对象与空历史（H2）。草稿与提交同一门槛。
+      if (tool === "magnifier") {
+        const lens = normalizedRect({ start, end });
+        if (lens.width < MIN_DRAW_DISTANCE || lens.height < MIN_DRAW_DISTANCE)
+          return;
+      }
       let createdId: string | undefined;
       if (tool === "crop") {
         if (!commit({ ...state, crop: { start, end } })) return;
@@ -5100,11 +5114,46 @@ export function ImageCanvasEditor({
     }
   }
 
+  /** 识别/贴图上传的宿主排除框：基础屏蔽 + 放大镜采样泄露区（同一
+   * 归一化映射，复用既有 excludeBoxes 契约，无新 IPC）。基础屏蔽数+泄露
+   * 区数超过桥上限（与 MAX_EXCLUSION_MARKS/codec 同界）时返回 undefined，
+   * 调用方必须明确拒绝该操作：不截断、不静默丢屏蔽、不放宽预算。 */
+  function hostExclusionBoxes():
+    { x: number; y: number; width: number; height: number }[] | undefined {
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas) return [];
+    const size = canvasSize(canvas);
+    const base = exclusionNormalizedRects(image, state, size);
+    const leak = displayRectsToNormalizedRects(
+      magnifierExclusionLeakRects(state, image, size),
+      image,
+      state,
+      size,
+    );
+    if (base.length + leak.length > MAX_EXCLUSION_MARKS) return undefined;
+    return [...base, ...leak].map((rect) => ({
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    }));
+  }
+
   async function pinCurrentImage() {
     if (!session || !canExport || exportInProgressRef.current) return;
     exportInProgressRef.current = true;
     setIsExporting(true);
     try {
+      // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
+      // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
+      const boxes = hostExclusionBoxes();
+      if (!boxes) {
+        setOperationMessage(
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试贴图。",
+        );
+        return;
+      }
       // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
       const exported = await exportFinalImageIfUnchanged(false);
@@ -5116,7 +5165,7 @@ export function ImageCanvasEditor({
         revision: exported.revision,
         // 归一化排除矩形：宿主对贴图文字层执行同一正面积相交丢弃策略，
         // 保持与原位行过滠除跨边界行以外的一致。
-        excludeBoxes: currentExclusionBoxes(),
+        excludeBoxes: boxes,
       });
       setOperationMessage(
         pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
@@ -5127,21 +5176,6 @@ export function ImageCanvasEditor({
       exportInProgressRef.current = false;
       setIsExporting(false);
     }
-  }
-
-  /** 当前排除区的 [0,1000] 归一化矩形（供宿主过滤贴图文字层）。 */
-  function currentExclusionBoxes() {
-    const image = imageRef.current;
-    const canvas = canvasRef.current;
-    if (!image || !canvas) return [];
-    return exclusionNormalizedRects(image, state, canvasSize(canvas)).map(
-      (rect) => ({
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      }),
-    );
   }
 
   /** 整图屏蔽拒绝：没有可识别内容时不提交，原图与屏蔽草稿保持不变。 */
@@ -5167,6 +5201,15 @@ export function ImageCanvasEditor({
     setIsExporting(true);
     try {
       setOperationMessage("正在提交显式识别……");
+      // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
+      // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
+      const boxes = hostExclusionBoxes();
+      if (!boxes) {
+        setOperationMessage(
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试识别。",
+        );
+        return;
+      }
       // 上传未烘焙遮罩的普通最终像素 + 归一化排除框：宿主冻结普通显示
       // 基准并自行生成白色遮罩 OCR 输入；普通基准绝不采用遮罩像素。
       const exported = await exportFinalImageIfUnchanged(false);
@@ -5177,7 +5220,7 @@ export function ImageCanvasEditor({
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
-        excludeBoxes: currentExclusionBoxes(),
+        excludeBoxes: boxes,
       });
       if (started) {
         // 宿主完成显式识别交接（scene 会话转移/主窗口导航）；结果由
@@ -5636,11 +5679,25 @@ export function ImageCanvasEditor({
   const layerExclusionRects = useMemo(
     () =>
       layerReady && imageForLayer && displayCanvas
-        ? exclusionNormalizedRects(
-            imageForLayer,
-            state,
-            canvasSize(displayCanvas),
-          )
+        ? [
+            ...exclusionNormalizedRects(
+              imageForLayer,
+              state,
+              canvasSize(displayCanvas),
+            ),
+            // 放大镜泄露区与屏蔽块同规则参与行过滤：与贴图宿主侧过滤一致
+            // （H3；输入像素本身已烘焙，此处是同一信任边界的行级兑现）。
+            ...displayRectsToNormalizedRects(
+              magnifierExclusionLeakRects(
+                state,
+                imageForLayer,
+                canvasSize(displayCanvas),
+              ),
+              imageForLayer,
+              state,
+              canvasSize(displayCanvas),
+            ),
+          ]
         : undefined,
     [layerReady, state, imageForLayer, displayCanvas],
   );
@@ -7899,11 +7956,30 @@ function textLayerStatusLabel(
 
 function moveMark(mark: Mark, delta: Point): Mark {
   const move = (at: Point) => ({ x: at.x + delta.x, y: at.y + delta.y });
+  // 聚光灯区域随同一增量映射：拖拽预览与 moveMarkIds 提交同几何，
+  // 松开不跳变（H1）。
   return {
     ...mark,
     start: move(mark.start),
     end: move(mark.end),
     ...(mark.points ? { points: mark.points.map(move) } : {}),
+    ...(mark.regions
+      ? {
+          regions: mark.regions.map((region) => {
+            const cornerA = move({ x: region.x, y: region.y });
+            const cornerB = move({
+              x: region.x + region.width,
+              y: region.y + region.height,
+            });
+            return {
+              x: Math.min(cornerA.x, cornerB.x),
+              y: Math.min(cornerA.y, cornerB.y),
+              width: Math.abs(cornerB.x - cornerA.x),
+              height: Math.abs(cornerB.y - cornerA.y),
+            };
+          }),
+        }
+      : {}),
   };
 }
 
@@ -8178,6 +8254,7 @@ function draw(
         background,
         inpaintLayer,
         imageAssets,
+        bakeExclusions,
       );
       break;
     }
@@ -8475,14 +8552,12 @@ function draw(
         bounds.width + 10,
         bounds.height + 10,
       );
-      // 几何编辑手柄：矩形/椭圆八点缩放；直线/箭头两端端点（屏蔽标记
-      // 自带八点手柄，不重复绘制）。
+      // 几何编辑手柄：矩形/椭圆/遮挡/放大镜共用 isBoxResizableMark
+      // （命中与渲染同一白名单，H5）；屏蔽标记自带八点手柄，不重复绘制。
       if (
         selectedIds?.size === 1 &&
         !mark.locked &&
-        (mark.tool === "rectangle" ||
-          mark.tool === "ellipse" ||
-          mark.tool === "solid") &&
+        isBoxResizableMark(mark) &&
         !isExclusionMark(mark)
       ) {
         drawHandleSquares(context, normalizedRect(mark), "#f38b35");
@@ -8504,6 +8579,27 @@ function draw(
       }
     }
   });
+  if (bakeExclusions) {
+    // 识别/屏蔽副本的最终硬覆盖：任何在屏蔽块之后绘制的对象（放大镜的
+    // 替换式重绘、聚光灯、任何效果）都不得把被屏蔽内容带回屏蔽区（H3）。
+    // 普通导出（bake=false）不进入此分支，保留正常像素。
+    context.save();
+    context.setLineDash([]);
+    context.fillStyle = "#ffffff";
+    for (const mark of marks) {
+      if (!isExclusionMark(mark)) continue;
+      const area = normalizedRect(mark);
+      const x = Math.floor(area.x);
+      const y = Math.floor(area.y);
+      context.fillRect(
+        x,
+        y,
+        Math.ceil(area.x + area.width) - x,
+        Math.ceil(area.y + area.height) - y,
+      );
+    }
+    context.restore();
+  }
   if (showEditorChrome && overlays && state.crop) {
     context.setLineDash([8, 5]);
     context.lineWidth = 1 * markScale;
@@ -9472,6 +9568,83 @@ function applyBlurBrush(
   compositeThroughMask(context, cut, mask, area);
 }
 
+/** #235 H3：放大镜把屏蔽源区域放大显示到原屏蔽框之外时，被屏蔽内容
+ * 会随普通像素上传并绕过宿主遮罩。权威屏蔽源与烘焙/识别输入同一外扩
+ * 取整自然矩形（exclusionNaturalRects），回投显示空间后做源→镜内投影
+ * （裁剪前推导，仅输出时裁剪），返回每个（镜×屏蔽块）在镜内的泄露
+ * 显示矩形——raw mark 几何不直接参与（取整边界 texel 不得遗漏）。 */
+function magnifierExclusionLeakRects(
+  state: EditorState,
+  image: HTMLImageElement,
+  displaySize: CanvasSize,
+): Rect[] {
+  const rects: Rect[] = [];
+  const naturalSize = outputSize(image, state.rotation);
+  const toDisplay = (at: Point) =>
+    projectPoint(
+      at,
+      image,
+      state.rotation,
+      naturalSize,
+      state.rotation,
+      displaySize,
+    );
+  const authoritativeSources = exclusionNaturalRects(
+    image,
+    state,
+    displaySize,
+  ).map((rect) => {
+    const start = toDisplay({ x: rect.x, y: rect.y });
+    const end = toDisplay({
+      x: rect.x + rect.width,
+      y: rect.y + rect.height,
+    });
+    return {
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    };
+  });
+  for (const mark of state.marks) {
+    if (mark.tool !== "magnifier") continue;
+    const dest = normalizedRect(mark);
+    if (dest.width < 1 || dest.height < 1) continue;
+    const zoom = magnifierZoomOf(mark);
+    const source = {
+      x: dest.x + dest.width / 2 - dest.width / 2 / zoom,
+      y: dest.y + dest.height / 2 - dest.height / 2 / zoom,
+      width: dest.width / zoom,
+      height: dest.height / zoom,
+    };
+    for (const area of authoritativeSources) {
+      const left = Math.max(source.x, area.x);
+      const top = Math.max(source.y, area.y);
+      const right = Math.min(source.x + source.width, area.x + area.width);
+      const bottom = Math.min(source.y + source.height, area.y + area.height);
+      if (right <= left || bottom <= top) continue;
+      const destLeft = Math.max(dest.x, dest.x + (left - source.x) * zoom);
+      const destTop = Math.max(dest.y, dest.y + (top - source.y) * zoom);
+      const destRight = Math.min(
+        dest.x + dest.width,
+        dest.x + (right - source.x) * zoom,
+      );
+      const destBottom = Math.min(
+        dest.y + dest.height,
+        dest.y + (bottom - source.y) * zoom,
+      );
+      if (destRight > destLeft && destBottom > destTop) {
+        rects.push({
+          x: destLeft,
+          y: destTop,
+          width: destRight - destLeft,
+          height: destBottom - destTop,
+        });
+      }
+    }
+  }
+  return rects;
+}
 function clampRect(rect: ReturnType<typeof normalizedRect>, size: CanvasSize) {
   const x = Math.max(0, Math.min(size.width, rect.x));
   const y = Math.max(0, Math.min(size.height, rect.y));
@@ -9640,7 +9813,9 @@ function drawMagnifier(
 
 /** 放大镜采样基底：底图与已应用的修补的干净重绘（无标注、无编辑 chrome、
  * 无未提交预览），与外层 draw 同一状态/背景/缩放，保证镜内像素在预览
- * 与导出中同源。marksOverride 为空数组，递归不会再进入放大镜分支。 */
+ * 与导出中同源。marksOverride 为空数组，递归不会再进入放大镜分支；
+ * bake 路径例外：识别/屏蔽副本输入中，基底必须烘焙屏蔽白块——镜不得
+ * 从无标注底图读回被屏蔽内容（H3）。 */
 function renderMagnifierBase(
   canvas: HTMLCanvasElement,
   image: HTMLImageElement | undefined,
@@ -9649,6 +9824,7 @@ function renderMagnifierBase(
   background: string | undefined,
   inpaintLayer: InpaintDrawLayer | undefined,
   imageAssets: ReadonlyMap<string, CanvasImageSource> | undefined,
+  bakeExclusions = false,
 ): HTMLCanvasElement | undefined {
   const size = canvasSize(canvas);
   const base = effectSurface(canvas, size.width, size.height, "magnifier-base");
@@ -9660,11 +9836,11 @@ function renderMagnifierBase(
     // 裁剪只限制最终输出，不能清空镜子的底图采样源。
     { ...state, crop: undefined },
     undefined,
-    [],
+    bakeExclusions ? state.marks.filter(isExclusionMark) : [],
     false,
     markScale,
     background,
-    false,
+    bakeExclusions,
     { patches: inpaintLayer?.patches },
     undefined,
     false,
