@@ -142,107 +142,119 @@ internal sealed partial class WorkbenchImageOwner
     {
       throw new ImageImportRefusedException("workbench.error.imageImportRefused");
     }
-    string sourceEntryName = VibpProjectRules.SourceEntryName(input.MediaType);
-    (int sourceWidth, int sourceHeight) =
-      await ReadProjectImageDimensionsAsync(sourcePath, input.MediaType, cancellationToken);
-    long sourceLength = new FileInfo(sourcePath).Length;
-
-    // 只持久化被当前 marks 引用的资产：manifest 语义要求声明资产全部被引用；
-    // 引用未知资产的 mark 由 ValidateManifest 在写入时拒绝（fail closed）。
-    HashSet<string> referenced = referencedAssetIds;
-    List<VibpAssetResource> assetResources = [];
-    List<VibpProjectEntry> entries =
-    [
-      new(sourceEntryName, sourceLength, () => new FileStream(
-        sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-        64 * 1024, FileOptions.SequentialScan | FileOptions.Asynchronous)),
-    ];
-    foreach ((WorkbenchResourceReference reference, string assetId, int width, int height) in held)
+    // 保存期间持有真实文件句柄；会话回收可删除路径，但不能截断在途读取。
+    List<FileStream> opened = [];
+    try
     {
-      if (!referenced.Contains(assetId))
+      FileStream source = new(sourcePath, FileMode.Open, FileAccess.Read,
+        FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
+      opened.Add(source);
+      long sourceLength = source.Length;
+      string sourceEntryName = VibpProjectRules.SourceEntryName(input.MediaType);
+      List<VibpAssetResource> assetResources = [];
+      List<VibpProjectEntry> entries = [new(sourceEntryName, sourceLength, () => source)];
+      foreach ((WorkbenchResourceReference reference, string assetId, int width, int height) in held)
       {
-        continue;
-      }
-      if (!string.Equals(reference.MediaType, "image/png", StringComparison.Ordinal))
-      {
-        throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-      }
-      if (!resources.TryGetSessionFile(reference.Url, out string? assetPath) || !File.Exists(assetPath))
-      {
-        throw new ImageImportRefusedException("workbench.error.imageImportRefused");
-      }
-      long assetLength = new FileInfo(assetPath).Length;
-      assetResources.Add(new VibpAssetResource
-      {
-        Id = assetId,
-        Width = width,
-        Height = height,
-        Length = assetLength,
-      });
-      entries.Add(new($"asset-{assetId}.png", assetLength, () => new FileStream(
-        assetPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-        64 * 1024, FileOptions.SequentialScan | FileOptions.Asynchronous)));
-    }
-    foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
-    {
-      byte[] png = patch.Png;
-      entries.Add(new($"patch-{patch.Id}.png", png.LongLength,
-        () => new MemoryStream(png, writable: false)));
-    }
-    // 补丁字节直接来自 Web 上传：原子写入前用真实平台 decoder 完整验证
-    // （codec/尺寸 + 全像素解码，捕获缺 IDAT/IEND/截断/损坏）；预算先限
-    // 1MP/8MP 再逐块解码，取消随 token 传播。
-    long decodedPixels = 0;
-    foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
-    {
-      long pixels = (long)patch.Width * patch.Height;
-      if (pixels > VibpProjectLimits.MaximumPatchPixels)
-      {
-        throw new VibpProjectFormatException(
-          $"Project patch {patch.Id} exceeds the per-patch pixel budget.");
-      }
-      decodedPixels += pixels;
-      if (decodedPixels > VibpProjectLimits.MaximumPatchAggregatePixels)
-      {
-        throw new VibpProjectFormatException(
-          "Project patches exceed the aggregate pixel budget.");
-      }
-      await ValidatePatchPngAsync(patch, cancellationToken);
-    }
-
-    var manifest = new VibpProjectManifest
-    {
-      SchemaVersion = VibpProjectLimits.SchemaVersion,
-      Canvas = contribution.Canvas,
-      Source = new VibpSourceResource
-      {
-        MediaType = input.MediaType,
-        Width = sourceWidth,
-        Height = sourceHeight,
-        Length = sourceLength,
-      },
-      Assets = assetResources,
-      State = contribution.State with
-      {
-        Patches = [.. contribution.Patches.Select(patch => new VibpPatch
+        if (!referencedAssetIds.Contains(assetId))
         {
-          Id = patch.Id,
-          X = patch.X,
-          Y = patch.Y,
-          Width = patch.Width,
-          Height = patch.Height,
-          Length = patch.Png.LongLength,
-        })],
-      },
-    };
-    // 最终身份核验后同步原子写：失败抛出，旧工程文件保持。
-    if (channel.SessionId != sessionId || channel.Revision != revision ||
-      generation != Volatile.Read(ref channel.Generation))
-    {
-      throw new ScreenshotSessionStaleException();
+          continue;
+        }
+        if (!string.Equals(reference.MediaType, "image/png", StringComparison.Ordinal) ||
+          !resources.TryGetSessionFile(reference.Url, out string? assetPath))
+        {
+          throw new ImageImportRefusedException("workbench.error.imageImportRefused");
+        }
+        FileStream asset = new(assetPath, FileMode.Open, FileAccess.Read,
+          FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.SequentialScan);
+        opened.Add(asset);
+        long assetLength = asset.Length;
+        assetResources.Add(new VibpAssetResource
+        {
+          Id = assetId,
+          Width = width,
+          Height = height,
+          Length = assetLength,
+        });
+        entries.Add(new($"asset-{assetId}.png", assetLength, () => asset));
+      }
+      (int sourceWidth, int sourceHeight) =
+        await ReadProjectImageDimensionsAsync(sourcePath, input.MediaType, cancellationToken);
+      foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+      {
+        byte[] png = patch.Png;
+        entries.Add(new($"patch-{patch.Id}.png", png.LongLength,
+          () => new MemoryStream(png, writable: false)));
+      }
+      // 补丁字节直接来自 Web 上传：原子写入前用真实平台 decoder 完整验证
+      // （codec/尺寸 + 全像素解码，捕获缺 IDAT/IEND/截断/损坏）；预算先限
+      // 1MP/8MP 再逐块解码，取消随 token 传播。
+      long decodedPixels = 0;
+      foreach (WorkbenchProjectPatchBytes patch in contribution.Patches)
+      {
+        long pixels = (long)patch.Width * patch.Height;
+        if (pixels > VibpProjectLimits.MaximumPatchPixels)
+        {
+          throw new VibpProjectFormatException(
+            $"Project patch {patch.Id} exceeds the per-patch pixel budget.");
+        }
+        decodedPixels += pixels;
+        if (decodedPixels > VibpProjectLimits.MaximumPatchAggregatePixels)
+        {
+          throw new VibpProjectFormatException(
+            "Project patches exceed the aggregate pixel budget.");
+        }
+        await ValidatePatchPngAsync(patch, cancellationToken);
+      }
+
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = VibpProjectLimits.SchemaVersion,
+        Canvas = contribution.Canvas,
+        Source = new VibpSourceResource
+        {
+          MediaType = input.MediaType,
+          Width = sourceWidth,
+          Height = sourceHeight,
+          Length = sourceLength,
+        },
+        Assets = assetResources,
+        State = contribution.State with
+        {
+          Patches = [.. contribution.Patches.Select(patch => new VibpPatch
+          {
+            Id = patch.Id,
+            X = patch.X,
+            Y = patch.Y,
+            Width = patch.Width,
+            Height = patch.Height,
+            Length = patch.Png.LongLength,
+          })],
+        },
+      };
+      // 最终身份核验后异步原子写（后台压缩不阻塞 UI，chunk/entry/提交前
+      // 响应取消）：失败/取消抛出，旧工程文件保持，临时文件由 AtomicFile 清理。
+      // entry 只交出已打开的流，不在后台重新查询会话或资源路径。
+      if (channel.SessionId != sessionId || channel.Revision != revision ||
+        generation != Volatile.Read(ref channel.Generation))
+      {
+        throw new ScreenshotSessionStaleException();
+      }
+      await VibpProjectFile.WriteAsync(path, manifest, entries, cancellationToken);
+      // await 后身份再核验：会话已替换时不返回旧通道投影覆盖错误会话。
+      if (channel.SessionId != sessionId || channel.Revision != revision ||
+        generation != Volatile.Read(ref channel.Generation))
+      {
+        throw new ScreenshotSessionStaleException();
+      }
+      return CurrentChannelState(channel);
     }
-    VibpProjectFile.Write(path, manifest, entries);
-    return CurrentChannelState(channel);
+    finally
+    {
+      foreach (FileStream stream in opened)
+      {
+        stream.Dispose();
+      }
+    }
   }
 
   private async Task<WorkbenchState?> OpenProjectAsync(CancellationToken cancellationToken)

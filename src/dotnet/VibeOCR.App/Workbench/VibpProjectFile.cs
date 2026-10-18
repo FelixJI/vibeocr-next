@@ -6,7 +6,7 @@ using VibeOCR.App.Services;
 namespace VibeOCR.App.Workbench;
 
 /// <summary>保存时提供的资源 entry：Name 必须在 manifest 派生白名单内，
-/// Length 为声明长度，OpenRead 每次打开一个从零读取的新流。</summary>
+/// Length 为声明长度；单次写入仅调用一次 OpenRead，流从零读取并由写入方释放。</summary>
 public sealed record VibpProjectEntry(string Name, long Length, Func<Stream> OpenRead);
 
 /// <summary>打开成功的工程包：条目已按声明长度与实际字节核对并解包到
@@ -39,12 +39,24 @@ public static class VibpProjectFile
   public static void Write(string path, VibpProjectManifest manifest, IReadOnlyList<VibpProjectEntry> entries) =>
     Write(path, manifest, entries, VibpProjectLimits.MaximumFileBytes);
 
+  /// <summary>#233 生产异步写入入口：受控后台线程执行同步压缩复制，
+  /// 在每个 entry 前后、每 chunk 与原子提交前观察取消，不阻塞 UI 调用
+  /// 线程；异常/取消保留旧目标文件并清理临时文件（AtomicFile 既有语义）。</summary>
+  public static Task WriteAsync(
+    string path,
+    VibpProjectManifest manifest,
+    IReadOnlyList<VibpProjectEntry> entries,
+    CancellationToken cancellationToken) =>
+    Task.Run(() => Write(path, manifest, entries, VibpProjectLimits.MaximumFileBytes, cancellationToken),
+      CancellationToken.None);
+
   /// <summary>带输出文件预算的写入（测试 seam）：压缩后真实输出长度在原子提交前校验。</summary>
   internal static void Write(
     string path,
     VibpProjectManifest manifest,
     IReadOnlyList<VibpProjectEntry> entries,
-    long maximumOutputBytes)
+    long maximumOutputBytes,
+    CancellationToken cancellationToken = default)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(path);
     ArgumentNullException.ThrowIfNull(manifest);
@@ -103,6 +115,7 @@ public static class VibpProjectFile
 
     AtomicFile.Write(path, destination =>
     {
+      cancellationToken.ThrowIfCancellationRequested();
       using (var archive = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true))
       {
         ZipArchiveEntry manifestEntry = archive.CreateEntry(VibpProjectLimits.ManifestEntryName);
@@ -113,10 +126,12 @@ public static class VibpProjectFile
         foreach ((string name, VibpProjectEntry entry) in
           expected.Select(name => (name, provided[name])))
         {
+          // entry 边界观察取消：后台压缩期间随时可中止。
+          cancellationToken.ThrowIfCancellationRequested();
           ZipArchiveEntry zipEntry = archive.CreateEntry(name);
           using Stream source = entry.OpenRead();
           using Stream target = zipEntry.Open();
-          CopyDeclared(source, target, entry.Length, name);
+          CopyDeclared(source, target, entry.Length, name, cancellationToken);
         }
       }
       // 压缩后真实输出长度（含 ZIP 元数据开销）在原子替换前校验；
@@ -126,7 +141,7 @@ public static class VibpProjectFile
         throw new VibpProjectFormatException(
           "Project package exceeds the 192 MiB file budget on write.");
       }
-    });
+    }, cancellationToken);
   }
 
   /// <summary>有界读取工程包到 destinationDirectory：先 entry 总数/白名单/
@@ -431,13 +446,15 @@ public static class VibpProjectFile
     return (destinationPath, decompressedTotal);
   }
 
-  private static void CopyDeclared(Stream source, Stream target, long declaredLength, string name)
+  private static void CopyDeclared(
+    Stream source, Stream target, long declaredLength, string name, CancellationToken cancellationToken)
   {
     byte[] buffer = new byte[CopyBufferSize];
     long total = 0;
     int read;
     while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
     {
+      cancellationToken.ThrowIfCancellationRequested();
       total += read;
       if (total > declaredLength)
       {

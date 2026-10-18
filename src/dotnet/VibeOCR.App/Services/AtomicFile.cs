@@ -4,10 +4,11 @@ namespace VibeOCR.App.Services;
 
 internal static class AtomicFile
 {
-  public static void Write(string path, Action<Stream> write)
+  public static void Write(string path, Action<Stream> write, CancellationToken cancellationToken = default)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(path);
     ArgumentNullException.ThrowIfNull(write);
+    cancellationToken.ThrowIfCancellationRequested();
 
     string target = Path.GetFullPath(path);
     string directory = Path.GetDirectoryName(target) ?? Directory.GetCurrentDirectory();
@@ -26,6 +27,8 @@ internal static class AtomicFile
         write(stream);
         stream.Flush(flushToDisk: true);
       }
+      // 原子提交前观察取消：此时临时文件完整但尚未替换目标。
+      cancellationToken.ThrowIfCancellationRequested();
       File.Move(temporary, target, overwrite: true);
     }
     catch

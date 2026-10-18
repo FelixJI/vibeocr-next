@@ -7,6 +7,34 @@ namespace VibeOCR.App.Tests;
 public sealed class AtomicFileTests
 {
   [Fact]
+  public void CancellationAfterWriteBeforeCommitPreservesTargetAndCleansTemporaryFile()
+  {
+    string directory = Path.Combine(Path.GetTempPath(), $"atomic-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    string path = Path.Combine(directory, "settings.json");
+    File.WriteAllText(path, "original");
+    using var cancellation = new CancellationTokenSource();
+    bool writeCompleted = false;
+    try
+    {
+      Assert.ThrowsAny<OperationCanceledException>(() => AtomicFile.Write(path, stream =>
+      {
+        stream.Write(Encoding.UTF8.GetBytes("replacement"));
+        cancellation.Cancel();
+        writeCompleted = true;
+      }, cancellation.Token));
+
+      Assert.True(writeCompleted);
+      Assert.Equal("original", File.ReadAllText(path));
+      Assert.Empty(Directory.EnumerateFiles(directory, ".settings.json.*.tmp"));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
   public void FailedWritePreservesExistingTargetAndCleansTemporaryFile()
   {
     string directory = Path.Combine(Path.GetTempPath(), $"atomic-{Guid.NewGuid():N}");
@@ -19,7 +47,7 @@ public sealed class AtomicFileTests
       {
         stream.Write(Encoding.UTF8.GetBytes("partial"));
         throw new IOException("write failed");
-      }));
+      }, TestContext.Current.CancellationToken));
 
       Assert.Equal("original", File.ReadAllText(path));
       Assert.Empty(Directory.EnumerateFiles(directory, ".settings.json.*.tmp"));

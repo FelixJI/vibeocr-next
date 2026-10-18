@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using Windows.Foundation;
 using Windows.Graphics.Imaging;
@@ -21,15 +22,21 @@ public sealed class VibpProjectFileTests
   public async Task RoundTripSupportsRealWebpSource()
   {
     // 真实 VP8 WebP（Pillow 生成）。WebP 是可选系统 codec（微软官方
-    // bitmapdecoder/GetDecoderInformationEnumerator 均不保证 inbox），
-    // 测试按实际能力双分支：无 codec 时用真实 WebP 包验证安全拒绝。
+    // BitmapDecoder 不保证 inbox），
+    // 测试按真实解码能力双分支：不可用时用真实 WebP 包验证安全拒绝。
     byte[] source = Convert.FromBase64String(
       "UklGRjoAAABXRUJQVlA4IC4AAACQAQCdASoEAAMAAUAmJaACdLoAA5gA/vCbQ/4DdfFtMv/ucD/uyf/2yf+pAAAA");
     Assert.Equal("RIFF"u8.ToArray(), source[..4]);
-    if (!HasWebPDecoder())
+    (Guid codecId, int width, int height) probe;
+    try
     {
-      // 分支证据（本机/云各自标记，不声称双分支本地实测）：系统无 WebP
-      // decoder 时，真实 WebP 包的 ReadAsync 必须安全拒绝。
+      probe = await ProbeImageAsync(source);
+    }
+    catch (System.Runtime.InteropServices.COMException error)
+    {
+      // 已注册的 codec 也可能无法实际解码；仅平台 probe 的 COM 失败进入拒绝分支。
+      TestContext.Current.TestOutputHelper!.WriteLine(
+        $"Windows WebP probe failed: 0x{error.HResult:X8}: {error.Message}");
       string absentDirectory = NewTempDirectory();
       try
       {
@@ -40,6 +47,7 @@ public sealed class VibpProjectFileTests
             Path.Combine(absentDirectory, "open"),
             TestContext.Current.CancellationToken));
         Assert.Contains("metadata cannot be read", rejected.Message);
+        Assert.IsType<System.Runtime.InteropServices.COMException>(rejected.InnerException);
         // 分层：source entry 解包后 WIC 元数据拒绝；解包目录清理由调用方
         // （owner catch）负责——本测试 finally 删除临时目录，不断言底层
         // 错误路径的目录状态。
@@ -50,7 +58,7 @@ public sealed class VibpProjectFileTests
       }
       return;
     }
-    (Guid codecId, int width, int height) = await ProbeImageAsync(source);
+    (Guid codecId, int width, int height) = probe;
     // CodecId 由本机 decoder 实证，与模块常量一致（不凭记忆断言）。
     Assert.Equal(VibpProjectFile.WebpDecoderId, codecId);
     Assert.Equal((4, 3), (width, height));
@@ -576,7 +584,8 @@ public sealed class VibpProjectFileTests
       Assert.Throws<VibpProjectFormatException>(() => VibpProjectFile.Write(
         packagePath, manifest,
         [new VibpProjectEntry("source.png", source.Length, () => new MemoryStream(source))],
-        maximumOutputBytes: 10));
+        maximumOutputBytes: 10,
+        cancellationToken: TestContext.Current.CancellationToken));
       Assert.False(File.Exists(packagePath));
       Assert.Empty(Directory.EnumerateFiles(directory, "*.tmp"));
     }
@@ -1752,20 +1761,6 @@ public sealed class VibpProjectFileTests
       (int)decoder.OrientedPixelWidth, (int)decoder.OrientedPixelHeight);
   }
 
-  /// <summary>枚举系统实际 codec：WebP CodecId 是否可用（能力探测，非假设）。
-  /// GetDecoderInformationEnumerator 在当前投影中同步返回集合。</summary>
-  private static bool HasWebPDecoder()
-  {
-    foreach (BitmapCodecInformation codec in BitmapDecoder.GetDecoderInformationEnumerator())
-    {
-      if (codec.CodecId == VibpProjectFile.WebpDecoderId)
-      {
-        return true;
-      }
-    }
-    return false;
-  }
-
   /// <summary>写入声明 image/webp 的真实 WebP 工程（供安全拒绝分支）。</summary>
   private static void WriteWebpPackage(string packagePath, byte[] source)
   {
@@ -1853,6 +1848,183 @@ public sealed class VibpProjectFileTests
     }
     uint checksum = b << 16 | a;
     return [(byte)(checksum >> 24), (byte)(checksum >> 16), (byte)(checksum >> 8), (byte)checksum];
+  }
+
+  [Fact]
+  public async Task WriteAsyncReadsOpenedResourcesAfterSessionRelease()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(directory);
+      var resources = new WorkbenchResourcesOwner(broker, directory);
+      byte[] source = PngBytes(6, 4);
+      byte[] asset = PngBytes(2, 2);
+      byte[] patch1 = PngBytes(3, 1);
+      byte[] patch2 = PngBytes(1, 2);
+      var sourceResource = await resources.PublishFileAsync(
+        source, "image/png", ".png", TestContext.Current.CancellationToken);
+      var assetResource = await resources.PublishFileAsync(
+        asset, "image/png", ".png", TestContext.Current.CancellationToken);
+      using FileStream sourceStream = new(sourceResource.Path, FileMode.Open, FileAccess.Read,
+        FileShare.Read | FileShare.Delete);
+      using FileStream assetStream = new(assetResource.Path, FileMode.Open, FileAccess.Read,
+        FileShare.Read | FileShare.Delete);
+      long sourceLength = sourceStream.Length;
+      long assetLength = assetStream.Length;
+      resources.ReleaseResource(sourceResource.Reference);
+      resources.ReleaseResource(assetResource.Reference);
+      Assert.False(File.Exists(sourceResource.Path));
+      Assert.False(File.Exists(assetResource.Path));
+
+      string packagePath = Path.Combine(directory, "held.vibp");
+      await VibpProjectFile.WriteAsync(packagePath, FullManifest(source, asset, patch1, patch2),
+      [
+        new("source.png", sourceLength, () => sourceStream),
+        new($"asset-{AssetId}.png", assetLength, () => assetStream),
+        new("patch-1.png", patch1.Length, () => new MemoryStream(patch1)),
+        new("patch-2.png", patch2.Length, () => new MemoryStream(patch2)),
+      ], TestContext.Current.CancellationToken);
+
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      Assert.Equal(source, await File.ReadAllBytesAsync(
+        archive.SourcePath, TestContext.Current.CancellationToken));
+      Assert.Equal(asset, await File.ReadAllBytesAsync(
+        archive.AssetPaths[AssetId], TestContext.Current.CancellationToken));
+      Assert.False(sourceStream.CanRead);
+      Assert.False(assetStream.CanRead);
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+  [Fact]
+  public async Task WriteAsyncCancelsMidCopyKeepsOldTargetAndCleansTemporary()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      // 旧目标文件先存在：取消必须保留其字节且不残留 .tmp。
+      string packagePath = Path.Combine(directory, "cancel.vibp");
+      byte[] original = [0x11, 0x22, 0x33];
+      File.WriteAllBytes(packagePath, original);
+      byte[] source = PngBytes(64, 48);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = [] },
+      };
+      using var cancellation = new CancellationTokenSource();
+      // 可控门控流：首次读取后同步取消（确定性，不依赖定时/调度）。
+      using GatedEntryStream gated = new(source, cancellation);
+      var entry = new VibpProjectEntry("source.png", source.Length, () => gated);
+
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        VibpProjectFile.WriteAsync(packagePath, manifest, [entry], cancellation.Token));
+
+      Assert.True(gated.Triggered);
+      Assert.Equal(original, await File.ReadAllBytesAsync(
+        packagePath, TestContext.Current.CancellationToken));
+      Assert.Empty(Directory.GetFiles(directory, "*.tmp", SearchOption.TopDirectoryOnly));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  [Fact]
+  public async Task WriteAsyncRunsOffCallingThreadAndRoundTrips()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(64, 48);
+      var manifest = new VibpProjectManifest
+      {
+        SchemaVersion = 1,
+        Canvas = new VibpCanvas { Width = 64, Height = 48 },
+        Source = new VibpSourceResource
+        {
+          MediaType = "image/png",
+          Width = 64,
+          Height = 48,
+          Length = source.Length,
+        },
+        Assets = [],
+        State = new VibpEditorState { Rotation = 0, Marks = [] },
+      };
+      string packagePath = Path.Combine(directory, "roundtrip.vibp");
+      System.Threading.Tasks.Task writeTask;
+      lock (GateSync.Root)
+      {
+        // 持门期间启动写入：调用线程不被阻塞（后台执行），释放后完成。
+        writeTask = VibpProjectFile.WriteAsync(
+          packagePath, manifest,
+          [new VibpProjectEntry("source.png", source.Length,
+            () => new BlockingGateStream(source))],
+          TestContext.Current.CancellationToken);
+        Assert.False(writeTask.IsCompleted);
+      }
+      await writeTask.WaitAsync(
+        TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(
+        packagePath, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      Assert.Equal(source, await File.ReadAllBytesAsync(
+        archive.SourcePath, TestContext.Current.CancellationToken));
+    }
+    finally
+    {
+      Directory.Delete(directory, recursive: true);
+    }
+  }
+
+  /// <summary>同步门：构造后持有，使后台写入在读取 source 时阻塞。</summary>
+  private static class GateSync
+  {
+    public static readonly object Root = new();
+  }
+
+  private sealed class BlockingGateStream(byte[] content) : MemoryStream(content)
+  {
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+      // 后台线程进入读取后必须能拿到门：门只在主线程持有时阻塞。
+      lock (GateSync.Root)
+      {
+        return base.Read(buffer, offset, count);
+      }
+    }
+  }
+
+  /// <summary>首次读取后同步取消的门控流（确定性取消 seam）。</summary>
+  private sealed class GatedEntryStream(
+    byte[] content, CancellationTokenSource cancellation) : MemoryStream(content)
+  {
+    public bool Triggered { get; private set; }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+      int read = base.Read(buffer, offset, count);
+      if (read > 0 && !Triggered)
+      {
+        Triggered = true;
+        cancellation.Cancel();
+      }
+      return read;
+    }
   }
 
   private static byte[] PngChunk(string type, byte[] data)
