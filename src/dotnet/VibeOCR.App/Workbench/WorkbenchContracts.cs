@@ -298,6 +298,67 @@ public sealed record ReleaseScreenshotAssetsCommand(
     Guid SessionId,
     IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
 
+// ---- #233 工程保存/打开：宿主 picker 授权 + 会话持有资源 + pending 确认事务 ----
+
+/// <summary>保存当前通道会话为 .vibp 工程：ContributeId 为 /__project 上传令牌，
+/// 绑定会话/修订，异步边界后宿主再核验；字节全部来自会话持有文件。</summary>
+public sealed record SaveImageEditProjectCommand(
+    Guid ContributeId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+public sealed record SaveScreenshotProjectCommand(
+    Guid ContributeId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+/// <summary>打开 .vibp 工程：宿主 picker 授权选择文件，完整有界解析验证后
+/// 发布 pending 资源并登记确认事务；旧会话在 ack 前不变。</summary>
+public sealed record OpenImageEditProjectCommand : WorkbenchCommand;
+
+/// <summary>Web 全部 decode 后的确认：绑定 pending 身份与旧会话身份
+/// （含宿主通道代际），验证通过才原子切换 imageEdit 会话。</summary>
+public sealed record AckImageEditProjectOpenCommand(
+    Guid PendingId,
+    Guid SessionId,
+    long Revision,
+    long Generation) : WorkbenchCommand;
+
+/// <summary>Web 拒收 pending（取消/部分资源失败）：精确回收，旧工程保留；幂等。</summary>
+public sealed record RejectImageEditProjectOpenCommand(
+    Guid PendingId,
+    Guid SessionId,
+    long Revision) : WorkbenchCommand, IScreenshotSessionTarget;
+
+/// <summary>
+/// #233 pending 工程打开的 imageEdit 状态投影（一次性）：只携带旧会话绑定
+/// （sessionId/revision/generation）与受控资源引用——manifest 本体经
+/// /__resource/ 以 application/json 发布（同一解析真源的重序列化，非第二
+/// 真源），语义（canvas/source/assets/state/补丁矩形）由 Web GET manifest
+/// 获得；引用均为 opaque /__resource/ URL。补丁/manifest 引用仅供 ack 前
+/// fetch+decode：ack 成功后宿主释放补丁与 manifest 字节，Web 持有已 decode
+/// 的 prepared 数据，不得重新 fetch 已失效 URL。
+/// </summary>
+public sealed record WorkbenchProjectOpenState(
+    string PendingId,
+    string SessionId,
+    long Revision,
+    long Generation,
+    WorkbenchResourceReference Manifest,
+    WorkbenchResourceReference Source,
+    IReadOnlyList<WorkbenchProjectOpenAsset> Assets,
+    IReadOnlyList<WorkbenchProjectOpenPatch> Patches);
+
+/// <summary>投影内单资产引用（语义见 manifest；此处仅 opaque 资源事实）。</summary>
+public sealed record WorkbenchProjectOpenAsset(
+    string Id,
+    WorkbenchResourceReference Resource);
+
+/// <summary>投影内单补丁引用：仅供 ack 前一次性 decode。</summary>
+public sealed record WorkbenchProjectOpenPatch(
+    int Id,
+    WorkbenchResourceReference Resource);
+
 /// <summary>
 /// 一次成功导入的描述符集合：只携带有界元数据与 opaque 资源引用，
 /// 图片/文本体一律经资源获取，永不内联进 64KiB 桥状态。
@@ -697,7 +758,8 @@ public sealed record ImageEditWorkbenchState(
   RecognitionTextLayerState? TextLayer = null,
   ImageEditImportState? Import = null,
   string? ImportError = null,
-  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null) : WorkbenchState
+  IReadOnlyList<ScreenshotRecognitionModeEntry>? RecognitionModes = null,
+  WorkbenchProjectOpenState? ProjectOpen = null) : WorkbenchState
 {
   public override string Scope => "imageEdit";
 }

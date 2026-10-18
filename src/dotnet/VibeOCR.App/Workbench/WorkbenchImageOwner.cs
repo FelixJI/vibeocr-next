@@ -17,7 +17,7 @@ using Windows.ApplicationModel.DataTransfer;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode, ISystemImportReader? systemImportReader)
+internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImagePlatform, WorkbenchAnnotationStore annotationStore, Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?, IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot, Func<RecognitionViewModel> recognitionFactory, WorkbenchResourceBroker resourceBroker, ShellActionDispatcher? shellActions, IStructuredClipboardPlatform structuredClipboard, Func<string?> supervisorInstanceId, Func<RecognitionViewModel> textLayerRecognitionFactory, IResultActionPlatform resultActionPlatform, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations, Action synchronizeBatchMode, ISystemImportReader? systemImportReader, WorkbenchProjectStore? projectStore = null, Func<CancellationToken, Task<string?>>? projectSavePicker = null, Func<CancellationToken, Task<string?>>? projectOpenPicker = null)
 {
   internal event Action? ScreenshotSelectionSettingsRequested;
   internal event Action? ScreenshotSelectionRecognized;
@@ -28,7 +28,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -168,6 +168,15 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       imageEditChannel, imageEditImport, release.SessionId, release.ResourceUris),
     ReleaseScreenshotAssetsCommand release => ReleaseImportAssets(
       recognitionChannel, recognitionImport, release.SessionId, release.ResourceUris),
+    SaveImageEditProjectCommand saveProject => await SaveProjectAsync(
+      imageEditChannel, imageEditImport, saveProject.ContributeId, saveProject.SessionId,
+      saveProject.Revision, cancellationToken),
+    SaveScreenshotProjectCommand saveProject => await SaveProjectAsync(
+      recognitionChannel, recognitionImport, saveProject.ContributeId, saveProject.SessionId,
+      saveProject.Revision, cancellationToken),
+    OpenImageEditProjectCommand => await OpenProjectAsync(cancellationToken),
+    AckImageEditProjectOpenCommand ackProject => AcknowledgeProjectOpen(ackProject, cancellationToken),
+    RejectImageEditProjectOpenCommand rejectProject => RejectProjectOpen(rejectProject),
     _ => throw new InvalidOperationException("Unsupported Image workbench command."),
   };
 
@@ -393,7 +402,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
         channel.ExcludeBoxes)
       : null;
 
-  /// <summary>imageEdit 通道状态：会话独立，三类识别共用权威目录投影。</summary>
+  /// <summary>imageEdit 通道状态：会话独立，三类识别共用权威目录投影；
+  /// ProjectOpen 携带 pending 工程打开投影（仅打开事务期间非空）。</summary>
   internal ImageEditWorkbenchState ImageEditState(
     bool isBusy,
     string statusCode) => new(
@@ -403,7 +413,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     CurrentScreenshotSession(imageEditChannel),
     imageEditChannel.TextLayer,
     Import: Volatile.Read(ref imageEditImport.PendingDescriptor),
-    RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection));
+    RecognitionModes: BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection),
+    ProjectOpen: ProjectOpenProjection());
 
   /// <summary>会话状态固定复用缓存的基准图/结果资源，避免重发布新 URL 导致编辑器重置。</summary>
   private RecognitionWorkbenchState SessionRecognitionState(
@@ -487,6 +498,8 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
     WorkbenchResourceReference Reference,
     string AssetId,
     long Pixels,
+    int Width,
+    int Height,
     CancellationToken DocumentToken);
 
   /// <summary>通道导入状态：在途单飞请求 + 待确认暂存 + 已采纳会话资产。</summary>
@@ -824,7 +837,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
           WorkbenchResourcesOwner.ExtensionForMediaType(image.MediaType),
           cancellation.Token);
         staged.Add(new StagedImportAsset(reference, Guid.NewGuid().ToString("N"),
-          (long)image.PixelWidth * image.PixelHeight, originCancellation));
+          (long)image.PixelWidth * image.PixelHeight, image.PixelWidth, image.PixelHeight, originCancellation));
         items.Add(new ImageEditImportItem(
           "image", staged[^1].AssetId, reference.Url, reference.MediaType, reference.ByteLength,
           image.PixelWidth, image.PixelHeight));
@@ -836,7 +849,7 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
           "text/plain; charset=utf-8",
           ".txt",
           cancellation.Token);
-        staged.Add(new StagedImportAsset(reference, Guid.NewGuid().ToString("N"), 0, originCancellation));
+        staged.Add(new StagedImportAsset(reference, Guid.NewGuid().ToString("N"), 0, 0, 0, originCancellation));
         items.Add(new ImageEditImportItem(
           "text", staged[^1].AssetId, reference.Url, reference.MediaType, reference.ByteLength,
           TextLength: text.Length,
@@ -2515,12 +2528,12 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       : [.. lines.OrderBy(line => line.Y1).ThenBy(line => line.X1)];
   }
 
-  private void ClearScreenshotSession(ImageSessionChannel channel)
+  private void ClearScreenshotSession(ImageSessionChannel channel, bool notifyDetached = true)
   {
     // 会话被关闭/替换：导入暂存与会话资产随会话整体回收，不残留 owned 文件。
     ReleaseChannelImports(ImportStateFor(channel));
     if (ReferenceEquals(channel, recognitionChannel)) ClearResultActions();
-    if (channel.SessionId is { } id)
+    if (notifyDetached && channel.SessionId is { } id)
       ScreenshotSessionDetached?.Invoke(id, channel.Revision);
     if (channel.SessionInput is { } input)
       resources.ReleaseResource(input);
@@ -3392,5 +3405,6 @@ internal sealed class WorkbenchImageOwner(IAnnotatedImagePlatform annotatedImage
       channel.ViewModel?.Cancel(); channel.TextPreparation?.Cancel(); channel.CaptureDemand?.Cancel();
       channel.TextLayerViewModel?.Cancel();
     }
+    ReleaseProjectOpen();
   }
 }

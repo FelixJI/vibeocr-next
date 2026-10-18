@@ -19,6 +19,8 @@ export async function mountHost(
     const commands: HostCommand[] = [];
     const captureReports: BridgeEnvelope[] = [];
     let rejectNext = false;
+    let deferredAction: string | undefined;
+    let deferredResponse: (() => void) | undefined;
     const emit = (data: unknown) =>
       listeners.forEach((listener) => listener({ data }));
     const state = (scope: string, value: unknown) => {
@@ -41,6 +43,14 @@ export async function mountHost(
         commands,
         captureReports,
         state,
+        deferCommand: (action: string) => {
+          deferredAction = action;
+        },
+        releaseCommand: () => {
+          if (!deferredResponse) throw new Error("No deferred command");
+          deferredResponse();
+          deferredResponse = undefined;
+        },
         rejectNext: () => {
           rejectNext = true;
         },
@@ -70,6 +80,16 @@ export async function mountHost(
               }
               const command = request.payload.command as unknown as HostCommand;
               commands.push(command);
+              if (command.action === deferredAction) {
+                deferredAction = undefined;
+                deferredResponse = () =>
+                  emit({
+                    ...request,
+                    kind: "response",
+                    payload: { revision, ok: true, problem: null },
+                  });
+                return;
+              }
               if (rejectNext) {
                 rejectNext = false;
                 emit({
@@ -110,9 +130,24 @@ type TestHostWindow = Window & {
   __testHost: {
     commands: HostCommand[];
     rejectNext(): void;
+    deferCommand(action: string): void;
+    releaseCommand(): void;
     state(scope: string, value: unknown): void;
   };
 };
+
+export async function deferCommand(page: Page, action: string): Promise<void> {
+  await page.evaluate(
+    (action) => (window as TestHostWindow).__testHost.deferCommand(action),
+    action,
+  );
+}
+
+export async function releaseCommand(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    (window as TestHostWindow).__testHost.releaseCommand(),
+  );
+}
 
 export async function rejectNextCommand(page: Page): Promise<void> {
   await page.evaluate(() => (window as TestHostWindow).__testHost.rejectNext());

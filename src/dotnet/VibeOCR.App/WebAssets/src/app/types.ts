@@ -1,6 +1,17 @@
 import type { CaptureScene, CapturePixelFailure } from "../bridge/captureScene";
 import type { AppRoute } from "../bridge/client";
 
+import type { EditorProjectInstall } from "../components/ImageCanvasEditor";
+import type { ProjectOpenWire } from "../components/project/projectWire";
+
+export interface ProjectOpenHandoffState {
+  readonly pendingId: string;
+  readonly sourceUrl: string;
+  readonly phase: "confirming" | "awaitingState" | "uncertain" | "installing";
+  readonly sessionId?: string;
+  readonly install?: EditorProjectInstall;
+}
+
 export type ThemePreference = "system" | "light" | "dark";
 
 export interface AppViewState {
@@ -13,6 +24,8 @@ export interface AppViewState {
   readonly features: Readonly<Record<string, unknown>>;
   readonly runtimeLabel: string;
   readonly commandProblem?: string;
+  /** 仅当前 Web runtime 内存交接，不进入宿主 wire 或持久化。 */
+  readonly projectOpenHandoff?: ProjectOpenHandoffState;
 }
 
 export type AppActionType =
@@ -33,6 +46,10 @@ export type AppActionType =
   | "imageEdit.copyScreenshotSelection"
   | "imageEdit.copyAnnotatedImage"
   | "imageEdit.saveAnnotatedImage"
+  | "imageEdit.saveProject"
+  | "imageEdit.openProject"
+  | "imageEdit.ackProjectOpen"
+  | "imageEdit.rejectProjectOpen"
   | "recognition.selectImage"
   | "recognition.readClipboard"
   | "recognition.openImageForEdit"
@@ -63,6 +80,7 @@ export type AppActionType =
   | "recognition.export"
   | "recognition.copyAnnotatedImage"
   | "recognition.saveAnnotatedImage"
+  | "recognition.saveProject"
   | "batch.addFiles"
   | "batch.exportAll"
   | "batch.start"
@@ -175,6 +193,16 @@ export interface AppActions {
     documentId: string,
     flush: () => Promise<void>,
   ) => () => void;
+  readonly commitProjectOpen?: (
+    descriptor: ProjectOpenWire,
+    install: EditorProjectInstall,
+  ) => boolean;
+  readonly consumeProjectOpen?: (
+    token: string,
+    sessionId: string,
+    revision: number,
+    install: () => void,
+  ) => boolean;
   readonly run: (action: AppAction) => Promise<boolean>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;

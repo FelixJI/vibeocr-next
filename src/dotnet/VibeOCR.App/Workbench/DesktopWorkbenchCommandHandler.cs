@@ -96,7 +96,10 @@ public sealed class DesktopWorkbenchCommandHandler :
     Func<string, Task<bool>>? flushPdfPreview = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
     IResultActionPlatform? resultActionPlatform = null,
-    ISystemImportReader? systemImportReader = null)
+    ISystemImportReader? systemImportReader = null,
+    VibeOCR.App.Web.WorkbenchProjectStore? projectStore = null,
+    Func<CancellationToken, Task<string?>>? projectSavePicker = null,
+    Func<CancellationToken, Task<string?>>? projectOpenPicker = null)
   {
 
     recognitionFactory = recognitionFactory ??
@@ -129,7 +132,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
     Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
-    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader);
+    Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker);
+    // 工程打开事务终止（取消/超时/替换）经既有状态邮箱发布终态，不触碰 UI 线程。
+    Image.ProjectOpenTerminated += Image.OnProjectOpenTerminated;
     Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
@@ -286,6 +291,27 @@ public sealed class DesktopWorkbenchCommandHandler :
           false,
           error.MessageKey));
     }
+    catch (WorkbenchProjectOpenConflictException)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "project_open_conflict",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.screenshotSessionStale"));
+    }
+    catch (VibpProjectFormatException)
+    {
+      // 损坏/版本/资源/解压超限：明确拒绝且不触发全局 WebView 恢复。
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "project_format_invalid",
+          WorkbenchProblemCategory.InvalidCommand,
+          false,
+          "workbench.error.desktopCommandFailed"));
+    }
     catch (SystemImportRejectException error)
     {
       // 同步读取阶段即被拒绝（超限/坏格式/无内容）：明确回执，不触碰画布。
@@ -371,6 +397,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
   public IReadOnlyList<PdfDocumentEntry> PdfDocuments => Pdf.PdfDocuments;
   internal Guid? CurrentImageSessionId => Image.CurrentImageSessionId;
+  /// <summary>当前 pending 工程打开描述符（接线测试/Web 阶段状态投影消费）。</summary>
+  internal WorkbenchImageOwner.ProjectOpenDescriptor? CurrentProjectOpen => Image.CurrentProjectOpen;
   internal ScreenshotCaptureScene? PendingScreenshotCaptureScene => Image.PendingScreenshotCaptureScene;
   internal ScreenshotCaptureScene? TakeScreenshotCaptureScene(Guid sessionId) => Image.TakeScreenshotCaptureScene(sessionId);
   public Task<RecognitionTextLayerState?> PreparePinnedTextLayerAsync(Guid sessionId, long revision, string imagePath, CancellationToken cancellationToken = default) => Image.PreparePinnedTextLayerAsync(sessionId, revision, imagePath, cancellationToken);

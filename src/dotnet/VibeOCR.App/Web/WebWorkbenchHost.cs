@@ -40,6 +40,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly IWorkbenchApplication application;
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly WorkbenchAnnotationStore annotationStore;
+  private readonly WorkbenchProjectStore? projectStore;
   private readonly WorkbenchRecoveryPolicy recoveryPolicy = new();
   private PackagedWebAssets? packagedAssets;
   private CoreWebView2? core;
@@ -186,11 +187,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     WorkbenchResourceBroker resourceBroker,
     WorkbenchAnnotationStore annotationStore,
     bool applicationOwner = true,
-    WorkbenchRoute? fixedRoute = null)
+    WorkbenchRoute? fixedRoute = null,
+    WorkbenchProjectStore? projectStore = null)
   {
     this.application = application ?? throw new ArgumentNullException(nameof(application));
     this.resourceBroker = resourceBroker ?? throw new ArgumentNullException(nameof(resourceBroker));
     this.annotationStore = annotationStore ?? throw new ArgumentNullException(nameof(annotationStore));
+    this.projectStore = projectStore;
     this.applicationOwner = applicationOwner;
     this.fixedRoute = fixedRoute;
     importDocumentCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -231,6 +234,26 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     return uri.AbsolutePath is "/" or "/index.html";
   }
+
+  /// <summary>窄 project 保存贡献上传（#233）：同源 POST /__project，
+  /// 请求体为 JSON（canvas+state+base64 补丁）；store 未接线时拒绝。</summary>
+  internal static bool IsProjectUploadRequest(
+    Uri uri,
+    string method,
+    string? contentType) =>
+    uri.IsAbsoluteUri &&
+    string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+    string.Equals(uri.IdnHost, VirtualHost, StringComparison.OrdinalIgnoreCase) &&
+    uri.IsDefaultPort &&
+    string.IsNullOrEmpty(uri.UserInfo) &&
+    string.IsNullOrEmpty(uri.Query) &&
+    string.IsNullOrEmpty(uri.Fragment) &&
+    string.Equals(uri.AbsolutePath, "/__project", StringComparison.Ordinal) &&
+    string.Equals(method, "POST", StringComparison.Ordinal) &&
+    contentType is not null &&
+    // 精确 media type 匹配（允许尾随 charset 参数），拒绝 application/jsonx 等前缀伪装。
+    contentType.Split(';', 2)[0].Trim().Equals(
+      "application/json", StringComparison.OrdinalIgnoreCase);
 
   internal static bool IsAnnotationUploadRequest(
     Uri uri,
@@ -428,7 +451,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
         envelope,
-        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand
+        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
+          AckImageEditProjectOpenCommand
           ? importDocumentCancellation.Token : lifetime.Token);
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。
       if (bridge is { } deliver && OwnsCurrentBridgeDocument(sender, document))
@@ -621,6 +645,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     subscriptionCancellation?.Cancel();
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
+    // 文档身份推进后仅撤销本宿主槽位：其他宿主的在途贡献不受影响。
+    projectStore?.RevokeAll(this);
   }
 
   private void Recover(CoreWebView2? sender)
@@ -654,6 +680,41 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         StringComparison.Ordinal)
         ? args.Request.Headers.GetHeader("Content-Type")
         : string.Empty;
+      if (IsProjectUploadRequest(uri, args.Request.Method, contentType))
+      {
+        // 窄保存贡献上传：未接线的窗口 fail closed；贡献仅暂存，保存命令
+        // 才消费（会话字节仍由宿主持有，不经此端点）。
+        if (projectStore is null)
+        {
+          args.Response = Forbidden(sender);
+          return;
+        }
+        using Stream upload = args.Request.Content.AsStreamForRead();
+        WorkbenchProjectContributionLease lease = await projectStore.UploadAsync(
+          upload, this, lifetime.Token);
+        if (disposed)
+        {
+          // 与 /__annotation 对称的销毁竞态守卫：不向已分离 core 构造响应；
+          // 本槽代际已使在途贡献不可提交，此处再撤销本槽兜底。
+          projectStore.RevokeAll(this);
+          return;
+        }
+        byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+          contributeId = lease.ContributeId.ToString("N"),
+        }));
+        buffered = await BufferBytesAsync(payload, CancellationToken.None);
+        args.Response = sender.Environment.CreateWebResourceResponse(
+          buffered,
+          201,
+          "Created",
+          "Content-Type: application/json; charset=utf-8\r\n" +
+          $"Content-Length: {payload.LongLength}\r\n" +
+          "Cache-Control: no-store\r\n" +
+          "X-Content-Type-Options: nosniff");
+        buffered = null;
+        return;
+      }
       if (IsAnnotationUploadRequest(uri, args.Request.Method, contentType))
       {
         using Stream upload = args.Request.Content.AsStreamForRead();
@@ -780,6 +841,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     disposed = true;
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
+    projectStore?.RevokeAll(this);
     CaptureBackground = null;
     lifetime.Cancel();
     importDocumentCancellation.Dispose();

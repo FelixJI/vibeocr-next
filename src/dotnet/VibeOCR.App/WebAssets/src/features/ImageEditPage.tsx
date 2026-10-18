@@ -2,11 +2,29 @@ import { Button } from "@fluentui/react-components";
 
 import { ClipboardPaste, ImagePlus } from "lucide-react";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import {
+  decodeProjectImage,
+  decodeProjectPatch,
+  fetchProjectResource,
+  parseProjectManifest,
+  parseProjectOpen,
+} from "../components/project/projectWire";
+import {
+  ImageCanvasEditor,
+  validateProjectRestore,
+  type EditorProjectInstall,
+} from "../components/ImageCanvasEditor";
 
 import { shouldRunDocumentCommand } from "../app/keyboard";
-
-import { ImageCanvasEditor } from "../components/ImageCanvasEditor";
 
 import { EmptyStage, Workspace } from "../components/Workspace";
 
@@ -28,6 +46,18 @@ import { StatusLine } from "./FeaturePanels";
 
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const [autoTextPreference, setAutoTextPreference] = useState(true);
+  const [projectMessage, setProjectMessage] = useState<string>();
+
+  const projectOpenGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      projectOpenGenerationRef.current += 1;
+    };
+  }, []);
+  const consumedProjectPendingRef = useRef<ReadonlySet<string>>(new Set());
   const captureScene = viewState.captureScene ?? undefined;
   const scene =
     captureScene !== undefined || window.location.hash.includes("?scene=1");
@@ -44,7 +74,158 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, scene ? "recognition" : "imageEdit");
   const input = resource(state.input);
   const session = screenshotSession(state.screenshotSession);
-  const busy = booleanValue(state.isBusy);
+  const handoff = scene ? undefined : viewState.projectOpenHandoff;
+  const busy = booleanValue(state.isBusy) || handoff !== undefined;
+  // #233 打开工程：收到 projectOpen 投影 → 全部资源 fetch/decode 与全部
+  // 可失败校验（预算/逻辑 frame/资产补丁一致）→ ack 旧绑定 → 确认宿主已
+  // 切换（权威 source/session/revision）→ 一次消费已 decode 安装包。准备失败/取消/
+  // 代际变化拒收并保持旧画布；绝不重 fetch 已释放 URL。30 秒到期由宿主
+  // 事务权威取消（迟到 ack 得冲突回执）。仅普通编辑页（scene 无）。
+  // descriptor 按 pending 键控准备；发 ack 前所有权同步交给 runtime，
+  // 此后 route 卸载不撤销已提交内容，未移交的准备仍由页面取消。
+  const projectOpen = useMemo(
+    () => (scene ? undefined : parseProjectOpen(state.projectOpen)),
+    [scene, state.projectOpen],
+  );
+  const projectOpenRef = useRef(projectOpen);
+  const currentSessionRef = useRef(session);
+  useLayoutEffect(() => {
+    projectOpenRef.current = projectOpen;
+    currentSessionRef.current = session;
+  });
+  const pendingId = projectOpen?.pendingId;
+  const handedOffId = handoff?.pendingId;
+  useEffect(() => {
+    if (!pendingId) return undefined;
+    const descriptor = projectOpenRef.current;
+    if (!descriptor || !viewState.connected || handedOffId === pendingId)
+      return undefined;
+    const controller = new AbortController();
+    let transferred = false;
+    const generation = ++projectOpenGenerationRef.current;
+    const reject = () =>
+      void actions.run({
+        type: "imageEdit.rejectProjectOpen",
+        pendingId: descriptor.pendingId,
+        sessionId: descriptor.sessionId,
+        revision: descriptor.revision,
+      });
+    void (async () => {
+      try {
+        if (consumedProjectPendingRef.current.has(pendingId)) return;
+        consumedProjectPendingRef.current = new Set([
+          ...consumedProjectPendingRef.current,
+          pendingId,
+        ]);
+        setProjectMessage("正在读取工程清单与资源……");
+        const manifestResponse = await fetchProjectResource(
+          descriptor.manifest.url,
+          controller.signal,
+        );
+        const manifest = parseProjectManifest(await manifestResponse.json());
+        if (generation !== projectOpenGenerationRef.current) return;
+        const sourceImage = await decodeProjectImage(
+          descriptor.source.url,
+          controller.signal,
+        );
+        if (!sourceImage.naturalWidth || !sourceImage.naturalHeight) {
+          throw new Error("工程原图解码失败");
+        }
+        const assets = new Map<
+          string,
+          { image: HTMLImageElement; url: string }
+        >();
+        for (const entry of descriptor.assets) {
+          assets.set(entry.id, {
+            image: await decodeProjectImage(
+              entry.resource.url,
+              controller.signal,
+            ),
+            url: entry.resource.url,
+          });
+        }
+        const patches = new Map<number, HTMLCanvasElement>();
+        for (const entry of descriptor.patches) {
+          const rect = manifest.state.patches.find(
+            (patch) => patch.id === entry.id,
+          );
+          if (!rect) throw new Error("工程清单与补丁资源不一致");
+          patches.set(
+            entry.id,
+            await decodeProjectPatch(
+              entry.resource.url,
+              rect,
+              controller.signal,
+            ),
+          );
+        }
+        if (generation !== projectOpenGenerationRef.current) return;
+        // ack 前完成全部可失败校验：ack 后安装无失败路径。
+        validateProjectRestore(sourceImage, manifest.canvas, manifest.state);
+        if (
+          (currentSessionRef.current?.sessionId ?? "0".repeat(32)) !==
+            descriptor.sessionId ||
+          (currentSessionRef.current?.revision ?? 0) !== descriptor.revision
+        ) {
+          throw new Error("会话已变化，本次打开未确认");
+        }
+        const install: EditorProjectInstall = {
+          token: descriptor.pendingId,
+          sourceUrl: descriptor.source.url,
+          sourceImage,
+          savedCanvas: manifest.canvas,
+          state: manifest.state,
+          assets,
+          patches,
+        };
+        if (!actions.commitProjectOpen?.(descriptor, install))
+          throw new Error("会话已变化，本次打开未确认");
+        transferred = true;
+        setProjectMessage(undefined);
+      } catch (error) {
+        if (generation !== projectOpenGenerationRef.current) return;
+        if (controller.signal.aborted) return;
+        reject();
+        setProjectMessage(
+          error instanceof Error
+            ? `${error.message}；当前画布保持不变。`
+            : "工程打开失败；当前画布保持不变。",
+        );
+      }
+    })();
+    return () => {
+      controller.abort();
+      if (!transferred) {
+        projectOpenGenerationRef.current += 1;
+        reject();
+        if (mountedRef.current)
+          setProjectMessage("工程打开已取消或超时；当前画布与历史保持不变。");
+      }
+    };
+  }, [pendingId, handedOffId, viewState.connected, actions]);
+
+  const pendingProjectInstall =
+    handoff?.sessionId === session?.sessionId &&
+    input?.url === handoff?.sourceUrl &&
+    session?.revision === 0
+      ? handoff?.install
+      : undefined;
+  const installProject = useCallback(
+    (token: string, install: () => void) =>
+      session !== undefined &&
+      actions.consumeProjectOpen?.(
+        token,
+        session.sessionId,
+        session.revision,
+        install,
+      ) === true,
+    [actions, session],
+  );
+  const openProject = useCallback(() => {
+    setProjectMessage(undefined);
+    void actions.run({ type: "imageEdit.openProject" });
+  }, [actions]);
+
   // 打开入口共享同一业务命令；busy=true 会禁用按钮并失焦，busy 周期
   // 回落时恢复到可见的“选择图片”按钮（scene 无此按钮不参与）。
   const chooseButtonRef = useRef<HTMLButtonElement>(null);
@@ -115,6 +296,13 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
               >
                 粘贴图片
               </Button>
+              {/* #233 打开工程：宿主 picker 授权选择 .vibp，空会话也可打开。 */}
+              <Button
+                disabled={!viewState.connected || busy}
+                onClick={openProject}
+              >
+                打开工程
+              </Button>
             </>
           )}
           {/* #232 显式文字动作：宿主读取系统剪贴板，图片/文本成为可编辑
@@ -135,14 +323,25 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
       }
     >
       <StatusLine>
-        {importErrorLabel(state.importError) ??
-          (busy
-            ? "正在读取图片…"
-            : state.statusCode === "recognition.inputFailed"
-              ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
-              : input
-                ? "原图保留；默认另存副本。"
-                : "选择、粘贴或拖入图片。")}
+        {state.statusCode === "imageEdit.projectOpenTimeout"
+          ? "工程打开超时；当前画布与历史保持不变。"
+          : state.statusCode === "imageEdit.projectOpenCancelled"
+            ? "工程打开已取消；当前画布与历史保持不变。"
+            : handoff
+              ? handoff.phase === "uncertain"
+                ? "工程确认尚未完成，请检查连接后恢复；当前内容保持不变。"
+                : handoff.phase === "confirming"
+                  ? "资源就绪，正在确认切换……"
+                  : "工程已确认，正在恢复编辑内容……"
+              : (projectMessage ??
+                importErrorLabel(state.importError) ??
+                (busy
+                  ? "正在读取图片…"
+                  : state.statusCode === "recognition.inputFailed"
+                    ? "无法读取图片；当前编辑已保留，请检查格式、尺寸和访问权限。"
+                    : input
+                      ? "原图保留；默认另存副本。"
+                      : "选择、粘贴或拖入图片。"))}
       </StatusLine>
       {session?.sceneEditing && !scene ? (
         <EmptyStage
@@ -164,6 +363,9 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           session={session}
           textLayer={screenshotTextLayer(state.textLayer)}
           systemImport={imageEditImport(state.import)}
+          projectInstall={pendingProjectInstall}
+          installProject={installProject}
+          interactionLocked={handoff !== undefined}
           autoText={
             session?.textSelectionRequested === true && autoTextPreference
           }

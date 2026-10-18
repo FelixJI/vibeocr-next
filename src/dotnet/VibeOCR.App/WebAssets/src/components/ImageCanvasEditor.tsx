@@ -101,6 +101,23 @@ import {
   hitStrokePaths,
 } from "./annotationStrokeGeometry";
 import { uploadAnnotatedImage } from "./annotationHandoff";
+import {
+  buildContributionState,
+  contributionStateBytes,
+  countReferencedAssets,
+  PROJECT_CANVAS_TOTAL_PIXELS,
+  patchEntryBudget,
+  PROJECT_PATCH_MAX_PIXELS,
+  PROJECT_PATCH_TOTAL_BYTES,
+  PROJECT_PATCH_TOTAL_PIXELS,
+  PROJECT_RESIZE_MAX_SIDE,
+  PROJECT_RESIZE_TOTAL_PIXELS,
+  PROJECT_STATE_BUDGET_BYTES,
+  restoreEditorState,
+  wireToMark,
+  type WireEditorState,
+  uploadProjectContribution,
+} from "./project/projectWire";
 import { captureSceneStyle } from "./captureSceneLayout";
 import type { CaptureScene } from "../bridge/captureScene";
 import { CapturePixelPresentation } from "./capturePixelPresentation";
@@ -514,6 +531,23 @@ export interface EditorImportDescriptor {
   readonly items: readonly EditorImportItem[];
 }
 
+/** #233 恢复安装包：宿主 ack 切换成功后由页面交付；全部为已 decode 强
+ * 引用（位图/画布），安装后不重 fetch 任何已释放 URL。 */
+export interface EditorProjectInstall {
+  /** 幂等消费键（pendingId）。 */
+  readonly token: string;
+  readonly sourceUrl: string;
+  /** 已 decode 的 source 强引用：安装直接使用，不经 URL 重载。 */
+  readonly sourceImage: HTMLImageElement;
+  readonly savedCanvas: { readonly width: number; readonly height: number };
+  readonly state: WireEditorState;
+  readonly assets: ReadonlyMap<
+    string,
+    { image: HTMLImageElement; url: string }
+  >;
+  readonly patches: ReadonlyMap<number, HTMLCanvasElement>;
+}
+
 /** draw()/exportCanvas 共用的补丁绘制层：矩形为原图（未旋转）像素空间。 */
 export interface InpaintDrawLayer {
   readonly patches?: readonly {
@@ -615,6 +649,10 @@ interface ImageCanvasEditorProps {
   readonly textLayer?: ScreenshotTextLayerState;
   /** #232 宿主系统内容导入描述符：全部解码成功后一次 commit 追加对象。 */
   readonly systemImport?: EditorImportDescriptor;
+  /** #233 工程恢复安装包：宿主 ack 成功切换后安装已准备数据。 */
+  readonly projectInstall?: EditorProjectInstall;
+  readonly installProject?: (token: string, install: () => void) => boolean;
+  readonly interactionLocked?: boolean;
   readonly autoText?: boolean;
   readonly showAutoTextPreference?: boolean;
   readonly onAutoTextChange?: (enabled: boolean) => void;
@@ -1015,6 +1053,9 @@ export function ImageCanvasEditor({
   session,
   textLayer,
   systemImport,
+  projectInstall,
+  installProject,
+  interactionLocked = false,
   autoText: autoTextProp,
   showAutoTextPreference = true,
   onAutoTextChange,
@@ -1025,6 +1066,11 @@ export function ImageCanvasEditor({
   proofreadActive = false,
 }: ImageCanvasEditorProps) {
   const commands = EDITOR_COMMANDS[commandScope];
+  // #233 工程保存命令：scene/识别面发 recognition.*，普通编辑页发 imageEdit.*。
+  const projectSaveCommand =
+    commandScope === "imageEdit"
+      ? ("imageEdit.saveProject" as const)
+      : ("recognition.saveProject" as const);
   // 校对模式：同一图片区切换显示结果行框，编辑器其余 chrome 隐藏但状态保留。
   const proofreading = !!proofread && proofreadActive;
   const captureGeometry = captureScene;
@@ -1214,10 +1260,10 @@ export function ImageCanvasEditor({
     readonly ids: ReadonlySet<string>;
     readonly primary: string | undefined;
   }
-  const NO_SELECTION: ObjectSelectionState = {
-    ids: new Set<string>(),
-    primary: undefined,
-  };
+  const NO_SELECTION = useMemo<ObjectSelectionState>(
+    () => ({ ids: new Set<string>(), primary: undefined }),
+    [],
+  );
   const [objectSelection, setObjectSelection] =
     useState<ObjectSelectionState>(NO_SELECTION);
   const selectionRef = useRef(objectSelection);
@@ -1496,6 +1542,8 @@ export function ImageCanvasEditor({
     inpaintWorkerRef.current = undefined;
     inpaintPatchStore.current.clear();
     inpaintDraft.current = undefined;
+    // 换图/换会话：恢复逻辑 frame 一并回到默认（下次安装重新采纳）。
+    setProjectFrame(undefined);
     // 换图/换会话：丢弃导入资产强引用与消费记录；宿主在会话替换时整体回收。
     importAssetsRef.current.clear();
     importAssetUrlsRef.current.clear();
@@ -1581,6 +1629,12 @@ export function ImageCanvasEditor({
   });
 
   useEffect(() => {
+    // 恢复安装已提供 decode 强引用的 source：不重 fetch 该 URL。
+    if (
+      projectInstall?.sourceUrl === source ||
+      preparedSourceUrlsRef.current.has(source)
+    )
+      return;
     // 换图后立即失效旧解码结果：新图 decode 完成前不得导出旧 image。
     imageRef.current = undefined;
     const image = new Image();
@@ -1621,7 +1675,7 @@ export function ImageCanvasEditor({
       image.onerror = null;
       if (imageRef.current === image) imageRef.current = undefined;
     };
-  }, [source, captureScene]);
+  }, [source, captureScene, projectInstall?.sourceUrl]);
 
   // 去水印绘制层：应用补丁从存储解析；预览仅在对比为“修补后”时叠加；
   // 选区高亮按映射后的有效范围回投显示，用户看到的就是实际修改范围。
@@ -2243,6 +2297,96 @@ export function ImageCanvasEditor({
       }
     })();
   }, [systemImport, session, actions, commands, state]);
+
+  // #233 工程恢复安装：宿主 ack 切换（新会话到位）后原子安装已 decode 的
+  // marks/补丁/资产/source。合同“恢复使用保存的逻辑 frame，不做重投影”：
+  // 采纳 saved canvas 为逻辑 frame（仅 CSS 适配 viewport）；全部可失败
+  // 校验已在 ack 前由页面 validateProjectRestore 完成，此处无失败路径；
+  // 恢复为初始历史基线（不追加到空白 history），token 消费后不再重 fetch
+  // 任何 URL（source 安装强引用，不触发 URL 重载）。
+  const installedProjectTokensRef = useRef<ReadonlySet<string>>(new Set());
+  const preparedSourceUrlsRef = useRef<ReadonlySet<string>>(new Set());
+  // 恢复工程的逻辑画布：undefined = 默认 900×600；install 采纳 saved canvas。
+  const [projectFrame, setProjectFrame] = useState<CanvasSize | undefined>();
+  useEffect(() => {
+    const install = projectInstall;
+    if (!install || installedProjectTokensRef.current.has(install.token)) {
+      return;
+    }
+    const image = install.sourceImage;
+    if (!image.naturalWidth || !image.naturalHeight) return;
+    const apply = () => {
+      installedProjectTokensRef.current = new Set([
+        ...installedProjectTokensRef.current,
+        install.token,
+      ]);
+      preparedSourceUrlsRef.current = new Set([
+        ...preparedSourceUrlsRef.current,
+        install.sourceUrl,
+      ]);
+      const restored = restoreEditorState(install.state, {
+        naturalSize: {
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        },
+        savedCanvas: install.savedCanvas,
+        displayCanvas: install.savedCanvas,
+        rotation: install.state.rotation,
+      });
+      // 强引用先登记，再替换历史基线。
+      for (const [id, patchCanvas] of install.patches) {
+        inpaintPatchStore.current.set(id, patchCanvas);
+      }
+      for (const [assetId, entry] of install.assets) {
+        importAssetsRef.current.set(assetId, entry.image);
+        importAssetUrlsRef.current.set(assetId, entry.url);
+      }
+      advanceProjectIdCounters(restored);
+      imageRef.current = image;
+      setDecodedSourceSize({
+        image,
+        source: install.sourceUrl,
+        size: { width: image.naturalWidth, height: image.naturalHeight },
+      });
+      setImageRevision((current) => current + 1);
+      setProjectFrame({
+        width: install.savedCanvas.width,
+        height: install.savedCanvas.height,
+      });
+      setHistory([restored]);
+      setHistoryIndex(0);
+      setObjectSelection(NO_SELECTION);
+      setOperationMessage(
+        "工程已恢复：对象/样式/修补/裁剪/旋转全部就位，可继续编辑。",
+      );
+    };
+    if (installProject) installProject(install.token, apply);
+    else apply();
+  }, [projectInstall, installProject, NO_SELECTION]);
+
+  /** 恢复后的稳定 id 计数推进：新对象不与恢复对象撞 id（含组/补丁）。 */
+  function advanceProjectIdCounters(restored: EditorState) {
+    for (const mark of restored.marks) {
+      const markNumber = Number(mark.id.replace(/^mark-/, ""));
+      if (Number.isInteger(markNumber) && markNumber > nextMarkIdRef.current) {
+        nextMarkIdRef.current = markNumber;
+      }
+      const groupNumber = mark.groupId
+        ? Number(mark.groupId.replace(/^group-/, ""))
+        : 0;
+      if (
+        Number.isInteger(groupNumber) &&
+        groupNumber > nextGroupIdRef.current
+      ) {
+        nextGroupIdRef.current = groupNumber;
+      }
+    }
+    for (const patch of restored.patches ?? []) {
+      if (patch.id > inpaintPatchIdRef.current) {
+        inpaintPatchIdRef.current = patch.id;
+      }
+    }
+  }
 
   // 卸载：终止 Worker、释放补丁像素，并退役本编辑器持有的导入资源。
   useEffect(() => {
@@ -4504,6 +4648,113 @@ export function ImageCanvasEditor({
     }
   }
 
+  /** #233 保存工程：采集逻辑 canvas+可编辑 state+已应用补丁 PNG，经
+   * /__project 窄上传贡献后发送保存命令；宿主 picker 授权并原子写，
+   * 失败/取消保留旧文件与当前画布。 */
+  async function saveCurrentProject() {
+    if (!session || exportInProgressRef.current || textEdit) return;
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      return;
+    }
+    exportInProgressRef.current = true;
+    setIsExporting(true);
+    const frozenSession = session.sessionId;
+    const frozenRevision = contentRevisionRef.current;
+    try {
+      setOperationMessage("正在采集工程内容……");
+      const applied = appliedInpaintPatches();
+      // entry 总预算前置（encode/upload/picker 前）：manifest+source+唯一
+      // 引用资产+补丁 ≤128；共享 asset 引用只计一次（与宿主同界）。
+      const referencedAssetCount = countReferencedAssets(state.marks);
+      const patchBudget = patchEntryBudget(referencedAssetCount);
+      if (applied.length > patchBudget) {
+        throw new Error(
+          `工程包含 ${referencedAssetCount} 张嵌入图片和 ${applied.length} 块修补，合计最多 ${patchBudget} 块修补，请减少图片对象或修补后再保存。`,
+        );
+      }
+      const encoded: {
+        id: number;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        png: string;
+      }[] = [];
+      let totalPixels = 0;
+      let totalBytes = 0;
+      for (const { rect, canvas: patchCanvas } of applied) {
+        if (encoded.length >= patchBudget) {
+          throw new Error(
+            `工程包含 ${referencedAssetCount} 张嵌入图片，修补最多 ${patchBudget} 块，请减少图片对象或修补后再保存。`,
+          );
+        }
+        const pixels = rect.width * rect.height;
+        if (pixels > PROJECT_PATCH_MAX_PIXELS) {
+          throw new Error("单块修补超过 1MP 像素上限，无法保存为工程。");
+        }
+        totalPixels += pixels;
+        if (totalPixels > PROJECT_PATCH_TOTAL_PIXELS) {
+          throw new Error("修补总像素超过 8MP 上限，无法保存为工程。");
+        }
+        const blob = await new Promise<Blob | null>((resolve) =>
+          patchCanvas.toBlob(resolve, "image/png"),
+        );
+        if (!blob) throw new Error("工程补丁编码失败，请重试。");
+        totalBytes += blob.size;
+        if (totalBytes > PROJECT_PATCH_TOTAL_BYTES) {
+          throw new Error("修补编码总量超过 64MiB 上限，无法保存为工程。");
+        }
+        encoded.push({
+          id: rect.id,
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          png: arrayBufferToBase64(await blob.arrayBuffer()),
+        });
+      }
+      const payload = {
+        ...buildContributionState(canvasSize(canvas), state),
+        patches: encoded,
+      };
+      const stateBytes = contributionStateBytes(payload);
+      if (stateBytes > PROJECT_STATE_BUDGET_BYTES) {
+        throw new Error(
+          "工程状态超出 256KiB 上限（对象过多），无法保存；可拆分后重试。",
+        );
+      }
+      setOperationMessage("正在上传工程贡献……");
+      const contributeId = await uploadProjectContribution(payload);
+      if (
+        sessionIdRef.current !== frozenSession ||
+        contentRevisionRef.current !== frozenRevision
+      ) {
+        setOperationMessage("上传期间会话已变化，本次未保存；请在新画面重试。");
+        return;
+      }
+      const saved = await actions.run({
+        type: projectSaveCommand,
+        contributeId,
+        sessionId: frozenSession,
+        revision: frozenRevision,
+      });
+      setOperationMessage(
+        saved
+          ? "已保存工程（.vibp）：包含原图、对象/样式与已应用修补；与另存图片互不影响。"
+          : "工程未保存：内容已变化、会话失效或格式/预算不符，请查看页面提示后重试。",
+      );
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "工程保存失败，请重试。",
+      );
+    } finally {
+      exportInProgressRef.current = false;
+      setIsExporting(false);
+    }
+  }
+
   async function pinCurrentImage() {
     if (!session || !canExport || exportInProgressRef.current) return;
     exportInProgressRef.current = true;
@@ -5167,7 +5418,7 @@ export function ImageCanvasEditor({
       canExport,
       isExporting,
       hasSession: !!session,
-      suspended: proofreading,
+      suspended: proofreading || interactionLocked,
     };
   });
   useEffect(() => {
@@ -6233,6 +6484,17 @@ export function ImageCanvasEditor({
       {captureStyle ? undefined : "保存屏蔽副本"}
     </Button>
   );
+  const saveProjectButton = session && (
+    <Button
+      title="保存工程"
+      aria-label="保存工程"
+      size="small"
+      disabled={!canExport || isExporting || !!textEdit}
+      onClick={() => void saveCurrentProject()}
+    >
+      保存工程
+    </Button>
+  );
   const pinButton = session && (
     <Button
       title="贴图"
@@ -6404,6 +6666,7 @@ export function ImageCanvasEditor({
         captureStyle ? " capture-scene-editor" : ""
       }${proofreading ? " is-proofreading" : ""}`}
       style={captureStyle}
+      inert={interactionLocked}
       data-screenshot-session={session?.sessionId ?? ""}
       onKeyDown={(event) => {
         if (textComposing.current || isImeCompositionEvent(event.nativeEvent))
@@ -6521,6 +6784,7 @@ export function ImageCanvasEditor({
           {captureStyle ? null : copyExcludedButton}
           {saveAnnotatedButton}
           {captureStyle ? null : saveExcludedButton}
+          {saveProjectButton}
           {pinButton}
           {recognizeButton}
           {closeSessionButton}
@@ -6853,14 +7117,24 @@ export function ImageCanvasEditor({
         ) : null}
         <canvas
           aria-label="图片检查画布"
-          data-coordinate-width={captureStyle ? captureGeometry?.width : 900}
-          data-coordinate-height={captureStyle ? captureGeometry?.height : 600}
+          data-coordinate-width={
+            captureStyle ? captureGeometry?.width : (projectFrame?.width ?? 900)
+          }
+          data-coordinate-height={
+            captureStyle
+              ? captureGeometry?.height
+              : (projectFrame?.height ?? 600)
+          }
           className={`inspection-canvas tool-${tool}`}
-          height={captureStyle ? captureGeometry?.height : 600}
+          height={
+            captureStyle
+              ? captureGeometry?.height
+              : (projectFrame?.height ?? 600)
+          }
           style={{
             aspectRatio: captureStyle
               ? `${captureGeometry?.width} / ${captureGeometry?.height}`
-              : "3 / 2",
+              : `${projectFrame?.width ?? 900} / ${projectFrame?.height ?? 600}`,
             display: layerReady || proofreading ? "none" : "block",
             cursor: panning
               ? "grab"
@@ -7004,7 +7278,9 @@ export function ImageCanvasEditor({
           onPointerUp={pointerUp}
           ref={attachCanvas}
           tabIndex={0}
-          width={captureStyle ? captureGeometry?.width : 900}
+          width={
+            captureStyle ? captureGeometry?.width : (projectFrame?.width ?? 900)
+          }
         />
         {copyMenu?.key === layerSelectionKey && copyMenu.text && (
           <Button
@@ -7193,6 +7469,17 @@ function canvasSize(canvas: HTMLCanvasElement): CanvasSize {
     width: Number(canvas.dataset.coordinateWidth) || canvas.width,
     height: Number(canvas.dataset.coordinateHeight) || canvas.height,
   };
+}
+
+/** 分块 base64：避免大补丁一次展开超过调用栈。 */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
 }
 
 function draw(
@@ -8123,6 +8410,65 @@ function applyBlur(
   context.clearRect(area.x, area.y, area.width, area.height);
   context.drawImage(scratch, sample.x, sample.y, sample.width, sample.height);
   context.restore();
+}
+
+/** #233 ack 前可失败校验：效果笔刷预算与逻辑 frame 合法性。全部通过才
+ * 允许 ack——ack 后安装无失败路径，旧宿主会话/旧画布只在此时前受保护。 */
+// eslint-disable-next-line react-refresh/only-export-components -- 纯函数与组件同文件共享 brushTiles 预算其源
+export function validateProjectRestore(
+  sourceImage: HTMLImageElement,
+  savedCanvas: { readonly width: number; readonly height: number },
+  state: WireEditorState,
+): void {
+  if (
+    !sourceImage.naturalWidth ||
+    !sourceImage.naturalHeight ||
+    !Number.isFinite(savedCanvas.width) ||
+    !Number.isFinite(savedCanvas.height) ||
+    savedCanvas.width < 1 ||
+    savedCanvas.height < 1
+  ) {
+    throw new Error("工程逻辑画布或原图尺寸无效");
+  }
+  // 逻辑 canvas 总像素预算（与宿主/编辑器 64MP 一致）：在任何真实画布
+  // 分配前拒绝，不依赖后续安装路径兜底。
+  if (savedCanvas.width * savedCanvas.height > PROJECT_CANVAS_TOTAL_PIXELS) {
+    throw new Error(
+      `工程逻辑画布超出 64MP 总像素上限（${savedCanvas.width}×${savedCanvas.height}）；未确认切换，当前画布保持不变。`,
+    );
+  }
+  // 输出 resize 上限（与编辑器 UI 一致）：恢复后导出分配前拒绝。
+  if (
+    state.resize &&
+    (!Number.isInteger(state.resize.width) ||
+      !Number.isInteger(state.resize.height) ||
+      state.resize.width < 1 ||
+      state.resize.height < 1 ||
+      state.resize.width > PROJECT_RESIZE_MAX_SIDE ||
+      state.resize.height > PROJECT_RESIZE_MAX_SIDE ||
+      state.resize.width * state.resize.height > PROJECT_RESIZE_TOTAL_PIXELS)
+  ) {
+    throw new Error(
+      "工程输出尺寸超出上限（单边≤16384px，总像素≤64MP）；未确认切换，当前画布保持不变。",
+    );
+  }
+  const canvas = document.createElement("canvas");
+  canvas.dataset.coordinateWidth = String(savedCanvas.width);
+  canvas.dataset.coordinateHeight = String(savedCanvas.height);
+  const restored: EditorState = {
+    rotation: state.rotation,
+    marks: state.marks.map((mark) => wireToMark(mark, (point) => point, 1)),
+    crop: state.crop
+      ? { start: { ...state.crop.start }, end: { ...state.crop.end } }
+      : undefined,
+    resize: state.resize ? { ...state.resize } : undefined,
+    patches: state.patches.map((patch) => ({ ...patch })),
+  };
+  try {
+    validateBrushBudget(sourceImage, canvas, restored);
+  } catch {
+    throw new Error("工程效果笔刷超出当前预算；未确认切换，当前画布保持不变。");
+  }
 }
 
 function validateBrushBudget(

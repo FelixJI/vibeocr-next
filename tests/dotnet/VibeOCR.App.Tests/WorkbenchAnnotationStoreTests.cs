@@ -342,7 +342,40 @@ public sealed class WorkbenchAnnotationStoreTests : IDisposable
     destination.Write(length);
     destination.Write(Encoding.ASCII.GetBytes(type));
     destination.Write(data);
-    destination.Write([0, 0, 0, 0]);
+    // 标准 PNG CRC32（预置/异或 0xFFFFFFFF），与生产校验一致。
+    uint crc = 0xFFFF_FFFFu;
+    crc = UpdateCrc(crc, Encoding.ASCII.GetBytes(type));
+    crc = UpdateCrc(crc, data);
+    Span<byte> crcBytes = stackalloc byte[4];
+    BinaryPrimitives.WriteUInt32BigEndian(crcBytes, crc ^ 0xFFFF_FFFFu);
+    destination.Write(crcBytes);
+  }
+
+  private static uint UpdateCrc(uint crc, byte[] data)
+  {
+    uint current = crc;
+    foreach (byte value in data)
+    {
+      current = CrcTable[(current ^ value) & 0xFF] ^ (current >> 8);
+    }
+    return current;
+  }
+
+  private static readonly uint[] CrcTable = BuildCrcTable();
+
+  private static uint[] BuildCrcTable()
+  {
+    uint[] table = new uint[256];
+    for (uint index = 0; index < 256; index++)
+    {
+      uint value = index;
+      for (int bit = 0; bit < 8; bit++)
+      {
+        value = (value & 1) != 0 ? 0xEDB8_8320u ^ (value >> 1) : value >> 1;
+      }
+      table[index] = value;
+    }
+    return table;
   }
 
   public void Dispose()
