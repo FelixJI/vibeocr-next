@@ -473,7 +473,7 @@ internal sealed partial class WorkbenchImageOwner
     }
     try
     {
-      InMemoryRandomAccessStream stream = new();
+      using InMemoryRandomAccessStream stream = new();
       using DataWriter writer = new(stream);
       writer.WriteBytes(patch.Png);
       await writer.StoreAsync().AsTask(cancellationToken);
