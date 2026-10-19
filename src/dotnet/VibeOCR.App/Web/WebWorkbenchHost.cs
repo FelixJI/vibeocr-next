@@ -574,13 +574,30 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         activeSession);
       if (fixedRoute is not null && envelope.Command is NavigateWorkbenchCommand)
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
-      if (pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand) PinSnapshotInFlight = true;
-      WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
-        envelope,
-        envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
-          AckImageEditProjectOpenCommand
-          ? importDocumentCancellation.Token : lifetime.Token);
-      if (pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand) PinSnapshotInFlight = false;
+      bool snapshotApply = pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand;
+      if (snapshotApply) PinSnapshotInFlight = true;
+      WorkbenchCommandReceipt receipt;
+      try
+      {
+        receipt = await application.ExecuteAsync(
+          envelope,
+          envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
+            AckImageEditProjectOpenCommand
+            ? importDocumentCancellation.Token : lifetime.Token);
+      }
+      catch (Exception error) when (snapshotApply && error is not OperationCanceledException &&
+        OwnsCurrentBridgeDocument(sender, document))
+      {
+        // 真实保存命令异常（磁盘/权限等未建模失败）：错误完整记录日志，宿主
+        // 在途状态复位，并回有界失败终态回执——Web 保存 Promise 可完成并可
+        // 重试；不进入全局恢复（避免导航重置丢贴图编辑现场）。
+        VibeOCR.App.Services.AppLog.Error("Pin snapshot apply command failed", error);
+        StateChanged?.Invoke($"bridge-command-failed:{error.GetType().Name}");
+        receipt = new WorkbenchCommandReceipt(envelope.Id, 0,
+          new WorkbenchProblem("pinEdit.snapshotFailed", WorkbenchProblemCategory.Internal, true,
+            "workbench.error.commandFailed"));
+      }
+      finally { if (snapshotApply) PinSnapshotInFlight = false; }
       if (pinEditRoute && receipt.Ok && envelope.Command is ApplyPinEditSnapshotCommand snapshot)
         committedPinSnapshot = snapshot.SessionId;
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。

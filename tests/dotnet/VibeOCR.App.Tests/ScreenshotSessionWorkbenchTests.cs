@@ -3276,6 +3276,36 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>真实 typed 目录 + 记录识别提交请求/上传；可派生改写终态。</summary>
+  private sealed class SelectionFailureClient : SelectionSubmitClient
+  {
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Failed,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>(),
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
+  }
+
   private class SelectionSubmitClient(bool rapidReady = true, bool mineruConfig = false)
     : TextModeHealthClient(rapidReady, mineruConfig: mineruConfig)
   {
@@ -4328,6 +4358,36 @@ public sealed class ScreenshotSessionWorkbenchTests
       await AssertHistoryImageAsync(history, HistoryPixels);
       Assert.Single(history.Projection("selection text").Entries);
       Assert.Equal("selection te", history.Projection(null).Entries[0].RecognizedText);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task SelectionRecognitionFailureStillRecordsCapturedHistoryWithoutTextEnrich()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new SelectionFailureClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await completed.Task;
+      // OCR 失败终态：像素已成功捕获，历史仍记录该截图；无结果不补充文本。
+      Assert.Null(state.Result);
+      Assert.Equal(JobState.Failed, recognition.TerminalState);
+      await AssertHistoryImageAsync(history, HistoryPixels);
+      Assert.Null(history.Projection(null).Entries[0].RecognizedText);
+      Assert.Empty(history.Projection("selection text").Entries);
     }
     finally { Directory.Delete(root, recursive: true); }
   }

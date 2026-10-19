@@ -1477,11 +1477,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         generation,
         cancellationToken);
       // 动作栏直接识别不经过 CompleteRecognitionAsync，也须记录成功截图。
-      if (state.Result is not null && generation == Volatile.Read(ref recognitionChannel.Generation))
+      // 选区像素已成功捕获即录入历史（OCR 失败/无结果不丢已捕获截图），
+      // Result 只控制识别文本补充；用户取消经 OperationCanceledException 路径不录入。
+      if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
         recognitionChannel.HistoryCaptureKey = Guid.NewGuid().ToString("N");
         if (!await RecordCapturedHistoryAsync(recognitionChannel.HistoryCaptureKey, input, generation, cancellationToken)) return;
-        if (RecognitionVm.Result is { } recognized)
+        if (state.Result is not null && RecognitionVm.Result is { } recognized)
           EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
       }
       // typed 意图在显式识别链路中的终态由调用方按代际发布。

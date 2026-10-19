@@ -1,5 +1,6 @@
 using VibeOCR.App.Features.Pins;
 using VibeOCR.App.Workbench;
+using Windows.Graphics;
 using Xunit;
 
 namespace VibeOCR.App.Tests;
@@ -33,6 +34,46 @@ public sealed class PinSnapshotStoreTests : IDisposable
 
   private static List<VibpProjectEntry> Entries() =>
     [new("source.png", Png.LongLength, () => new MemoryStream(Png, writable: false))];
+
+  [Fact]
+  public void ConstrainRestoredGeometryKeepsVisibleBandIncludingNegativeAndCrossScreen()
+  {
+    RectInt32[] dual = [new(0, 0, 1920, 1080), new(-1920, 0, 1920, 1080)];
+    // 已与任一工作区保有可拖 band 交集的合法坐标（含负值/跨屏）不乱挪。
+    Assert.Equal(new RectInt32(-1500, 100, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(-1500, 100, 300, 200), dual, 36, 16));
+    Assert.Equal(new RectInt32(1900, 100, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(1900, 100, 300, 200), dual, 36, 16));
+    // band 刚好压线：顶部 16px 在屏内即可拖，保留。
+    Assert.Equal(new RectInt32(100, -20, 300, 500),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(100, -20, 300, 500), [new(0, 0, 1920, 1080)], 36, 16));
+  }
+
+  [Fact]
+  public void ConstrainRestoredGeometryClampsWhenOnlyTheBodyIntersectsOrFullyOffscreen()
+  {
+    // band 全在屏外、仅正文相交：不可拖，必须吸附（root 回归样本）。
+    Assert.Equal(new RectInt32(16, 16, 300, 500),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(100, -200, 300, 500), [new(0, 0, 1920, 1080)], 32, 16));
+    // 完全落在当前虚拟桌面外：就近吸附，尺寸不变。
+    Assert.Equal(new RectInt32(16, 16, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(-5000, -4000, 300, 200), [new(0, 0, 1920, 1080)], 36, 16));
+    RectInt32[] dual = [new(0, 0, 1920, 1080), new(1920, 0, 1920, 1080)];
+    Assert.Equal(new RectInt32(1936, 16, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(new RectInt32(2100, -3000, 300, 200), dual, 36, 16));
+  }
+
+  [Fact]
+  public void ConstrainRestoredGeometryStaysSafeAtExtremeCoordinates()
+  {
+    // 几何端点用 int 近似极值时不得回绕：仍应判为屏外并吸附。
+    Assert.Equal(new RectInt32(16, 16, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(
+        new RectInt32(int.MaxValue - 10, int.MaxValue - 10, 300, 200), [new(0, 0, 1920, 1080)], 36, 16));
+    Assert.Equal(new RectInt32(16, 16, 300, 200),
+      PinSnapshotStore.ConstrainRestoredGeometry(
+        new RectInt32(int.MinValue, int.MinValue, 300, 200), [new(0, 0, 1920, 1080)], 36, 16));
+  }
 
   public void Dispose()
   {

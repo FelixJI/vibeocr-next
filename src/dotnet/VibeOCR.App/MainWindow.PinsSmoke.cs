@@ -204,7 +204,31 @@ public sealed partial class MainWindow
       if (first.SmokeClientSize.Width != expanded.Width || first.SmokeClientSize.Height != expanded.Height)
         throw new InvalidOperationException($"Recovery lost expanded size: expected={expanded.Width}x{expanded.Height}, actual={first.SmokeClientSize.Width}x{first.SmokeClientSize.Height}, record={JsonSerializer.Serialize(recovered.Single())}");
       await VerifySmokePinTextAsync(first);
-      first.Close(); second.Close();
+
+      // 拓扑变更回归：自身窗口的屏外恢复记录，用当前工作区验证 image 与
+      // typed 贴图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
+      CaptureUiSmokeTrace.Stage("pins.offscreen-recovery");
+      var typed = CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind.Text);
+      typed.SetText("offscreen-restore");
+      var workAreas = Features.Pins.PinSnapshotStore.CurrentWorkAreas();
+      int offscreenX = checked((int)(workAreas.Max(area => (long)area.X + area.Width) + 4000));
+      int offscreenY = checked((int)(workAreas.Max(area => (long)area.Y + area.Height) + 4000));
+      pinSnapshotStore!.SaveRecovery(first.RecoveryState() with { X = offscreenX, Y = offscreenY });
+      pinSnapshotStore.SaveRecovery(typed.RecoveryState() with { X = offscreenX, Y = offscreenY });
+      shuttingDown = true;
+      first.ForceClose();
+      typed.ForceClose();
+      shuttingDown = false;
+      RestorePins();
+      var recoveredImage = pinnedImages.Single(pin => pin.RecoveryState().X != offscreenX);
+      var recoveredTyped = typedPins.Single(pin => pin.RecoveryState().X != offscreenX);
+      if (!BandVisibleOnCurrentDesktop(recoveredImage.SmokePosition.X, recoveredImage.SmokePosition.Y,
+          recoveredImage.RecoveryState().Width) ||
+        !BandVisibleOnCurrentDesktop(recoveredTyped.SmokePosition.X, recoveredTyped.SmokePosition.Y,
+          recoveredTyped.RecoveryState().Width))
+        throw new InvalidOperationException($"Offscreen recovery did not keep a draggable band visible: image=({recoveredImage.SmokePosition.X},{recoveredImage.SmokePosition.Y}), typed=({recoveredTyped.SmokePosition.X},{recoveredTyped.SmokePosition.Y}), areas={string.Join(";", Features.Pins.PinSnapshotStore.CurrentWorkAreas())}");
+      first = recoveredImage;
+      first.Close(); second.Close(); recoveredTyped.ForceClose();
       if (pinSnapshotStore.LoadRecovery().Count != 0) throw new InvalidOperationException("Closing a pin kept its owned recovery entry.");
     }
     finally
@@ -215,6 +239,11 @@ public sealed partial class MainWindow
       pinManager?.ForceClose();
     }
   }
+
+  private static bool BandVisibleOnCurrentDesktop(int x, int y, int width) =>
+    Features.Pins.PinSnapshotStore.CurrentWorkAreas().Any(area =>
+      Math.Min((long)x + width, (long)area.X + area.Width) - Math.Max(x, area.X) >= 16 &&
+      Math.Min((long)y + 36, (long)area.Y + area.Height) - Math.Max(y, area.Y) >= 16);
 
   private static async Task VerifySmokePinTextAsync(PinnedImageWindow pin)
   {

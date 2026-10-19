@@ -114,6 +114,29 @@ describe("PinHistoryPanel", () => {
     });
   });
 
+  it("enables clear by total count even when the filtered list is empty", () => {
+    const run = vi.fn().mockResolvedValue(true);
+    render(
+      <PinHistoryPanel
+        history={parsePinHistory({ ...validHistory, entries: [] })}
+        actions={actions(run)}
+        connected={true}
+      />,
+    );
+    // 检索无匹配时列表为空但宿主仍持有全量记录，清空按 count 启用。
+    expect(screen.getByRole("button", { name: "清空" })).toBeEnabled();
+
+    cleanup();
+    render(
+      <PinHistoryPanel
+        history={parsePinHistory({ ...validHistory, count: 0, entries: [] })}
+        actions={actions(run)}
+        connected={true}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "清空" })).toBeDisabled();
+  });
+
   it("renders nothing without a host projection", () => {
     const { container } = render(
       <PinHistoryPanel

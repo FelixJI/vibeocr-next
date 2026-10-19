@@ -94,7 +94,7 @@ export function PinHistoryPanel({
             </Button>
             <Button
               size="small"
-              disabled={!connected || history.entries.length === 0}
+              disabled={!connected || history.count === 0}
               onClick={() => {
                 if (
                   window.confirm(

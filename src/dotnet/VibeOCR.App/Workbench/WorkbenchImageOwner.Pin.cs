@@ -129,7 +129,18 @@ internal sealed partial class WorkbenchImageOwner
       pinEditChannel.ExcludeBoxes = excludeBoxes ?? [];
       pinEditPinId = pinId;
       if (pinSnapshotWriter.GetSnapshotProjectPath(pinId) is { } projectPath)
-        await RestorePinProjectAsync(projectPath, cancellationToken);
+      {
+        try { await RestorePinProjectAsync(projectPath, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+          // .vibp 损坏/不兼容/读取失败发生在恢复描述符发布前（前端无机会拒收）：
+          // 回退扁平 PNG 会话，原 .vibp 保留供后续恢复或诊断；部分发布的工程
+          // 资源与已采纳导入全部回收，不泄漏；真正取消继续外抛。
+          VibeOCR.App.Services.AppLog.Warn($"Pin project restore failed; flat pin remains editable: {error.Message}");
+          FallBackToFlatPinEditInput();
+        }
+      }
       operations.Publish(PinEditState(false, "pinEdit.session"));
       return pinEditChannel.SessionId;
     }
@@ -193,6 +204,20 @@ internal sealed partial class WorkbenchImageOwner
     ClearPinProjectRestore();
     AdvanceImageGeneration(pinEditChannel);
     return PinEditState(false, "pinEdit.session");
+  }
+
+  /// <summary>工程恢复失败回退：恢复扁平输入、回收部分发布的工程资源与已采纳
+  /// 导入，保留无工程投影的 pinEdit 会话（与拒收路径同一资源终态）。</summary>
+  private void FallBackToFlatPinEditInput()
+  {
+    if (pinFlatInput is { } flat)
+    {
+      if (pinEditChannel.SessionInput is { } current) resources.ReleaseResource(current);
+      pinEditChannel.SessionInput = flat;
+      pinFlatInput = null;
+    }
+    ReleaseChannelImports(pinEditImport);
+    ClearPinProjectRestore();
   }
 
   private void ClearPinProjectRestore()

@@ -4,6 +4,7 @@ using VibeOCR.App.Services;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
+using Windows.Graphics;
 
 namespace VibeOCR.App.Features.Pins;
 
@@ -22,6 +23,64 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
   private sealed record Snapshot(string Generation, IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
   internal const int MaximumRecoveryBytes = 2 * 1024 * 1024;
   internal const int MaximumRecoveryCharacters = 262144;
+
+  /// <summary>当前虚拟桌面的全部工作区：复用 Platform 既有 EnumerateMonitors
+  /// 枚举物理边界，逐台经 DisplayArea.GetFromPoint(Nearest) 取 WorkArea（与
+  /// ImageEditWindow/MainWindow 相同的单对象投影路径，不用 FindAll 向量投影）。</summary>
+  internal static List<RectInt32> CurrentWorkAreas()
+  {
+    List<RectInt32> areas = [];
+    foreach (VibeOCR.Platform.Windows.ScreenMonitorTarget monitor in
+      VibeOCR.Platform.Windows.ScreenTargetQuery.EnumerateMonitors())
+    {
+      Windows.Graphics.PointInt32 center = new(
+        monitor.Bounds.X + Math.Max(1, monitor.Bounds.Width / 2),
+        monitor.Bounds.Y + Math.Max(1, monitor.Bounds.Height / 2));
+      RectInt32 work = Microsoft.UI.Windowing.DisplayArea.GetFromPoint(
+        center, Microsoft.UI.Windowing.DisplayAreaFallback.Nearest).WorkArea;
+      if (!areas.Contains(work)) areas.Add(work);
+    }
+    return areas;
+  }
+
+  /// <summary>恢复位置约束：顶部拖动区（band，高 bandHeight）与任一当前工作区
+  /// 保持至少 minimumVisible 的可拖交集时原样保留（合法负坐标/跨屏不乱挪；
+  /// 仅正文相交不算可拖）；否则就近吸附到该工作区左上角偏移 16px，尺寸不变。
+  /// 几何端点/差值先提升 long，避免边界值 int 溢出；距离比较有界安全，不求平方。</summary>
+  internal static RectInt32 ConstrainRestoredGeometry(
+    RectInt32 saved, IReadOnlyList<RectInt32> workAreas, int bandHeight, int minimumVisible)
+  {
+    if (workAreas.Count == 0) return saved;
+    foreach (RectInt32 area in workAreas)
+    {
+      long bandOverlapWidth = Math.Min((long)saved.X + saved.Width, (long)area.X + area.Width) -
+        Math.Max(saved.X, area.X);
+      long bandOverlapHeight = Math.Min((long)saved.Y + bandHeight, (long)area.Y + area.Height) -
+        Math.Max(saved.Y, area.Y);
+      if (bandOverlapWidth >= minimumVisible && bandOverlapHeight >= minimumVisible) return saved;
+    }
+    RectInt32 nearest = workAreas[0];
+    (long Spread, long Sum) best = (long.MaxValue, long.MaxValue);
+    foreach (RectInt32 area in workAreas)
+    {
+      long dx = Math.Max(0, saved.X >= area.X
+        ? (long)saved.X - area.X - area.Width
+        : (long)area.X - saved.X - saved.Width);
+      long dy = Math.Max(0, saved.Y >= area.Y
+        ? (long)saved.Y - area.Y - area.Height
+        : (long)area.Y - saved.Y - saved.Height);
+      (long, long) current = (Math.Max(dx, dy), dx + dy);
+      if (current.CompareTo(best) < 0)
+      {
+        best = current;
+        nearest = area;
+      }
+    }
+    return new RectInt32(
+      (int)Math.Clamp((long)nearest.X + 16, int.MinValue, int.MaxValue),
+      (int)Math.Clamp((long)nearest.Y + 16, int.MinValue, int.MaxValue),
+      saved.Width, saved.Height);
+  }
   private const string PointerFileName = "current.json";
   private const string RecoveryFileName = "window.json";
 

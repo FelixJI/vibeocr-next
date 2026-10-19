@@ -313,10 +313,18 @@ internal sealed class TypedPinWindow : IDisposable
   internal PinSnapshotStore.Recovery RecoveryState() => new(PinId, kind.ToString(), editor.Text,
     window.AppWindow.Position.X, window.AppWindow.Position.Y, window.AppWindow.Size.Width, window.AppWindow.Size.Height);
 
+  internal (int X, int Y) SmokePosition => (window.AppWindow.Position.X, window.AppWindow.Position.Y);
+
   internal void Restore(PinSnapshotStore.Recovery recovery)
   {
     editor.Text = recovery.Content;
-    window.AppWindow.MoveAndResize(new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height));
+    // 拓扑变更后保存的绝对坐标可能落在当前虚拟桌面外：约束到当前工作区
+    // 并保留至少顶部可拖 band 可见，已有合法坐标（含负值/跨屏）不乱挪。
+    int bandPhysical = (int)Math.Ceiling(BandHeightDip *
+      GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(window)) / 96.0);
+    window.AppWindow.MoveAndResize(PinSnapshotStore.ConstrainRestoredGeometry(
+      new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height),
+      PinSnapshotStore.CurrentWorkAreas(), bandPhysical, 16));
     if (kind == ContentKind.Color) ApplySwatchColor();
     if (kind == ContentKind.Formula) _ = RenderFormulaAsync();
   }
@@ -368,9 +376,12 @@ internal sealed class TypedPinWindow : IDisposable
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool GetWindowRect(nint window, out RectL rect);
 
-  [DllImport("user32.dll", SetLastError = true)]
+  [DllImport("user32.dll")]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool GetCursorPos(out PointL point);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetDpiForWindow(nint window);
 
   [DllImport("user32.dll", SetLastError = true)]
   [return: MarshalAs(UnmanagedType.Bool)]

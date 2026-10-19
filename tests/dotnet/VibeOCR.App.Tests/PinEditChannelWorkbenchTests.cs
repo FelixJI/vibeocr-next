@@ -441,6 +441,44 @@ public sealed class PinEditChannelWorkbenchTests
   }
 
   [Fact]
+  public async Task CorruptProjectArchiveFallsBackToFlatEditableSessionAndKeepsVibp()
+  {
+    await using var harness = new Harness();
+    string project = Path.Combine(harness.Root, "corrupt.vibp");
+    // 非 zip 骨架：ReadAsync 在恢复描述符发布前抛出，前端无机会拒收。
+    await File.WriteAllBytesAsync(project, [0x50, 0x4b, 0x03, 0x04, 0x00], TestContext.Current.CancellationToken);
+    byte[] originalProject = File.ReadAllBytes(project);
+    harness.Writer.ProjectPath = project;
+    Guid pinId = Guid.NewGuid();
+    Guid? session = await harness.Handler.TryOpenPinEditSessionAsync(
+      pinId, Png, TestContext.Current.CancellationToken);
+    // 工程读取失败不清整个 pinEdit：扁平会话可用、无工程投影。
+    Assert.NotNull(session);
+    PinEditWorkbenchState opened = Assert.IsType<PinEditWorkbenchState>(harness.States.Last());
+    Assert.Null(opened.ProjectRestore);
+    Assert.NotNull(opened.Input);
+    await using (var response = await harness.Broker.OpenAsync(
+      new Uri(opened.Input.Url), TestContext.Current.CancellationToken))
+    {
+      using var bytes = new MemoryStream();
+      await response.Content.CopyToAsync(bytes, TestContext.Current.CancellationToken);
+      Assert.Equal(Png, bytes.ToArray());
+    }
+    Assert.All(harness.States, state => Assert.Equal("pinEdit", state.Scope));
+    Assert.Equal(originalProject, File.ReadAllBytes(project));
+    // 回退后的会话可完整保存（资源无泄漏阻塞）：正常 applySnapshot 成功。
+    WorkbenchProjectContributionLease contribution = await harness.Projects.UploadAsync(
+      new MemoryStream(System.Text.Encoding.UTF8.GetBytes(ContributionBody)),
+      this, TestContext.Current.CancellationToken);
+    WorkbenchAnnotationLease finalPng = await harness.Annotations.UploadPngAsync(
+      new MemoryStream(Png), TestContext.Current.CancellationToken);
+    WorkbenchCommandOutcome applied = harness.Execute(new ApplyPinEditSnapshotCommand(
+      contribution.ContributeId, finalPng.ResourceUri.AbsoluteUri, session!.Value, 0));
+    Assert.Null(applied.Error);
+    Assert.Equal((session.Value, 0L, pinId), harness.Applied.Single());
+  }
+
+  [Fact]
   public async Task RejectedPinRestoreRebindsOnlyMatchingSessionToRetainedFlatPng()
   {
     await using var harness = new Harness();

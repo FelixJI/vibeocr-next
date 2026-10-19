@@ -38,6 +38,32 @@ public sealed class WebWorkbenchCommandDeliveryTests
     },
   });
 
+  private static string ApplySnapshot(Guid requestId, Guid session, string resourceUri) =>
+    JsonSerializer.Serialize(new
+    {
+      version = 2,
+      kind = "request",
+      id = requestId,
+      type = "app.command",
+      payload = new
+      {
+        sessionId = session,
+        command = new
+        {
+          scope = "pinEdit",
+          action = "applySnapshot",
+          arguments = new
+          {
+            contributeId = Guid.NewGuid().ToString("N"),
+            resourceUri,
+            sessionId = session.ToString("N"),
+            revision = 0,
+            excludeBoxes = Array.Empty<object>(),
+          },
+        },
+      },
+    });
+
   private static IEnumerable<(Guid Id, bool Ok)> Receipts(IEnumerable<string> posted)
   {
     foreach (string json in posted)
@@ -268,6 +294,34 @@ public sealed class WebWorkbenchCommandDeliveryTests
     Assert.Equal(1, fixture.Recoveries);
   }
 
+  [Fact]
+  public async Task PinSnapshotApplyExceptionResetsInFlightAndRepliesBoundedFailureReceipt()
+  {
+    Guid session = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, session);
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    WorkbenchAnnotationLease png = await fixture.Annotations.UploadPngAsync(
+      new MemoryStream(Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")),
+      TestContext.Current.CancellationToken);
+
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(
+      ApplySnapshot(commandId, session, png.ResourceUri.AbsoluteUri), fixture.Document);
+    gate.SetException(new IOException("disk failure during snapshot persist"));
+    await command;
+
+    // 真实命令异常：在途状态复位（否则退出对话框永久禁用且保存复挂起 Promise），
+    // Web 收到有界失败终态回执可重试；不进入导航重置（不丢编辑现场）。
+    Assert.False(fixture.Host.PinSnapshotInFlight);
+    Assert.Equal([(commandId, false)], Receipts(fixture.Posted));
+    Assert.Equal(0, fixture.Recoveries);
+    Assert.Empty(fixture.Violations);
+    Assert.Contains("bridge-command-failed:IOException", fixture.States);
+  }
+
   private sealed class HostFixture : IAsyncDisposable
   {
     public readonly string Root = Path.Combine(Path.GetTempPath(), $"workbench-delivery-{Guid.NewGuid():N}");
@@ -281,13 +335,18 @@ public sealed class WebWorkbenchCommandDeliveryTests
     public readonly object Document = new();
     public int Recoveries;
 
-    public HostFixture(params Guid[] sessions)
+    public HostFixture(params Guid[] sessions) : this(false, sessions)
+    {
+    }
+
+    public HostFixture(bool pinEditHost, params Guid[] sessions)
     {
       Directory.CreateDirectory(Root);
       Application = new DeliveryApplication(sessions);
       Broker = new WorkbenchResourceBroker(Root);
       Annotations = new WorkbenchAnnotationStore(Root);
-      Host = new WebWorkbenchHost(Application, Broker, Annotations, applicationOwner: false);
+      Host = new WebWorkbenchHost(Application, Broker, Annotations,
+        applicationOwner: false, pinEditHost: pinEditHost);
       Host.RegisterBridge(Document, Posted.Add);
       Host.StateChanged += States.Add;
       Host.ProtocolViolation += Violations.Enqueue;

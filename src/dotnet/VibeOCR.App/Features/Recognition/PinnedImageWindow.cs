@@ -498,7 +498,13 @@ internal sealed class PinnedImageWindow : IDisposable
 
   internal void RestoreGeometry(Features.Pins.PinSnapshotStore.Recovery recovery)
   {
-    window.AppWindow.MoveAndResize(new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height));
+    // 显示拓扑变更后保存的绝对坐标可能完全落在当前虚拟桌面外：约束到当前
+    // 工作区并保留至少顶部可拖 band 可见，已有合法坐标（含负值/跨屏）不乱挪。
+    nint restoreHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    int bandPhysical = (int)Math.Ceiling(BandHeightDip * GetDpiForWindow(restoreHandle) / 96.0);
+    window.AppWindow.MoveAndResize(Features.Pins.PinSnapshotStore.ConstrainRestoredGeometry(
+      new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height),
+      Features.Pins.PinSnapshotStore.CurrentWorkAreas(), bandPhysical, 16));
     SetGrouped(recovery.Grouped);
     SetCollapsed(recovery.Collapsed);
     if (recovery.Collapsed)
