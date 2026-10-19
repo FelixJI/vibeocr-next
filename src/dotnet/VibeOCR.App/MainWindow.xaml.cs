@@ -1220,6 +1220,25 @@ public sealed partial class MainWindow : Window
     await Task.CompletedTask;
   }
 
+  /// <summary>smoke 注入：公式宿主创建完成后的挂起闸门（生产为 null）。</summary>
+  internal TaskCompletionSource? SmokeFormulaHostGate { get; set; }
+  /// <summary>smoke 观察：闸门路径下已创建的公式宿主实例。</summary>
+  internal readonly List<WebWorkbenchHost> SmokeFormulaHosts = [];
+
+  /// <summary>smoke 注入：下一次恢复根枚举抛存储异常（真实启动链验证），
+  /// 消费后自动还原；启动后经 SmokeRecoveryInjectionConsumed 确认。</summary>
+  internal bool SmokeRecoveryInjectionConsumed { get; private set; }
+  internal void SmokeInjectRecoveryRootFailure()
+  {
+    SmokeRecoveryInjectionConsumed = false;
+    pinSnapshotStore!.RecoveryDirectoryEnumeration = _ =>
+    {
+      pinSnapshotStore.RecoveryDirectoryEnumeration = null;
+      SmokeRecoveryInjectionConsumed = true;
+      throw new UnauthorizedAccessException("smoke injected recovery root failure");
+    };
+  }
+
   private Features.Pins.TypedPinWindow CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind kind, Guid? id = null)
   {
     var pin = new Features.Pins.TypedPinWindow(kind, id, async view =>
@@ -1228,6 +1247,13 @@ public sealed partial class MainWindow : Window
         applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, projectStore: projectStore, pinEditHost: true);
       // 公式窗口不预载普通 pin 页，首次导航由 RenderFormulaAsync 唯一发出。
       await host.InitializeAsync(view, layout.WebAssetsRoot, deferInitialNavigation: true);
+      // smoke 注入（生产为 null）：宿主创建完成后挂起，用于真实 GUI 验证
+      // 并发单飞/迟到丢弃/创建期间关闭释放。
+      if (SmokeFormulaHostGate is { } gate)
+      {
+        SmokeFormulaHosts.Add(host);
+        await gate.Task;
+      }
       return host;
     });
     pin.Closed += closed =>

@@ -137,6 +137,44 @@ describe("PinHistoryPanel", () => {
     expect(screen.getByRole("button", { name: "清空" })).toBeDisabled();
   });
 
+  it("bounds the search query to the host 128-character budget", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn().mockResolvedValue(true);
+    render(
+      <PinHistoryPanel
+        history={parsePinHistory(validHistory)}
+        actions={actions(run)}
+        connected={true}
+      />,
+    );
+    const search = screen.getByRole("searchbox", {
+      name: "检索截图历史",
+    });
+    // 粘贴超过宿主协议预算的检索词后提交：不发送会被拒收且无回执的超长查询。
+    await user.type(search, "x".repeat(140) + "{Enter}");
+    const call = run.mock.calls.find(
+      ([command]) => command.type === "pinEdit.listHistory",
+    );
+    expect(call).toBeDefined();
+    expect((call![0] as { query: string }).query.length).toBeLessThanOrEqual(
+      128,
+    );
+  });
+
+  it("shows entry dates in the host-searchable yyyy-MM-dd HH:mm:ss format", () => {
+    render(
+      <PinHistoryPanel
+        history={parsePinHistory(validHistory)}
+        actions={actions()}
+        connected={true}
+      />,
+    );
+    // 显示与宿主检索同一固定格式：按界面看到的日期输入检索必须命中。
+    const names = screen.getAllByText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.every((node) => !node.textContent!.includes("/"))).toBe(true);
+  });
+
   it("renders nothing without a host projection", () => {
     const { container } = render(
       <PinHistoryPanel

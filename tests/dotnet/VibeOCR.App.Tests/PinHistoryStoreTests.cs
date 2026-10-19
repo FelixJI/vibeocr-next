@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using VibeOCR.App.Features.Pins;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Web;
@@ -270,6 +271,133 @@ public sealed class PinHistoryStoreTests : IDisposable
     string wire = WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(), new WorkbenchStateEnvelope(
       1, "pinEdit", WorkbenchStateChange.Replace, new PinEditWorkbenchState(false, "pinEdit.ready", History: history)));
     Assert.True(System.Text.Encoding.UTF8.GetByteCount(wire) < WorkbenchBridgeCodec.MaxMessageBytes);
+  }
+
+  [Fact]
+  public void ClearPreservesUnknownFilesAndKeepsRetryVisible()
+  {
+    var store = Store();
+    store.SetEnabled(true);
+    store.RecordSuccessfulCapture("owned", PngWithTag(1));
+    string id = store.Projection(null).Entries[0].EntryId;
+    string directory = Path.Combine(PinHistoryStore.RootFor(root), id);
+    string unknown = Path.Combine(directory, "user-note.txt");
+    File.WriteAllText(unknown, "must remain");
+    Assert.Equal(0, store.ClearAll());
+    Assert.Equal("must remain", File.ReadAllText(unknown));
+    Assert.False(File.Exists(Path.Combine(directory, "image.png")));
+    Assert.Empty(store.Projection(null).Entries);
+    Assert.Equal(1, store.Projection(null).Count);
+    Assert.NotNull(store.Projection(null).Error);
+    var restarted = LoadedStore(root);
+    Assert.Equal(1, restarted.Projection(null).Count);
+    Assert.NotNull(restarted.Projection(null).Error);
+    File.Delete(unknown);
+    Assert.Equal(1, restarted.ClearAll());
+    Assert.Equal(0, restarted.Projection(null).Count);
+    Assert.Null(restarted.Projection(null).Error);
+    Assert.False(Directory.Exists(directory));
+  }
+
+  [Fact]
+  public void ClearFailurePersistsRetryIdentityBeforeReturning()
+  {
+    var store = Store();
+    store.SetEnabled(true);
+    store.RecordSuccessfulCapture("owned", PngWithTag(1));
+    string id = store.Projection(null).Entries[0].EntryId;
+    string directory = Path.Combine(PinHistoryStore.RootFor(root), id);
+    using (File.Open(Path.Combine(directory, "image.png"), FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+      Assert.Equal(0, store.ClearAll());
+      Assert.Equal(1, store.Projection(null).Count);
+      Assert.NotNull(store.Projection(null).Error);
+      JsonNode index = JsonNode.Parse(File.ReadAllText(Path.Combine(PinHistoryStore.RootFor(root), "index.json")))!;
+      Assert.Contains(index["pendingCleanup"]!.AsArray(), item => item!.GetValue<string>() == id);
+    }
+    var restarted = LoadedStore(root);
+    Assert.Equal(1, restarted.Projection(null).Count);
+    Assert.Equal(1, restarted.ClearAll());
+    Assert.False(Directory.Exists(directory));
+  }
+
+  [Fact]
+  public async Task FailedDamagedEntryCleanupPersistsAcrossRestartUntilClearAllRetries()
+  {
+    // 删除失败（目录内文件被占用）不被吞成已清理：待清理身份持久化在合法
+    // 索引中，跨重启（新实例）后 ClearAll 仍可重试真正删除，不再永久残留。
+    var seed = LoadedStore(root); seed.SetEnabled(true);
+    seed.RecordSuccessfulCapture("damaged", PngWithTag(2));
+    string id = seed.Projection(null).Entries[0].EntryId;
+    string directory = Path.Combine(PinHistoryStore.RootFor(root), id);
+    string path = Path.Combine(directory, "image.png");
+    byte[] damaged = File.ReadAllBytes(path);
+    Array.Clear(damaged, 24, damaged.Length - 24);
+    File.WriteAllBytes(path, damaged);
+    using (var held = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+      var store = new PinHistoryStore(root);
+      await store.Initialization.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Empty(store.Projection(null).Entries);
+      // 目录删除失败：仍在磁盘，且未被吞成已清理。
+      Assert.True(Directory.Exists(directory));
+    }
+    // 重启（新实例）：合法索引携带待清理身份，清空重试真正删除。
+    var restarted = LoadedStore(root);
+    Assert.Equal(1, restarted.ClearAll());
+    Assert.False(Directory.Exists(directory));
+  }
+
+  [Fact]
+  public void LegalIndexDropsInvalidMetadataEntriesAndCleansTheirDirectories()
+  {
+    // 合法索引中元数据非法（Bytes=0）但 Guid(N) 合法的条目：丢弃时其 owned
+    // 目录一并清理；Guid 非法的未知目录不触碰；在册条目目录保留。
+    var seed = LoadedStore(root); seed.SetEnabled(true);
+    seed.RecordSuccessfulCapture("good", PngWithTag(1));
+    string goodId = seed.Projection(null).Entries[0].EntryId;
+    string badId = Guid.NewGuid().ToString("N");
+    string unknownId = "not-a-guid";
+    Directory.CreateDirectory(Path.Combine(PinHistoryStore.RootFor(root), badId));
+    Directory.CreateDirectory(Path.Combine(PinHistoryStore.RootFor(root), unknownId));
+    string index = Path.Combine(PinHistoryStore.RootFor(root), "index.json");
+    JsonNode document = JsonNode.Parse(File.ReadAllText(index))!;
+    JsonArray entries = document["entries"]!.AsArray();
+    JsonNode template = entries[0]!.DeepClone();
+    template["id"] = badId;
+    template["key"] = "bad";
+    template["bytes"] = 0;
+    entries.Add(template);
+    JsonNode unknown = template.DeepClone();
+    unknown["id"] = unknownId;
+    unknown["key"] = "unknown";
+    unknown["bytes"] = 100;
+    entries.Add(unknown);
+    File.WriteAllText(index, document.ToJsonString());
+    var store = LoadedStore(root);
+    Assert.Single(store.Projection(null).Entries);
+    Assert.False(Directory.Exists(Path.Combine(PinHistoryStore.RootFor(root), badId)));
+    Assert.True(Directory.Exists(Path.Combine(PinHistoryStore.RootFor(root), unknownId)));
+    Assert.True(Directory.Exists(Path.Combine(PinHistoryStore.RootFor(root), goodId)));
+  }
+
+  [Fact]
+  public async Task BackgroundValidationRemovesDamagedEntryDirectorySafely()
+  {
+    // 验证失败的损坏条目不仅退出索引，其 owned 目录也一并安全清理，
+    // 否则后续“清空全部”只能收集当前索引，损坏目录永久残留。
+    var seed = LoadedStore(root); seed.SetEnabled(true);
+    seed.RecordSuccessfulCapture("damaged", PngWithTag(2));
+    string id = seed.Projection(null).Entries[0].EntryId;
+    string directory = Path.Combine(PinHistoryStore.RootFor(root), id);
+    string path = Path.Combine(directory, "image.png");
+    byte[] damaged = File.ReadAllBytes(path);
+    Array.Clear(damaged, 24, damaged.Length - 24);
+    File.WriteAllBytes(path, damaged);
+    var store = new PinHistoryStore(root);
+    await store.Initialization.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Empty(store.Projection(null).Entries);
+    Assert.False(Directory.Exists(directory));
   }
 
   [Theory]

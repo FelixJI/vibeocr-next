@@ -4469,7 +4469,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   [InlineData(false, true)]
   [InlineData(true, false)]
   [InlineData(true, true)]
-  public async Task JpegOutputAfterEnablingHistoryRecordsPngCopyOnlyOnce(bool save, bool sessionCommand)
+  public async Task JpegOutputAfterEnablingDoesNotBackfillCaptureTakenWhileDisabled(bool save, bool sessionCommand)
   {
     string root = TemporaryRoot();
     try
@@ -4504,8 +4504,48 @@ public sealed class ScreenshotSessionWorkbenchTests
         Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
         Assert.Equal(jpeg, save ? platform.SavedBytes : platform.CopiedBytes);
         Assert.Throws<WorkbenchAnnotationAccessException>(() => annotations.Take(lease.ResourceUri));
-        await AssertHistoryImageAsync(history, (await DecodePngAsync(jpeg)).Pixels);
+        // R8 契约：捕获时历史停用则不保录入键，之后启用也不追溯落盘。
+        Assert.Equal(0, history.Projection(null).Count);
+        Assert.Null(history.Projection(null).Error);
       }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task EnablingDuringPendingSelectionRecognitionDoesNotBackfillDisabledCapture()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new SelectionSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      // 捕获时停用：OCR 提交挂起期间经生产命令路径启用历史，不得追溯落盘
+      // 本次捕获（SetPinHistoryEnabled 无 busy 门禁，该交错在生产可达）。
+      inference.SubmitGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      Task<WorkbenchCommandOutcome> pending = handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken).AsTask();
+      await UntilAsync(() => inference.Requests.Count == 1);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetPinHistoryEnabledCommand(true), TestContext.Current.CancellationToken)).Error);
+      Assert.True(history.IsEnabled);
+      inference.SubmitGate.TrySetResult();
+      // 明确等非 busy 终态：录入发生在该终态发布前，不得只等命令启动。
+      await completed.Task;
+      Assert.Null((await pending.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
     }
     finally { Directory.Delete(root, recursive: true); }
   }

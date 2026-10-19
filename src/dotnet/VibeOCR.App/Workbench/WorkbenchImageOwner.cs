@@ -1249,6 +1249,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
               return;
           }
 
+          // 捕获被接受即冻结历史录入决定（PublishBytesAsync/编码 await 期间
+          // 开关变化不追溯）：同一 key 贯穿本次录入与后续输出消费。
+          bool historyAllowed = pinHistory?.IsEnabled == true;
           WorkbenchResourceReference input = await resources.PublishBytesAsync(
             captured.Data,
             captured.MediaType,
@@ -1263,7 +1266,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           }
 
           Guid captureSession = Guid.NewGuid();
-          if (!await RecordCapturedHistoryAsync(captureSession.ToString("N"), captured, generation, cancellationToken))
+          string? frozenHistoryKey = historyAllowed ? captureSession.ToString("N") : null;
+          if (frozenHistoryKey is not null &&
+            !await RecordCapturedHistoryAsync(frozenHistoryKey, captured, generation, cancellationToken))
           {
             resources.ReleaseResource(input);
             return;
@@ -1280,8 +1285,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           recognitionChannel.ExcludeBoxes = [];
           publishedSession = true;
           ReleaseCaptureGuard();
-          // #238 截图历史：会话确立即录入（含未钉图；未启用为 no-op）。
-          recognitionChannel.HistoryCaptureKey = captureSession.ToString("N");
+          // #238 截图历史：会话确立即录入（含未钉图；捕获时未启用则不持键，
+          // 之后启用也不追溯落盘）。
+          recognitionChannel.HistoryCaptureKey = frozenHistoryKey;
           operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.session"));
         }
         else
@@ -1468,6 +1474,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
       ApplyTaskEngine(modeId!);
       SynchronizeRecognitionMode(requireUsable: true);
+      // 捕获被接受即冻结是否录入与 key：OCR await 期间启用不追溯落盘。
+      string? selectionHistoryKey =
+        pinHistory?.IsEnabled == true ? Guid.NewGuid().ToString("N") : null;
       // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
@@ -1478,11 +1487,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         cancellationToken);
       // 动作栏直接识别不经过 CompleteRecognitionAsync，也须记录成功截图。
       // 选区像素已成功捕获即录入历史（OCR 失败/无结果不丢已捕获截图），
-      // Result 只控制识别文本补充；用户取消经 OperationCanceledException 路径不录入。
+      // Result 只控制识别文本补充；用户取消经 OperationCanceledException 不录入。
+      // 捕获被接受即冻结是否录入与 key（OCR await 期间启用不追溯）。
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        recognitionChannel.HistoryCaptureKey = Guid.NewGuid().ToString("N");
-        if (!await RecordCapturedHistoryAsync(recognitionChannel.HistoryCaptureKey, input, generation, cancellationToken)) return;
+        recognitionChannel.HistoryCaptureKey = selectionHistoryKey;
+        if (selectionHistoryKey is not null &&
+          !await RecordCapturedHistoryAsync(selectionHistoryKey, input, generation, cancellationToken)) return;
         if (state.Result is not null && RecognitionVm.Result is { } recognized)
           EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
       }
@@ -1554,6 +1565,10 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     bool failed = false;
     WorkbenchAnnotationLease? lease = null;
+    // 捕获被接受即冻结是否录入与 key（编码/上传 await 期间启用不追溯）。
+    bool historyAllowed = pinHistory?.IsEnabled == true;
+    Guid outputSession = Guid.NewGuid();
+    string? frozenHistoryKey = historyAllowed ? outputSession.ToString("N") : null;
     try
     {
       byte[] png = await QrCodeSavePlatform.EncodeImageAsync(
@@ -1564,7 +1579,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
       ClearResultActions();
-      recognitionChannel.SessionId = Guid.NewGuid();
+      recognitionChannel.SessionId = outputSession;
       recognitionChannel.Revision = 0;
       recognitionChannel.TextSelectionRequested = false;
       recognitionChannel.SceneEditing = false;
@@ -1573,7 +1588,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       recognitionChannel.ExcludeBoxes = [];
       Guid sessionId = recognitionChannel.SessionId.Value;
       string resourceUri = lease.ResourceUri.AbsoluteUri;
-      recognitionChannel.HistoryCaptureKey = sessionId.ToString("N");
+      recognitionChannel.HistoryCaptureKey = frozenHistoryKey;
       switch (action)
       {
         case ScreenshotSelectionAction.Copy:
@@ -2742,10 +2757,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         // 取代时不建会话、不覆盖新状态。
         state = AdoptSessionForRecognitionInput(state, generation);
         if (screenCapture && generation == Volatile.Read(ref recognitionChannel.Generation) &&
-          recognitionChannel.SessionId is { } captureSession && RecognitionVm.CurrentInput is { } captured)
+          recognitionChannel.SessionId is not null && RecognitionVm.CurrentInput is { } captured)
         {
-          recognitionChannel.HistoryCaptureKey = captureSession.ToString("N");
-          if (!await RecordCapturedHistoryAsync(recognitionChannel.HistoryCaptureKey, captured, generation, cancellationToken)) return;
+          // 会话确立时已冻结录入决定：此处不重新查询开关，同一 key 贯穿
+          // （OCR await 期间启用不追溯）。
+          if (recognitionChannel.HistoryCaptureKey is { } frozenKey &&
+            !await RecordCapturedHistoryAsync(frozenKey, captured, generation, cancellationToken)) return;
           if (RecognitionVm.Result is { } recognized)
             EnrichHistoryText(recognitionChannel, recognized.RawText ?? recognized.Text);
         }

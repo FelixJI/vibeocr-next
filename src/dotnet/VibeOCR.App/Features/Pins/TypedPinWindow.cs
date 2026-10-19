@@ -48,6 +48,7 @@ internal sealed class TypedPinWindow : IDisposable
   private readonly Func<WebView2, Task<WebWorkbenchHost>>? createFormulaHost;
   private WebView2? formulaView;
   private WebWorkbenchHost? formulaHost;
+  private bool formulaRenderInFlight;
   private ContentKind kind;
   private bool disposed;
 
@@ -281,14 +282,38 @@ internal sealed class TypedPinWindow : IDisposable
   internal async Task RenderFormulaAsync()
   {
     if (formulaView is null || createFormulaHost is null) return;
+    // 整个渲染单飞：恢复自动渲染与手动点击不得并发创建宿主或并发渲染
+    // （同一 WebView2 被两个 host 初始化/导航会泄漏并互相干扰）。
+    if (formulaRenderInFlight) return;
+    formulaRenderInFlight = true;
     try
     {
       formulaView.Visibility = Visibility.Visible;
       image.Visibility = Visibility.Collapsed;
       root.UpdateLayout();
-      formulaHost ??= await createFormulaHost(formulaView);
-      byte[] png = await formulaHost.RenderFormulaAsync(editor.Text);
+      // 冻结请求文本：异步返回后源已变化的结果不再套用。
+      string requested = editor.Text;
+      WebWorkbenchHost host = formulaHost ?? await createFormulaHost(formulaView);
+      if (disposed)
+      {
+        // 创建期间已关闭：Dispose 已按当时字段（null）跑过，迟到宿主立即
+        // 释放，不接管字段造成泄漏。
+        if (!ReferenceEquals(formulaHost, host)) _ = host.DisposeAsync();
+        return;
+      }
+      formulaHost ??= host;
+      if (editor.Text != requested)
+      {
+        DiscardStaleFormulaRender();
+        return;
+      }
+      byte[] png = await host.RenderFormulaAsync(requested);
       if (disposed) return;
+      if (editor.Text != requested)
+      {
+        DiscardStaleFormulaRender();
+        return;
+      }
       using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
       using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
       {
@@ -298,6 +323,13 @@ internal sealed class TypedPinWindow : IDisposable
       stream.Seek(0);
       var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
       await bitmap.SetSourceAsync(stream);
+      if (disposed) return;
+      if (editor.Text != requested)
+      {
+        // SetSourceAsync 后源已变化：不把旧公式装进窗口。
+        DiscardStaleFormulaRender();
+        return;
+      }
       image.Source = bitmap;
       image.Visibility = Visibility.Visible;
       formulaView.Visibility = Visibility.Collapsed;
@@ -306,8 +338,21 @@ internal sealed class TypedPinWindow : IDisposable
     catch (Exception error)
     {
       image.Source = null;
+      // 失败同样不残留渲染 WebView 的旧内容，用户可修改后重试。
+      formulaView.Visibility = Visibility.Collapsed;
+      image.Visibility = Visibility.Collapsed;
       status.Text = $"公式渲染失败，源文本已保留：{error.Message}";
     }
+    finally { formulaRenderInFlight = false; }
+  }
+
+  /// <summary>迟到结果不套用：渲染 WebView 收起（不再展示旧公式内容），
+  /// 已有图片按是否存在恢复可见性，提示重新渲染。</summary>
+  private void DiscardStaleFormulaRender()
+  {
+    formulaView!.Visibility = Visibility.Collapsed;
+    image.Visibility = image.Source is not null ? Visibility.Visible : Visibility.Collapsed;
+    status.Text = "公式源已修改，本次渲染未套用；请重新渲染。";
   }
 
   internal PinSnapshotStore.Recovery RecoveryState() => new(PinId, kind.ToString(), editor.Text,

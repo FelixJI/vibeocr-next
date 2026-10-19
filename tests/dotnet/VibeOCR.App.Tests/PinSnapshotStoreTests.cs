@@ -36,6 +36,16 @@ public sealed class PinSnapshotStoreTests : IDisposable
     [new("source.png", Png.LongLength, () => new MemoryStream(Png, writable: false))];
 
   [Fact]
+  public void RecoveryRootEnumerationFailureDegradesToEmptyInsteadOfCrashingStartup()
+  {
+    // ACL/瞬时 I/O 等根级枚举失败不得从 Loaded 启动路径逸出：降级为空恢复集。
+    Directory.CreateDirectory(root);
+    var store = new PinSnapshotStore(root);
+    store.RecoveryDirectoryEnumeration = _ => throw new UnauthorizedAccessException("denied");
+    Assert.Empty(store.LoadRecovery());
+  }
+
+  [Fact]
   public void ConstrainRestoredGeometryKeepsVisibleBandIncludingNegativeAndCrossScreen()
   {
     RectInt32[] dual = [new(0, 0, 1920, 1080), new(-1920, 0, 1920, 1080)];

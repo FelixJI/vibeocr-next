@@ -45,6 +45,9 @@ public sealed partial class App
         await PinSnapshotStore.ValidatePngAsync(png, CancellationToken.None);
         return true;
       }));
+    // 真实启动链验证：恢复根枚举抛存储异常（一次性，消费后还原），
+    // MainWindow 仍应正常就绪，不因不可读而启动失败。
+    main.SmokeInjectRecoveryRootFailure();
     main.Activate();
     try
     {

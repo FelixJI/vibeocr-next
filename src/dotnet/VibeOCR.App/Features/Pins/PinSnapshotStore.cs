@@ -233,29 +233,43 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
   internal IReadOnlyList<Recovery> LoadRecovery()
   {
     List<Recovery> result = [];
-    if (!Directory.Exists(root)) return result;
-    EnsureOwnedDirectory(root);
-    foreach (string directory in Directory.EnumerateDirectories(root))
+    // 根检查/枚举的存储异常（ACL、瞬时 I/O、reparse 防护）不从 Loaded 启动
+    // 路径逸出：降级为空/部分恢复集，仅跳过不可恢复的贴图。
+    try
     {
-      if (!Guid.TryParseExact(Path.GetFileName(directory), "N", out Guid id)) continue;
-      try
+      // 测试接缝优先于存在性检查（真实根不可读场景的启动链注入）。
+      if (RecoveryDirectoryEnumeration is null)
       {
-        EnsureOwnedDirectory(directory);
-        string path = Path.Combine(directory, RecoveryFileName);
-        if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;
-        Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
-        if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
-        if (record?.Kind == "Image" && ReadSnapshotPng(id) is null) continue;
-        if (record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
-          record.Height is > 0 and <= 32768 && record.Content is { Length: <= MaximumRecoveryCharacters } &&
-          record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText") result.Add(record);
+        if (!Directory.Exists(root)) return result;
+        EnsureOwnedDirectory(root);
       }
-      catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
-      { AppLog.Warn($"Skipped damaged pin recovery: {id}: {error.Message}"); }
-      if (result.Count == 4) break;
+      foreach (string directory in (RecoveryDirectoryEnumeration ?? Directory.EnumerateDirectories)(root))
+      {
+        if (!Guid.TryParseExact(Path.GetFileName(directory), "N", out Guid id)) continue;
+        try
+        {
+          EnsureOwnedDirectory(directory);
+          string path = Path.Combine(directory, RecoveryFileName);
+          if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;
+          Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
+          if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
+          if (record?.Kind == "Image" && ReadSnapshotPng(id) is null) continue;
+          if (record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
+            record.Height is > 0 and <= 32768 && record.Content is { Length: <= MaximumRecoveryCharacters } &&
+            record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText") result.Add(record);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        { AppLog.Warn($"Skipped damaged pin recovery: {id}: {error.Message}"); }
+        if (result.Count == 4) break;
+      }
     }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+    { AppLog.Warn($"Pin recovery root unavailable: {error.Message}"); }
     return result;
   }
+
+  /// <summary>测试接缝：恢复根目录枚举注入（存储异常降级回归）；生产为 null。</summary>
+  internal Func<string, IEnumerable<string>>? RecoveryDirectoryEnumeration { get; set; }
 
   internal static void EnsureOwnedDirectory(string directory)
   {

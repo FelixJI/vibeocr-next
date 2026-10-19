@@ -11,11 +11,21 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
-function entryName(createdAt: string): string {
+/** 宿主 WorkbenchBridgeCodec.MaxHistoryQueryLength 同源预算：超长查询会被
+ * 协议拒收且无回执，输入与提交两路统一限制。 */
+const maximumHistoryQueryLength = 128;
+
+/** 与宿主 EntryName/检索同一固定本地格式（yyyy-MM-dd HH:mm:ss），
+ * 用户按界面看到的日期输入检索才能命中。 */
+function formatHistoryTimestamp(createdAt: string): string {
   const date = new Date(createdAt);
-  return Number.isNaN(date.getTime())
-    ? createdAt
-    : date.toLocaleString("zh-CN", { hour12: false });
+  if (Number.isNaN(date.getTime())) return createdAt;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function entryName(createdAt: string): string {
+  return formatHistoryTimestamp(createdAt);
 }
 
 /** #238 截图历史管理面板：开关/检索/重开/删除/清空（仅 pinEdit.* 命令；
@@ -69,6 +79,7 @@ export function PinHistoryPanel({
               placeholder="按日期或已识别文本检索"
               aria-label="检索截图历史"
               value={query}
+              maxLength={maximumHistoryQueryLength}
               disabled={!connected}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
@@ -76,7 +87,10 @@ export function PinHistoryPanel({
                 event.preventDefault();
                 void actions.run({
                   type: "pinEdit.listHistory",
-                  query: query.trim() === "" ? null : query.trim(),
+                  query:
+                    query.trim() === ""
+                      ? null
+                      : query.trim().slice(0, maximumHistoryQueryLength),
                 });
               }}
             />
@@ -86,7 +100,10 @@ export function PinHistoryPanel({
               onClick={() =>
                 void actions.run({
                   type: "pinEdit.listHistory",
-                  query: query.trim() === "" ? null : query.trim(),
+                  query:
+                    query.trim() === ""
+                      ? null
+                      : query.trim().slice(0, maximumHistoryQueryLength),
                 })
               }
             >

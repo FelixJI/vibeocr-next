@@ -158,8 +158,23 @@ public sealed partial class MainWindow
       CaptureUiSmokeTrace.Stage("pins.formula-render");
       var formula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
       formula.SetText("\\frac{x^2+1}{2}");
+      // 真实并发/迟到回归（闸门注入）：挂起创建 + 第二次调用只创建一次，
+      // 挂起期间修改源文本 → 迟到结果不套用且无旧内容展示，随后重试成功。
+      SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      Task suspendedRender = formula.RenderFormulaAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 1), "Formula host creation did not start.");
       await formula.RenderFormulaAsync();
-      if (!formula.HasFormulaImage) throw new InvalidOperationException(formula.StatusText);
+      if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Concurrent render created a second formula host.");
+      formula.SetText("\\frac{x^2+5}{9}");
+      SmokeFormulaHostGate.TrySetResult();
+      await suspendedRender;
+      if (formula.HasFormulaImage) throw new InvalidOperationException("Stale formula render installed an old image.");
+      if (!formula.StatusText.Contains("未套用")) throw new InvalidOperationException($"Stale render did not surface discard guidance: {formula.StatusText}");
+      // 重试（无闸门，复用同一宿主）：新源文本渲染成功且源保留。
+      await formula.RenderFormulaAsync();
+      if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("x^2+5"))
+        throw new InvalidOperationException($"Formula retry after discard failed: {formula.StatusText}");
+      if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Formula retry created another host instead of reusing.");
       formula.SetText("\\unknownCommand{");
       await formula.RenderFormulaAsync();
       if (formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("unknownCommand"))
@@ -170,8 +185,19 @@ public sealed partial class MainWindow
       if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("sqrt"))
         throw new InvalidOperationException($"Formula retry after failure did not recover: {formula.StatusText}");
       formula.ForceClose();
+      // 创建期间关闭：迟到宿主必须释放，不得接管字段泄漏。
+      var closing = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+      SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      Task lateRender = closing.RenderFormulaAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 2), "Late formula host creation did not start.");
+      closing.ForceClose();
+      SmokeFormulaHostGate.TrySetResult();
+      await lateRender;
+      if (!SmokeFormulaHosts[1].IsDisposed) throw new InvalidOperationException("Late formula host after close was leaked.");
+      SmokeFormulaHostGate = null;
 
       CaptureUiSmokeTrace.Stage("pins.close-cancel-discard");
+      if (!SmokeRecoveryInjectionConsumed) throw new InvalidOperationException("Injected recovery root failure never ran at startup.");
       await EnterPinEditAsync(second);
       await WaitForPinEditorAsync(second);
       await RotateSmokePinAsync(second);

@@ -318,6 +318,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   }
   public event Action<string>? StateChanged;
 
+  /// <summary>smoke/测试观察：宿主是否已释放（迟到创建释放验证）。</summary>
+  internal bool IsDisposed => disposed;
+
   public event Action<Exception>? ProtocolViolation;
 
   public event Action? RecoveryRequired;

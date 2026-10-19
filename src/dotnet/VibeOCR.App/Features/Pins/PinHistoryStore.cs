@@ -37,7 +37,8 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     long Bytes,
     string? RecognizedText = null);
 
-  private sealed record IndexFile(bool Enabled, string? LastKey, IReadOnlyList<IndexEntry> Entries);
+  private sealed record IndexFile(bool Enabled, string? LastKey, IReadOnlyList<IndexEntry> Entries,
+    IReadOnlyList<string>? PendingCleanup = null);
 
   private readonly object gate = new();
   private readonly string root;
@@ -47,6 +48,8 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   private string? lastError;
   private List<IndexEntry> entries = [];
   private readonly HashSet<string> verified = [];
+  // 删除前将归属保留在索引中，文件占用或进程退出后仍可重试。
+  private readonly HashSet<string> pendingCleanup = [];
   internal Task Initialization { get; }
 
   internal PinHistoryStore(string dataRoot, TimeProvider? timeProvider = null, Func<byte[], Task<bool>>? validateLoadedImage = null)
@@ -79,13 +82,21 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         document.RootElement.GetRawText(), IndexJson) ??
         throw new JsonException();
       List<IndexEntry> valid = [];
+      List<string> dropped = [];
       foreach (IndexEntry entry in index.Entries ?? [])
       {
         try
         {
           if (entry is null) continue;
-          if (!Guid.TryParseExact(entry.Id, "N", out _) || entry.Bytes is < 1 or > MaximumEntryBytes ||
-            entry.Width < 1 || entry.Height < 1 || valid.Any(item => item.Id == entry.Id)) continue;
+          if (!Guid.TryParseExact(entry.Id, "N", out _)) continue;
+          if (entry.Bytes is < 1 or > MaximumEntryBytes ||
+            entry.Width < 1 || entry.Height < 1 || valid.Any(item => item.Id == entry.Id))
+          {
+            // 合法索引已确认归属（Guid(N)+索引内条目），丢弃时其 owned 目录
+            // 一并清理；重复 id 保留给在册条目，不在此清理。
+            if (!valid.Any(item => item.Id == entry.Id)) dropped.Add(entry.Id);
+            continue;
+          }
           valid.Add(entry);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
@@ -94,7 +105,27 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
       lastKey = index.LastKey;
       entries = valid.OrderBy(entry => entry.CreatedAt).ToList();
       while (entries.Count > MaximumEntries || entries.Sum(entry => entry.Bytes) > MaximumTotalBytes)
+      {
+        dropped.Add(entries[0].Id);
         entries.RemoveAt(0);
+      }
+      // 合法索引携带的待清理身份（上次删除失败且已确认归属的 Guid(N)）：
+      // 重载后 ClearAll 可重试；在册条目不重复挂起；索引整体损坏不破归属。
+      pendingCleanup.Clear();
+      pendingCleanup.UnionWith((index.PendingCleanup ?? [])
+        .Where(id => Guid.TryParseExact(id, "N", out _)));
+      pendingCleanup.RemoveWhere(id => entries.Any(entry => entry.Id == id));
+      // 索引合法时才执行丢弃清理；整个索引损坏不猜归属，条目目录全部保留。
+      // 同 id 后续在册的（重复条目保留后者等情形）不清理，避免误删活条目目录。
+      dropped.RemoveAll(id => entries.Any(entry => entry.Id == id));
+      if (dropped.Count > 0)
+      {
+        lock (gate)
+        {
+          pendingCleanup.UnionWith(dropped);
+          PersistCleanupAndRetry();
+        }
+      }
     }
     catch (Exception error) when (
       error is JsonException or IOException or UnauthorizedAccessException)
@@ -132,7 +163,13 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         // 删除/清空/淘汰发生后，迟到验证不能复活条目；启用和新录入保持当前真值。
         if (!entries.Any(current => current.Id == entry.Id)) continue;
         if (valid) verified.Add(entry.Id);
-        else entries = entries.Where(current => current.Id != entry.Id).ToList();
+        else
+        {
+          entries = entries.Where(current => current.Id != entry.Id).ToList();
+          verified.Remove(entry.Id);
+          pendingCleanup.Add(entry.Id);
+          PersistCleanupAndRetry();
+        }
       }
     }
   }
@@ -144,7 +181,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     AtomicFile.WriteAllText(
       Path.Combine(root, IndexFileName),
       JsonSerializer.Serialize(
-        new IndexFile(enabled, lastKey, entries), IndexJson));
+        new IndexFile(enabled, lastKey, entries, [.. pendingCleanup]), IndexJson));
   }
 
   private string ImagePath(string entryId) => Path.Combine(root, entryId, ImageFileName);
@@ -190,6 +227,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         return;
       }
       List<IndexEntry> previous = entries;
+      HashSet<string> previousPending = [.. pendingCleanup];
       string? previousKey = lastKey;
       string id = Guid.NewGuid().ToString("N");
       List<IndexEntry> next = [.. previous, new IndexEntry(id, captureKey,
@@ -209,6 +247,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         AtomicFile.Write(ImagePath(id), stream => stream.Write(png));
         entries = next;
         lastKey = captureKey;
+        pendingCleanup.UnionWith(evicted);
         SaveIndex();
         verified.Add(id);
         lastError = null;
@@ -218,10 +257,19 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         entries = previous;
         lastKey = previousKey;
         lastError = $"截图已成功，但历史保存失败：{error.Message}";
-        DeleteEntryDirectory(id);
+        verified.Remove(id);
+        pendingCleanup.Clear();
+        pendingCleanup.UnionWith(previousPending);
+        // 未提交的新文件直接回滚；只有回滚失败才需要持久保存清理身份。
+        if (!TryDeleteOwnedEntry(id))
+        {
+          pendingCleanup.Add(id);
+          PersistCleanupAndRetry();
+        }
         return;
       }
-      foreach (string oldId in evicted) DeleteEntryDirectory(oldId);
+      verified.ExceptWith(evicted);
+      RetryPendingCleanup();
     }
   }
 
@@ -271,11 +319,13 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         entry.RecognizedText is { } text ? text[..Math.Min(12, text.Length)] : null));
       return new PinHistoryState(
         enabled,
-        available.Length,
+        available.Length + pendingCleanup.Count,
         available.Sum(entry => entry.Bytes),
         MaximumEntries,
         MaximumTotalBytes,
-        [.. list], lastError);
+        [.. list], pendingCleanup.Count > 0
+          ? $"有 {pendingCleanup.Count} 条历史尚未清理；请检查文件占用、权限或目录内额外文件后重试清空。"
+          : lastError);
     }
   }
 
@@ -317,22 +367,22 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
 
   public bool DeleteEntry(string entryId)
   {
-    if (!Guid.TryParseExact(entryId, "N", out _))
-    {
-      return false;
-    }
+    if (!Guid.TryParseExact(entryId, "N", out _)) return false;
     lock (gate)
     {
       List<IndexEntry> previous = entries;
       entries = entries.Where(entry => entry.Id != entryId).ToList();
-      int removed = previous.Count - entries.Count;
-      if (removed == 0)
-      {
-        return false;
-      }
+      if (entries.Count == previous.Count) return false;
+      pendingCleanup.Add(entryId);
       try { SaveIndex(); }
-      catch { entries = previous; throw; }
-      DeleteEntryDirectory(entryId);
+      catch
+      {
+        entries = previous;
+        pendingCleanup.Remove(entryId);
+        throw;
+      }
+      verified.Remove(entryId);
+      RetryPendingCleanup();
       return true;
     }
   }
@@ -341,20 +391,57 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   {
     lock (gate)
     {
-      List<string> ids = [.. entries.Select(entry => entry.Id)];
       List<IndexEntry> previous = entries;
+      HashSet<string> previousPending = [.. pendingCleanup];
+      pendingCleanup.UnionWith(entries.Select(entry => entry.Id));
+      int requested = pendingCleanup.Count;
       entries = [];
       try { SaveIndex(); }
-      catch { entries = previous; throw; }
-      foreach (string id in ids) DeleteEntryDirectory(id);
-      return ids.Count;
+      catch
+      {
+        entries = previous;
+        pendingCleanup.Clear();
+        pendingCleanup.UnionWith(previousPending);
+        throw;
+      }
+      verified.Clear();
+      RetryPendingCleanup();
+      if (pendingCleanup.Count == 0) lastError = null;
+      return requested - pendingCleanup.Count;
     }
   }
 
-  /// <summary>仅删除 owned 根下 Guid(N) 点状子目录；任何其它路径不触碰。</summary>
+  // 调用方持有 gate；登记成功后才删除，失败时原索引仍保留归属。
+  private void PersistCleanupAndRetry()
+  {
+    try { SaveIndex(); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    {
+      AppLog.Warn($"Screenshot history cleanup registration failed: {error.Message}");
+      return;
+    }
+    RetryPendingCleanup();
+  }
+
+  private void RetryPendingCleanup()
+  {
+    bool changed = false;
+    foreach (string id in pendingCleanup.ToArray())
+      if (TryDeleteOwnedEntry(id)) changed |= pendingCleanup.Remove(id);
+    if (!changed) return;
+    try { SaveIndex(); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    {
+      // 磁盘上的旧待清理记录仍安全；下次对不存在的目录重试即可。
+      AppLog.Warn($"Screenshot history cleanup completion failed to persist: {error.Message}");
+    }
+  }
+
+  /// <summary>仅删除 owned 根下 Guid(N) 点状子目录；任何其它路径不触碰。
+  /// 不吞 IO/权限失败（抛出=未清成）；verified/pending 状态由调用方在 gate
+  /// 内维护，避免与 Projection/录入并发访问共享集合。</summary>
   private void DeleteEntryDirectory(string entryId)
   {
-    verified.Remove(entryId);
     if (!Guid.TryParseExact(entryId, "N", out _))
     {
       return;
@@ -366,11 +453,23 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
       return;
     }
     PinSnapshotStore.EnsureOwnedDirectory(directory);
-    try { File.Delete(Path.Combine(directory, ImageFileName)); }
-    catch (IOException) { }
-    catch (UnauthorizedAccessException) { }
-    try { Directory.Delete(directory); }
-    catch (IOException) { }
-    catch (UnauthorizedAccessException) { }
+    File.Delete(Path.Combine(directory, ImageFileName));
+    Directory.Delete(directory);
+  }
+
+  /// <summary>共享安全删除：成功（或目录已不存在/非 owned id）返回 true；
+  /// IO/权限失败返回 false，由调用方保留待清理身份，后续 ClearAll 重试。</summary>
+  private bool TryDeleteOwnedEntry(string entryId)
+  {
+    try
+    {
+      DeleteEntryDirectory(entryId);
+      return true;
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+    {
+      AppLog.Warn($"Screenshot history directory cleanup failed: {entryId}: {error.Message}");
+      return false;
+    }
   }
 }
