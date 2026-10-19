@@ -247,6 +247,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private TaskCompletionSource<bool>? acknowledgingPinSnapshot;
   internal bool PinSnapshotInFlight { get; private set; }
   internal event Func<Task>? PinSnapshotAcknowledged;
+  // Only a successful native apply whose document cannot receive its receipt may bypass the web acknowledgement.
+  internal event Action<Guid>? PinSnapshotReceiptLost;
+  internal Func<Task>? SmokeBeforePinSnapshotReceipt { get; set; }
 
   internal Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
   {
@@ -630,7 +633,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       }
       finally { if (snapshotApply) PinSnapshotInFlight = false; }
       if (pinEditRoute && receipt.Ok && envelope.Command is ApplyPinEditSnapshotCommand snapshot)
-        committedPinSnapshot = snapshot.SessionId;
+      {
+        if (OwnsCurrentBridgeDocument(sender, document)) committedPinSnapshot = snapshot.SessionId;
+        else if (!disposed) PinSnapshotReceiptLost?.Invoke(snapshot.SessionId);
+      }
+      if (snapshotApply && SmokeBeforePinSnapshotReceipt is { } beforeReceipt)
+      {
+        SmokeBeforePinSnapshotReceipt = null;
+        await beforeReceipt();
+      }
       // 同一文档内 bootstrap 换 session 不丢已接受回执；换文档/换桥/销毁后旧回执抑制。
       if (bridge is { } deliver && OwnsCurrentBridgeDocument(sender, document))
         deliver.Post(WorkbenchBridgeCodec.SerializeReceipt(receipt));
@@ -822,8 +833,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     subscriptionCancellation?.Cancel();
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
+    Guid? committed = committedPinSnapshot;
     committedPinSnapshot = null;
     pinSnapshotFlush?.TrySetResult(false);
+    if (committed is { } pinSession) PinSnapshotReceiptLost?.Invoke(pinSession);
     // 文档身份推进后仅撤销本宿主槽位：其他宿主的在途贡献不受影响。
     projectStore?.RevokeAll(this);
   }

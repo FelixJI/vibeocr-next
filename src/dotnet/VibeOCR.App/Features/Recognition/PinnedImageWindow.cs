@@ -145,9 +145,8 @@ internal sealed class PinnedImageWindow : IDisposable
   internal nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(window);
   internal event Func<PinnedImageWindow, Guid, Task>? SnapshotConfirmed;
 
-  /// <summary>编辑宿主 renderer 失败（含提交后回执丢失场景）：提交完成时
-  /// 协调器据此对已提交槽幂等收尾。</summary>
-  internal event Action<PinnedImageWindow, Guid>? EditorRecoveryRequired;
+  /// <summary>成功提交对应的文档已失效，协调器可在本次换装后免回执收尾。</summary>
+  internal event Action<PinnedImageWindow, Guid>? SnapshotReceiptLost;
 
   /// <summary>按冻结的归一化排除矩形丢弃正面积相交行；无层/无矩形原样返回。</summary>
   private static RecognitionTextLayerState? FilterExcludedLines(
@@ -246,9 +245,24 @@ internal sealed class PinnedImageWindow : IDisposable
   internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
   internal string SmokeStatus => status.Text;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
-  /// <summary>smoke：对编辑宿主注入 renderer 失败（提交后、回执前）。</summary>
+  /// <summary>smoke：对当前编辑宿主注入 renderer 失败，覆盖空闲与保存交错。</summary>
   internal void SmokeResetEditorDocument() =>
     editorHost?.HandleRendererFailure("smoke-injected-renderer-failure");
+  internal async Task SmokeResetIdleEditorAsync()
+  {
+    var host = editorHost ?? throw new InvalidOperationException("No editor host.");
+    var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    void Observe(string state) { if (state == "bridge-ready") ready.TrySetResult(); }
+    host.StateChanged += Observe;
+    try
+    {
+      SmokeResetEditorDocument();
+      await ready.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+    finally { host.StateChanged -= Observe; }
+  }
+  internal void SmokeDelaySnapshotReceipt(Func<Task> delay) =>
+    (editorHost ?? throw new InvalidOperationException("No editor host.")).SmokeBeforePinSnapshotReceipt = delay;
   internal Func<Task> SmokeCaptureSnapshotConfirmation() => editorSnapshotAcknowledged ??
     throw new InvalidOperationException("No editor acknowledgement is registered.");
 
@@ -1026,14 +1040,12 @@ internal sealed class PinnedImageWindow : IDisposable
         if (!disposed && IsEditingSession(editSessionId))
         {
           status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
-          EditorRecoveryRequired?.Invoke(this, editSessionId);
         }
       };
-      host.StateChanged += state =>
+      host.PinSnapshotReceiptLost += sourceSession =>
       {
-        // renderer 进程失败同样通知：恢复首失败走 Reload 不触发 RecoveryRequired。
-        if (state.StartsWith("process-failed:", StringComparison.Ordinal) && !disposed && IsEditingSession(editSessionId))
-          EditorRecoveryRequired?.Invoke(this, editSessionId);
+        if (!disposed && sourceSession == editSessionId && IsEditingSession(editSessionId))
+          SnapshotReceiptLost?.Invoke(this, editSessionId);
       };
       editorHost = host;
       await overlay.EnsureCoreWebView2Async();

@@ -1124,7 +1124,7 @@ public sealed partial class MainWindow : Window
   private void WirePinWindow(PinnedImageWindow pinned)
   {
     pinned.EditRequested += EnterPinEditAsync;
-    pinned.EditorRecoveryRequired += OnPinEditorRecoveryRequired;
+    pinned.SnapshotReceiptLost += OnPinSnapshotReceiptLost;
     pinned.SnapshotConfirmed += OnPinSnapshotConfirmedAsync;
     pinned.ExitEditRequested += ExitPinEditAsync;
     pinned.MovedDelta += (dx, dy) => MovePinGroup(pinned, dx, dy);
@@ -1342,7 +1342,7 @@ public sealed partial class MainWindow : Window
     internal Guid SessionId { get; } = sessionId;
     internal Task<bool>? Swap { get; set; }
     internal Task? Completion { get; set; }
-    internal bool RecoveryRequired { get; set; }
+    internal bool ReceiptLost { get; set; }
   }
   private PinEditSlot? pinEditing;
   private readonly Dictionary<PinnedImageWindow, Guid> pinGroups = [];
@@ -1449,7 +1449,7 @@ public sealed partial class MainWindow : Window
       slot.Swap = path is not null
         ? ApplyCommittedPinSnapshotAsync(slot.Window, path, sessionId, pinId)
         : Task.FromResult(false);
-      if (slot.RecoveryRequired) _ = FinalizeCommittedPinEditAsync(slot);
+      if (slot.ReceiptLost) _ = FinalizeCommittedPinEditAsync(slot);
       SmokeCommittedResetProbe?.Invoke(slot.Window);
     }
     if (DispatcherQueue.HasThreadAccess) Apply();
@@ -1478,10 +1478,10 @@ public sealed partial class MainWindow : Window
     finally { if (ReferenceEquals(pinEditing, slot)) pinEditing = null; }
   }
 
-  private void OnPinEditorRecoveryRequired(PinnedImageWindow window, Guid sessionId)
+  private void OnPinSnapshotReceiptLost(PinnedImageWindow window, Guid sessionId)
   {
     if (pinEditing is not { } slot || slot.Window != window || slot.SessionId != sessionId) return;
-    slot.RecoveryRequired = true;
+    slot.ReceiptLost = true;
     if (slot.Swap is not null) _ = FinalizeCommittedPinEditAsync(slot);
   }
 

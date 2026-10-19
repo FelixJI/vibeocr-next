@@ -322,6 +322,97 @@ public sealed class WebWorkbenchCommandDeliveryTests
     Assert.Contains("bridge-command-failed:IOException", fixture.States);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ResetDocumentReportsReceiptLossOnlyAfterItsApplySucceeds(bool succeeds)
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source, Guid.NewGuid());
+    List<Guid> lost = [];
+    fixture.Host.PinSnapshotReceiptLost += lost.Add;
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    string png = await UploadPinPngAsync(fixture);
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
+    Assert.True(fixture.Host.PinSnapshotInFlight);
+    fixture.Host.ResetWebDocument();
+    Assert.Empty(lost);
+    // A new document may bootstrap before the accepted native apply completes.
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    if (succeeds) gate.SetResult(new WorkbenchCommandReceipt(commandId, 7, null));
+    else gate.SetException(new IOException("snapshot writer failed after document reset"));
+    await command;
+    Assert.Equal(succeeds ? new[] { source } : Array.Empty<Guid>(), lost);
+    Assert.False(fixture.Host.PinSnapshotInFlight);
+    fixture.Host.ResetWebDocument();
+    Assert.Equal(succeeds ? new[] { source } : Array.Empty<Guid>(), lost);
+    Assert.Empty(Receipts(fixture.Posted));
+  }
+
+  [Fact]
+  public async Task IdleResetDoesNotBypassTheNextSuccessfulSnapshotAcknowledgement()
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, Guid.NewGuid(), source);
+    List<Guid> lost = [];
+    fixture.Host.PinSnapshotReceiptLost += lost.Add;
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    fixture.Host.ResetWebDocument();
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    Assert.Empty(lost);
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    Task<bool> flush = fixture.Host.RequestPinSnapshotFlushAsync(source, _ => { });
+    string png = await UploadPinPngAsync(fixture);
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
+    gate.SetResult(new WorkbenchCommandReceipt(commandId, 7, null));
+    await command;
+    Assert.Empty(lost);
+    Assert.False(flush.IsCompleted);
+    await fixture.Host.ReceiveWebMessageAsync(JsonSerializer.Serialize(new
+    {
+      version = WorkbenchProtocol.Version, kind = "event", type = "pinEdit.snapshotResult",
+      payload = new { sessionId = source.ToString("N"), ok = true },
+    }), fixture.Document);
+    Assert.True(await flush);
+    fixture.Host.ResetWebDocument();
+    Assert.Empty(lost);
+  }
+
+  [Fact]
+  public async Task ResetAfterCommitReportsItsUnacknowledgedSnapshotExactlyOnce()
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source);
+    List<Guid> lost = [];
+    fixture.Host.PinSnapshotReceiptLost += lost.Add;
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    string png = await UploadPinPngAsync(fixture);
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
+    gate.SetResult(new WorkbenchCommandReceipt(commandId, 7, null));
+    await command;
+    Assert.Empty(lost);
+    fixture.Host.ResetWebDocument();
+    fixture.Host.ResetWebDocument();
+    Assert.Equal([source], lost);
+  }
+
+  private static async Task<string> UploadPinPngAsync(HostFixture fixture)
+  {
+    WorkbenchAnnotationLease png = await fixture.Annotations.UploadPngAsync(
+      new MemoryStream(Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")),
+      TestContext.Current.CancellationToken);
+    return png.ResourceUri.AbsoluteUri;
+  }
+
   private sealed class HostFixture : IAsyncDisposable
   {
     public readonly string Root = Path.Combine(Path.GetTempPath(), $"workbench-delivery-{Guid.NewGuid():N}");

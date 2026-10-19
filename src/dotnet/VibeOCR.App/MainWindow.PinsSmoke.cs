@@ -186,6 +186,27 @@ public sealed partial class MainWindow
       }
       await VerifySmokePinTextAsync(first);
 
+      CaptureUiSmokeTrace.Stage("pins.idle-recovery-normal-switch");
+      await EnterPinEditAsync(first);
+      await WaitForPinEditorAsync(first);
+      await first.SmokeResetIdleEditorAsync();
+      await WaitForPinEditorAsync(first);
+      PinEditSlot recoveredIdleSlot = pinEditing!;
+      bool swapFinishedBeforeReceipt = false;
+      first.SmokeDelaySnapshotReceipt(async () =>
+      {
+        await WaitForPinCheckAsync(() => Task.FromResult(recoveredIdleSlot.Swap is not null),
+          "Fresh save did not start its committed display swap.");
+        await recoveredIdleSlot.Swap!;
+        swapFinishedBeforeReceipt = true;
+      });
+      await RotateSmokePinAsync(first);
+      await EnterPinEditAsync(second);
+      if (!swapFinishedBeforeReceipt || first.Editing || pinEditing?.Window != second || !second.Editing)
+        throw new InvalidOperationException("Idle renderer recovery made a later successful save fail or blocked switching pins.");
+      await ExitPinEditAsync(second);
+      await WaitForPinCheckAsync(() => Task.FromResult(!second.Editing), "Switch target did not discard.");
+
       // A13-02：提交后 renderer 重置且回执丢失：已落盘提交为权威结果，槽幂等
       // 收尾不重做保存；同窗重开新代后旧回调不得拆新编辑器；再开新贴图后旧会
       // 迟到确认不得清除新槽；单次提交由真实提交事件计数验证。
