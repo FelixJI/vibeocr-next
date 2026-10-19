@@ -66,6 +66,67 @@ public sealed class WebWorkbenchHostPolicyTests
   }
 
   [Fact]
+  public async Task DisposingPinHostCompletesEverySharedSnapshotWaiter()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pin-flush-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+    var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, pinEditHost: true);
+    Task<bool> first = host.RequestPinSnapshotFlushAsync(Guid.NewGuid(), _ => { });
+    Task<bool> second = host.FlushPinSnapshotAsync(Guid.NewGuid());
+    await host.DisposeAsync();
+    Assert.False(await first.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+    Assert.False(await second.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+  }
+
+  [Fact]
+  public async Task SuccessfulSnapshotAcknowledgementCanDisposeItsOwnHostBeforeCompletingWaiters()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pin-ack-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+    await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, pinEditHost: true);
+    object sender = new();
+    host.RegisterBridge(sender, _ => { });
+    Guid source = Guid.NewGuid();
+    typeof(WebWorkbenchHost).GetField("committedPinSnapshot", System.Reflection.BindingFlags.Instance |
+      System.Reflection.BindingFlags.NonPublic)!.SetValue(host, source);
+    Task<bool> first = host.RequestPinSnapshotFlushAsync(source, _ => { });
+    Task<bool> second = host.FlushPinSnapshotAsync(source);
+    host.PinSnapshotAcknowledged += async () => await host.DisposeAsync();
+    await host.ReceiveWebMessageAsync(JsonSerializer.Serialize(new
+    {
+      version = WorkbenchProtocol.Version, kind = "event", type = "pinEdit.snapshotResult",
+      payload = new { sessionId = source.ToString("N"), ok = true },
+    }), sender);
+    Assert.True(await first);
+    Assert.True(await second);
+  }
+
+  [Fact]
+  public async Task PinSnapshotTimeoutCompletesEverySharedWaiterAndAllowsAnotherRequest()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pin-timeout-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+    await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, pinEditHost: true);
+    Task<bool> first = host.RequestPinSnapshotFlushAsync(Guid.NewGuid(), _ => { });
+    Task<bool> second = host.FlushPinSnapshotAsync(Guid.NewGuid());
+    Assert.False(await first.WaitAsync(TimeSpan.FromSeconds(65), TestContext.Current.CancellationToken));
+    Assert.False(await second.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+    Task<bool> retry = host.RequestPinSnapshotFlushAsync(Guid.NewGuid(), _ => { });
+    Assert.False(retry.IsCompleted);
+    await host.DisposeAsync();
+    Assert.False(await retry);
+  }
+
+  [Fact]
   public async Task PdfPreviewFlushCorrelatesOneRequestAndAbandonsOnCancellationOrDispose()
   {
     string root = Path.Combine(Path.GetTempPath(), $"pdf-flush-{Guid.NewGuid():N}"); Directory.CreateDirectory(root);

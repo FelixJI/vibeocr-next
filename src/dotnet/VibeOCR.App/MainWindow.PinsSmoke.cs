@@ -158,6 +158,17 @@ public sealed partial class MainWindow
       CaptureUiSmokeTrace.Stage("pins.formula-render");
       var formula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
       formula.SetText("\\frac{x^2+1}{2}");
+      SmokeFailFormulaInitialization = true;
+      await formula.RenderFormulaAsync();
+      if (SmokeFailedFormulaHost is not { IsDisposed: true } || formula.HasFormulaImage ||
+        !formula.RecoveryState().Content.Contains("x^2+1"))
+        throw new InvalidOperationException("Failed formula initialization leaked its host or lost its source.");
+      CaptureUiSmokeTrace.Stage("pins.formula-initialization-rollback");
+      bool failedHostNavigated = false;
+      SmokeFailedFormulaHost.StateChanged += state =>
+      {
+        if (state.StartsWith("navigation-", StringComparison.Ordinal)) failedHostNavigated = true;
+      };
       // 真实并发/迟到回归（闸门注入）：挂起创建 + 第二次调用只创建一次，
       // 挂起期间修改源文本 → 迟到结果不套用且无旧内容展示，随后重试成功。
       SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -175,6 +186,7 @@ public sealed partial class MainWindow
       if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("x^2+5"))
         throw new InvalidOperationException($"Formula retry after discard failed: {formula.StatusText}");
       if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Formula retry created another host instead of reusing.");
+      if (failedHostNavigated) throw new InvalidOperationException("Failed formula host retained a native navigation handler.");
       formula.SetText("\\unknownCommand{");
       await formula.RenderFormulaAsync();
       if (formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("unknownCommand"))

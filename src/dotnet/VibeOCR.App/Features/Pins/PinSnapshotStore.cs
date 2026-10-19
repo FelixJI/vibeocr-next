@@ -83,6 +83,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
   }
   private const string PointerFileName = "current.json";
   private const string RecoveryFileName = "window.json";
+  private const string DeletionFileName = "delete.pending";
 
   private readonly string root = Path.Combine(dataRoot, "pins");
 
@@ -249,6 +250,12 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         try
         {
           EnsureOwnedDirectory(directory);
+          if (File.Exists(Path.Combine(directory, DeletionFileName)))
+          {
+            DeleteSnapshot(id);
+            continue;
+          }
+          if (result.Count == 4) continue;
           string path = Path.Combine(directory, RecoveryFileName);
           if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;
           Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
@@ -260,7 +267,6 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
         { AppLog.Warn($"Skipped damaged pin recovery: {id}: {error.Message}"); }
-        if (result.Count == 4) break;
       }
     }
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
@@ -286,20 +292,33 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 
   public void DeleteSnapshot(Guid pinId)
   {
-    if (Directory.Exists(root)) EnsureOwnedDirectory(root);
-    string directory = DirectoryFor(pinId);
-    if (!Directory.Exists(directory)) return;
-    EnsureOwnedDirectory(directory);
-    foreach (string path in Directory.EnumerateFiles(directory))
+    try
     {
-      string name = Path.GetFileName(path);
-      if (name is PointerFileName or RecoveryFileName or "image.png" ||
-        Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out _) &&
-        Path.GetExtension(path) is ".png" or ".vibp") TryDelete(path);
+      if (Directory.Exists(root)) EnsureOwnedDirectory(root);
+      string directory = DirectoryFor(pinId);
+      if (!Directory.Exists(directory)) return;
+      EnsureOwnedDirectory(directory);
+      string marker = Path.Combine(directory, DeletionFileName);
+      // Persist the closed identity before deleting recovery or content; startup retries it.
+      if (!File.Exists(marker)) AtomicFile.Write(marker, stream => stream.WriteByte(1));
+      EnsureOwnedDirectory(marker);
+      foreach (string path in Directory.EnumerateFiles(directory))
+      {
+        string name = Path.GetFileName(path);
+        if (name is PointerFileName or RecoveryFileName or "image.png" ||
+          Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out _) &&
+          Path.GetExtension(path) is ".png" or ".vibp")
+        {
+          EnsureOwnedDirectory(path);
+          File.Delete(path);
+        }
+      }
+      File.Delete(marker);
+      // User files and subdirectories are never recursively removed.
+      if (!Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
     }
-    try { Directory.Delete(directory); }
-    catch (IOException) { }
-    catch (UnauthorizedAccessException) { }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+    { AppLog.Warn($"Pin cleanup deferred; recovery or deletion marker retained: {pinId}: {error.Message}"); }
   }
 
   /// <summary>PNG 头级尺寸探针（IHDR 宽高）；非 PNG/损坏返回 (0,0)。</summary>

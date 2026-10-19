@@ -244,19 +244,25 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private TaskCompletionSource<bool>? pinSnapshotFlush;
   private Guid? committedPinSnapshot;
   private Guid? requestedPinSnapshot;
+  private TaskCompletionSource<bool>? acknowledgingPinSnapshot;
   internal bool PinSnapshotInFlight { get; private set; }
   internal event Func<Task>? PinSnapshotAcknowledged;
 
-  internal async Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
+  internal Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
   {
-    if (pinSnapshotFlush is { } existing) return await existing.Task;
-    if (!pinEditRoute || core is not { } current || disposed) return false;
+    if (pinSnapshotFlush is { } existing) return existing.Task;
+    if (!pinEditRoute || core is not { } current || disposed) return Task.FromResult(false);
+    return RequestPinSnapshotFlushAsync(sourceSession, current.PostWebMessageAsJson);
+  }
+
+  internal async Task<bool> RequestPinSnapshotFlushAsync(Guid sourceSession, Action<string> post)
+  {
     var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     pinSnapshotFlush = completion;
     requestedPinSnapshot = sourceSession;
     try
     {
-      current.PostWebMessageAsJson(JsonSerializer.Serialize(new
+      post(JsonSerializer.Serialize(new
       {
         version = WorkbenchProtocol.Version,
         kind = "request", id = Guid.NewGuid().ToString("N"), type = "pinEdit.requestSnapshot",
@@ -264,8 +270,17 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       }));
       return await completion.Task.WaitAsync(TimeSpan.FromSeconds(60));
     }
-    catch (Exception error) when (error is TimeoutException or OperationCanceledException) { return false; }
-    finally { if (ReferenceEquals(pinSnapshotFlush, completion)) { pinSnapshotFlush = null; requestedPinSnapshot = null; } }
+    catch (Exception error) when (error is TimeoutException or OperationCanceledException)
+    {
+      completion.TrySetResult(false);
+      return await completion.Task;
+    }
+    finally
+    {
+      // Complete shared waiters even if sending or waiting fails.
+      completion.TrySetResult(false);
+      if (ReferenceEquals(pinSnapshotFlush, completion)) { pinSnapshotFlush = null; requestedPinSnapshot = null; }
+    }
   }
 
   private async Task AcceptPinSnapshotResultAsync(JsonElement message)
@@ -277,12 +292,23 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       !Guid.TryParseExact(payload.GetProperty("sessionId").GetString(), "N", out Guid sourceSession)) return;
     bool ok = payload.GetProperty("ok").GetBoolean();
     if (ok ? committedPinSnapshot != sourceSession : requestedPinSnapshot != sourceSession) return;
-    if (ok)
+    TaskCompletionSource<bool>? completion = pinSnapshotFlush;
+    try
     {
-      committedPinSnapshot = null;
-      if (PinSnapshotAcknowledged is { } acknowledged) await acknowledged();
+      if (ok)
+      {
+        committedPinSnapshot = null;
+        // A successful acknowledgement tears down this host before returning.
+        acknowledgingPinSnapshot = completion;
+        if (PinSnapshotAcknowledged is { } acknowledged) await acknowledged();
+      }
+      completion?.TrySetResult(ok);
     }
-    pinSnapshotFlush?.TrySetResult(ok);
+    finally
+    {
+      acknowledgingPinSnapshot = null;
+      completion?.TrySetResult(false);
+    }
   }
 
   public WebWorkbenchHost(
@@ -408,7 +434,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     // Serve the packaged bundle and opaque resources through one same-origin route.
     packagedAssets = new PackagedWebAssets(assets);
     ConfigureSettings(next.Settings);
+    // Own the core before binding: initialization failure must still detach partial handlers.
+    core = next;
     next.NavigationStarting += OnNavigationStarting;
+    StateChanged?.Invoke("webview-binding");
     next.NavigationCompleted += OnNavigationCompleted;
     next.NewWindowRequested += OnNewWindowRequested;
     next.PermissionRequested += OnPermissionRequested;
@@ -421,7 +450,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       $"https://{VirtualHost}/*",
       CoreWebView2WebResourceContext.All);
     next.WebResourceRequested += OnWebResourceRequested;
-    core = next;
     RegisterBridge(next, next.PostWebMessageAsJson);
     // 公式窗口延迟初始导航，让 RenderFormulaAsync 的目标成为唯一首次导航，
     // 避免与普通初始导航交错触发 ERR_ABORTED→恢复 Reload 的契约内竞态。
@@ -990,6 +1018,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       return;
     }
     disposed = true;
+    if (!ReferenceEquals(pinSnapshotFlush, acknowledgingPinSnapshot)) pinSnapshotFlush?.TrySetResult(false);
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
     projectStore?.RevokeAll(this);

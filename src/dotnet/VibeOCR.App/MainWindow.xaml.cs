@@ -1224,6 +1224,8 @@ public sealed partial class MainWindow : Window
   internal TaskCompletionSource? SmokeFormulaHostGate { get; set; }
   /// <summary>smoke 观察：闸门路径下已创建的公式宿主实例。</summary>
   internal readonly List<WebWorkbenchHost> SmokeFormulaHosts = [];
+  internal WebWorkbenchHost? SmokeFailedFormulaHost { get; private set; }
+  internal bool SmokeFailFormulaInitialization { get; set; }
 
   /// <summary>smoke 注入：下一次恢复根枚举抛存储异常（真实启动链验证），
   /// 消费后自动还原；启动后经 SmokeRecoveryInjectionConsumed 确认。</summary>
@@ -1245,16 +1247,33 @@ public sealed partial class MainWindow : Window
     {
       var host = new WebWorkbenchHost(application, resourceBroker, annotationStore,
         applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, projectStore: projectStore, pinEditHost: true);
-      // 公式窗口不预载普通 pin 页，首次导航由 RenderFormulaAsync 唯一发出。
-      await host.InitializeAsync(view, layout.WebAssetsRoot, deferInitialNavigation: true);
-      // smoke 注入（生产为 null）：宿主创建完成后挂起，用于真实 GUI 验证
-      // 并发单飞/迟到丢弃/创建期间关闭释放。
-      if (SmokeFormulaHostGate is { } gate)
+      if (SmokeFailFormulaInitialization)
       {
-        SmokeFormulaHosts.Add(host);
-        await gate.Task;
+        SmokeFailFormulaInitialization = false;
+        SmokeFailedFormulaHost = host;
+        host.StateChanged += state =>
+        {
+          if (state == "webview-binding") throw new IOException("smoke formula initialization failure");
+        };
       }
-      return host;
+      try
+      {
+        // 公式窗口不预载普通 pin 页，首次导航由 RenderFormulaAsync 唯一发出。
+        await host.InitializeAsync(view, layout.WebAssetsRoot, deferInitialNavigation: true);
+        // smoke 注入（生产为 null）：宿主创建完成后挂起，用于真实 GUI 验证
+        // 并发单飞/迟到丢弃/创建期间关闭释放。
+        if (SmokeFormulaHostGate is { } gate)
+        {
+          SmokeFormulaHosts.Add(host);
+          await gate.Task;
+        }
+        return host;
+      }
+      catch
+      {
+        await host.DisposeAsync();
+        throw;
+      }
     });
     pin.Closed += closed =>
     {

@@ -348,6 +348,27 @@ public sealed class PinEditChannelWorkbenchTests
     Assert.Null(projection.ScreenshotSession);
   }
 
+  [Fact]
+  public async Task HistoryOperationsPreserveTheLastSubmittedQuery()
+  {
+    await using var harness = new Harness();
+    harness.History.SetEnabled(true);
+    harness.History.RecordSuccessfulCapture("capture-a", Png);
+    harness.History.RecordSuccessfulCapture("capture-b", Png);
+    harness.History.EnrichRecognizedText("capture-a", "发票");
+    harness.Execute(new ListPinHistoryCommand("发票"));
+    string id = Assert.Single(harness.History.Projection("发票").Entries).EntryId;
+    harness.Handler.PinHistoryReopenRequested += _ => Task.CompletedTask;
+    var reopened = harness.Execute(new ReopenPinHistoryEntryCommand(id));
+    Assert.Equal(id, Assert.Single(Assert.IsType<PinEditWorkbenchState>(
+      reopened.States.Single(state => state.Scope == "pinEdit")).History!.Entries).EntryId);
+    var deleted = harness.Execute(new DeletePinHistoryEntryCommand(id));
+    Assert.Empty(Assert.IsType<PinEditWorkbenchState>(deleted.States.Single(state => state.Scope == "pinEdit")).History!.Entries);
+    Assert.Equal(1, harness.History.Projection(null).Count);
+    var reset = harness.Execute(new ListPinHistoryCommand(null));
+    Assert.Single(Assert.IsType<PinEditWorkbenchState>(reset.States.Single(state => state.Scope == "pinEdit")).History!.Entries);
+  }
+
   [Theory]
   [InlineData(ScreenshotSelectionAction.Copy, false, 1)]
   [InlineData(ScreenshotSelectionAction.Save, false, 1)]

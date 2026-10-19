@@ -133,6 +133,57 @@ public sealed class PinSnapshotStoreTests : IDisposable
     store.DeleteSnapshot(pinId);
   }
 
+  [Theory]
+  [InlineData(".png")]
+  [InlineData(".vibp")]
+  public async Task FailedOwnedFileDeletionIsRetriedAtStartupWithoutRestoringTheClosedPin(string extension)
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string image = (extension == ".png" ? store.GetSnapshotPngPath(id) : store.GetSnapshotProjectPath(id))!;
+    using (var locked = new FileStream(image, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+      store.DeleteSnapshot(id);
+      Assert.True(File.Exists(image));
+      Assert.Empty(new PinSnapshotStore(root).LoadRecovery());
+    }
+    Assert.Empty(new PinSnapshotStore(root).LoadRecovery());
+    Assert.False(File.Exists(image));
+    Assert.False(Directory.Exists(Path.GetDirectoryName(image)));
+  }
+
+  [Fact]
+  public void StartupRetriesCleanupEvenAfterFourWindowsHaveBeenRecovered()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid closed = Guid.NewGuid();
+    store.SaveRecovery(new(closed, "Image", "", 0, 0, 640, 480), Png);
+    string image = store.GetSnapshotPngPath(closed)!;
+    using (var locked = new FileStream(image, FileMode.Open, FileAccess.Read, FileShare.Read))
+      store.DeleteSnapshot(closed);
+    var live = Enumerable.Range(0, 4).Select(_ => Guid.NewGuid()).ToArray();
+    foreach (Guid id in live) store.SaveRecovery(new(id, "Text", "keep", 0, 0, 640, 480));
+    store.RecoveryDirectoryEnumeration = _ => live.Append(closed).Select(id =>
+      Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N")));
+    Assert.Equal(4, store.LoadRecovery().Count);
+    Assert.False(File.Exists(image));
+  }
+
+  [Fact]
+  public void FailedCleanupRegistrationPreservesRecoveryAndDoesNotEscapeClose()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    string image = store.GetSnapshotPngPath(id)!;
+    Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(image)!, "delete.pending"));
+    Assert.Null(Record.Exception(() => store.DeleteSnapshot(id)));
+    Assert.True(File.Exists(image));
+    Assert.Equal(id, Assert.Single(new PinSnapshotStore(root).LoadRecovery()).Id);
+  }
+
   [Fact]
   public void SniffPngSizeReadsHeaderAndRejectsInvalidInput()
   {

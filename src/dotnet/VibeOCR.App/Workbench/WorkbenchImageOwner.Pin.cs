@@ -338,8 +338,9 @@ internal sealed partial class WorkbenchImageOwner
 
   // ---- #238 截图历史：开关/检索/重开/删除/清空（无编辑会话时也可用）。 ----
 
+  private string? pinHistoryQuery;
   private PinHistoryState? PinHistoryProjection() =>
-    pinHistory?.Projection(null);
+    pinHistory?.Projection(pinHistoryQuery);
 
   private WorkbenchState SetPinHistoryEnabled(SetPinHistoryEnabledCommand command)
   {
@@ -357,10 +358,8 @@ internal sealed partial class WorkbenchImageOwner
     {
       throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
     }
-    return PinEditState(false, SessionStatusCode(pinEditChannel)) with
-    {
-      History = pinHistory.Projection(command.Query),
-    };
+    pinHistoryQuery = command.Query;
+    return PinEditState(false, SessionStatusCode(pinEditChannel));
   }
 
   private async Task<WorkbenchState> ReopenPinHistoryEntryAsync(
