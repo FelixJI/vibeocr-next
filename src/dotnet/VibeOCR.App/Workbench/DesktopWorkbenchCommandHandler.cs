@@ -419,6 +419,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   /// <summary>#238 pinEdit：单编辑槽会话建立与宿主事件转发。</summary>
   internal Task<Guid?> TryOpenPinEditSessionAsync(Guid pinId, byte[] png, CancellationToken cancellationToken = default,
     IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null) => Image.TryOpenPinEditSessionAsync(pinId, png, cancellationToken, excludeBoxes);
+  internal void PublishPinHistory() => Image.PublishPinHistory();
   internal event Action<Guid, long, Guid>? PinSnapshotApplied
   {
     add => Image.PinSnapshotApplied += value;

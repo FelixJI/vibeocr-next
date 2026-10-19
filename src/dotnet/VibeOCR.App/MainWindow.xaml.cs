@@ -311,10 +311,10 @@ public sealed partial class MainWindow : Window
       if (pinHistoryStore is null) return;
       await pinHistoryStore.Initialization.ConfigureAwait(false);
       if (shuttingDown) return;
-      DispatcherQueue.TryEnqueue(async () =>
+      DispatcherQueue.TryEnqueue(() =>
       {
         if (shuttingDown) return;
-        try { await application.ExecuteAsync(new(Guid.NewGuid(), new ListPinHistoryCommand(null)), CancellationToken.None); }
+        try { commandHandler.PublishPinHistory(); }
         catch (Exception error) { AppLog.Warn($"History initialization publication failed: {error.Message}"); }
       });
     }
@@ -1358,6 +1358,7 @@ public sealed partial class MainWindow : Window
     {
       await EnterPinEditCoreAsync(target);
     }
+    catch (Exception error) { AppLog.Error("Pin editor creation failed", error); }
     finally { pinTransitionInFlight = false; pinTransitionComplete.TrySetResult(); }
   }
 
@@ -1387,10 +1388,31 @@ public sealed partial class MainWindow : Window
       await application.ExecuteAsync(new(Guid.NewGuid(), new ClosePinEditSessionCommand()), CancellationToken.None);
       return;
     }
-    pinEditing = new PinEditSlot(target, id);
-    await target.EnterEditModeAsync(
-      application, resourceBroker, annotationStore, projectStore, layout.WebAssetsRoot, id);
-    if (!target.Editing) await ExitPinEditAsync(target);
+    var opened = new PinEditSlot(target, id);
+    pinEditing = opened;
+    try
+    {
+      await target.EnterEditModeAsync(
+        application, resourceBroker, annotationStore, projectStore, layout.WebAssetsRoot, id);
+      if (!target.Editing) await ExitPinEditAsync(target);
+    }
+    catch
+    {
+      if (ReferenceEquals(pinEditing, opened))
+      {
+        try
+        {
+          if (commandHandler.InitialStates.OfType<PinEditWorkbenchState>().Single().ScreenshotSession?.SessionId == id.ToString("N"))
+            await application.ExecuteAsync(new(Guid.NewGuid(), new ClosePinEditSessionCommand()), CancellationToken.None);
+        }
+        finally
+        {
+          if (ReferenceEquals(pinEditing, opened)) pinEditing = null;
+          await target.ExitEditModeAsync();
+        }
+      }
+      throw;
+    }
   }
 
   /// <summary>放弃编辑：关闭 pinEdit 会话；会话事件回调完成退出与槽释放。</summary>

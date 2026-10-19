@@ -232,6 +232,8 @@ internal sealed class PinnedImageWindow : IDisposable
   internal string CurrentImagePath => ownedImagePath ?? image.Path;
   internal IReadOnlyList<WorkbenchExclusionBox> CurrentExcludeBoxes => excludeBoxes;
   internal Func<Task>? SmokeSnapshotDisplayStep { get; set; }
+  internal Action? SmokeEditorSetupStep { get; set; }
+  internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
   internal string SmokeStatus => status.Text;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
 
@@ -944,45 +946,50 @@ internal sealed class PinnedImageWindow : IDisposable
   {
     editingSessionId = editSessionId;
     if (disposed || editing) return;
-    editing = true;
-    SetCollapsed(false);
-    SetPassThrough(false);
-    beforeEditSize = window.AppWindow.Size;
-    RectInt32 work = DisplayArea.GetFromWindowId(window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
-    window.AppWindow.Resize(new SizeInt32(Math.Min(work.Width, Math.Max(800, window.AppWindow.Size.Width)),
-      Math.Min(work.Height, Math.Max(600, window.AppWindow.Size.Height))));
-    SyncEditButton();
-    status.Text = "贴图编辑中：完成后点击工具栏“完成贴图”";
-    var overlay = new WebView2 { Margin = new Thickness(0, BandHeightDip, 0, 0) };
-    Grid.SetRow(overlay, 0);
-    overlay.VerticalAlignment = VerticalAlignment.Stretch;
-    overlay.HorizontalAlignment = HorizontalAlignment.Stretch;
-    // 编辑层覆盖静态图（含 band 之下全部区域）；band 保持在最上层可拖动/退出。
-    overlay.SetValue(Canvas.ZIndexProperty, 1);
-    band.SetValue(Canvas.ZIndexProperty, 2);
-    statusChip.SetValue(Canvas.ZIndexProperty, 3);
-    root.Children.Add(overlay);
-    editorView = overlay;
-    var host = new VibeOCR.App.Web.WebWorkbenchHost(
-      application, resourceBroker, annotations,
-      applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit,
-      projectStore: projectStore, pinEditHost: true);
-    host.PinSnapshotAcknowledged += async () =>
-    {
-      if (SnapshotConfirmed is { } confirmed) await confirmed(this);
-    };
-    host.ProtocolViolation += error =>
-      VibeOCR.App.Services.AppLog.Error("Pin editor bridge rejected a message", error);
-    host.RecoveryRequired += () =>
-    {
-      if (!disposed && editing)
-      {
-        status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
-      }
-    };
-    editorHost = host;
     try
     {
+      editing = true;
+      SetCollapsed(false);
+      SetPassThrough(false);
+      beforeEditSize = window.AppWindow.Size;
+      RectInt32 work = DisplayArea.GetFromWindowId(window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+      window.AppWindow.Resize(new SizeInt32(Math.Min(work.Width, Math.Max(800, window.AppWindow.Size.Width)),
+        Math.Min(work.Height, Math.Max(600, window.AppWindow.Size.Height))));
+      SyncEditButton();
+      status.Text = "贴图编辑中：完成后点击工具栏“完成贴图”";
+      var overlay = new WebView2 { Margin = new Thickness(0, BandHeightDip, 0, 0) };
+      editorView = overlay;
+      Grid.SetRow(overlay, 0);
+      overlay.VerticalAlignment = VerticalAlignment.Stretch;
+      overlay.HorizontalAlignment = HorizontalAlignment.Stretch;
+      // 编辑层覆盖静态图（含 band 之下全部区域）；band 保持在最上层可拖动/退出。
+      overlay.SetValue(Canvas.ZIndexProperty, 1);
+      band.SetValue(Canvas.ZIndexProperty, 2);
+      statusChip.SetValue(Canvas.ZIndexProperty, 3);
+      root.Children.Add(overlay);
+      if (SmokeEditorSetupStep is { } setup)
+      {
+        SmokeEditorSetupStep = null;
+        setup();
+      }
+      var host = new VibeOCR.App.Web.WebWorkbenchHost(
+        application, resourceBroker, annotations,
+        applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit,
+        projectStore: projectStore, pinEditHost: true);
+      host.PinSnapshotAcknowledged += async () =>
+      {
+        if (SnapshotConfirmed is { } confirmed) await confirmed(this);
+      };
+      host.ProtocolViolation += error =>
+        VibeOCR.App.Services.AppLog.Error("Pin editor bridge rejected a message", error);
+      host.RecoveryRequired += () =>
+      {
+        if (!disposed && editing)
+        {
+          status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
+        }
+      };
+      editorHost = host;
       await overlay.EnsureCoreWebView2Async();
       if (disposed || !editing)
       {
@@ -995,8 +1002,9 @@ internal sealed class PinnedImageWindow : IDisposable
     catch (Exception error)
     {
       VibeOCR.App.Services.AppLog.Error("Pin editor initialization failed", error);
+      await ExitEditModeAsync();
       status.Text = "贴图编辑器启动失败，请重试";
-      await TeardownEditorAsync();
+      throw;
     }
   }
 

@@ -43,11 +43,12 @@ internal interface IPinHistoryRecorder
 {
   bool IsEnabled { get; }
 
-  /// <summary>设置开关并原子持久化；关闭不清除既有条目。</summary>
+  /// <summary>原子持久化开关；按捕获被接受时的开关决定录入，变化不追溯，关闭不清既有条目。</summary>
   void SetEnabled(bool enabled);
 
-  /// <summary>成功截图录入（best-effort：任何存储失败只丢条目不抛出）。</summary>
-  void RecordSuccessfulCapture(string captureKey, byte[] png);
+  /// <summary>成功截图录入；默认拒绝停用时直接调用。acceptedWhileEnabled
+  /// 仅由捕获时冻结的非空 captureKey 授权在途录入，不随随后开关变化。</summary>
+  void RecordSuccessfulCapture(string captureKey, byte[] png, bool acceptedWhileEnabled = false);
 
   /// <summary>捕获图归一化失败：只更新历史提示，不回滚成功截图。</summary>
   void ReportRecordingFailure(string message);
@@ -339,6 +340,7 @@ internal sealed partial class WorkbenchImageOwner
   // ---- #238 截图历史：开关/检索/重开/删除/清空（无编辑会话时也可用）。 ----
 
   private string? pinHistoryQuery;
+  internal void PublishPinHistory() => operations.Publish(CurrentPinEditState());
   private PinHistoryState? PinHistoryProjection() =>
     pinHistory?.Projection(pinHistoryQuery);
 
@@ -429,7 +431,7 @@ internal sealed partial class WorkbenchImageOwner
   {
     bool Current() => !cancellationToken.IsCancellationRequested && isCurrent();
     if (!Current()) return false;
-    if (pinHistory?.IsEnabled != true) return true;
+    if (pinHistory is null) return true;
     try
     {
       // 仅归一化历史副本；OCR/编辑保留原始捕获 BMP，普通复制/保存
@@ -459,7 +461,7 @@ internal sealed partial class WorkbenchImageOwner
     ImageSessionChannel channel, WorkbenchAnnotationFile image, string? captureKey, CancellationToken cancellationToken)
   {
     bool Current() => captureKey is not null && channel.HistoryCaptureKey == captureKey;
-    if (!Current() || pinHistory?.IsEnabled != true) return;
+    if (!Current() || pinHistory is null) return;
     try
     {
       byte[] data = await File.ReadAllBytesAsync(image.Path, cancellationToken);
@@ -473,13 +475,13 @@ internal sealed partial class WorkbenchImageOwner
   /// <summary>统一 PNG 历史录入：捕获归一化与成功输出复用同一去重存储。</summary>
   private void RecordPinHistory(string captureKey, byte[] png)
   {
-    if (pinHistory?.IsEnabled != true)
+    if (pinHistory is null)
     {
       return;
     }
     try
     {
-      pinHistory.RecordSuccessfulCapture(captureKey, png);
+      pinHistory.RecordSuccessfulCapture(captureKey, png, acceptedWhileEnabled: true);
       operations.Publish(PinEditState(false, "pinEdit.historyUpdated"));
     }
     catch (Exception error)

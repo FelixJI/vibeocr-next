@@ -1,3 +1,4 @@
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using VibeOCR.App.Features.Recognition;
@@ -42,10 +43,25 @@ internal sealed class PinManagerWindow
   public void Show()
   {
     Render();
+    if (window.AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsAlwaysOnTop = true;
     window.Activate();
   }
 
   public void ForceClose() => window.Close();
+
+  internal bool SmokeInvokeRestoreClickability(Guid id)
+  {
+    if (scroller.Content is not StackPanel panel) return false;
+    foreach (Border border in panel.Children.OfType<Border>())
+      if (border.Child is StackPanel { Tag: PinnedImageWindow pin } row && pin.PinId == id)
+        foreach (Button button in row.Children.OfType<StackPanel>().SelectMany(actions => actions.Children).OfType<Button>())
+          if (button.Content as string == "恢复可点击" && button.IsEnabled)
+          {
+            new Microsoft.UI.Xaml.Automation.Peers.ButtonAutomationPeer(button).Invoke();
+            return true;
+          }
+    return false;
+  }
 
   public void Refresh()
   {

@@ -357,6 +357,8 @@ public sealed class PinEditChannelWorkbenchTests
     harness.History.RecordSuccessfulCapture("capture-b", Png);
     harness.History.EnrichRecognizedText("capture-a", "发票");
     harness.Execute(new ListPinHistoryCommand("发票"));
+    harness.Handler.PublishPinHistory();
+    Assert.Single(Assert.IsType<PinEditWorkbenchState>(harness.States.Last()).History!.Entries);
     string id = Assert.Single(harness.History.Projection("发票").Entries).EntryId;
     harness.Handler.PinHistoryReopenRequested += _ => Task.CompletedTask;
     var reopened = harness.Execute(new ReopenPinHistoryEntryCommand(id));

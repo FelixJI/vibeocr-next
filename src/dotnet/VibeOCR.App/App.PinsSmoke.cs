@@ -54,7 +54,7 @@ public sealed partial class App
       await decodeStarted.Task;
       if (!main.AppWindow.IsVisible || !main.SmokeHistoryInitializing)
         throw new InvalidOperationException("Main window activation waited for history decoding.");
-      decodeReleased.TrySetResult(true);
+      await main.VerifyLoadingHistoryQueryAsync(() => decodeReleased.TrySetResult(true));
       await main.SmokeHistoryInitialization;
       await main.VerifyPinsSelfCheckAsync();
     }

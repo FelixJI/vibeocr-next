@@ -206,7 +206,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     }
   }
 
-  public void RecordSuccessfulCapture(string captureKey, byte[] png)
+  public void RecordSuccessfulCapture(string captureKey, byte[] png, bool acceptedWhileEnabled = false)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(captureKey);
     ArgumentNullException.ThrowIfNull(png);
@@ -217,7 +217,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     }
     lock (gate)
     {
-      if (!enabled || entries.Any(entry => entry.Key == captureKey))
+      if ((!enabled && !acceptedWhileEnabled) || entries.Any(entry => entry.Key == captureKey))
       {
         return;
       }

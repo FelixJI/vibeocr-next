@@ -77,6 +77,17 @@ public sealed class PinHistoryStoreTests : IDisposable
   }
 
   [Fact]
+  public void DisablingStillRejectsDirectCallsWithoutFrozenCaptureAuthorization()
+  {
+    var store = Store();
+    store.SetEnabled(true);
+    store.RecordSuccessfulCapture("accepted", PngWithTag(1));
+    store.SetEnabled(false);
+    store.RecordSuccessfulCapture("not-accepted", PngWithTag(2));
+    Assert.Single(store.Projection(null).Entries);
+  }
+
+  [Fact]
   public void RecordsOncePerCaptureKeyAndEvictsOldestFirst()
   {
     var time = new FrozenTime();

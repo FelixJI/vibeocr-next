@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using VibeOCR.App.Features.Pins;
 using VibeOCR.App.Features.Recognition;
@@ -23,6 +24,29 @@ public sealed partial class MainWindow
 
   internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;
   internal Task SmokeHistoryInitialization => pinHistoryStore!.Initialization;
+
+  internal async Task VerifyLoadingHistoryQueryAsync(Action release)
+  {
+    using var stop = new CancellationTokenSource();
+    async Task<PinEditWorkbenchState> ObserveAsync()
+    {
+      await foreach (WorkbenchStateEnvelope state in application.SubscribeAsync(0, stop.Token,
+        new HashSet<string> { "pinEdit" }))
+        if (state.State is PinEditWorkbenchState { History.Count: > 0 } history) return history;
+      throw new InvalidOperationException("History publication ended before initialization.");
+    }
+    Task<PinEditWorkbenchState> published = ObserveAsync();
+    try
+    {
+      await application.ExecuteAsync(new(Guid.NewGuid(), new ListPinHistoryCommand("no-match-loading-query")), CancellationToken.None);
+      release();
+      PinEditWorkbenchState loaded = await published.WaitAsync(TimeSpan.FromSeconds(10));
+      if (loaded.History!.Entries.Count != 0)
+        throw new InvalidOperationException("History initialization cleared the already submitted query.");
+      CaptureUiSmokeTrace.Stage("pins.loading-query-preserved");
+    }
+    finally { stop.Cancel(); }
+  }
 
   internal async Task VerifyPinsSelfCheckAsync()
   {
@@ -94,6 +118,20 @@ public sealed partial class MainWindow
     commandHandler.StateChanged += state => observedScopes.Add(state.Scope);
     try
     {
+      byte[] beforeSetupFailure = await File.ReadAllBytesAsync(first.CurrentImagePath);
+      first.SmokeEditorSetupStep = () => throw new IOException("smoke editor setup before host initialization");
+      try { await EnterPinEditAsync(first); }
+      catch (IOException) { }
+      byte[] afterSetupFailure = await File.ReadAllBytesAsync(first.CurrentImagePath);
+      if (pinEditing is not null || first.Editing || first.SmokeHasEditorOverlay ||
+        commandHandler.InitialStates.OfType<PinEditWorkbenchState>().Single().ScreenshotSession is not null ||
+        !beforeSetupFailure.SequenceEqual(afterSetupFailure))
+        throw new InvalidOperationException("Failed editor setup retained its native slot/UI or changed the image.");
+      await EnterPinEditAsync(second);
+      await WaitForPinEditorAsync(second);
+      await ExitPinEditAsync(second);
+      await WaitForPinCheckAsync(() => Task.FromResult(!second.Editing), "Other pin could not leave its editor after setup failure.");
+      CaptureUiSmokeTrace.Stage("pins.editor-setup-rollback");
       CaptureUiSmokeTrace.Stage("pins.first-edit");
       var oldTextIdentity = (first.SessionId, first.Revision);
       WorkbenchAnnotationLease sharedLease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
@@ -152,7 +190,18 @@ public sealed partial class MainWindow
       MovePinGroup(first, 30, -20);
       if (first.SmokePosition != firstBefore || second.SmokePosition.X != secondBefore.X + 30 ||
         second.SmokePosition.Y != secondBefore.Y - 20) throw new InvalidOperationException("Group movement did not use physical deltas.");
-      first.SetPassThrough(true); ShowPinManager(); first.SetPassThrough(false);
+      first.SmokeInvokeMaximize();
+      first.SetPassThrough(true);
+      ShowPinManagerFromTray();
+      if (pinManager is null) throw new InvalidOperationException("Tray did not open the manager.");
+      for (nint above = GetPinSmokeWindow(pinManager.Handle, 3); above != 0; above = GetPinSmokeWindow(above, 3))
+        if (above == first.Handle) throw new InvalidOperationException("Pass-through pin covers its recovery manager in native z-order.");
+      if (!pinManager.SmokeInvokeRestoreClickability(first.PinId))
+        throw new InvalidOperationException("Manager restore action was unavailable.");
+      await WaitForPinCheckAsync(() => Task.FromResult(!first.PassThrough &&
+        ((long)PaddleSmokeNative.GetWindowLongPtr(first.Handle, -20) & 0x20) == 0), "Manager did not restore native clickability.");
+      first.SmokeInvokeMaximize();
+      CaptureUiSmokeTrace.Stage("pins.manager-above-pass-through");
       first.SetCollapsed(true); first.SetCollapsed(false);
 
       CaptureUiSmokeTrace.Stage("pins.formula-render");
@@ -334,6 +383,9 @@ public sealed partial class MainWindow
     GC.KeepAlive(probe);
     return count;
   }
+
+  [DllImport("user32.dll", EntryPoint = "GetWindow")]
+  private static extern nint GetPinSmokeWindow(nint window, uint command);
 
   private static Task WaitForPinEditorAsync(PinnedImageWindow pin) => WaitForPinCheckAsync(
     async () => (await pin.SmokeEditorEvaluateAsync(
