@@ -406,6 +406,127 @@ public sealed class WebWorkbenchCommandDeliveryTests
     Assert.Equal([source], lost);
   }
 
+  [Fact]
+  public async Task NativeFlushJoinsAnAcceptedButtonApplyBeforeAndAfterCommitUntilItsAck()
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source);
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    string png = await UploadPinPngAsync(fixture);
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
+    Task<bool> beforeCommit = fixture.Host.FlushPinSnapshotAsync(source);
+    Assert.False(beforeCommit.IsCompleted);
+    gate.SetResult(new WorkbenchCommandReceipt(commandId, 7, null));
+    await command;
+    Task<bool> afterCommit = fixture.Host.FlushPinSnapshotAsync(source);
+    Assert.Same(beforeCommit, afterCommit);
+    Assert.False(afterCommit.IsCompleted);
+    Assert.DoesNotContain(fixture.Posted, json => json.Contains("pinEdit.requestSnapshot", StringComparison.Ordinal));
+    int acknowledged = 0;
+    fixture.Host.PinSnapshotAcknowledged += async () => { acknowledged++; await fixture.Host.DisposeAsync(); };
+    string result = ButtonSnapshotResult(source);
+    await fixture.Host.ReceiveWebMessageAsync(result, fixture.Document);
+    await fixture.Host.ReceiveWebMessageAsync(result, fixture.Document);
+    Assert.True(await beforeCommit);
+    Assert.True(await afterCommit);
+    Assert.Equal(1, acknowledged);
+  }
+
+  [Fact]
+  public async Task FailedAcceptedButtonApplyReleasesItsWaiterAndDoesNotAffectTheNextApply()
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source);
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    string png = await UploadPinPngAsync(fixture);
+    var failed = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = failed;
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(Guid.NewGuid(), source, png), fixture.Document);
+    Task<bool> oldWaiter = fixture.Host.FlushPinSnapshotAsync(source);
+    failed.SetException(new IOException("button snapshot writer failure"));
+    await command;
+    Assert.False(await oldWaiter);
+    var retry = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = retry;
+    Guid nextId = Guid.NewGuid();
+    Task next = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(nextId, source, png), fixture.Document);
+    Task<bool> newWaiter = fixture.Host.FlushPinSnapshotAsync(source);
+    Assert.NotSame(oldWaiter, newWaiter);
+    Assert.False(newWaiter.IsCompleted);
+    retry.SetResult(new WorkbenchCommandReceipt(nextId, 8, null));
+    await next;
+    await fixture.Host.ReceiveWebMessageAsync(ButtonSnapshotResult(source), fixture.Document);
+    Assert.True(await newWaiter);
+    Assert.False(await oldWaiter);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ResetOrDisposeAbandonsOnlyItsAcceptedButtonApply(bool dispose)
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source);
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = gate;
+    string png = await UploadPinPngAsync(fixture);
+    Guid commandId = Guid.NewGuid();
+    Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
+    Task<bool> waiter = fixture.Host.FlushPinSnapshotAsync(source);
+    Assert.False(waiter.IsCompleted);
+    if (dispose) await fixture.Host.DisposeAsync();
+    else fixture.Host.ResetWebDocument();
+    Assert.False(await waiter);
+    gate.SetResult(new WorkbenchCommandReceipt(commandId, 7, null));
+    await command;
+    await fixture.Host.ReceiveWebMessageAsync(ButtonSnapshotResult(source), fixture.Document);
+    Assert.False(await waiter);
+  }
+
+  [Fact]
+  public async Task LateFailureForEarlierRequestDoesNotCompleteTheNextAcceptedApply()
+  {
+    Guid source = Guid.NewGuid();
+    await using HostFixture fixture = new(pinEditHost: true, source);
+    await fixture.Host.ReceiveWebMessageAsync(Bootstrap(Guid.NewGuid()), fixture.Document);
+    string png = await UploadPinPngAsync(fixture);
+    string oldRequest = "";
+    Task<bool> oldFlush = fixture.Host.RequestPinSnapshotFlushAsync(source, json => oldRequest = json);
+    var failed = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = failed;
+    Task oldApply = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(Guid.NewGuid(), source, png), fixture.Document);
+    failed.SetException(new IOException("first snapshot failed"));
+    await oldApply;
+    var retry = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+    fixture.Application.ExecuteGate = retry;
+    Guid nextId = Guid.NewGuid();
+    Task nextApply = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(nextId, source, png), fixture.Document);
+    using JsonDocument request = JsonDocument.Parse(oldRequest);
+    await fixture.Host.ReceiveWebMessageAsync(JsonSerializer.Serialize(new
+    {
+      version = WorkbenchProtocol.Version, kind = "event", id = request.RootElement.GetProperty("id").GetString(), type = "pinEdit.snapshotResult",
+      payload = new { sessionId = source.ToString("N"), ok = false },
+    }), fixture.Document);
+    Assert.False(await oldFlush);
+    Task<bool> nextWaiter = fixture.Host.FlushPinSnapshotAsync(source);
+    bool stillWaiting = !nextWaiter.IsCompleted;
+    retry.SetResult(new WorkbenchCommandReceipt(nextId, 8, null));
+    await nextApply;
+    await fixture.Host.ReceiveWebMessageAsync(ButtonSnapshotResult(source), fixture.Document);
+    Assert.True(stillWaiting, "An earlier request's failure completed the next accepted button apply.");
+    Assert.True(await nextWaiter);
+  }
+
+  private static string ButtonSnapshotResult(Guid source) => JsonSerializer.Serialize(new
+  {
+    version = WorkbenchProtocol.Version, kind = "event", id = Guid.NewGuid().ToString("N"), type = "pinEdit.snapshotResult",
+    payload = new { sessionId = source.ToString("N"), ok = true },
+  });
+
   private static async Task<string> UploadPinPngAsync(HostFixture fixture)
   {
     WorkbenchAnnotationLease png = await fixture.Annotations.UploadPngAsync(

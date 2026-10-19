@@ -188,6 +188,25 @@ test("a native request joins a button save and receives its own result ID", asyn
   expect(uploads).toHaveLength(1);
 });
 
+test("button completion still reports after committed state unmounts the editor", async ({
+  page,
+}) => {
+  const { projects, uploads } = await pinEditor(page);
+  await deferCommand(page, "applySnapshot", true);
+  await page.getByRole("button", { name: "完成贴图", exact: true }).click();
+  await expect(page.getByText("等待图片", { exact: true })).toBeVisible();
+  await expect(
+    page.locator(".canvas-editor[data-screenshot-session]"),
+  ).toHaveCount(0);
+  expect(await readPinReports(page)).toHaveLength(0);
+  await releaseCommand(page);
+  await expect.poll(async () => (await readPinReports(page)).length).toBe(1);
+  const [result] = await readPinReports(page);
+  expect(result?.payload).toEqual({ sessionId: sourceSession, ok: true });
+  expect(projects).toHaveLength(1);
+  expect(uploads).toHaveLength(1);
+});
+
 test("failed save preserves the editor and a late request for another pin is ignored", async ({
   page,
 }) => {

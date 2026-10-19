@@ -21,6 +21,7 @@ export async function mountHost(
     const pinReports: BridgeEnvelope[] = [];
     let rejectNext = false;
     let deferredAction: string | undefined;
+    let clearPinEditorOnCommit = false;
     let deferredResponse: (() => void) | undefined;
     const emit = (data: unknown) =>
       listeners.forEach((listener) => listener({ data }));
@@ -56,8 +57,9 @@ export async function mountHost(
           return id;
         },
         state,
-        deferCommand: (action: string) => {
+        deferCommand: (action: string, clearPinEditor = false) => {
           deferredAction = action;
+          clearPinEditorOnCommit = clearPinEditor;
         },
         releaseCommand: () => {
           if (!deferredResponse) throw new Error("No deferred command");
@@ -108,6 +110,15 @@ export async function mountHost(
                     kind: "response",
                     payload: { revision, ok: true, problem: null },
                   });
+                if (clearPinEditorOnCommit) {
+                  clearPinEditorOnCommit = false;
+                  state("pinEdit", {
+                    isBusy: false,
+                    statusCode: "pinEdit.applied",
+                    input: null,
+                    screenshotSession: null,
+                  });
+                }
                 return;
               }
               if (rejectNext) {
@@ -152,7 +163,7 @@ type TestHostWindow = Window & {
     pinReports: BridgeEnvelope[];
     requestPinSnapshot(sourceSession: string): string;
     rejectNext(): void;
-    deferCommand(action: string): void;
+    deferCommand(action: string, clearPinEditor?: boolean): void;
     releaseCommand(): void;
     state(scope: string, value: unknown): void;
   };
@@ -173,10 +184,18 @@ export async function readPinReports(page: Page): Promise<BridgeEnvelope[]> {
   return page.evaluate(() => (window as TestHostWindow).__testHost.pinReports);
 }
 
-export async function deferCommand(page: Page, action: string): Promise<void> {
+export async function deferCommand(
+  page: Page,
+  action: string,
+  clearPinEditor = false,
+): Promise<void> {
   await page.evaluate(
-    (action) => (window as TestHostWindow).__testHost.deferCommand(action),
-    action,
+    ([action, clearPinEditor]) =>
+      (window as TestHostWindow).__testHost.deferCommand(
+        action,
+        clearPinEditor,
+      ),
+    [action, clearPinEditor] as const,
   );
 }
 

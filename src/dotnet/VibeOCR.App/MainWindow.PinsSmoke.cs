@@ -186,6 +186,38 @@ public sealed partial class MainWindow
       }
       await VerifySmokePinTextAsync(first);
 
+      CaptureUiSmokeTrace.Stage("pins.button-commit-unmounted-native-switch");
+      await EnterPinEditAsync(first);
+      await WaitForPinEditorAsync(first);
+      await RotateSmokePinAsync(first);
+      var buttonReceiptEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var releaseButtonReceipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      first.SmokeDelaySnapshotReceipt(() => { buttonReceiptEntered.TrySetResult(); return releaseButtonReceipt.Task; });
+      int buttonAppliedBefore = SmokePinSnapshotAppliedCount;
+      try
+      {
+        if (await first.SmokeEditorEvaluateAsync(
+          "(()=>{const b=Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='完成贴图');if(!b||b.disabled)return false;b.click();return true})()") != "true")
+          throw new InvalidOperationException("Real pin completion button was unavailable.");
+        await buttonReceiptEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await WaitForPinCheckAsync(async () => await first.SmokeEditorEvaluateAsync(
+          "!document.querySelector('.canvas-editor[data-screenshot-session]') && document.body.textContent.includes('等待图片')") == "true",
+          "Successful button commit did not unmount its editor before the receipt.");
+        Task switching = EnterPinEditAsync(second);
+        releaseButtonReceipt.TrySetResult();
+        try { await switching.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (TimeoutException error)
+        {
+          throw new InvalidOperationException("Native switch waited for a new request after the button commit unmounted its listener.", error);
+        }
+        if (first.Editing || pinEditing?.Window != second || !second.Editing ||
+          SmokePinSnapshotAppliedCount - buttonAppliedBefore != 1)
+          throw new InvalidOperationException("Joining a committed button save failed to switch exactly once.");
+      }
+      finally { releaseButtonReceipt.TrySetResult(); }
+      await ExitPinEditAsync(second);
+      await WaitForPinCheckAsync(() => Task.FromResult(!second.Editing), "Button switch target did not discard.");
+
       CaptureUiSmokeTrace.Stage("pins.idle-recovery-normal-switch");
       await EnterPinEditAsync(first);
       await WaitForPinEditorAsync(first);

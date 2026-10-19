@@ -246,6 +246,15 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private Guid? requestedPinSnapshot;
   private Guid? requestedPinSnapshotId;
   private TaskCompletionSource<bool>? acknowledgingPinSnapshot;
+  private sealed class PendingPinSnapshot(Guid sourceSession, long document)
+  {
+    internal Guid SourceSession { get; } = sourceSession;
+    internal long Document { get; } = document;
+    internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task<bool>? Wait { get; set; }
+    internal bool Acknowledging { get; set; }
+  }
+  private PendingPinSnapshot? pendingPinSnapshot;
   internal bool PinSnapshotInFlight { get; private set; }
   internal event Func<Task>? PinSnapshotAcknowledged;
   // Only a successful native apply whose document cannot receive its receipt may bypass the web acknowledgement.
@@ -255,8 +264,29 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   internal Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
   {
     if (pinSnapshotFlush is { } existing) return existing.Task;
+    // The editor may already be unmounted after native commit. Join its accepted apply through the final ack.
+    if (pendingPinSnapshot is { } pending && pending.SourceSession == sourceSession &&
+      pending.Document == Volatile.Read(ref documentGeneration))
+      return pending.Wait ??= WaitForPinSnapshotAsync(pending);
     if (!pinEditRoute || core is not { } current || disposed) return Task.FromResult(false);
     return RequestPinSnapshotFlushAsync(sourceSession, current.PostWebMessageAsJson);
+  }
+
+  private static async Task<bool> WaitForPinSnapshotAsync(PendingPinSnapshot pending)
+  {
+    try { return await pending.Completion.Task.WaitAsync(TimeSpan.FromSeconds(60)); }
+    catch (TimeoutException)
+    {
+      // The accepted apply still owns its late ack; do not issue a new request to an unmounted editor.
+      pending.Completion.TrySetResult(false);
+      return await pending.Completion.Task;
+    }
+  }
+
+  private void CompletePinSnapshot(PendingPinSnapshot pending, bool ok)
+  {
+    pending.Completion.TrySetResult(ok);
+    if (ReferenceEquals(pendingPinSnapshot, pending)) pendingPinSnapshot = null;
   }
 
   internal async Task<bool> RequestPinSnapshotFlushAsync(Guid sourceSession, Action<string> post)
@@ -306,21 +336,26 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       !Guid.TryParse(identity.GetString(), out Guid requestId) || requestedPinSnapshotId != requestId)) return;
     if (ok ? committedPinSnapshot != sourceSession : requestedPinSnapshot != sourceSession) return;
     TaskCompletionSource<bool>? completion = pinSnapshotFlush;
+    PendingPinSnapshot? operation = ok && pendingPinSnapshot is { } pending && pending.SourceSession == sourceSession &&
+      pending.Document == Volatile.Read(ref documentGeneration) ? pending : null;
     try
     {
       if (ok)
       {
         committedPinSnapshot = null;
+        if (operation is not null) operation.Acknowledging = true;
         // A successful acknowledgement tears down this host before returning.
         acknowledgingPinSnapshot = completion;
         if (PinSnapshotAcknowledged is { } acknowledged) await acknowledged();
       }
       completion?.TrySetResult(ok);
+      if (operation is not null) CompletePinSnapshot(operation, ok);
     }
     finally
     {
       acknowledgingPinSnapshot = null;
       completion?.TrySetResult(false);
+      if (operation is not null) CompletePinSnapshot(operation, false);
     }
   }
 
@@ -619,7 +654,14 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (fixedRoute is not null && envelope.Command is NavigateWorkbenchCommand)
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       bool snapshotApply = pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand;
+      PendingPinSnapshot? snapshotOperation = null;
       if (snapshotApply) PinSnapshotInFlight = true;
+      if (snapshotApply && envelope.Command is ApplyPinEditSnapshotCommand applying)
+      {
+        snapshotOperation = new PendingPinSnapshot(applying.SessionId, document);
+        pendingPinSnapshot ??= snapshotOperation;
+      }
+      bool snapshotSucceeded = false;
       WorkbenchCommandReceipt receipt;
       try
       {
@@ -628,6 +670,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           envelope.Command is PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or
             AckImageEditProjectOpenCommand
             ? importDocumentCancellation.Token : lifetime.Token);
+        snapshotSucceeded = receipt.Ok;
       }
       catch (Exception error) when (snapshotApply && error is not OperationCanceledException &&
         OwnsCurrentBridgeDocument(sender, document))
@@ -641,7 +684,11 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           new WorkbenchProblem("pinEdit.snapshotFailed", WorkbenchProblemCategory.Internal, true,
             "workbench.error.commandFailed"));
       }
-      finally { if (snapshotApply) PinSnapshotInFlight = false; }
+      finally
+      {
+        if (snapshotApply) PinSnapshotInFlight = false;
+        if (!snapshotSucceeded && snapshotOperation is not null) CompletePinSnapshot(snapshotOperation, false);
+      }
       if (pinEditRoute && receipt.Ok && envelope.Command is ApplyPinEditSnapshotCommand snapshot)
       {
         if (OwnsCurrentBridgeDocument(sender, document)) committedPinSnapshot = snapshot.SessionId;
@@ -846,6 +893,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     Guid? committed = committedPinSnapshot;
     committedPinSnapshot = null;
     pinSnapshotFlush?.TrySetResult(false);
+    if (pendingPinSnapshot is { } pending) CompletePinSnapshot(pending, false);
     if (committed is { } pinSession) PinSnapshotReceiptLost?.Invoke(pinSession);
     // 文档身份推进后仅撤销本宿主槽位：其他宿主的在途贡献不受影响。
     projectStore?.RevokeAll(this);
@@ -1042,6 +1090,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     disposed = true;
     if (!ReferenceEquals(pinSnapshotFlush, acknowledgingPinSnapshot)) pinSnapshotFlush?.TrySetResult(false);
+    if (pendingPinSnapshot is { Acknowledging: false } pending) CompletePinSnapshot(pending, false);
     CancelCapturePixels();
     AbandonPdfPreviewFlush();
     projectStore?.RevokeAll(this);
