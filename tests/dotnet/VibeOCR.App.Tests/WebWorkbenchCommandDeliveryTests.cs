@@ -365,7 +365,8 @@ public sealed class WebWorkbenchCommandDeliveryTests
     Assert.Empty(lost);
     var gate = new TaskCompletionSource<WorkbenchCommandReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
     fixture.Application.ExecuteGate = gate;
-    Task<bool> flush = fixture.Host.RequestPinSnapshotFlushAsync(source, _ => { });
+    string request = "";
+    Task<bool> flush = fixture.Host.RequestPinSnapshotFlushAsync(source, json => request = json);
     string png = await UploadPinPngAsync(fixture);
     Guid commandId = Guid.NewGuid();
     Task command = fixture.Host.ReceiveWebMessageAsync(ApplySnapshot(commandId, source, png), fixture.Document);
@@ -373,9 +374,10 @@ public sealed class WebWorkbenchCommandDeliveryTests
     await command;
     Assert.Empty(lost);
     Assert.False(flush.IsCompleted);
+    using JsonDocument sent = JsonDocument.Parse(request);
     await fixture.Host.ReceiveWebMessageAsync(JsonSerializer.Serialize(new
     {
-      version = WorkbenchProtocol.Version, kind = "event", type = "pinEdit.snapshotResult",
+      version = WorkbenchProtocol.Version, kind = "event", id = sent.RootElement.GetProperty("id").GetString(), type = "pinEdit.snapshotResult",
       payload = new { sessionId = source.ToString("N"), ok = true },
     }), fixture.Document);
     Assert.True(await flush);

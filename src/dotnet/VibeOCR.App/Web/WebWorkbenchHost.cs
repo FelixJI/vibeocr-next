@@ -244,6 +244,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private TaskCompletionSource<bool>? pinSnapshotFlush;
   private Guid? committedPinSnapshot;
   private Guid? requestedPinSnapshot;
+  private Guid? requestedPinSnapshotId;
   private TaskCompletionSource<bool>? acknowledgingPinSnapshot;
   internal bool PinSnapshotInFlight { get; private set; }
   internal event Func<Task>? PinSnapshotAcknowledged;
@@ -263,12 +264,14 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     pinSnapshotFlush = completion;
     requestedPinSnapshot = sourceSession;
+    Guid requestId = Guid.NewGuid();
+    requestedPinSnapshotId = requestId;
     try
     {
       post(JsonSerializer.Serialize(new
       {
         version = WorkbenchProtocol.Version,
-        kind = "request", id = Guid.NewGuid().ToString("N"), type = "pinEdit.requestSnapshot",
+        kind = "request", id = requestId.ToString("N"), type = "pinEdit.requestSnapshot",
         payload = new { sessionId = sourceSession.ToString("N") },
       }));
       return await completion.Task.WaitAsync(TimeSpan.FromSeconds(60));
@@ -282,7 +285,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     {
       // Complete shared waiters even if sending or waiting fails.
       completion.TrySetResult(false);
-      if (ReferenceEquals(pinSnapshotFlush, completion)) { pinSnapshotFlush = null; requestedPinSnapshot = null; }
+      if (ReferenceEquals(pinSnapshotFlush, completion))
+      {
+        pinSnapshotFlush = null; requestedPinSnapshot = null; requestedPinSnapshotId = null;
+      }
     }
   }
 
@@ -294,6 +300,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     if (payload.EnumerateObject().Count() != 2 ||
       !Guid.TryParseExact(payload.GetProperty("sessionId").GetString(), "N", out Guid sourceSession)) return;
     bool ok = payload.GetProperty("ok").GetBoolean();
+    // A native flush belongs to one request, even when a reloaded document edits the same native session.
+    if (pinSnapshotFlush is not null && (requestedPinSnapshot != sourceSession ||
+      !message.TryGetProperty("id", out JsonElement identity) || identity.ValueKind != JsonValueKind.String ||
+      !Guid.TryParse(identity.GetString(), out Guid requestId) || requestedPinSnapshotId != requestId)) return;
     if (ok ? committedPinSnapshot != sourceSession : requestedPinSnapshot != sourceSession) return;
     TaskCompletionSource<bool>? completion = pinSnapshotFlush;
     try

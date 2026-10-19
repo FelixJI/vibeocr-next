@@ -117,7 +117,7 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
   ).toHaveCount(0);
   await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
   await deferCommand(page, "applySnapshot");
-  await requestPinSnapshot(page, sourceSession);
+  const requestId = await requestPinSnapshot(page, sourceSession);
   await expect
     .poll(async () =>
       (await page.evaluate(() => document.body.textContent))?.includes(
@@ -140,7 +140,9 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
   await releaseCommand(page);
   await expect
     .poll(async () =>
-      (await readPinReports(page)).some((report) => report.payload.ok === true),
+      (await readPinReports(page)).some(
+        (report) => report.id === requestId && report.payload.ok === true,
+      ),
     )
     .toBe(true);
   await expectCommand(page, {
@@ -157,6 +159,35 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
   await page.screenshot({ path: testInfo.outputPath("pin-editor.png") });
 });
 
+test("a native request joins a button save and receives its own result ID", async ({
+  page,
+}) => {
+  const { projects, uploads } = await pinEditor(page);
+  await deferCommand(page, "applySnapshot");
+  await page.getByRole("button", { name: "完成贴图", exact: true }).click();
+  await expectCommand(page, {
+    scope: "pinEdit",
+    action: "applySnapshot",
+    arguments: {
+      contributeId: "b".repeat(32),
+      resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
+      sessionId: sourceSession,
+      revision: 0,
+      excludeBoxes: [],
+    },
+  });
+  const requestId = await requestPinSnapshot(page, sourceSession);
+  expect(await readPinReports(page)).toHaveLength(0);
+  await releaseCommand(page);
+  await expect.poll(async () => (await readPinReports(page)).length).toBe(2);
+  const reports = await readPinReports(page);
+  expect(reports.filter((report) => report.id === requestId)).toHaveLength(1);
+  expect(reports.every((report) => report.payload.ok === true)).toBe(true);
+  expect(reports.some((report) => report.id !== requestId)).toBe(true);
+  expect(projects).toHaveLength(1);
+  expect(uploads).toHaveLength(1);
+});
+
 test("failed save preserves the editor and a late request for another pin is ignored", async ({
   page,
 }) => {
@@ -166,21 +197,25 @@ test("failed save preserves the editor and a late request for another pin is ign
     page.getByRole("button", { name: "完成贴图", exact: true }),
   ).toBeEnabled();
   await rejectNextCommand(page);
-  await requestPinSnapshot(page, sourceSession);
+  const failedRequestId = await requestPinSnapshot(page, sourceSession);
   await expect
     .poll(async () =>
       (await readPinReports(page)).some(
-        (report) => report.payload.ok === false,
+        (report) =>
+          report.id === failedRequestId && report.payload.ok === false,
       ),
     )
     .toBe(true);
   await expect(
     page.getByRole("button", { name: "完成贴图", exact: true }),
   ).toBeEnabled();
-  await requestPinSnapshot(page, sourceSession);
+  const retryRequestId = await requestPinSnapshot(page, sourceSession);
+  expect(retryRequestId).not.toBe(failedRequestId);
   await expect
     .poll(async () =>
-      (await readPinReports(page)).some((report) => report.payload.ok === true),
+      (await readPinReports(page)).some(
+        (report) => report.id === retryRequestId && report.payload.ok === true,
+      ),
     )
     .toBe(true);
 });

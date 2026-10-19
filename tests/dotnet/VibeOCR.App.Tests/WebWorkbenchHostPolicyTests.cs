@@ -82,6 +82,44 @@ public sealed class WebWorkbenchHostPolicyTests
   }
 
   [Fact]
+  public async Task OldDocumentFailureCannotCompleteANewFlushForTheSamePinSession()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pin-stale-flush-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+    await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, pinEditHost: true);
+    object sender = new();
+    host.RegisterBridge(sender, _ => { });
+    Guid source = Guid.NewGuid();
+    string firstRequest = "", currentRequest = "";
+    Task<bool> first = host.RequestPinSnapshotFlushAsync(source, json => firstRequest = json);
+    host.ResetWebDocument();
+    Assert.False(await first);
+    Task<bool> current = host.RequestPinSnapshotFlushAsync(source, json => currentRequest = json);
+    Task<bool> shared = host.FlushPinSnapshotAsync(source);
+    using JsonDocument previous = JsonDocument.Parse(firstRequest);
+    using JsonDocument latest = JsonDocument.Parse(currentRequest);
+    Guid previousId = Guid.Parse(previous.RootElement.GetProperty("id").GetString()!);
+    Guid currentId = Guid.Parse(latest.RootElement.GetProperty("id").GetString()!);
+    Assert.NotEqual(previousId, currentId);
+    string Failure(Guid id, Guid session) => JsonSerializer.Serialize(new
+    {
+      version = WorkbenchProtocol.Version, kind = "event", id = id.ToString("N"), type = "pinEdit.snapshotResult",
+      payload = new { sessionId = session.ToString("N"), ok = false },
+    });
+    await host.ReceiveWebMessageAsync(Failure(previousId, source), sender);
+    Assert.False(current.IsCompleted, "A stale failure completed the new request for the same native session.");
+    Assert.False(shared.IsCompleted);
+    await host.ReceiveWebMessageAsync(Failure(currentId, Guid.NewGuid()), sender);
+    Assert.False(current.IsCompleted);
+    await host.ReceiveWebMessageAsync(Failure(currentId, source), sender);
+    Assert.False(await current);
+    Assert.False(await shared);
+  }
+
+  [Fact]
   public async Task SuccessfulSnapshotAcknowledgementCanDisposeItsOwnHostBeforeCompletingWaiters()
   {
     string root = Path.Combine(Path.GetTempPath(), $"pin-ack-{Guid.NewGuid():N}");
@@ -95,16 +133,52 @@ public sealed class WebWorkbenchHostPolicyTests
     Guid source = Guid.NewGuid();
     typeof(WebWorkbenchHost).GetField("committedPinSnapshot", System.Reflection.BindingFlags.Instance |
       System.Reflection.BindingFlags.NonPublic)!.SetValue(host, source);
-    Task<bool> first = host.RequestPinSnapshotFlushAsync(source, _ => { });
+    string request = "";
+    Task<bool> first = host.RequestPinSnapshotFlushAsync(source, json => request = json);
     Task<bool> second = host.FlushPinSnapshotAsync(source);
-    host.PinSnapshotAcknowledged += async () => await host.DisposeAsync();
-    await host.ReceiveWebMessageAsync(JsonSerializer.Serialize(new
+    using JsonDocument sent = JsonDocument.Parse(request);
+    string requestId = sent.RootElement.GetProperty("id").GetString()!;
+    int acknowledged = 0;
+    host.PinSnapshotAcknowledged += async () => { acknowledged++; await host.DisposeAsync(); };
+    string Result(string id) => JsonSerializer.Serialize(new
     {
-      version = WorkbenchProtocol.Version, kind = "event", type = "pinEdit.snapshotResult",
+      version = WorkbenchProtocol.Version, kind = "event", id, type = "pinEdit.snapshotResult",
       payload = new { sessionId = source.ToString("N"), ok = true },
-    }), sender);
+    });
+    await host.ReceiveWebMessageAsync(Result(Guid.NewGuid().ToString("N")), sender);
+    Assert.False(first.IsCompleted);
+    Assert.Equal(0, acknowledged);
+    await host.ReceiveWebMessageAsync(Result(requestId), sender);
+    await host.ReceiveWebMessageAsync(Result(requestId), sender);
     Assert.True(await first);
     Assert.True(await second);
+    Assert.Equal(1, acknowledged);
+  }
+
+  [Fact]
+  public async Task ButtonSnapshotSuccessWithoutANativeFlushAcknowledgesOnlyItsCommitOnce()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"pin-button-ack-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+    await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, pinEditHost: true);
+    object sender = new();
+    host.RegisterBridge(sender, _ => { });
+    Guid source = Guid.NewGuid();
+    typeof(WebWorkbenchHost).GetField("committedPinSnapshot", System.Reflection.BindingFlags.Instance |
+      System.Reflection.BindingFlags.NonPublic)!.SetValue(host, source);
+    int acknowledged = 0;
+    host.PinSnapshotAcknowledged += () => { acknowledged++; return Task.CompletedTask; };
+    string result = JsonSerializer.Serialize(new
+    {
+      version = WorkbenchProtocol.Version, kind = "event", id = Guid.NewGuid().ToString("N"), type = "pinEdit.snapshotResult",
+      payload = new { sessionId = source.ToString("N"), ok = true },
+    });
+    await host.ReceiveWebMessageAsync(result, sender);
+    await host.ReceiveWebMessageAsync(result, sender);
+    Assert.Equal(1, acknowledged);
   }
 
   [Fact]

@@ -5197,8 +5197,11 @@ export function ImageCanvasEditor({
   /** #238 完成贴图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
    * 合成 PNG（换装显示）一次上传，宿主原子写入 owned 快照后才回 ack；
    * 会话已变化/超限时保留编辑现场可重试。 */
-  const pinSavePromiseRef = useRef<Promise<boolean> | undefined>(undefined);
-  const pinSaveRef = useRef<() => Promise<boolean>>(undefined);
+  const pinSavePromiseRef = useRef<
+    { sourceSession: string | undefined; promise: Promise<boolean> } | undefined
+  >(undefined);
+  const pinSaveRef =
+    useRef<(requestId?: string) => Promise<boolean>>(undefined);
   pinSaveRef.current = applyPinSnapshot;
   useEffect(() => {
     if (!pinSnapshotApply) return;
@@ -5208,38 +5211,45 @@ export function ImageCanvasEditor({
       const request = value as {
         version?: unknown;
         kind?: unknown;
+        id?: unknown;
         type?: unknown;
         payload?: { sessionId?: unknown };
       };
       if (
         request.version === BRIDGE_VERSION &&
         request.kind === "request" &&
+        typeof request.id === "string" &&
+        request.id.length > 0 &&
         request.type === "pinEdit.requestSnapshot" &&
         request.payload?.sessionId === sessionIdRef.current
       )
-        void pinSaveRef.current?.();
+        void pinSaveRef.current?.(request.id);
     });
   }, [pinSnapshotApply]);
 
-  function applyPinSnapshot(): Promise<boolean> {
-    if (pinSavePromiseRef.current) return pinSavePromiseRef.current;
-    const sourceSession = sessionIdRef.current;
-    const promise = applyPinSnapshotCore()
-      .then((ok) => {
-        ChromeWebViewTransport.fromWindow(window)?.postMessage({
-          version: BRIDGE_VERSION,
-          kind: "event",
-          id: crypto.randomUUID(),
-          type: "pinEdit.snapshotResult",
-          payload: { sessionId: sourceSession, ok },
-        });
-        return ok;
-      })
-      .finally(() => {
-        pinSavePromiseRef.current = undefined;
+  function applyPinSnapshot(requestId?: string): Promise<boolean> {
+    let pending = pinSavePromiseRef.current;
+    if (!pending) {
+      pending = {
+        sourceSession: sessionIdRef.current,
+        promise: applyPinSnapshotCore().finally(() => {
+          pinSavePromiseRef.current = undefined;
+        }),
+      };
+      pinSavePromiseRef.current = pending;
+    }
+    // Native requests may join a button save already in progress; each echoes its own request ID.
+    const { sourceSession, promise } = pending;
+    return promise.then((ok) => {
+      ChromeWebViewTransport.fromWindow(window)?.postMessage({
+        version: BRIDGE_VERSION,
+        kind: "event",
+        id: requestId ?? crypto.randomUUID(),
+        type: "pinEdit.snapshotResult",
+        payload: { sessionId: sourceSession, ok },
       });
-    pinSavePromiseRef.current = promise;
-    return promise;
+      return ok;
+    });
   }
 
   async function applyPinSnapshotCore(): Promise<boolean> {

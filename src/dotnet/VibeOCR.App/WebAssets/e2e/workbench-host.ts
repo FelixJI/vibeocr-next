@@ -44,14 +44,17 @@ export async function mountHost(
         commands,
         captureReports,
         pinReports,
-        requestPinSnapshot: (sourceSession: string) =>
+        requestPinSnapshot: (sourceSession: string) => {
+          const id = crypto.randomUUID();
           emit({
             version: 2,
             kind: "request",
-            id: crypto.randomUUID(),
+            id,
             type: "pinEdit.requestSnapshot",
             payload: { sessionId: sourceSession },
-          }),
+          });
+          return id;
+        },
         state,
         deferCommand: (action: string) => {
           deferredAction = action;
@@ -147,7 +150,7 @@ type TestHostWindow = Window & {
   __testHost: {
     commands: HostCommand[];
     pinReports: BridgeEnvelope[];
-    requestPinSnapshot(sourceSession: string): void;
+    requestPinSnapshot(sourceSession: string): string;
     rejectNext(): void;
     deferCommand(action: string): void;
     releaseCommand(): void;
@@ -158,8 +161,8 @@ type TestHostWindow = Window & {
 export async function requestPinSnapshot(
   page: Page,
   sourceSession: string,
-): Promise<void> {
-  await page.evaluate(
+): Promise<string> {
+  return page.evaluate(
     (source) =>
       (window as TestHostWindow).__testHost.requestPinSnapshot(source),
     sourceSession,
