@@ -106,6 +106,7 @@ public sealed partial class MainWindow
       }
     }
     finally { File.Delete(pinRoot); }
+    await VerifyRecoveryBeforeCleanupAsync(png);
     await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
     await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 1), "JPEG selection prevented first pin creation.");
     if (pinSnapshotStore!.ReadSnapshotPng(pinnedImages[0].PinId) is not { Width: 64, Height: 32 })
@@ -369,13 +370,29 @@ public sealed partial class MainWindow
       if (formula.RecoveryState().Content != emojiBoundary)
         throw new InvalidOperationException("Formula input split or rejected valid emoji at the byte boundary.");
       string legacyFormula = new('中', 4096);
-      formula.Restore(new(formula.PinId, "Formula", legacyFormula, formula.SmokePosition.X, formula.SmokePosition.Y, 640, 400));
+      var legacyRecovery = new PinSnapshotStore.Recovery(formula.PinId, "Formula", legacyFormula,
+        formula.SmokePosition.X, formula.SmokePosition.Y, 640, 400);
+      string legacyDirectory = Path.Combine(PinSnapshotStore.RootFor(layout.DataRoot), formula.PinId.ToString("N"));
+      Directory.CreateDirectory(legacyDirectory);
+      File.WriteAllText(Path.Combine(legacyDirectory, "window.json"), JsonSerializer.Serialize(legacyRecovery));
+      formula.Restore(legacyRecovery);
       if (formula.RecoveryState().Content != legacyFormula || !formula.StatusText.Contains("完整恢复"))
         throw new InvalidOperationException("Legacy oversized formula text was silently dropped.");
       await formula.RenderFormulaAsync();
+      if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
+        throw new InvalidOperationException("Unchanged legacy oversized formula blocked actual exit preparation.");
+      if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula)
+        throw new InvalidOperationException("Legacy exit preparation dropped the original formula text.");
+      CancelPinsExitPreparation();
       formula.SmokeInputText(legacyFormula[..^1]);
       if (formula.RecoveryState().Content.Length != legacyFormula.Length - 1)
         throw new InvalidOperationException("Legacy formula cannot be shortened while still beyond the byte budget.");
+      if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
+        throw new InvalidOperationException("Shortened legacy formula still above the byte budget blocked exit preparation.");
+      if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula[..^1])
+        throw new InvalidOperationException("Legacy formula shortening did not persist through actual exit preparation.");
+      CancelPinsExitPreparation();
+      CaptureUiSmokeTrace.Stage("pins.legacy-formula-exit-preserved");
       CaptureUiSmokeTrace.Stage("pins.formula-utf8-budget");
       formula.SetText("\\frac{x^2+1}{2}");
       SmokeFailFormulaInitialization = true;
@@ -567,6 +584,51 @@ public sealed partial class MainWindow
       foreach (var pin in typedPins.ToArray()) pin.ForceClose();
       pinManager?.ForceClose();
     }
+  }
+
+  private async Task VerifyRecoveryBeforeCleanupAsync(byte[] png)
+  {
+    Guid id = Guid.NewGuid();
+    pinSnapshotStore!.SaveRecovery(new(id, "Image", "", 100, 100, 300, 200), png);
+    var manifest = new VibpProjectManifest
+    {
+      SchemaVersion = VibpProjectLimits.SchemaVersion,
+      Canvas = new VibpCanvas { Width = 64, Height = 32 },
+      Source = new VibpSourceResource { MediaType = "image/png", Width = 64, Height = 32, Length = png.LongLength },
+      State = new VibpEditorState { Rotation = 0, Marks = [] },
+      Assets = [],
+    };
+    await pinSnapshotStore.WriteSnapshotAsync(id, manifest,
+      [new("source.png", png.LongLength, () => new MemoryStream(png, writable: false))], png, CancellationToken.None);
+    string obsolete = Path.Combine(Path.GetDirectoryName(pinSnapshotStore.GetSnapshotPngPath(id))!, Guid.NewGuid().ToString("N") + ".png");
+    File.WriteAllBytes(obsolete, png);
+    var validationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var validationReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    pinSnapshotStore.BeforeCleanupValidation = () =>
+    {
+      validationStarted.TrySetResult(pinnedImages.Any(pin => pin.PinId == id));
+      return validationReleased.Task;
+    };
+    try
+    {
+      RestorePins();
+      if (!await validationStarted.Task.WaitAsync(TimeSpan.FromSeconds(10)))
+        throw new InvalidOperationException("Cleanup validated the project before restoring its native pin window.");
+      if (await WorkbenchWebView.ExecuteScriptAsync("true") != "true")
+        throw new InvalidOperationException("Workbench was unavailable during paused background recovery cleanup.");
+      await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Single(pin => pin.PinId == id).SmokeDocumentReady),
+        "Restored native pin did not render while cleanup validation was paused.");
+    }
+    finally
+    {
+      validationReleased.TrySetResult();
+      await pinRecoveryCleanup;
+      pinSnapshotStore.BeforeCleanupValidation = null;
+    }
+    if (File.Exists(obsolete)) throw new InvalidOperationException("Background cleanup did not remove the obsolete generation.");
+    pinnedImages.Single(pin => pin.PinId == id).Close();
+    await WaitForPinCheckAsync(() => Task.FromResult(!pinnedImages.Any(pin => pin.PinId == id)), "Recovery scheduling pin did not close.");
+    CaptureUiSmokeTrace.Stage("pins.recovery-before-background-cleanup");
   }
 
   private static bool BandVisibleOnCurrentDesktop(int x, int y, int width) =>

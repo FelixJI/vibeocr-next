@@ -66,6 +66,7 @@ public sealed partial class MainWindow : Window
   /// <summary>#238 pin owned 快照与截图历史存储（DataRoot 下固定 owned 目录）。</summary>
   private readonly Features.Pins.PinSnapshotStore? pinSnapshotStore;
   private readonly Features.Pins.PinHistoryStore? pinHistoryStore;
+  private Task pinRecoveryCleanup = Task.CompletedTask;
   private readonly VibeOCR.App.Web.WorkbenchProjectStore projectStore;
   private ImageEditWindow? imageEditor;
   private WorkbenchTheme workbenchTheme = WorkbenchTheme.System;
@@ -1070,6 +1071,7 @@ public sealed partial class MainWindow : Window
     {
       await editorRetirement.Drain;
       await imageEditorCreation;
+      await pinRecoveryCleanup;
     }
     finally
     {
@@ -1628,6 +1630,7 @@ public sealed partial class MainWindow : Window
       }
       catch (Exception error) { AppLog.Warn($"Skipped damaged pin: {record.Id}: {error.Message}"); }
     }
+    pinRecoveryCleanup = pinSnapshotStore.CleanupRecoveryAsync();
   }
 
   private async Task<RecognitionTextLayerState?> PreparePinTextAsync(

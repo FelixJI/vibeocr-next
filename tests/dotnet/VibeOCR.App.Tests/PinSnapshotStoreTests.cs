@@ -178,7 +178,9 @@ public sealed class PinSnapshotStoreTests : IDisposable
     {
       await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
       Assert.True(File.Exists(old));
-      Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+      var whileLocked = new PinSnapshotStore(root);
+      Assert.Single(whileLocked.LoadRecovery());
+      await whileLocked.CleanupRecoveryAsync();
     }
     string current = store.GetSnapshotPngPath(id)!;
     string directory = Path.GetDirectoryName(current)!;
@@ -187,7 +189,9 @@ public sealed class PinSnapshotStoreTests : IDisposable
     string nested = Path.Combine(directory, "user-folder");
     Directory.CreateDirectory(nested);
     File.WriteAllBytes(Path.Combine(nested, Guid.NewGuid().ToString("N") + ".png"), Png);
-    Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+    var restarted = new PinSnapshotStore(root);
+    Assert.Single(restarted.LoadRecovery());
+    await restarted.CleanupRecoveryAsync();
     Assert.False(File.Exists(old));
     Assert.Equal(Png, File.ReadAllBytes(current));
     Assert.True(File.Exists(store.GetSnapshotProjectPath(id)));
@@ -209,10 +213,95 @@ public sealed class PinSnapshotStoreTests : IDisposable
     File.WriteAllBytes(obsolete, Png);
     File.WriteAllText(Path.Combine(directory, "current.json"),
       System.Text.Json.JsonSerializer.Serialize(new { Generation = Path.GetFileNameWithoutExtension(current).ToUpperInvariant() }));
-    Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+    var restarted = new PinSnapshotStore(root);
+    Assert.Single(restarted.LoadRecovery());
+    await restarted.CleanupRecoveryAsync();
     Assert.True(File.Exists(current));
     Assert.True(File.Exists(store.GetSnapshotProjectPath(id)));
     Assert.False(File.Exists(obsolete));
+  }
+
+  [Fact]
+  public async Task LoadRecoveryDoesNotWaitForObsoleteGenerationValidation()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Text", "restored-first", 0, 0, 640, 480));
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string directory = Path.GetDirectoryName(store.GetSnapshotPngPath(id))!;
+    File.WriteAllBytes(Path.Combine(directory, Guid.NewGuid().ToString("N") + ".png"), Png);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    store.BeforeCleanupValidation = () => { entered.TrySetResult(); return released.Task; };
+    Task<IReadOnlyList<PinSnapshotStore.Recovery>> loading = Task.Run(store.LoadRecovery);
+    bool returned;
+    try
+    {
+      await Task.WhenAny(loading, entered.Task).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+      returned = loading.IsCompleted;
+    }
+    finally { released.TrySetResult(); await loading; }
+    Assert.True(returned, "Loading recovery waited for full obsolete-generation validation.");
+    Assert.Equal("restored-first", Assert.Single(await loading).Content);
+  }
+
+  [Fact]
+  public async Task BackgroundCleanupIsSingleFlightAndCannotRaceANewSnapshotWrite()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string old = store.GetSnapshotPngPath(id)!;
+    string obsolete = Path.Combine(Path.GetDirectoryName(old)!, Guid.NewGuid().ToString("N") + ".png");
+    File.WriteAllBytes(obsolete, Png);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    store.BeforeCleanupValidation = () => { entered.TrySetResult(); return released.Task; };
+    Task cleanup = store.CleanupRecoveryAsync();
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+    Assert.Same(cleanup, store.CleanupRecoveryAsync());
+    using var canceled = new CancellationTokenSource();
+    Task canceledSave = store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, canceled.Token);
+    canceled.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceledSave);
+    Task save = store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    try
+    {
+      Assert.False(save.IsCompleted);
+      Assert.Equal(old, store.GetSnapshotPngPath(id));
+    }
+    finally { released.TrySetResult(); }
+    await cleanup;
+    await save;
+    Assert.NotEqual(old, store.GetSnapshotPngPath(id));
+    Assert.Equal(Png, File.ReadAllBytes(store.GetSnapshotPngPath(id)!));
+    await VibpProjectFile.ValidateArchiveAsync(store.GetSnapshotProjectPath(id)!, TestContext.Current.CancellationToken);
+    Assert.False(File.Exists(old));
+    Assert.False(File.Exists(obsolete));
+  }
+
+  [Fact]
+  public void LegacyFormulaRecoveryCanBeSavedUnchangedOrProgressivelyShortened()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    string directory = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"));
+    Directory.CreateDirectory(directory);
+    string legacy = new('中', 4096);
+    var original = new PinSnapshotStore.Recovery(id, "Formula", legacy, 0, 0, 640, 400);
+    File.WriteAllText(Path.Combine(directory, "window.json"), System.Text.Json.JsonSerializer.Serialize(original));
+    var moved = original with { X = 200, Y = 300 };
+    store.SaveRecovery(moved);
+    Assert.Equal(moved, Assert.Single(store.LoadRecovery()));
+    var shortened = moved with { Content = legacy[..^1], X = 250 };
+    store.SaveRecovery(shortened);
+    Assert.Equal(shortened, Assert.Single(store.LoadRecovery()));
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(moved));
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(shortened with { Content = new string('文', 4095) }));
+    Assert.Equal(shortened, Assert.Single(store.LoadRecovery()));
+    store.SaveRecovery(shortened with { Content = "x+1" });
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(shortened));
   }
 
   [Theory]
@@ -224,6 +313,29 @@ public sealed class PinSnapshotStoreTests : IDisposable
     var store = new PinSnapshotStore(root);
     string source = string.Concat(Enumerable.Repeat(unit, count));
     Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(new(Guid.NewGuid(), "Formula", source, 0, 0, 640, 400)));
+  }
+
+  [Theory]
+  [InlineData("wrong-id")]
+  [InlineData("wrong-kind")]
+  [InlineData("bad-bounds")]
+  [InlineData("bad-json")]
+  public void LegacyFormulaExceptionRequiresAValidExistingFormulaRecord(string invalid)
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    string directory = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"));
+    Directory.CreateDirectory(directory);
+    var candidate = new PinSnapshotStore.Recovery(id, "Formula", new string('中', 4096), 0, 0, 640, 400);
+    var previous = invalid switch
+    {
+      "wrong-id" => candidate with { Id = Guid.NewGuid() },
+      "wrong-kind" => candidate with { Kind = "Text" },
+      "bad-bounds" => candidate with { Width = 0 },
+      _ => candidate,
+    };
+    File.WriteAllText(Path.Combine(directory, "window.json"), invalid == "bad-json" ? "{" : System.Text.Json.JsonSerializer.Serialize(previous));
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(candidate));
   }
 
   [Theory]
@@ -242,7 +354,9 @@ public sealed class PinSnapshotStoreTests : IDisposable
     File.WriteAllBytes(old, Png);
     string target = damaged switch { "pointer" => Path.Combine(directory, "current.json"), "project" => store.GetSnapshotProjectPath(id)!, _ => current };
     File.WriteAllText(target, "corrupt");
-    _ = new PinSnapshotStore(root).LoadRecovery();
+    var restarted = new PinSnapshotStore(root);
+    _ = restarted.LoadRecovery();
+    await restarted.CleanupRecoveryAsync();
     Assert.Equal(Png, File.ReadAllBytes(old));
     Assert.Equal(Png, File.ReadAllBytes(Path.Combine(directory, "image.png")));
   }
@@ -278,13 +392,15 @@ public sealed class PinSnapshotStoreTests : IDisposable
       Assert.True(File.Exists(image));
       Assert.Empty(new PinSnapshotStore(root).LoadRecovery());
     }
-    Assert.Empty(new PinSnapshotStore(root).LoadRecovery());
+    var restarted = new PinSnapshotStore(root);
+    Assert.Empty(restarted.LoadRecovery());
+    await restarted.CleanupRecoveryAsync();
     Assert.False(File.Exists(image));
     Assert.False(Directory.Exists(Path.GetDirectoryName(image)));
   }
 
   [Fact]
-  public void StartupRetriesCleanupEvenAfterFourWindowsHaveBeenRecovered()
+  public async Task StartupRetriesCleanupEvenAfterFourWindowsHaveBeenRecovered()
   {
     var store = new PinSnapshotStore(root);
     Guid closed = Guid.NewGuid();
@@ -297,6 +413,7 @@ public sealed class PinSnapshotStoreTests : IDisposable
     store.RecoveryDirectoryEnumeration = _ => live.Append(closed).Select(id =>
       Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N")));
     Assert.Equal(4, store.LoadRecovery().Count);
+    await store.CleanupRecoveryAsync();
     Assert.False(File.Exists(image));
   }
 

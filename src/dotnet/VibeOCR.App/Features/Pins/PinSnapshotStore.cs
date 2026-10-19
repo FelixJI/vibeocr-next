@@ -86,6 +86,9 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
   private const string DeletionFileName = "delete.pending";
 
   private readonly string root = Path.Combine(dataRoot, "pins");
+  private readonly SemaphoreSlim snapshotMutation = new(1, 1);
+  private readonly object cleanupSync = new();
+  private Task recoveryCleanup = Task.CompletedTask;
 
   internal static string RootFor(string dataRoot) => Path.Combine(dataRoot, "pins");
 
@@ -102,32 +105,72 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     ArgumentNullException.ThrowIfNull(manifest);
     ArgumentNullException.ThrowIfNull(entries);
     ArgumentNullException.ThrowIfNull(finalPng);
-    await ValidatePngAsync(finalPng, cancellationToken);
-    WorkbenchExclusionBox.ValidateCollection(excludeBoxes ?? []);
-    Directory.CreateDirectory(root);
-    EnsureOwnedDirectory(root);
-    string directory = DirectoryFor(pinId);
-    Directory.CreateDirectory(directory);
-    EnsureOwnedDirectory(directory);
-    string generation = Guid.NewGuid().ToString("N");
-    string project = Path.Combine(directory, generation + ".vibp");
-    string image = Path.Combine(directory, generation + ".png");
+    await snapshotMutation.WaitAsync(cancellationToken);
     try
     {
-      await VibpProjectFile.WriteAsync(project, manifest, entries, cancellationToken);
-      AtomicFile.Write(image, stream => stream.Write(finalPng), cancellationToken);
-      // The pointer is the sole commit: readers see the old pair or the new pair.
-      byte[] pointer = JsonSerializer.SerializeToUtf8Bytes(new Snapshot(generation, excludeBoxes ?? []));
-      AtomicFile.Write(Path.Combine(directory, PointerFileName), stream => stream.Write(pointer), cancellationToken);
+      await ValidatePngAsync(finalPng, cancellationToken);
+      WorkbenchExclusionBox.ValidateCollection(excludeBoxes ?? []);
+      Directory.CreateDirectory(root);
+      EnsureOwnedDirectory(root);
+      string directory = DirectoryFor(pinId);
+      Directory.CreateDirectory(directory);
+      EnsureOwnedDirectory(directory);
+      string generation = Guid.NewGuid().ToString("N");
+      string project = Path.Combine(directory, generation + ".vibp");
+      string image = Path.Combine(directory, generation + ".png");
+      try
+      {
+        await VibpProjectFile.WriteAsync(project, manifest, entries, cancellationToken);
+        AtomicFile.Write(image, stream => stream.Write(finalPng), cancellationToken);
+        // The pointer is the sole commit: readers see the old pair or the new pair.
+        byte[] pointer = JsonSerializer.SerializeToUtf8Bytes(new Snapshot(generation, excludeBoxes ?? []));
+        AtomicFile.Write(Path.Combine(directory, PointerFileName), stream => stream.Write(pointer), cancellationToken);
+      }
+      catch
+      {
+        TryDelete(project);
+        TryDelete(image);
+        throw;
+      }
+      await CleanupOldGenerationsAsync(pinId);
     }
-    catch
-    {
-      TryDelete(project);
-      TryDelete(image);
-      throw;
-    }
-    await CleanupOldGenerationsAsync(pinId);
+    finally { snapshotMutation.Release(); }
   }
+
+  /// <summary>恢复窗口后启动一次后台清理；与快照写入互斥，失败文件留待下次启动。</summary>
+  internal Task CleanupRecoveryAsync()
+  {
+    lock (cleanupSync)
+    {
+      if (!recoveryCleanup.IsCompleted) return recoveryCleanup;
+      return recoveryCleanup = Task.Run(async () =>
+      {
+        try
+        {
+          if (!Directory.Exists(root)) return;
+          EnsureOwnedDirectory(root);
+          foreach (string directory in Directory.EnumerateDirectories(root))
+          {
+            if (!Guid.TryParseExact(Path.GetFileName(directory), "N", out Guid id)) continue;
+            await snapshotMutation.WaitAsync();
+            try
+            {
+              EnsureOwnedDirectory(directory);
+              if (!File.Exists(Path.Combine(directory, DeletionFileName)))
+                await CleanupOldGenerationsAsync(id);
+              if (File.Exists(Path.Combine(directory, DeletionFileName))) DeleteSnapshot(id);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            { AppLog.Warn($"Pin recovery cleanup deferred: {id}: {error.Message}"); }
+            finally { snapshotMutation.Release(); }
+          }
+        }
+        catch (Exception error) { AppLog.Error("Pin recovery background cleanup failed; files retained for retry", error); }
+      });
+    }
+  }
+
+  internal Func<Task>? BeforeCleanupValidation { get; set; }
 
   private async Task CleanupOldGenerationsAsync(Guid pinId)
   {
@@ -141,6 +184,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         candidate != generation &&
         Path.GetExtension(path) is ".png" or ".vibp").ToArray();
       if (obsolete.Length == 0) return;
+      if (BeforeCleanupValidation is { } beforeValidation) await beforeValidation();
       string png = Path.Combine(directory, snapshot.Generation + ".png");
       string project = Path.Combine(directory, snapshot.Generation + ".vibp");
       if (!File.Exists(png) || !File.Exists(project)) return;
@@ -246,9 +290,23 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 
   internal void SaveRecovery(Recovery record, byte[]? png = null)
   {
-    if (record.Kind == "Formula" && (!WebWorkbenchHost.TryGetFormulaSourceByteCount(record.Content, out int formulaBytes) ||
-      formulaBytes > WebWorkbenchHost.MaximumFormulaSourceBytes))
-      throw new InvalidOperationException("公式超过 4096 个 UTF-8 字节；请缩短后再保存。");
+    if (record.Kind == "Formula")
+    {
+      if (!WebWorkbenchHost.TryGetFormulaSourceByteCount(record.Content, out int formulaBytes))
+        throw new InvalidOperationException("公式包含无效 Unicode，无法保存。");
+      if (formulaBytes > WebWorkbenchHost.MaximumFormulaSourceBytes)
+      {
+        Recovery? previous = null;
+        try { previous = ReadRecovery(record.Id); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        { AppLog.Warn($"Legacy formula recovery unavailable: {record.Id}: {error.Message}"); }
+        if (previous?.Kind != "Formula" ||
+          !WebWorkbenchHost.TryGetFormulaSourceByteCount(previous.Content, out int previousBytes) ||
+          previousBytes <= WebWorkbenchHost.MaximumFormulaSourceBytes ||
+          !(record.Content == previous.Content || formulaBytes < previousBytes))
+          throw new InvalidOperationException("公式超过 4096 个 UTF-8 字节；只能保留或缩短已有的超限公式。");
+      }
+    }
     if (record.Width < 1 || record.Height < 1 || record.Content.Length > MaximumRecoveryCharacters) throw new InvalidOperationException("Invalid pin bounds.");
     WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
     byte[] serialized = JsonSerializer.SerializeToUtf8Bytes(record);
@@ -286,21 +344,11 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         try
         {
           EnsureOwnedDirectory(directory);
-          if (File.Exists(Path.Combine(directory, DeletionFileName)))
-          {
-            DeleteSnapshot(id);
-            continue;
-          }
-          Task.Run(() => CleanupOldGenerationsAsync(id)).GetAwaiter().GetResult();
+          if (File.Exists(Path.Combine(directory, DeletionFileName))) continue;
           if (result.Count == 4) continue;
-          string path = Path.Combine(directory, RecoveryFileName);
-          if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;
-          Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
-          if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
+          Recovery? record = ReadRecovery(id);
           if (record?.Kind == "Image" && ReadSnapshotPng(id) is null) continue;
-          if (record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
-            record.Height is > 0 and <= 32768 && record.Content is { Length: <= MaximumRecoveryCharacters } &&
-            record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText") result.Add(record);
+          if (record is not null) result.Add(record);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
         { AppLog.Warn($"Skipped damaged pin recovery: {id}: {error.Message}"); }
@@ -309,6 +357,20 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
     { AppLog.Warn($"Pin recovery root unavailable: {error.Message}"); }
     return result;
+  }
+
+  private Recovery? ReadRecovery(Guid id)
+  {
+    string directory = DirectoryFor(id);
+    string path = Path.Combine(directory, RecoveryFileName);
+    if (!File.Exists(path)) return null;
+    EnsureOwnedDirectory(root); EnsureOwnedDirectory(directory); EnsureOwnedDirectory(path);
+    if (new FileInfo(path).Length > MaximumRecoveryBytes) return null;
+    Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
+    if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
+    return record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
+      record.Height is > 0 and <= 32768 && record.Content is { Length: <= MaximumRecoveryCharacters } &&
+      record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText" ? record : null;
   }
 
   /// <summary>测试接缝：恢复根目录枚举注入（存储异常降级回归）；生产为 null。</summary>

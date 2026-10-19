@@ -80,7 +80,7 @@ internal sealed class TypedPinWindow : IDisposable
       }
       bool shortening = valid && WebWorkbenchHost.TryGetFormulaSourceByteCount(editor.Text, out int previous) && bytes < previous;
       args.Cancel = !shortening;
-      status.Text = "公式最多 4096 个 UTF-8 字节；请删减文本后再渲染或保存（中文/emoji 占多个字节）。";
+      status.Text = "公式最多 4096 个 UTF-8 字节；已有超限文本可保留或缩短后退出，渲染前请删减（中文/emoji 占多个字节）。";
     };
     this.createFormulaHost = createFormulaHost;
     BuildBand();
@@ -433,7 +433,7 @@ internal sealed class TypedPinWindow : IDisposable
     if (kind == ContentKind.Formula)
     {
       if (!WebWorkbenchHost.TryGetFormulaSourceByteCount(editor.Text, out int bytes) || bytes > WebWorkbenchHost.MaximumFormulaSourceBytes)
-        status.Text = "已完整恢复超限公式；请删减至 4096 个 UTF-8 字节以内再渲染或保存。";
+        status.Text = "已完整恢复超限公式，可保留原文退出或继续删减；渲染前请缩短至 4096 个 UTF-8 字节以内。";
       else _ = RenderFormulaAsync();
     }
   }
