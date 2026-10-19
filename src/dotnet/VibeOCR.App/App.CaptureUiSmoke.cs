@@ -27,6 +27,9 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
+        case "PinsSaveSwitchRecoverAndRenderFormula":
+          await VerifyPinsUiAsync(layout);
+          break;
         case "ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame":
           await ScrollCaptureSession.Session.VerifyCorrectionAuthorizationSelfCheckAsync();
           break;

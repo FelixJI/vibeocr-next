@@ -1483,3 +1483,57 @@ select {
   margin: 0;
   min-width: 0;
 }
+
+/* #238 截图历史管理面板：主窗图片编辑页底部可折叠区。 */
+.pin-history > summary {
+  cursor: pointer;
+  padding: 6px 0;
+  user-select: none;
+}
+.pin-history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  max-width: 720px;
+}
+.pin-history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.pin-history-search {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+.pin-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow: auto;
+}
+.pin-history-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.pin-history-name {
+  white-space: nowrap;
+}
+.pin-history-text {
+  flex: 1 1 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+.pin-history-actions {
+  display: inline-flex;
+  gap: 4px;
+}

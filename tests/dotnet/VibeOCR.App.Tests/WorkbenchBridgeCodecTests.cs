@@ -22,6 +22,30 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   }
 
   [Fact]
+  public void PinEditPresetOutputRequiresSessionBindingAndKeepsOpaqueResourceBoundary()
+  {
+    // #239×#238 连接：pinEdit.savePresetImage 与既有预设输出同一资源/路径
+    // 边界，但会话/修订为强制字段，缺失即 fail closed，不降级为可选绑定。
+    Guid session = Guid.NewGuid();
+    string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 3 });
+    SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(
+      ParseForTest(CommandJson(session, "pinEdit", "savePresetImage", valid), session).Command);
+    Assert.Equal("pinEdit", command.Scope);
+    Assert.Equal(session, command.SessionId);
+    Assert.Equal(3, command.Revision);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default" })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N") })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 0, directory = "C:/private" })), session));
+  }
+
+  [Fact]
   public void PdfBlockEditRequiresDocumentSessionAndOldText()
   {
     Guid bridgeSession = Guid.NewGuid();
@@ -1471,4 +1495,16 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       },
     });
   }
+
+  [Fact]
+  public void PinRestoreRejectionHasExactBoundArgumentsAndPinScope()
+  {
+    Guid session = Guid.NewGuid(), pending = Guid.NewGuid();
+    string args = JsonSerializer.Serialize(new { pendingId = pending.ToString("N"), sessionId = session.ToString("N"), revision = 0 });
+    var command = Assert.IsType<RejectPinProjectRestoreCommand>(ParseForTest(CommandJson(session, "pinEdit", "rejectProjectRestore", args), session).Command);
+    Assert.Equal(pending, command.PendingId); Assert.Equal(session, command.SessionId);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "imageEdit", "rejectProjectRestore", args), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "pinEdit", "rejectProjectRestore", "{}"), session));
+  }
+
 }

@@ -155,6 +155,48 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     },
   );
 
+  it("pinEdit 预设保存发送会话绑定的 pinEdit 命令，不误落其他通道", async () => {
+    stubCanvasStack();
+    const actions = createActions();
+    render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport
+        canRecognize
+        commandScope="pinEdit"
+        pinSnapshotApply
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        session={{ sessionId: "pin-session", revision: 4 }}
+        showAutoTextPreference={false}
+        editorSettings={{ imageOutputDirectory: "C:/authorized-output" }}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    await waitFor(() =>
+      expect(screen.getByText(/原图 900×400/)).toBeInTheDocument(),
+    );
+    fireEvent.click(
+      within(mainRow).getByRole("button", { name: "按常用预设保存" }),
+    );
+    // pinEdit 通道必须携带当前会话/修订；宿主对缺失绑定 fail closed。
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "pinEdit.savePresetImage",
+          sessionId: "pin-session",
+          revision: 4,
+        }),
+      ),
+    );
+    expect(
+      actions.run.mock.calls.some(
+        ([action]) =>
+          action.type === "recognition.savePresetImage" ||
+          action.type === "imageEdit.savePresetImage",
+      ),
+    ).toBe(false);
+  });
+
   it("composition-only edits clear and reset in the main row, with undo restoring properties", async () => {
     stubCanvasStack();
     render(

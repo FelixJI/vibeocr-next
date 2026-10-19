@@ -559,6 +559,7 @@ const STATE_SCOPES = new Set<string>([
   "shell",
   "recognition",
   "imageEdit",
+  "pinEdit",
   "batch",
   "pdf",
   "qrcode",

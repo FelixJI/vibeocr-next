@@ -145,6 +145,32 @@ public static class VibpProjectFile
     }, cancellationToken);
   }
 
+  /// <summary>只读验证工程的完整资源集合、字节预算及图片元数据，不创建抽取文件。</summary>
+  internal static Task ValidateArchiveAsync(string path, CancellationToken cancellationToken = default) => Task.Run(async () =>
+  {
+    await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    if (file.Length > VibpProjectLimits.MaximumFileBytes) throw new VibpProjectFormatException("Project file exceeds its byte budget.");
+    ValidateCentralDirectoryBudget(file, VibpProjectLimits.MaximumEntries);
+    using var archive = new ZipArchive(file, ZipArchiveMode.Read);
+    Dictionary<string, ZipArchiveEntry> entries = CollectEntries(archive);
+    (VibpProjectManifest manifest, long total) = await ReadManifestAsync(entries, 0, cancellationToken);
+    ValidateEntrySet(manifest, entries);
+    List<(string Name, string Media, long Length, int Width, int Height)> resources =
+      [(VibpProjectRules.SourceEntryName(manifest.Source.MediaType), manifest.Source.MediaType,
+        manifest.Source.Length, manifest.Source.Width, manifest.Source.Height)];
+    resources.AddRange(manifest.Assets.Select(asset => ($"asset-{asset.Id}.png", "image/png", asset.Length, asset.Width, asset.Height)));
+    resources.AddRange(manifest.State.Patches.Select(patch => ($"patch-{patch.Id}.png", "image/png", patch.Length, patch.Width, patch.Height)));
+    foreach (var resource in resources)
+    {
+      (byte[] bytes, long length) = await ReadEntryBoundedAsync(entries[resource.Name], resource.Length, cancellationToken);
+      if (length != resource.Length || (total += length) > VibpProjectLimits.MaximumDecompressedBytes)
+        throw new VibpProjectFormatException("Project resource length or decompressed budget is invalid.");
+      using var stream = new MemoryStream(bytes, writable: false);
+      (int width, int height) = await ReadImageDimensionsAsync(stream, resource.Media, cancellationToken);
+      RequireSameDimensions(resource.Name, width, height, resource.Width, resource.Height);
+    }
+  }, cancellationToken);
+
   /// <summary>有界读取工程包到 destinationDirectory：先 entry 总数/白名单/
   /// manifest 校验，再按实际流式字节数限额解包每个 entry 并核对声明长度，
   /// 最后用平台解码器元数据校验容器类型与维度（与 manifest 声明一致）。
@@ -267,6 +293,14 @@ public static class VibpProjectFile
   internal static async Task<(int Width, int Height)> ReadImageDimensionsAsync(
     string path, string mediaType, CancellationToken cancellationToken)
   {
+    await using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+      CopyBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+    return await ReadImageDimensionsAsync(stream, mediaType, cancellationToken);
+  }
+
+  private static async Task<(int Width, int Height)> ReadImageDimensionsAsync(
+    Stream stream, string mediaType, CancellationToken cancellationToken)
+  {
     Guid expectedCodec = mediaType switch
     {
       "image/png" => BitmapDecoder.PngDecoderId,
@@ -278,9 +312,6 @@ public static class VibpProjectFile
     };
     try
     {
-      await using FileStream stream = new(
-        path, FileMode.Open, FileAccess.Read, FileShare.Read, CopyBufferSize,
-        FileOptions.Asynchronous | FileOptions.SequentialScan);
       using var random = stream.AsRandomAccessStream();
       BitmapDecoder decoder = await BitmapDecoder.CreateAsync(random).AsTask(cancellationToken);
       if (decoder.DecoderInformation.CodecId != expectedCodec)

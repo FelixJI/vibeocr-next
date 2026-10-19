@@ -41,6 +41,10 @@ public sealed partial class MainWindow : Window
   [DllImport("user32.dll")]
   private static extern bool IsZoomed(IntPtr hWnd);
 
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool SetWindowPos(
+    IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
   [StructLayout(LayoutKind.Sequential)]
   private struct RECT
   {
@@ -59,6 +63,10 @@ public sealed partial class MainWindow : Window
   private readonly WorkbenchResourceBroker resourceBroker;
   private readonly string resourceRoot;
   private readonly WorkbenchAnnotationStore annotationStore;
+  /// <summary>#238 pin owned 快照与截图历史存储（DataRoot 下固定 owned 目录）。</summary>
+  private readonly Features.Pins.PinSnapshotStore? pinSnapshotStore;
+  private readonly Features.Pins.PinHistoryStore? pinHistoryStore;
+  private Task pinRecoveryCleanup = Task.CompletedTask;
   private readonly VibeOCR.App.Web.WorkbenchProjectStore projectStore;
   private ImageEditWindow? imageEditor;
   private WorkbenchTheme workbenchTheme = WorkbenchTheme.System;
@@ -83,10 +91,13 @@ public sealed partial class MainWindow : Window
   internal Guid? SceneSessionId => imageEditor?.SessionId;
   private Microsoft.UI.Xaml.Controls.WebView2 SmokeEditorWebView => SceneWebView ?? WorkbenchWebView;
   private readonly List<PinnedImageWindow> pinnedImages = [];
+  /// <summary>#238 类型化贴图（文字/颜色/文件预览）；与图片贴图共用 4 张上限。</summary>
+  private readonly List<Features.Pins.TypedPinWindow> typedPins = [];
   private readonly Dictionary<(Guid SessionId, long Revision),
     (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
   private readonly SyntheticScreenRegionPicker? screenshotSmokePicker;
   private readonly Func<string?>? supervisorInstanceId;
+  private readonly Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>> preparePinnedTextLayer;
   private readonly Func<int>? smokeSubmitAttempts;
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
@@ -121,7 +132,9 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeInstallAttempts = null,
     ShellActionDispatcher? shellActions = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
-    ISystemImportReader? systemImportReader = null)
+    ISystemImportReader? systemImportReader = null,
+    Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>>? preparePinnedTextLayer = null,
+    Func<string, Features.Pins.PinHistoryStore>? pinHistoryFactory = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -149,6 +162,8 @@ public sealed partial class MainWindow : Window
       paddleSmokePriorResourceFiles.UnionWith(Directory.GetFiles(resourceRoot, "*", SearchOption.AllDirectories));
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+    pinSnapshotStore = new Features.Pins.PinSnapshotStore(layout.DataRoot);
+    pinHistoryStore = pinHistoryFactory?.Invoke(layout.DataRoot) ?? new Features.Pins.PinHistoryStore(layout.DataRoot);
     // #233 同一 store 同时供命令（保存消费）与 /__project 上传（暂存）共享。
     projectStore = new VibeOCR.App.Web.WorkbenchProjectStore();
     Func<nint> activeWindowHandle = () => imageEditor is { } editor ? editor.Handle : pendingImageEditor?.Scene is { } scene ?
@@ -177,9 +192,16 @@ public sealed partial class MainWindow : Window
       ensureRuntimeReady: ensureRuntimeReady,
       systemImportReader: systemImportReader,
       projectStore: projectStore,
+      pinSnapshotWriter: pinSnapshotStore,
+      pinHistory: pinHistoryStore,
       projectSavePicker: projectPicker.PickSavePathAsync,
       projectOpenPicker: projectPicker.PickOpenPathAsync);
+    this.preparePinnedTextLayer = preparePinnedTextLayer ?? commandHandler.PreparePinnedTextLayerAsync;
     commandHandler.ScreenshotSessionReady += ShowImageEditor;
+    commandHandler.PinSnapshotApplied += OnPinSnapshotApplied;
+    commandHandler.PinEditSessionClosed += OnPinEditSessionClosed;
+    commandHandler.PinHistoryReopenRequested += OnPinHistoryReopenRequested;
+    commandHandler.PinManagerRequested += ShowPinManagerFromTray;
     commandHandler.ScreenshotCaptureStarting += OnScreenshotCaptureStarting;
     commandHandler.ScreenshotCaptureFinished += OnScreenshotCaptureFinished;
     commandHandler.ScreenshotTextLayerChanged += layer =>
@@ -280,6 +302,24 @@ public sealed partial class MainWindow : Window
     ApplyPersistedOrDefaultGeometry();
     Closed += OnWindowClosed;
     Activated += OnWindowActivated;
+    _ = PublishLoadedPinHistoryAsync();
+  }
+
+  private async Task PublishLoadedPinHistoryAsync()
+  {
+    try
+    {
+      if (pinHistoryStore is null) return;
+      await pinHistoryStore.Initialization.ConfigureAwait(false);
+      if (shuttingDown) return;
+      DispatcherQueue.TryEnqueue(() =>
+      {
+        if (shuttingDown) return;
+        try { commandHandler.PublishPinHistory(); }
+        catch (Exception error) { AppLog.Warn($"History initialization publication failed: {error.Message}"); }
+      });
+    }
+    catch (Exception error) { AppLog.Warn($"History initialization failed: {error.Message}"); }
   }
 
   private async void OnWorkbenchLoaded(object sender, RoutedEventArgs args)
@@ -289,6 +329,7 @@ public sealed partial class MainWindow : Window
       return;
     }
     initialized = true;
+    RestorePins();
     WebReadySmokeStatus.Stage("webview-initializing");
     try
     {
@@ -521,7 +562,7 @@ public sealed partial class MainWindow : Window
     WorkbenchRoute route = destination switch
     {
       "recognition" => WorkbenchRoute.Recognition,
-      "imageEdit" => WorkbenchRoute.ImageEdit,
+      "imageEdit" or "pinEdit" => WorkbenchRoute.ImageEdit,
       "batch" => WorkbenchRoute.Batch,
       "qrcode" => WorkbenchRoute.QrCode,
       "pdf" => WorkbenchRoute.Pdf,
@@ -982,6 +1023,16 @@ public sealed partial class MainWindow : Window
     }
     finally { if (ReferenceEquals(activePdfCloseDialog, dialog)) activePdfCloseDialog = null; }
   }
+  internal event Action? ExitRequested;
+
+  public new void Close()
+  {
+    if (ExitRequested is { } request) request();
+    else base.Close();
+  }
+
+  internal void CloseAfterPreparation() => base.Close();
+
   private void OnExitClicked(object sender, RoutedEventArgs args) =>
     Close();
 
@@ -1020,11 +1071,14 @@ public sealed partial class MainWindow : Window
     {
       await editorRetirement.Drain;
       await imageEditorCreation;
+      await pinRecoveryCleanup;
     }
     finally
     {
       ClearPinTextTasks();
-      foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.Close();
+      foreach (PinnedImageWindow pinned in pinnedImages.ToArray()) pinned.ForceClose();
+      foreach (Features.Pins.TypedPinWindow typed in typedPins.ToArray()) typed.ForceClose();
+      pinManager?.ForceClose();
       webHost.ProtocolViolation -= OnProtocolViolation;
       webHost.RecoveryRequired -= OnRecoveryRequired;
       webHost.StateChanged -= OnHostStateChanged;
@@ -1043,21 +1097,540 @@ public sealed partial class MainWindow : Window
     RecognitionTextLayerState? layer,
     IReadOnlyList<WorkbenchExclusionBox> excludeBoxes)
   {
-    if (pinnedImages.Count >= 4)
+    if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Pin creation is unavailable while preparing to exit.");
+    if (pinnedImages.Count + typedPins.Count >= 4)
     {
-      throw new InvalidOperationException("最多同时打开四张贴图，请先关闭一张。");
+      // C6：专属回执文案；宿主仍以此处为最终防竞态防线。
+      throw new PinLimitReachedException();
     }
+    PinnedImageWindow? pending = null;
     var pinned = new PinnedImageWindow(image, sessionId, revision, layer, excludeBoxes,
-      () => PreparePinTextAsync(sessionId, revision, image.Path, excludeBoxes),
+      () => PreparePinTextAsync(
+        pending!.SessionId, pending!.Revision, pending!.CurrentImagePath,
+        pending!.CurrentExcludeBoxes),
       () => supervisorInstanceId?.Invoke());
+    pending = pinned;
+    try
+    {
+      pinSnapshotStore?.SaveRecovery(pinned.RecoveryState(), File.ReadAllBytes(image.Path));
+      WirePinWindow(pinned);
+    }
+    catch
+    {
+      // Construction already owns the image and native window, even before registration.
+      pinned.ForceClose();
+      throw;
+    }
+  }
+
+  /// <summary>贴图窗口统一接线：编辑槽事件、交互事件、关闭清理与注册。</summary>
+  private void WirePinWindow(PinnedImageWindow pinned)
+  {
+    pinned.EditRequested += EnterPinEditAsync;
+    pinned.SnapshotReceiptLost += OnPinSnapshotReceiptLost;
+    pinned.SnapshotConfirmed += OnPinSnapshotConfirmedAsync;
+    pinned.ExitEditRequested += ExitPinEditAsync;
+    pinned.MovedDelta += (dx, dy) => MovePinGroup(pinned, dx, dy);
+    pinned.CollapseToggleRequested += pin => pin.SetCollapsed(!pin.Collapsed);
+    pinned.PassThroughToggleRequested += pin => pin.SetPassThrough(!pin.PassThrough);
+    pinned.GroupToggleRequested += TogglePinGroup;
+    pinned.PinManagerRequested += ShowPinManager;
     pinned.Closed += closed =>
     {
+      if (pinEditing?.Window == closed) pinEditing = null;
       pinnedImages.Remove(closed);
-      if (!pinnedImages.Any(other => other.SessionId == sessionId && other.Revision == revision))
-        RemovePinTextTask((sessionId, revision));
+      pinGroups.Remove(closed);
+      if (!pinnedImages.Any(other => other.SessionId == closed.SessionId &&
+          other.Revision == closed.Revision))
+        RemovePinTextTask((closed.SessionId, closed.Revision));
+      // 关闭单张清 owned 记录：仅非活动编辑槽（在途事务结束后才清理）；
+      // 初始化失败关闭（RetainSnapshotOnClose）≠用户主动关闭，恢复快照保留
+      // 供下一次恢复重试。
+      if (!shuttingDown)
+      {
+        if (!closed.RetainSnapshotOnClose) pinSnapshotStore?.DeleteSnapshot(closed.PinId);
+      }
+      pinManager?.Refresh();
     };
     pinnedImages.Add(pinned);
     _ = ShowPinnedAsync(pinned);
+  }
+
+  /// <summary>编组同步移动：同组成员应用同一物理位移（不含发起者自身）。</summary>
+  private void MovePinGroup(PinnedImageWindow source, int dx, int dy)
+  {
+    if (shuttingDown || pinsExitReview) return;
+    if (dx == 0 && dy == 0) return;
+    if (!pinGroups.TryGetValue(source, out Guid group)) return;
+    foreach ((PinnedImageWindow member, Guid memberGroup) in pinGroups)
+    {
+      if (member == source || memberGroup != group || member.Disposed) continue;
+      nint handle = member.Handle;
+      if (!GetWindowRect(handle, out RECT bounds)) continue;
+      SetWindowPos(handle, 0,
+        bounds.Left + dx, bounds.Top + dy, 0, 0,
+        0x0001 | 0x0004 | 0x0010);
+    }
+  }
+
+  /// <summary>编组开关：首次编组创建新组；同组多成员共享一个组 id。</summary>
+  private void TogglePinGroup(PinnedImageWindow pin)
+  {
+    if (shuttingDown || pinsExitReview) return;
+    if (pinGroups.Remove(pin, out _))
+    {
+      pin.SetGrouped(false);
+      return;
+    }
+    Guid group = pinGroups.Values.FirstOrDefault();
+    if (group == default) group = Guid.NewGuid();
+    pinGroups[pin] = group;
+    pin.SetGrouped(true);
+  }
+
+  /// <summary>始终可达的贴图管理入口（穿透恢复）。</summary>
+  /// <summary>始终可达的贴图管理入口（穿透恢复；托盘同入口）。</summary>
+  internal void ShowPinManagerFromTray()
+  {
+    if (shuttingDown) return;
+    if (DispatcherQueue.HasThreadAccess) ShowPinManager();
+    else DispatcherQueue.TryEnqueue(ShowPinManager);
+  }
+
+  /// <summary>#238 新建类型化贴图：默认文字（AC“新入口默认文字”）。
+  /// 文件预览经原生 picker 授权，仅图片/有界纯文本，未知格式拒绝。</summary>
+  internal async void CreateTypedPinFromTray(Features.Pins.TypedPinWindow.ContentKind kind)
+  {
+    if (shuttingDown || pinsExitReview) return;
+    void Create()
+    {
+      if (shuttingDown || pinsExitReview) return;
+      if (pinnedImages.Count + typedPins.Count >= 4)
+      {
+        _ = ShowPinMessageAsync("最多同时打开四张贴图，请先关闭一张。");
+        return;
+      }
+      var pin = CreateTypedPin(kind);
+      if (kind == Features.Pins.TypedPinWindow.ContentKind.FilePreview)
+      {
+        _ = PickTypedPinFileAsync(pin);
+      }
+    }
+    if (DispatcherQueue.HasThreadAccess) Create();
+    else DispatcherQueue.TryEnqueue(Create);
+    await Task.CompletedTask;
+  }
+
+  /// <summary>smoke 注入：公式宿主创建完成后的挂起闸门（生产为 null）。</summary>
+  internal TaskCompletionSource? SmokeFormulaHostGate { get; set; }
+  /// <summary>smoke 观察：闸门路径下已创建的公式宿主实例。</summary>
+  internal readonly List<WebWorkbenchHost> SmokeFormulaHosts = [];
+  internal WebWorkbenchHost? SmokeFailedFormulaHost { get; private set; }
+  internal bool SmokeFailFormulaInitialization { get; set; }
+
+  /// <summary>smoke 注入：下一次恢复根枚举抛存储异常（真实启动链验证），
+  /// 消费后自动还原；启动后经 SmokeRecoveryInjectionConsumed 确认。</summary>
+  internal bool SmokeRecoveryInjectionConsumed { get; private set; }
+  internal void SmokeInjectRecoveryRootFailure()
+  {
+    SmokeRecoveryInjectionConsumed = false;
+    pinSnapshotStore!.RecoveryDirectoryEnumeration = _ =>
+    {
+      pinSnapshotStore.RecoveryDirectoryEnumeration = null;
+      SmokeRecoveryInjectionConsumed = true;
+      throw new UnauthorizedAccessException("smoke injected recovery root failure");
+    };
+  }
+
+  private Features.Pins.TypedPinWindow CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind kind, Guid? id = null)
+  {
+    if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Pin creation is unavailable while preparing to exit.");
+    var pin = new Features.Pins.TypedPinWindow(kind, id, async view =>
+    {
+      var host = new WebWorkbenchHost(application, resourceBroker, annotationStore,
+        applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, projectStore: projectStore, pinEditHost: true);
+      if (SmokeFailFormulaInitialization)
+      {
+        SmokeFailFormulaInitialization = false;
+        SmokeFailedFormulaHost = host;
+        host.StateChanged += state =>
+        {
+          if (state == "webview-binding") throw new IOException("smoke formula initialization failure");
+        };
+      }
+      try
+      {
+        // 公式窗口不预载普通 pin 页，首次导航由 RenderFormulaAsync 唯一发出。
+        await host.InitializeAsync(view, layout.WebAssetsRoot, deferInitialNavigation: true);
+        // smoke 注入（生产为 null）：宿主创建完成后挂起，用于真实 GUI 验证
+        // 并发单飞/迟到丢弃/创建期间关闭释放。
+        if (SmokeFormulaHostGate is { } gate)
+        {
+          SmokeFormulaHosts.Add(host);
+          await gate.Task;
+        }
+        return host;
+      }
+      catch
+      {
+        await host.DisposeAsync();
+        throw;
+      }
+    });
+    pin.Closed += closed =>
+    {
+      typedPins.Remove(closed);
+      if (!shuttingDown) pinSnapshotStore?.DeleteSnapshot(closed.PinId);
+      pinManager?.Refresh();
+    };
+    typedPins.Add(pin);
+    pin.Show();
+    return pin;
+  }
+
+  private async Task PickTypedPinFileAsync(Features.Pins.TypedPinWindow pin)
+  {
+    try
+    {
+      var picker = new Windows.Storage.Pickers.FileOpenPicker();
+      WinRT.Interop.InitializeWithWindow.Initialize(
+        picker, WindowNative.GetWindowHandle(this));
+      picker.FileTypeFilter.Add(".png");
+      picker.FileTypeFilter.Add(".jpg");
+      picker.FileTypeFilter.Add(".jpeg");
+      picker.FileTypeFilter.Add(".txt");
+      picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary;
+      Windows.Storage.StorageFile? file =
+        await picker.PickSingleFileAsync();
+      if (pin.Disposed || shuttingDown || pinsExitReview) return;
+      if (file is null) { pin.ForceClose(); return; }
+      string extension = Path.GetExtension(file.Path).ToLowerInvariant();
+      if (extension is ".png" or ".jpg" or ".jpeg")
+      {
+        using var input = await file.OpenReadAsync();
+        SystemImportImageItem imported = await InputService.ReadImportImageAsync(input, CancellationToken.None);
+        if (pin.Disposed || shuttingDown || pinsExitReview) return;
+        byte[] png = imported.Data;
+        var lease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
+        WorkbenchAnnotationFile annotation = annotationStore.Take(lease.ResourceUri);
+        if (pin.Disposed || shuttingDown || pinsExitReview) { annotation.Dispose(); return; }
+        typedPins.Remove(pin);
+        try { PinScreenshot(annotation, Guid.NewGuid(), 0, null, []); }
+        catch { annotation.Dispose(); throw; }
+        finally { pin.ForceClose(); }
+      }
+      else await pin.LoadFileAsync(file.Path);
+    }
+    catch (Exception error)
+    {
+      VibeOCR.App.Services.AppLog.Error("Typed pin file pick failed", error);
+      pin.ShowError($"文件预览失败：{error.Message}");
+    }
+  }
+
+  private void ShowPinManager()
+  {
+    if (shuttingDown || pinsExitReview) return;
+    if (pinManager is null)
+    {
+      pinManager = new Features.Pins.PinManagerWindow(
+        () => pinnedImages.ToArray(),
+        manager => manager.Refresh(),
+        kind => CreateTypedPinFromTray(kind),
+        pin => { if (pinGroups.ContainsKey(pin)) TogglePinGroup(pin); },
+        () => typedPins.ToArray());
+      pinManager.Closed += _ => pinManager = null;
+    }
+    pinManager.Show();
+  }
+
+  // One native session owns its display swap and shared terminal task; discard/close releases the slot.
+  private sealed class PinEditSlot(PinnedImageWindow window, Guid sessionId)
+  {
+    internal PinnedImageWindow Window { get; } = window;
+    internal Guid SessionId { get; } = sessionId;
+    internal Task<bool>? Swap { get; set; }
+    internal Task? Completion { get; set; }
+    internal bool ReceiptLost { get; set; }
+  }
+  private PinEditSlot? pinEditing;
+  private readonly Dictionary<PinnedImageWindow, Guid> pinGroups = [];
+  private Features.Pins.PinManagerWindow? pinManager;
+
+  /// <summary>进入贴图编辑（单槽）：另一张在编辑时激活它，不抢占（C3）。</summary>
+  private bool pinTransitionInFlight;
+  private bool pinsExitReview;
+  private TaskCompletionSource? pinTransitionComplete;
+  private async Task EnterPinEditAsync(PinnedImageWindow target)
+  {
+    if (shuttingDown || pinsExitReview || pinTransitionInFlight || target.Disposed) return;
+    pinTransitionInFlight = true;
+    pinTransitionComplete = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    try
+    {
+      await EnterPinEditCoreAsync(target);
+    }
+    catch (Exception error) { AppLog.Error("Pin editor creation failed", error); }
+    finally { pinTransitionInFlight = false; pinTransitionComplete.TrySetResult(); }
+  }
+
+  private async Task EnterPinEditCoreAsync(PinnedImageWindow target)
+  {
+    if (pinEditing is { } existing)
+    {
+      if (existing.Window == target) { target.Activate(); return; }
+      if (!await existing.Window.SaveEditAsync()) { existing.Window.Activate(); return; }
+    }
+    if (pinSnapshotStore is null)
+    {
+      return;
+    }
+    byte[] png;
+    try { png = await File.ReadAllBytesAsync(target.CurrentImagePath); }
+    catch (Exception error)
+    {
+      VibeOCR.App.Services.AppLog.Error("Pin edit source read failed", error);
+      return;
+    }
+    Guid? sessionId = await commandHandler.TryOpenPinEditSessionAsync(
+      target.PinId, png, CancellationToken.None, target.CurrentExcludeBoxes);
+    if (sessionId is not { } id) return;
+    if (shuttingDown || target.Disposed)
+    {
+      await application.ExecuteAsync(new(Guid.NewGuid(), new ClosePinEditSessionCommand()), CancellationToken.None);
+      return;
+    }
+    var opened = new PinEditSlot(target, id);
+    pinEditing = opened;
+    try
+    {
+      await target.EnterEditModeAsync(
+        application, resourceBroker, annotationStore, projectStore, layout.WebAssetsRoot, id);
+      if (!target.Editing) await ExitPinEditAsync(target);
+    }
+    catch
+    {
+      if (ReferenceEquals(pinEditing, opened))
+      {
+        try
+        {
+          if (commandHandler.InitialStates.OfType<PinEditWorkbenchState>().Single().ScreenshotSession?.SessionId == id.ToString("N"))
+            await application.ExecuteAsync(new(Guid.NewGuid(), new ClosePinEditSessionCommand()), CancellationToken.None);
+        }
+        finally
+        {
+          if (ReferenceEquals(pinEditing, opened)) pinEditing = null;
+          await target.ExitEditModeAsync();
+        }
+      }
+      throw;
+    }
+  }
+
+  /// <summary>放弃编辑：关闭 pinEdit 会话；会话事件回调完成退出与槽释放。
+  /// 权威会话已空但已提交槽未收尾（回执丢失）时补幂等终态：只清匹配旧槽。</summary>
+  private async Task ExitPinEditAsync(PinnedImageWindow target)
+  {
+    if (pinEditing is not { } slot || slot.Window != target)
+    {
+      return;
+    }
+    if (slot.Swap is not null)
+    {
+      await FinalizeCommittedPinEditAsync(slot);
+      return;
+    }
+    _ = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new ClosePinEditSessionCommand()),
+      CancellationToken.None);
+  }
+
+  internal Action<PinnedImageWindow>? SmokeCommittedResetProbe { get; set; }
+  internal int SmokePinSnapshotAppliedCount { get; private set; }
+
+  private void OnPinSnapshotApplied(Guid sessionId, long revision, Guid pinId)
+  {
+    void Apply()
+    {
+      SmokePinSnapshotAppliedCount++;
+      if (pinEditing is not { } slot || slot.SessionId != sessionId) return;
+      string? path = pinSnapshotStore?.GetSnapshotPngPath(pinId);
+      slot.Swap = path is not null
+        ? ApplyCommittedPinSnapshotAsync(slot.Window, path, sessionId, pinId)
+        : Task.FromResult(false);
+      if (slot.ReceiptLost) _ = FinalizeCommittedPinEditAsync(slot);
+      SmokeCommittedResetProbe?.Invoke(slot.Window);
+    }
+    if (DispatcherQueue.HasThreadAccess) Apply();
+    else DispatcherQueue.TryEnqueue(Apply);
+  }
+
+  private Task OnPinSnapshotConfirmedAsync(PinnedImageWindow window, Guid sessionId) =>
+    pinEditing is { } slot && slot.Window == window && slot.SessionId == sessionId && slot.Swap is not null
+      ? FinalizeCommittedPinEditAsync(slot) : Task.CompletedTask;
+
+  private Task FinalizeCommittedPinEditAsync(PinEditSlot slot) =>
+    slot.Completion ??= FinishCommittedPinEditAsync(slot);
+
+  private async Task FinishCommittedPinEditAsync(PinEditSlot slot)
+  {
+    bool displayed = false;
+    try { displayed = await slot.Swap!; }
+    catch (Exception error) { AppLog.Error("Committed pin swap observation failed", error); }
+    try
+    {
+      await slot.Window.ExitEditModeAsync(slot.SessionId);
+      if (!displayed && !slot.Window.Disposed && !slot.Window.Editing && slot.Window.SessionId == slot.SessionId)
+        slot.Window.ReportSnapshotDisplayFailure();
+    }
+    catch (Exception error) { AppLog.Error("Committed pin editor teardown failed", error); }
+    finally { if (ReferenceEquals(pinEditing, slot)) pinEditing = null; }
+  }
+
+  private void OnPinSnapshotReceiptLost(PinnedImageWindow window, Guid sessionId)
+  {
+    if (pinEditing is not { } slot || slot.Window != window || slot.SessionId != sessionId) return;
+    slot.ReceiptLost = true;
+    if (slot.Swap is not null) _ = FinalizeCommittedPinEditAsync(slot);
+  }
+
+  private async Task<bool> ApplyCommittedPinSnapshotAsync(PinnedImageWindow target, string path, Guid sessionId, Guid pinId)
+  {
+    var oldIdentity = (target.SessionId, target.Revision);
+    try
+    {
+      (int width, int height) = Features.Pins.PinSnapshotStore.SniffPngSize(await File.ReadAllBytesAsync(path));
+      await target.ApplySnapshotAsync(path, width, height, sessionId, pinSnapshotStore!.GetSnapshotExclusions(pinId) ?? []);
+      return true;
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Pin snapshot committed but display swap failed", error);
+      return false;
+    }
+    finally
+    {
+      if (!pinnedImages.Any(other => other.SessionId == oldIdentity.SessionId && other.Revision == oldIdentity.Revision))
+        RemovePinTextTask(oldIdentity);
+    }
+  }
+
+  private void OnPinEditSessionClosed(Guid sessionId)
+  {
+    void Restore()
+    {
+      if (pinEditing is { } slot && slot.SessionId == sessionId)
+      {
+        pinEditing = null;
+        _ = slot.Window.ExitEditModeAsync(slot.SessionId);
+      }
+    }
+    if (DispatcherQueue.HasThreadAccess) Restore();
+    else DispatcherQueue.TryEnqueue(Restore);
+  }
+
+  private Task OnPinHistoryReopenRequested(PinHistoryImage image)
+  {
+    void Reopen()
+    {
+      if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Application is closing.");
+      if (pinnedImages.Count + typedPins.Count >= 4) throw new PinLimitReachedException();
+      string temp = Path.Combine(resourceRoot, $"pin-{Guid.NewGuid():N}.png");
+      File.WriteAllBytes(temp, image.Png);
+      var annotation = new WorkbenchAnnotationFile(temp, image.Width, image.Height);
+      try { PinScreenshot(annotation, Guid.NewGuid(), 0, null, []); }
+      catch { annotation.Dispose(); throw; }
+    }
+    if (DispatcherQueue.HasThreadAccess) { Reopen(); return Task.CompletedTask; }
+    var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    if (!DispatcherQueue.TryEnqueue(() =>
+    {
+      try { Reopen(); completion.TrySetResult(); }
+      catch (Exception error) { completion.TrySetException(error); }
+    })) completion.TrySetException(new InvalidOperationException("UI dispatcher is unavailable."));
+    return completion.Task;
+  }
+
+  internal async Task<bool> PreparePinsExitAsync()
+  {
+    if (pinsExitReview) return false;
+    pinsExitReview = true;
+    bool prepared = false;
+    try
+    {
+      if (pinTransitionComplete is { } transition) await transition.Task;
+      if (pinEditing is { } slot && !await slot.Window.PrepareEditExitAsync()) return false;
+      foreach (PinnedImageWindow pin in pinnedImages) pin.SetExitFrozen(true);
+      foreach (Features.Pins.TypedPinWindow pin in typedPins) pin.SetExitFrozen(true);
+      if (pinSnapshotStore is not null)
+      {
+        foreach (PinnedImageWindow pin in pinnedImages)
+          pinSnapshotStore.SaveRecovery(pin.RecoveryState(), await File.ReadAllBytesAsync(pin.CurrentImagePath));
+        foreach (Features.Pins.TypedPinWindow pin in typedPins)
+          pinSnapshotStore.SaveRecovery(pin.RecoveryState());
+      }
+      prepared = true;
+      return true;
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Pin exit recovery persistence failed", error);
+      await ShowPinMessageAsync("贴图恢复内容保存失败，请重试后退出。");
+      return false;
+    }
+    finally { if (!prepared) CancelPinsExitPreparation(); }
+  }
+  internal Func<Func<Task>, Task>? SmokeExitCoordinatorFailureProbe { get; set; }
+  internal void CancelPinsExitPreparation()
+  {
+    foreach (PinnedImageWindow pin in pinnedImages) pin.SetExitFrozen(false);
+    foreach (Features.Pins.TypedPinWindow pin in typedPins) pin.SetExitFrozen(false);
+    pinsExitReview = false;
+  }
+
+  private async Task ShowPinMessageAsync(string message)
+  {
+    Activate();
+    await new ContentDialog { Title = "贴图", Content = message, CloseButtonText = "确定",
+      XamlRoot = WorkbenchWebView.XamlRoot }.ShowAsync();
+  }
+
+  private void RestorePins()
+  {
+    if (shuttingDown || pinsExitReview) return;
+    if (pinSnapshotStore is null) return;
+    foreach (var record in pinSnapshotStore.LoadRecovery())
+    {
+      try
+      {
+        if (record.Kind == "Image")
+        {
+          string? path = pinSnapshotStore.GetSnapshotPngPath(record.Id);
+          if (path is null) continue;
+          PinHistoryImage? decoded = pinSnapshotStore.ReadSnapshotPng(record.Id);
+          if (decoded is null) continue;
+          byte[] png = decoded.Png;
+          int width = decoded.Width, height = decoded.Height;
+          IReadOnlyList<WorkbenchExclusionBox> exclusions = pinSnapshotStore.GetSnapshotExclusions(record.Id) ?? record.ExcludeBoxes ?? [];
+          string temp = Path.Combine(resourceRoot, $"pin-{Guid.NewGuid():N}.png");
+          File.WriteAllBytes(temp, png);
+          PinnedImageWindow? pin = null;
+          pin = new PinnedImageWindow(new WorkbenchAnnotationFile(temp, width, height),
+            Guid.NewGuid(), 0, null, exclusions, () => PreparePinTextAsync(pin!.SessionId,
+              pin.Revision, pin.CurrentImagePath, pin.CurrentExcludeBoxes), () => supervisorInstanceId?.Invoke(), record.Id);
+          WirePinWindow(pin);
+          pin.RestoreGeometry(record);
+          if (record.Grouped) TogglePinGroup(pin);
+        }
+        else if (Enum.TryParse(record.Kind, out Features.Pins.TypedPinWindow.ContentKind kind))
+        {
+          var typed = CreateTypedPin(kind, record.Id);
+          typed.Restore(record);
+        }
+      }
+      catch (Exception error) { AppLog.Warn($"Skipped damaged pin: {record.Id}: {error.Message}"); }
+    }
+    pinRecoveryCleanup = pinSnapshotStore.CleanupRecoveryAsync();
   }
 
   private async Task<RecognitionTextLayerState?> PreparePinTextAsync(
@@ -1100,7 +1673,7 @@ public sealed partial class MainWindow : Window
     CancellationToken cancellationToken)
   {
     if (excludeBoxes.Count == 0)
-      return await commandHandler.PreparePinnedTextLayerAsync(
+      return await preparePinnedTextLayer(
         sessionId, revision, imagePath, cancellationToken);
     if (PinnedTextMask.CoversEntireImage(excludeBoxes))
       throw new PinnedTextPreparationException(
@@ -1109,7 +1682,7 @@ public sealed partial class MainWindow : Window
       imagePath, excludeBoxes, cancellationToken);
     try
     {
-      return await commandHandler.PreparePinnedTextLayerAsync(
+      return await preparePinnedTextLayer(
         sessionId, revision, masked, cancellationToken);
     }
     finally
@@ -1149,6 +1722,8 @@ public sealed partial class MainWindow : Window
     catch (Exception error)
     {
       AppLog.Error("Pinned image window failed to start", error);
+      // 启动 WebView 瞬态失败只释放失败窗口，不删恢复快照：下一次恢复重试。
+      pinned.RetainSnapshotOnClose = true;
       pinned.Close();
     }
   }
