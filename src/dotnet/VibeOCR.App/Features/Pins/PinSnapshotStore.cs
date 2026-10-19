@@ -20,6 +20,8 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     int? ExpandedClientWidth = null, int? ExpandedClientHeight = null,
     IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
   private sealed record Snapshot(string Generation, IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null);
+  internal const int MaximumRecoveryBytes = 2 * 1024 * 1024;
+  internal const int MaximumRecoveryCharacters = 262144;
   private const string PointerFileName = "current.json";
   private const string RecoveryFileName = "window.json";
 
@@ -151,8 +153,10 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 
   internal void SaveRecovery(Recovery record, byte[]? png = null)
   {
-    if (record.Width < 1 || record.Height < 1 || record.Content.Length > 256 * 1024) throw new InvalidOperationException("Invalid pin bounds.");
+    if (record.Width < 1 || record.Height < 1 || record.Content.Length > MaximumRecoveryCharacters) throw new InvalidOperationException("Invalid pin bounds.");
     WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
+    byte[] serialized = JsonSerializer.SerializeToUtf8Bytes(record);
+    if (serialized.Length > MaximumRecoveryBytes) throw new InvalidOperationException("Pin recovery exceeds the serialized byte budget.");
     Directory.CreateDirectory(root);
     EnsureOwnedDirectory(root);
     string directory = DirectoryFor(record.Id);
@@ -164,7 +168,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
         throw new InvalidOperationException("Invalid pin image.");
       AtomicFile.Write(Path.Combine(directory, "image.png"), stream => stream.Write(png));
     }
-    AtomicFile.WriteAllText(Path.Combine(directory, RecoveryFileName), JsonSerializer.Serialize(record));
+    AtomicFile.Write(Path.Combine(directory, RecoveryFileName), stream => stream.Write(serialized));
   }
 
   internal IReadOnlyList<Recovery> LoadRecovery()
@@ -179,12 +183,12 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
       {
         EnsureOwnedDirectory(directory);
         string path = Path.Combine(directory, RecoveryFileName);
-        if (!File.Exists(path) || new FileInfo(path).Length > 512 * 1024) continue;
+        if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;
         Recovery? record = JsonSerializer.Deserialize<Recovery>(File.ReadAllText(path));
         if (record is not null) WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
         if (record?.Kind == "Image" && ReadSnapshotPng(id) is null) continue;
         if (record is not null && record.Id == id && record.Width is > 0 and <= 32768 &&
-          record.Height is > 0 and <= 32768 && record.Content is { Length: <= 262144 } &&
+          record.Height is > 0 and <= 32768 && record.Content is { Length: <= MaximumRecoveryCharacters } &&
           record.Kind is "Image" or "Text" or "Color" or "Formula" or "FileText") result.Add(record);
       }
       catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)

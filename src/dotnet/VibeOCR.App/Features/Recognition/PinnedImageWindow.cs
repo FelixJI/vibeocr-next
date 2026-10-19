@@ -231,6 +231,8 @@ internal sealed class PinnedImageWindow : IDisposable
   internal bool Disposed => disposed;
   internal string CurrentImagePath => ownedImagePath ?? image.Path;
   internal IReadOnlyList<WorkbenchExclusionBox> CurrentExcludeBoxes => excludeBoxes;
+  internal Func<Task>? SmokeSnapshotDisplayStep { get; set; }
+  internal string SmokeStatus => status.Text;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
 
   internal bool SmokeInvokeEditDecision(string text)
@@ -1021,6 +1023,11 @@ internal sealed class PinnedImageWindow : IDisposable
     layer = null;
     textGeneration++;
     oldSnapshot = false;
+    if (SmokeSnapshotDisplayStep is { } probe)
+    {
+      SmokeSnapshotDisplayStep = null;
+      await probe();
+    }
     RebuildStageScaleScript();
     if (core is { } current)
     {
@@ -1041,6 +1048,11 @@ internal sealed class PinnedImageWindow : IDisposable
         $"document.body.style.zoom='{zoom.ToString(CultureInfo.InvariantCulture)}'");
       Render();
     }
+  }
+
+  internal void ReportSnapshotDisplayFailure()
+  {
+    if (!disposed) status.Text = "贴图已保存，但显示更新失败；可重新进入编辑或关闭后重新打开。";
   }
 
   private void RebuildStageScaleScript()

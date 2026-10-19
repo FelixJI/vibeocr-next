@@ -117,6 +117,8 @@ public sealed class PinEditChannelWorkbenchTests
     public byte[]? LastPng;
     public IReadOnlyList<WorkbenchExclusionBox>? LastExclusions;
     public string? PngPath;
+    public string? ProjectPath;
+    public string? GetSnapshotProjectPath(Guid pinId) => ProjectPath;
 
     public Task WriteSnapshotAsync(
       Guid pinId,
@@ -437,4 +439,46 @@ public sealed class PinEditChannelWorkbenchTests
     try { await completion.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); }
     finally { handler.StateChanged -= Observe; }
   }
+
+  [Fact]
+  public async Task RejectedPinRestoreRebindsOnlyMatchingSessionToRetainedFlatPng()
+  {
+    await using var harness = new Harness();
+    string project = Path.Combine(harness.Root, "kept.vibp");
+    var manifest = new VibpProjectManifest
+    {
+      SchemaVersion = VibpProjectLimits.SchemaVersion,
+      Canvas = new VibpCanvas { Width = 1, Height = 1 },
+      Source = new VibpSourceResource { MediaType = "image/png", Width = 1, Height = 1, Length = Png.Length },
+      State = new VibpEditorState { Rotation = 0, Marks = [] }, Assets = [],
+    };
+    await VibpProjectFile.WriteAsync(project, manifest,
+      [new("source.png", Png.Length, () => new MemoryStream(Png, false))], TestContext.Current.CancellationToken);
+    byte[] originalProject = File.ReadAllBytes(project);
+    harness.Writer.ProjectPath = project;
+    Guid? session = await harness.Handler.TryOpenPinEditSessionAsync(Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
+    PinEditWorkbenchState restored = Assert.IsType<PinEditWorkbenchState>(harness.States.Last());
+    var descriptor = Assert.IsType<WorkbenchProjectOpenState>(restored.ProjectRestore);
+    harness.States.Clear();
+    Assert.NotNull(harness.Execute(new RejectPinProjectRestoreCommand(Guid.NewGuid(), session!.Value, 0)).Error);
+    WorkbenchCommandOutcome rejected = harness.Execute(new RejectPinProjectRestoreCommand(Guid.Parse(descriptor.PendingId), session.Value, 0));
+    Assert.Null(rejected.Error);
+    PinEditWorkbenchState fallback = Assert.IsType<PinEditWorkbenchState>(Assert.Single(rejected.States));
+    Assert.All(rejected.States, state => Assert.Equal("pinEdit", state.Scope));
+    Assert.Null(fallback.ProjectRestore);
+    Assert.NotEqual(restored.Input!.Url, fallback.Input!.Url);
+    await using (var response = await harness.Broker.OpenAsync(new Uri(fallback.Input.Url), TestContext.Current.CancellationToken))
+    {
+      using var bytes = new MemoryStream(); await response.Content.CopyToAsync(bytes, TestContext.Current.CancellationToken);
+      Assert.Equal(Png, bytes.ToArray());
+    }
+    Assert.All(harness.States, state => Assert.Equal("pinEdit", state.Scope));
+    Assert.Equal(originalProject, File.ReadAllBytes(project));
+    Assert.NotNull(harness.Execute(new RejectPinProjectRestoreCommand(Guid.Parse(descriptor.PendingId), session.Value, 0)).Error);
+    harness.Execute(new ClosePinEditSessionCommand());
+    Guid? next = await harness.Handler.TryOpenPinEditSessionAsync(Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
+    Assert.NotNull(harness.Execute(new RejectPinProjectRestoreCommand(Guid.Parse(descriptor.PendingId), session.Value, 0)).Error);
+    Assert.NotEqual(session, next);
+  }
+
 }

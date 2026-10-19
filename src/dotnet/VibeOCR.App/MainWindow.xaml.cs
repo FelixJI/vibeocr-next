@@ -132,7 +132,8 @@ public sealed partial class MainWindow : Window
     ShellActionDispatcher? shellActions = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
     ISystemImportReader? systemImportReader = null,
-    Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>>? preparePinnedTextLayer = null)
+    Func<Guid, long, string, CancellationToken, Task<RecognitionTextLayerState?>>? preparePinnedTextLayer = null,
+    Func<string, Features.Pins.PinHistoryStore>? pinHistoryFactory = null)
   {
     this.diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     this.layout = layout ?? throw new ArgumentNullException(nameof(layout));
@@ -161,7 +162,7 @@ public sealed partial class MainWindow : Window
     resourceBroker = new WorkbenchResourceBroker(resourceRoot);
     annotationStore = new WorkbenchAnnotationStore(resourceRoot);
     pinSnapshotStore = new Features.Pins.PinSnapshotStore(layout.DataRoot);
-    pinHistoryStore = new Features.Pins.PinHistoryStore(layout.DataRoot);
+    pinHistoryStore = pinHistoryFactory?.Invoke(layout.DataRoot) ?? new Features.Pins.PinHistoryStore(layout.DataRoot);
     // #233 同一 store 同时供命令（保存消费）与 /__project 上传（暂存）共享。
     projectStore = new VibeOCR.App.Web.WorkbenchProjectStore();
     Func<nint> activeWindowHandle = () => imageEditor is { } editor ? editor.Handle : pendingImageEditor?.Scene is { } scene ?
@@ -300,6 +301,24 @@ public sealed partial class MainWindow : Window
     ApplyPersistedOrDefaultGeometry();
     Closed += OnWindowClosed;
     Activated += OnWindowActivated;
+    _ = PublishLoadedPinHistoryAsync();
+  }
+
+  private async Task PublishLoadedPinHistoryAsync()
+  {
+    try
+    {
+      if (pinHistoryStore is null) return;
+      await pinHistoryStore.Initialization.ConfigureAwait(false);
+      if (shuttingDown) return;
+      DispatcherQueue.TryEnqueue(async () =>
+      {
+        if (shuttingDown) return;
+        try { await application.ExecuteAsync(new(Guid.NewGuid(), new ListPinHistoryCommand(null)), CancellationToken.None); }
+        catch (Exception error) { AppLog.Warn($"History initialization publication failed: {error.Message}"); }
+      });
+    }
+    catch (Exception error) { AppLog.Warn($"History initialization failed: {error.Message}"); }
   }
 
   private async void OnWorkbenchLoaded(object sender, RoutedEventArgs args)
@@ -1107,9 +1126,13 @@ public sealed partial class MainWindow : Window
     pinned.EditRequested += EnterPinEditAsync;
     pinned.SnapshotConfirmed += async target =>
     {
-      await pinSnapshotSwap;
+      bool displayed = false;
+      try { displayed = await pinSnapshotSwap; }
+      catch (Exception error) { AppLog.Error("Committed pin swap observation failed", error); }
       if (pinEditing?.Window == target) pinEditing = null;
-      await target.ExitEditModeAsync();
+      try { await target.ExitEditModeAsync(); }
+      catch (Exception error) { AppLog.Error("Committed pin editor teardown failed", error); }
+      if (!displayed) target.ReportSnapshotDisplayFailure();
     };
     pinned.ExitEditRequested += ExitPinEditAsync;
     pinned.MovedDelta += (dx, dy) => MovePinGroup(pinned, dx, dy);
@@ -1336,7 +1359,7 @@ public sealed partial class MainWindow : Window
       CancellationToken.None);
   }
 
-  private Task pinSnapshotSwap = Task.CompletedTask;
+  private Task<bool> pinSnapshotSwap = Task.FromResult(true);
 
   private void OnPinSnapshotApplied(Guid sessionId, long revision, Guid pinId)
   {
@@ -1348,25 +1371,34 @@ public sealed partial class MainWindow : Window
         string? pngPath = pinSnapshotStore?.GetSnapshotPngPath(pinId);
         if (pngPath is { } path)
         {
-          try
-          {
-            (int width, int height) = Features.Pins.PinSnapshotStore.SniffPngSize(File.ReadAllBytes(path));
-            pinSnapshotSwap = target.ApplySnapshotAsync(path, width, height, sessionId, pinSnapshotStore!.GetSnapshotExclusions(pinId) ?? []);
-          }
-          catch (Exception error)
-          {
-            VibeOCR.App.Services.AppLog.Error("Pin snapshot swap failed", error);
-            _ = target.ExitEditModeAsync();
-          }
+          pinSnapshotSwap = ApplyCommittedPinSnapshotAsync(target, path, sessionId, pinId);
         }
-        else
-        {
-          _ = target.ExitEditModeAsync();
-        }
+        else pinSnapshotSwap = Task.FromResult(false);
       }
     }
     if (DispatcherQueue.HasThreadAccess) Apply();
     else DispatcherQueue.TryEnqueue(Apply);
+  }
+
+  private async Task<bool> ApplyCommittedPinSnapshotAsync(PinnedImageWindow target, string path, Guid sessionId, Guid pinId)
+  {
+    var oldIdentity = (target.SessionId, target.Revision);
+    try
+    {
+      (int width, int height) = Features.Pins.PinSnapshotStore.SniffPngSize(await File.ReadAllBytesAsync(path));
+      await target.ApplySnapshotAsync(path, width, height, sessionId, pinSnapshotStore!.GetSnapshotExclusions(pinId) ?? []);
+      return true;
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Pin snapshot committed but display swap failed", error);
+      return false;
+    }
+    finally
+    {
+      if (!pinnedImages.Any(other => other.SessionId == oldIdentity.SessionId && other.Revision == oldIdentity.Revision))
+        RemovePinTextTask(oldIdentity);
+    }
   }
 
   private void OnPinEditSessionClosed(Guid sessionId)

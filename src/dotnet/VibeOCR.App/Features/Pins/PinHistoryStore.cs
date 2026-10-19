@@ -46,19 +46,24 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   private string? lastKey;
   private string? lastError;
   private List<IndexEntry> entries = [];
+  private readonly HashSet<string> verified = [];
+  internal Task Initialization { get; }
 
-  internal PinHistoryStore(string dataRoot, TimeProvider? timeProvider = null)
+  internal PinHistoryStore(string dataRoot, TimeProvider? timeProvider = null, Func<byte[], Task<bool>>? validateLoadedImage = null)
   {
     root = Path.Combine(dataRoot, "screenshots");
     this.timeProvider = timeProvider ?? TimeProvider.System;
-    Load();
+    LoadMetadata();
+    IndexEntry[] candidates = [.. entries];
+    Initialization = candidates.Length == 0 ? Task.CompletedTask :
+      Task.Run(() => ValidateLoadedAsync(candidates, validateLoadedImage));
   }
 
   internal static string RootFor(string dataRoot) => Path.Combine(dataRoot, "screenshots");
 
   /// <summary>加载索引：损坏的索引文件按空历史处理（不抛出）；单条损坏
   /// （缺图/尺寸不符）跳过该条且不阻止其它条目。</summary>
-  private void Load()
+  private void LoadMetadata()
   {
     try
     {
@@ -81,10 +86,6 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
           if (entry is null) continue;
           if (!Guid.TryParseExact(entry.Id, "N", out _) || entry.Bytes is < 1 or > MaximumEntryBytes ||
             entry.Width < 1 || entry.Height < 1 || valid.Any(item => item.Id == entry.Id)) continue;
-          PinSnapshotStore.EnsureOwnedDirectory(Path.Combine(root, entry.Id));
-          if (!File.Exists(ImagePath(entry.Id)) || new FileInfo(ImagePath(entry.Id)).Length != entry.Bytes ||
-            !PinSnapshotStore.TryValidatePng(File.ReadAllBytes(ImagePath(entry.Id)), out int width, out int height) ||
-            width != entry.Width || height != entry.Height) continue;
           valid.Add(entry);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
@@ -102,6 +103,37 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
       enabled = false;
       lastKey = null;
       entries = [];
+    }
+  }
+
+  private async Task ValidateLoadedAsync(IndexEntry[] candidates, Func<byte[], Task<bool>>? validate)
+  {
+    foreach (IndexEntry entry in candidates)
+    {
+      lock (gate) { if (!entries.Any(current => current.Id == entry.Id)) continue; }
+      bool valid = false;
+      try
+      {
+        PinSnapshotStore.EnsureOwnedDirectory(root);
+        PinSnapshotStore.EnsureOwnedDirectory(Path.Combine(root, entry.Id));
+        if (new FileInfo(ImagePath(entry.Id)).Length == entry.Bytes)
+        {
+          byte[] png = await File.ReadAllBytesAsync(ImagePath(entry.Id)).ConfigureAwait(false);
+          if (validate is null) await PinSnapshotStore.ValidatePngAsync(png, CancellationToken.None).ConfigureAwait(false);
+          bool decoded = validate is null || await validate(png).ConfigureAwait(false);
+          (int width, int height) = PinSnapshotStore.SniffPngSize(png);
+          valid = decoded && width == entry.Width && height == entry.Height;
+        }
+      }
+      catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException)
+      { AppLog.Warn($"Skipped damaged screenshot history: {entry.Id}: {error.Message}"); }
+      lock (gate)
+      {
+        // 删除/清空/淘汰发生后，迟到验证不能复活条目；启用和新录入保持当前真值。
+        if (!entries.Any(current => current.Id == entry.Id)) continue;
+        if (valid) verified.Add(entry.Id);
+        else entries = entries.Where(current => current.Id != entry.Id).ToList();
+      }
     }
   }
 
@@ -178,6 +210,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         entries = next;
         lastKey = captureKey;
         SaveIndex();
+        verified.Add(id);
         lastError = null;
       }
       catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -223,7 +256,8 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   {
     lock (gate)
     {
-      IEnumerable<IndexEntry> filtered = entries.OrderByDescending(entry => entry.CreatedAt);
+      IndexEntry[] available = [.. entries.Where(entry => verified.Contains(entry.Id))];
+      IEnumerable<IndexEntry> filtered = available.OrderByDescending(entry => entry.CreatedAt);
       if (!string.IsNullOrWhiteSpace(query))
       {
         string needle = query.Trim();
@@ -237,8 +271,8 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
         entry.RecognizedText is { } text ? text[..Math.Min(12, text.Length)] : null));
       return new PinHistoryState(
         enabled,
-        entries.Count,
-        entries.Sum(entry => entry.Bytes),
+        available.Length,
+        available.Sum(entry => entry.Bytes),
         MaximumEntries,
         MaximumTotalBytes,
         [.. list], lastError);
@@ -254,7 +288,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
     IndexEntry? entry;
     lock (gate)
     {
-      entry = entries.FirstOrDefault(item => item.Id == entryId);
+      entry = entries.FirstOrDefault(item => item.Id == entryId && verified.Contains(item.Id));
       if (entry is null || !Guid.TryParseExact(entryId, "N", out _))
       {
         return null;
@@ -320,6 +354,7 @@ internal sealed class PinHistoryStore : IPinHistoryRecorder
   /// <summary>仅删除 owned 根下 Guid(N) 点状子目录；任何其它路径不触碰。</summary>
   private void DeleteEntryDirectory(string entryId)
   {
+    verified.Remove(entryId);
     if (!Guid.TryParseExact(entryId, "N", out _))
     {
       return;

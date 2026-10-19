@@ -580,3 +580,188 @@ test("first pin is PNG while ordinary save and copy retain JPEG selection", asyn
     "image/jpeg",
   );
 });
+
+function restoredPinState(
+  sessionId: string,
+  pendingId: string,
+  manifestUrl?: string,
+) {
+  const input = {
+    url: sourceUrl,
+    mediaType: "image/png",
+    byteLength: png.length,
+  };
+  return {
+    isBusy: false,
+    statusCode: "pinEdit.session",
+    input,
+    screenshotSession: { sessionId, revision: 0, excludeBoxes: [] },
+    ...(manifestUrl
+      ? {
+          projectRestore: {
+            pendingId,
+            sessionId,
+            revision: 0,
+            generation: 3,
+            manifest: {
+              url: manifestUrl,
+              mediaType: "application/json",
+              byteLength: 128,
+            },
+            source: input,
+            assets: [],
+            patches: [],
+          },
+        }
+      : {}),
+  };
+}
+const restoreManifest = (width = 1) => ({
+  schemaVersion: 1,
+  canvas: { width, height: 1 },
+  source: { mediaType: "image/png", width: 1, height: 1, length: png.length },
+  assets: [],
+  state: { rotation: 0, marks: [], patches: [] },
+});
+
+for (const failure of ["fetch", "validate"] as const) {
+  test(`pin project ${failure} failure returns to confirmed flat PNG and can save`, async ({
+    page,
+  }) => {
+    const { projects } = await pinEditor(page);
+    const manifestUrl = `https://app.vibeocr/__resource/failed-${failure}`;
+    await page.route(manifestUrl, (route) =>
+      failure === "fetch"
+        ? route.fulfill({ status: 500, body: "unavailable" })
+        : route.fulfill({ json: restoreManifest(0) }),
+    );
+    const session = "d".repeat(32),
+      pending = "f".repeat(32);
+    await sendState(
+      page,
+      "pinEdit",
+      restoredPinState(session, pending, manifestUrl),
+    );
+    await expectCommand(page, {
+      scope: "pinEdit",
+      action: "rejectProjectRestore",
+      arguments: { pendingId: pending, sessionId: session, revision: 0 },
+    });
+    await expect(
+      page.getByRole("button", { name: "完成贴图", exact: true }),
+    ).toBeDisabled();
+    await sendState(page, "pinEdit", restoredPinState(session, pending));
+    await expect(
+      page.getByRole("button", { name: "完成贴图", exact: true }),
+    ).toBeEnabled();
+    await expect(
+      page.getByText("工程恢复失败", { exact: false }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
+    await requestPinSnapshot(page, session);
+    await expect.poll(() => projects.length).toBe(1);
+    expect(projects[0]!.state.rotation).toBe(90);
+    expect(projects[0]!.state.marks).toEqual([]);
+    await expect
+      .poll(async () =>
+        (await readPinReports(page)).some(
+          (report) => report.payload.ok === true,
+        ),
+      )
+      .toBe(true);
+  });
+}
+
+for (const late of ["fetch", "receipt"] as const) {
+  test(`late old pin restore ${late} cannot unlock or install into a new session`, async ({
+    page,
+  }) => {
+    await pinEditor(page);
+    const urlA = "https://app.vibeocr/__resource/old-restore";
+    const urlB = "https://app.vibeocr/__resource/new-restore";
+    let releaseA!: () => void, releaseB!: () => void;
+    const a = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const b = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    let startedA = false,
+      startedB = false;
+    await page.route(urlA, async (route) => {
+      startedA = true;
+      if (late === "fetch") await a;
+      await route.fulfill({ status: 500 });
+    });
+    await page.route(urlB, async (route) => {
+      startedB = true;
+      await b;
+      await route.fulfill({ json: restoreManifest() });
+    });
+    const sessionA = "d".repeat(32),
+      sessionB = "e".repeat(32);
+    if (late === "receipt") await deferCommand(page, "rejectProjectRestore");
+    await sendState(
+      page,
+      "pinEdit",
+      restoredPinState(sessionA, "a".repeat(32), urlA),
+    );
+    await expect.poll(() => startedA).toBe(true);
+    if (late === "receipt")
+      await expectCommand(page, {
+        scope: "pinEdit",
+        action: "rejectProjectRestore",
+        arguments: {
+          pendingId: "a".repeat(32),
+          sessionId: sessionA,
+          revision: 0,
+        },
+      });
+    await sendState(
+      page,
+      "pinEdit",
+      restoredPinState(sessionB, "b".repeat(32), urlB),
+    );
+    await expect.poll(() => startedB).toBe(true);
+    releaseA();
+    if (late === "receipt") await releaseCommand(page);
+    await expect(
+      page.getByRole("button", { name: "完成贴图", exact: true }),
+    ).toBeDisabled();
+    releaseB();
+    await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "完成贴图", exact: true }),
+    ).toBeEnabled();
+    await requestPinSnapshot(page, sessionB);
+    await expect
+      .poll(async () =>
+        (await readPinReports(page)).some(
+          (report) =>
+            report.payload.sessionId === sessionB && report.payload.ok === true,
+        ),
+      )
+      .toBe(true);
+  });
+}
+
+test("pin restore rejection failure remains locked with an explicit discard exit", async ({
+  page,
+}) => {
+  await pinEditor(page);
+  const url = "https://app.vibeocr/__resource/reject-failure";
+  await page.route(url, (route) => route.fulfill({ status: 500 }));
+  await rejectNextCommand(page);
+  await sendState(
+    page,
+    "pinEdit",
+    restoredPinState("d".repeat(32), "e".repeat(32), url),
+  );
+  await expect(page.getByText("回退未确认", { exact: false })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "完成贴图", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "放弃更改", exact: true }),
+  ).toBeEnabled();
+});

@@ -206,6 +206,29 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
       } catch (error) {
         if (generation !== projectOpenGenerationRef.current) return;
         if (controller.signal.aborted) return;
+        if (pin) {
+          transferred = true;
+          setProjectMessage("工程恢复失败；正在回退到已保存的贴图……");
+          const accepted = await actions
+            .run({
+              type: "pinEdit.rejectProjectRestore",
+              pendingId: descriptor.pendingId,
+              sessionId: descriptor.sessionId,
+              revision: descriptor.revision,
+            })
+            .catch(() => false);
+          if (
+            generation !== projectOpenGenerationRef.current ||
+            !mountedRef.current
+          )
+            return;
+          setProjectMessage(
+            accepted
+              ? "工程恢复失败，已回退到已保存的贴图，可继续编辑；原工程仍保留。"
+              : "工程恢复失败，回退未确认；请取消编辑后重试，原工程仍保留。",
+          );
+          return;
+        }
         reject();
         setProjectMessage(
           error instanceof Error
@@ -225,8 +248,13 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
     };
   }, [pendingId, handedOffId, viewState.connected, actions, pin]);
 
+  const activePinInstall =
+    pinInstall?.token === projectOpen?.pendingId &&
+    projectOpen?.sessionId === session?.sessionId
+      ? pinInstall
+      : undefined;
   const pendingProjectInstall = pin
-    ? pinInstall
+    ? activePinInstall
     : handoff?.sessionId === session?.sessionId &&
         input?.url === handoff?.sourceUrl &&
         session?.revision === 0
@@ -390,7 +418,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           actions={actions}
           canExport={
             viewState.capabilities.includes("recognition.annotation") &&
-            (!pin || !projectOpen || pinInstall !== undefined)
+            (!pin || !projectOpen || activePinInstall !== undefined)
           }
           canRecognize={
             !pin &&
@@ -409,7 +437,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
           installProject={installProject}
           interactionLocked={
             handoff !== undefined ||
-            (pin && projectOpen !== undefined && pinInstall === undefined)
+            (pin && projectOpen !== undefined && activePinInstall === undefined)
           }
           autoText={
             session?.textSelectionRequested === true && autoTextPreference

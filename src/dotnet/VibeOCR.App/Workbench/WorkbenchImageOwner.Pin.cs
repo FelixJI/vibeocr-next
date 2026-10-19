@@ -81,6 +81,7 @@ internal sealed partial class WorkbenchImageOwner
   /// <summary>当前 pinEdit 会话绑定的贴图 id；无会话为 null。</summary>
   private Guid? pinEditPinId;
   private WorkbenchProjectOpenState? pinProjectRestore;
+  private WorkbenchResourceReference? pinFlatInput;
   private readonly List<WorkbenchResourceReference> pinProjectTransient = [];
   private int pinOpenInFlight;
 
@@ -151,7 +152,7 @@ internal sealed partial class WorkbenchImageOwner
       WorkbenchResourceReference source = await resources.PublishBytesAsync(
         await File.ReadAllBytesAsync(archive.SourcePath, cancellationToken), archive.Manifest.Source.MediaType,
         WorkbenchResourcesOwner.ExtensionForMediaType(archive.Manifest.Source.MediaType), cancellationToken);
-      if (pinEditChannel.SessionInput is { } previous) resources.ReleaseResource(previous);
+      pinFlatInput = pinEditChannel.SessionInput;
       pinEditChannel.SessionInput = source;
       List<WorkbenchProjectOpenAsset> assets = [];
       foreach (VibpAssetResource asset in archive.Manifest.Assets)
@@ -180,9 +181,25 @@ internal sealed partial class WorkbenchImageOwner
     finally { TryDeleteProjectDirectory(extraction); }
   }
 
+  private WorkbenchState RejectPinProjectRestore(RejectPinProjectRestoreCommand command)
+  {
+    ValidateScreenshotSession(pinEditChannel, command.SessionId, command.Revision);
+    if (pinProjectRestore?.PendingId != command.PendingId.ToString("N") || pinFlatInput is not { } flat)
+      throw new ScreenshotSessionStaleException();
+    if (pinEditChannel.SessionInput is { } source) resources.ReleaseResource(source);
+    pinEditChannel.SessionInput = flat;
+    pinFlatInput = null;
+    ReleaseChannelImports(pinEditImport);
+    ClearPinProjectRestore();
+    AdvanceImageGeneration(pinEditChannel);
+    return PinEditState(false, "pinEdit.session");
+  }
+
   private void ClearPinProjectRestore()
   {
     pinProjectRestore = null;
+    if (pinFlatInput is { } flat) resources.ReleaseResource(flat);
+    pinFlatInput = null;
     foreach (WorkbenchResourceReference reference in pinProjectTransient) resources.ReleaseResource(reference);
     pinProjectTransient.Clear();
   }

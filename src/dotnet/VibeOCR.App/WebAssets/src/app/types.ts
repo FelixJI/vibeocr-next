@@ -61,6 +61,7 @@ export type AppActionType =
   | "pinEdit.rejectImport"
   | "pinEdit.releaseAssets"
   | "pinEdit.applySnapshot"
+  | "pinEdit.rejectProjectRestore"
   // 以下 pinEdit.* 仅为编辑器静态全量命令映射的类型完整性存在；宿主未
   // 实现且 pin 模式 UI 不可达（发送会被宿主 fail-closed 拒绝）。
   | "pinEdit.pinScreenshotImage"

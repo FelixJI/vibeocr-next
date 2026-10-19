@@ -21,6 +21,9 @@ public sealed partial class MainWindow
     }
   }
 
+  internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;
+  internal Task SmokeHistoryInitialization => pinHistoryStore!.Initialization;
+
   internal async Task VerifyPinsSelfCheckAsync()
   {
     CaptureUiSmokeTrace.Stage("pins.main-ready");
@@ -92,6 +95,14 @@ public sealed partial class MainWindow
     try
     {
       CaptureUiSmokeTrace.Stage("pins.first-edit");
+      var oldTextIdentity = (first.SessionId, first.Revision);
+      WorkbenchAnnotationLease sharedLease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
+      PinScreenshot(annotationStore.Take(sharedLease.ResourceUri), first.SessionId, first.Revision, null, first.CurrentExcludeBoxes);
+      PinnedImageWindow shared = pinnedImages.Last();
+      await VerifySmokePinTextAsync(first);
+      await VerifySmokePinTextAsync(shared);
+      if (pinTextTasks.Count != 1) throw new InvalidOperationException("Shared pin text was not cached once.");
+      first.SmokeSnapshotDisplayStep = () => Task.FromException(new IOException("Injected static display swap failure."));
       await EnterPinEditAsync(first);
       await WaitForPinEditorAsync(first);
       await RotateSmokePinAsync(first);
@@ -101,6 +112,10 @@ public sealed partial class MainWindow
       if (first.Editing || !second.Editing || pinSnapshotStore!.GetSnapshotProjectPath(first.PinId) is null ||
         first.SmokeImageSize != (32, 64)) throw new InvalidOperationException($"Switch did not commit: firstEditing={first.Editing}, secondEditing={second.Editing}, size={first.SmokeImageSize}, project={pinSnapshotStore!.GetSnapshotProjectPath(first.PinId)}, body={await first.SmokeEditorEvaluateAsync("document.body.textContent")}");
 
+      if (pinSnapshotSwap.IsFaulted || !first.SmokeStatus.Contains("显示更新失败") || !pinTextTasks.ContainsKey(oldTextIdentity))
+        throw new InvalidOperationException("Committed display failure lost the slot, saved image, or shared OCR task.");
+      shared.ForceClose();
+      if (pinTextTasks.ContainsKey(oldTextIdentity)) throw new InvalidOperationException("Last shared pin did not release old OCR task.");
       await RotateSmokePinAsync(second);
       string blocker = Path.Combine(PinSnapshotStore.RootFor(layout.DataRoot), second.PinId.ToString("N"), "current.json");
       Directory.CreateDirectory(blocker);
@@ -119,6 +134,15 @@ public sealed partial class MainWindow
       await RotateSmokePinAsync(first);
       if (!await first.SaveEditAsync()) throw new InvalidOperationException("Restored project could not save.");
       if (first.SmokeImageSize != (64, 32)) throw new InvalidOperationException("Restored rotation was lost or flattened.");
+      for (int cycle = 0; cycle < 3; cycle++)
+      {
+        await VerifySmokePinTextAsync(first);
+        if (pinTextTasks.Count != 1) throw new InvalidOperationException("OCR cache accumulated before rebind.");
+        await EnterPinEditAsync(first); await WaitForPinEditorAsync(first);
+        await RotateSmokePinAsync(first); await RotateSmokePinAsync(first);
+        if (!await first.SaveEditAsync() || pinEditing is not null || pinTextTasks.Count != 0)
+          throw new InvalidOperationException("Repeated text/edit/save leaked its old OCR task or editor slot.");
+      }
       await VerifySmokePinTextAsync(first);
       if (observedScopes.Any(scope => scope is "recognition" or "imageEdit"))
         throw new InvalidOperationException("Pin editing polluted a main image channel.");
@@ -198,7 +222,7 @@ public sealed partial class MainWindow
   internal async Task<RecognitionTextLayerState?> VerifyMaskedPinOcrInputAsync(
     Guid session, long revision, string input, CancellationToken token)
   {
-    PinnedImageWindow pin = pinnedImages.Single(item => item.SessionId == session);
+    PinnedImageWindow pin = pinnedImages.First(item => item.SessionId == session);
     if (input == pin.CurrentImagePath) throw new InvalidOperationException("OCR received the ordinary unmasked pin.");
     using var memory = new MemoryStream(await File.ReadAllBytesAsync(input, token));
     using var random = memory.AsRandomAccessStream();

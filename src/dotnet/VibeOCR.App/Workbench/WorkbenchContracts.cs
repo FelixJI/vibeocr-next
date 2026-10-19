@@ -360,6 +360,9 @@ public sealed record ApplyPinEditSnapshotCommand(
     long Revision,
     IReadOnlyList<WorkbenchExclusionBox>? ExcludeBoxes = null) : WorkbenchCommand, IScreenshotSessionResource;
 
+public sealed record RejectPinProjectRestoreCommand(Guid PendingId, Guid SessionId, long Revision)
+    : WorkbenchCommand;
+
 // ---- #238 截图历史：宿主 owned 持久化；默认关闭，容量双上限。 ----
 
 /// <summary>显式启用/停用截图历史（设置真值，非编辑会话状态）。</summary>

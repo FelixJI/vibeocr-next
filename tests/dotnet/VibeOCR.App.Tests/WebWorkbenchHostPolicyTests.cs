@@ -191,6 +191,42 @@ public sealed class WebWorkbenchHostPolicyTests
   }
 
   [Fact]
+  public void SupersededNavigationFailureSkipsRecoveryWhileGenuineFailuresRecover()
+  {
+    var supersession = new WorkbenchNavigationSupersession();
+
+    // 无后续请求：独立失败不属于被主动取代，仍进入恢复。
+    supersession.NavigateRequested();
+    supersession.NavigationStarted(newDocument: true);
+    Assert.False(supersession.IsSuperseded);
+
+    // 公式首次渲染的实测序列：初始导航开始后、其失败完成到达前，
+    // 宿主已再次 Navigate（渲染目标导航尚未开始）。
+    supersession.NavigateRequested();
+    Assert.True(supersession.IsSuperseded);
+
+    // 取代导航开始后配对恢复平衡；后续独立失败不再视为被取代。
+    supersession.NavigationStarted(newDocument: true);
+    Assert.False(supersession.IsSuperseded);
+  }
+
+  [Fact]
+  public void NonDocumentNavigationKindsDoNotConsumeHostNavigateRequests()
+  {
+    var supersession = new WorkbenchNavigationSupersession();
+
+    supersession.NavigateRequested();
+    supersession.NavigationStarted(newDocument: true);
+    // 页面 hash 路由与恢复 Reload 不消耗宿主 Navigate 请求。
+    supersession.NavigationStarted(newDocument: false);
+    supersession.NavigationStarted(newDocument: false);
+    Assert.False(supersession.IsSuperseded);
+
+    supersession.NavigateRequested();
+    Assert.True(supersession.IsSuperseded);
+  }
+
+  [Fact]
   public async Task BufferResourceReleasesSourceAfterCopy()
   {
     byte[] expected = Encoding.UTF8.GetBytes("resource-content");

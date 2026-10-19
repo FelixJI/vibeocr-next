@@ -209,4 +209,39 @@ public sealed class PinSnapshotStoreTests : IDisposable
     Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(record with { Id = Guid.NewGuid() }, damaged));
   }
 
+
+  [Theory]
+  [InlineData("中")]
+  [InlineData("😀")]
+  [InlineData("\\\"\n")]
+  public void LargeUnicodeRecoveryRoundTripsAtCharacterBudget(string unit)
+  {
+    var store = new PinSnapshotStore(root); Guid id = Guid.NewGuid();
+    string content = string.Concat(Enumerable.Repeat(unit, PinSnapshotStore.MaximumRecoveryCharacters / unit.Length)) +
+      new string('x', PinSnapshotStore.MaximumRecoveryCharacters % unit.Length);
+    var record = new PinSnapshotStore.Recovery(id, "Text", content, 0, 0, 640, 480);
+    store.SaveRecovery(record);
+    Assert.Equal(content, Assert.Single(store.LoadRecovery()).Content);
+    string path = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"), "window.json");
+    byte[] committed = File.ReadAllBytes(path);
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(record with { Content = content + "x" }));
+    Assert.Equal(committed, File.ReadAllBytes(path));
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(record with { Kind = new string('中', PinSnapshotStore.MaximumRecoveryBytes) }));
+    Assert.Equal(committed, File.ReadAllBytes(path));
+  }
+
+  [Fact]
+  public void RecoveryReadUsesTheSameExactSerializedByteBudget()
+  {
+    var store = new PinSnapshotStore(root); Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Text", "中文😀\\\"", 0, 0, 640, 480));
+    string path = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"), "window.json");
+    byte[] json = File.ReadAllBytes(path);
+    byte[] boundary = new byte[PinSnapshotStore.MaximumRecoveryBytes];
+    Array.Fill(boundary, (byte)' '); json.CopyTo(boundary, 0); File.WriteAllBytes(path, boundary);
+    Assert.Single(store.LoadRecovery());
+    File.WriteAllBytes(path, [.. boundary, (byte)' ']);
+    Assert.Empty(store.LoadRecovery());
+  }
+
 }

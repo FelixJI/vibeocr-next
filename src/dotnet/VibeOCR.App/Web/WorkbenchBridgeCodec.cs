@@ -539,6 +539,10 @@ public static class WorkbenchBridgeCodec
         return new CopyPinEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("pinEdit", "saveAnnotatedImage"):
         return new SavePinEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("pinEdit", "rejectProjectRestore"):
+        EnsureObjectWithFields(arguments, RejectProjectOpenArgumentFields, "command arguments");
+        return new RejectPinProjectRestoreCommand(ParseGuidArgument(arguments, "pendingId"),
+          ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments));
       case ("pinEdit", "applySnapshot"):
         EnsureObjectWithFields(arguments, ApplySnapshotArgumentFields, "command arguments");
         return new ApplyPinEditSnapshotCommand(

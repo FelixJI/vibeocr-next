@@ -15,6 +15,13 @@ public sealed class PinHistoryStoreTests : IDisposable
   private readonly string root = Path.Combine(
     Path.GetTempPath(), $"vibeocr-pin-history-{Guid.NewGuid():N}");
 
+  private static PinHistoryStore LoadedStore(string dataRoot, TimeProvider? time = null)
+  {
+    var store = new PinHistoryStore(dataRoot, time);
+    store.Initialization.GetAwaiter().GetResult();
+    return store;
+  }
+
   private sealed class FrozenTime : TimeProvider
   {
     public DateTimeOffset Now { get; set; } =
@@ -45,7 +52,7 @@ public sealed class PinHistoryStoreTests : IDisposable
   private PinHistoryStore Store(FrozenTime? time = null)
   {
     time ??= new FrozenTime();
-    return new PinHistoryStore(root, time);
+    return LoadedStore(root, time);
   }
 
   public void Dispose()
@@ -58,21 +65,21 @@ public sealed class PinHistoryStoreTests : IDisposable
   public void DisabledByDefaultAndEnablePersists()
   {
     var time = new FrozenTime();
-    var store = new PinHistoryStore(root, time);
+    var store = LoadedStore(root, time);
     Assert.False(store.IsEnabled);
     store.RecordSuccessfulCapture("k1", PngWithTag(1));
     Assert.Equal(0, store.Projection(null).Count);
     store.SetEnabled(true);
     Assert.True(store.IsEnabled);
     // 开关持久化；关闭不清条目。
-    Assert.True(new PinHistoryStore(root, time).IsEnabled);
+    Assert.True(LoadedStore(root, time).IsEnabled);
   }
 
   [Fact]
   public void RecordsOncePerCaptureKeyAndEvictsOldestFirst()
   {
     var time = new FrozenTime();
-    var store = new PinHistoryStore(root, time);
+    var store = LoadedStore(root, time);
     store.SetEnabled(true);
     DateTimeOffset firstAt = time.Now;
     store.RecordSuccessfulCapture("capture-1", PngWithTag(1));
@@ -103,7 +110,7 @@ public sealed class PinHistoryStoreTests : IDisposable
   [Fact]
   public void OversizeEntryIsRefusedWithoutBreakingOthers()
   {
-    var store = new PinHistoryStore(root, new FrozenTime());
+    var store = LoadedStore(root, new FrozenTime());
     store.SetEnabled(true);
     store.RecordSuccessfulCapture("ok", PngWithTag(3));
     // 单条超界（>64MiB）：明确拒绝且不影响已有条目/后续录制。
@@ -121,7 +128,7 @@ public sealed class PinHistoryStoreTests : IDisposable
   public void SearchMatchesDateAndEnrichedRecognizedText()
   {
     var time = new FrozenTime();
-    var store = new PinHistoryStore(root, time);
+    var store = LoadedStore(root, time);
     store.SetEnabled(true);
     store.RecordSuccessfulCapture("a", PngWithTag(1));
     time.Now += TimeSpan.FromDays(1);
@@ -146,14 +153,14 @@ public sealed class PinHistoryStoreTests : IDisposable
   public void CorruptEntryIsSkippedWithoutBlockingOthers()
   {
     var time = new FrozenTime();
-    var store = new PinHistoryStore(root, time);
+    var store = LoadedStore(root, time);
     store.SetEnabled(true);
     store.RecordSuccessfulCapture("a", PngWithTag(1));
     store.RecordSuccessfulCapture("b", PngWithTag(2));
     // 破坏其中一条的图像文件后重载：坏条跳过，其它仍可用。
-    string badId = new PinHistoryStore(root, time).Projection(null).Entries.Last().EntryId;
+    string badId = LoadedStore(root, time).Projection(null).Entries.Last().EntryId;
     File.Delete(Path.Combine(PinHistoryStore.RootFor(root), badId, "image.png"));
-    var reloaded = new PinHistoryStore(root, time);
+    var reloaded = LoadedStore(root, time);
     PinHistoryState projection = reloaded.Projection(null);
     Assert.Equal(1, projection.Count);
     Assert.Null(reloaded.TryReadImage(badId));
@@ -183,7 +190,7 @@ public sealed class PinHistoryStoreTests : IDisposable
   [Fact]
   public void ClearAndDeleteOnlyTouchOwnedListedDirectories()
   {
-    var store = new PinHistoryStore(root, new FrozenTime());
+    var store = LoadedStore(root, new FrozenTime());
     store.SetEnabled(true);
     store.RecordSuccessfulCapture("a", PngWithTag(1));
     string entryId = store.Projection(null).Entries.Single().EntryId;
@@ -291,6 +298,45 @@ public sealed class PinHistoryStoreTests : IDisposable
     store.RecordSuccessfulCapture("invalid-new", damaged);
     Assert.Equal(2, store.Projection(null).Count);
     Assert.NotNull(store.Projection(null).Error);
+  }
+
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task BackgroundValidationDoesNotBlockOrOverwriteConcurrentOperations(bool clear)
+  {
+    var seed = LoadedStore(root); seed.SetEnabled(true);
+    seed.RecordSuccessfulCapture("a", PngWithTag(1));
+    seed.RecordSuccessfulCapture("b", PngWithTag(2));
+    string deleted = seed.Projection(null).Entries[0].EntryId;
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var loading = new PinHistoryStore(root, validateLoadedImage: async png =>
+    {
+      started.TrySetResult(); await release.Task;
+      await PinSnapshotStore.ValidatePngAsync(png, CancellationToken.None); return true;
+    });
+    try
+    {
+      await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.False(loading.Initialization.IsCompleted);
+      Assert.Empty(loading.Projection(null).Entries);
+      Assert.True(loading.IsEnabled);
+      Assert.True(loading.DeleteEntry(deleted));
+      loading.RecordSuccessfulCapture("new", PngWithTag(3));
+      Assert.Single(loading.Projection(null).Entries);
+      loading.SetEnabled(false);
+      if (clear) Assert.Equal(2, loading.ClearAll());
+    }
+    finally { release.TrySetResult(true); }
+    await loading.Initialization;
+    Assert.False(loading.IsEnabled);
+    Assert.Equal(clear ? 0 : 2, loading.Projection(null).Count);
+    Assert.DoesNotContain(loading.Projection(null).Entries, entry => entry.EntryId == deleted);
+    var reloaded = LoadedStore(root);
+    Assert.False(reloaded.IsEnabled);
+    Assert.Equal(loading.Projection(null).Entries.Select(entry => entry.EntryId), reloaded.Projection(null).Entries.Select(entry => entry.EntryId));
   }
 
 }
