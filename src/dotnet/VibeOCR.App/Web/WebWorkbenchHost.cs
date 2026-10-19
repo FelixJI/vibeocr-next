@@ -34,27 +34,6 @@ public sealed class WorkbenchRecoveryPolicy
   public void MarkReady() => automaticRecoveryUsed = false;
 }
 
-/// <summary>主动取代的导航判定：宿主在上一导航仍在途时再次 Navigate，
-/// 旧导航随后的失败完成（ERR_ABORTED）属于被主动取代，不触发恢复——
-/// 取代它的导航拥有文档生命周期（其自身成功会 MarkReady，失败仍恢复）。
-/// 只配对新文档导航；Reload/前后退/同文档路由导航不消耗宿主 Navigate 请求，
-/// 宿主 Navigate 也不得以仅 fragment 变更作为目标（公式渲染正是强制换路径）。</summary>
-internal sealed class WorkbenchNavigationSupersession
-{
-  private long requested;
-  private long started;
-
-  public void NavigateRequested() => Interlocked.Increment(ref requested);
-
-  public void NavigationStarted(bool newDocument)
-  {
-    if (newDocument) Interlocked.Increment(ref started);
-  }
-
-  /// <summary>存在已请求但尚未开始的新文档导航时，本次失败完成属于被主动取代。</summary>
-  public bool IsSuperseded => Volatile.Read(ref requested) > Volatile.Read(ref started);
-}
-
 public sealed class WebWorkbenchHost : IAsyncDisposable
 {
   public const string VirtualHost = "app.vibeocr";
@@ -65,7 +44,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly WorkbenchAnnotationStore annotationStore;
   private readonly WorkbenchProjectStore? projectStore;
   private readonly WorkbenchRecoveryPolicy recoveryPolicy = new();
-  private readonly WorkbenchNavigationSupersession navigationSupersession = new();
   private PackagedWebAssets? packagedAssets;
   private CoreWebView2? core;
   // 生产由 InitializeAsync 与 core 同点绑定、DisposeAsync 同点清空；换绑/清空后旧文档在途消息被抑制。
@@ -223,7 +201,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     {
       string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(latex)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
       string page = new Uri(current.Source).AbsolutePath == "/index.html" ? "/" : "/index.html";
-      navigationSupersession.NavigateRequested();
       current.Navigate($"https://{VirtualHost}{page}#/imageEdit?formula=1&render={formulaRenderId:N}&src={encoded}");
       JsonElement payload = await formulaRender.Task.WaitAsync(TimeSpan.FromSeconds(15), lifetime.Token);
       using var capture = new InMemoryRandomAccessStream();
@@ -400,7 +377,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     (string.Equals(contentType?.Trim(), "image/png", StringComparison.OrdinalIgnoreCase) ||
       string.Equals(contentType?.Trim(), "image/jpeg", StringComparison.OrdinalIgnoreCase));
 
-  public async Task InitializeAsync(WebView2 webView, string assetFolder)
+  public async Task InitializeAsync(WebView2 webView, string assetFolder, bool deferInitialNavigation = false)
   {
     ArgumentNullException.ThrowIfNull(webView);
     ArgumentException.ThrowIfNullOrWhiteSpace(assetFolder);
@@ -443,12 +420,21 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.WebResourceRequested += OnWebResourceRequested;
     core = next;
     RegisterBridge(next, next.PostWebMessageAsJson);
-    string initialUri = fixedRoute is null ? StartUri.AbsoluteUri
-      : pinEditRoute ? StartUri.AbsoluteUri + "#/imageEdit?pin=1"
-      : StartUri.AbsoluteUri + "#/imageEdit?scene=1";
-    navigationSupersession.NavigateRequested();
-    next.Navigate(initialUri);
+    // 公式窗口延迟初始导航，让 RenderFormulaAsync 的目标成为唯一首次导航，
+    // 避免与普通初始导航交错触发 ERR_ABORTED→恢复 Reload 的契约内竞态。
+    if (InitialNavigationUri(fixedRoute, pinEditRoute, deferInitialNavigation) is { } initialUri)
+    {
+      next.Navigate(initialUri);
+    }
   }
+
+  /// <summary>初始导航目标；deferInitialNavigation（公式窗口）为 null，
+  /// 首次导航由 RenderFormulaAsync 唯一发出。</summary>
+  internal static string? InitialNavigationUri(WorkbenchRoute? fixedRoute, bool pinEditRoute, bool deferInitialNavigation) =>
+    deferInitialNavigation ? null
+    : fixedRoute is null ? StartUri.AbsoluteUri
+    : pinEditRoute ? StartUri.AbsoluteUri + "#/imageEdit?pin=1"
+    : StartUri.AbsoluteUri + "#/imageEdit?scene=1";
 
   public void Reload()
   {
@@ -479,7 +465,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       args.Cancel = true;
       return;
     }
-    navigationSupersession.NavigationStarted(args.NavigationKind == CoreWebView2NavigationKind.NewDocument);
     ResetWebDocument();
     StateChanged?.Invoke("navigation-starting");
   }
@@ -495,12 +480,6 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     ResetWebDocument();
     StateChanged?.Invoke($"navigation-failed:{args.WebErrorStatus}");
-    // 被主动取代的导航（宿主已再次 Navigate）不进入恢复：恢复 Reload 会
-    // 反过来取消取代它的在途导航，留下无人恢复的空文档（公式首次渲染路径）。
-    if (navigationSupersession.IsSuperseded)
-    {
-      return;
-    }
     Recover(sender);
   }
 

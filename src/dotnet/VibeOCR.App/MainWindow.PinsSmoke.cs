@@ -164,6 +164,11 @@ public sealed partial class MainWindow
       await formula.RenderFormulaAsync();
       if (formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("unknownCommand"))
         throw new InvalidOperationException("Failed formula inserted an image or lost its source.");
+      // 失败后重试成功：换新有效公式重新渲染，图片恢复且新源保留。
+      formula.SetText("\\sqrt{a^2+b^2}");
+      await formula.RenderFormulaAsync();
+      if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("sqrt"))
+        throw new InvalidOperationException($"Formula retry after failure did not recover: {formula.StatusText}");
       formula.ForceClose();
 
       CaptureUiSmokeTrace.Stage("pins.close-cancel-discard");

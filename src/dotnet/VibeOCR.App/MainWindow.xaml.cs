@@ -1226,7 +1226,8 @@ public sealed partial class MainWindow : Window
     {
       var host = new WebWorkbenchHost(application, resourceBroker, annotationStore,
         applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, projectStore: projectStore, pinEditHost: true);
-      await host.InitializeAsync(view, layout.WebAssetsRoot);
+      // 公式窗口不预载普通 pin 页，首次导航由 RenderFormulaAsync 唯一发出。
+      await host.InitializeAsync(view, layout.WebAssetsRoot, deferInitialNavigation: true);
       return host;
     });
     pin.Closed += closed =>
