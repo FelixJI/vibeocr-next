@@ -167,6 +167,104 @@ public sealed class PinSnapshotStoreTests : IDisposable
   [Theory]
   [InlineData(".png")]
   [InlineData(".vibp")]
+  public async Task StartupRetriesObsoleteGenerationWhileThePinStaysOpen(string extension)
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string old = (extension == ".png" ? store.GetSnapshotPngPath(id) : store.GetSnapshotProjectPath(id))!;
+    using (var locked = new FileStream(old, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+      await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+      Assert.True(File.Exists(old));
+      Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+    }
+    string current = store.GetSnapshotPngPath(id)!;
+    string directory = Path.GetDirectoryName(current)!;
+    string unknown = Path.Combine(directory, "user-note.txt");
+    File.WriteAllText(unknown, "keep");
+    string nested = Path.Combine(directory, "user-folder");
+    Directory.CreateDirectory(nested);
+    File.WriteAllBytes(Path.Combine(nested, Guid.NewGuid().ToString("N") + ".png"), Png);
+    Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+    Assert.False(File.Exists(old));
+    Assert.Equal(Png, File.ReadAllBytes(current));
+    Assert.True(File.Exists(store.GetSnapshotProjectPath(id)));
+    Assert.True(File.Exists(Path.Combine(directory, "image.png")));
+    Assert.True(File.Exists(unknown));
+    Assert.Single(Directory.EnumerateFiles(nested));
+  }
+
+  [Fact]
+  public async Task CleanupTreatsUppercaseCurrentGenerationAsTheSameOwnedPair()
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string current = store.GetSnapshotPngPath(id)!;
+    string directory = Path.GetDirectoryName(current)!;
+    string obsolete = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".png");
+    File.WriteAllBytes(obsolete, Png);
+    File.WriteAllText(Path.Combine(directory, "current.json"),
+      System.Text.Json.JsonSerializer.Serialize(new { Generation = Path.GetFileNameWithoutExtension(current).ToUpperInvariant() }));
+    Assert.Single(new PinSnapshotStore(root).LoadRecovery());
+    Assert.True(File.Exists(current));
+    Assert.True(File.Exists(store.GetSnapshotProjectPath(id)));
+    Assert.False(File.Exists(obsolete));
+  }
+
+  [Theory]
+  [InlineData("中", 1366)]
+  [InlineData("😀", 1025)]
+  [InlineData("x", 4097)]
+  public void NewFormulaRecoveryRefusesSourcesBeyondTheRenderByteBudget(string unit, int count)
+  {
+    var store = new PinSnapshotStore(root);
+    string source = string.Concat(Enumerable.Repeat(unit, count));
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(new(Guid.NewGuid(), "Formula", source, 0, 0, 640, 400)));
+  }
+
+  [Theory]
+  [InlineData("pointer")]
+  [InlineData("png")]
+  [InlineData("project")]
+  public async Task DamagedCurrentPairDoesNotDeletePreviousGenerationsOrFallback(string damaged)
+  {
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png, TestContext.Current.CancellationToken);
+    string current = store.GetSnapshotPngPath(id)!;
+    string directory = Path.GetDirectoryName(current)!;
+    string old = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".png");
+    File.WriteAllBytes(old, Png);
+    string target = damaged switch { "pointer" => Path.Combine(directory, "current.json"), "project" => store.GetSnapshotProjectPath(id)!, _ => current };
+    File.WriteAllText(target, "corrupt");
+    _ = new PinSnapshotStore(root).LoadRecovery();
+    Assert.Equal(Png, File.ReadAllBytes(old));
+    Assert.Equal(Png, File.ReadAllBytes(Path.Combine(directory, "image.png")));
+  }
+
+  [Fact]
+  public void FormulaRecoveryKeepsUtf8BoundaryAndLoadsLegacyOversizeWithoutDroppingText()
+  {
+    var store = new PinSnapshotStore(root);
+    string exact = string.Concat(Enumerable.Repeat("😀", 1024));
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Formula", exact, 0, 0, 640, 400));
+    Assert.Equal(exact, Assert.Single(store.LoadRecovery()).Content);
+    string legacy = new('中', 4096);
+    string path = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"), "window.json");
+    File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new PinSnapshotStore.Recovery(id, "Formula", legacy, 0, 0, 640, 400)));
+    Assert.Equal(legacy, Assert.Single(new PinSnapshotStore(root).LoadRecovery()).Content);
+    Assert.Throws<InvalidOperationException>(() => store.SaveRecovery(new(id, "Formula", "\ud800", 0, 0, 640, 400)));
+  }
+
+  [Theory]
+  [InlineData(".png")]
+  [InlineData(".vibp")]
   public async Task FailedOwnedFileDeletionIsRetriedAtStartupWithoutRestoringTheClosedPin(string extension)
   {
     var store = new PinSnapshotStore(root);

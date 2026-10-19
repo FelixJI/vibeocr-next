@@ -190,10 +190,17 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private void AbandonPdfPreviewFlush() => pendingPdfPreviewFlush?.Completion.TrySetResult(false);
 
   private TaskCompletionSource<JsonElement>? formulaRender;
+  internal const int MaximumFormulaSourceBytes = 4096;
+  internal static bool TryGetFormulaSourceByteCount(string source, out int count)
+  {
+    try { count = new UTF8Encoding(false, true).GetByteCount(source); return true; }
+    catch (EncoderFallbackException) { count = 0; return false; }
+  }
   private Guid formulaRenderId;
   internal async Task<byte[]> RenderFormulaAsync(string latex)
   {
-    if (Encoding.UTF8.GetByteCount(latex) is < 1 or > 4096 || formulaRender is not null || core is not { } current)
+    if (!TryGetFormulaSourceByteCount(latex, out int bytes) || bytes is < 1 or > MaximumFormulaSourceBytes ||
+      formulaRender is not null || core is not { } current)
       throw new InvalidOperationException("Formula source is empty, oversized, or already rendering.");
     formulaRenderId = Guid.NewGuid();
     formulaRender = new(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -19,6 +19,28 @@ public sealed class VibpProjectFileTests
   private const string AssetId = "0123456789abcdef0123456789abcdef";
 
   [Fact]
+  public async Task ReadOnlyValidationChecksResourcesWithoutCreatingExtractionFiles()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] png = PngBytes(4, 3);
+      string path = Path.Combine(directory, "project.vibp");
+      WriteRawPackage(path, ManifestJson(png.Length), ("source.png", png));
+      await VibpProjectFile.ValidateArchiveAsync(path, TestContext.Current.CancellationToken);
+      Assert.Single(Directory.EnumerateFileSystemEntries(directory));
+      File.Delete(path);
+      WriteRawPackage(path, ManifestJson(png.Length), ("source.png", new byte[png.Length]));
+      await Assert.ThrowsAsync<VibpProjectFormatException>(() => VibpProjectFile.ValidateArchiveAsync(path, TestContext.Current.CancellationToken));
+      File.Delete(path);
+      WriteRawPackage(path, ManifestJson(png.Length), ("source.png", png[..^1]));
+      await Assert.ThrowsAsync<VibpProjectFormatException>(() => VibpProjectFile.ValidateArchiveAsync(path, TestContext.Current.CancellationToken));
+      Assert.Single(Directory.EnumerateFileSystemEntries(directory));
+    }
+    finally { Directory.Delete(directory, recursive: true); }
+  }
+
+  [Fact]
   public async Task RoundTripSupportsRealWebpSource()
   {
     // 真实 VP8 WebP（Pillow 生成）。WebP 是可选系统 codec（微软官方

@@ -48,6 +48,14 @@ public sealed partial class App
     // 真实启动链验证：恢复根枚举抛存储异常（一次性，消费后还原），
     // MainWindow 仍应正常就绪，不因不可读而启动失败。
     main.SmokeInjectRecoveryRootFailure();
+    main.SmokeExitCoordinatorFailureProbe = async probe =>
+    {
+      MainWindow? previous = _window;
+      _window = main;
+      SmokeBeforePinShutdown = probe;
+      try { await RequestAppExitAsync(main.AppWindow); }
+      finally { SmokeBeforePinShutdown = null; _window = previous; }
+    };
     main.Activate();
     try
     {

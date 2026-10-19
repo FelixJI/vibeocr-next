@@ -179,6 +179,24 @@ internal sealed class PinnedImageWindow : IDisposable
   private bool loaded;
   private bool documentReady;
   private bool disposed;
+  private bool exitFrozen;
+  private bool previousHitTestVisible;
+  private bool previousWindowEnabled;
+  internal void SetExitFrozen(bool frozen)
+  {
+    if (disposed || exitFrozen == frozen) return;
+    if (frozen) { previousHitTestVisible = root.IsHitTestVisible; previousWindowEnabled = IsWindowEnabled(Handle); }
+    exitFrozen = frozen;
+    root.IsHitTestVisible = frozen ? false : previousHitTestVisible;
+    EnableWindow(Handle, frozen ? false : previousWindowEnabled);
+    dragOrigin = null;
+  }
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool IsWindowEnabled(nint window);
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool EnableWindow(nint window, [MarshalAs(UnmanagedType.Bool)] bool enabled);
   private CoreWebView2? core;
   private ulong activeNavigation;
   private string navigationState = "not_started";
@@ -484,6 +502,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private async void OnPinWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
   {
+    if (exitFrozen && !closingAfterEditDecision) { args.Cancel = true; return; }
     if (!editing || closingAfterEditDecision) return;
     args.Cancel = true;
     if (await PrepareEditExitAsync()) Close();
@@ -545,6 +564,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   internal void RestoreGeometry(Features.Pins.PinSnapshotStore.Recovery recovery)
   {
+    if (exitFrozen) return;
     // 显示拓扑变更后保存的绝对坐标可能完全落在当前虚拟桌面外：约束到当前
     // 工作区并保留至少顶部可拖 band 可见，已有合法坐标（含负值/跨屏）不乱挪。
     nint restoreHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
@@ -729,7 +749,7 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>折叠/展开：收起为把手条高度；展开恢复折叠前客户区尺寸。</summary>
   internal void SetCollapsed(bool value)
   {
-    if (disposed || collapsed == value) return;
+    if (disposed || exitFrozen || collapsed == value) return;
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     if (value)
     {
@@ -766,7 +786,7 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>穿透：点击穿过贴图；恢复仅经管理入口或其他贴图菜单。</summary>
   internal void SetPassThrough(bool value)
   {
-    if (disposed || passThrough == value) return;
+    if (disposed || exitFrozen || passThrough == value) return;
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     long style = (long)GetWindowLongPtrW(handle, GwlExStyle);
     long target = value ? style | WsExTransparent : style & ~WsExTransparent;
@@ -781,7 +801,7 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>编组成员标记（同步移动由 MainWindow 按组分发）。</summary>
   internal void SetGrouped(bool value)
   {
-    if (grouped == value) return;
+    if (exitFrozen || grouped == value) return;
     grouped = value;
     status.Text = value ? "已加入编组：拖动任一成员同步移动" : "已退出编组";
     SyncInteractionButtons();
@@ -897,6 +917,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void OnBandPointerPressed(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     var point = args.GetCurrentPoint(band);
     if (!point.Properties.IsLeftButtonPressed) return;
     if (!TryGetCursorLocation(out Windows.Foundation.Point origin)) return;
@@ -909,6 +930,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void OnBandPointerMoved(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     if (dragOrigin is not { } origin || !TryGetCursorLocation(out Windows.Foundation.Point current))
       return;
     double deltaX = current.X - origin.X;
@@ -1472,8 +1494,9 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private async Task RequestCloseAsync()
   {
-    if (disposed) return;
+    if (disposed || exitFrozen) return;
     if (editing && !closingAfterEditDecision && !await PrepareEditExitAsync()) return;
+    if (disposed || exitFrozen) return;
     closingAfterEditDecision = true;
     window.Close();
   }

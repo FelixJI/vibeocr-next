@@ -1382,6 +1382,7 @@ public sealed partial class App : Application
 
 
     private bool _pdfCloseReview;
+    internal Func<Task>? SmokeBeforePinShutdown { get; set; }
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_shutdownStarted) return;
@@ -1397,19 +1398,25 @@ public sealed partial class App : Application
         {
             if (_window is not null && !await _window.PreparePdfExitAsync()) return;
             if (_window is not null && !await _window.PreparePinsExitAsync()) return;
+            if (SmokeBeforePinShutdown is { } beforeShutdown) await beforeShutdown();
+            if (_environmentSettings is not null)
+                await _environmentSettings.CancelAndWaitForInstallAsync();
             _actionDispatcher?.EndHotkeyRecording();
             _shutdownStarted = true;
-            _applicationShutdown.Cancel();
+            try { _applicationShutdown.Cancel(); }
+            catch (AggregateException error) { AppLog.Error("Application shutdown cancellation callback failed", error); }
             await ShutdownAndExitAsync(sender);
         }
         catch (Exception error) { AppLog.Error("Application exit coordination failed", error); }
-        finally { _pdfCloseReview = false; }
+        finally
+        {
+            if (!_shutdownStarted) _window?.CancelPinsExitPreparation();
+            _pdfCloseReview = false;
+        }
     }
 
     private async Task ShutdownAndExitAsync(AppWindow appWindow)
     {
-        if (_environmentSettings is not null)
-            await _environmentSettings.CancelAndWaitForInstallAsync();
         try
         {
             try

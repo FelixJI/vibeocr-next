@@ -1095,6 +1095,7 @@ public sealed partial class MainWindow : Window
     RecognitionTextLayerState? layer,
     IReadOnlyList<WorkbenchExclusionBox> excludeBoxes)
   {
+    if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Pin creation is unavailable while preparing to exit.");
     if (pinnedImages.Count + typedPins.Count >= 4)
     {
       // C6：专属回执文案；宿主仍以此处为最终防竞态防线。
@@ -1156,6 +1157,7 @@ public sealed partial class MainWindow : Window
   /// <summary>编组同步移动：同组成员应用同一物理位移（不含发起者自身）。</summary>
   private void MovePinGroup(PinnedImageWindow source, int dx, int dy)
   {
+    if (shuttingDown || pinsExitReview) return;
     if (dx == 0 && dy == 0) return;
     if (!pinGroups.TryGetValue(source, out Guid group)) return;
     foreach ((PinnedImageWindow member, Guid memberGroup) in pinGroups)
@@ -1172,6 +1174,7 @@ public sealed partial class MainWindow : Window
   /// <summary>编组开关：首次编组创建新组；同组多成员共享一个组 id。</summary>
   private void TogglePinGroup(PinnedImageWindow pin)
   {
+    if (shuttingDown || pinsExitReview) return;
     if (pinGroups.Remove(pin, out _))
     {
       pin.SetGrouped(false);
@@ -1199,6 +1202,7 @@ public sealed partial class MainWindow : Window
     if (shuttingDown || pinsExitReview) return;
     void Create()
     {
+      if (shuttingDown || pinsExitReview) return;
       if (pinnedImages.Count + typedPins.Count >= 4)
       {
         _ = ShowPinMessageAsync("最多同时打开四张贴图，请先关闭一张。");
@@ -1238,6 +1242,7 @@ public sealed partial class MainWindow : Window
 
   private Features.Pins.TypedPinWindow CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind kind, Guid? id = null)
   {
+    if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Pin creation is unavailable while preparing to exit.");
     var pin = new Features.Pins.TypedPinWindow(kind, id, async view =>
     {
       var host = new WebWorkbenchHost(application, resourceBroker, annotationStore,
@@ -1295,17 +1300,18 @@ public sealed partial class MainWindow : Window
       picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary;
       Windows.Storage.StorageFile? file =
         await picker.PickSingleFileAsync();
+      if (pin.Disposed || shuttingDown || pinsExitReview) return;
       if (file is null) { pin.ForceClose(); return; }
-      if (pin.Disposed || shuttingDown) return;
       string extension = Path.GetExtension(file.Path).ToLowerInvariant();
       if (extension is ".png" or ".jpg" or ".jpeg")
       {
         using var input = await file.OpenReadAsync();
         SystemImportImageItem imported = await InputService.ReadImportImageAsync(input, CancellationToken.None);
-        if (pin.Disposed || shuttingDown) return;
+        if (pin.Disposed || shuttingDown || pinsExitReview) return;
         byte[] png = imported.Data;
         var lease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
         WorkbenchAnnotationFile annotation = annotationStore.Take(lease.ResourceUri);
+        if (pin.Disposed || shuttingDown || pinsExitReview) { annotation.Dispose(); return; }
         typedPins.Remove(pin);
         try { PinScreenshot(annotation, Guid.NewGuid(), 0, null, []); }
         catch { annotation.Dispose(); throw; }
@@ -1322,6 +1328,7 @@ public sealed partial class MainWindow : Window
 
   private void ShowPinManager()
   {
+    if (shuttingDown || pinsExitReview) return;
     if (pinManager is null)
     {
       pinManager = new Features.Pins.PinManagerWindow(
@@ -1524,7 +1531,7 @@ public sealed partial class MainWindow : Window
   {
     void Reopen()
     {
-      if (shuttingDown) throw new InvalidOperationException("Application is closing.");
+      if (shuttingDown || pinsExitReview) throw new InvalidOperationException("Application is closing.");
       if (pinnedImages.Count + typedPins.Count >= 4) throw new PinLimitReachedException();
       string temp = Path.Combine(resourceRoot, $"pin-{Guid.NewGuid():N}.png");
       File.WriteAllBytes(temp, image.Png);
@@ -1551,6 +1558,8 @@ public sealed partial class MainWindow : Window
     {
       if (pinTransitionComplete is { } transition) await transition.Task;
       if (pinEditing is { } slot && !await slot.Window.PrepareEditExitAsync()) return false;
+      foreach (PinnedImageWindow pin in pinnedImages) pin.SetExitFrozen(true);
+      foreach (Features.Pins.TypedPinWindow pin in typedPins) pin.SetExitFrozen(true);
       if (pinSnapshotStore is not null)
       {
         foreach (PinnedImageWindow pin in pinnedImages)
@@ -1567,7 +1576,14 @@ public sealed partial class MainWindow : Window
       await ShowPinMessageAsync("贴图恢复内容保存失败，请重试后退出。");
       return false;
     }
-    finally { if (!prepared) pinsExitReview = false; }
+    finally { if (!prepared) CancelPinsExitPreparation(); }
+  }
+  internal Func<Func<Task>, Task>? SmokeExitCoordinatorFailureProbe { get; set; }
+  internal void CancelPinsExitPreparation()
+  {
+    foreach (PinnedImageWindow pin in pinnedImages) pin.SetExitFrozen(false);
+    foreach (Features.Pins.TypedPinWindow pin in typedPins) pin.SetExitFrozen(false);
+    pinsExitReview = false;
   }
 
   private async Task ShowPinMessageAsync(string message)
@@ -1579,6 +1595,7 @@ public sealed partial class MainWindow : Window
 
   private void RestorePins()
   {
+    if (shuttingDown || pinsExitReview) return;
     if (pinSnapshotStore is null) return;
     foreach (var record in pinSnapshotStore.LoadRecovery())
     {

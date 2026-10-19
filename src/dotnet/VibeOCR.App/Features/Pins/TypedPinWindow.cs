@@ -51,6 +51,10 @@ internal sealed class TypedPinWindow : IDisposable
   private bool formulaRenderInFlight;
   private ContentKind kind;
   private bool disposed;
+  private bool exitFrozen;
+  private bool previousHitTestVisible;
+  private bool previousWindowEnabled;
+  private bool restoringFormula;
 
   /// <summary>贴图身份（4 张上限计数与编组共用）。</summary>
   internal Guid PinId { get; }
@@ -63,7 +67,21 @@ internal sealed class TypedPinWindow : IDisposable
   {
     PinId = pinId ?? Guid.NewGuid();
     this.kind = kind;
-    editor.MaxLength = kind == ContentKind.Formula ? 4096 : 256 * 1024;
+    editor.MaxLength = kind == ContentKind.Formula ? 0 : 256 * 1024;
+    editor.BeforeTextChanging += (_, args) =>
+    {
+      if (exitFrozen) { args.Cancel = true; return; }
+      if (this.kind != ContentKind.Formula || restoringFormula) return;
+      bool valid = WebWorkbenchHost.TryGetFormulaSourceByteCount(args.NewText, out int bytes);
+      if (valid && bytes <= WebWorkbenchHost.MaximumFormulaSourceBytes)
+      {
+        status.Text = bytes == 0 ? "请输入公式（最多 4096 个 UTF-8 字节）。" : $"公式源 {bytes}/4096 个 UTF-8 字节，可渲染。";
+        return;
+      }
+      bool shortening = valid && WebWorkbenchHost.TryGetFormulaSourceByteCount(editor.Text, out int previous) && bytes < previous;
+      args.Cancel = !shortening;
+      status.Text = "公式最多 4096 个 UTF-8 字节；请删减文本后再渲染或保存（中文/emoji 占多个字节）。";
+    };
     this.createFormulaHost = createFormulaHost;
     BuildBand();
     root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -91,6 +109,7 @@ internal sealed class TypedPinWindow : IDisposable
       window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
     window.AppWindow.MoveAndResize(new RectInt32(
       work.X + 120, work.Y + 120, kind == ContentKind.Formula ? 640 : 360, kind == ContentKind.Formula ? 400 : 200));
+    window.AppWindow.Closing += (_, args) => { if (exitFrozen) args.Cancel = true; };
     window.Closed += (_, _) => Dispose();
   }
 
@@ -193,7 +212,7 @@ internal sealed class TypedPinWindow : IDisposable
     };
     AddBandButton(buttons, "关闭", () =>
     {
-      window.Close();
+      Close();
       return Task.CompletedTask;
     });
     band.Children.Add(buttons);
@@ -207,6 +226,7 @@ internal sealed class TypedPinWindow : IDisposable
 
   private void OnBandPointerPressed(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     var point = args.GetCurrentPoint(band);
     if (!point.Properties.IsLeftButtonPressed) return;
     if (!GetCursorPos(out PointL origin)) return;
@@ -217,6 +237,7 @@ internal sealed class TypedPinWindow : IDisposable
 
   private void OnBandPointerMoved(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     if (dragOrigin is not { } origin || !GetCursorPos(out PointL current)) return;
     double deltaX = current.X - origin.X;
     double deltaY = current.Y - origin.Y;
@@ -241,13 +262,37 @@ internal sealed class TypedPinWindow : IDisposable
 
   internal void SetText(string text)
   {
+    if (exitFrozen) return;
     editor.Text = text;
   }
+  internal Func<Task>? SmokeBeforeFileTextApply { get; set; }
+  internal void SmokeInputText(string text) => editor.Text = text;
+  internal bool SmokeNativeEnabled => IsWindowEnabled(WinRT.Interop.WindowNative.GetWindowHandle(window));
+  internal void SmokeSetNativeEnabled(bool enabled) => EnableWindow(WinRT.Interop.WindowNative.GetWindowHandle(window), enabled);
+  public void Close() { if (!exitFrozen) window.Close(); }
+  internal void SetExitFrozen(bool frozen)
+  {
+    if (disposed || exitFrozen == frozen) return;
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    if (frozen) { previousHitTestVisible = root.IsHitTestVisible; previousWindowEnabled = IsWindowEnabled(handle); }
+    exitFrozen = frozen;
+    root.IsHitTestVisible = frozen ? false : previousHitTestVisible;
+    EnableWindow(handle, frozen ? false : previousWindowEnabled);
+    dragOrigin = null;
+  }
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool IsWindowEnabled(nint window);
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool EnableWindow(nint window, [MarshalAs(UnmanagedType.Bool)] bool enabled);
 
   /// <summary>文件预览装载：仅授权图片（png/jpg）与有界纯文本（≤256KiB）；
   /// 其他格式/超限明确拒绝（窗口保持打开但无内容）。</summary>
   internal async Task LoadFileAsync(string path)
   {
+    if (exitFrozen || disposed) return;
     string extension = System.IO.Path.GetExtension(path).ToLowerInvariant();
     try
     {
@@ -264,6 +309,8 @@ internal sealed class TypedPinWindow : IDisposable
         using var text = new StreamReader(new MemoryStream(bytes), new System.Text.UTF8Encoding(false, true),
           detectEncodingFromByteOrderMarks: true);
         string content = await text.ReadToEndAsync();
+        if (SmokeBeforeFileTextApply is { } beforeApply) await beforeApply();
+        if (exitFrozen || disposed) return;
         if (content.Any(character => char.IsControl(character) && character is not ('\r' or '\n' or '\t')))
           throw new InvalidOperationException("文件包含二进制控制字节，仅支持纯文本。");
         editor.Text = content;
@@ -281,7 +328,14 @@ internal sealed class TypedPinWindow : IDisposable
 
   internal async Task RenderFormulaAsync()
   {
-    if (formulaView is null || createFormulaHost is null) return;
+    if (exitFrozen || formulaView is null || createFormulaHost is null) return;
+    if (!WebWorkbenchHost.TryGetFormulaSourceByteCount(editor.Text, out int bytes) || bytes is < 1 or > WebWorkbenchHost.MaximumFormulaSourceBytes)
+    {
+      image.Source = null;
+      image.Visibility = formulaView.Visibility = Visibility.Collapsed;
+      status.Text = "请输入 1–4096 个 UTF-8 字节的公式；请缩短中文/emoji 文本后重试。";
+      return;
+    }
     // 整个渲染单飞：恢复自动渲染与手动点击不得并发创建宿主或并发渲染
     // （同一 WebView2 被两个 host 初始化/导航会泄漏并互相干扰）。
     if (formulaRenderInFlight) return;
@@ -302,13 +356,14 @@ internal sealed class TypedPinWindow : IDisposable
         return;
       }
       formulaHost ??= host;
+      if (exitFrozen) return;
       if (editor.Text != requested)
       {
         DiscardStaleFormulaRender();
         return;
       }
       byte[] png = await host.RenderFormulaAsync(requested);
-      if (disposed) return;
+      if (disposed || exitFrozen) return;
       if (editor.Text != requested)
       {
         DiscardStaleFormulaRender();
@@ -323,7 +378,7 @@ internal sealed class TypedPinWindow : IDisposable
       stream.Seek(0);
       var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
       await bitmap.SetSourceAsync(stream);
-      if (disposed) return;
+      if (disposed || exitFrozen) return;
       if (editor.Text != requested)
       {
         // SetSourceAsync 后源已变化：不把旧公式装进窗口。
@@ -337,6 +392,7 @@ internal sealed class TypedPinWindow : IDisposable
     }
     catch (Exception error)
     {
+      if (disposed || exitFrozen) return;
       image.Source = null;
       // 失败同样不残留渲染 WebView 的旧内容，用户可修改后重试。
       formulaView.Visibility = Visibility.Collapsed;
@@ -362,7 +418,10 @@ internal sealed class TypedPinWindow : IDisposable
 
   internal void Restore(PinSnapshotStore.Recovery recovery)
   {
-    editor.Text = recovery.Content;
+    if (exitFrozen) return;
+    restoringFormula = true;
+    try { editor.Text = recovery.Content; }
+    finally { restoringFormula = false; }
     // 拓扑变更后保存的绝对坐标可能落在当前虚拟桌面外：约束到当前工作区
     // 并保留至少顶部可拖 band 可见，已有合法坐标（含负值/跨屏）不乱挪。
     int bandPhysical = (int)Math.Ceiling(BandHeightDip *
@@ -371,7 +430,12 @@ internal sealed class TypedPinWindow : IDisposable
       new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height),
       PinSnapshotStore.CurrentWorkAreas(), bandPhysical, 16));
     if (kind == ContentKind.Color) ApplySwatchColor();
-    if (kind == ContentKind.Formula) _ = RenderFormulaAsync();
+    if (kind == ContentKind.Formula)
+    {
+      if (!WebWorkbenchHost.TryGetFormulaSourceByteCount(editor.Text, out int bytes) || bytes > WebWorkbenchHost.MaximumFormulaSourceBytes)
+        status.Text = "已完整恢复超限公式；请删减至 4096 个 UTF-8 字节以内再渲染或保存。";
+      else _ = RenderFormulaAsync();
+    }
   }
 
   internal void ShowError(string message) { if (!disposed) status.Text = message; }
@@ -394,7 +458,7 @@ internal sealed class TypedPinWindow : IDisposable
     Closed?.Invoke(this);
   }
 
-  public void ForceClose() => window.Close();
+  public void ForceClose() { SetExitFrozen(false); window.Close(); }
 
   private void AddBandButton(Panel bar, string label, Func<Task> action)
   {

@@ -126,17 +126,37 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
       TryDelete(image);
       throw;
     }
+    await CleanupOldGenerationsAsync(pinId);
+  }
+
+  private async Task CleanupOldGenerationsAsync(Guid pinId)
+  {
     try
     {
-      foreach (string path in Directory.EnumerateFiles(directory))
+      Snapshot? snapshot = ReadSnapshot(pinId);
+      if (snapshot is null || !Guid.TryParseExact(snapshot.Generation, "N", out Guid generation)) return;
+      string directory = DirectoryFor(pinId);
+      string[] obsolete = Directory.EnumerateFiles(directory).Where(path =>
+        Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out Guid candidate) &&
+        candidate != generation &&
+        Path.GetExtension(path) is ".png" or ".vibp").ToArray();
+      if (obsolete.Length == 0) return;
+      string png = Path.Combine(directory, snapshot.Generation + ".png");
+      string project = Path.Combine(directory, snapshot.Generation + ".vibp");
+      if (!File.Exists(png) || !File.Exists(project)) return;
+      if (new FileInfo(png).Length > PinHistoryStore.MaximumEntryBytes) return;
+      EnsureOwnedDirectory(png); EnsureOwnedDirectory(project);
+      await ValidatePngAsync(await File.ReadAllBytesAsync(png), CancellationToken.None);
+      await VibpProjectFile.ValidateArchiveAsync(project);
+      foreach (string path in obsolete)
       {
-        string name = Path.GetFileNameWithoutExtension(path);
-        if (name != generation && Guid.TryParseExact(name, "N", out _) &&
-          Path.GetExtension(path) is ".vibp" or ".png") TryDelete(path);
+        try { EnsureOwnedDirectory(path); File.Delete(path); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { AppLog.Warn($"Old pin generation retained for startup retry: {error.Message}"); }
       }
     }
-    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-    { AppLog.Warn($"Pin snapshot committed; old generation cleanup failed: {error.Message}"); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or VibpProjectFormatException)
+    { AppLog.Warn($"Old pin generations retained: current pair is unavailable: {error.Message}"); }
   }
 
   private string? SnapshotPath(Guid pinId, string extension)
@@ -165,6 +185,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     if (!File.Exists(path)) return null;
     EnsureOwnedDirectory(root);
     EnsureOwnedDirectory(DirectoryFor(pinId));
+    EnsureOwnedDirectory(path);
     if (new FileInfo(path).Length > 16 * 1024) throw new InvalidDataException("Invalid pin metadata.");
     // 指针内容损坏（JSON 不可解析/排除框无效）降级为无 generation：读取方
     // 回退 image.png 与已验证 window.json 的排除框，损坏文件保留供重试/取证；
@@ -225,6 +246,9 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
 
   internal void SaveRecovery(Recovery record, byte[]? png = null)
   {
+    if (record.Kind == "Formula" && (!WebWorkbenchHost.TryGetFormulaSourceByteCount(record.Content, out int formulaBytes) ||
+      formulaBytes > WebWorkbenchHost.MaximumFormulaSourceBytes))
+      throw new InvalidOperationException("公式超过 4096 个 UTF-8 字节；请缩短后再保存。");
     if (record.Width < 1 || record.Height < 1 || record.Content.Length > MaximumRecoveryCharacters) throw new InvalidOperationException("Invalid pin bounds.");
     WorkbenchExclusionBox.ValidateCollection(record.ExcludeBoxes ?? []);
     byte[] serialized = JsonSerializer.SerializeToUtf8Bytes(record);
@@ -267,6 +291,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
             DeleteSnapshot(id);
             continue;
           }
+          Task.Run(() => CleanupOldGenerationsAsync(id)).GetAwaiter().GetResult();
           if (result.Count == 4) continue;
           string path = Path.Combine(directory, RecoveryFileName);
           if (!File.Exists(path) || new FileInfo(path).Length > MaximumRecoveryBytes) continue;

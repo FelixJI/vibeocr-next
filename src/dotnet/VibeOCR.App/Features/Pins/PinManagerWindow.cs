@@ -102,7 +102,7 @@ internal sealed class PinManagerWindow
         TypedPinWindow.ContentKind.Formula => "公式贴图", _ => "文件预览贴图" },
         VerticalAlignment = VerticalAlignment.Center });
       AddAction(row, "激活", true, typed.Show);
-      AddAction(row, "关闭", true, typed.ForceClose);
+      AddAction(row, "关闭", true, typed.Close);
       panel.Children.Add(row);
     }
     scroller.Content = panel;

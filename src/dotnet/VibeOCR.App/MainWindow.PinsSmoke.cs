@@ -326,7 +326,7 @@ public sealed partial class MainWindow
       }
       if (!await first.PrepareEditExitAsync() || !await PreparePinsExitAsync())
         throw new InvalidOperationException("Recovered commit blocked window close or application exit.");
-      pinsExitReview = false;
+      CancelPinsExitPreparation();
       CaptureUiSmokeTrace.Stage("pins.native-inflight-reset-committed-once");
       // 新贴图新槽：旧会话迟到确认不得清除新槽。
       await EnterPinEditAsync(second);
@@ -361,6 +361,22 @@ public sealed partial class MainWindow
 
       CaptureUiSmokeTrace.Stage("pins.formula-render");
       var formula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+      formula.SmokeInputText(new string('中', 1366));
+      if (formula.RecoveryState().Content.Length != 0 || !formula.StatusText.Contains("4096"))
+        throw new InvalidOperationException("Formula input accepted an over-budget UTF-8 source without guidance.");
+      string emojiBoundary = string.Concat(Enumerable.Repeat("😀", 1024));
+      formula.SmokeInputText(emojiBoundary);
+      if (formula.RecoveryState().Content != emojiBoundary)
+        throw new InvalidOperationException("Formula input split or rejected valid emoji at the byte boundary.");
+      string legacyFormula = new('中', 4096);
+      formula.Restore(new(formula.PinId, "Formula", legacyFormula, formula.SmokePosition.X, formula.SmokePosition.Y, 640, 400));
+      if (formula.RecoveryState().Content != legacyFormula || !formula.StatusText.Contains("完整恢复"))
+        throw new InvalidOperationException("Legacy oversized formula text was silently dropped.");
+      await formula.RenderFormulaAsync();
+      formula.SmokeInputText(legacyFormula[..^1]);
+      if (formula.RecoveryState().Content.Length != legacyFormula.Length - 1)
+        throw new InvalidOperationException("Legacy formula cannot be shortened while still beyond the byte budget.");
+      CaptureUiSmokeTrace.Stage("pins.formula-utf8-budget");
       formula.SetText("\\frac{x^2+1}{2}");
       SmokeFailFormulaInitialization = true;
       await formula.RenderFormulaAsync();
@@ -403,6 +419,7 @@ public sealed partial class MainWindow
       formula.ForceClose();
       // 创建期间关闭：迟到宿主必须释放，不得接管字段泄漏。
       var closing = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+      closing.SetText("x+1");
       SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
       Task lateRender = closing.RenderFormulaAsync();
       await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 2), "Late formula host creation did not start.");
@@ -430,6 +447,42 @@ public sealed partial class MainWindow
       CaptureUiSmokeTrace.Stage("pins.exit-recovery");
       var expanded = first.SmokeClientSize;
       first.SetCollapsed(true);
+      var exitText = CreateTypedPin(TypedPinWindow.ContentKind.Text);
+      var exitColor = CreateTypedPin(TypedPinWindow.ContentKind.Color);
+      var exitFormula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+      exitText.SetText("saved-before-exit"); exitColor.SetText("#123456"); exitFormula.SetText("x+1");
+      exitColor.SmokeSetNativeEnabled(false);
+      var lateReadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var lateReadReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      exitText.SmokeBeforeFileTextApply = () => { lateReadStarted.TrySetResult(); return lateReadReleased.Task; };
+      string lateTextPath = Path.Combine(resourceRoot, "pins-exit-late-text.txt");
+      File.WriteAllText(lateTextPath, "late-file-text");
+      Task lateTextLoad = exitText.LoadFileAsync(lateTextPath);
+      await lateReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      bool gapReached = false, preserved = false;
+      await (SmokeExitCoordinatorFailureProbe ?? throw new InvalidOperationException("No exit coordinator probe."))(async () =>
+      {
+        gapReached = true;
+        lateReadReleased.TrySetResult();
+        await lateTextLoad;
+        exitText.SmokeInputText("late-text"); exitColor.SmokeInputText("#ABCDEF"); exitFormula.SmokeInputText("late-formula");
+        first.SetCollapsed(false);
+        exitText.Close();
+        preserved = exitText.Kind == TypedPinWindow.ContentKind.Text &&
+          exitText.RecoveryState().Content == "saved-before-exit" &&
+          exitColor.RecoveryState().Content == "#123456" && exitFormula.RecoveryState().Content == "x+1" &&
+          !exitText.Disposed && !exitText.SmokeNativeEnabled && first.Collapsed;
+        await Task.Yield();
+        throw new IOException("smoke injected failure after pin exit preparation");
+      });
+      if (!gapReached || !preserved)
+        throw new InvalidOperationException("Prepared pin contents or close state changed during the real shutdown await gap.");
+      exitText.SmokeInputText("resumed-after-failure");
+      if (pinsExitReview || !exitText.SmokeNativeEnabled || exitText.RecoveryState().Content != "resumed-after-failure")
+        throw new InvalidOperationException("Failed application exit did not restore pin editing.");
+      if (exitColor.SmokeNativeEnabled) throw new InvalidOperationException("Exit cancellation enabled a previously disabled window.");
+      exitColor.SmokeSetNativeEnabled(true);
+      exitText.ForceClose(); exitColor.ForceClose(); exitFormula.ForceClose();
       if (!await PreparePinsExitAsync()) throw new InvalidOperationException("Exit recovery could not persist pins.");
       var recovered = pinSnapshotStore.LoadRecovery();
       if (recovered.Count != 1 || !recovered.Any(item => item.Id == first.PinId && item.X == first.SmokePosition.X))
@@ -438,6 +491,7 @@ public sealed partial class MainWindow
       shuttingDown = true;
       first.ForceClose();
       shuttingDown = false;
+      CancelPinsExitPreparation();
       RestorePins();
       first = pinnedImages.Single();
       await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Recovered static pin not ready.");
