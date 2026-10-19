@@ -1,5 +1,5 @@
 import { Button, Switch } from "@fluentui/react-components";
-import { useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import type { AppActions } from "../app/types";
 
@@ -40,6 +40,25 @@ export function PinHistoryPanel({
   readonly connected: boolean;
 }) {
   const [query, setQuery] = useState("");
+  const submittedQuery = useRef<string | null>(null);
+  const ready = connected && history !== undefined;
+  const refreshHistory = useEffectEvent(() => {
+    void actions.run({
+      type: "pinEdit.listHistory",
+      query: submittedQuery.current,
+    });
+  });
+  useEffect(() => {
+    if (ready) refreshHistory();
+  }, [ready]);
+  const submitSearch = () => {
+    submittedQuery.current =
+      query.trim().slice(0, maximumHistoryQueryLength) || null;
+    void actions.run({
+      type: "pinEdit.listHistory",
+      query: submittedQuery.current,
+    });
+  };
   if (history === undefined) return null;
   return (
     <div className="pin-history">
@@ -85,28 +104,10 @@ export function PinHistoryPanel({
               onKeyDown={(event) => {
                 if (event.key !== "Enter") return;
                 event.preventDefault();
-                void actions.run({
-                  type: "pinEdit.listHistory",
-                  query:
-                    query.trim() === ""
-                      ? null
-                      : query.trim().slice(0, maximumHistoryQueryLength),
-                });
+                submitSearch();
               }}
             />
-            <Button
-              size="small"
-              disabled={!connected}
-              onClick={() =>
-                void actions.run({
-                  type: "pinEdit.listHistory",
-                  query:
-                    query.trim() === ""
-                      ? null
-                      : query.trim().slice(0, maximumHistoryQueryLength),
-                })
-              }
-            >
+            <Button size="small" disabled={!connected} onClick={submitSearch}>
               检索
             </Button>
             <Button

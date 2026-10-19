@@ -114,6 +114,130 @@ describe("PinHistoryPanel", () => {
     });
   });
 
+  it("resets the host filter when a new panel mounts after history changes off-page", async () => {
+    const user = userEvent.setup();
+    let hostQuery: string | null = null;
+    const entries = [...validHistory.entries];
+    const run = vi.fn(async (command: Parameters<AppActions["run"]>[0]) => {
+      if (
+        command.type === "pinEdit.listHistory" &&
+        (command.query === null || typeof command.query === "string")
+      )
+        hostQuery = command.query;
+      return true;
+    });
+    const projection = () =>
+      parsePinHistory({
+        ...validHistory,
+        count: entries.length,
+        entries: entries.filter(
+          (entry) =>
+            hostQuery === null || entry.recognizedText?.includes(hostQuery),
+        ),
+      });
+    const panel = () => (
+      <PinHistoryPanel
+        history={projection()}
+        actions={actions(run)}
+        connected={true}
+      />
+    );
+    const first = render(panel());
+    await user.type(
+      screen.getByRole("searchbox", { name: "检索截图历史" }),
+      "发票{Enter}",
+    );
+    first.rerender(panel());
+    expect(screen.getAllByRole("button", { name: "重开" })).toHaveLength(1);
+    first.unmount();
+    // 路由离开后新截图发布历史，宿主仍持有上次已提交的筛选。
+    entries.push({ ...validHistory.entries[1]!, entryId: "c".repeat(32) });
+    const returned = render(panel());
+    returned.rerender(panel());
+    expect(screen.getByRole("searchbox", { name: "检索截图历史" })).toHaveValue(
+      "",
+    );
+    expect(screen.getAllByRole("button", { name: "重开" })).toHaveLength(3);
+    expect(run).toHaveBeenLastCalledWith({
+      type: "pinEdit.listHistory",
+      query: null,
+    });
+  });
+
+  it("syncs only when history becomes available and preserves the submitted query on reconnect", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn().mockResolvedValue(true);
+    const panel = (
+      history: ReturnType<typeof parsePinHistory>,
+      connected: boolean,
+    ) => (
+      <PinHistoryPanel
+        history={history}
+        actions={actions(run)}
+        connected={connected}
+      />
+    );
+    const view = render(panel(undefined, true));
+    expect(run).not.toHaveBeenCalled();
+    view.rerender(panel(parsePinHistory(validHistory), false));
+    expect(run).not.toHaveBeenCalled();
+    view.rerender(panel(parsePinHistory(validHistory), true));
+    expect(run).toHaveBeenLastCalledWith({
+      type: "pinEdit.listHistory",
+      query: null,
+    });
+    const search = screen.getByRole("searchbox", { name: "检索截图历史" });
+    await user.type(search, "发票{Enter}未提交");
+    run.mockClear();
+    view.rerender(panel(parsePinHistory(validHistory), true));
+    expect(run).not.toHaveBeenCalled();
+    view.rerender(panel(parsePinHistory(validHistory), false));
+    view.rerender(panel(parsePinHistory(validHistory), true));
+    expect(run).toHaveBeenCalledExactlyOnceWith({
+      type: "pinEdit.listHistory",
+      query: "发票",
+    });
+    expect(search).toHaveValue("发票未提交");
+    run.mockClear();
+    view.rerender(panel(undefined, true));
+    expect(run).not.toHaveBeenCalled();
+    view.rerender(panel(parsePinHistory(validHistory), true));
+    expect(run).toHaveBeenCalledExactlyOnceWith({
+      type: "pinEdit.listHistory",
+      query: "发票",
+    });
+  });
+
+  it("keeps the submitted filter through reopen and delete projections", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn().mockResolvedValue(true);
+    const panel = (entries = validHistory.entries) => (
+      <PinHistoryPanel
+        history={parsePinHistory({ ...validHistory, entries })}
+        actions={actions(run)}
+        connected={true}
+      />
+    );
+    const view = render(panel());
+    await user.type(
+      screen.getByRole("searchbox", { name: "检索截图历史" }),
+      "发票{Enter}",
+    );
+    run.mockClear();
+    view.rerender(panel([validHistory.entries[0]!]));
+    await user.click(screen.getByRole("button", { name: "重开" }));
+    view.rerender(panel([validHistory.entries[0]!]));
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    view.rerender(panel([]));
+    expect(screen.getByRole("searchbox", { name: "检索截图历史" })).toHaveValue(
+      "发票",
+    );
+    expect(run.mock.calls.map(([command]) => command.type)).toEqual([
+      "pinEdit.reopenHistoryEntry",
+      "pinEdit.deleteHistoryEntry",
+    ]);
+  });
+
   it("enables clear by total count even when the filtered list is empty", () => {
     const run = vi.fn().mockResolvedValue(true);
     render(
@@ -152,7 +276,7 @@ describe("PinHistoryPanel", () => {
     });
     // 粘贴超过宿主协议预算的检索词后提交：不发送会被拒收且无回执的超长查询。
     await user.type(search, "x".repeat(140) + "{Enter}");
-    const call = run.mock.calls.find(
+    const call = run.mock.calls.findLast(
       ([command]) => command.type === "pinEdit.listHistory",
     );
     expect(call).toBeDefined();
