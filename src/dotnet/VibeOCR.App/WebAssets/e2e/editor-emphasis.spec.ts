@@ -1729,15 +1729,17 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
   const recognizeCount = uploads.length;
   await action(page, "文字识别");
   await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
-  const commands = await page.evaluate(
-    () =>
-      (window as unknown as { __testHost: { commands: unknown[] } }).__testHost
-        .commands,
+  // 上传请求被收到早于响应解析和 bridge 发送，等待实际识别命令。
+  const recognizeHandle = await page.waitForFunction(() =>
+    (
+      window as unknown as {
+        __testHost: { commands: { action?: string }[] };
+      }
+    ).__testHost.commands.find(
+      (command) => command.action === "recognizeScreenshotImage",
+    ),
   );
-  const recognize = commands.find(
-    (command) =>
-      (command as { action?: string }).action === "recognizeScreenshotImage",
-  ) as {
+  const recognize = (await recognizeHandle.jsonValue()) as {
     arguments?: {
       excludeBoxes?: { x: number; y: number; width: number; height: number }[];
     };

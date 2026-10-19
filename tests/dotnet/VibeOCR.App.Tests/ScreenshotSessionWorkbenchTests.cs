@@ -2,6 +2,7 @@ using System.Text.Json;
 using Windows.Graphics.Imaging;
 using Windows.Storage.Streams;
 using VibeOCR.App.Features.QrCode;
+using VibeOCR.App.Features.Pins;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
 using VibeOCR.App.Features.Shell;
@@ -45,20 +46,23 @@ public sealed class ScreenshotSessionWorkbenchTests
     public int CaptureCalls;
     public bool CancelCapture;
     public bool FailCapture;
+    public byte[] Data = CaptureBytes;
+    public byte[] FileData = CaptureBytes;
+    public TaskCompletionSource? CaptureGate;
 
     public Task<RecognitionInput?> PickFileAsync(CancellationToken cancellationToken) =>
-      Task.FromResult<RecognitionInput?>(new RecognitionInput(CaptureBytes, "image/png", "capture.png", "file"));
+      Task.FromResult<RecognitionInput?>(new RecognitionInput(FileData, "image/png", "capture.png", "file"));
 
     public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
       Task.FromResult<RecognitionInput?>(null);
 
-    public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
+    public async Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken)
     {
       Interlocked.Increment(ref CaptureCalls);
       if (FailCapture) throw new IOException("Synthetic capture failed.");
-      if (CancelCapture) return Task.FromResult<RecognitionInput?>(null);
-      return Task.FromResult<RecognitionInput?>(
-        new RecognitionInput(CaptureBytes, "image/bmp", "screenshot.bmp", "screenshot"));
+      if (CancelCapture) return null;
+      if (CaptureGate is { } gate) await gate.Task;
+      return new RecognitionInput(Data, "image/bmp", "screenshot.bmp", "screenshot");
     }
 
     public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
@@ -226,7 +230,8 @@ public sealed class ScreenshotSessionWorkbenchTests
     Func<RecognitionViewModel>? textLayerRecognitionFactory = null,
     Action<WorkbenchAnnotationFile, Guid, long, RecognitionTextLayerState?,
       IReadOnlyList<WorkbenchExclusionBox>>? pinScreenshot = null,
-    Func<CancellationToken, Task>? ensureRuntimeReady = null) => new(
+    Func<CancellationToken, Task>? ensureRuntimeReady = null,
+    IPinHistoryRecorder? pinHistory = null) => new(
       () => recognition,
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
@@ -245,7 +250,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       inferenceAttached,
       supervisorInstanceId,
       textLayerRecognitionFactory,
-      pinScreenshot, ensureRuntimeReady: ensureRuntimeReady);
+      pinScreenshot, ensureRuntimeReady: ensureRuntimeReady, pinHistory: pinHistory);
 
   private sealed class CompletedImageSelectionClient : SelectionSubmitClient
   {
@@ -1412,15 +1417,21 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public byte[]? CopiedBytes { get; private set; }
     public byte[]? SavedBytes { get; private set; }
+    public TaskCompletionSource? OutputStarted;
+    public TaskCompletionSource? OutputGate;
 
     public async Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
       CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      OutputStarted?.TrySetResult();
+      if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
     }
 
     public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
       SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      OutputStarted?.TrySetResult();
+      if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
       return true;
     }
 
@@ -3265,6 +3276,36 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>真实 typed 目录 + 记录识别提交请求/上传；可派生改写终态。</summary>
+  private sealed class SelectionFailureClient : SelectionSubmitClient
+  {
+    public override Task<JobUpdate> ObserveAsync(
+      string jobId,
+      int afterSequence,
+      CancellationToken cancellationToken) => Task.FromResult(new JobUpdate
+      {
+        Snapshot = new JobSnapshot
+        {
+          JobId = jobId,
+          Kind = JobKind.Recognition,
+          Priority = JobPriority.Interactive,
+          State = JobState.Completed,
+        },
+        Events = Array.Empty<StageEvent>(),
+        Outcomes =
+        [
+          new ItemOutcome
+          {
+            ItemId = "it-0",
+            State = ItemState.Failed,
+            Attempt = 1,
+            PayloadType = "ocr.v1",
+            Payload = new Dictionary<string, JsonElement>(),
+          },
+        ],
+        ThroughSequence = afterSequence,
+      });
+  }
+
   private class SelectionSubmitClient(bool rapidReady = true, bool mineruConfig = false)
     : TextModeHealthClient(rapidReady, mineruConfig: mineruConfig)
   {
@@ -4222,4 +4263,502 @@ public sealed class ScreenshotSessionWorkbenchTests
       Directory.Delete(root, recursive: true);
     }
   }
+
+  private static readonly byte[] HistoryPixels =
+    [0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 20, 40, 60, 255];
+
+  private static async Task AssertHistoryImageAsync(PinHistoryStore history, byte[] pixels)
+  {
+    PinHistoryEntryState entry = Assert.Single(history.Projection(null).Entries);
+    PinHistoryImage image = Assert.IsType<PinHistoryImage>(history.TryReadImage(entry.EntryId));
+    Assert.True(PinSnapshotStore.TryValidatePng(image.Png, out int width, out int height));
+    Assert.Equal((2, 2), (width, height));
+    var decoded = await DecodePngAsync(image.Png);
+    Assert.Equal(pixels, decoded.Pixels);
+  }
+
+  [Theory]
+  [InlineData(0)]
+  [InlineData(1)]
+  [InlineData(2)]
+  [InlineData(3)]
+  public async Task BmpCaptureEnteringEditorRecordsHistoryWithoutAnyOutput(int entryPoint)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inputs = new FixedCaptureInput { Data = bmp };
+      var inference = new ThrowingSubmitClient();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => false, pinHistory: history);
+      WorkbenchCommand command = entryPoint switch
+      {
+        1 => new CaptureScrollingScreenshotCommand(),
+        2 => new CaptureScreenshotTextSessionCommand(),
+        3 => new CaptureRecognitionScreenCommand(),
+        _ => new CaptureScreenshotSessionCommand(),
+      };
+      for (int capture = 0; capture < 2; capture++)
+      {
+        if (capture == 1) history.SetEnabled(true);
+        using var ready = new RecognitionStateAwaiter(handler,
+          state => !state.IsBusy && state.StatusCode == "recognition.session");
+        await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+        RecognitionWorkbenchState state = await ready.Task;
+        Assert.NotNull(state.ScreenshotSession);
+        Assert.Equal("image/bmp", state.Input!.MediaType);
+        Assert.Equal(bmp, await ReadResourceAsync(broker, state.Input.Url));
+        Assert.Same(bmp, recognition.CurrentInput!.Data);
+        Assert.Equal(capture, history.Projection(null).Count);
+        await handler.ExecuteAsync(new CloseScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      }
+      Assert.Equal(0, inference.SubmitCalls);
+      await AssertHistoryImageAsync(history, HistoryPixels);
+      PinHistoryImage? reopened = null;
+      handler.PinHistoryReopenRequested += image => { reopened = image; return Task.CompletedTask; };
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new ReopenPinHistoryEntryCommand(history.Projection(null).Entries[0].EntryId), TestContext.Current.CancellationToken);
+      Assert.Null(outcome.Error);
+      Assert.NotNull(reopened);
+      Assert.Equal(1, history.Projection(null).Count);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task BmpSelectionRecognitionRecordsHistoryWithoutChangingOcrInputOrDuplicating()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new SelectionSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      await completed.Task;
+      Assert.Same(bmp, recognition.CurrentInput!.Data);
+      Assert.Equal("image/bmp", recognition.CurrentInput.MediaType);
+      Assert.Equal(bmp, Assert.Single(inference.UploadedContent));
+      Assert.Single(inference.Requests);
+      await AssertHistoryImageAsync(history, HistoryPixels);
+      Assert.Single(history.Projection("selection text").Entries);
+      Assert.Equal("selection te", history.Projection(null).Entries[0].RecognizedText);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task SelectionRecognitionFailureStillRecordsCapturedHistoryWithoutTextEnrich()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new SelectionFailureClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await completed.Task;
+      // OCR 失败终态：像素已成功捕获，历史仍记录该截图；无结果不补充文本。
+      Assert.Null(state.Result);
+      Assert.Equal(JobState.Failed, recognition.TerminalState);
+      await AssertHistoryImageAsync(history, HistoryPixels);
+      Assert.Null(history.Projection(null).Entries[0].RecognizedText);
+      Assert.Empty(history.Projection("selection text").Entries);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task HistoryNormalizationOrPersistenceFailureKeepsSuccessfulBmpEditor(bool persistenceFailure)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = persistenceFailure ? InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8) : [66, 77];
+      var inference = new ThrowingSubmitClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput { Data = bmp });
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      if (persistenceFailure)
+      {
+        string index = Path.Combine(PinHistoryStore.RootFor(root), "index.json");
+        File.Delete(index); Directory.CreateDirectory(index);
+      }
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => false, pinHistory: history);
+      using var ready = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.session");
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await ready.Task;
+      Assert.NotNull(state.ScreenshotSession);
+      Assert.Equal(bmp, await ReadResourceAsync(broker, state.Input!.Url));
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Contains("截图已成功，但历史保存失败", history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task CancelledOrLateBmpCaptureDoesNotRecordHistory(bool late)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var inputs = new FixedCaptureInput
+      {
+        Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8),
+        CancelCapture = !late,
+        CaptureGate = late ? gate : null,
+      };
+      var inference = new ThrowingSubmitClient();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      await using var handler = CreateHandler(new RecognitionViewModel(inference, inputs), root, broker, annotations,
+        new SettingsViewModel(inference), inferenceAttached: () => false, pinHistory: history);
+      var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.ScreenshotCaptureFinished += () => finished.TrySetResult();
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      if (late)
+      {
+        await UntilAsync(() => inputs.CaptureCalls == 1);
+        await handler.ExecuteAsync(new CancelRecognitionCommand(), TestContext.Current.CancellationToken);
+        gate.TrySetResult();
+      }
+      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+      Assert.Null(handler.CurrentImageSessionId);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  [InlineData(true, true)]
+  public async Task JpegOutputAfterEnablingDoesNotBackfillCaptureTakenWhileDisabled(bool save, bool sessionCommand)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      byte[] jpeg = await QrCodeSavePlatform.EncodeImageAsync(bmp, BitmapEncoder.JpegEncoderId, TestContext.Current.CancellationToken);
+      var inference = new ThrowingSubmitClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput { Data = bmp });
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      var platform = new RecordingAnnotatedImagePlatform();
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform, () => false, pinHistory: history);
+      using var ready = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState state = await ready.Task;
+      Assert.Equal(0, history.Projection(null).Count);
+      history.SetEnabled(true);
+      Guid session = Guid.Parse(state.ScreenshotSession!.SessionId);
+      for (int repeat = 0; repeat < 2; repeat++)
+      {
+        WorkbenchAnnotationLease lease = await annotations.UploadImageAsync(new MemoryStream(jpeg), "image/jpeg", TestContext.Current.CancellationToken);
+        string uri = lease.ResourceUri.AbsoluteUri;
+        WorkbenchCommand command = (save, sessionCommand) switch
+        {
+          (true, true) => new SaveScreenshotImageCommand(uri, session, 0),
+          (false, true) => new CopyScreenshotImageCommand(uri, session, 0),
+          (true, false) => new SaveAnnotatedImageCommand(uri),
+          _ => new CopyAnnotatedImageCommand(uri),
+        };
+        Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+        Assert.Equal(jpeg, save ? platform.SavedBytes : platform.CopiedBytes);
+        Assert.Throws<WorkbenchAnnotationAccessException>(() => annotations.Take(lease.ResourceUri));
+        // R8 契约：捕获时历史停用则不保录入键，之后启用也不追溯落盘。
+        Assert.Equal(0, history.Projection(null).Count);
+        Assert.Null(history.Projection(null).Error);
+      }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task EnablingDuringPendingSelectionReadinessDoesNotBackfillDisabledCapture()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new ReadinessGatedSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      // 捕获时停用：提交前目录/readiness 等待挂起期间经生产命令启用历史，
+      // 不得追溯落盘本次捕获（readiness 等待在生产可达；不预加载目录，
+      // 使提交路径的首次加载即挂起）。
+      inference.HealthGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      Task<WorkbenchCommandOutcome> pending = handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken).AsTask();
+      await UntilAsync(() => inference.HealthCalls == 1);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetPinHistoryEnabledCommand(true), TestContext.Current.CancellationToken)).Error);
+      Assert.True(history.IsEnabled);
+      inference.HealthGate.TrySetResult();
+      // 明确等真正 recognition.completed 终态（录入发生在该终态发布前）。
+      await completed.Task;
+      Assert.Null((await pending.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class ReadinessGatedSubmitClient : SelectionSubmitClient
+  {
+    public TaskCompletionSource? HealthGate { get; set; }
+    public int HealthCalls { get; private set; }
+
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      // 提交路径的目录加载挂起（测试不预加载，首次调用即提交路径）。
+      HealthCalls++;
+      if (HealthGate is { } gate) await gate.Task;
+      return await base.GetHealthAsync(cancellationToken);
+    }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task DisablingDuringAcceptedSelectionKeepsItsFrozenHistoryAuthorization(bool waitForReadiness)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new ReadinessGatedSubmitClient();
+      var settings = new SettingsViewModel(inference);
+      if (!waitForReadiness) await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      if (waitForReadiness) inference.HealthGate = gate; else inference.SubmitGate = gate;
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      await UntilAsync(() => waitForReadiness ? inference.HealthCalls == 1 : inference.Requests.Count == 1);
+      await handler.ExecuteAsync(new SetPinHistoryEnabledCommand(false), TestContext.Current.CancellationToken);
+      gate.TrySetResult();
+      await completed.Task;
+      Assert.False(history.IsEnabled);
+      await AssertHistoryImageAsync(history, HistoryPixels);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  [InlineData(true, true)]
+  public async Task LocalOutputUsesHistorySwitchFrozenBeforeAwait(bool acceptedWhileEnabled, bool save)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new ThrowingSubmitClient();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(acceptedWhileEnabled);
+      var platform = new RecordingAnnotatedImagePlatform
+      {
+        OutputStarted = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        OutputGate = new(TaskCreationOptions.RunContinuationsAsynchronously),
+      };
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(save ? ScreenshotSelectionAction.Save : ScreenshotSelectionAction.Copy, null, bmp));
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform, () => false, pinHistory: history);
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.ScreenshotSession is null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      await platform.OutputStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      history.SetEnabled(!acceptedWhileEnabled);
+      platform.OutputGate.TrySetResult();
+      await completed.Task;
+      Assert.Equal(acceptedWhileEnabled ? 1 : 0, history.Projection(null).Count);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task EnablingDuringPendingSelectionRecognitionDoesNotBackfillDisabledCapture()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new SelectionSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      // 捕获时停用：OCR 提交挂起期间经生产命令路径启用历史，不得追溯落盘
+      // 本次捕获（SetPinHistoryEnabled 无 busy 门禁，该交错在生产可达）。
+      inference.SubmitGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      Task<WorkbenchCommandOutcome> pending = handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken).AsTask();
+      await UntilAsync(() => inference.Requests.Count == 1);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetPinHistoryEnabledCommand(true), TestContext.Current.CancellationToken)).Error);
+      Assert.True(history.IsEnabled);
+      inference.SubmitGate.TrySetResult();
+      // 明确等非 busy 终态：录入发生在该终态发布前，不得只等命令启动。
+      await completed.Task;
+      Assert.Null((await pending.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task LateOutputDoesNotAssignPreviousCaptureToNewHistoryKey(bool save)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new ThrowingSubmitClient();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      var platform = new RecordingAnnotatedImagePlatform
+      {
+        OutputStarted = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        OutputGate = new(TaskCreationOptions.RunContinuationsAsynchronously),
+      };
+      await using var handler = CreateHandler(new RecognitionViewModel(inference, new FixedCaptureInput { Data = bmp }),
+        root, broker, annotations, new SettingsViewModel(inference), platform, () => false, pinHistory: history);
+      using var first = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      Guid firstSession = Guid.Parse((await first.Task).ScreenshotSession!.SessionId);
+      history.SetEnabled(true);
+      byte[] jpeg = await QrCodeSavePlatform.EncodeImageAsync(bmp, BitmapEncoder.JpegEncoderId, TestContext.Current.CancellationToken);
+      WorkbenchAnnotationLease lease = await annotations.UploadImageAsync(new MemoryStream(jpeg), "image/jpeg", TestContext.Current.CancellationToken);
+      WorkbenchCommand output = save ? new SaveScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, firstSession, 0)
+        : new CopyScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, firstSession, 0);
+      Task<WorkbenchCommandOutcome> pending = handler.ExecuteAsync(output, TestContext.Current.CancellationToken).AsTask();
+      await platform.OutputStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      try
+      {
+        history.SetEnabled(false);
+        using var second = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.ScreenshotSession is not null &&
+          state.ScreenshotSession.SessionId != firstSession.ToString("N"));
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        await second.Task;
+        history.SetEnabled(true);
+      }
+      finally { platform.OutputGate.TrySetResult(); }
+      Assert.Null((await pending).Error);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(false, true)]
+  [InlineData(true, false)]
+  [InlineData(true, true)]
+  public async Task OrdinaryImageEditorJpegOutputsDoNotBecomeScreenshotHistory(bool save, bool sessionCommand)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      byte[] png = await QrCodeSavePlatform.EncodeImageAsync(bmp, BitmapEncoder.PngEncoderId, TestContext.Current.CancellationToken);
+      byte[] jpeg = await QrCodeSavePlatform.EncodeImageAsync(bmp, BitmapEncoder.JpegEncoderId, TestContext.Current.CancellationToken);
+      var inference = new ThrowingSubmitClient();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root); history.SetEnabled(true);
+      var platform = new RecordingAnnotatedImagePlatform();
+      await using var handler = CreateHandler(new RecognitionViewModel(inference, new FixedCaptureInput { FileData = png }),
+        root, broker, annotations, new SettingsViewModel(inference), platform, () => false, pinHistory: history);
+      var ready = new TaskCompletionSource<ImageEditWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      { if (state is ImageEditWorkbenchState { IsBusy: false, ScreenshotSession: not null } image) ready.TrySetResult(image); };
+      await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+      Guid session = Guid.Parse((await ready.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).ScreenshotSession!.SessionId);
+      WorkbenchAnnotationLease lease = await annotations.UploadImageAsync(new MemoryStream(jpeg), "image/jpeg", TestContext.Current.CancellationToken);
+      string uri = lease.ResourceUri.AbsoluteUri;
+      WorkbenchCommand command = (save, sessionCommand) switch
+      {
+        (true, true) => new SaveImageEditImageCommand(uri, session, 0),
+        (false, true) => new CopyImageEditImageCommand(uri, session, 0),
+        (true, false) => new SaveImageEditAnnotatedImageCommand(uri),
+        _ => new CopyImageEditAnnotatedImageCommand(uri),
+      };
+      Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(jpeg, save ? platform.SavedBytes : platform.CopiedBytes);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
 }

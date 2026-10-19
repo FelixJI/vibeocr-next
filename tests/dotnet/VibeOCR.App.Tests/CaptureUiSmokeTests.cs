@@ -14,6 +14,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
   private readonly string _root = Path.Combine(Path.GetTempPath(), $"vibeocr-capture-ui-{Guid.NewGuid():N}");
 
   [Fact]
+  public Task PinsSaveSwitchRecoverAndRenderFormula() =>
+      RunUiSmokeAsync(nameof(PinsSaveSwitchRecoverAndRenderFormula));
+
+  [Fact]
   public Task OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion() =>
       RunUiSmokeAsync(nameof(OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion));
 

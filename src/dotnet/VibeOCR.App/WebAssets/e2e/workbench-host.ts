@@ -18,8 +18,10 @@ export async function mountHost(
     const listeners = new Set<(event: { data: unknown }) => void>();
     const commands: HostCommand[] = [];
     const captureReports: BridgeEnvelope[] = [];
+    const pinReports: BridgeEnvelope[] = [];
     let rejectNext = false;
     let deferredAction: string | undefined;
+    let clearPinEditorOnCommit = false;
     let deferredResponse: (() => void) | undefined;
     const emit = (data: unknown) =>
       listeners.forEach((listener) => listener({ data }));
@@ -42,9 +44,22 @@ export async function mountHost(
       __testHost: {
         commands,
         captureReports,
+        pinReports,
+        requestPinSnapshot: (sourceSession: string) => {
+          const id = crypto.randomUUID();
+          emit({
+            version: 2,
+            kind: "request",
+            id,
+            type: "pinEdit.requestSnapshot",
+            payload: { sessionId: sourceSession },
+          });
+          return id;
+        },
         state,
-        deferCommand: (action: string) => {
+        deferCommand: (action: string, clearPinEditor = false) => {
           deferredAction = action;
+          clearPinEditorOnCommit = clearPinEditor;
         },
         releaseCommand: () => {
           if (!deferredResponse) throw new Error("No deferred command");
@@ -78,6 +93,13 @@ export async function mountHost(
                 captureReports.push(request);
                 return;
               }
+              if (
+                request.type === "pinEdit.snapshotResult" ||
+                request.type.startsWith("formula.")
+              ) {
+                pinReports.push(request);
+                return;
+              }
               const command = request.payload.command as unknown as HostCommand;
               commands.push(command);
               if (command.action === deferredAction) {
@@ -88,6 +110,15 @@ export async function mountHost(
                     kind: "response",
                     payload: { revision, ok: true, problem: null },
                   });
+                if (clearPinEditorOnCommit) {
+                  clearPinEditorOnCommit = false;
+                  state("pinEdit", {
+                    isBusy: false,
+                    statusCode: "pinEdit.applied",
+                    input: null,
+                    screenshotSession: null,
+                  });
+                }
                 return;
               }
               if (rejectNext) {
@@ -129,17 +160,42 @@ export async function mountHost(
 type TestHostWindow = Window & {
   __testHost: {
     commands: HostCommand[];
+    pinReports: BridgeEnvelope[];
+    requestPinSnapshot(sourceSession: string): string;
     rejectNext(): void;
-    deferCommand(action: string): void;
+    deferCommand(action: string, clearPinEditor?: boolean): void;
     releaseCommand(): void;
     state(scope: string, value: unknown): void;
   };
 };
 
-export async function deferCommand(page: Page, action: string): Promise<void> {
+export async function requestPinSnapshot(
+  page: Page,
+  sourceSession: string,
+): Promise<string> {
+  return page.evaluate(
+    (source) =>
+      (window as TestHostWindow).__testHost.requestPinSnapshot(source),
+    sourceSession,
+  );
+}
+
+export async function readPinReports(page: Page): Promise<BridgeEnvelope[]> {
+  return page.evaluate(() => (window as TestHostWindow).__testHost.pinReports);
+}
+
+export async function deferCommand(
+  page: Page,
+  action: string,
+  clearPinEditor = false,
+): Promise<void> {
   await page.evaluate(
-    (action) => (window as TestHostWindow).__testHost.deferCommand(action),
-    action,
+    ([action, clearPinEditor]) =>
+      (window as TestHostWindow).__testHost.deferCommand(
+        action,
+        clearPinEditor,
+      ),
+    [action, clearPinEditor] as const,
   );
 }
 

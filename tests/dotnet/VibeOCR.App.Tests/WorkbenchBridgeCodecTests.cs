@@ -1458,4 +1458,16 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       },
     });
   }
+
+  [Fact]
+  public void PinRestoreRejectionHasExactBoundArgumentsAndPinScope()
+  {
+    Guid session = Guid.NewGuid(), pending = Guid.NewGuid();
+    string args = JsonSerializer.Serialize(new { pendingId = pending.ToString("N"), sessionId = session.ToString("N"), revision = 0 });
+    var command = Assert.IsType<RejectPinProjectRestoreCommand>(ParseForTest(CommandJson(session, "pinEdit", "rejectProjectRestore", args), session).Command);
+    Assert.Equal(pending, command.PendingId); Assert.Equal(session, command.SessionId);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "imageEdit", "rejectProjectRestore", args), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "pinEdit", "rejectProjectRestore", "{}"), session));
+  }
+
 }

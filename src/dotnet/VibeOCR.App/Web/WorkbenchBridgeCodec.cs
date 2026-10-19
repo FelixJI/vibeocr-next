@@ -114,6 +114,10 @@ public static class WorkbenchBridgeCodec
     ["sessionId", "revision", "requestId"];
   private static readonly HashSet<string> SaveProjectArgumentFields =
     ["contributeId", "sessionId", "revision"];
+  private static readonly HashSet<string> ApplySnapshotArgumentFields =
+    ["contributeId", "resourceUri", "sessionId", "revision", "excludeBoxes"];
+  private static readonly HashSet<string> EntryIdArgumentFields = ["entryId"];
+  private static readonly HashSet<string> ListHistoryArgumentFields = ["query"];
   private static readonly HashSet<string> RejectProjectOpenArgumentFields =
     ["pendingId", "sessionId", "revision"];
   private static readonly HashSet<string> AckProjectOpenArgumentFields =
@@ -507,6 +511,84 @@ public static class WorkbenchBridgeCodec
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
           openGeneration);
+      // ---- #238 pinEdit：仅实现有真实消费者的动作（C6：无空命令）。 ----
+      case ("pinEdit", "notifyScreenshotRevision"):
+        EnsureObjectWithFields(
+          arguments, SessionRevisionArgumentFields, "command arguments");
+        return new NotifyPinEditRevisionCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("pinEdit", "closeScreenshotSession"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new ClosePinEditSessionCommand();
+      case ("pinEdit", "copyScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new CopyPinEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("pinEdit", "saveScreenshotImage"):
+        EnsureObjectWithFields(
+          arguments, SessionResourceArgumentFields, "command arguments");
+        return new SavePinEditImageCommand(
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments));
+      case ("pinEdit", "copyAnnotatedImage"):
+        return new CopyPinEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("pinEdit", "saveAnnotatedImage"):
+        return new SavePinEditAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("pinEdit", "rejectProjectRestore"):
+        EnsureObjectWithFields(arguments, RejectProjectOpenArgumentFields, "command arguments");
+        return new RejectPinProjectRestoreCommand(ParseGuidArgument(arguments, "pendingId"),
+          ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments));
+      case ("pinEdit", "applySnapshot"):
+        EnsureObjectWithFields(arguments, ApplySnapshotArgumentFields, "command arguments");
+        return new ApplyPinEditSnapshotCommand(
+          ParseProjectContributionId(arguments),
+          ReadAnnotationResourceUri(arguments),
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          arguments.TryGetProperty("excludeBoxes", out _) ? ParseExclusionBoxes(arguments) : null);
+      case ("pinEdit", "ackImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new AckPinEditImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("pinEdit", "rejectImport"):
+        EnsureObjectWithFields(arguments, ImportRequestArgumentFields, "command arguments");
+        return new RejectPinEditImportCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseContentRevision(arguments),
+          ParseImportRequestId(arguments));
+      case ("pinEdit", "releaseAssets"):
+        EnsureObjectWithFields(arguments, ReleaseAssetsArgumentFields, "command arguments");
+        return new ReleasePinEditAssetsCommand(
+          ParseGuidArgument(arguments, "sessionId"),
+          ParseReleasedImportAssets(arguments));
+      case ("pinEdit", "showManager"):
+        EnsureObjectWithFields(arguments, EmptyFields, "show pin manager arguments");
+        return new ShowPinManagerCommand();
+      case ("pinEdit", "setHistoryEnabled"):
+        EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
+        if (arguments.GetProperty("enabled").ValueKind != JsonValueKind.True &&
+          arguments.GetProperty("enabled").ValueKind != JsonValueKind.False)
+          throw new WorkbenchBridgeProtocolException("Pin history enabled flag is invalid.");
+        return new SetPinHistoryEnabledCommand(arguments.GetProperty("enabled").GetBoolean());
+      case ("pinEdit", "listHistory"):
+        EnsureObjectWithFields(arguments, ListHistoryArgumentFields, "command arguments");
+        return new ListPinHistoryCommand(ParseHistoryQuery(arguments));
+      case ("pinEdit", "reopenHistoryEntry"):
+        EnsureObjectWithFields(arguments, EntryIdArgumentFields, "command arguments");
+        return new ReopenPinHistoryEntryCommand(ParseHistoryEntryId(arguments));
+      case ("pinEdit", "deleteHistoryEntry"):
+        EnsureObjectWithFields(arguments, EntryIdArgumentFields, "command arguments");
+        return new DeletePinHistoryEntryCommand(ParseHistoryEntryId(arguments));
+      case ("pinEdit", "clearHistory"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new ClearPinHistoryCommand();
       case ("recognition", "pasteSystemContent"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PasteScreenshotSystemContentCommand();
@@ -1660,6 +1742,41 @@ public static class WorkbenchBridgeCodec
       importError = imageEdit.ImportError,
       projectOpen = imageEdit.ProjectOpen is null ? null : SerializeProjectOpenState(imageEdit.ProjectOpen),
     },
+    PinEditWorkbenchState pinEdit => new
+    {
+      pinEdit.IsBusy,
+      pinEdit.StatusCode,
+      pinEdit.Input,
+      screenshotSession = pinEdit.ScreenshotSession is null ? null : new
+      {
+        sessionId = pinEdit.ScreenshotSession.SessionId,
+        revision = pinEdit.ScreenshotSession.Revision,
+        textSelectionRequested = pinEdit.ScreenshotSession.TextSelectionRequested,
+        sceneEditing = pinEdit.ScreenshotSession.SceneEditing,
+        excludeBoxes = pinEdit.ScreenshotSession.ExcludeBoxes ?? [],
+      },
+      import = pinEdit.Import is null ? null : SerializeImportState(pinEdit.Import),
+      importError = pinEdit.ImportError,
+      projectRestore = pinEdit.ProjectRestore is null ? null : SerializeProjectOpenState(pinEdit.ProjectRestore),
+      history = pinEdit.History is null ? null : new
+      {
+        enabled = pinEdit.History.Enabled,
+        error = pinEdit.History.Error,
+        count = pinEdit.History.Count,
+        totalBytes = pinEdit.History.TotalBytes,
+        maximumEntries = pinEdit.History.MaximumEntries,
+        maximumBytes = pinEdit.History.MaximumBytes,
+        entries = pinEdit.History.Entries.Select(entry => new
+        {
+          entry.EntryId,
+          createdAt = entry.CreatedAt,
+          entry.Width,
+          entry.Height,
+          entry.Bytes,
+          recognizedText = entry.RecognizedText,
+        }).ToArray(),
+      },
+    },
     RecognitionWorkbenchState recognition => new
     {
       recognition.IsBusy,
@@ -1972,6 +2089,32 @@ public static class WorkbenchBridgeCodec
     if (!Guid.TryParseExact(token, "N", out Guid value))
     {
       throw new WorkbenchBridgeProtocolException("Project contribution id is invalid.");
+    }
+    return value;
+  }
+
+  /// <summary>#238 历史条目 id：宿主生成的 Guid（N 格式），不接受任意字符串。</summary>
+  private static string ParseHistoryEntryId(JsonElement arguments)
+  {
+    string? entryId = arguments.GetProperty("entryId").GetString();
+    if (!Guid.TryParseExact(entryId, "N", out _))
+    {
+      throw new WorkbenchBridgeProtocolException("Pin history entry id is invalid.");
+    }
+    return entryId!;
+  }
+
+  /// <summary>#238 历史检索词：可为 null；非空时有界。</summary>
+  private const int MaxHistoryQueryLength = 128;
+  private static string? ParseHistoryQuery(JsonElement arguments)
+  {
+    JsonElement query = arguments.GetProperty("query");
+    if (query.ValueKind == JsonValueKind.Null) return null;
+    string? value = query.GetString();
+    if (string.IsNullOrWhiteSpace(value)) return null;
+    if (value.Length > MaxHistoryQueryLength)
+    {
+      throw new WorkbenchBridgeProtocolException("Pin history query is too long.");
     }
     return value;
   }

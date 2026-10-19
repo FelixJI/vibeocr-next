@@ -64,12 +64,34 @@ internal sealed class PinnedImageWindow : IDisposable
   private const string ChromeRestoreGlyph = "\uE923";
   private const string ChromeCloseGlyph = "\uE8BB";
 
-  private readonly string imageUrl;
+  private string imageUrl;
+  /// <summary>当前实际注册到 WebView2 的图片过滤 URI；未注册为 null。
+  /// 换装只移除真正注册过的旧 URI 并按需注册新 URI，重复换装不累积。</summary>
+  private string? registeredImageUrl;
   private readonly Window window = new();
   private readonly OverlappedPresenter presenter = OverlappedPresenter.Create();
   private readonly Grid root = new();
   private readonly Grid band = new();
   private readonly WebView2 view = new();
+  /// <summary>#238 编辑态覆盖层：独立授权 WebView，仅编辑期间存在（单槽）。</summary>
+  private WebView2? editorView;
+  private VibeOCR.App.Web.WebWorkbenchHost? editorHost;
+  private SizeInt32? beforeEditSize;
+  private bool editing;
+  private Guid editingSessionId;
+  private Func<Task>? editorSnapshotAcknowledged;
+  /// <summary>当前编辑代际凭证：窗口是否正以指定会话编辑（终态绑定旧代）。</summary>
+  internal bool IsEditingSession(Guid session) => editing && editingSessionId == session;
+  private bool closingAfterEditDecision;
+  private bool closeDialogShowing;
+  private ContentDialog? activeEditDialog;
+
+  /// <summary>#238 折叠：收起为只剩顶部把手条；展开恢复折叠前客户区。</summary>
+  private bool collapsed;
+  private Windows.Graphics.SizeInt32? expandedClientSize;
+  /// <summary>#238 穿透：点击穿过贴图；恢复仅经管理入口。</summary>
+  private bool passThrough;
+  private const long WsExTransparent = 0x00000020;
   private readonly TextBlock status = new()
   {
     FontSize = 12,
@@ -99,22 +121,32 @@ internal sealed class PinnedImageWindow : IDisposable
   private readonly Button maximizeButton;
   private readonly Button closeButton;
   private readonly Button moreButton;
+  private Button? editButton;
   private readonly FontIcon topmostIcon = new() { Glyph = UnpinGlyph, FontSize = 14 };
   private readonly FontIcon maximizeIcon = new() { Glyph = ChromeMaximizeGlyph, FontSize = 14 };
   private readonly Slider opacitySlider;
   /// <summary>导航后把 stage 宽固定为图片像素/devicePixelRatio，保持 1:1。</summary>
-  private readonly string stageScaleScript;
-  private readonly WorkbenchAnnotationFile image;
+  private string stageScaleScript;
+  private WorkbenchAnnotationFile image;
   private readonly IAnnotatedImagePlatform platform;
   private readonly Func<Task<RecognitionTextLayerState?>> prepareText;
-  private readonly IReadOnlyList<WorkbenchExclusionBox> excludeBoxes = [];
+  private IReadOnlyList<WorkbenchExclusionBox> excludeBoxes = [];
   private readonly Func<string?> currentServiceInstance;
   private readonly List<IRandomAccessStream> responseStreams = [];
-  private readonly Guid sessionId;
-  private readonly long revision;
-  private readonly int imageWidth;
-  private readonly int imageHeight;
+  private Guid sessionId;
+  private long revision;
+  private int imageWidth;
+  private int imageHeight;
+  /// <summary>apply/重开后的 owned 存储路径；非空时显示源为该文件且关闭不删除。</summary>
+  private string? ownedImagePath;
   private RecognitionTextLayerState? layer;
+  /// <summary>#238 贴图身份：编辑槽/快照目录/编组的稳定键。</summary>
+  internal Guid PinId { get; }
+  internal nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(window);
+  internal event Func<PinnedImageWindow, Guid, Task>? SnapshotConfirmed;
+
+  /// <summary>成功提交对应的文档已失效，协调器可在本次换装后免回执收尾。</summary>
+  internal event Action<PinnedImageWindow, Guid>? SnapshotReceiptLost;
 
   /// <summary>按冻结的归一化排除矩形丢弃正面积相交行；无层/无矩形原样返回。</summary>
   private static RecognitionTextLayerState? FilterExcludedLines(
@@ -147,6 +179,24 @@ internal sealed class PinnedImageWindow : IDisposable
   private bool loaded;
   private bool documentReady;
   private bool disposed;
+  private bool exitFrozen;
+  private bool previousHitTestVisible;
+  private bool previousWindowEnabled;
+  internal void SetExitFrozen(bool frozen)
+  {
+    if (disposed || exitFrozen == frozen) return;
+    if (frozen) { previousHitTestVisible = root.IsHitTestVisible; previousWindowEnabled = IsWindowEnabled(Handle); }
+    exitFrozen = frozen;
+    root.IsHitTestVisible = frozen ? false : previousHitTestVisible;
+    EnableWindow(Handle, frozen ? false : previousWindowEnabled);
+    dragOrigin = null;
+  }
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool IsWindowEnabled(nint window);
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool EnableWindow(nint window, [MarshalAs(UnmanagedType.Bool)] bool enabled);
   private CoreWebView2? core;
   private ulong activeNavigation;
   private string navigationState = "not_started";
@@ -158,8 +208,12 @@ internal sealed class PinnedImageWindow : IDisposable
   private Windows.Foundation.Point? dragOrigin;
 
   public event Action<PinnedImageWindow>? Closed;
+  /// <summary>#238 请求进入贴图编辑（单槽仲裁由 MainWindow 协调器负责）。</summary>
+  internal event Func<PinnedImageWindow, Task>? EditRequested;
+  /// <summary>#238 请求放弃编辑并退出（宿主关闭 pinEdit 会话后回调 ExitEditMode）。</summary>
+  internal event Func<PinnedImageWindow, Task>? ExitEditRequested;
 
-  internal string SmokeImagePath => image.Path;
+  internal string SmokeImagePath => CurrentImagePath;
   internal string SmokeNavigationState => $"loaded={loaded}; lines={layer?.Lines?.Count}; {navigationState}";
   internal bool SmokeDisposed => disposed;
   internal bool SmokeDocumentReady => documentReady;
@@ -200,6 +254,69 @@ internal sealed class PinnedImageWindow : IDisposable
   internal PointInt32 SmokePosition => window.AppWindow.Position;
   internal Guid SessionId => sessionId;
   internal long Revision => revision;
+  internal bool Editing => editing;
+  internal bool Disposed => disposed;
+  internal string CurrentImagePath => ownedImagePath ?? image.Path;
+  internal IReadOnlyList<WorkbenchExclusionBox> CurrentExcludeBoxes => excludeBoxes;
+  internal Func<Task>? SmokeSnapshotDisplayStep { get; set; }
+  internal Action? SmokeEditorSetupStep { get; set; }
+  internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
+  internal string SmokeStatus => status.Text;
+  internal bool SmokeEditDecisionPending => closeDialogShowing;
+  /// <summary>smoke：对当前编辑宿主注入 renderer 失败，覆盖空闲与保存交错。</summary>
+  internal void SmokeResetEditorDocument() =>
+    editorHost?.HandleRendererFailure("smoke-injected-renderer-failure");
+  internal async Task SmokeResetIdleEditorAsync()
+  {
+    var host = editorHost ?? throw new InvalidOperationException("No editor host.");
+    var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    void Observe(string state) { if (state == "bridge-ready") ready.TrySetResult(); }
+    host.StateChanged += Observe;
+    try
+    {
+      SmokeResetEditorDocument();
+      await ready.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+    finally { host.StateChanged -= Observe; }
+  }
+  internal void SmokeDelaySnapshotReceipt(Func<Task> delay) =>
+    (editorHost ?? throw new InvalidOperationException("No editor host.")).SmokeBeforePinSnapshotReceipt = delay;
+  internal Func<Task> SmokeCaptureSnapshotConfirmation() => editorSnapshotAcknowledged ??
+    throw new InvalidOperationException("No editor acknowledgement is registered.");
+
+  /// <summary>smoke 注入：下一次 ShowAsync 抛瞬时启动失败（一次性，消费即清）。</summary>
+  internal static bool SmokeFailNextShow;
+  /// <summary>初始化失败关闭 ≠ 用户关闭：Closed 处置保留恢复快照供下次重试。</summary>
+  internal bool RetainSnapshotOnClose { get; set; }
+  /// <summary>smoke 观察：真实 Add/RemoveWebResourceRequestedFilter 调用记录
+  /// （实例序号, Uri, added）；仅 SmokeFilterRecording 时记录，生产为 false
+  /// 不参与逻辑。过滤器按 WebView2 实例独立，配对断言按实例分组。</summary>
+  internal static readonly List<(int Instance, string Uri, bool Added)> SmokeFilterEvents = [];
+  internal static bool SmokeFilterRecording;
+  private static int smokeFilterInstanceCounter;
+  private readonly int smokeFilterInstance = ++smokeFilterInstanceCounter;
+  private void RecordFilterEvent(string uri, bool added)
+  {
+    if (SmokeFilterRecording) SmokeFilterEvents.Add((smokeFilterInstance, uri, added));
+  }
+
+  internal bool SmokeInvokeEditDecision(string text)
+  {
+    static Button? Find(DependencyObject parent, string label)
+    {
+      if (parent is Button button && button.Content as string == label) return button;
+      for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        if (Find(VisualTreeHelper.GetChild(parent, i), label) is { } found) return found;
+      return null;
+    }
+    if (activeEditDialog is not { } dialog || Find(dialog, text) is not { } action) return false;
+    new ButtonAutomationPeer(action).Invoke();
+    return true;
+  }
+
+  internal async Task<string> SmokeEditorEvaluateAsync(string script) =>
+    editorView is { } editor ? await editor.ExecuteScriptAsync(script) : "null";
+
   internal async Task<string> SmokeEvaluateAsync(string script) =>
     await view.ExecuteScriptAsync(script);
   internal async Task<string> SmokeDispatchMouseAsync(string type, double x, double y, int buttons) =>
@@ -319,8 +436,9 @@ internal sealed class PinnedImageWindow : IDisposable
     RecognitionTextLayerState? layer,
     IReadOnlyList<WorkbenchExclusionBox> excludeBoxes,
     Func<Task<RecognitionTextLayerState?>> prepareText,
-    Func<string?> currentServiceInstance)
+    Func<string?> currentServiceInstance, Guid? pinId = null)
   {
+    PinId = pinId ?? Guid.NewGuid();
     this.image = image;
     imageUrl = "https://pin.vibeocr/image" + Path.GetExtension(image.Path);
     this.sessionId = sessionId;
@@ -378,7 +496,95 @@ internal sealed class PinnedImageWindow : IDisposable
       work.Y + Math.Min(160, Math.Max(0, work.Height - clientHeight))));
     window.AppWindow.ResizeClient(new SizeInt32(clientWidth, clientHeight));
     window.AppWindow.Changed += OnAppWindowChanged;
+    window.AppWindow.Closing += OnPinWindowClosing;
     window.Closed += (_, _) => Dispose();
+  }
+
+  private async void OnPinWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+  {
+    if (exitFrozen && !closingAfterEditDecision) { args.Cancel = true; return; }
+    if (!editing || closingAfterEditDecision) return;
+    args.Cancel = true;
+    if (await PrepareEditExitAsync()) Close();
+  }
+
+  // Only the application exit coordinator may bypass the decision, after it drained saves.
+  internal void ForceClose()
+  {
+    closingAfterEditDecision = true;
+    if (!disposed) window.Close();
+  }
+
+  internal async Task<bool> SaveEditAsync()
+  {
+    bool saved = !editing || editorHost is { } host && await host.FlushPinSnapshotAsync(editingSessionId);
+    if (!saved && !disposed) status.Text = "未保存，编辑现场已保留；请检查错误或先完成文字编辑后重试。";
+    return saved;
+  }
+
+  internal async Task<bool> PrepareEditExitAsync()
+  {
+    if (!editing) return true;
+    if (closeDialogShowing) return false;
+    closeDialogShowing = true;
+    try
+    {
+      Activate();
+      var dialog = new ContentDialog
+      {
+        Title = "保存贴图编辑？",
+        Content = editorHost?.PinSnapshotInFlight == true
+          ? "保存已开始，将等待结果；失败会保留编辑现场。" : "保存成功后再退出；放弃将恢复上次静态内容。",
+        PrimaryButtonText = "保存", SecondaryButtonText = "放弃更改", CloseButtonText = "取消",
+        IsSecondaryButtonEnabled = editorHost?.PinSnapshotInFlight != true,
+        DefaultButton = ContentDialogButton.Primary, XamlRoot = root.XamlRoot,
+      };
+      activeEditDialog = dialog;
+      ContentDialogResult decision = await dialog.ShowAsync();
+      if (decision == ContentDialogResult.None) return false;
+      // An already accepted save owns its transaction until its successful web ack.
+      if (decision == ContentDialogResult.Primary || editorHost?.PinSnapshotInFlight == true)
+        return await SaveEditAsync();
+      if (ExitEditRequested is { } exit) await exit(this);
+      return !editing;
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Pin exit decision failed", error);
+      status.Text = "未保存；编辑现场已保留，请重试。";
+      return false;
+    }
+    finally { closeDialogShowing = false; activeEditDialog = null; }
+  }
+
+  internal Features.Pins.PinSnapshotStore.Recovery RecoveryState() => new(
+    PinId, "Image", "", window.AppWindow.Position.X, window.AppWindow.Position.Y,
+    window.AppWindow.Size.Width, window.AppWindow.Size.Height, collapsed, passThrough, grouped,
+    expandedClientSize?.Width, expandedClientSize?.Height, excludeBoxes);
+
+  internal void RestoreGeometry(Features.Pins.PinSnapshotStore.Recovery recovery)
+  {
+    if (exitFrozen) return;
+    // 显示拓扑变更后保存的绝对坐标可能完全落在当前虚拟桌面外：约束到当前
+    // 工作区并保留至少顶部可拖 band 可见，已有合法坐标（含负值/跨屏）不乱挪。
+    nint restoreHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    int bandPhysical = (int)Math.Ceiling(BandHeightDip * GetDpiForWindow(restoreHandle) / 96.0);
+    window.AppWindow.MoveAndResize(Features.Pins.PinSnapshotStore.ConstrainRestoredGeometry(
+      new RectInt32(recovery.X, recovery.Y, recovery.Width, recovery.Height),
+      Features.Pins.PinSnapshotStore.CurrentWorkAreas(), bandPhysical, 16));
+    SetGrouped(recovery.Grouped);
+    SetCollapsed(recovery.Collapsed);
+    if (recovery.Collapsed)
+    {
+      (int width, int height) = ComputeOriginalClientSize(
+        imageWidth, imageHeight, AvailableClientWidth(), AvailableClientHeight());
+      // Legacy collapsed records have no expanded size; use image geometry, never the narrow band.
+      expandedClientSize = recovery.ExpandedClientWidth is > 0 and <= 32768 &&
+        recovery.ExpandedClientHeight is > 0 and <= 32768
+        ? new SizeInt32(recovery.ExpandedClientWidth.Value, recovery.ExpandedClientHeight.Value)
+        : new SizeInt32(width, height);
+    }
+    SetPassThrough(recovery.PassThrough);
   }
 
   private (Button Topmost, Button OriginalSize, Button Minimize, Button Maximize, Button Close,
@@ -406,6 +612,21 @@ internal sealed class PinnedImageWindow : IDisposable
       Margin = new Thickness(0, 0, 2, 0),
       Spacing = 2,
     };
+    // #238 贴图内编辑入口：静态时进入编辑槽，编辑时确认放弃退出。
+    Button editState = AddBandButton(buttons,
+      new TextBlock { Text = "编辑", FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
+      "编辑贴图", () =>
+    {
+      if (editing)
+      {
+        ConfirmDiscardEditAsync();
+        return Task.CompletedTask;
+      }
+      if (EditRequested is { } request) return request(this);
+      status.Text = "贴图编辑不可用";
+      return Task.CompletedTask;
+    });
+    editButton = editState;
     Button topmost = AddBandButton(buttons, topmostIcon, "取消置顶", () =>
     {
       ToggleTopmost();
@@ -428,8 +649,7 @@ internal sealed class PinnedImageWindow : IDisposable
     Button close = AddBandButton(buttons,
       new FontIcon { Glyph = ChromeCloseGlyph, FontSize = 14 }, "关闭", () =>
     {
-      window.Close();
-      return Task.CompletedTask;
+      return RequestCloseAsync();
     });
     // 小图窗口窄于五键时顶部条可横向滚动，不放大图片显示比例。
     var scroller = new ScrollViewer
@@ -452,28 +672,33 @@ internal sealed class PinnedImageWindow : IDisposable
     return (topmost, originalSize, minimize, maximize, close, more);
   }
 
+  private async Task PrepareTextAsync()
+  {
+    long generation = textGeneration;
+    status.Text = "正在准备文字层";
+    RecognitionTextLayerState? prepared = await prepareText();
+    if (disposed || generation != textGeneration) return;
+    if (prepared is not null) Update(prepared, detached: true);
+  }
+
+  internal Task SmokePrepareTextAsync() => PrepareTextAsync();
+  internal IReadOnlyList<string> SmokeLayerTexts => layer?.Lines?.Select(line => line.Text).ToArray() ?? [];
+
   private (Button PrepareText, Button CopySelection, Button ZoomIn, Slider Opacity)
     BuildActionsFlyout()
   {
     var panel = new StackPanel { Spacing = 4 };
     var primary = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-    Button prepareText = AddButton(primary, "取字", async () =>
-    {
-      long generation = textGeneration;
-      status.Text = "正在准备文字层";
-      RecognitionTextLayerState? prepared = await this.prepareText();
-      if (disposed || generation != textGeneration) return;
-      if (prepared is not null) Update(prepared, detached: true);
-    });
+    Button prepareText = AddButton(primary, "取字", PrepareTextAsync);
     Button copySelection = AddButton(primary, "复制所选", CopySelectionAsync);
     AddButton(primary, "复制图片", async () =>
     {
-      await platform.CopyImageAsync(image.Path, CancellationToken.None);
+      await platform.CopyImageAsync(CurrentImagePath, CancellationToken.None);
       status.Text = "已复制图片";
     });
     AddButton(primary, "保存", async () =>
     {
-      status.Text = await platform.SaveImageAsync(image.Path, CancellationToken.None)
+      status.Text = await platform.SaveImageAsync(CurrentImagePath, CancellationToken.None)
         ? "已保存图片" : "已取消保存";
     });
     var secondary = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -485,8 +710,123 @@ internal sealed class PinnedImageWindow : IDisposable
     secondary.Children.Add(opacity);
     panel.Children.Add(primary);
     panel.Children.Add(secondary);
+    // #238 交互行：折叠/穿透/编组 + 始终可达的贴图管理入口（穿透恢复）。
+    var tertiary = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+    collapseButton = AddButton(tertiary, "折叠", () =>
+    {
+      CollapseToggleRequested?.Invoke(this);
+      return Task.CompletedTask;
+    });
+    passThroughButton = AddButton(tertiary, "穿透", () =>
+    {
+      PassThroughToggleRequested?.Invoke(this);
+      return Task.CompletedTask;
+    });
+    groupButton = AddButton(tertiary, "编组", () =>
+    {
+      GroupToggleRequested?.Invoke(this);
+      return Task.CompletedTask;
+    });
+    AddButton(tertiary, "贴图管理", () =>
+    {
+      PinManagerRequested?.Invoke();
+      return Task.CompletedTask;
+    });
+    panel.Children.Add(tertiary);
     actionsFlyout.Content = panel;
     return (prepareText, copySelection, zoomIn, opacity);
+  }
+
+  private Button? collapseButton;
+  private Button? passThroughButton;
+  private Button? groupButton;
+  private bool grouped;
+
+  internal bool Collapsed => collapsed;
+  internal bool PassThrough => passThrough;
+  internal bool Grouped => grouped;
+
+  /// <summary>折叠/展开：收起为把手条高度；展开恢复折叠前客户区尺寸。</summary>
+  internal void SetCollapsed(bool value)
+  {
+    if (disposed || exitFrozen || collapsed == value) return;
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    if (value)
+    {
+      if (IsZoomed(handle)) presenter.Restore();
+      if (!GetClientRect(handle, out RectL client)) return;
+      expandedClientSize = new SizeInt32(client.Right - client.Left, client.Bottom - client.Top);
+      uint dpi = GetDpiForWindow(handle);
+      int bandPhysical = (int)Math.Ceiling(BandHeightDip * dpi / 96.0);
+      ResizePhysicalClient(new SizeInt32(expandedClientSize.Value.Width, bandPhysical));
+      collapsed = true;
+      status.Text = "已折叠；可从更多菜单展开";
+    }
+    else
+    {
+      (int restoreWidth, int restoreHeight) = ComputeOriginalClientSize(
+        imageWidth, imageHeight, AvailableClientWidth(), AvailableClientHeight());
+      SizeInt32 target = expandedClientSize ?? new SizeInt32(restoreWidth, restoreHeight);
+      ResizePhysicalClient(target);
+      collapsed = false;
+    }
+    SyncInteractionButtons();
+  }
+
+  private void ResizePhysicalClient(SizeInt32 target)
+  {
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    if (!GetWindowRect(handle, out RectL outer) || !GetClientRect(handle, out RectL client))
+      throw new InvalidOperationException("Pin physical bounds are unavailable.");
+    // ResizeClient counts the hidden WinUI title bar on restored windows. Use the actual native frame.
+    window.AppWindow.Resize(new SizeInt32(target.Width + outer.Right - outer.Left - client.Right + client.Left,
+      target.Height + outer.Bottom - outer.Top - client.Bottom + client.Top));
+  }
+
+  /// <summary>穿透：点击穿过贴图；恢复仅经管理入口或其他贴图菜单。</summary>
+  internal void SetPassThrough(bool value)
+  {
+    if (disposed || exitFrozen || passThrough == value) return;
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    long style = (long)GetWindowLongPtrW(handle, GwlExStyle);
+    long target = value ? style | WsExTransparent : style & ~WsExTransparent;
+    _ = SetWindowLongPtrW(handle, GwlExStyle, (nint)target);
+    passThrough = value;
+    status.Text = value
+      ? "已穿透：点击穿过贴图；可从其他贴图的“贴图管理”或托盘恢复"
+      : "已恢复可点击";
+    SyncInteractionButtons();
+  }
+
+  /// <summary>编组成员标记（同步移动由 MainWindow 按组分发）。</summary>
+  internal void SetGrouped(bool value)
+  {
+    if (exitFrozen || grouped == value) return;
+    grouped = value;
+    status.Text = value ? "已加入编组：拖动任一成员同步移动" : "已退出编组";
+    SyncInteractionButtons();
+  }
+
+  private void SyncInteractionButtons()
+  {
+    if (collapseButton is { } collapse)
+    {
+      string label = collapsed ? "展开" : "折叠";
+      collapse.Content = label;
+      AutomationProperties.SetName(collapse, label);
+    }
+    if (passThroughButton is { } pass)
+    {
+      string label = passThrough ? "取消穿透" : "穿透";
+      pass.Content = label;
+      AutomationProperties.SetName(pass, label);
+    }
+    if (groupButton is { } group)
+    {
+      string label = grouped ? "取消编组" : "编组";
+      group.Content = label;
+      AutomationProperties.SetName(group, label);
+    }
   }
 
   private void ToggleTopmost()
@@ -577,6 +917,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void OnBandPointerPressed(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     var point = args.GetCurrentPoint(band);
     if (!point.Properties.IsLeftButtonPressed) return;
     if (!TryGetCursorLocation(out Windows.Foundation.Point origin)) return;
@@ -589,6 +930,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   private void OnBandPointerMoved(object sender, PointerRoutedEventArgs args)
   {
+    if (exitFrozen) return;
     if (dragOrigin is not { } origin || !TryGetCursorLocation(out Windows.Foundation.Point current))
       return;
     double deltaX = current.X - origin.X;
@@ -601,8 +943,19 @@ internal sealed class PinnedImageWindow : IDisposable
       checked(bounds.Left + (int)Math.Round(deltaX)),
       checked(bounds.Top + (int)Math.Round(deltaY)),
       0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+    // #238 编组同步移动：同组成员跟随同一物理位移。
+    MovedDelta?.Invoke((int)Math.Round(deltaX), (int)Math.Round(deltaY));
     args.Handled = true;
   }
+
+  /// <summary>#238 编组同步移动通知：携带本窗口已应用的物理位移。</summary>
+  internal event Action<int, int>? MovedDelta;
+  /// <summary>#238 穿透/折叠/编组切换请求（由 MainWindow 持有状态）。</summary>
+  internal event Action<PinnedImageWindow>? PassThroughToggleRequested;
+  internal event Action<PinnedImageWindow>? CollapseToggleRequested;
+  internal event Action<PinnedImageWindow>? GroupToggleRequested;
+  /// <summary>#238 打开贴图管理入口（始终可达的穿透恢复路径）。</summary>
+  internal event Action? PinManagerRequested;
 
   private void OnBandPointerReleased(object sender, PointerRoutedEventArgs args)
   {
@@ -631,6 +984,11 @@ internal sealed class PinnedImageWindow : IDisposable
 
   public async Task ShowAsync()
   {
+    if (SmokeFailNextShow)
+    {
+      SmokeFailNextShow = false;
+      throw new InvalidOperationException("smoke injected WebView startup failure");
+    }
     window.Activate();
     await view.EnsureCoreWebView2Async();
     if (disposed) return;
@@ -643,9 +1001,212 @@ internal sealed class PinnedImageWindow : IDisposable
     core.NavigationStarting += OnNavigationStarting;
     core.NavigationCompleted += OnNavigationCompleted;
     core.AddWebResourceRequestedFilter(imageUrl, CoreWebView2WebResourceContext.Image);
+    registeredImageUrl = imageUrl;
+    RecordFilterEvent(imageUrl, true);
     core.WebResourceRequested += OnImageRequested;
     loaded = true;
     Render();
+  }
+
+  // ---- #238 贴图内编辑：独立授权 WebView 覆盖层 + 单槽生命周期。 ----
+
+  /// <summary>进入编辑态：宿主已建立 pinEdit 会话后由协调器调用。</summary>
+  internal async Task EnterEditModeAsync(
+    VibeOCR.App.Workbench.IWorkbenchApplication application,
+    WorkbenchResourceBroker resourceBroker,
+    WorkbenchAnnotationStore annotations,
+    VibeOCR.App.Web.WorkbenchProjectStore projectStore,
+    string assetFolder, Guid editSessionId)
+  {
+    editingSessionId = editSessionId;
+    if (disposed || editing) return;
+    try
+    {
+      editing = true;
+      SetCollapsed(false);
+      SetPassThrough(false);
+      beforeEditSize = window.AppWindow.Size;
+      RectInt32 work = DisplayArea.GetFromWindowId(window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+      window.AppWindow.Resize(new SizeInt32(Math.Min(work.Width, Math.Max(800, window.AppWindow.Size.Width)),
+        Math.Min(work.Height, Math.Max(600, window.AppWindow.Size.Height))));
+      SyncEditButton();
+      status.Text = "贴图编辑中：完成后点击工具栏“完成贴图”";
+      var overlay = new WebView2 { Margin = new Thickness(0, BandHeightDip, 0, 0) };
+      editorView = overlay;
+      Grid.SetRow(overlay, 0);
+      overlay.VerticalAlignment = VerticalAlignment.Stretch;
+      overlay.HorizontalAlignment = HorizontalAlignment.Stretch;
+      // 编辑层覆盖静态图（含 band 之下全部区域）；band 保持在最上层可拖动/退出。
+      overlay.SetValue(Canvas.ZIndexProperty, 1);
+      band.SetValue(Canvas.ZIndexProperty, 2);
+      statusChip.SetValue(Canvas.ZIndexProperty, 3);
+      root.Children.Add(overlay);
+      if (SmokeEditorSetupStep is { } setup)
+      {
+        SmokeEditorSetupStep = null;
+        setup();
+      }
+      var host = new VibeOCR.App.Web.WebWorkbenchHost(
+        application, resourceBroker, annotations,
+        applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit,
+        projectStore: projectStore, pinEditHost: true);
+      editorSnapshotAcknowledged = async () =>
+      {
+        if (SnapshotConfirmed is { } confirmed) await confirmed(this, editSessionId);
+      };
+      host.PinSnapshotAcknowledged += editorSnapshotAcknowledged;
+      host.ProtocolViolation += error =>
+        VibeOCR.App.Services.AppLog.Error("Pin editor bridge rejected a message", error);
+      host.RecoveryRequired += () =>
+      {
+        if (!disposed && IsEditingSession(editSessionId))
+        {
+          status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
+        }
+      };
+      host.PinSnapshotReceiptLost += sourceSession =>
+      {
+        if (!disposed && sourceSession == editSessionId && IsEditingSession(editSessionId))
+          SnapshotReceiptLost?.Invoke(this, editSessionId);
+      };
+      editorHost = host;
+      await overlay.EnsureCoreWebView2Async();
+      if (disposed || !editing)
+      {
+        await TeardownEditorAsync();
+        return;
+      }
+      overlay.CoreWebView2.Settings.AreDevToolsEnabled = false;
+      await host.InitializeAsync(overlay, assetFolder);
+    }
+    catch (Exception error)
+    {
+      VibeOCR.App.Services.AppLog.Error("Pin editor initialization failed", error);
+      await ExitEditModeAsync();
+      status.Text = "贴图编辑器启动失败，请重试";
+      throw;
+    }
+  }
+
+  /// <summary>退出编辑态：applied=true 前调用方需先 ApplySnapshot 换装。</summary>
+  internal async Task ExitEditModeAsync(Guid? sourceSession = null)
+  {
+    if (!editing || sourceSession is { } expected && editingSessionId != expected) return;
+    Guid exiting = editingSessionId;
+    SizeInt32? previousSize = beforeEditSize;
+    beforeEditSize = null;
+    await TeardownEditorAsync();
+    if (editing || editingSessionId != exiting) return;
+    if (previousSize is { } size && !disposed) window.AppWindow.Resize(size);
+    if (!disposed)
+    {
+      status.Text = "贴图编辑已结束";
+    }
+  }
+
+  /// <summary>应用快照：显示源换为 owned PNG，尺寸/会话身份重绑，
+  /// 旧文字层失效；退出最大化时按新像素恢复 1:1 客户区。</summary>
+  internal async Task ApplySnapshotAsync(string ownedPngPath, int width, int height, Guid newSessionId,
+    IReadOnlyList<WorkbenchExclusionBox> snapshotExclusions)
+  {
+    if (disposed) return;
+    ownedImagePath = ownedPngPath;
+    imageWidth = width;
+    imageHeight = height;
+    sessionId = newSessionId;
+    revision = 0;
+    imageUrl = "https://pin.vibeocr/image.png";
+    excludeBoxes = snapshotExclusions;
+    layer = null;
+    textGeneration++;
+    oldSnapshot = false;
+    if (SmokeSnapshotDisplayStep is { } probe)
+    {
+      SmokeSnapshotDisplayStep = null;
+      await probe();
+    }
+    RebuildStageScaleScript();
+    if (core is { } current && registeredImageUrl != imageUrl)
+    {
+      // 移除真正注册过的旧 URI（与 Add 同参同 context），再注册新 URI；
+      // 同 URI 重复换装为无操作，不累积过滤器。
+      if (registeredImageUrl is { } previous)
+      {
+        current.RemoveWebResourceRequestedFilter(previous, CoreWebView2WebResourceContext.Image);
+        RecordFilterEvent(previous, false);
+      }
+      current.AddWebResourceRequestedFilter(imageUrl, CoreWebView2WebResourceContext.Image);
+      registeredImageUrl = imageUrl;
+      RecordFilterEvent(imageUrl, true);
+    }
+    if (presenter.State == OverlappedPresenterState.Maximized) presenter.Restore();
+    (int availableWidth, int availableHeight) = ComputeAvailableClientSize();
+    (int clientWidth, int clientHeight) = ComputeOriginalClientSize(
+      imageWidth, imageHeight, availableWidth, availableHeight);
+    window.AppWindow.ResizeClient(new SizeInt32(clientWidth, clientHeight));
+    SyncMaximizeButton();
+    if (loaded)
+    {
+      await view.ExecuteScriptAsync(
+        $"document.body.style.zoom='{zoom.ToString(CultureInfo.InvariantCulture)}'");
+      Render();
+    }
+  }
+
+  internal void ReportSnapshotDisplayFailure()
+  {
+    if (!disposed) status.Text = "贴图已保存，但显示更新失败；可重新进入编辑或关闭后重新打开。";
+  }
+
+  private void RebuildStageScaleScript()
+  {
+    stageScaleScript =
+      "(()=>{const s=document.getElementById('stage');" +
+      "if(s)s.style.width=(" + imageWidth.ToString(CultureInfo.InvariantCulture) +
+      "/window.devicePixelRatio)+'px';})();";
+    appliedStageDpi = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(window));
+  }
+
+  private void ConfirmDiscardEditAsync() => _ = PrepareEditExitAsync();
+
+  private async Task TeardownEditorAsync()
+  {
+    editing = false;
+    SyncEditButton();
+    WebView2? overlay = editorView;
+    editorView = null;
+    VibeOCR.App.Web.WebWorkbenchHost? host = editorHost;
+    editorHost = null;
+    editorSnapshotAcknowledged = null;
+    if (host is not null)
+    {
+      try { await host.DisposeAsync(); }
+      catch (Exception error)
+      {
+        VibeOCR.App.Services.AppLog.Error("Pin editor host disposal failed", error);
+      }
+    }
+    if (overlay is not null)
+    {
+      root.Children.Remove(overlay);
+      try { overlay.Close(); }
+      catch (Exception error)
+      {
+        VibeOCR.App.Services.AppLog.Error("Pin editor WebView close failed", error);
+      }
+    }
+  }
+
+  private void SyncEditButton()
+  {
+    if (editButton is not { } button) return;
+    if (button.Content is TextBlock label)
+    {
+      label.Text = editing ? "退出编辑" : "编辑";
+    }
+    string name = editing ? "退出编辑" : "编辑贴图";
+    AutomationProperties.SetName(button, name);
+    ToolTipService.SetToolTip(button, editing ? "放弃更改并退出编辑" : "编辑贴图");
   }
 
   private static void OnNewWindowRequested(CoreWebView2 sender,
@@ -741,7 +1302,7 @@ internal sealed class PinnedImageWindow : IDisposable
     try
     {
       if (disposed) return;
-      StorageFile file = await StorageFile.GetFileFromPathAsync(image.Path);
+      StorageFile file = await StorageFile.GetFileFromPathAsync(CurrentImagePath);
       if (disposed) return;
       var stream = await file.OpenReadAsync();
       if (disposed)
@@ -895,6 +1456,7 @@ internal sealed class PinnedImageWindow : IDisposable
     textGeneration++;
     loaded = false;
     window.AppWindow.Changed -= OnAppWindowChanged;
+    window.AppWindow.Closing -= OnPinWindowClosing;
     if (core is { } current)
     {
       current.NewWindowRequested -= OnNewWindowRequested;
@@ -912,14 +1474,34 @@ internal sealed class PinnedImageWindow : IDisposable
       catch (Exception error) { AppLog.Error("Pinned image stream close failed", error); }
     }
     responseStreams.Clear();
+    // 仅初始临时 annotation 在此删除；owned 存储路径由 store 清理负责。
     image.Dispose();
+    // 编辑层异步拆除：fire-and-forget，不阻塞窗口销毁。
+    _ = TeardownForDisposeAsync();
     Closed?.Invoke(this);
   }
 
-  public void Close()
+  private async Task TeardownForDisposeAsync()
   {
-    if (!disposed) window.Close();
+    try { await TeardownEditorAsync(); }
+    catch (Exception error)
+    {
+      AppLog.Error("Pin editor teardown failed", error);
+    }
   }
+
+  public void Close() => _ = RequestCloseAsync();
+
+  private async Task RequestCloseAsync()
+  {
+    if (disposed || exitFrozen) return;
+    if (editing && !closingAfterEditDecision && !await PrepareEditExitAsync()) return;
+    if (disposed || exitFrozen) return;
+    closingAfterEditDecision = true;
+    window.Close();
+  }
+
+  internal void Activate() => window.Activate();
 
   private void ApplyWindowOpacity(double opacity)
   {

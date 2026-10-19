@@ -107,6 +107,7 @@ import {
   annotationPaths,
   hitStrokePaths,
 } from "./annotationStrokeGeometry";
+import { BRIDGE_VERSION, ChromeWebViewTransport } from "../bridge/client";
 import { uploadAnnotatedImage } from "./annotationHandoff";
 import {
   buildContributionState,
@@ -599,7 +600,7 @@ export interface InpaintDrawLayer {
 /** 编辑器发出的会话/导出命令 scope：同一命令形状在两个宿主 feature 上
  * 等价实现（非 scene 图片编辑页发 imageEdit.*，识别面与 scene 发
  * recognition.*，宿主命令约定同步演进）。 */
-export type EditorCommandScope = "recognition" | "imageEdit";
+export type EditorCommandScope = "recognition" | "imageEdit" | "pinEdit";
 
 /** 编辑器命令后缀：与 AppActionType 中两个 scope 的同名后缀一致。 */
 type EditorCommandSuffix =
@@ -657,6 +658,24 @@ const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
       ackImport: "imageEdit.ackImport",
       rejectImport: "imageEdit.rejectImport",
       releaseAssets: "imageEdit.releaseAssets",
+    },
+    // #238 贴图内编辑：宿主只实现真实消费者动作（C6）；映射保持全量
+    // 类型形状，未消费动作在 pin 模式 UI 不可达且宿主 fail-closed 拒绝。
+    pinEdit: {
+      notifyScreenshotRevision: "pinEdit.notifyScreenshotRevision",
+      closeScreenshotSession: "pinEdit.closeScreenshotSession",
+      copyScreenshotImage: "pinEdit.copyScreenshotImage",
+      saveScreenshotImage: "pinEdit.saveScreenshotImage",
+      pinScreenshotImage: "pinEdit.pinScreenshotImage",
+      recognizeScreenshotImage: "pinEdit.recognizeScreenshotImage",
+      prepareScreenshotTextLayer: "pinEdit.prepareScreenshotTextLayer",
+      cancelScreenshotTextLayer: "pinEdit.cancelScreenshotTextLayer",
+      copyScreenshotSelection: "pinEdit.copyScreenshotSelection",
+      copyAnnotatedImage: "pinEdit.copyAnnotatedImage",
+      saveAnnotatedImage: "pinEdit.saveAnnotatedImage",
+      ackImport: "pinEdit.ackImport",
+      rejectImport: "pinEdit.rejectImport",
+      releaseAssets: "pinEdit.releaseAssets",
     },
   };
 
@@ -730,8 +749,12 @@ interface ImageCanvasEditorProps {
   /** 工具集用途：默认 full；单次识别面传 recognition 精简为
    * 去水印/旋转/屏蔽三类处理工具。 */
   readonly toolset?: EditorToolset;
-  /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit。 */
+  /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit；
+   * 贴图内编辑传 pinEdit。 */
   readonly commandScope?: EditorCommandScope;
+  /** #238 贴图内编辑模式：主排以“完成贴图”取代“保存工程”，隐藏
+   * 钉图/识别入口；会话命令走 pinEdit.*。 */
+  readonly pinSnapshotApply?: boolean;
   /** 左侧校对面数据：冻结参考图（宿主 state.resultImage，绝不用会话基准
    * 图冒充）+ 结果行框与行编辑闭环。提供且 proofreadActive 时，同一图片
    * 区显示校对层；编辑画布仅隐藏（display:none），编辑历史与未提交状态
@@ -1131,6 +1154,7 @@ export function ImageCanvasEditor({
   onRecognitionSubmitted,
   toolset = "full",
   commandScope = "recognition",
+  pinSnapshotApply = false,
   proofread,
   proofreadActive = false,
 }: ImageCanvasEditorProps) {
@@ -1668,7 +1692,7 @@ export function ImageCanvasEditor({
   // 显示空间重建初始 exclude 标记（可编辑/可清除）；仅在基准变化时执行
   // 一次，不推进修订、不触发 OCR，后续修改沿用既有 revision 机制。
   const seededBaselineRef = useRef<string>("");
-  useEffect(() => {
+  useLayoutEffect(() => {
     const seedKey = session ? `${session.sessionId}:${source}` : "";
     if (!seedKey || seededBaselineRef.current === seedKey) return;
     const boxes = session?.excludeBoxes;
@@ -1715,6 +1739,13 @@ export function ImageCanvasEditor({
     historyIndex,
     state,
   ]);
+
+  function initialExclusionsReady(): boolean {
+    return (
+      !session?.excludeBoxes?.length ||
+      seededBaselineRef.current === `${session.sessionId}:${source}`
+    );
+  }
 
   // 画布取色（EyeDropper 不可用时的 fallback）：true 时下一次画布点击只取样颜色。
   const colorPickPendingRef = useRef(false);
@@ -2680,6 +2711,10 @@ export function ImageCanvasEditor({
   ]);
 
   function commit(next: EditorState): boolean {
+    if (!initialExclusionsReady()) {
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试编辑。");
+      return false;
+    }
     try {
       validateBrushBudget(imageRef.current, canvasRef.current, next);
     } catch (error) {
@@ -4895,7 +4930,10 @@ export function ImageCanvasEditor({
 
   /** 多出口共用的安全导出：上传归来后校验未变；变化则不发送。
    * bake=true 时把排除区写入不透明白色像素（识别输入与显式屏蔽副本）。 */
-  async function exportFinalImageIfUnchanged(bakeExclusions = false): Promise<
+  async function exportFinalImageIfUnchanged(
+    bakeExclusions = false,
+    forcePng = false,
+  ): Promise<
     | {
         resourceUri: string;
         sessionId?: string;
@@ -4911,7 +4949,7 @@ export function ImageCanvasEditor({
     }
     const frozen = freezeExportContext();
     const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
-      format: outputFormat,
+      format: forcePng ? "image/png" : outputFormat,
       quality: jpegQuality,
       inpaint: { patches: appliedInpaintPatches() },
       bakeExclusions,
@@ -5015,6 +5053,100 @@ export function ImageCanvasEditor({
     }
   }
 
+  /** #233/#238 共享：已应用补丁的预算前置 + 逐块 PNG 编码。失败以既有
+   * 文案抛出（保存工程与完成贴图同一套边界）。 */
+  async function encodeAppliedProjectPatches(): Promise<
+    {
+      id: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      png: string;
+    }[]
+  > {
+    const applied = appliedInpaintPatches();
+    // entry 总预算前置（encode/upload/picker 前）：manifest+source+唯一
+    // 引用资产+补丁 ≤128；共享 asset 引用只计一次（与宿主同界）。
+    const referencedAssetCount = countReferencedAssets(state.marks);
+    const patchBudget = patchEntryBudget(referencedAssetCount);
+    if (applied.length > patchBudget) {
+      throw new Error(
+        `工程包含 ${referencedAssetCount} 张嵌入图片和 ${applied.length} 块修补，合计最多 ${patchBudget} 块修补，请减少图片对象或修补后再保存。`,
+      );
+    }
+    const encoded: {
+      id: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      png: string;
+    }[] = [];
+    let totalPixels = 0;
+    let totalBytes = 0;
+    for (const { rect, canvas: patchCanvas } of applied) {
+      if (encoded.length >= patchBudget) {
+        throw new Error(
+          `工程包含 ${referencedAssetCount} 张嵌入图片，修补最多 ${patchBudget} 块，请减少图片对象或修补后再保存。`,
+        );
+      }
+      const pixels = rect.width * rect.height;
+      if (pixels > PROJECT_PATCH_MAX_PIXELS) {
+        throw new Error("单块修补超过 1MP 像素上限，无法保存为工程。");
+      }
+      totalPixels += pixels;
+      if (totalPixels > PROJECT_PATCH_TOTAL_PIXELS) {
+        throw new Error("修补总像素超过 8MP 上限，无法保存为工程。");
+      }
+      const blob = await new Promise<Blob | null>((resolve) =>
+        patchCanvas.toBlob(resolve, "image/png"),
+      );
+      if (!blob) throw new Error("工程补丁编码失败，请重试。");
+      totalBytes += blob.size;
+      if (totalBytes > PROJECT_PATCH_TOTAL_BYTES) {
+        throw new Error("修补编码总量超过 64MiB 上限，无法保存为工程。");
+      }
+      encoded.push({
+        id: rect.id,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        png: arrayBufferToBase64(await blob.arrayBuffer()),
+      });
+    }
+    return encoded;
+  }
+
+  /** #233/#238 共享：组装 /__project 贡献（canvas+state+补丁）并校验状态预算。 */
+  async function buildProjectContributionPayload(): Promise<
+    ReturnType<typeof buildContributionState> & {
+      patches: {
+        id: number;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        png: string;
+      }[];
+    }
+  > {
+    const canvas = canvasRef.current;
+    if (!canvas) throw new Error("画布尚未就绪，请重试。");
+    const payload = {
+      ...buildContributionState(canvasSize(canvas), state),
+      patches: await encodeAppliedProjectPatches(),
+    };
+    const stateBytes = contributionStateBytes(payload);
+    if (stateBytes > PROJECT_STATE_BUDGET_BYTES) {
+      throw new Error(
+        "工程状态超出 256KiB 上限（对象过多），无法保存；可拆分后重试。",
+      );
+    }
+    return payload;
+  }
+
   /** #233 保存工程：采集逻辑 canvas+可编辑 state+已应用补丁 PNG，经
    * /__project 窄上传贡献后发送保存命令；宿主 picker 授权并原子写，
    * 失败/取消保留旧文件与当前画布。 */
@@ -5031,67 +5163,7 @@ export function ImageCanvasEditor({
     const frozenRevision = contentRevisionRef.current;
     try {
       setOperationMessage("正在采集工程内容……");
-      const applied = appliedInpaintPatches();
-      // entry 总预算前置（encode/upload/picker 前）：manifest+source+唯一
-      // 引用资产+补丁 ≤128；共享 asset 引用只计一次（与宿主同界）。
-      const referencedAssetCount = countReferencedAssets(state.marks);
-      const patchBudget = patchEntryBudget(referencedAssetCount);
-      if (applied.length > patchBudget) {
-        throw new Error(
-          `工程包含 ${referencedAssetCount} 张嵌入图片和 ${applied.length} 块修补，合计最多 ${patchBudget} 块修补，请减少图片对象或修补后再保存。`,
-        );
-      }
-      const encoded: {
-        id: number;
-        x: number;
-        y: number;
-        width: number;
-        height: number;
-        png: string;
-      }[] = [];
-      let totalPixels = 0;
-      let totalBytes = 0;
-      for (const { rect, canvas: patchCanvas } of applied) {
-        if (encoded.length >= patchBudget) {
-          throw new Error(
-            `工程包含 ${referencedAssetCount} 张嵌入图片，修补最多 ${patchBudget} 块，请减少图片对象或修补后再保存。`,
-          );
-        }
-        const pixels = rect.width * rect.height;
-        if (pixels > PROJECT_PATCH_MAX_PIXELS) {
-          throw new Error("单块修补超过 1MP 像素上限，无法保存为工程。");
-        }
-        totalPixels += pixels;
-        if (totalPixels > PROJECT_PATCH_TOTAL_PIXELS) {
-          throw new Error("修补总像素超过 8MP 上限，无法保存为工程。");
-        }
-        const blob = await new Promise<Blob | null>((resolve) =>
-          patchCanvas.toBlob(resolve, "image/png"),
-        );
-        if (!blob) throw new Error("工程补丁编码失败，请重试。");
-        totalBytes += blob.size;
-        if (totalBytes > PROJECT_PATCH_TOTAL_BYTES) {
-          throw new Error("修补编码总量超过 64MiB 上限，无法保存为工程。");
-        }
-        encoded.push({
-          id: rect.id,
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          png: arrayBufferToBase64(await blob.arrayBuffer()),
-        });
-      }
-      const payload = {
-        ...buildContributionState(canvasSize(canvas), state),
-        patches: encoded,
-      };
-      const stateBytes = contributionStateBytes(payload);
-      if (stateBytes > PROJECT_STATE_BUDGET_BYTES) {
-        throw new Error(
-          "工程状态超出 256KiB 上限（对象过多），无法保存；可拆分后重试。",
-        );
-      }
+      const payload = await buildProjectContributionPayload();
       setOperationMessage("正在上传工程贡献……");
       const contributeId = await uploadProjectContribution(payload);
       if (
@@ -5116,6 +5188,141 @@ export function ImageCanvasEditor({
       setOperationMessage(
         error instanceof Error ? error.message : "工程保存失败，请重试。",
       );
+    } finally {
+      exportInProgressRef.current = false;
+      setIsExporting(false);
+    }
+  }
+
+  /** #238 完成贴图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
+   * 合成 PNG（换装显示）一次上传，宿主原子写入 owned 快照后才回 ack；
+   * 会话已变化/超限时保留编辑现场可重试。 */
+  const pinSavePromiseRef = useRef<
+    { sourceSession: string | undefined; promise: Promise<boolean> } | undefined
+  >(undefined);
+  const pinSaveRef =
+    useRef<(requestId?: string) => Promise<boolean>>(undefined);
+  pinSaveRef.current = applyPinSnapshot;
+  useEffect(() => {
+    if (!pinSnapshotApply) return;
+    const transport = ChromeWebViewTransport.fromWindow(window);
+    return transport?.subscribe((value) => {
+      if (typeof value !== "object" || value === null) return;
+      const request = value as {
+        version?: unknown;
+        kind?: unknown;
+        id?: unknown;
+        type?: unknown;
+        payload?: { sessionId?: unknown };
+      };
+      if (
+        request.version === BRIDGE_VERSION &&
+        request.kind === "request" &&
+        typeof request.id === "string" &&
+        request.id.length > 0 &&
+        request.type === "pinEdit.requestSnapshot" &&
+        request.payload?.sessionId === sessionIdRef.current
+      )
+        void pinSaveRef.current?.(request.id);
+    });
+  }, [pinSnapshotApply]);
+
+  function applyPinSnapshot(requestId?: string): Promise<boolean> {
+    let pending = pinSavePromiseRef.current;
+    if (!pending) {
+      pending = {
+        sourceSession: sessionIdRef.current,
+        promise: applyPinSnapshotCore().finally(() => {
+          pinSavePromiseRef.current = undefined;
+        }),
+      };
+      pinSavePromiseRef.current = pending;
+    }
+    // Native requests may join a button save already in progress; each echoes its own request ID.
+    const { sourceSession, promise } = pending;
+    return promise.then((ok) => {
+      ChromeWebViewTransport.fromWindow(window)?.postMessage({
+        version: BRIDGE_VERSION,
+        kind: "event",
+        id: requestId ?? crypto.randomUUID(),
+        type: "pinEdit.snapshotResult",
+        payload: { sessionId: sourceSession, ok },
+      });
+      return ok;
+    });
+  }
+
+  async function applyPinSnapshotCore(): Promise<boolean> {
+    if (
+      !session ||
+      !pinSnapshotApply ||
+      exportInProgressRef.current ||
+      textEdit
+    )
+      return false;
+    if (interactionLocked) {
+      // 原生 requestSnapshot 与按钮保存共用同一就绪门：工程恢复挂起
+      // （含 manifest/assets 待装、换手）时画布不完整，不得上传/提交截断
+      // 用户已保存工程；失败 ack 立即完成，恢复完成后可重试。
+      setOperationMessage(
+        "工程恢复尚未完成，已保留原工程；请等待恢复完成后重试。",
+      );
+      return false;
+    }
+    if (!initialExclusionsReady()) {
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成贴图。");
+      return false;
+    }
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas || !image.naturalWidth || !image.naturalHeight) {
+      return false;
+    }
+    exportInProgressRef.current = true;
+    setIsExporting(true);
+    const frozenSession = session.sessionId;
+    const frozenRevision = contentRevisionRef.current;
+    try {
+      const boxes = hostExclusionBoxes();
+      if (!boxes) {
+        setOperationMessage(
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成贴图。",
+        );
+        return false;
+      }
+      setOperationMessage("正在采集贴图内容……");
+      const payload = await buildProjectContributionPayload();
+      setOperationMessage("正在上传贴图内容……");
+      const contributeId = await uploadProjectContribution(payload);
+      // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核。
+      const exported = await exportFinalImageIfUnchanged(false, true);
+      if (
+        !exported?.sessionId ||
+        sessionIdRef.current !== frozenSession ||
+        contentRevisionRef.current !== frozenRevision
+      ) {
+        setOperationMessage("上传期间内容或会话已变化，本次未完成；请重试。");
+        return false;
+      }
+      const applied = await actions.run({
+        type: "pinEdit.applySnapshot",
+        excludeBoxes: boxes,
+        contributeId,
+        resourceUri: exported.resourceUri,
+        sessionId: frozenSession,
+        revision: frozenRevision,
+      });
+      setOperationMessage(
+        applied
+          ? "已完成贴图编辑；贴图已更新。"
+          : "完成未生效：会话已失效或格式/预算不符，请查看提示后重试。",
+      );
+      return applied;
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "完成贴图失败，请重试。",
+      );
+      return false;
     } finally {
       exportInProgressRef.current = false;
       setIsExporting(false);
@@ -5164,7 +5371,8 @@ export function ImageCanvasEditor({
       }
       // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
-      const exported = await exportFinalImageIfUnchanged(false);
+      // 首次贴图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
+      const exported = await exportFinalImageIfUnchanged(false, true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: commands.pinScreenshotImage,
@@ -5812,10 +6020,16 @@ export function ImageCanvasEditor({
 
   const textLayerHint = textLayerStatusLabel(textLayer);
 
+  function closeSession(): Promise<boolean> {
+    if (pinSnapshotApply && !window.confirm("放弃当前更改并恢复上次贴图？"))
+      return Promise.resolve(false);
+    return actions.run({ type: commands.closeScreenshotSession });
+  }
+
   // 容器外的工作台控件也可调用文档命令；ref 保留最新回调。
   const documentCommandRef = useRef({
-    save: saveAnnotatedImage,
-    close: () => actions.run({ type: commands.closeScreenshotSession }),
+    save: pinSnapshotApply ? applyPinSnapshot : saveAnnotatedImage,
+    close: closeSession,
     canExport,
     isExporting,
     hasSession: !!session,
@@ -5823,8 +6037,8 @@ export function ImageCanvasEditor({
   });
   useEffect(() => {
     documentCommandRef.current = {
-      save: saveAnnotatedImage,
-      close: () => actions.run({ type: commands.closeScreenshotSession }),
+      save: pinSnapshotApply ? applyPinSnapshot : saveAnnotatedImage,
+      close: closeSession,
       canExport,
       isExporting,
       hasSession: !!session,
@@ -5872,6 +6086,7 @@ export function ImageCanvasEditor({
   // 普通页仍是单条工具栏+底部 footer，两种布局共用片段，可访问名称与
   // 命令不随布局变化。
   const toolButtons = TOOLSETS[toolset]
+    .filter((candidate) => !pinSnapshotApply || candidate !== "textSelect")
     // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
     .filter((value) => !(captureStyle && value === "crop"))
     .map((value) => {
@@ -7098,7 +7313,19 @@ export function ImageCanvasEditor({
       保存工程
     </Button>
   );
-  const pinButton = session && (
+  const applyPinSnapshotButton = session && pinSnapshotApply && (
+    <Button
+      title="完成贴图"
+      aria-label="完成贴图"
+      appearance="primary"
+      size="small"
+      disabled={!canExport || isExporting || !!textEdit}
+      onClick={() => void applyPinSnapshot()}
+    >
+      完成贴图
+    </Button>
+  );
+  const pinButton = session && !pinSnapshotApply && (
     <Button
       title="贴图"
       icon={<ToolbarIcon name="pin" />}
@@ -7170,17 +7397,15 @@ export function ImageCanvasEditor({
     ));
   const closeSessionButton = session && (
     <Button
-      title="结束会话"
+      title={pinSnapshotApply ? "放弃更改" : "结束会话"}
       icon={<ToolbarIcon name="exit" />}
-      aria-label="结束会话"
+      aria-label={pinSnapshotApply ? "放弃更改" : "结束会话"}
       appearance="transparent"
       size="small"
       disabled={isExporting}
-      onClick={() =>
-        void actions.run({ type: commands.closeScreenshotSession })
-      }
+      onClick={() => void closeSession()}
     >
-      {captureStyle ? undefined : "结束会话"}
+      {captureStyle ? undefined : pinSnapshotApply ? "放弃更改" : "结束会话"}
     </Button>
   );
   const clearEditsButton = (
@@ -7293,7 +7518,7 @@ export function ImageCanvasEditor({
           !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
         ) {
           event.preventDefault();
-          void actions.run({ type: commands.closeScreenshotSession });
+          void closeSession();
           return;
         }
         if (
@@ -7392,14 +7617,15 @@ export function ImageCanvasEditor({
           {captureStyle ? null : copyExcludedButton}
           {saveAnnotatedButton}
           {captureStyle ? null : saveExcludedButton}
-          {saveProjectButton}
+          {pinSnapshotApply ? null : saveProjectButton}
+          {applyPinSnapshotButton}
           {pinButton}
-          {recognizeButton}
+          {pinSnapshotApply ? null : recognizeButton}
           {closeSessionButton}
           {captureStyle ? null : clearEditsButton}
           {moreActionsMenu}
         </Toolbar>
-        {session && !canRecognize && (
+        {session && !canRecognize && !pinSnapshotApply && (
           <p className="form-note">
             当前宿主未提供图片识别能力；请检查运行环境。
           </p>
