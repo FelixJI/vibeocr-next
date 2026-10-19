@@ -1850,7 +1850,7 @@ public static class WorkbenchBridgeCodec
       batch.CompletedCount,
       batch.FailedCount,
       items = batch.Items ?? [],
-      batch.ExportImage, batch.ExportImageId,
+      batch.ExportImage, batch.ExportImageId, batch.ExportImageError,
       batch.WindowStart,
       engines = batch.Engines ?? [],
       batch.TaskEngine,

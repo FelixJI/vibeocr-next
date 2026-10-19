@@ -194,7 +194,11 @@ public sealed record VibpCompositionCut(string Axis, double Start, double End);
 public sealed record VibpComposition(
   double Margin, string Background, string Color, string EndColor,
   double Shadow, double Radius, string Ratio, string Stitch,
-  IReadOnlyList<string> AssetIds, string? BackgroundAssetId = null, VibpCompositionCut? Cut = null);
+  IReadOnlyList<string> AssetIds,
+  // 可选成员无值时省略字段而非写 null：与 web parseComposition 的
+  // undefined 语义对齐，否则常见仅 margin/color 排版工程重开即被拒。
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BackgroundAssetId = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] VibpCompositionCut? Cut = null);
 
 public sealed record VibpEditorState
 {

@@ -197,6 +197,173 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).toBe(false);
   });
 
+  it("pinEdit 上下文取字快捷键不激活被过滤工具，其余隐藏工具仍可发现", async () => {
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        commandScope="pinEdit"
+        pinSnapshotApply
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        session={{ sessionId: "pin-session", revision: 0 }}
+        showAutoTextPreference={false}
+        editorSettings={{
+          editorPreferences: {
+            ...DEFAULT_EDITOR_PREFERENCES,
+            hidden: ["pen"],
+            shortcuts: { textSelect: "t", pen: "p" },
+          },
+        }}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const rectangle = within(mainRow).getByRole("button", {
+      name: "矩形",
+    });
+    fireEvent.click(rectangle);
+    expect(rectangle.getAttribute("aria-pressed")).toBe("true");
+    const editor = document.querySelector(".canvas-editor")!;
+    // 自定义取字快捷键在 pinEdit 上下文被按钮同源过滤拦下，工具不切换。
+    fireEvent.keyDown(editor, { key: "t" });
+    expect(rectangle.getAttribute("aria-pressed")).toBe("true");
+    // 隐藏菜单同样不提供取字，但被隐藏的画笔仍可发现。
+    fireEvent.click(within(mainRow).getByRole("button", { name: "更多操作" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByRole("menuitem", { name: "取字" })).toBeNull();
+    expect(
+      within(menu).getByRole("menuitem", { name: "画笔" }),
+    ).toBeInTheDocument();
+  });
+
+  it("截图现场裁剪快捷键不激活被过滤的裁剪工具", () => {
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        captureScene={scene}
+        session={{ sessionId: "capture", revision: 0 }}
+        showAutoTextPreference={false}
+        editorSettings={{
+          editorPreferences: {
+            ...DEFAULT_EDITOR_PREFERENCES,
+            shortcuts: { crop: "c" },
+          },
+        }}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const main = within(mainRow);
+    expect(main.queryByRole("button", { name: "裁剪" })).toBeNull();
+    const rectangle = main.getByRole("button", { name: "矩形" });
+    fireEvent.click(rectangle);
+    expect(rectangle.getAttribute("aria-pressed")).toBe("true");
+    const editor = document.querySelector(".canvas-editor")!;
+    fireEvent.keyDown(editor, { key: "c" });
+    expect(rectangle.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("正常上下文隐藏工具仍可经快捷键激活（快捷键机制对照）", () => {
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        source="https://app.vibeocr/__resource/screenshot.bmp"
+        session={{ sessionId: "capture", revision: 0 }}
+        showAutoTextPreference={false}
+        editorSettings={{
+          editorPreferences: {
+            ...DEFAULT_EDITOR_PREFERENCES,
+            hidden: ["pen"],
+            shortcuts: { pen: "p" },
+          },
+        }}
+      />,
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const rectangle = within(mainRow).getByRole("button", {
+      name: "矩形",
+    });
+    fireEvent.click(rectangle);
+    expect(rectangle.getAttribute("aria-pressed")).toBe("true");
+    const editor = document.querySelector(".canvas-editor")!;
+    fireEvent.keyDown(editor, { key: "p" });
+    expect(rectangle.getAttribute("aria-pressed")).toBe("false");
+    // 隐藏工具激活后其属性仍可达，证明“仍可发现”语义未被快捷键破坏。
+    expect(screen.getByLabelText("线条宽度")).toBeInTheDocument();
+  });
+
+  it("超预算排版保存工程被拒且原工作保留", async () => {
+    // F239-R3-05：保存路径与恢复同一 compositionLayout 预算；拒绝时
+    // 不上传贡献、排版/编辑保留可撤销。
+    stubCanvasStack();
+    vi.stubGlobal(
+      "Image",
+      class BigImage {
+        decoding = "async";
+        onload: (() => void) | null = null;
+        naturalWidth = 20000;
+        naturalHeight = 100;
+        private assigned = "";
+        set src(value: string) {
+          this.assigned = value;
+          queueMicrotask(() => this.onload?.());
+        }
+        get src() {
+          return this.assigned;
+        }
+      },
+    );
+    const fetchCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL) => {
+        fetchCalls.push(String(input));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              resourceUri:
+                "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }),
+    );
+    render(
+      <ImageCanvasEditor
+        actions={createActions()}
+        canExport
+        canRecognize
+        source="https://app.vibeocr/__resource/big.png"
+        session={{ sessionId: "capture", revision: 0 }}
+        showAutoTextPreference={false}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/原图 20000×100/)).toBeInTheDocument(),
+    );
+    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
+    const main = within(mainRow);
+    fireEvent.click(main.getByRole("button", { name: "画布排版" }));
+    fireEvent.change(screen.getByLabelText("排版边距", { exact: true }), {
+      target: { value: "10" },
+    });
+    fireEvent.click(main.getByRole("button", { name: "保存工程" }));
+    await waitFor(() =>
+      expect(screen.getByText(/工程未保存：排版输出超限/)).toBeInTheDocument(),
+    );
+    expect(fetchCalls.some((url) => url.includes("/__project"))).toBe(false);
+    // 原工作保留：排版面板仍在，可撤销。
+    expect(
+      screen.getByRole("region", { name: "画布排版属性" }),
+    ).toBeInTheDocument();
+    expect(main.getByRole("button", { name: "撤销" })).toBeEnabled();
+  });
+
   it("composition-only edits clear and reset in the main row, with undo restoring properties", async () => {
     stubCanvasStack();
     render(

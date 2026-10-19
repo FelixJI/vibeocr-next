@@ -5207,6 +5207,25 @@ export function ImageCanvasEditor({
   > {
     const canvas = canvasRef.current;
     if (!canvas) throw new Error("画布尚未就绪，请重试。");
+    // 保存前跑与恢复同一排版最终预算：超限不上传贡献，拒绝时现场保留。
+    if (state.composition) {
+      const image = imageRef.current;
+      if (!image) throw new Error("画布尚未就绪，请重试。");
+      try {
+        compositionLayout(
+          finalOutputSize(image, state, canvasSize(canvas)),
+          state.composition,
+          importAssetsRef.current,
+        );
+      } catch (error) {
+        throw new Error(
+          `工程未保存：排版输出超限（${
+            error instanceof Error ? error.message : "单边≤16384px，总像素≤64MP"
+          }）；当前排版与画布保持不变，可重置排版后重试。`,
+          { cause: error },
+        );
+      }
+    }
     const payload = {
       ...buildContributionState(canvasSize(canvas), state),
       patches: await encodeAppliedProjectPatches(),
@@ -6146,15 +6165,18 @@ export function ImageCanvasEditor({
   const orderedTools = preferences.order.filter((value) =>
     TOOLSETS[toolset].includes(value),
   );
-  const hiddenTools = orderedTools.filter((value) =>
-    preferences.hidden.includes(value),
+  // 按钮上下文可用性：pinEdit 现场不提供取字（文字层由宿主 owned 快照
+  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪）。快捷键
+  // 与隐藏菜单复用同一判断，不让隐藏入口绕过上下文限制。
+  const toolAvailable = (value: string) =>
+    (!pinSnapshotApply || value !== "textSelect") &&
+    !(captureStyle && value === "crop");
+  const hiddenTools = orderedTools.filter(
+    (value) => preferences.hidden.includes(value) && toolAvailable(value),
   );
   const toolButtons = orderedTools
     .filter((value) => !preferences.hidden.includes(value))
-    // pinEdit 现场不提供取字工具：文字层由宿主 owned 快照供给。
-    .filter((candidate) => !pinSnapshotApply || candidate !== "textSelect")
-    // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
-    .filter((value) => !(captureStyle && value === "crop"))
+    .filter(toolAvailable)
     .map((value) => {
       // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
       const icon = TOOL_ICONS[value];
@@ -7590,7 +7612,11 @@ export function ImageCanvasEditor({
           !target.closest("input, textarea, select, [contenteditable=true]")
         ) {
           const selectedTool = shortcutTool(event, preferences);
-          if (selectedTool && TOOLSETS[toolset].includes(selectedTool)) {
+          if (
+            selectedTool &&
+            TOOLSETS[toolset].includes(selectedTool) &&
+            toolAvailable(selectedTool)
+          ) {
             event.preventDefault();
             cancelDrawing();
             setTool(selectedTool);

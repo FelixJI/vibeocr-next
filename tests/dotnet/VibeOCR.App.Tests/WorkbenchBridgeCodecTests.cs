@@ -46,6 +46,29 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   }
 
   [Fact]
+  public void BatchStateSerializesExportImageErrorForWebDecodeUnavailable()
+  {
+    // F239-R3-01：批量图片预设的 decode_unavailable 必须经真实 bridge 进
+    // wire，否则前端等不到状态只能逐项等 15s 超时。
+    var state = new BatchWorkbenchState(false, 2, 0, 1, [])
+    {
+      ExportImageError = "decode_unavailable",
+    };
+    string json = WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(3, "batch", WorkbenchStateChange.Replace, state));
+    using JsonDocument document = JsonDocument.Parse(json);
+    JsonElement batch = document.RootElement.GetProperty("payload").GetProperty("state");
+    Assert.Equal(
+      "decode_unavailable",
+      batch.GetProperty("exportImageError").GetString());
+    string idle = WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(4, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(false, 0, 0, 0, [])));
+    Assert.Contains("\"exportImageError\":null", idle);
+  }
+
+  [Fact]
   public void PdfBlockEditRequiresDocumentSessionAndOldText()
   {
     Guid bridgeSession = Guid.NewGuid();

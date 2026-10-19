@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_COMPOSITION } from "../canvasComposition";
+import { DEFAULT_COMPOSITION, parseComposition } from "../canvasComposition";
+import hostPlainComposition from "./fixtures/host-plain-composition.json";
 import type { EditorState, Mark } from "../annotationGeometry";
 import { validateProjectRestore } from "../ImageCanvasEditor";
 import {
@@ -726,5 +727,29 @@ describe("ack 前预算校验", () => {
     expect(() =>
       validateProjectRestore(image, { width: 900, height: 600 }, huge),
     ).toThrow("超出当前预算");
+  });
+});
+
+describe("真实宿主产物的跨语言 composition roundtrip（F239-R3-03）", () => {
+  it("接受真实 VibpProjectFile 写出的仅 margin/color/ratio 排版 manifest", () => {
+    // 共享 fixture：与 C# 测试
+    // CompositionWithoutOptionalsOmitsNullFieldsForWebParser 用同一文件
+    // （真实 VibpProjectFile.Write 产物，无值可选成员完全省略）；C# 侧
+    // 断言写出物与本 fixture 语义相等。
+    const parsed = parseComposition(hostPlainComposition);
+    expect(parsed).toBeDefined();
+    expect(parsed?.margin).toBe(10);
+    expect(parsed?.background).toBe("solid");
+    expect(parsed?.ratio).toBe("16:9");
+    expect(parsed?.cut).toBeUndefined();
+    expect(parsed?.backgroundAssetId).toBeUndefined();
+    // 根因确证：显式 null（旧 C# 写法）正是重开被拒的断裂点；修复后
+    // 宿主不再写出，web 侧拒绝语义保持不变。
+    expect(() =>
+      parseComposition({ ...hostPlainComposition, cut: null }),
+    ).toThrow("中段裁除数据无效");
+    expect(() =>
+      parseComposition({ ...hostPlainComposition, backgroundAssetId: null }),
+    ).toThrow("工程排版数据无效");
   });
 });
