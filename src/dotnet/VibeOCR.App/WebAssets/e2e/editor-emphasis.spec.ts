@@ -2188,7 +2188,9 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
   // 超额：识别明确拒绝——不上传、不发送命令、明确提示。
   await action(page, "文字识别");
   await expect
-    .poll(() => page.getByText("排除框数量超过宿主上限（64）").count())
+    .poll(() =>
+      page.getByText("排版后的屏蔽区超过 64 个", { exact: false }).count(),
+    )
     .toBeGreaterThan(0);
   await page.waitForTimeout(600);
   expect(uploads.length).toBe(0);
