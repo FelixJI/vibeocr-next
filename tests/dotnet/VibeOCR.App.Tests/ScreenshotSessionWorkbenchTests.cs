@@ -4513,6 +4513,58 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task EnablingDuringPendingSelectionReadinessDoesNotBackfillDisabledCapture()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      byte[] bmp = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      var inference = new ReadinessGatedSubmitClient();
+      var recognition = new RecognitionViewModel(inference,
+        new SelectionActionCaptureInput(ScreenshotSelectionAction.Recognize, "windows_text", bmp));
+      var settings = new SettingsViewModel(inference);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        settings, inferenceAttached: () => true, pinHistory: history);
+      // 捕获时停用：提交前目录/readiness 等待挂起期间经生产命令启用历史，
+      // 不得追溯落盘本次捕获（readiness 等待在生产可达；不预加载目录，
+      // 使提交路径的首次加载即挂起）。
+      inference.HealthGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.completed");
+      Task<WorkbenchCommandOutcome> pending = handler.ExecuteAsync(
+        new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken).AsTask();
+      await UntilAsync(() => inference.HealthCalls == 1);
+      Assert.Null((await handler.ExecuteAsync(
+        new SetPinHistoryEnabledCommand(true), TestContext.Current.CancellationToken)).Error);
+      Assert.True(history.IsEnabled);
+      inference.HealthGate.TrySetResult();
+      // 明确等真正 recognition.completed 终态（录入发生在该终态发布前）。
+      await completed.Task;
+      Assert.Null((await pending.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).Error);
+      Assert.Equal(0, history.Projection(null).Count);
+      Assert.Null(history.Projection(null).Error);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  private sealed class ReadinessGatedSubmitClient : SelectionSubmitClient
+  {
+    public TaskCompletionSource? HealthGate { get; set; }
+    public int HealthCalls { get; private set; }
+
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      // 提交路径的目录加载挂起（测试不预加载，首次调用即提交路径）。
+      HealthCalls++;
+      if (HealthGate is { } gate) await gate.Task;
+      return await base.GetHealthAsync(cancellationToken);
+    }
+  }
+
+  [Fact]
   public async Task EnablingDuringPendingSelectionRecognitionDoesNotBackfillDisabledCapture()
   {
     string root = TemporaryRoot();

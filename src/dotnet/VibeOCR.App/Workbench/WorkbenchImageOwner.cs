@@ -1441,6 +1441,10 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     CancellationToken cancellationToken)
   {
     bool terminalVisible = false;
+    // 捕获被接受即冻结是否录入与 key：方法首个 await（提交前目录/readiness
+    // 等待）之前判定，等待期间启用不追溯落盘，同一 key 贯穿后续消费。
+    string? selectionHistoryKey =
+      pinHistory?.IsEnabled == true ? Guid.NewGuid().ToString("N") : null;
     try
     {
       // 提交前权威目录：与单次/批量/PDF 同一契约；切换窗口返回 false 时
@@ -1474,9 +1478,6 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
       ApplyTaskEngine(modeId!);
       SynchronizeRecognitionMode(requireUsable: true);
-      // 捕获被接受即冻结是否录入与 key：OCR await 期间启用不追溯落盘。
-      string? selectionHistoryKey =
-        pinHistory?.IsEnabled == true ? Guid.NewGuid().ToString("N") : null;
       // 显式识别取代旧截图会话（关闭旧 scene 编辑窗），不新建编辑会话。
       ClearScreenshotSession(recognitionChannel);
       InvalidateScreenshotTextLayer(recognitionChannel);
