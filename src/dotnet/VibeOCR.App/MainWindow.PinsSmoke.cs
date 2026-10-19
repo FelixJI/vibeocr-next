@@ -51,6 +51,8 @@ public sealed partial class MainWindow
   internal async Task VerifyPinsSelfCheckAsync()
   {
     CaptureUiSmokeTrace.Stage("pins.main-ready");
+    Features.Recognition.PinnedImageWindow.SmokeFilterEvents.Clear();
+    Features.Recognition.PinnedImageWindow.SmokeFilterRecording = true;
     await WaitForPinCheckAsync(() => Task.FromResult(webHost.HasSubscription), "Main bridge was not ready.");
     if (commandHandler.InitialStates.OfType<PinEditWorkbenchState>().Single().History is not { Enabled: false })
       throw new InvalidOperationException("History must be available and disabled without an editing session.");
@@ -143,6 +145,7 @@ public sealed partial class MainWindow
       first.SmokeSnapshotDisplayStep = () => Task.FromException(new IOException("Injected static display swap failure."));
       await EnterPinEditAsync(first);
       await WaitForPinEditorAsync(first);
+      PinEditSlot failedDisplaySlot = pinEditing!;
       await RotateSmokePinAsync(first);
       CaptureUiSmokeTrace.Stage("pins.switch-save");
       await EnterPinEditAsync(second);
@@ -150,7 +153,7 @@ public sealed partial class MainWindow
       if (first.Editing || !second.Editing || pinSnapshotStore!.GetSnapshotProjectPath(first.PinId) is null ||
         first.SmokeImageSize != (32, 64)) throw new InvalidOperationException($"Switch did not commit: firstEditing={first.Editing}, secondEditing={second.Editing}, size={first.SmokeImageSize}, project={pinSnapshotStore!.GetSnapshotProjectPath(first.PinId)}, body={await first.SmokeEditorEvaluateAsync("document.body.textContent")}");
 
-      if (pinSnapshotSwap.IsFaulted || !first.SmokeStatus.Contains("显示更新失败") || !pinTextTasks.ContainsKey(oldTextIdentity))
+      if (failedDisplaySlot.Swap?.IsFaulted == true || !first.SmokeStatus.Contains("显示更新失败") || !pinTextTasks.ContainsKey(oldTextIdentity))
         throw new InvalidOperationException("Committed display failure lost the slot, saved image, or shared OCR task.");
       shared.ForceClose();
       if (pinTextTasks.ContainsKey(oldTextIdentity)) throw new InvalidOperationException("Last shared pin did not release old OCR task.");
@@ -181,6 +184,105 @@ public sealed partial class MainWindow
         if (!await first.SaveEditAsync() || pinEditing is not null || pinTextTasks.Count != 0)
           throw new InvalidOperationException("Repeated text/edit/save leaked its old OCR task or editor slot.");
       }
+      await VerifySmokePinTextAsync(first);
+
+      // A13-02：提交后 renderer 重置且回执丢失：已落盘提交为权威结果，槽幂等
+      // 收尾不重做保存；同窗重开新代后旧回调不得拆新编辑器；再开新贴图后旧会
+      // 迟到确认不得清除新槽；单次提交由真实提交事件计数验证。
+      CaptureUiSmokeTrace.Stage("pins.committed-receipt-loss");
+      int appliedBefore = SmokePinSnapshotAppliedCount;
+      SmokeCommittedResetProbe = win => win.SmokeResetEditorDocument();
+      await EnterPinEditAsync(first);
+      await WaitForPinEditorAsync(first);
+      Func<Task> oldConfirmed = first.SmokeCaptureSnapshotConfirmation();
+      await RotateSmokePinAsync(first);
+      await first.SaveEditAsync(); // 回执丢失下返回值不可靠；权威提交已落盘
+      SmokeCommittedResetProbe = null;
+      await WaitForPinCheckAsync(() => Task.FromResult(!first.Editing && pinEditing is null),
+        "Committed pin with lost receipt left the edit slot open.");
+      if (SmokePinSnapshotAppliedCount - appliedBefore != 1)
+        throw new InvalidOperationException($"Committed pin was written {SmokePinSnapshotAppliedCount - appliedBefore} times instead of once.");
+      if (pinSnapshotStore!.GetSnapshotPngPath(first.PinId) is null)
+        throw new InvalidOperationException("Committed snapshot was not persisted.");
+      // 同窗重开新代：旧窗口迟到确认回调不得拆除新编辑器。
+      await EnterPinEditAsync(first);
+      await WaitForPinEditorAsync(first);
+      if (pinEditing is not { } reentered || reentered.Window != first)
+        throw new InvalidOperationException("Same-window re-entry did not open a new slot.");
+      await oldConfirmed();
+      if (!first.Editing || pinEditing is not { } intact || !ReferenceEquals(intact, reentered))
+        throw new InvalidOperationException("Late same-window confirmation tore down the new edit generation.");
+      var displayEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var releaseDisplay = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      first.SmokeSnapshotDisplayStep = () => { displayEntered.TrySetResult(); return releaseDisplay.Task; };
+      await RotateSmokePinAsync(first);
+      Task<bool> newSave = first.SaveEditAsync();
+      await displayEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+      try
+      {
+        Task lateOldConfirmation = oldConfirmed();
+        if (!lateOldConfirmation.IsCompleted)
+          throw new InvalidOperationException("Old host acknowledgement waited for the new generation's committed display swap.");
+        await lateOldConfirmation;
+        if (!first.Editing || !ReferenceEquals(pinEditing, reentered))
+          throw new InvalidOperationException("Old host acknowledgement ended the new committed generation.");
+      }
+      finally { releaseDisplay.TrySetResult(); }
+      if (!await newSave) throw new InvalidOperationException("Current generation could not finish after a stale callback.");
+      await EnterPinEditAsync(first);
+      await WaitForPinEditorAsync(first);
+      // Native apply 已验证贡献且即将进入真实 writer：在安全 await 卡住后重置旧文档。
+      await RotateSmokePinAsync(first);
+      var applyEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      var releaseCommit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      VibpProjectManifest? acceptedManifest = null;
+      byte[]? acceptedPng = null;
+      int preparedCommits = 0;
+      commandHandler.Image.SmokeBeforePinSnapshotCommit = (manifest, finalPng) =>
+      {
+        preparedCommits++;
+        acceptedManifest = manifest;
+        acceptedPng = finalPng.ToArray();
+        applyEntered.TrySetResult();
+        return releaseCommit.Task;
+      };
+      appliedBefore = SmokePinSnapshotAppliedCount;
+      Task<bool> resetSave = first.SaveEditAsync();
+      try
+      {
+        await applyEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        if (SmokePinSnapshotAppliedCount != appliedBefore)
+          throw new InvalidOperationException("Native save committed before the controlled renderer reset.");
+        first.SmokeResetEditorDocument();
+      }
+      finally { releaseCommit.TrySetResult(); commandHandler.Image.SmokeBeforePinSnapshotCommit = null; }
+      await resetSave;
+      await WaitForPinCheckAsync(() => Task.FromResult(!first.Editing && pinEditing is null),
+        "Committed pin after an in-flight renderer reset retained its edit slot.");
+      if (preparedCommits != 1 || SmokePinSnapshotAppliedCount - appliedBefore != 1 || acceptedManifest is null)
+        throw new InvalidOperationException("In-flight renderer reset did not produce exactly one real native commit.");
+      using (var archive = System.IO.Compression.ZipFile.OpenRead(pinSnapshotStore.GetSnapshotProjectPath(first.PinId)!))
+      using (Stream savedManifest = archive.GetEntry(VibpProjectLimits.ManifestEntryName)!.Open())
+      {
+        VibpProjectManifest saved = JsonSerializer.Deserialize<VibpProjectManifest>(savedManifest, VibpProjectRules.ManifestJson)!;
+        if (JsonSerializer.Serialize(saved.State, VibpProjectRules.ManifestJson) != JsonSerializer.Serialize(acceptedManifest.State, VibpProjectRules.ManifestJson) ||
+          pinSnapshotStore.ReadSnapshotPng(first.PinId) is not { } committedImage ||
+          (committedImage.Width, committedImage.Height) != first.SmokeImageSize ||
+          acceptedPng is null || !committedImage.Png.SequenceEqual(acceptedPng))
+          throw new InvalidOperationException("In-flight reset changed the committed project or its final image.");
+      }
+      if (!await first.PrepareEditExitAsync() || !await PreparePinsExitAsync())
+        throw new InvalidOperationException("Recovered commit blocked window close or application exit.");
+      pinsExitReview = false;
+      CaptureUiSmokeTrace.Stage("pins.native-inflight-reset-committed-once");
+      // 新贴图新槽：旧会话迟到确认不得清除新槽。
+      await EnterPinEditAsync(second);
+      await WaitForPinEditorAsync(second);
+      await oldConfirmed();
+      if (pinEditing?.Window != second)
+        throw new InvalidOperationException("Late old-session confirmation cleared the new edit slot.");
+      await ExitPinEditAsync(second);
+      await WaitForPinCheckAsync(() => Task.FromResult(!second.Editing), "New slot did not exit after discard.");
       await VerifySmokePinTextAsync(first);
       if (observedScopes.Any(scope => scope is "recognition" or "imageEdit"))
         throw new InvalidOperationException("Pin editing polluted a main image channel.");
@@ -292,6 +394,21 @@ public sealed partial class MainWindow
         throw new InvalidOperationException($"Recovery lost expanded size: expected={expanded.Width}x{expanded.Height}, actual={first.SmokeClientSize.Width}x{first.SmokeClientSize.Height}, record={JsonSerializer.Serialize(recovered.Single())}");
       await VerifySmokePinTextAsync(first);
 
+      // 启动显示瞬时失败≠用户关闭：失败窗口释放但恢复快照保留，重试恢复成功。
+      CaptureUiSmokeTrace.Stage("pins.show-failure-retain");
+      shuttingDown = true;
+      first.ForceClose();
+      shuttingDown = false;
+      Features.Recognition.PinnedImageWindow.SmokeFailNextShow = true;
+      RestorePins();
+      await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 0), "Failed show window was not released.");
+      if (pinSnapshotStore!.LoadRecovery().Count != 1)
+        throw new InvalidOperationException("Startup show failure deleted the recovery snapshot.");
+      RestorePins();
+      first = pinnedImages.Single();
+      await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Retry after startup failure did not restore.");
+      await VerifySmokePinTextAsync(first);
+
       // 拓扑变更回归：自身窗口的屏外恢复记录，用当前工作区验证 image 与
       // typed 贴图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
       CaptureUiSmokeTrace.Stage("pins.offscreen-recovery");
@@ -317,6 +434,24 @@ public sealed partial class MainWindow
       first = recoveredImage;
       first.Close(); second.Close(); recoveredTyped.ForceClose();
       if (pinSnapshotStore.LoadRecovery().Count != 0) throw new InvalidOperationException("Closing a pin kept its owned recovery entry.");
+
+      // 图片过滤注册真实调用配对（按 WebView2 实例分组）：每实例每 URI
+      // add−remove ≤1（多次换装不累积），移除的 URI 必曾被注册。
+      foreach (var group in Features.Recognition.PinnedImageWindow.SmokeFilterEvents
+        .GroupBy(item => item.Instance))
+      {
+        Dictionary<string, int> adds = [];
+        Dictionary<string, int> removes = [];
+        foreach ((_, string uri, bool added) in group)
+        {
+          if (added) adds[uri] = adds.GetValueOrDefault(uri) + 1;
+          else removes[uri] = removes.GetValueOrDefault(uri) + 1;
+        }
+        if (adds.Keys.Concat(removes.Keys).Any(uri =>
+            adds.GetValueOrDefault(uri) - removes.GetValueOrDefault(uri) > 1) ||
+          removes.Keys.Any(uri => adds.GetValueOrDefault(uri) == 0))
+          throw new InvalidOperationException($"Image filter registrations accumulated or removed an unregistered URI (instance {group.Key}): {string.Join("; ", group.Select(item => $"{(item.Added ? "add" : "remove")}({item.Uri})"))}");
+      }
     }
     finally
     {

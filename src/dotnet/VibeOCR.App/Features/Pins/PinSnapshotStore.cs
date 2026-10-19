@@ -166,9 +166,21 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
     EnsureOwnedDirectory(root);
     EnsureOwnedDirectory(DirectoryFor(pinId));
     if (new FileInfo(path).Length > 16 * 1024) throw new InvalidDataException("Invalid pin metadata.");
-    Snapshot? snapshot = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path));
-    WorkbenchExclusionBox.ValidateCollection(snapshot?.ExcludeBoxes ?? []);
-    return snapshot;
+    // 指针内容损坏（JSON 不可解析/排除框无效）降级为无 generation：读取方
+    // 回退 image.png 与已验证 window.json 的排除框，损坏文件保留供重试/取证；
+    // owned/reparse/size 防护仍在上方严格抛出，不在此宽 catch。
+    try
+    {
+      Snapshot? snapshot = JsonSerializer.Deserialize<Snapshot>(File.ReadAllText(path));
+      if (snapshot is null) return null;
+      WorkbenchExclusionBox.ValidateCollection(snapshot.ExcludeBoxes ?? []);
+      return snapshot;
+    }
+    catch (Exception error) when (error is JsonException or InvalidDataException)
+    {
+      AppLog.Warn($"Corrupt pin pointer ignored: {pinId:N}: {error.Message}");
+      return null;
+    }
   }
 
   internal IReadOnlyList<WorkbenchExclusionBox>? GetSnapshotExclusions(Guid pinId) => ReadSnapshot(pinId)?.ExcludeBoxes;

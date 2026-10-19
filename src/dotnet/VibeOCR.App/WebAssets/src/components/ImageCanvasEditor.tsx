@@ -5250,6 +5250,15 @@ export function ImageCanvasEditor({
       textEdit
     )
       return false;
+    if (interactionLocked) {
+      // 原生 requestSnapshot 与按钮保存共用同一就绪门：工程恢复挂起
+      // （含 manifest/assets 待装、换手）时画布不完整，不得上传/提交截断
+      // 用户已保存工程；失败 ack 立即完成，恢复完成后可重试。
+      setOperationMessage(
+        "工程恢复尚未完成，已保留原工程；请等待恢复完成后重试。",
+      );
+      return false;
+    }
     if (!initialExclusionsReady()) {
       setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成贴图。");
       return false;

@@ -78,6 +78,7 @@ internal sealed partial class WorkbenchImageOwner
 {
   /// <summary>pin 快照单飞：与工程保存单飞分离，不占用 picker 事务槽。</summary>
   private int pinSnapshotInFlight;
+  internal Func<VibpProjectManifest, byte[], Task>? SmokeBeforePinSnapshotCommit { get; set; }
 
   /// <summary>当前 pinEdit 会话绑定的贴图 id；无会话为 null。</summary>
   private Guid? pinEditPinId;
@@ -307,8 +308,11 @@ internal sealed partial class WorkbenchImageOwner
       byte[] finalPng = await File.ReadAllBytesAsync(annotation.Path, cancellationToken);
       Guid pinId = pinEditPinId ?? throw new ScreenshotSessionStaleException();
       await PersistProjectSnapshotAsync(pinEditChannel, pinEditImport, contribution,
-        command.SessionId, command.Revision, (manifest, entries) =>
-          pinSnapshotWriter.WriteSnapshotAsync(pinId, manifest, entries, finalPng, cancellationToken, snapshotExclusions),
+        command.SessionId, command.Revision, async (manifest, entries) =>
+        {
+          if (SmokeBeforePinSnapshotCommit is { } beforeCommit) await beforeCommit(manifest, finalPng);
+          await pinSnapshotWriter.WriteSnapshotAsync(pinId, manifest, entries, finalPng, cancellationToken, snapshotExclusions);
+        },
         cancellationToken);
       PinSnapshotApplied?.Invoke(command.SessionId, command.Revision, pinId);
       pinEditPinId = null;

@@ -65,6 +65,9 @@ internal sealed class PinnedImageWindow : IDisposable
   private const string ChromeCloseGlyph = "\uE8BB";
 
   private string imageUrl;
+  /// <summary>当前实际注册到 WebView2 的图片过滤 URI；未注册为 null。
+  /// 换装只移除真正注册过的旧 URI 并按需注册新 URI，重复换装不累积。</summary>
+  private string? registeredImageUrl;
   private readonly Window window = new();
   private readonly OverlappedPresenter presenter = OverlappedPresenter.Create();
   private readonly Grid root = new();
@@ -76,6 +79,9 @@ internal sealed class PinnedImageWindow : IDisposable
   private SizeInt32? beforeEditSize;
   private bool editing;
   private Guid editingSessionId;
+  private Func<Task>? editorSnapshotAcknowledged;
+  /// <summary>当前编辑代际凭证：窗口是否正以指定会话编辑（终态绑定旧代）。</summary>
+  internal bool IsEditingSession(Guid session) => editing && editingSessionId == session;
   private bool closingAfterEditDecision;
   private bool closeDialogShowing;
   private ContentDialog? activeEditDialog;
@@ -137,7 +143,11 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>#238 贴图身份：编辑槽/快照目录/编组的稳定键。</summary>
   internal Guid PinId { get; }
   internal nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(window);
-  internal event Func<PinnedImageWindow, Task>? SnapshotConfirmed;
+  internal event Func<PinnedImageWindow, Guid, Task>? SnapshotConfirmed;
+
+  /// <summary>编辑宿主 renderer 失败（含提交后回执丢失场景）：提交完成时
+  /// 协调器据此对已提交槽幂等收尾。</summary>
+  internal event Action<PinnedImageWindow, Guid>? EditorRecoveryRequired;
 
   /// <summary>按冻结的归一化排除矩形丢弃正面积相交行；无层/无矩形原样返回。</summary>
   private static RecognitionTextLayerState? FilterExcludedLines(
@@ -236,6 +246,27 @@ internal sealed class PinnedImageWindow : IDisposable
   internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
   internal string SmokeStatus => status.Text;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
+  /// <summary>smoke：对编辑宿主注入 renderer 失败（提交后、回执前）。</summary>
+  internal void SmokeResetEditorDocument() =>
+    editorHost?.HandleRendererFailure("smoke-injected-renderer-failure");
+  internal Func<Task> SmokeCaptureSnapshotConfirmation() => editorSnapshotAcknowledged ??
+    throw new InvalidOperationException("No editor acknowledgement is registered.");
+
+  /// <summary>smoke 注入：下一次 ShowAsync 抛瞬时启动失败（一次性，消费即清）。</summary>
+  internal static bool SmokeFailNextShow;
+  /// <summary>初始化失败关闭 ≠ 用户关闭：Closed 处置保留恢复快照供下次重试。</summary>
+  internal bool RetainSnapshotOnClose { get; set; }
+  /// <summary>smoke 观察：真实 Add/RemoveWebResourceRequestedFilter 调用记录
+  /// （实例序号, Uri, added）；仅 SmokeFilterRecording 时记录，生产为 false
+  /// 不参与逻辑。过滤器按 WebView2 实例独立，配对断言按实例分组。</summary>
+  internal static readonly List<(int Instance, string Uri, bool Added)> SmokeFilterEvents = [];
+  internal static bool SmokeFilterRecording;
+  private static int smokeFilterInstanceCounter;
+  private readonly int smokeFilterInstance = ++smokeFilterInstanceCounter;
+  private void RecordFilterEvent(string uri, bool added)
+  {
+    if (SmokeFilterRecording) SmokeFilterEvents.Add((smokeFilterInstance, uri, added));
+  }
 
   internal bool SmokeInvokeEditDecision(string text)
   {
@@ -917,6 +948,11 @@ internal sealed class PinnedImageWindow : IDisposable
 
   public async Task ShowAsync()
   {
+    if (SmokeFailNextShow)
+    {
+      SmokeFailNextShow = false;
+      throw new InvalidOperationException("smoke injected WebView startup failure");
+    }
     window.Activate();
     await view.EnsureCoreWebView2Async();
     if (disposed) return;
@@ -929,6 +965,8 @@ internal sealed class PinnedImageWindow : IDisposable
     core.NavigationStarting += OnNavigationStarting;
     core.NavigationCompleted += OnNavigationCompleted;
     core.AddWebResourceRequestedFilter(imageUrl, CoreWebView2WebResourceContext.Image);
+    registeredImageUrl = imageUrl;
+    RecordFilterEvent(imageUrl, true);
     core.WebResourceRequested += OnImageRequested;
     loaded = true;
     Render();
@@ -976,18 +1014,26 @@ internal sealed class PinnedImageWindow : IDisposable
         application, resourceBroker, annotations,
         applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit,
         projectStore: projectStore, pinEditHost: true);
-      host.PinSnapshotAcknowledged += async () =>
+      editorSnapshotAcknowledged = async () =>
       {
-        if (SnapshotConfirmed is { } confirmed) await confirmed(this);
+        if (SnapshotConfirmed is { } confirmed) await confirmed(this, editSessionId);
       };
+      host.PinSnapshotAcknowledged += editorSnapshotAcknowledged;
       host.ProtocolViolation += error =>
         VibeOCR.App.Services.AppLog.Error("Pin editor bridge rejected a message", error);
       host.RecoveryRequired += () =>
       {
-        if (!disposed && editing)
+        if (!disposed && IsEditingSession(editSessionId))
         {
           status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
+          EditorRecoveryRequired?.Invoke(this, editSessionId);
         }
+      };
+      host.StateChanged += state =>
+      {
+        // renderer 进程失败同样通知：恢复首失败走 Reload 不触发 RecoveryRequired。
+        if (state.StartsWith("process-failed:", StringComparison.Ordinal) && !disposed && IsEditingSession(editSessionId))
+          EditorRecoveryRequired?.Invoke(this, editSessionId);
       };
       editorHost = host;
       await overlay.EnsureCoreWebView2Async();
@@ -1009,12 +1055,15 @@ internal sealed class PinnedImageWindow : IDisposable
   }
 
   /// <summary>退出编辑态：applied=true 前调用方需先 ApplySnapshot 换装。</summary>
-  internal async Task ExitEditModeAsync()
+  internal async Task ExitEditModeAsync(Guid? sourceSession = null)
   {
-    if (!editing) return;
-    await TeardownEditorAsync();
-    if (beforeEditSize is { } size && !disposed) window.AppWindow.Resize(size);
+    if (!editing || sourceSession is { } expected && editingSessionId != expected) return;
+    Guid exiting = editingSessionId;
+    SizeInt32? previousSize = beforeEditSize;
     beforeEditSize = null;
+    await TeardownEditorAsync();
+    if (editing || editingSessionId != exiting) return;
+    if (previousSize is { } size && !disposed) window.AppWindow.Resize(size);
     if (!disposed)
     {
       status.Text = "贴图编辑已结束";
@@ -1043,12 +1092,18 @@ internal sealed class PinnedImageWindow : IDisposable
       await probe();
     }
     RebuildStageScaleScript();
-    if (core is { } current)
+    if (core is { } current && registeredImageUrl != imageUrl)
     {
-      try { current.RemoveWebResourceRequestedFilter(
-        "https://pin.vibeocr/*", CoreWebView2WebResourceContext.Image); }
-      catch (ArgumentException) { }
+      // 移除真正注册过的旧 URI（与 Add 同参同 context），再注册新 URI；
+      // 同 URI 重复换装为无操作，不累积过滤器。
+      if (registeredImageUrl is { } previous)
+      {
+        current.RemoveWebResourceRequestedFilter(previous, CoreWebView2WebResourceContext.Image);
+        RecordFilterEvent(previous, false);
+      }
       current.AddWebResourceRequestedFilter(imageUrl, CoreWebView2WebResourceContext.Image);
+      registeredImageUrl = imageUrl;
+      RecordFilterEvent(imageUrl, true);
     }
     if (presenter.State == OverlappedPresenterState.Maximized) presenter.Restore();
     (int availableWidth, int availableHeight) = ComputeAvailableClientSize();
@@ -1088,6 +1143,7 @@ internal sealed class PinnedImageWindow : IDisposable
     editorView = null;
     VibeOCR.App.Web.WebWorkbenchHost? host = editorHost;
     editorHost = null;
+    editorSnapshotAcknowledged = null;
     if (host is not null)
     {
       try { await host.DisposeAsync(); }

@@ -1124,16 +1124,8 @@ public sealed partial class MainWindow : Window
   private void WirePinWindow(PinnedImageWindow pinned)
   {
     pinned.EditRequested += EnterPinEditAsync;
-    pinned.SnapshotConfirmed += async target =>
-    {
-      bool displayed = false;
-      try { displayed = await pinSnapshotSwap; }
-      catch (Exception error) { AppLog.Error("Committed pin swap observation failed", error); }
-      if (pinEditing?.Window == target) pinEditing = null;
-      try { await target.ExitEditModeAsync(); }
-      catch (Exception error) { AppLog.Error("Committed pin editor teardown failed", error); }
-      if (!displayed) target.ReportSnapshotDisplayFailure();
-    };
+    pinned.EditorRecoveryRequired += OnPinEditorRecoveryRequired;
+    pinned.SnapshotConfirmed += OnPinSnapshotConfirmedAsync;
     pinned.ExitEditRequested += ExitPinEditAsync;
     pinned.MovedDelta += (dx, dy) => MovePinGroup(pinned, dx, dy);
     pinned.CollapseToggleRequested += pin => pin.SetCollapsed(!pin.Collapsed);
@@ -1142,15 +1134,18 @@ public sealed partial class MainWindow : Window
     pinned.PinManagerRequested += ShowPinManager;
     pinned.Closed += closed =>
     {
+      if (pinEditing?.Window == closed) pinEditing = null;
       pinnedImages.Remove(closed);
       pinGroups.Remove(closed);
       if (!pinnedImages.Any(other => other.SessionId == closed.SessionId &&
           other.Revision == closed.Revision))
         RemovePinTextTask((closed.SessionId, closed.Revision));
-      // 关闭单张清 owned 记录：仅非活动编辑槽（在途事务结束后才清理）。
+      // 关闭单张清 owned 记录：仅非活动编辑槽（在途事务结束后才清理）；
+      // 初始化失败关闭（RetainSnapshotOnClose）≠用户主动关闭，恢复快照保留
+      // 供下一次恢复重试。
       if (!shuttingDown)
       {
-        pinSnapshotStore?.DeleteSnapshot(closed.PinId);
+        if (!closed.RetainSnapshotOnClose) pinSnapshotStore?.DeleteSnapshot(closed.PinId);
       }
       pinManager?.Refresh();
     };
@@ -1340,7 +1335,15 @@ public sealed partial class MainWindow : Window
     pinManager.Show();
   }
 
-  private sealed record PinEditSlot(PinnedImageWindow Window, Guid SessionId);
+  // One native session owns its display swap and shared terminal task; discard/close releases the slot.
+  private sealed class PinEditSlot(PinnedImageWindow window, Guid sessionId)
+  {
+    internal PinnedImageWindow Window { get; } = window;
+    internal Guid SessionId { get; } = sessionId;
+    internal Task<bool>? Swap { get; set; }
+    internal Task? Completion { get; set; }
+    internal bool RecoveryRequired { get; set; }
+  }
   private PinEditSlot? pinEditing;
   private readonly Dictionary<PinnedImageWindow, Guid> pinGroups = [];
   private Features.Pins.PinManagerWindow? pinManager;
@@ -1415,11 +1418,17 @@ public sealed partial class MainWindow : Window
     }
   }
 
-  /// <summary>放弃编辑：关闭 pinEdit 会话；会话事件回调完成退出与槽释放。</summary>
+  /// <summary>放弃编辑：关闭 pinEdit 会话；会话事件回调完成退出与槽释放。
+  /// 权威会话已空但已提交槽未收尾（回执丢失）时补幂等终态：只清匹配旧槽。</summary>
   private async Task ExitPinEditAsync(PinnedImageWindow target)
   {
     if (pinEditing is not { } slot || slot.Window != target)
     {
+      return;
+    }
+    if (slot.Swap is not null)
+    {
+      await FinalizeCommittedPinEditAsync(slot);
       return;
     }
     _ = await application.ExecuteAsync(
@@ -1427,25 +1436,53 @@ public sealed partial class MainWindow : Window
       CancellationToken.None);
   }
 
-  private Task<bool> pinSnapshotSwap = Task.FromResult(true);
+  internal Action<PinnedImageWindow>? SmokeCommittedResetProbe { get; set; }
+  internal int SmokePinSnapshotAppliedCount { get; private set; }
 
   private void OnPinSnapshotApplied(Guid sessionId, long revision, Guid pinId)
   {
     void Apply()
     {
-      if (pinEditing is { } slot && slot.SessionId == sessionId)
-      {
-        PinnedImageWindow target = slot.Window;
-        string? pngPath = pinSnapshotStore?.GetSnapshotPngPath(pinId);
-        if (pngPath is { } path)
-        {
-          pinSnapshotSwap = ApplyCommittedPinSnapshotAsync(target, path, sessionId, pinId);
-        }
-        else pinSnapshotSwap = Task.FromResult(false);
-      }
+      SmokePinSnapshotAppliedCount++;
+      if (pinEditing is not { } slot || slot.SessionId != sessionId) return;
+      string? path = pinSnapshotStore?.GetSnapshotPngPath(pinId);
+      slot.Swap = path is not null
+        ? ApplyCommittedPinSnapshotAsync(slot.Window, path, sessionId, pinId)
+        : Task.FromResult(false);
+      if (slot.RecoveryRequired) _ = FinalizeCommittedPinEditAsync(slot);
+      SmokeCommittedResetProbe?.Invoke(slot.Window);
     }
     if (DispatcherQueue.HasThreadAccess) Apply();
     else DispatcherQueue.TryEnqueue(Apply);
+  }
+
+  private Task OnPinSnapshotConfirmedAsync(PinnedImageWindow window, Guid sessionId) =>
+    pinEditing is { } slot && slot.Window == window && slot.SessionId == sessionId && slot.Swap is not null
+      ? FinalizeCommittedPinEditAsync(slot) : Task.CompletedTask;
+
+  private Task FinalizeCommittedPinEditAsync(PinEditSlot slot) =>
+    slot.Completion ??= FinishCommittedPinEditAsync(slot);
+
+  private async Task FinishCommittedPinEditAsync(PinEditSlot slot)
+  {
+    bool displayed = false;
+    try { displayed = await slot.Swap!; }
+    catch (Exception error) { AppLog.Error("Committed pin swap observation failed", error); }
+    try
+    {
+      await slot.Window.ExitEditModeAsync(slot.SessionId);
+      if (!displayed && !slot.Window.Disposed && !slot.Window.Editing && slot.Window.SessionId == slot.SessionId)
+        slot.Window.ReportSnapshotDisplayFailure();
+    }
+    catch (Exception error) { AppLog.Error("Committed pin editor teardown failed", error); }
+    finally { if (ReferenceEquals(pinEditing, slot)) pinEditing = null; }
+  }
+
+  private void OnPinEditorRecoveryRequired(PinnedImageWindow window, Guid sessionId)
+  {
+    if (pinEditing is not { } slot || slot.Window != window || slot.SessionId != sessionId) return;
+    slot.RecoveryRequired = true;
+    if (slot.Swap is not null) _ = FinalizeCommittedPinEditAsync(slot);
   }
 
   private async Task<bool> ApplyCommittedPinSnapshotAsync(PinnedImageWindow target, string path, Guid sessionId, Guid pinId)
@@ -1476,7 +1513,7 @@ public sealed partial class MainWindow : Window
       if (pinEditing is { } slot && slot.SessionId == sessionId)
       {
         pinEditing = null;
-        _ = slot.Window.ExitEditModeAsync();
+        _ = slot.Window.ExitEditModeAsync(slot.SessionId);
       }
     }
     if (DispatcherQueue.HasThreadAccess) Restore();
@@ -1665,6 +1702,8 @@ public sealed partial class MainWindow : Window
     catch (Exception error)
     {
       AppLog.Error("Pinned image window failed to start", error);
+      // 启动 WebView 瞬态失败只释放失败窗口，不删恢复快照：下一次恢复重试。
+      pinned.RetainSnapshotOnClose = true;
       pinned.Close();
     }
   }

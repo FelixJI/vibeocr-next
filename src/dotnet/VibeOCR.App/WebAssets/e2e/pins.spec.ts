@@ -616,12 +616,12 @@ function restoredPinState(
       : {}),
   };
 }
-const restoreManifest = (width = 1) => ({
+const restoreManifest = (width = 1, rotation = 0) => ({
   schemaVersion: 1,
   canvas: { width, height: 1 },
   source: { mediaType: "image/png", width: 1, height: 1, length: png.length },
   assets: [],
-  state: { rotation: 0, marks: [], patches: [] },
+  state: { rotation, marks: [], patches: [] },
 });
 
 for (const failure of ["fetch", "validate"] as const) {
@@ -671,6 +671,94 @@ for (const failure of ["fetch", "validate"] as const) {
       .toBe(true);
   });
 }
+
+test("pending pin project restore blocks native snapshot save and keeps project", async ({
+  page,
+}) => {
+  const image = Buffer.from(
+    await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 32;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#aaddff";
+      context.fillRect(0, 0, 64, 32);
+      return canvas.toDataURL("image/png").split(",")[1]!;
+    }),
+    "base64",
+  );
+  const { projects, uploads } = await pinEditor(page, image);
+  const manifestUrl = "https://app.vibeocr/__resource/hanging-manifest";
+  let releaseManifest!: () => void;
+  const saved = {
+    ...restoreManifest(),
+    canvas: { width: 64, height: 32 },
+    source: {
+      mediaType: "image/png",
+      width: 64,
+      height: 32,
+      length: image.length,
+    },
+    state: {
+      rotation: 45,
+      marks: [
+        {
+          id: "saved-rectangle",
+          tool: "rectangle",
+          start: { x: 8, y: 6 },
+          end: { x: 52, y: 24 },
+          style: { color: "#dd2200", strokeWidth: 2 },
+        },
+      ],
+      crop: { start: { x: 4, y: 2 }, end: { x: 60, y: 30 } },
+      patches: [],
+    },
+  };
+  // 恢复真实的标注、裁剪、旋转工程，避免仅凭非默认rotation掩盖内容丢失。
+  await page.route(manifestUrl, (route) => {
+    void new Promise<void>((resolve) => {
+      releaseManifest = resolve;
+    }).then(() => route.fulfill({ json: saved }));
+  });
+  const session = "d".repeat(32),
+    pending = "f".repeat(32);
+  const restored = restoredPinState(session, pending, manifestUrl);
+  await sendState(page, "pinEdit", {
+    ...restored,
+    input: { ...restored.input, byteLength: image.length },
+    projectRestore: {
+      ...restored.projectRestore!,
+      source: { ...restored.input, byteLength: image.length },
+      manifest: {
+        ...restored.projectRestore!.manifest,
+        byteLength: JSON.stringify(saved).length,
+      },
+    },
+  });
+  await expect(
+    page.getByRole("button", { name: "完成贴图", exact: true }),
+  ).toBeDisabled();
+  // 恢复挂起期间原生 requestSnapshot：必须完成失败 ack，不上传、不写入，
+  // 不得用未安装的扁平画布截断用户已保存工程。
+  await requestPinSnapshot(page, session);
+  await expect
+    .poll(async () => (await readPinReports(page)).at(-1)?.payload.ok)
+    .toBe(false);
+  expect(projects.length).toBe(0);
+  expect(uploads.length).toBe(0);
+  // 恢复完成后直接保存，逐值验证已保存标注、裁剪与旋转未丢失。
+  releaseManifest();
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  await requestPinSnapshot(page, session);
+  await expect.poll(() => projects.length).toBe(1);
+  await expect
+    .poll(async () => (await readPinReports(page)).at(-1)?.payload.ok)
+    .toBe(true);
+  expect(projects[0]!.state.rotation).toBe(saved.state.rotation);
+  expect(projects[0]!.state.marks).toEqual(saved.state.marks);
+  expect(projects[0]!.state.crop).toEqual(saved.state.crop);
+  expect(projects[0]!.canvas).toEqual(saved.canvas);
+});
 
 for (const late of ["fetch", "receipt"] as const) {
   test(`late old pin restore ${late} cannot unlock or install into a new session`, async ({
@@ -748,7 +836,7 @@ for (const late of ["fetch", "receipt"] as const) {
 test("pin restore rejection failure remains locked with an explicit discard exit", async ({
   page,
 }) => {
-  await pinEditor(page);
+  const { projects, uploads } = await pinEditor(page);
   const url = "https://app.vibeocr/__resource/reject-failure";
   await page.route(url, (route) => route.fulfill({ status: 500 }));
   await rejectNextCommand(page);
@@ -764,4 +852,10 @@ test("pin restore rejection failure remains locked with an explicit discard exit
   await expect(
     page.getByRole("button", { name: "放弃更改", exact: true }),
   ).toBeEnabled();
+  await requestPinSnapshot(page, "d".repeat(32));
+  await expect
+    .poll(async () => (await readPinReports(page)).at(-1)?.payload.ok)
+    .toBe(false);
+  expect(projects).toHaveLength(0);
+  expect(uploads).toHaveLength(0);
 });

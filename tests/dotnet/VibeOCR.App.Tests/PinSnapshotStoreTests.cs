@@ -91,6 +91,37 @@ public sealed class PinSnapshotStoreTests : IDisposable
     catch (IOException) { }
   }
 
+  [Theory]
+  [InlineData("corrupt-json")]
+  [InlineData("invalid-exclusions")]
+  public async Task CorruptPointerFallsBackToSavedPngAndWindowMetadata(string corruption)
+  {
+    // 指针损坏（JSON/排除框无效）≠丢失恢复：无 generation、工程 null、PNG
+    // 回退 image.png、恢复用已验证 window.json 的 ExcludeBoxes；损坏文件
+    // 保留供重试/取证；owned/reparse/size 防护不受影响。
+    var store = new PinSnapshotStore(root);
+    Guid id = Guid.NewGuid();
+    store.SaveRecovery(new(id, "Image", "", 0, 0, 640, 480, ExcludeBoxes: [new(0, 0, 10, 10)]), Png);
+    await store.WriteSnapshotAsync(id, Manifest(), Entries(), Png,
+      TestContext.Current.CancellationToken, [new(0, 0, 20, 20)]);
+    string directory = Path.Combine(PinSnapshotStore.RootFor(root), id.ToString("N"));
+    string pointer = Path.Combine(directory, "current.json");
+    File.WriteAllText(pointer, corruption == "corrupt-json" ? "{ not valid json"
+      : """{"Generation":"x","ExcludeBoxes":[{"X":-5,"Y":0,"Width":10,"Height":10}]}""");
+
+    string? pngPath = store.GetSnapshotPngPath(id);
+    Assert.NotNull(pngPath);
+    Assert.Equal(Path.Combine(directory, "image.png"), pngPath);
+    Assert.Null(store.GetSnapshotProjectPath(id));
+    Assert.Null(store.GetSnapshotExclusions(id));
+    Assert.True(File.Exists(pointer));
+
+    IReadOnlyList<Features.Pins.PinSnapshotStore.Recovery> recovered = new PinSnapshotStore(root).LoadRecovery();
+    Features.Pins.PinSnapshotStore.Recovery record = Assert.Single(recovered, item => item.Id == id);
+    Assert.NotNull(record.ExcludeBoxes);
+    Assert.Equal(new WorkbenchExclusionBox(0, 0, 10, 10), Assert.Single(record.ExcludeBoxes));
+  }
+
   [Fact]
   public async Task WriteThenReadSnapshotPathsAndBytes()
   {
