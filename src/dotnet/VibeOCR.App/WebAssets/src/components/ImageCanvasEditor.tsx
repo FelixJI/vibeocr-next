@@ -1,3 +1,18 @@
+import { compositionExclusions } from "./compositionExclusions";
+import { CanvasCompositionPanel } from "./CanvasCompositionPanel";
+import { EditorPreferencesPanel } from "./EditorPreferencesPanel";
+import {
+  EDITOR_TOOLS,
+  editorPreferences,
+  shortcutTool,
+} from "./editorPreferences";
+import {
+  renderComposition,
+  parseComposition,
+  boundedCanvasSize,
+  compositionLayout,
+  pruneCompositionAssets,
+} from "./canvasComposition";
 import {
   Button,
   Input,
@@ -21,7 +36,7 @@ import {
   useState,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
-import type { AppActions } from "../app/types";
+import type { AppAction, AppActions } from "../app/types";
 import type { ImageRecognitionMode } from "../features/ScreenshotSession";
 import { availabilityLabel } from "../features/FeatureValues";
 
@@ -35,11 +50,7 @@ import {
   annotationStrokeWidth,
   constrainBoxDrag,
   constrainLineDrag,
-  exclusionCoversOutput,
   exclusionDisplayPoints,
-  exclusionNaturalRects,
-  exclusionNormalizedRects,
-  displayRectsToNormalizedRects,
   finalOutputSize,
   imageTransform,
   isExclusionMark,
@@ -108,7 +119,10 @@ import {
   hitStrokePaths,
 } from "./annotationStrokeGeometry";
 import { BRIDGE_VERSION, ChromeWebViewTransport } from "../bridge/client";
-import { uploadAnnotatedImage } from "./annotationHandoff";
+import {
+  discardAnnotatedImage,
+  uploadAnnotatedImage,
+} from "./annotationHandoff";
 import {
   buildContributionState,
   contributionStateBytes,
@@ -304,31 +318,7 @@ const LINE_STYLE_TOOLS: readonly Tool[] = [
 const CORNER_TOOLS: readonly Tool[] = ["rectangle"];
 const ARROW_TOOLS: readonly Tool[] = ["arrow"];
 
-const TOOL_ORDER: readonly Tool[] = [
-  "select",
-  "hand",
-  "textSelect",
-  "rectangle",
-  "ellipse",
-  "arrow",
-  "line",
-  "polyline",
-  "text",
-  "callout",
-  "mosaic",
-  "blur",
-  "solid",
-  "spotlight",
-  "magnifier",
-  "pen",
-  "highlighter",
-  "numbering",
-  "objectEraser",
-  "exclude",
-  "crop",
-  "inpaint",
-  "dupmatch",
-];
+const TOOL_ORDER: readonly Tool[] = EDITOR_TOOLS;
 
 /** 编辑器用途：full=完整图片编辑（原工具集全量保留）；recognition=单次
  * 识别精简，只保留去水印、旋转、屏蔽三类图片处理工具及必要交互入口
@@ -725,6 +715,7 @@ function PercentInputControl({
 }
 
 interface ImageCanvasEditorProps {
+  readonly editorSettings?: Readonly<Record<string, unknown>>;
   readonly actions: AppActions;
   readonly canExport: boolean;
   readonly canRecognize: boolean;
@@ -1136,6 +1127,7 @@ function AnnotationStylePanel({
 
 export function ImageCanvasEditor({
   actions,
+  editorSettings = {},
   canExport,
   canRecognize,
   recognitionModes,
@@ -1159,6 +1151,8 @@ export function ImageCanvasEditor({
   proofreadActive = false,
 }: ImageCanvasEditorProps) {
   const commands = EDITOR_COMMANDS[commandScope];
+  const preferences = editorPreferences(editorSettings.editorPreferences);
+  const [compositionOpen, setCompositionOpen] = useState(false);
   // #233 工程保存命令：scene/识别面发 recognition.*，普通编辑页发 imageEdit.*。
   const projectSaveCommand =
     commandScope === "imageEdit"
@@ -1170,6 +1164,7 @@ export function ImageCanvasEditor({
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const importGenerationRef = useRef(0);
   const importMountedRef = useRef(true);
+  const exportGenerationRef = useRef(0);
   const presentation = useRef<CapturePixelPresentation | undefined>(undefined);
   const backdropRef = useRef<HTMLImageElement>(null);
   useEffect(() => {
@@ -2564,6 +2559,8 @@ export function ImageCanvasEditor({
     const dupWorkerRef = dupmatchWorkerRef;
     return () => {
       importMountedRef.current = false;
+      // 同步使旧导出失效；StrictMode 重新 setup 也不能复活旧异步操作。
+      exportGenerationRef.current += 1;
       // StrictMode 的探测卸载会立即重新挂载；仅真实退役才释放宿主资源。
       queueMicrotask(() => {
         if (!importMountedRef.current) retireImportsRef.current();
@@ -2716,6 +2713,16 @@ export function ImageCanvasEditor({
       return false;
     }
     try {
+      if (next.composition) {
+        const alive = new Set(
+          next.marks.flatMap((mark) =>
+            mark.tool === "image" && mark.assetId ? [mark.assetId] : [],
+          ),
+        );
+        const composition = pruneCompositionAssets(next.composition, alive);
+        parseComposition(composition);
+        next = { ...next, composition };
+      }
       validateBrushBudget(imageRef.current, canvasRef.current, next);
     } catch (error) {
       setOperationMessage(
@@ -4892,6 +4899,7 @@ export function ImageCanvasEditor({
 
   /** 操作开始时冻结的导出上下文；await 归来后必须逐项一致才允许发送。 */
   interface FrozenExportContext {
+    readonly generation: number;
     readonly key: string;
     readonly sessionId: string | undefined;
     readonly contentVersion: number;
@@ -4904,6 +4912,7 @@ export function ImageCanvasEditor({
 
   function freezeExportContext(): FrozenExportContext {
     return {
+      generation: exportGenerationRef.current,
       key: currentKeyRef.current,
       sessionId: sessionIdRef.current,
       contentVersion: contentRevisionRef.current,
@@ -4919,6 +4928,8 @@ export function ImageCanvasEditor({
     // 全部读 ref：上传期间用户切换格式/质量或几何编辑（含无会话的文件
     // 模式）都推进内容版本，旧像素不得贴上新设置发出。
     return (
+      importMountedRef.current &&
+      frozen.generation === exportGenerationRef.current &&
       frozen.key === currentKeyRef.current &&
       frozen.sessionId === sessionIdRef.current &&
       frozen.image === imageRef.current &&
@@ -4932,6 +4943,7 @@ export function ImageCanvasEditor({
    * bake=true 时把排除区写入不透明白色像素（识别输入与显式屏蔽副本）。 */
   async function exportFinalImageIfUnchanged(
     bakeExclusions = false,
+    validateExclusions = false,
     forcePng = false,
   ): Promise<
     | {
@@ -4953,10 +4965,12 @@ export function ImageCanvasEditor({
       quality: jpegQuality,
       inpaint: { patches: appliedInpaintPatches() },
       bakeExclusions,
+      validateExclusions,
       imageAssets: importAssetsRef.current,
     });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (textEditingRef.current || !exportContextUnchanged(frozen)) {
+      await discardAnnotatedImage(resourceUri);
       setOperationMessage(
         "导出期间内容或会话已变化，本次未发送；请在新画面重试。",
       );
@@ -4992,6 +5006,15 @@ export function ImageCanvasEditor({
             type: commands.copyAnnotatedImage,
             resourceUri: exported.resourceUri,
           });
+      if (
+        copied &&
+        preferences.output.closeAfterCopy &&
+        exported.sessionId &&
+        exported.sessionId === sessionIdRef.current &&
+        exported.revision === contentRevisionRef.current
+      ) {
+        await actions.run({ type: commands.closeScreenshotSession });
+      }
       setOperationMessage(
         copied
           ? exported.sessionId
@@ -5005,6 +5028,81 @@ export function ImageCanvasEditor({
       );
     } catch {
       setOperationMessage("无法生成或传递标注图片，请重试。");
+    } finally {
+      exportInProgressRef.current = false;
+      setIsExporting(false);
+    }
+  }
+
+  async function saveWithPreset() {
+    if (!canExport || exportInProgressRef.current || textEdit) return;
+    exportInProgressRef.current = true;
+    setIsExporting(true);
+    const frozen = freezeExportContext();
+    const preset = preferences.output;
+    const presetBinding = {
+      preset,
+      directory:
+        typeof editorSettings.imageOutputDirectory === "string"
+          ? editorSettings.imageOutputDirectory
+          : "",
+    };
+    try {
+      const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
+        format: preset.format,
+        quality: preset.quality,
+        outputSize:
+          preset.width > 0
+            ? { width: preset.width, height: preset.height }
+            : undefined,
+        inpaint: { patches: appliedInpaintPatches() },
+        imageAssets: importAssetsRef.current,
+      });
+      const resourceUri = await uploadAnnotatedImage(blob);
+      if (!exportContextUnchanged(frozen)) {
+        await discardAnnotatedImage(resourceUri);
+        setOperationMessage("导出期间内容已变化，请重试。");
+        return;
+      }
+      // pinEdit 预设输出与会话强绑定：无会话时直接拒绝，不发送会被宿主
+      // fail-closed 拒绝的命令；其余两通道沿用可选绑定兼容契约。
+      if (commandScope === "pinEdit" && !frozen.sessionId) {
+        await discardAnnotatedImage(resourceUri);
+        setOperationMessage("贴图会话已失效，本次预设输出未发送，请重试。");
+        return;
+      }
+      const command: AppAction = {
+        type:
+          commandScope === "imageEdit"
+            ? "imageEdit.savePresetImage"
+            : commandScope === "pinEdit"
+              ? "pinEdit.savePresetImage"
+              : "recognition.savePresetImage",
+        resourceUri,
+        presetId: preset.id,
+        presetBinding,
+        ...(frozen.sessionId
+          ? { sessionId: frozen.sessionId, revision: frozen.contentVersion }
+          : {}),
+      };
+      const receipt = actions.runWithReceipt
+        ? await actions.runWithReceipt(command)
+        : (await actions.run(command))
+          ? "succeeded"
+          : "unconfirmed";
+      // 只有明确失败回执终结本次操作；连接/代际失效不能推断宿主已停止。
+      if (receipt === "rejected") await discardAnnotatedImage(resourceUri);
+      setOperationMessage(
+        receipt === "succeeded"
+          ? "已按常用预设保存副本；已有文件不会被覆盖。"
+          : receipt === "rejected"
+            ? "预设输出未完成；原图和已保存副本保留，请查看宿主提示。"
+            : "预设保存结果尚未确认；请先查看输出目录或恢复连接，确认后再重试。",
+      );
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "预设输出失败",
+      );
     } finally {
       exportInProgressRef.current = false;
       setIsExporting(false);
@@ -5134,6 +5232,26 @@ export function ImageCanvasEditor({
   > {
     const canvas = canvasRef.current;
     if (!canvas) throw new Error("画布尚未就绪，请重试。");
+    // 保存前跑与恢复同一排版最终预算：超限不上传贡献，拒绝时现场保留。
+    if (state.composition) {
+      const image = imageRef.current;
+      if (!image) throw new Error("画布尚未就绪，请重试。");
+      try {
+        compositionLayout(
+          finalOutputSize(image, state, canvasSize(canvas)),
+          state.composition,
+          importAssetsRef.current,
+          state.marks,
+        );
+      } catch (error) {
+        throw new Error(
+          `工程未保存：排版输出超限（${
+            error instanceof Error ? error.message : "单边≤16384px，总像素≤64MP"
+          }）；当前排版与画布保持不变，可重置排版后重试。`,
+          { cause: error },
+        );
+      }
+    }
     const payload = {
       ...buildContributionState(canvasSize(canvas), state),
       patches: await encodeAppliedProjectPatches(),
@@ -5294,8 +5412,9 @@ export function ImageCanvasEditor({
       const payload = await buildProjectContributionPayload();
       setOperationMessage("正在上传贴图内容……");
       const contributeId = await uploadProjectContribution(payload);
-      // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核。
-      const exported = await exportFinalImageIfUnchanged(false, true);
+      // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核；与首贴
+      // 同源同一预算检查，未烘焙遮罩的最终像素由宿主 owned 快照接续。
+      const exported = await exportFinalImageIfUnchanged(false, true, true);
       if (
         !exported?.sessionId ||
         sessionIdRef.current !== frozenSession ||
@@ -5329,30 +5448,17 @@ export function ImageCanvasEditor({
     }
   }
 
-  /** 识别/贴图上传的宿主排除框：基础屏蔽 + 放大镜采样泄露区（同一
-   * 归一化映射，复用既有 excludeBoxes 契约，无新 IPC）。基础屏蔽数+泄露
-   * 区数超过桥上限（与 MAX_EXCLUSION_MARKS/codec 同界）时返回 undefined，
-   * 调用方必须明确拒绝该操作：不截断、不静默丢屏蔽、不放宽预算。 */
-  function hostExclusionBoxes():
-    { x: number; y: number; width: number; height: number }[] | undefined {
+  /** 与排版、屏蔽副本、文字层共用最终输出几何；超预算在上传前拒绝。 */
+  function hostExclusionBoxes() {
     const image = imageRef.current;
     const canvas = canvasRef.current;
     if (!image || !canvas) return [];
-    const size = canvasSize(canvas);
-    const base = exclusionNormalizedRects(image, state, size);
-    const leak = displayRectsToNormalizedRects(
-      magnifierExclusionLeakRects(state, image, size),
+    return compositionExclusions(
       image,
       state,
-      size,
-    );
-    if (base.length + leak.length > MAX_EXCLUSION_MARKS) return undefined;
-    return [...base, ...leak].map((rect) => ({
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    }));
+      canvasSize(canvas),
+      importAssetsRef.current,
+    ).normalized;
   }
 
   async function pinCurrentImage() {
@@ -5363,16 +5469,10 @@ export function ImageCanvasEditor({
       // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
       // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
       const boxes = hostExclusionBoxes();
-      if (!boxes) {
-        setOperationMessage(
-          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试贴图。",
-        );
-        return;
-      }
       // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
       // 首次贴图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
-      const exported = await exportFinalImageIfUnchanged(false, true);
+      const exported = await exportFinalImageIfUnchanged(false, true, true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
         type: commands.pinScreenshotImage,
@@ -5386,8 +5486,10 @@ export function ImageCanvasEditor({
       setOperationMessage(
         pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
       );
-    } catch {
-      setOperationMessage("无法创建贴图，请重试。");
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error ? error.message : "无法创建贴图，请重试。",
+      );
     } finally {
       exportInProgressRef.current = false;
       setIsExporting(false);
@@ -5399,9 +5501,23 @@ export function ImageCanvasEditor({
     const image = imageRef.current;
     const canvas = canvasRef.current;
     if (!image || !canvas) return false;
-    if (!exclusionCoversOutput(image, state, canvasSize(canvas))) {
-      return false;
+    let fullyMasked: boolean;
+    try {
+      fullyMasked = compositionExclusions(
+        image,
+        state,
+        canvasSize(canvas),
+        importAssetsRef.current,
+      ).fullyMasked;
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error
+          ? error.message
+          : "排版屏蔽区域无效，本次未上传。",
+      );
+      return true;
     }
+    if (!fullyMasked) return false;
     setOperationMessage(
       kind === "recognition"
         ? "整张图都在屏蔽区内：没有可识别内容，已取消本次识别；原图与屏蔽区保持不变，可撤销后重试。"
@@ -5420,15 +5536,9 @@ export function ImageCanvasEditor({
       // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
       // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
       const boxes = hostExclusionBoxes();
-      if (!boxes) {
-        setOperationMessage(
-          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试识别。",
-        );
-        return;
-      }
       // 上传未烘焙遮罩的普通最终像素 + 归一化排除框：宿主冻结普通显示
       // 基准并自行生成白色遮罩 OCR 输入；普通基准绝不采用遮罩像素。
-      const exported = await exportFinalImageIfUnchanged(false);
+      const exported = await exportFinalImageIfUnchanged(false, true);
       if (!exported) return;
       const started = await actions.run({
         type: commands.recognizeScreenshotImage,
@@ -5448,8 +5558,12 @@ export function ImageCanvasEditor({
           ? `已提交识别当前图（${formatLabel(exported)}）；结果将在识别页面显示。`
           : "识别未开始：内容已更新或会话已失效，请重试。",
       );
-    } catch {
-      setOperationMessage("无法生成或传递识别图片，请重试。");
+    } catch (error) {
+      setOperationMessage(
+        error instanceof Error
+          ? error.message
+          : "无法生成或传递识别图片，请重试。",
+      );
     } finally {
       exportInProgressRef.current = false;
       setIsExporting(false);
@@ -5892,31 +6006,20 @@ export function ImageCanvasEditor({
   // 边界相交策略：行框与任一排除矩形有正面积重叠即整体丢弃（仅贴边不算），
   // 不臆造引擎缺失坐标；被屏蔽文字因输入像素已覆盖本就不可进入层。
   // 行框是 [0,1000] 归一化坐标（参考最终输出 PNG），排除矩形同步归一化。
-  const layerExclusionRects = useMemo(
-    () =>
-      layerReady && imageForLayer && displayCanvas
-        ? [
-            ...exclusionNormalizedRects(
-              imageForLayer,
-              state,
-              canvasSize(displayCanvas),
-            ),
-            // 放大镜泄露区与屏蔽块同规则参与行过滤：与贴图宿主侧过滤一致
-            // （H3；输入像素本身已烘焙，此处是同一信任边界的行级兑现）。
-            ...displayRectsToNormalizedRects(
-              magnifierExclusionLeakRects(
-                state,
-                imageForLayer,
-                canvasSize(displayCanvas),
-              ),
-              imageForLayer,
-              state,
-              canvasSize(displayCanvas),
-            ),
-          ]
-        : undefined,
-    [layerReady, state, imageForLayer, displayCanvas],
-  );
+  const layerExclusionRects = useMemo(() => {
+    if (!layerReady || !imageForLayer || !displayCanvas) return undefined;
+    try {
+      return compositionExclusions(
+        imageForLayer,
+        state,
+        canvasSize(displayCanvas),
+        importAssetsRef.current,
+      ).normalized;
+    } catch {
+      // 无效/超预算排版不得让旧文字层变为可选；提交处保留具体错误提示。
+      return [{ x: 0, y: 0, width: 1000, height: 1000 }];
+    }
+  }, [layerReady, state, imageForLayer, displayCanvas]);
   const visibleLayerLines = useMemo(
     () =>
       toImageTextLines(
@@ -6085,10 +6188,21 @@ export function ImageCanvasEditor({
   // 过宽靠容器内水平滚动保持单行可达；下排仅当前工具属性，可换行收纳。
   // 普通页仍是单条工具栏+底部 footer，两种布局共用片段，可访问名称与
   // 命令不随布局变化。
-  const toolButtons = TOOLSETS[toolset]
-    .filter((candidate) => !pinSnapshotApply || candidate !== "textSelect")
-    // 截图现场无裁剪按钮：选区四边/四角拖拽直接调整裁剪。
-    .filter((value) => !(captureStyle && value === "crop"))
+  const orderedTools = preferences.order.filter((value) =>
+    TOOLSETS[toolset].includes(value),
+  );
+  // 按钮上下文可用性：pinEdit 现场不提供取字（文字层由宿主 owned 快照
+  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪）。快捷键
+  // 与隐藏菜单复用同一判断，不让隐藏入口绕过上下文限制。
+  const toolAvailable = (value: string) =>
+    (!pinSnapshotApply || value !== "textSelect") &&
+    !(captureStyle && value === "crop");
+  const hiddenTools = orderedTools.filter(
+    (value) => preferences.hidden.includes(value) && toolAvailable(value),
+  );
+  const toolButtons = orderedTools
+    .filter((value) => !preferences.hidden.includes(value))
+    .filter(toolAvailable)
     .map((value) => {
       // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
       const icon = TOOL_ICONS[value];
@@ -7240,6 +7354,7 @@ export function ImageCanvasEditor({
     state.rotation !== 0 ||
     !!state.crop ||
     !!state.resize ||
+    !!state.composition ||
     !!state.patches?.length;
 
   /** 清除编辑：整体回到空白基准，入历史可撤销；进行中的草稿（折线等）
@@ -7424,7 +7539,7 @@ export function ImageCanvasEditor({
 
   // “更多”菜单收纳现场低频操作（按当前可用状态）；菜单项保留原按钮
   // 的权限/忙态守卫，普通页直出按钮不收菜单。
-  const moreActionsMenu = captureStyle && (
+  const moreActionsMenu = (captureStyle || hiddenTools.length > 0) && (
     <Menu>
       <MenuTrigger disableButtonEnhancement>
         <ToolbarButton
@@ -7435,6 +7550,17 @@ export function ImageCanvasEditor({
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
+          {hiddenTools.map((value) => (
+            <MenuItem
+              key={value}
+              onClick={() => {
+                cancelDrawing();
+                setTool(value);
+              }}
+            >
+              {TOOL_LABELS[value]}
+            </MenuItem>
+          ))}
           <MenuItem
             disabled={!hasExclusions}
             icon={<ToolbarIcon name="clearExclusions" />}
@@ -7507,6 +7633,22 @@ export function ImageCanvasEditor({
         // 校对模式挂起本地编辑手势（Space 平移/Esc 关闭），不抢占校对交互。
         if (proofreading) return;
         const target = event.target as HTMLElement;
+        if (
+          !isExporting &&
+          !target.closest("input, textarea, select, [contenteditable=true]")
+        ) {
+          const selectedTool = shortcutTool(event, preferences);
+          if (
+            selectedTool &&
+            TOOLSETS[toolset].includes(selectedTool) &&
+            toolAvailable(selectedTool)
+          ) {
+            event.preventDefault();
+            cancelDrawing();
+            setTool(selectedTool);
+            return;
+          }
+        }
         // 文档命令由 window 消费，画布手势仍在本地处理。
         if (
           captureStyle &&
@@ -7567,6 +7709,27 @@ export function ImageCanvasEditor({
           }`}
         >
           {toolButtons}
+          {toolset === "full" && (
+            <ToolbarButton
+              aria-label="画布排版"
+              aria-pressed={compositionOpen}
+              onClick={() => setCompositionOpen((open) => !open)}
+            >
+              排版
+            </ToolbarButton>
+          )}
+          {toolset === "full" && (compositionOpen || state.composition) && (
+            <ToolbarButton
+              aria-label="重置排版"
+              disabled={!state.composition || isExporting || !!textEdit}
+              onClick={() => {
+                cancelDrawing();
+                commit({ ...state, composition: undefined });
+              }}
+            >
+              重置排版
+            </ToolbarButton>
+          )}
           {textLayerControls}
           {inpaintOperations}
           {dupmatchOperations}
@@ -7616,6 +7779,19 @@ export function ImageCanvasEditor({
           {copyAnnotatedButton}
           {captureStyle ? null : copyExcludedButton}
           {saveAnnotatedButton}
+          {toolset === "full" && (
+            <ToolbarButton
+              disabled={
+                !canExport ||
+                isExporting ||
+                !!textEdit ||
+                !editorSettings.imageOutputDirectory
+              }
+              onClick={() => void saveWithPreset()}
+            >
+              按常用预设保存
+            </ToolbarButton>
+          )}
           {captureStyle ? null : saveExcludedButton}
           {pinSnapshotApply ? null : saveProjectButton}
           {applyPinSnapshotButton}
@@ -7682,6 +7858,50 @@ export function ImageCanvasEditor({
           </Toolbar>
         ) : null}
       </div>
+      {compositionOpen && toolset === "full" && (
+        <CanvasCompositionPanel
+          value={state.composition}
+          revision={contentRevisionRef.current}
+          assets={[
+            ...new Map(
+              state.marks
+                .filter((mark) => mark.tool === "image" && mark.assetId)
+                .map((mark, index) => [
+                  mark.assetId!,
+                  { id: mark.assetId!, label: `导入图片 ${index + 1}` },
+                ]),
+            ).values(),
+          ]}
+          onChange={(composition) => commit({ ...state, composition })}
+          render={() =>
+            exportCanvas(imageRef.current, canvasRef.current, state, {
+              format: outputFormat,
+              quality: jpegQuality,
+              inpaint: { patches: appliedInpaintPatches() },
+              imageAssets: importAssetsRef.current,
+            })
+          }
+        />
+      )}
+      {toolset === "full" && (
+        <fieldset className="editor-preferences-lock" disabled={isExporting}>
+          <EditorPreferencesPanel
+            key={JSON.stringify(preferences)}
+            value={preferences}
+            directory={
+              typeof editorSettings.imageOutputDirectory === "string"
+                ? editorSettings.imageOutputDirectory
+                : undefined
+            }
+            error={
+              typeof editorSettings.editorPreferencesError === "string"
+                ? editorSettings.editorPreferencesError
+                : undefined
+            }
+            actions={actions}
+          />
+        </fieldset>
+      )}
       {toolset === "full" && (
         <details
           className="editor-output-settings"
@@ -7808,6 +8028,11 @@ export function ImageCanvasEditor({
           “确认应用”才一次性写入遮挡补丁（取候选周边环境色、不透明真实像素，可撤销）；确认前不修改内容，换图/编辑/选区变化会作废候选。
         </p>
       )}
+      {state.composition && (
+        <p className="editor-guidance">
+          排版会应用于复制、保存、贴图和识别/取字。复用图片对象与屏蔽区相交时，该图片在拼接/背景中的整幅复用区域也会从识别与取字排除；普通副本保留像素。排版最终尺寸见排版输出预览。
+        </p>
+      )}
       <p className="editor-guidance">
         屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与贴图画面保留原图内容，贴图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
       </p>
@@ -7818,7 +8043,7 @@ export function ImageCanvasEditor({
                 typeof sourceByteLength === "number"
                   ? ` · ${formatBytes(sourceByteLength)}`
                   : ""
-              } → 输出 ${currentOutputSize.width}×${
+              } → ${state.composition ? "排版前尺寸" : "输出"} ${currentOutputSize.width}×${
                 currentOutputSize.height
               } · ${
                 outputFormat === "image/jpeg"
@@ -9429,6 +9654,7 @@ export function validateProjectRestore(
   sourceImage: HTMLImageElement,
   savedCanvas: { readonly width: number; readonly height: number },
   state: WireEditorState,
+  assets?: ReadonlyMap<string, { readonly image: HTMLImageElement }>,
 ): void {
   if (
     !sourceImage.naturalWidth ||
@@ -9466,6 +9692,7 @@ export function validateProjectRestore(
   canvas.dataset.coordinateWidth = String(savedCanvas.width);
   canvas.dataset.coordinateHeight = String(savedCanvas.height);
   const restored: EditorState = {
+    composition: parseComposition(state.composition),
     rotation: state.rotation,
     marks: state.marks.map((mark) => wireToMark(mark, (point) => point, 1)),
     crop: state.crop
@@ -9474,6 +9701,14 @@ export function validateProjectRestore(
     resize: state.resize ? { ...state.resize } : undefined,
     patches: state.patches.map((patch) => ({ ...patch })),
   };
+  if (restored.composition) {
+    compositionLayout(
+      finalOutputSize(sourceImage, restored, savedCanvas),
+      restored.composition,
+      new Map([...(assets ?? [])].map(([id, asset]) => [id, asset.image])),
+      restored.marks,
+    );
+  }
   try {
     validateBrushBudget(sourceImage, canvas, restored);
   } catch {
@@ -9802,83 +10037,6 @@ function applyBlurBrush(
   compositeThroughMask(context, cut, mask, area);
 }
 
-/** #235 H3：放大镜把屏蔽源区域放大显示到原屏蔽框之外时，被屏蔽内容
- * 会随普通像素上传并绕过宿主遮罩。权威屏蔽源与烘焙/识别输入同一外扩
- * 取整自然矩形（exclusionNaturalRects），回投显示空间后做源→镜内投影
- * （裁剪前推导，仅输出时裁剪），返回每个（镜×屏蔽块）在镜内的泄露
- * 显示矩形——raw mark 几何不直接参与（取整边界 texel 不得遗漏）。 */
-function magnifierExclusionLeakRects(
-  state: EditorState,
-  image: HTMLImageElement,
-  displaySize: CanvasSize,
-): Rect[] {
-  const rects: Rect[] = [];
-  const naturalSize = outputSize(image, state.rotation);
-  const toDisplay = (at: Point) =>
-    projectPoint(
-      at,
-      image,
-      state.rotation,
-      naturalSize,
-      state.rotation,
-      displaySize,
-    );
-  const authoritativeSources = exclusionNaturalRects(
-    image,
-    state,
-    displaySize,
-  ).map((rect) => {
-    const start = toDisplay({ x: rect.x, y: rect.y });
-    const end = toDisplay({
-      x: rect.x + rect.width,
-      y: rect.y + rect.height,
-    });
-    return {
-      x: Math.min(start.x, end.x),
-      y: Math.min(start.y, end.y),
-      width: Math.abs(end.x - start.x),
-      height: Math.abs(end.y - start.y),
-    };
-  });
-  for (const mark of state.marks) {
-    if (mark.tool !== "magnifier") continue;
-    const dest = normalizedRect(mark);
-    if (dest.width < 1 || dest.height < 1) continue;
-    const zoom = magnifierZoomOf(mark);
-    const source = {
-      x: dest.x + dest.width / 2 - dest.width / 2 / zoom,
-      y: dest.y + dest.height / 2 - dest.height / 2 / zoom,
-      width: dest.width / zoom,
-      height: dest.height / zoom,
-    };
-    for (const area of authoritativeSources) {
-      const left = Math.max(source.x, area.x);
-      const top = Math.max(source.y, area.y);
-      const right = Math.min(source.x + source.width, area.x + area.width);
-      const bottom = Math.min(source.y + source.height, area.y + area.height);
-      if (right <= left || bottom <= top) continue;
-      const destLeft = Math.max(dest.x, dest.x + (left - source.x) * zoom);
-      const destTop = Math.max(dest.y, dest.y + (top - source.y) * zoom);
-      const destRight = Math.min(
-        dest.x + dest.width,
-        dest.x + (right - source.x) * zoom,
-      );
-      const destBottom = Math.min(
-        dest.y + dest.height,
-        dest.y + (bottom - source.y) * zoom,
-      );
-      if (destRight > destLeft && destBottom > destTop) {
-        rects.push({
-          x: destLeft,
-          y: destTop,
-          width: destRight - destLeft,
-          height: destBottom - destTop,
-        });
-      }
-    }
-  }
-  return rects;
-}
 function clampRect(rect: ReturnType<typeof normalizedRect>, size: CanvasSize) {
   const x = Math.max(0, Math.min(size.width, rect.x));
   const y = Math.max(0, Math.min(size.height, rect.y));
@@ -10084,6 +10242,8 @@ function renderMagnifierBase(
 }
 
 interface ExportCanvasOptions {
+  readonly validateExclusions?: boolean;
+  readonly outputSize?: CanvasSize;
   readonly format: OutputImageFormat;
   readonly quality: number;
   /** 导出只包含已应用补丁；未提交预览绝不进入导出/复制/识别像素。 */
@@ -10125,6 +10285,16 @@ async function exportCanvas(
     throw new Error("source image is unavailable");
   }
   const displaySize = canvasSize(displayCanvas);
+  const exclusions =
+    options.bakeExclusions || options.validateExclusions
+      ? compositionExclusions(
+          image,
+          state,
+          displaySize,
+          options.imageAssets as
+            ReadonlyMap<string, HTMLImageElement> | undefined,
+        )
+      : undefined;
   const naturalSize = outputSize(image, state.rotation);
   const mapPoint = (point: Point) =>
     projectPoint(
@@ -10136,32 +10306,42 @@ async function exportCanvas(
       naturalSize,
     );
   // textWidth 与字号保持逻辑单位；draw 的 markScale 统一缩放一次。
+  const compositionAssets = new Set(
+    state.composition?.stitch !== "none" ? state.composition?.assetIds : [],
+  );
+  if (
+    state.composition?.background === "image" &&
+    state.composition.backgroundAssetId
+  )
+    compositionAssets.add(state.composition.backgroundAssetId);
   const naturalState: EditorState = {
     rotation: state.rotation,
-    marks: state.marks.map((mark) => ({
-      ...mark,
-      start: mapPoint(mark.start),
-      end: mapPoint(mark.end),
-      ...(mark.points ? { points: mark.points.map(mapPoint) } : {}),
-      // 聚光灯区域与端点同一投影：裁剪/缩放/旋转后孔洞位置不漂移。
-      ...(mark.regions
-        ? {
-            regions: mark.regions.map((region) => {
-              const cornerA = mapPoint({ x: region.x, y: region.y });
-              const cornerB = mapPoint({
-                x: region.x + region.width,
-                y: region.y + region.height,
-              });
-              return {
-                x: Math.min(cornerA.x, cornerB.x),
-                y: Math.min(cornerA.y, cornerB.y),
-                width: Math.abs(cornerB.x - cornerA.x),
-                height: Math.abs(cornerB.y - cornerA.y),
-              };
-            }),
-          }
-        : {}),
-    })),
+    marks: state.marks
+      .filter((mark) => !mark.assetId || !compositionAssets.has(mark.assetId))
+      .map((mark) => ({
+        ...mark,
+        start: mapPoint(mark.start),
+        end: mapPoint(mark.end),
+        ...(mark.points ? { points: mark.points.map(mapPoint) } : {}),
+        // 聚光灯区域与端点同一投影：裁剪/缩放/旋转后孔洞位置不漂移。
+        ...(mark.regions
+          ? {
+              regions: mark.regions.map((region) => {
+                const cornerA = mapPoint({ x: region.x, y: region.y });
+                const cornerB = mapPoint({
+                  x: region.x + region.width,
+                  y: region.y + region.height,
+                });
+                return {
+                  x: Math.min(cornerA.x, cornerB.x),
+                  y: Math.min(cornerA.y, cornerB.y),
+                  width: Math.abs(cornerB.x - cornerA.x),
+                  height: Math.abs(cornerB.y - cornerA.y),
+                };
+              }),
+            }
+          : {}),
+      })),
   };
   const rendered = document.createElement("canvas");
   rendered.width = naturalSize.width;
@@ -10177,7 +10357,7 @@ async function exportCanvas(
     1 / displayScale,
     // JPEG 无透明：导出时显式合成白色背景；PNG 不烧底色，保留 alpha。
     options.format === "image/jpeg" ? "#ffffff" : undefined,
-    options.bakeExclusions === true,
+    options.bakeExclusions === true && !state.composition,
     { patches: options.inpaint?.patches },
     undefined,
     true,
@@ -10218,8 +10398,42 @@ async function exportCanvas(
     output.width,
     output.height,
   );
+  let composed = renderComposition(
+    output,
+    state.composition,
+    options.imageAssets as ReadonlyMap<string, HTMLImageElement> | undefined,
+    state.marks,
+  );
+  if (options.bakeExclusions && exclusions) {
+    const masked = composed.getContext("2d");
+    if (!masked) throw new Error("屏蔽画布不可用");
+    masked.fillStyle = "#ffffff";
+    for (const rect of exclusions.pixels)
+      masked.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+  if (options.outputSize) {
+    const resized = document.createElement("canvas");
+    const bounded = boundedCanvasSize(
+      options.outputSize.width,
+      options.outputSize.height,
+    );
+    resized.width = bounded.width;
+    resized.height = bounded.height;
+    const resizedContext = resized.getContext("2d");
+    if (!resizedContext) throw new Error("输出画布不可用");
+    resizedContext.drawImage(composed, 0, 0, resized.width, resized.height);
+    composed = resized;
+  }
+  if (options.format === "image/jpeg") {
+    const composedContext = composed.getContext("2d");
+    if (!composedContext) throw new Error("输出画布不可用");
+    composedContext.globalCompositeOperation = "destination-over";
+    composedContext.fillStyle = "#ffffff";
+    composedContext.fillRect(0, 0, composed.width, composed.height);
+    composedContext.globalCompositeOperation = "source-over";
+  }
   const blob = await new Promise<Blob | null>((resolve) => {
-    output.toBlob(
+    composed.toBlob(
       (value) => resolve(value),
       options.format,
       options.format === "image/jpeg" ? options.quality : undefined,

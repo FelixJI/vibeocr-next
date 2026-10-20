@@ -1,0 +1,11 @@
+{
+  "margin": 10,
+  "background": "solid",
+  "color": "#112233",
+  "endColor": "#445566",
+  "shadow": 0,
+  "radius": 0,
+  "ratio": "16:9",
+  "stitch": "none",
+  "assetIds": []
+}

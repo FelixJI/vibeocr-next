@@ -884,3 +884,81 @@ describe("project open runtime ownership", () => {
     await Promise.resolve();
   });
 });
+
+describe("command receipt certainty", () => {
+  it("keeps an explicit host rejection distinct while preserving boolean/error projection", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.nextResult = {
+      revision: 8,
+      ok: false,
+      problem: {
+        code: "desktop_command_failed",
+        category: "Internal",
+        retryable: true,
+        messageKey: "workbench.error.commandFailed",
+      },
+    };
+    const states: AppViewState[] = [];
+    const runtime = new WorkbenchWebRuntime(bridge);
+    await runtime.start((state) => states.push(state));
+    expect(
+      await runtime.actions.runWithReceipt!({
+        type: "imageEdit.savePresetImage",
+      }),
+    ).toBe("rejected");
+    expect(states.at(-1)?.commandProblem).toBe("workbench.error.commandFailed");
+    expect(
+      await runtime.actions.run({ type: "imageEdit.savePresetImage" }),
+    ).toBe(false);
+    bridge.nextResult = { revision: 9, ok: true, problem: null };
+    expect(
+      await runtime.actions.runWithReceipt!({
+        type: "imageEdit.savePresetImage",
+      }),
+    ).toBe("succeeded");
+    expect(states.at(-1)?.commandProblem).toBeUndefined();
+    runtime.stop();
+  });
+  it("transport rejection is unconfirmed instead of a negative host receipt", async () => {
+    const bridge = new FakeHostBridge();
+    const error = new Error("transport disconnected");
+    bridge.execute = async () => {
+      throw error;
+    };
+    const onError = vi.fn();
+    const states: AppViewState[] = [];
+    const runtime = new WorkbenchWebRuntime(bridge, onError);
+    await runtime.start((state) => states.push(state));
+    expect(
+      await runtime.actions.runWithReceipt!({
+        type: "imageEdit.savePresetImage",
+      }),
+    ).toBe("unconfirmed");
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(states.at(-1)?.commandProblem).toBe(
+      "workbench.error.bridgeUnavailable",
+    );
+    expect(
+      await runtime.actions.run({ type: "imageEdit.savePresetImage" }),
+    ).toBe(false);
+    runtime.stop();
+  });
+  it("a receipt from the previous runtime generation cannot confirm the current operation", async () => {
+    const bridge = new FakeHostBridge();
+    let settle!: (result: CommandResult) => void;
+    bridge.execute = () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      });
+    const runtime = new WorkbenchWebRuntime(bridge);
+    await runtime.start(() => undefined);
+    const result = runtime.actions.runWithReceipt!({
+      type: "imageEdit.savePresetImage",
+    });
+    runtime.stop();
+    await runtime.start(() => undefined);
+    settle({ revision: 8, ok: true, problem: null });
+    expect(await result).toBe("unconfirmed");
+    runtime.stop();
+  });
+});

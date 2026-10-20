@@ -1,4 +1,5 @@
 using System.Text.Json;
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.App.Features.Pins;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Features.Settings;
@@ -186,7 +187,8 @@ public sealed class PinEditChannelWorkbenchTests
     public readonly List<(Guid Session, long Revision, Guid Pin)> Applied = [];
     public readonly List<Guid> Closed = [];
 
-    public Harness(Func<CancellationToken, Task<string?>>? savePicker = null)
+    public Harness(Func<CancellationToken, Task<string?>>? savePicker = null,
+      VibeOCR.Platform.Bootstrap.PortableLayout? optionsLayout = null)
     {
       Directory.CreateDirectory(Root);
       Broker = new WorkbenchResourceBroker(Root);
@@ -212,7 +214,8 @@ public sealed class PinEditChannelWorkbenchTests
         projectStore: Projects,
         projectSavePicker: savePicker,
         pinSnapshotWriter: Writer,
-        pinHistory: History);
+        pinHistory: History,
+        optionsLayout: optionsLayout);
       Handler.StateChanged += state => States.Add(state);
       Handler.PinSnapshotApplied += (session, revision, pin) => Applied.Add((session, revision, pin));
       Handler.PinEditSessionClosed += session => Closed.Add(session);
@@ -250,6 +253,75 @@ public sealed class PinEditChannelWorkbenchTests
     Assert.Equal(sessionId.ToString()!.Replace("-", ""), opened.ScreenshotSession!.SessionId);
     Assert.NotNull(opened.Input);
     Assert.Equal(new WorkbenchExclusionBox(0, 0, 250, 1000), Assert.Single(opened.ScreenshotSession.ExcludeBoxes!));
+  }
+
+  [Fact]
+  public async Task PinEditPresetSaveBindsCurrentSessionAndProjectsPinEditScope()
+  {
+    // #239×#238 连接契约：pinEdit.savePresetImage 走 pinEdit 通道——预设
+    // 输出必须绑定当前贴图会话/修订，返回 pinEdit 投影；缺失/过期绑定
+    // fail closed 且不消耗上传租约，成功保存租约仅一次消费。
+    string outputRoot = Path.Combine(
+      Path.GetTempPath(), $"vibeocr-pin-preset-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(outputRoot);
+    VibeOCR.Platform.Bootstrap.PortableLayout layout =
+      VibeOCR.Platform.Bootstrap.PortableLayout.Resolve(
+        Path.Combine(outputRoot, "VibeOCR.Next.exe"), "production");
+    layout.EnsurePortableState();
+    EditorPreferencesStore.Save(layout, new(
+      EditorPreferences.Default with { Output = new(NameTemplate: "{name}") },
+      outputRoot));
+    await using var harness = new Harness(optionsLayout: layout);
+    try
+    {
+      Guid? session = await harness.Handler.TryOpenPinEditSessionAsync(
+        Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
+      Assert.NotNull(session);
+      WorkbenchAnnotationLease png = await harness.Annotations.UploadPngAsync(
+        new MemoryStream(Png), TestContext.Current.CancellationToken);
+
+      // 缺失与过期会话绑定：拒绝且租约仍可后续使用。
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit")).Error);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session!.Value, 99)).Error);
+
+      harness.States.Clear();
+      WorkbenchCommandOutcome saved = harness.Execute(new SavePresetImageCommand(
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0, new(new(NameTemplate: "{name}"), outputRoot)));
+      Assert.Null(saved.Error);
+      Assert.NotEmpty(saved.States);
+      Assert.All(saved.States, state => Assert.Equal("pinEdit", state.Scope));
+      // 预设保存的返回投影仍是 pinEdit 会话状态（命令 outcome 直达，
+      // 不像 applySnapshot 额外 publish 终态）。
+      Assert.Contains(saved.States, state => state is PinEditWorkbenchState pin &&
+        pin.ScreenshotSession is not null);
+      // 输出按预设写入授权目录；pinEdit 通道无 DisplayName，回落安全默认名。
+      Assert.True(File.Exists(Path.Combine(outputRoot, "vibeocr.png")));
+      // 客户端目录只作等值绑定，不得提供另一写盘授权。
+      WorkbenchAnnotationLease forged = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(forged.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0,
+        new(new(NameTemplate: "{name}"), Path.Combine(outputRoot, "other")))).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(forged.ResourceUri));
+      Assert.False(Directory.Exists(Path.Combine(outputRoot, "other")));
+      WorkbenchAnnotationLease missing = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(missing.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0)).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(missing.ResourceUri));
+      // 另一个窗口更新同一预设后，旧语义快照被拒绝并释放未消费租约。
+      Assert.Null(harness.Execute(new SetEditorPreferencesCommand(EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Quality: 0.7) })).Error);
+      WorkbenchAnnotationLease stale = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(stale.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0,
+        new(new(NameTemplate: "{name}"), outputRoot))).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(stale.ResourceUri));
+      Assert.False(File.Exists(Path.Combine(outputRoot, "vibeocr_1.png")));
+      // 租约一次消费：重复命令无法再次取用同一上传。
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0, new(new(NameTemplate: "{name}"), outputRoot))).Error);
+    }
+    finally
+    {
+      try { Directory.Delete(outputRoot, recursive: true); } catch (IOException) { }
+    }
   }
 
   [Fact]

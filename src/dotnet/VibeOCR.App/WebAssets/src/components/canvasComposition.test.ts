@@ -1,0 +1,214 @@
+import { rotateEditorState } from "./annotationGeometry";
+import { validateProjectRestore } from "./ImageCanvasEditor";
+import { describe, expect, it } from "vitest";
+import {
+  compositionSize,
+  compositionLayout,
+  pruneCompositionAssets,
+  DEFAULT_COMPOSITION,
+  parseComposition,
+  boundedCanvasSize,
+} from "./canvasComposition";
+import {
+  buildContributionState,
+  restoreEditorState,
+} from "./project/projectWire";
+
+describe("non-destructive canvas composition", () => {
+  it("computes bounded horizontal/vertical stitching, margins and fixed aspect", () => {
+    expect(
+      compositionSize(
+        [
+          { width: 80, height: 40 },
+          { width: 20, height: 30 },
+        ],
+        { ...DEFAULT_COMPOSITION, stitch: "horizontal", margin: 10 },
+      ),
+    ).toEqual({ width: 120, height: 60 });
+    expect(
+      compositionSize(
+        [
+          { width: 80, height: 40 },
+          { width: 20, height: 30 },
+        ],
+        { ...DEFAULT_COMPOSITION, stitch: "vertical", margin: 10 },
+      ),
+    ).toEqual({ width: 100, height: 90 });
+    expect(
+      compositionSize([{ width: 80, height: 40 }], {
+        ...DEFAULT_COMPOSITION,
+        ratio: "1:1",
+        margin: 10,
+      }),
+    ).toEqual({ width: 100, height: 100 });
+    expect(() => boundedCanvasSize(16384, 16384)).toThrow(/64MP/);
+    expect(() => boundedCanvasSize(Number.NaN, 10)).toThrow();
+  });
+  it("keeps composition editable through project roundtrip and preserves original objects", () => {
+    const composition = {
+      ...DEFAULT_COMPOSITION,
+      margin: 20,
+      background: "gradient" as const,
+      cut: { axis: "horizontal" as const, start: 25, end: 50 },
+    };
+    const original = { rotation: 0, marks: [], composition };
+    const size = { width: 900, height: 600 };
+    const body = buildContributionState(size, original);
+    expect(body.state.composition).toEqual(composition);
+    const restored = restoreEditorState(body.state, {
+      naturalSize: size,
+      savedCanvas: size,
+      displayCanvas: size,
+      rotation: 0,
+    });
+    expect(restored.composition).toEqual(composition);
+    expect(original.marks).toEqual([]);
+    expect(parseComposition(undefined)).toBeUndefined();
+  });
+  it("rejects unknown formats, malformed resource ids, invalid cuts and unbounded values", () => {
+    for (const patch of [
+      { future: true },
+      { background: "future" },
+      { margin: Infinity },
+      { assetIds: ["file:///private.png"] },
+      { cut: { axis: "horizontal", start: 0, end: 100 } },
+    ])
+      expect(() =>
+        parseComposition({ ...DEFAULT_COMPOSITION, ...patch }),
+      ).toThrow();
+  });
+});
+
+it("rejects an unrenderable project composition before session acknowledgement", () => {
+  const image = { naturalWidth: 8000, naturalHeight: 8000 } as HTMLImageElement;
+  expect(() =>
+    validateProjectRestore(
+      image,
+      { width: 900, height: 600 },
+      {
+        rotation: 0,
+        marks: [],
+        patches: [],
+        composition: { ...DEFAULT_COMPOSITION, margin: 1000 },
+      },
+    ),
+  ).toThrow(/64MP/);
+});
+
+it("retains editable composition when rotating the source image", () => {
+  const composition = {
+    ...DEFAULT_COMPOSITION,
+    margin: 12,
+    stitch: "horizontal" as const,
+  };
+  const image = { naturalWidth: 80, naturalHeight: 40 } as HTMLImageElement;
+  const rotated = rotateEditorState(
+    { rotation: 0, marks: [], composition },
+    image,
+    { width: 900, height: 600 },
+    90,
+  );
+  expect(rotated.rotation).toBe(90);
+  expect(rotated.composition).toEqual(composition);
+});
+
+it("counts every live image object through undo/delete and legacy project roundtrip", () => {
+  const assetId = "a".repeat(32);
+  const mark = {
+    id: "mark-1",
+    tool: "image" as const,
+    assetId,
+    start: { x: 0, y: 0 },
+    end: { x: 20, y: 10 },
+  };
+  const composition = {
+    ...DEFAULT_COMPOSITION,
+    stitch: "horizontal" as const,
+    assetIds: [assetId],
+  };
+  const assets = new Map([[assetId, { naturalWidth: 20, naturalHeight: 10 }]]);
+  const size = { width: 80, height: 40 };
+  for (const marks of [[mark], [mark, { ...mark, id: "mark-2" }], [mark]]) {
+    const body = buildContributionState(size, {
+      rotation: 0,
+      marks,
+      composition,
+    });
+    const restored = restoreEditorState(body.state, {
+      naturalSize: size,
+      savedCanvas: size,
+      displayCanvas: size,
+      rotation: 0,
+    });
+    const layout = compositionLayout(
+      size,
+      restored.composition!,
+      assets,
+      restored.marks,
+    );
+    expect(layout.placements).toHaveLength(marks.length + 1);
+    expect(layout.size.width).toBe(80 + marks.length * 20);
+  }
+});
+
+it("persists explicit background membership and rejects contradictory membership metadata", () => {
+  const backgroundAssetId = "a".repeat(32);
+  const value = {
+    ...DEFAULT_COMPOSITION,
+    background: "image" as const,
+    backgroundAssetId,
+    backgroundStitchIndex: 1,
+  };
+  expect(parseComposition(JSON.parse(JSON.stringify(value)))).toEqual(value);
+  for (const patch of [
+    { backgroundStitchIndex: -1 },
+    { backgroundStitchIndex: 0.5 },
+    { backgroundStitchIndex: 17 },
+    { background: "solid" },
+    { assetIds: [backgroundAssetId] },
+  ])
+    expect(() => parseComposition({ ...value, ...patch })).toThrow();
+});
+
+it("prunes members before the hidden background without moving its saved position", () => {
+  const [a, b, c] = ["a", "b", "c"].map((id) => id.repeat(32));
+  const original = {
+    ...DEFAULT_COMPOSITION,
+    background: "image" as const,
+    backgroundAssetId: b,
+    backgroundStitchIndex: 1,
+    stitch: "horizontal" as const,
+    assetIds: [a!, c!],
+  };
+  const pruned = pruneCompositionAssets(original, new Set([b!, c!]));
+  expect(pruned.assetIds).toEqual([c]);
+  expect(pruned.backgroundStitchIndex).toBe(0);
+  expect(pruneCompositionAssets(pruned, new Set([b!, c!]))).toEqual(pruned);
+  expect(original.backgroundStitchIndex).toBe(1); // 撤销持有的历史不被就地改写。
+  const size = { width: 80, height: 40 };
+  const marks = [b!, c!].map((assetId, index) => ({
+    id: "mark-" + (index + 1),
+    tool: "image" as const,
+    assetId,
+    start: { x: 0, y: 0 },
+    end: { x: 20, y: 10 },
+  }));
+  const body = buildContributionState(size, {
+    rotation: 0,
+    marks,
+    composition: pruned,
+  });
+  expect(
+    restoreEditorState(body.state, {
+      naturalSize: size,
+      savedCanvas: size,
+      displayCanvas: size,
+      rotation: 0,
+    }).composition,
+  ).toEqual(pruned);
+  expect(pruneCompositionAssets(pruned, new Set([c!]))).toMatchObject({
+    background: "transparent",
+    backgroundAssetId: undefined,
+    backgroundStitchIndex: undefined,
+  });
+});

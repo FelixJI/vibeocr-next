@@ -1,4 +1,5 @@
 using VibeOCR.App.Web;
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.App.Workbench;
 using Xunit;
 using System.Text.Json;
@@ -8,6 +9,66 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Fact]
+  public void PresetOutputNeverAcceptsWebPathsAndRetainsSessionBinding()
+  {
+    Guid session = Guid.NewGuid();
+    string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", presetBinding = new { preset = new ImageOutputPreset(), directory = "C:/authorized-output" }, sessionId = session.ToString("N"), revision = 3 }, EditorPreferencesStore.Json);
+    SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(ParseForTest(CommandJson(session, "imageEdit", "savePresetImage", valid), session).Command);
+    Assert.Equal(session, command.SessionId);
+    Assert.Equal(3, command.Revision);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "imageEdit", "savePresetImage", JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", directory = "C:/private" })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "settings", "pickImageOutputDirectory", "{\"path\":\"C:/private\"}"), session));
+  }
+
+  [Fact]
+  public void PinEditPresetOutputRequiresSessionBindingAndKeepsOpaqueResourceBoundary()
+  {
+    // #239×#238 连接：pinEdit.savePresetImage 与既有预设输出同一资源/路径
+    // 边界，但会话/修订为强制字段，缺失即 fail closed，不降级为可选绑定。
+    Guid session = Guid.NewGuid();
+    string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", presetBinding = new { preset = new ImageOutputPreset(), directory = "C:/authorized-output" }, sessionId = session.ToString("N"), revision = 3 }, EditorPreferencesStore.Json);
+    SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(
+      ParseForTest(CommandJson(session, "pinEdit", "savePresetImage", valid), session).Command);
+    Assert.Equal("pinEdit", command.Scope);
+    Assert.Equal(session, command.SessionId);
+    Assert.Equal(3, command.Revision);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default" })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N") })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+      CommandJson(session, "pinEdit", "savePresetImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 0, directory = "C:/private" })), session));
+  }
+
+  [Fact]
+  public void BatchStateSerializesExportImageErrorForWebDecodeUnavailable()
+  {
+    // F239-R3-01：批量图片预设的 decode_unavailable 必须经真实 bridge 进
+    // wire，否则前端等不到状态只能逐项等 15s 超时。
+    var state = new BatchWorkbenchState(false, 2, 0, 1, [])
+    {
+      ExportImageError = "decode_unavailable",
+    };
+    string json = WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(3, "batch", WorkbenchStateChange.Replace, state));
+    using JsonDocument document = JsonDocument.Parse(json);
+    JsonElement batch = document.RootElement.GetProperty("payload").GetProperty("state");
+    Assert.Equal(
+      "decode_unavailable",
+      batch.GetProperty("exportImageError").GetString());
+    string idle = WorkbenchBridgeCodec.SerializeState(
+      Guid.NewGuid(),
+      new WorkbenchStateEnvelope(4, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(false, 0, 0, 0, [])));
+    Assert.Contains("\"exportImageError\":null", idle);
+  }
+
   [Fact]
   public void PdfBlockEditRequiresDocumentSessionAndOldText()
   {

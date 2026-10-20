@@ -312,6 +312,7 @@ public sealed class WorkbenchProjectStore : IDisposable
     {
       throw Fail("Project contribution state nullifies a required list.");
     }
+    VibpProjectRules.ValidateComposition(state.Composition, state.Marks);
     // 补丁描述符唯一来源是上传 patches 数组：state 内携带即拒绝，避免双真源。
     if (state.Patches.Count > 0)
     {

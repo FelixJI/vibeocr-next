@@ -29,6 +29,12 @@ export interface AppViewState {
 }
 
 export type AppActionType =
+  | "settings.setEditorPreferences"
+  | "settings.pickImageOutputDirectory"
+  | "imageEdit.savePresetImage"
+  | "recognition.savePresetImage"
+  | "batch.prepareImageExport"
+  | "batch.exportImage"
   | "imageEdit.selectImage"
   | "imageEdit.readClipboard"
   | "imageEdit.pasteSystemContent"
@@ -62,6 +68,8 @@ export type AppActionType =
   | "pinEdit.releaseAssets"
   | "pinEdit.applySnapshot"
   | "pinEdit.rejectProjectRestore"
+  // pinEdit 预设输出：与 imageEdit/recognition 同一预设命令，但会话强绑定。
+  | "pinEdit.savePresetImage"
   // 以下 pinEdit.* 仅为编辑器静态全量命令映射的类型完整性存在；宿主未
   // 实现且 pin 模式 UI 不可达（发送会被宿主 fail-closed 拒绝）。
   | "pinEdit.pinScreenshotImage"
@@ -207,6 +215,8 @@ export interface AppAction {
   readonly [argument: string]: unknown;
 }
 
+export type AppCommandReceipt = "succeeded" | "rejected" | "unconfirmed";
+
 export interface AppActions {
   readonly reportCapturePixels?: (
     scene: CaptureScene,
@@ -229,6 +239,7 @@ export interface AppActions {
     install: () => void,
   ) => boolean;
   readonly run: (action: AppAction) => Promise<boolean>;
+  readonly runWithReceipt?: (action: AppAction) => Promise<AppCommandReceipt>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;
 }

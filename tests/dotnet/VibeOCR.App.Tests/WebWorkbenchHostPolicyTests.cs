@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
+using VibeOCR.App.Features.Configuration;
 using Windows.Storage.Streams;
 using Xunit;
 
@@ -309,6 +310,74 @@ public sealed class WebWorkbenchHostPolicyTests
         new Uri(url),
         method,
         contentType));
+
+  [Fact]
+  public async Task FixedRouteSettingsIncludeAuthoritativeOutputPresetButNoEnvironmentLogs()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"editor-settings-projection-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, pinEditHost: true);
+      EditorPreferences preferences = EditorPreferences.Default with { Output = new(Quality: 0.7, NameTemplate: "custom-{name}") };
+      var settings = new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "ready", "cpu", false,
+        EnvironmentInstallLog: ["private environment log"], EditorPreferences: preferences, ImageOutputDirectory: root);
+      string json = WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(), host.ProjectState(new(1, "settings", WorkbenchStateChange.Replace, settings)));
+      using JsonDocument document = JsonDocument.Parse(json);
+      JsonElement state = document.RootElement.GetProperty("payload").GetProperty("state");
+      Assert.Equal(0.7, state.GetProperty("editorPreferences").GetProperty("output").GetProperty("quality").GetDouble());
+      Assert.Equal(root, state.GetProperty("imageOutputDirectory").GetString());
+      Assert.False(state.TryGetProperty("environmentInstallLog", out _));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task AnnotationDiscardIsScopedToUploadingHostAndReleasesQuotaImmediately()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"annotation-discard-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      await using var app = new WorkbenchApplication([], WorkbenchRoute.ImageEdit);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var store = new WorkbenchAnnotationStore(root);
+      await using var owner = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      await using var other = new WebWorkbenchHost(app, broker, store, applicationOwner: false);
+      for (int index = 0; index < 10; index++)
+      {
+        WorkbenchAnnotationLease lease = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+        owner.TrackAnnotationLease(lease.ResourceUri);
+        Assert.False(other.RevokeUploadedAnnotation(lease.ResourceUri));
+        Assert.True(owner.RevokeUploadedAnnotation(lease.ResourceUri));
+        Assert.False(owner.RevokeUploadedAnnotation(lease.ResourceUri));
+        Assert.Throws<WorkbenchAnnotationAccessException>(() => store.Take(lease.ResourceUri));
+      }
+      // Take已转移文件所有权：DELETE只能清掉上传记录，不能删除在途任务持有的文件。
+      WorkbenchAnnotationLease consumed = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+      owner.TrackAnnotationLease(consumed.ResourceUri);
+      using (WorkbenchAnnotationFile inFlight = store.Take(consumed.ResourceUri))
+      {
+        Assert.True(owner.RevokeUploadedAnnotation(consumed.ResourceUri));
+        Assert.True(File.Exists(inFlight.Path));
+        Assert.False(owner.RevokeUploadedAnnotation(consumed.ResourceUri));
+      }
+      // 绑定变化已由SettingsOwner拒绝并Revoke，第一次本宿主DELETE仍是成功no-op。
+      WorkbenchAnnotationLease revoked = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+      owner.TrackAnnotationLease(revoked.ResourceUri);
+      store.Revoke(revoked.ResourceUri);
+      Assert.True(owner.RevokeUploadedAnnotation(revoked.ResourceUri));
+      WorkbenchAnnotationLease foreign = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+      other.TrackAnnotationLease(foreign.ResourceUri);
+      Assert.False(owner.RevokeUploadedAnnotation(foreign.ResourceUri));
+      using WorkbenchAnnotationFile retained = store.Take(foreign.ResourceUri);
+      Assert.Equal(2, retained.Width);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
 
   [Fact]
   public void RecoveryAllowsOneAutomaticAttemptPerReadyEpisode()

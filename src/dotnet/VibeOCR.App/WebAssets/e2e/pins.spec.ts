@@ -10,6 +10,7 @@ import {
   releaseCommand,
   rejectNextCommand,
 } from "./workbench-host";
+import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
 import type { ProjectContributionBody } from "../src/components/project/projectWire";
 
 const sourceSession = "a".repeat(32);
@@ -25,6 +26,7 @@ async function pinEditor(
   excludeBoxes: { x: number; y: number; width: number; height: number }[] = [],
   imageReady?: Promise<void>,
   ordinaryEditor = false,
+  settings?: Record<string, unknown>,
 ) {
   const projects: ProjectContributionBody[] = [];
   const uploads: Buffer[] = [];
@@ -66,6 +68,7 @@ async function pinEditor(
       capabilities: ["recognition.annotation", "recognition.screenshotSession"],
       features: {
         recognition: { isBusy: false, statusCode: "recognition.ready" },
+        ...(settings ? { settings } : {}),
         [ordinaryEditor ? "pinEdit" : "imageEdit"]: {
           isBusy: false,
           statusCode: "recognition.session",
@@ -481,6 +484,257 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
   await expect.poll(() => projects.length).toBe(2);
   await expect.poll(() => uploads.length).toBe(2);
   expect(projects[1]!.state).toEqual(projects[0]!.state);
+  const allBoxes = await page.evaluate(() =>
+    (
+      window as Window & {
+        __testHost: {
+          commands: { action: string; arguments: { excludeBoxes?: unknown } }[];
+        };
+      }
+    ).__testHost.commands
+      .filter((command) => command.action === "applySnapshot")
+      .map((command) => command.arguments.excludeBoxes),
+  );
+  expect(allBoxes).toEqual([initialBoxes, initialBoxes]);
+  const differences = await page.evaluate(
+    async (encoded) => {
+      const frames = await Promise.all(
+        encoded.map(async (value) => {
+          const bitmap = await createImageBitmap(
+            new Blob(
+              [Uint8Array.from(atob(value), (char) => char.charCodeAt(0))],
+              { type: "image/png" },
+            ),
+          );
+          const canvas = document.createElement("canvas");
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          const context = canvas.getContext("2d")!;
+          context.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          return context.getImageData(0, 0, canvas.width, canvas.height).data;
+        }),
+      );
+      if (frames[0]!.length !== frames[1]!.length)
+        throw new Error("Restored dimensions changed");
+      return frames[0]!.reduce(
+        (count, value, index) => count + (value === frames[1]![index] ? 0 : 1),
+        0,
+      );
+    },
+    uploads.map((image) => image.toString("base64")),
+  );
+  expect(differences).toBe(0);
+  const scopes = await page.evaluate(() =>
+    (
+      window as Window & { __testHost: { commands: { scope: string }[] } }
+    ).__testHost.commands.map((command) => command.scope),
+  );
+  expect(scopes.every((scope) => scope === "pinEdit")).toBe(true);
+});
+
+test("composition pin snapshot save and reopen keep pixels, geometry, and session-bound preset", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const base = Buffer.from(
+    await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 900;
+      canvas.height = 600;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#e02020";
+      context.fillRect(0, 0, 450, 600);
+      context.fillStyle = "#12a150";
+      context.fillRect(450, 0, 450, 600);
+      return canvas.toDataURL("image/png").split(",")[1]!;
+    }),
+    "base64",
+  );
+  const { projects, uploads } = await pinEditor(
+    page,
+    base,
+    [{ x: 0, y: 0, width: 250, height: 1000 }],
+    undefined,
+    false,
+    {
+      editorPreferences: DEFAULT_EDITOR_PREFERENCES,
+      imageOutputDirectory: "C:/authorized-output",
+    },
+  );
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  // 真实排版进入 pinEdit：边距+纯色背景改变最终几何（920×620）。
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  await page.getByLabel("排版背景", { exact: true }).selectOption("solid");
+  await page.getByLabel("背景起色", { exact: true }).fill("#112233");
+  const preview = page.getByAltText("排版输出预览");
+  await expect
+    .poll(() =>
+      preview.evaluate((image: HTMLImageElement) => image.naturalWidth),
+    )
+    .toBe(920);
+  // pinEdit 预设输出：会话/修订强绑定，宿主仍接收 pinEdit 投影命令。
+  await page
+    .getByRole("button", { name: "按常用预设保存", exact: true })
+    .click();
+  const lastRevision = async () =>
+    (await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __testHost: {
+              commands: {
+                action: string;
+                arguments: { revision?: number };
+              }[];
+            };
+          }
+        ).__testHost.commands
+          .filter((command) => command.action === "notifyScreenshotRevision")
+          .at(-1)?.arguments.revision,
+    )) ?? 0;
+  await expectCommand(page, {
+    scope: "pinEdit",
+    action: "savePresetImage",
+    arguments: {
+      resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
+      presetId: "default",
+      presetBinding: {
+        preset: DEFAULT_EDITOR_PREFERENCES.output,
+        directory: "C:/authorized-output",
+      },
+      sessionId: sourceSession,
+      revision: await lastRevision(),
+    },
+  });
+  // owned 快照：贡献携带 composition，最终 PNG 是排版后的几何与像素。
+  await requestPinSnapshot(page, sourceSession);
+  await expect.poll(() => projects.length).toBe(1);
+  await expect.poll(() => uploads.length).toBe(1);
+  await expect
+    .poll(async () =>
+      (await readPinReports(page)).some((report) => report.payload.ok === true),
+    )
+    .toBe(true);
+  const savedState = projects[0]!.state as {
+    composition: { margin: number };
+  };
+  expect(savedState.composition.margin).toBe(10);
+  const initialBoxes = await page.evaluate(() => {
+    const commands = (
+      window as Window & {
+        __testHost: {
+          commands: {
+            action: string;
+            arguments: {
+              excludeBoxes?: {
+                x: number;
+                y: number;
+                width: number;
+                height: number;
+              }[];
+            };
+          }[];
+        };
+      }
+    ).__testHost.commands;
+    return commands.find((command) => command.action === "applySnapshot")!
+      .arguments.excludeBoxes!;
+  });
+  // 排版边距参与排除投影：左 1/4 屏蔽区不再贴边，而按 920×620 最终几何
+  // 平移缩放（x≈10.9，width≈244.6，y≈16.1，height≈967.7）。
+  expect(initialBoxes[0]!.x).toBeGreaterThan(5);
+  expect(initialBoxes[0]!.x).toBeLessThan(18);
+  expect(initialBoxes[0]!.width).toBeGreaterThan(235);
+  expect(initialBoxes[0]!.width).toBeLessThan(255);
+  expect(initialBoxes[0]!.y).toBeGreaterThan(10);
+  expect(initialBoxes[0]!.y).toBeLessThan(24);
+  expect(initialBoxes[0]!.height).toBeGreaterThan(950);
+  expect(initialBoxes[0]!.height).toBeLessThan(985);
+  const dimensions = await page.evaluate(async (encoded) => {
+    const bitmap = await createImageBitmap(
+      new Blob([Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))], {
+        type: "image/png",
+      }),
+    );
+    return { width: bitmap.width, height: bitmap.height };
+  }, uploads[0]!.toString("base64"));
+  expect([dimensions.width, dimensions.height]).toEqual([920, 620]);
+  await page.screenshot({ path: testInfo.outputPath("composition-pin.png") });
+  // 重开：工程恢复后同一会话几何/像素逐值保持。
+  const manifest = {
+    schemaVersion: 1,
+    canvas: projects[0]!.canvas,
+    source: {
+      mediaType: "image/png",
+      width: 900,
+      height: 600,
+      length: base.length,
+    },
+    assets: [],
+    state: projects[0]!.state,
+  };
+  const manifestUrl =
+    "https://app.vibeocr/__resource/composition-pin-restored-manifest";
+  await page.route(manifestUrl, (route) =>
+    route.fulfill({
+      contentType: "application/json; charset=utf-8",
+      json: manifest,
+    }),
+  );
+  const restoredSession = "d".repeat(32);
+  await sendState(page, "pinEdit", {
+    isBusy: false,
+    statusCode: "pinEdit.session",
+    input: { url: sourceUrl, mediaType: "image/png", byteLength: base.length },
+    screenshotSession: {
+      sessionId: restoredSession,
+      revision: 0,
+      excludeBoxes: initialBoxes,
+    },
+    projectRestore: {
+      pendingId: "e".repeat(32),
+      sessionId: restoredSession,
+      revision: 0,
+      generation: 3,
+      manifest: {
+        url: manifestUrl,
+        mediaType: "application/json; charset=utf-8",
+        byteLength: JSON.stringify(manifest).length,
+      },
+      source: {
+        url: sourceUrl,
+        mediaType: "image/png",
+        byteLength: base.length,
+      },
+      assets: [],
+      patches: [],
+    },
+  });
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  await requestPinSnapshot(page, restoredSession);
+  await expect.poll(() => projects.length).toBe(2);
+  await expect.poll(() => uploads.length).toBe(2);
+  expect(projects[1]!.state).toEqual(projects[0]!.state);
+  // 上传完成到 applySnapshot 命令入列存在异步间隙：先等第二条命令，
+  // 再比较两次几何。
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __testHost: {
+                commands: { action: string }[];
+              };
+            }
+          ).__testHost.commands.filter(
+            (command) => command.action === "applySnapshot",
+          ).length,
+      ),
+    )
+    .toBe(2);
   const allBoxes = await page.evaluate(() =>
     (
       window as Window & {

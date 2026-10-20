@@ -461,6 +461,19 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     (string.Equals(contentType?.Trim(), "image/png", StringComparison.OrdinalIgnoreCase) ||
       string.Equals(contentType?.Trim(), "image/jpeg", StringComparison.OrdinalIgnoreCase));
 
+  internal void TrackAnnotationLease(Uri uri)
+  {
+    if (!WorkbenchAnnotationStore.IsResourceUri(uri)) throw new WorkbenchAnnotationAccessException("Invalid annotation lease.");
+    uploadedAnnotations.Add(uri);
+  }
+
+  internal bool RevokeUploadedAnnotation(Uri uri)
+  {
+    if (!WorkbenchAnnotationStore.IsResourceUri(uri) || !uploadedAnnotations.Remove(uri)) return false;
+    annotationStore.Revoke(uri);
+    return true;
+  }
+
   public async Task InitializeAsync(WebView2 webView, string assetFolder, bool deferInitialNavigation = false)
   {
     ArgumentNullException.ThrowIfNull(webView);
@@ -745,7 +758,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     fixedRoute is { } route ? state.State switch
     {
       ShellWorkbenchState => state with { State = new ShellWorkbenchState(route) },
-      SettingsWorkbenchState settings => state with { State = new ThemeWorkbenchState(settings.Theme) },
+      SettingsWorkbenchState settings => state with { State = new ThemeWorkbenchState(settings.Theme, settings.EditorPreferences, settings.ImageOutputDirectory, settings.EditorPreferencesError) },
       RecognitionWorkbenchState recognition => state with { State = recognition with { Result = null, StructuredResult = null, Engines = null } },
       _ => state,
     } : state;
@@ -983,7 +996,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           annotationStore.Revoke(lease.ResourceUri);
           return;
         }
-        uploadedAnnotations.Add(lease.ResourceUri);
+        TrackAnnotationLease(lease.ResourceUri);
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
           resourceUri = lease.ResourceUri.AbsoluteUri,
@@ -998,6 +1011,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           "Cache-Control: no-store\r\n" +
           "X-Content-Type-Options: nosniff");
         buffered = null;
+        return;
+      }
+      if (string.Equals(args.Request.Method, "DELETE", StringComparison.Ordinal) &&
+        RevokeUploadedAnnotation(uri))
+      {
+        args.Response = sender.Environment.CreateWebResourceResponse(null, 204, "No Content", "Cache-Control: no-store");
         return;
       }
       if (!string.Equals(args.Request.Method, "GET", StringComparison.Ordinal))

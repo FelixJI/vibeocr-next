@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
 using Windows.Foundation;
@@ -1136,6 +1137,93 @@ public sealed class VibpProjectFileTests
     {
       Directory.Delete(directory, recursive: true);
     }
+  }
+
+  [Fact]
+  public async Task CompositionRoundTripKeepsOriginalSourceAuthorizedAssetAndEditableState()
+  {
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(6, 4), asset = PngBytes(2, 2), patch1 = PngBytes(3, 1), patch2 = PngBytes(1, 2);
+      VibpProjectManifest original = FullManifest(source, asset, patch1, patch2);
+      var composition = new VibpComposition(20, "image", "#ffffff", "#123456", 5, 12, "16:9", "horizontal", [], AssetId, new("vertical", 25, 50), 0);
+      VibpMark originalImage = original.State.Marks.First(mark => mark.Tool == "image");
+      VibpMark[] combinedMarks = [.. original.State.Marks, originalImage with { Id = "mark-102" },
+        new() { Id = "mark-100", Tool = "spotlight", Start = new() { X = 1, Y = 1 }, End = new() { X = 4, Y = 3 }, Regions = [new() { X = 1, Y = 1, Width = 3, Height = 2 }] },
+        new() { Id = "mark-101", Tool = "magnifier", Start = new() { X = 0, Y = 0 }, End = new() { X = 6, Y = 4 }, Zoom = 4 }];
+      VibpProjectManifest manifest = original with { State = original.State with { Composition = composition, Marks = combinedMarks } };
+      string package = Path.Combine(directory, "composed.vibp");
+      VibpProjectFile.Write(package, manifest,
+      [new("source.png", source.Length, () => new MemoryStream(source)), new($"asset-{AssetId}.png", asset.Length, () => new MemoryStream(asset)),
+       new("patch-1.png", patch1.Length, () => new MemoryStream(patch1)), new("patch-2.png", patch2.Length, () => new MemoryStream(patch2))]);
+      VibpProjectArchive archive = await VibpProjectFile.ReadAsync(package, Path.Combine(directory, "opened"), TestContext.Current.CancellationToken);
+      Assert.Equal(source, File.ReadAllBytes(archive.SourcePath));
+      Assert.Equal(asset, File.ReadAllBytes(archive.AssetPaths[AssetId]));
+      Assert.Equal(combinedMarks.Length, archive.Manifest.State.Marks.Count);
+      Assert.Equal(3, archive.Manifest.State.Marks.Single(mark => mark.Id == "mark-100").Regions![0].Width);
+      Assert.Equal(4, archive.Manifest.State.Marks.Single(mark => mark.Id == "mark-101").Zoom);
+      Assert.Equal(composition.Cut, archive.Manifest.State.Composition!.Cut);
+      Assert.Equal(AssetId, archive.Manifest.State.Composition.BackgroundAssetId);
+      Assert.Empty(archive.Manifest.State.Composition.AssetIds);
+      Assert.Equal(0, archive.Manifest.State.Composition.BackgroundStitchIndex);
+      Assert.Equal(2, archive.Manifest.State.Marks.Count(mark => mark.Tool == "image" && mark.AssetId == AssetId));
+    }
+    finally { Directory.Delete(directory, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(-1)]
+  [InlineData(17)]
+  [InlineData(0)]
+  public void CompositionRejectsInvalidOrContradictoryBackgroundMembership(int index)
+  {
+    var composition = new VibpComposition(0, "image", "#ffffff", "#ffffff", 0, 0, "free", "horizontal",
+      index == 0 ? [AssetId] : [], AssetId, BackgroundStitchIndex: index);
+    VibpMark mark = new() { Id = "mark-1", Tool = "image", AssetId = AssetId, Start = new() { X = 0, Y = 0 }, End = new() { X = 1, Y = 1 } };
+    Assert.Throws<VibpProjectFormatException>(() => VibpProjectRules.ValidateComposition(composition, [mark]));
+  }
+
+  [Fact]
+  public async Task CompositionWithoutOptionalsOmitsNullFieldsForWebParser()
+  {
+    // 与前端共享真实写出物契约，防止可选字段 null 导致工程无法重开。
+    string directory = NewTempDirectory();
+    try
+    {
+      byte[] source = PngBytes(6, 4), asset = PngBytes(2, 2), patch1 = PngBytes(3, 1), patch2 = PngBytes(1, 2);
+      VibpProjectManifest original = FullManifest(source, asset, patch1, patch2);
+      var composition = new VibpComposition(10, "solid", "#112233", "#445566", 0, 0, "16:9", "none", []);
+      VibpProjectManifest manifest = original with { State = original.State with { Composition = composition } };
+      string package = Path.Combine(directory, "plain-composition.vibp");
+      VibpProjectFile.Write(package, manifest,
+      [new("source.png", source.Length, () => new MemoryStream(source)), new($"asset-{AssetId}.png", asset.Length, () => new MemoryStream(asset)),
+       new("patch-1.png", patch1.Length, () => new MemoryStream(patch1)), new("patch-2.png", patch2.Length, () => new MemoryStream(patch2))]);
+      string text;
+      using (ZipArchive archive = ZipFile.OpenRead(package))
+      using (var reader = new StreamReader(archive.GetEntry("manifest.json")!.Open()))
+        text = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+      Assert.DoesNotContain("backgroundAssetId", text);
+      Assert.DoesNotContain("backgroundStitchIndex", text);
+      Assert.DoesNotContain("\"cut\"", text);
+      using (JsonDocument parsed = JsonDocument.Parse(text))
+      {
+        JsonElement compositionElement = parsed.RootElement
+          .GetProperty("state").GetProperty("composition");
+        // 共享 fixture 语义相等：web 单测 import 同一文件；旧实现写出的
+        // 显式 null 键会令 DeepEquals 不等，从而在这里失败。
+        JsonNode fixture = JsonNode.Parse(File.ReadAllText(Path.Combine(
+          AppContext.BaseDirectory, "fixtures", "host-plain-composition.json")))!;
+        Assert.True(JsonNode.DeepEquals(fixture, JsonSerializer.SerializeToNode(
+          compositionElement, VibpProjectRules.ManifestJson)),
+          "host-written composition must be semantically equal to the shared fixture");
+      }
+      VibpProjectArchive restored = await VibpProjectFile.ReadAsync(
+        package, Path.Combine(directory, "open"), TestContext.Current.CancellationToken);
+      Assert.Null(restored.Manifest.State.Composition!.BackgroundAssetId);
+      Assert.Null(restored.Manifest.State.Composition!.Cut);
+    }
+    finally { Directory.Delete(directory, recursive: true); }
   }
 
   [Fact]

@@ -28,10 +28,11 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SavePresetImageCommand or SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
+    SavePresetImageCommand preset => await SavePresetImageAsync(preset, cancellationToken),
     SelectRecognitionImageCommand => StartRecognition(
       viewModel => viewModel.RecognizeFileAsync(
         cancellationToken, selectionPolicy.AwaitSelectionBeforeFreeze()),
@@ -355,6 +356,32 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
     await RecordHistorySnapshotAsync(recognitionChannel, annotation, historyKey, cancellationToken);
     return CurrentRecognitionState();
+  }
+
+  private async Task<WorkbenchState> SavePresetImageAsync(SavePresetImageCommand command, CancellationToken token)
+  {
+    ImageSessionChannel channel = command.Scope == "imageEdit" ? imageEditChannel
+      : command.Scope == "pinEdit" ? pinEditChannel
+      : recognitionChannel;
+    // pinEdit 预设输出必须绑定当前贴图会话：拒绝缺失或过期会话，
+    // 避免把排版后的贴图快照落到已关闭会话的默认名输出。
+    if (command.Scope == "pinEdit")
+    {
+      if (command.SessionId is not { } pinSessionId)
+      {
+        throw new InvalidOperationException("pinEdit 预设保存缺少会话绑定");
+      }
+      ValidateScreenshotSession(channel, pinSessionId, command.Revision ?? -1);
+    }
+    else if (command.SessionId is { } id)
+    {
+      ValidateScreenshotSession(channel, id, command.Revision ?? -1);
+    }
+    try { settingsOwner.ValidatePresetBinding(command.PresetId, command.PresetBinding); }
+    catch { annotationStore.Revoke(new Uri(command.ResourceUri)); throw; }
+    using WorkbenchAnnotationFile annotation = annotationStore.Take(new Uri(command.ResourceUri));
+    await settingsOwner.SavePresetImageAsync(annotation, command.PresetId, channel.ViewModel?.CurrentInput?.DisplayName ?? "vibeocr", 1, token);
+    return CurrentChannelState(channel);
   }
 
   private async Task<RecognitionWorkbenchState> SaveAnnotatedImageAsync(

@@ -176,7 +176,12 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
         }
         if (generation !== projectOpenGenerationRef.current) return;
         // ack 前完成全部可失败校验：ack 后安装无失败路径。
-        validateProjectRestore(sourceImage, manifest.canvas, manifest.state);
+        validateProjectRestore(
+          sourceImage,
+          manifest.canvas,
+          manifest.state,
+          assets,
+        );
         if (
           (currentSessionRef.current?.sessionId ?? "0".repeat(32)) !==
             descriptor.sessionId ||
@@ -414,6 +419,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
         />
       ) : input ? (
         <ImageCanvasEditor
+          editorSettings={feature(viewState, "settings")}
           key={session ? `session-${session.sessionId}` : input.url}
           actions={actions}
           canExport={

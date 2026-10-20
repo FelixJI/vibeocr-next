@@ -304,6 +304,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                 </div>
               ) : null}
               <ImageCanvasEditor
+                editorSettings={feature(viewState, "settings")}
                 key={session ? `session-${session.sessionId}` : undefined}
                 actions={actions}
                 canExport={viewState.capabilities.includes(

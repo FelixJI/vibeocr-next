@@ -1440,6 +1440,50 @@ select {
   max-width: 100%;
 }
 
+.editor-preferences > label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 230px;
+  margin: 4px;
+}
+.editor-preferences > label:has(> input[type="checkbox"]) {
+  flex-direction: row;
+}
+.editor-preferences > .editor-style-control {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto auto 80px;
+  gap: 8px;
+  margin: 4px 0;
+  max-width: 540px;
+}
+.canvas-composition-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 8px;
+}
+.canvas-composition-panel > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.canvas-composition-panel > p,
+.canvas-composition-panel > img,
+.canvas-composition-panel > button {
+  grid-column: 1 / -1;
+}
+
+.editor-preferences-lock {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
 /* #238 截图历史管理面板：主窗图片编辑页底部可折叠区。 */
 .pin-history > summary {
   cursor: pointer;

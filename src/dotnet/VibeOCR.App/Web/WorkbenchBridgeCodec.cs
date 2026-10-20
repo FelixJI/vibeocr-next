@@ -1,3 +1,4 @@
+using VibeOCR.App.Features.Configuration;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -387,6 +388,35 @@ public static class WorkbenchBridgeCodec
   {
     switch (scope, action)
     {
+      case ("settings", "setEditorPreferences"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["preferences"]), "command arguments");
+        var editorPreferences = arguments.GetProperty("preferences").Deserialize<EditorPreferences>(EditorPreferencesStore.Json)
+          ?? throw new WorkbenchBridgeProtocolException("Invalid editor preferences.");
+        try { editorPreferences.Validate(); }
+        catch (InvalidDataException error) { throw new WorkbenchBridgeProtocolException("Invalid editor preferences.", error); }
+        return new SetEditorPreferencesCommand(editorPreferences);
+      case ("settings", "pickImageOutputDirectory"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new PickImageOutputDirectoryCommand();
+      case ("imageEdit", "savePresetImage"):
+      case ("recognition", "savePresetImage"):
+        bool boundPreset = arguments.TryGetProperty("sessionId", out _);
+        EnsureObjectWithFields(arguments, new HashSet<string>(boundPreset
+          ? ["resourceUri", "presetId", "presetBinding", "sessionId", "revision"] : ["resourceUri", "presetId", "presetBinding"]), "command arguments");
+        return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", scope!,
+          boundPreset ? ParseGuidArgument(arguments, "sessionId") : null, boundPreset ? ParseContentRevision(arguments) : null, ReadPresetBinding(arguments));
+      // pinEdit 预设输出与会话强绑定：必须携带 sessionId/revision，
+      // 宿主侧拒绝缺失或过期绑定，防止过期贴图快照被写入默认输出。
+      case ("pinEdit", "savePresetImage"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["resourceUri", "presetId", "presetBinding", "sessionId", "revision"]), "command arguments");
+        return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", "pinEdit",
+          ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments), ReadPresetBinding(arguments));
+      case ("batch", "prepareImageExport"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["index"]), "command arguments");
+        return new PrepareBatchImageCommand(arguments.GetProperty("index").GetInt32());
+      case ("batch", "exportImage"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["itemId", "resourceUri", "presetId", "presetBinding"]), "command arguments");
+        return new ExportBatchImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", ReadPresetBinding(arguments));
       case ("shell", "navigate"):
         EnsureObjectWithFields(arguments, RouteArgumentFields, "command arguments");
         return new NavigateWorkbenchCommand(
@@ -1336,6 +1366,17 @@ public static class WorkbenchBridgeCodec
     return uri.AbsoluteUri;
   }
 
+  private static ImageOutputBinding ReadPresetBinding(JsonElement arguments)
+  {
+    ImageOutputBinding binding = arguments.GetProperty("presetBinding").Deserialize<ImageOutputBinding>(EditorPreferencesStore.Json)
+      ?? throw new WorkbenchBridgeProtocolException("Missing output preset binding.");
+    if (binding.Preset is null || string.IsNullOrWhiteSpace(binding.Directory))
+      throw new WorkbenchBridgeProtocolException("Invalid output preset binding.");
+    try { (EditorPreferences.Default with { Output = binding.Preset }).Validate(); }
+    catch (InvalidDataException error) { throw new WorkbenchBridgeProtocolException("Invalid output preset binding.", error); }
+    return binding;
+  }
+
   private static string ParseAnnotationResourceUri(JsonElement arguments)
   {
     EnsureObjectWithFields(arguments, ResourceUriArgumentFields, "command arguments");
@@ -1820,6 +1861,7 @@ public static class WorkbenchBridgeCodec
       batch.CompletedCount,
       batch.FailedCount,
       items = batch.Items ?? [],
+      batch.ExportImage, batch.ExportImageId, batch.ExportImageError,
       batch.WindowStart,
       engines = batch.Engines ?? [],
       batch.TaskEngine,
@@ -1890,6 +1932,7 @@ public static class WorkbenchBridgeCodec
         settings.FloatingToolbar.Visibility,
         settings.FloatingToolbar.Error,
       },
+      settings.EditorPreferences, settings.ImageOutputDirectory, settings.EditorPreferencesError,
       settings.StatusMessage,
       settings.ServiceStatus,
       settings.MaintenanceStatus,
@@ -2009,7 +2052,9 @@ public static class WorkbenchBridgeCodec
       diagnostics.Milestones,
       diagnostics.DeviceEvidence,
     },
-    ThemeWorkbenchState theme => new { theme = theme.Theme.ToString().ToLowerInvariant() },
+    ThemeWorkbenchState theme => theme.EditorPreferences is null
+      ? (object)new { theme = theme.Theme.ToString().ToLowerInvariant() }
+      : new { theme = theme.Theme.ToString().ToLowerInvariant(), theme.EditorPreferences, theme.ImageOutputDirectory, theme.EditorPreferencesError },
     null => null,
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench state type is not supported."),

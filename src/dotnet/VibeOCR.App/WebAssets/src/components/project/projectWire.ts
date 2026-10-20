@@ -1,3 +1,4 @@
+import { parseComposition, type CanvasComposition } from "../canvasComposition";
 import type {
   AnnotationStyle,
   CanvasSize,
@@ -102,6 +103,7 @@ export interface WirePatch {
 }
 
 export interface WireEditorState {
+  readonly composition?: CanvasComposition;
   readonly rotation: number;
   readonly marks: readonly WireMark[];
   readonly crop?: { readonly start: WirePoint; readonly end: WirePoint };
@@ -533,6 +535,7 @@ export function parseProjectManifest(value: unknown): WireManifest {
     },
     assets,
     state: {
+      composition: parseComposition(value.state.composition),
       rotation: value.state.rotation,
       marks,
       crop:
@@ -643,6 +646,7 @@ export function buildContributionState(
   return {
     canvas: { width: canvas.width, height: canvas.height },
     state: {
+      composition: state.composition,
       rotation: state.rotation,
       marks: state.marks.map(markToWire),
       crop: state.crop
@@ -732,6 +736,7 @@ export function restoreEditorState(
 ): EditorState {
   void options;
   return {
+    composition: wire.composition,
     rotation: wire.rotation,
     marks: wire.marks.map((mark) => wireToMark(mark, (point) => point, 1)),
     crop: wire.crop

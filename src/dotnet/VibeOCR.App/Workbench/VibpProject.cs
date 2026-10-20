@@ -190,8 +190,21 @@ public sealed record VibpRegion
 }
 
 /// <summary>编辑器持久状态：当前 rotation/crop/resize/marks/applied patches。</summary>
+public sealed record VibpCompositionCut(string Axis, double Start, double End);
+public sealed record VibpComposition(
+  double Margin, string Background, string Color, string EndColor,
+  double Shadow, double Radius, string Ratio, string Stitch,
+  IReadOnlyList<string> AssetIds,
+  // 可选成员无值时省略字段而非写 null：与 web parseComposition 的
+  // undefined 语义对齐，否则常见仅 margin/color 排版工程重开即被拒。
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BackgroundAssetId = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] VibpCompositionCut? Cut = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BackgroundStitchIndex = null);
+
 public sealed record VibpEditorState
 {
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public VibpComposition? Composition { get; init; }
   public required int Rotation { get; init; }
   public VibpCrop? Crop { get; init; }
   public VibpSize? Resize { get; init; }
@@ -422,6 +435,7 @@ internal static class VibpProjectRules
         $"Project declares more than {VibpProjectLimits.MaximumMarks} marks.");
     }
 
+    ValidateComposition(state.Composition, state.Marks);
     HashSet<string> assetIds = [.. assets.Select(asset => asset.Id)];
     HashSet<string> referencedAssets = new(StringComparer.Ordinal);
     HashSet<string> markIds = new(StringComparer.Ordinal);
@@ -480,6 +494,33 @@ internal static class VibpProjectRules
           "Project patches exceed the aggregate encoded byte budget.");
       }
     }
+  }
+
+  internal static void ValidateComposition(VibpComposition? composition, IReadOnlyList<VibpMark> marks)
+  {
+    if (composition is null) return;
+    if (marks.Any(mark => mark is null)) throw new VibpProjectFormatException("Project composition contains a null image mark.");
+    if (new[] { composition.Margin, composition.Shadow, composition.Radius }.Any(number => !double.IsFinite(number) || number < 0 || number > 1000) ||
+      composition.Background is not ("transparent" or "solid" or "gradient" or "image") ||
+      composition.Color is null || !SixHexColor.IsMatch(composition.Color) ||
+      composition.EndColor is null || !SixHexColor.IsMatch(composition.EndColor) ||
+      composition.Ratio is not ("free" or "1:1" or "4:3" or "16:9" or "9:16") ||
+      composition.Stitch is not ("none" or "horizontal" or "vertical") ||
+      composition.AssetIds is null || composition.AssetIds.Count > VibpProjectLimits.MaximumAssets ||
+      composition.AssetIds.Distinct().Count() != composition.AssetIds.Count)
+      throw new VibpProjectFormatException("Project composition is invalid.");
+    if (composition.BackgroundStitchIndex is { } index &&
+      (index < 0 || index > VibpProjectLimits.MaximumAssets || composition.Background != "image" ||
+        composition.BackgroundAssetId is null || composition.AssetIds.Contains(composition.BackgroundAssetId)))
+      throw new VibpProjectFormatException("Project background stitch membership is invalid.");
+    HashSet<string> assets = [.. marks.Where(mark => mark.Tool == "image").Select(mark => mark.AssetId).OfType<string>()];
+    if (composition.AssetIds.Any(id => !assets.Contains(id)) ||
+      composition.BackgroundAssetId is { } background && !assets.Contains(background) ||
+      composition.Background == "image" && composition.BackgroundAssetId is null)
+      throw new VibpProjectFormatException("Project composition references an unauthorized image asset.");
+    if (composition.Cut is { } cut && (cut.Axis is not ("horizontal" or "vertical") ||
+      !double.IsFinite(cut.Start) || !double.IsFinite(cut.End) || cut.Start < 0 || cut.End > 100 || cut.Start >= cut.End || cut.End - cut.Start >= 100))
+      throw new VibpProjectFormatException("Project middle cut is outside supported bounds.");
   }
 
   private static void ValidateMark(

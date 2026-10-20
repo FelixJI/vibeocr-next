@@ -1,3 +1,4 @@
+import type { CanvasComposition } from "./canvasComposition";
 export type AnnotationTool =
   | "rectangle"
   | "ellipse"
@@ -134,6 +135,7 @@ export interface PixelPatch {
 }
 
 export interface EditorState {
+  readonly composition?: CanvasComposition;
   readonly rotation: number;
   readonly marks: readonly Mark[];
   readonly crop?: { readonly start: Point; readonly end: Point };
@@ -506,6 +508,7 @@ export function rotateEditorState(
           },
         }
       : {}),
+    ...(state.composition ? { composition: state.composition } : {}),
     // 指定输出尺寸是绝对目标：旋转内容不改变用户设置的输出宽高。
     ...(state.resize ? { resize: state.resize } : {}),
     // 像素修补固定在原图（未旋转）空间：旋转视图不需要重映射补丁坐标。
@@ -663,7 +666,7 @@ export function exclusionNaturalRects(
   return rects;
 }
 
-/** 屏蔽矩形在最终输出（裁剪 + 缩放后）空间的浮点投影；与文字层行框同坐标系。 */
+/** 基础屏蔽及放大镜泄露区在最终输出（裁剪 + 缩放后）空间的浮点投影。 */
 export function exclusionOutputRects(
   image: HTMLImageElement,
   state: EditorState,
@@ -674,7 +677,15 @@ export function exclusionOutputRects(
   const output = finalOutputSize(image, state, displaySize);
   const scaleX = output.width / crop.width;
   const scaleY = output.height / crop.height;
-  return exclusionNaturalRects(image, state, displaySize)
+  return [
+    ...exclusionNaturalRects(image, state, displaySize),
+    ...displayRectsToNaturalRects(
+      magnifierExclusionLeakRects(state, image, displaySize),
+      image,
+      state,
+      displaySize,
+    ),
+  ]
     .map((rect) => ({
       x: Math.max(rect.x, crop.x),
       y: Math.max(rect.y, crop.y),
@@ -744,6 +755,18 @@ export function displayRectsToNormalizedRects(
 ): Rect[] {
   const crop = mappedCropRect(image, state, displaySize);
   if (crop.width <= 0 || crop.height <= 0) return [];
+  return cropClippedNormalizedBoxes(
+    displayRectsToNaturalRects(rects, image, state, displaySize),
+    crop,
+  );
+}
+
+function displayRectsToNaturalRects(
+  rects: readonly Rect[],
+  image: HTMLImageElement,
+  state: EditorState,
+  displaySize: CanvasSize,
+): Rect[] {
   const naturalSize = outputSize(image, state.rotation);
   const mapPoint = (point: Point) =>
     projectPoint(
@@ -765,7 +788,7 @@ export function displayRectsToNormalizedRects(
       height: Math.abs(end.y - start.y),
     });
   }
-  return cropClippedNormalizedBoxes(naturalRects, crop);
+  return naturalRects;
 }
 
 /** 归一化 [0,1000] 排除框回投到当前显示空间：exclusionNormalizedRects
@@ -886,4 +909,87 @@ export function rectIntersectsBox(
     box.y2 > rect.y &&
     box.y1 < rect.y + rect.height
   );
+}
+
+/** #235 H3：放大镜把屏蔽源区域放大显示到原屏蔽框之外时，被屏蔽内容
+ * 会随普通像素上传并绕过宿主遮罩。权威屏蔽源与烘焙/识别输入同一外扩
+ * 取整自然矩形（exclusionNaturalRects），回投显示空间后做源→镜内投影
+ * （裁剪前推导，仅输出时裁剪），返回每个（镜×屏蔽块）在镜内的泄露
+ * 显示矩形——raw mark 几何不直接参与（取整边界 texel 不得遗漏）。 */
+export function magnifierExclusionLeakRects(
+  state: EditorState,
+  image: HTMLImageElement,
+  displaySize: CanvasSize,
+): Rect[] {
+  const rects: Rect[] = [];
+  const naturalSize = outputSize(image, state.rotation);
+  const toDisplay = (at: Point) =>
+    projectPoint(
+      at,
+      image,
+      state.rotation,
+      naturalSize,
+      state.rotation,
+      displaySize,
+    );
+  const authoritativeSources = exclusionNaturalRects(
+    image,
+    state,
+    displaySize,
+  ).map((rect) => {
+    const start = toDisplay({ x: rect.x, y: rect.y });
+    const end = toDisplay({
+      x: rect.x + rect.width,
+      y: rect.y + rect.height,
+    });
+    return {
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    };
+  });
+  for (const mark of state.marks) {
+    if (mark.tool !== "magnifier") continue;
+    const dest = {
+      x: Math.min(mark.start.x, mark.end.x),
+      y: Math.min(mark.start.y, mark.end.y),
+      width: Math.abs(mark.end.x - mark.start.x),
+      height: Math.abs(mark.end.y - mark.start.y),
+    };
+    if (dest.width < 1 || dest.height < 1) continue;
+    const zoom = magnifierZoomOf(mark);
+    const source = {
+      x: dest.x + dest.width / 2 - dest.width / 2 / zoom,
+      y: dest.y + dest.height / 2 - dest.height / 2 / zoom,
+      width: dest.width / zoom,
+      height: dest.height / zoom,
+    };
+    for (const area of authoritativeSources) {
+      const left = Math.max(source.x, area.x);
+      const top = Math.max(source.y, area.y);
+      const right = Math.min(source.x + source.width, area.x + area.width);
+      const bottom = Math.min(source.y + source.height, area.y + area.height);
+      if (right <= left || bottom <= top) continue;
+      const destLeft = Math.max(dest.x, dest.x + (left - source.x) * zoom);
+      const destTop = Math.max(dest.y, dest.y + (top - source.y) * zoom);
+      const destRight = Math.min(
+        dest.x + dest.width,
+        dest.x + (right - source.x) * zoom,
+      );
+      const destBottom = Math.min(
+        dest.y + dest.height,
+        dest.y + (bottom - source.y) * zoom,
+      );
+      if (destRight > destLeft && destBottom > destTop) {
+        rects.push({
+          x: destLeft,
+          y: destTop,
+          width: destRight - destLeft,
+          height: destBottom - destTop,
+        });
+      }
+    }
+  }
+  return rects;
 }
