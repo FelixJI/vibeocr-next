@@ -20,6 +20,7 @@ describe("背景图与拼接子集同步", () => {
       expected: {
         background: "image",
         backgroundAssetId: "a",
+        backgroundStitchIndex: 1,
         assetIds: ["c", "b"],
       },
     },
@@ -29,11 +30,13 @@ describe("背景图与拼接子集同步", () => {
       initial: {
         background: "image",
         backgroundAssetId: "a",
+        backgroundStitchIndex: 1,
         assetIds: ["c", "b"],
       },
       expected: {
         background: "image",
         backgroundAssetId: "c",
+        backgroundStitchIndex: 0,
         assetIds: ["a", "b"],
       },
     },
@@ -43,12 +46,52 @@ describe("背景图与拼接子集同步", () => {
       initial: {
         background: "image",
         backgroundAssetId: "a",
+        backgroundStitchIndex: 1,
         assetIds: ["c", "b"],
       },
       expected: {
         background: "solid",
         backgroundAssetId: undefined,
-        assetIds: ["a", "c", "b"],
+        backgroundStitchIndex: undefined,
+        assetIds: ["c", "a", "b"],
+      },
+    },
+    {
+      label: "排版背景图",
+      selected: "c",
+      initial: { background: "image", backgroundAssetId: "a", assetIds: ["b"] },
+      expected: {
+        background: "image",
+        backgroundAssetId: "c",
+        backgroundStitchIndex: undefined,
+        assetIds: ["b"],
+      },
+    },
+    {
+      label: "排版背景",
+      selected: "solid",
+      initial: { background: "image", backgroundAssetId: "a", assetIds: ["b"] },
+      expected: {
+        background: "solid",
+        backgroundAssetId: undefined,
+        backgroundStitchIndex: undefined,
+        assetIds: ["b"],
+      },
+    },
+    {
+      label: "多图拼接",
+      selected: "horizontal",
+      initial: {
+        background: "image",
+        backgroundAssetId: "a",
+        backgroundStitchIndex: 1,
+        assetIds: ["b"],
+      },
+      expected: {
+        background: "image",
+        backgroundAssetId: "a",
+        backgroundStitchIndex: 0,
+        assetIds: ["b", "c", "d"],
       },
     },
   ] as const)(

@@ -58,7 +58,7 @@ export function compositionExclusions(
   const settings = state.composition;
   // 无排版沿用普通图片的 32768px / 100MP 合同，不额外套排版画布预算。
   const layout: CompositionLayout = settings
-    ? compositionLayout(baseSize, settings, assets)
+    ? compositionLayout(baseSize, settings, assets, state.marks)
     : {
         size: baseSize,
         baseSize,

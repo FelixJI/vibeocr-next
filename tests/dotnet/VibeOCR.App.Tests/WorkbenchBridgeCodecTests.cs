@@ -1,4 +1,5 @@
 using VibeOCR.App.Web;
+using VibeOCR.App.Features.Configuration;
 using VibeOCR.App.Workbench;
 using Xunit;
 using System.Text.Json;
@@ -13,7 +14,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   {
     Guid session = Guid.NewGuid();
     string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
-    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 3 });
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", presetBinding = new { preset = new ImageOutputPreset(), directory = "C:/authorized-output" }, sessionId = session.ToString("N"), revision = 3 }, EditorPreferencesStore.Json);
     SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(ParseForTest(CommandJson(session, "imageEdit", "savePresetImage", valid), session).Command);
     Assert.Equal(session, command.SessionId);
     Assert.Equal(3, command.Revision);
@@ -28,7 +29,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     // 边界，但会话/修订为强制字段，缺失即 fail closed，不降级为可选绑定。
     Guid session = Guid.NewGuid();
     string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
-    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", sessionId = session.ToString("N"), revision = 3 });
+    string valid = JsonSerializer.Serialize(new { resourceUri = resource, presetId = "default", presetBinding = new { preset = new ImageOutputPreset(), directory = "C:/authorized-output" }, sessionId = session.ToString("N"), revision = 3 }, EditorPreferencesStore.Json);
     SavePresetImageCommand command = Assert.IsType<SavePresetImageCommand>(
       ParseForTest(CommandJson(session, "pinEdit", "savePresetImage", valid), session).Command);
     Assert.Equal("pinEdit", command.Scope);

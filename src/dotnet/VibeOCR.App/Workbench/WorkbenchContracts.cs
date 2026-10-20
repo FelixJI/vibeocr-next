@@ -673,9 +673,10 @@ public sealed record EndHotkeyRecordingCommand(Guid RecordingId) : WorkbenchComm
 /// </summary>
 public sealed record SetEditorPreferencesCommand(EditorPreferences Preferences) : WorkbenchCommand;
 public sealed record PickImageOutputDirectoryCommand : WorkbenchCommand;
-public sealed record SavePresetImageCommand(string ResourceUri, string PresetId, string Scope, Guid? SessionId = null, long? Revision = null) : WorkbenchCommand;
+public sealed record ImageOutputBinding(ImageOutputPreset Preset, string Directory);
+public sealed record SavePresetImageCommand(string ResourceUri, string PresetId, string Scope, Guid? SessionId = null, long? Revision = null, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
 public sealed record PrepareBatchImageCommand(int Index) : WorkbenchCommand;
-public sealed record ExportBatchImageCommand(Guid ItemId, string ResourceUri, string PresetId) : WorkbenchCommand;
+public sealed record ExportBatchImageCommand(Guid ItemId, string ResourceUri, string PresetId, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
 
 public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchCommand;
 
@@ -801,7 +802,7 @@ public sealed record ShellWorkbenchState(WorkbenchRoute Route) : WorkbenchState
   public override string Scope => "shell";
 }
 
-internal sealed record ThemeWorkbenchState(WorkbenchTheme Theme) : WorkbenchState
+internal sealed record ThemeWorkbenchState(WorkbenchTheme Theme, EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null) : WorkbenchState
 {
   public override string Scope => "settings";
 }

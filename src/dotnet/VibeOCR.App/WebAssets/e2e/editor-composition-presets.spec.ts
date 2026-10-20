@@ -11,6 +11,12 @@ import {
   readyImageRecognitionModes,
 } from "./workbench-host";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/__annotation/*", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+});
+
 const SESSION = "11111111111111111111111111111111";
 const ASSET = "22222222222222222222222222222222";
 const annotation =
@@ -371,7 +377,7 @@ test("离开图像背景解除绑定：旧背景资产可拼接且删除对象�
   expect(exported).toEqual(expected);
 });
 
-test("常用预设只发送 ID，复制失败不关闭，成功 ack 后关闭；工具可发现且不抢输入", async ({
+test("常用预设绑定语义快照，复制失败不关闭，成功 ack 后关闭；工具可发现且不抢输入", async ({
   page,
 }, info) => {
   const preferences = {
@@ -444,6 +450,10 @@ test("常用预设只发送 ID，复制失败不关闭，成功 ack 后关闭；
     arguments: {
       resourceUri: annotation,
       presetId: "default",
+      presetBinding: {
+        preset: preferences.output,
+        directory: "C:/authorized-output",
+      },
       sessionId: SESSION,
       revision: 0,
     },
@@ -582,6 +592,7 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
         itemId: index === 0 ? SESSION : ASSET,
         resourceUri: annotation,
         presetId: "default",
+        presetBinding: { preset: output, directory: "C:/authorized-output" },
       },
     });
   }
@@ -691,6 +702,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
       itemId: ITEM_A,
       resourceUri: annotation,
       presetId: "default",
+      presetBinding: { preset: output, directory: "C:/authorized-output" },
     },
   });
   // 宿主 exportImage 回执后瞬态字段被清除：等待中的下一项不得消费它。
@@ -721,6 +733,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
       itemId: ITEM_B,
       resourceUri: annotation,
       presetId: "default",
+      presetBinding: { preset: output, directory: "C:/authorized-output" },
     },
   });
   await expectCommand(page, {
@@ -880,7 +893,13 @@ test("停止图片导出后上传完成也不写入", async ({ page }) => {
   // 上传已发出且被门挡住：此刻停止，再放行；停止后不得再发 batch.exportImage。
   await expect.poll(() => uploadStarted).toBe(true);
   await page.getByRole("button", { name: "停止图片导出", exact: true }).click();
+  const discarded = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" &&
+      new URL(request.url()).pathname === new URL(annotation).pathname,
+  );
   releaseUpload();
+  await discarded;
   await expect(page.getByText(/已停止：成功 0，失败\/非图片 0/)).toBeVisible();
   expect(
     (await commands(page)).filter(
@@ -970,7 +989,13 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
   await sendState(page, "batch", ready);
   await expect.poll(() => releases.length).toBe(2);
   const oldResponse = page.waitForResponse("**/__annotation");
+  const discarded = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" &&
+      new URL(request.url()).pathname === new URL(annotation).pathname,
+  );
   releases[0]!();
+  await discarded;
   await (await oldResponse).finished();
   releases[1]!();
   await expect(
@@ -988,6 +1013,10 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
         itemId: SESSION,
         resourceUri: newAnnotation,
         presetId: "default",
+        presetBinding: {
+          preset: DEFAULT_EDITOR_PREFERENCES.output,
+          directory: "C:/authorized-output",
+        },
       },
     },
   ]);
@@ -1409,5 +1438,145 @@ test("F239-03：仅排版编辑可从上排清除或重置，撤销恢复真实�
   await page.screenshot({
     path: info.outputPath("composition-reset-primary-row.png"),
     fullPage: true,
+  });
+});
+
+test("复制的图片对象逐份拼接，撤销与删除一份保持出现次数", async ({ page }) => {
+  const { state, imported, uploads, projects } = await setup(page);
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: {
+      requestId: "copy-stitch",
+      sessionId: SESSION,
+      revision: 0,
+      items: [
+        {
+          kind: "image",
+          assetId: ASSET,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset.png",
+          byteLength: imported.length,
+          pixelWidth: 20,
+          pixelHeight: 10,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: { sessionId: SESSION, revision: 0, requestId: "copy-stitch" },
+  });
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("多图拼接", { exact: true }).selectOption("horizontal");
+  const preview = page.getByAltText("排版输出预览");
+  const width = () =>
+    preview.evaluate((image: HTMLImageElement) => image.naturalWidth);
+  await expect.poll(width).toBe(100);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByRole("button", { name: "全选对象", exact: true }).click();
+  await page.getByRole("button", { name: "复制对象", exact: true }).click();
+  await page.getByRole("button", { name: "粘贴对象", exact: true }).click();
+  await expect.poll(width).toBe(120);
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect.poll(width).toBe(100);
+  await page.getByRole("button", { name: "重做", exact: true }).click();
+  await expect.poll(width).toBe(120);
+  const objects = page.getByLabel("选择标注对象", { exact: true });
+  const ids = await objects
+    .locator("option")
+    .evaluateAll((options) =>
+      options
+        .map((option) => (option as HTMLOptionElement).value)
+        .filter(Boolean),
+    );
+  await objects.selectOption(ids.at(-1)!);
+  await page.getByRole("button", { name: "删除对象", exact: true }).click();
+  await expect.poll(width).toBe(100);
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect.poll(width).toBe(120);
+  await page.getByRole("button", { name: "保存工程", exact: true }).click();
+  await expect.poll(() => projects.length).toBe(1);
+  const saved = projects[0] as {
+    state: { marks: { tool: string; assetId?: string }[] };
+  };
+  expect(
+    saved.state.marks.filter(
+      (mark) => mark.tool === "image" && mark.assetId === ASSET,
+    ),
+  ).toHaveLength(2);
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  expect(
+    (
+      await pixels(
+        page,
+        "data:image/png;base64," + uploads[0]!.bytes.toString("base64"),
+      )
+    ).width,
+  ).toBe(120);
+});
+
+test("预设上传期间锁住设置和目录，并发送开始时的语义快照", async ({ page }) => {
+  const preferences = DEFAULT_EDITOR_PREFERENCES;
+  await setup(page, {
+    editorPreferences: preferences,
+    imageOutputDirectory: "C:/authorized-output",
+  });
+  let release!: () => void;
+  let started = false;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/__annotation", async (route) => {
+    started = true;
+    await gate;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: annotation }),
+    });
+  });
+  await page
+    .getByRole("button", { name: "按常用预设保存", exact: true })
+    .click();
+  await expect.poll(() => started).toBe(true);
+  await page.getByText("输出预设与工具栏定制", { exact: true }).click();
+  await expect(
+    page.getByLabel("预设文件名模板", { exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "选择输出目录", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "保存预设与工具栏", exact: true }),
+  ).toBeDisabled();
+  await sendState(page, "settings", {
+    editorPreferences: {
+      ...preferences,
+      output: {
+        ...preferences.output,
+        quality: 0.1,
+        nameTemplate: "changed-{name}",
+      },
+    },
+    imageOutputDirectory: "C:/other-output",
+  });
+  await expect(
+    page.getByLabel("预设文件名模板", { exact: true }),
+  ).toBeDisabled();
+  release();
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "savePresetImage",
+    arguments: {
+      resourceUri: annotation,
+      presetId: "default",
+      presetBinding: {
+        preset: preferences.output,
+        directory: "C:/authorized-output",
+      },
+      sessionId: SESSION,
+      revision: 0,
+    },
   });
 });

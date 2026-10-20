@@ -50,6 +50,11 @@ export function EditorPreferencesPanel({
   const conflict = shortcutConflict(draft);
   const updateOutput = (patch: Partial<ImageOutputPreset>) =>
     setDraft({ ...draft, output: { ...draft.output, ...patch } });
+  const templateValid =
+    draft.output.nameTemplate.length > 0 &&
+    !/[{}]/.test(
+      draft.output.nameTemplate.replace(/\{(name|date|index)\}/g, ""),
+    );
   const dimensionsValid =
     // 宿主 Width/Height 为 int：非整数（800.5/NaN/Infinity）在前端即拒绝，
     // 不发送必被宿主拒绝的设置；宽高均为 0 保持原尺寸的自动语义。
@@ -216,13 +221,19 @@ export function EditorPreferencesPanel({
             "尺寸须同时为 0（保留原尺寸）或为不超过 16384 的整数（≤64MP）。"}
         </p>
       )}
+      {!templateValid && (
+        <p role="alert">
+          文件名模板只能使用 {"{name}"}、{"{date}"}、{"{index}"}
+          ，且花括号须配对。
+        </p>
+      )}
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}
       <Button
         disabled={
           !!conflict ||
           !dimensionsValid ||
-          !draft.output.nameTemplate ||
+          !templateValid ||
           !Number.isFinite(draft.output.quality) ||
           draft.output.quality < 0.1 ||
           draft.output.quality > 1

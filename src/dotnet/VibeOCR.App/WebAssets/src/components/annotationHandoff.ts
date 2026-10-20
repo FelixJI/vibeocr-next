@@ -28,3 +28,16 @@ export async function uploadAnnotatedImage(blob: Blob): Promise<string> {
   }
   return payload.resourceUri;
 }
+
+/** 只释放本宿主上传且尚未消费的租约；宿主检查列表归属。 */
+export async function discardAnnotatedImage(
+  resourceUri: string,
+): Promise<void> {
+  if (!/^https:\/\/app\.vibeocr\/__annotation\/[0-9a-f]{32}$/.test(resourceUri))
+    throw new Error("annotated image discard URI is invalid");
+  const response = await fetch(new URL(resourceUri).pathname, {
+    method: "DELETE",
+  });
+  if (!response.ok)
+    throw new Error("取消上传后的图片租约释放失败，请重试或关闭页面。");
+}

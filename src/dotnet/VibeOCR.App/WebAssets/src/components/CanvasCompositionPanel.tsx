@@ -5,28 +5,31 @@ import {
   type CanvasComposition,
 } from "./canvasComposition";
 
-/** 背景变更时同步拼接列表：旧背景资产按对象顺序插回，新背景资产移出；
- * 只增删受影响项，保留用户既有排序与子集。 */
+// 只恢复确实被背景切换移出的项；旧工程缺记录时不推断成员资格。
 function restitchForBackground(
-  assetIds: readonly string[],
-  assets: readonly { id: string }[],
-  previous: string | undefined,
+  settings: CanvasComposition,
   next: string | undefined,
-): readonly string[] {
-  if (previous === next) return assetIds;
-  let ids = assetIds.filter((id) => id !== next);
-  if (previous && !ids.includes(previous)) {
-    const order = new Map(assets.map((asset, index) => [asset.id, index]));
-    const at = order.get(previous) ?? assets.length;
-    const insertAt = ids.findIndex(
-      (id) => (order.get(id) ?? assets.length) > at,
+): Partial<CanvasComposition> {
+  const previous =
+    settings.background === "image" ? settings.backgroundAssetId : undefined;
+  if (previous === next) return {};
+  const ids = [...settings.assetIds];
+  if (
+    previous &&
+    settings.backgroundStitchIndex !== undefined &&
+    !ids.includes(previous)
+  )
+    ids.splice(
+      Math.min(settings.backgroundStitchIndex, ids.length),
+      0,
+      previous,
     );
-    ids =
-      insertAt === -1
-        ? [...ids, previous]
-        : [...ids.slice(0, insertAt), previous, ...ids.slice(insertAt)];
-  }
-  return ids;
+  const index = next === undefined ? -1 : ids.indexOf(next);
+  if (index >= 0) ids.splice(index, 1);
+  return {
+    assetIds: ids,
+    backgroundStitchIndex: index >= 0 ? index : undefined,
+  };
 }
 
 export function CanvasCompositionPanel({
@@ -103,14 +106,7 @@ export function CanvasCompositionPanel({
               background,
               // 仅 image 背景持有绑定；离开时解除，避免旧资产被拼接排除或删除时误重置背景。
               backgroundAssetId: binding,
-              assetIds: restitchForBackground(
-                settings.assetIds,
-                assets,
-                settings.background === "image"
-                  ? settings.backgroundAssetId
-                  : undefined,
-                binding,
-              ),
+              ...restitchForBackground(settings, binding),
             });
           }}
         >
@@ -149,12 +145,7 @@ export function CanvasCompositionPanel({
             onChange={(_, data) =>
               update({
                 backgroundAssetId: data.value,
-                assetIds: restitchForBackground(
-                  settings.assetIds,
-                  assets,
-                  settings.backgroundAssetId,
-                  data.value,
-                ),
+                ...restitchForBackground(settings, data.value),
               })
             }
           >
@@ -212,6 +203,15 @@ export function CanvasCompositionPanel({
           onChange={(_, data) =>
             update({
               stitch: data.value as CanvasComposition["stitch"],
+              backgroundStitchIndex:
+                settings.background === "image" && settings.backgroundAssetId
+                  ? Math.max(
+                      0,
+                      assets.findIndex(
+                        (asset) => asset.id === settings.backgroundAssetId,
+                      ),
+                    )
+                  : undefined,
               // 仅当背景仍为 image 时排除背景图；陈旧绑定不阻碍旧资产拼接。
               assetIds: assets
                 .filter(

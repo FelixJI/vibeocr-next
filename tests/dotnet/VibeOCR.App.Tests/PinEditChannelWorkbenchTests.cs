@@ -288,7 +288,7 @@ public sealed class PinEditChannelWorkbenchTests
 
       harness.States.Clear();
       WorkbenchCommandOutcome saved = harness.Execute(new SavePresetImageCommand(
-        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0));
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0, new(new(NameTemplate: "{name}"), outputRoot)));
       Assert.Null(saved.Error);
       Assert.NotEmpty(saved.States);
       Assert.All(saved.States, state => Assert.Equal("pinEdit", state.Scope));
@@ -298,9 +298,25 @@ public sealed class PinEditChannelWorkbenchTests
         pin.ScreenshotSession is not null);
       // 输出按预设写入授权目录；pinEdit 通道无 DisplayName，回落安全默认名。
       Assert.True(File.Exists(Path.Combine(outputRoot, "vibeocr.png")));
+      // 客户端目录只作等值绑定，不得提供另一写盘授权。
+      WorkbenchAnnotationLease forged = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(forged.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0,
+        new(new(NameTemplate: "{name}"), Path.Combine(outputRoot, "other")))).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(forged.ResourceUri));
+      Assert.False(Directory.Exists(Path.Combine(outputRoot, "other")));
+      WorkbenchAnnotationLease missing = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(missing.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0)).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(missing.ResourceUri));
+      // 另一个窗口更新同一预设后，旧语义快照被拒绝并释放未消费租约。
+      Assert.Null(harness.Execute(new SetEditorPreferencesCommand(EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Quality: 0.7) })).Error);
+      WorkbenchAnnotationLease stale = await harness.Annotations.UploadPngAsync(new MemoryStream(Png), TestContext.Current.CancellationToken);
+      Assert.NotNull(harness.Execute(new SavePresetImageCommand(stale.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0,
+        new(new(NameTemplate: "{name}"), outputRoot))).Error);
+      Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.Annotations.Take(stale.ResourceUri));
+      Assert.False(File.Exists(Path.Combine(outputRoot, "vibeocr_1.png")));
       // 租约一次消费：重复命令无法再次取用同一上传。
       Assert.NotNull(harness.Execute(new SavePresetImageCommand(
-        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0)).Error);
+        png.ResourceUri.AbsoluteUri, "default", "pinEdit", session.Value, 0, new(new(NameTemplate: "{name}"), outputRoot))).Error);
     }
     finally
     {

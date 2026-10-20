@@ -198,7 +198,8 @@ public sealed record VibpComposition(
   // 可选成员无值时省略字段而非写 null：与 web parseComposition 的
   // undefined 语义对齐，否则常见仅 margin/color 排版工程重开即被拒。
   [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BackgroundAssetId = null,
-  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] VibpCompositionCut? Cut = null);
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] VibpCompositionCut? Cut = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BackgroundStitchIndex = null);
 
 public sealed record VibpEditorState
 {
@@ -508,6 +509,10 @@ internal static class VibpProjectRules
       composition.AssetIds is null || composition.AssetIds.Count > VibpProjectLimits.MaximumAssets ||
       composition.AssetIds.Distinct().Count() != composition.AssetIds.Count)
       throw new VibpProjectFormatException("Project composition is invalid.");
+    if (composition.BackgroundStitchIndex is { } index &&
+      (index < 0 || index > VibpProjectLimits.MaximumAssets || composition.Background != "image" ||
+        composition.BackgroundAssetId is null || composition.AssetIds.Contains(composition.BackgroundAssetId)))
+      throw new VibpProjectFormatException("Project background stitch membership is invalid.");
     HashSet<string> assets = [.. marks.Where(mark => mark.Tool == "image").Select(mark => mark.AssetId).OfType<string>()];
     if (composition.AssetIds.Any(id => !assets.Contains(id)) ||
       composition.BackgroundAssetId is { } background && !assets.Contains(background) ||

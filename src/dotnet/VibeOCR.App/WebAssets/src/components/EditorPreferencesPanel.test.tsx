@@ -28,6 +28,20 @@ async function openPanel() {
 }
 
 describe("EditorPreferencesPanel 预设尺寸校验", () => {
+  it.each(["{time}", "scan-{name", "scan-name}", "{{name}}"])(
+    "拒绝非法模板 %s 并允许合法模板",
+    async (template) => {
+      const { user, save } = await openPanel();
+      const input = screen.getByLabelText("预设文件名模板");
+      await user.clear(input);
+      await user.type(input, template.replaceAll("{", "{{"));
+      expect(save).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent("花括号须配对");
+      await user.clear(input);
+      await user.type(input, "{{name}-{{date}-{{index}");
+      expect(save).toBeEnabled();
+    },
+  );
   afterEach(() => cleanup());
   it("非整数宽高拒绝保存并提示，整数与 0 自动语义可保存", async () => {
     const { user, width, height, save } = await openPanel();

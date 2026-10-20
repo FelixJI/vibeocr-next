@@ -402,21 +402,21 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "savePresetImage"):
         bool boundPreset = arguments.TryGetProperty("sessionId", out _);
         EnsureObjectWithFields(arguments, new HashSet<string>(boundPreset
-          ? ["resourceUri", "presetId", "sessionId", "revision"] : ["resourceUri", "presetId"]), "command arguments");
+          ? ["resourceUri", "presetId", "presetBinding", "sessionId", "revision"] : ["resourceUri", "presetId", "presetBinding"]), "command arguments");
         return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", scope!,
-          boundPreset ? ParseGuidArgument(arguments, "sessionId") : null, boundPreset ? ParseContentRevision(arguments) : null);
+          boundPreset ? ParseGuidArgument(arguments, "sessionId") : null, boundPreset ? ParseContentRevision(arguments) : null, ReadPresetBinding(arguments));
       // pinEdit 预设输出与会话强绑定：必须携带 sessionId/revision，
       // 宿主侧拒绝缺失或过期绑定，防止过期贴图快照被写入默认输出。
       case ("pinEdit", "savePresetImage"):
-        EnsureObjectWithFields(arguments, new HashSet<string>(["resourceUri", "presetId", "sessionId", "revision"]), "command arguments");
+        EnsureObjectWithFields(arguments, new HashSet<string>(["resourceUri", "presetId", "presetBinding", "sessionId", "revision"]), "command arguments");
         return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", "pinEdit",
-          ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments));
+          ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments), ReadPresetBinding(arguments));
       case ("batch", "prepareImageExport"):
         EnsureObjectWithFields(arguments, new HashSet<string>(["index"]), "command arguments");
         return new PrepareBatchImageCommand(arguments.GetProperty("index").GetInt32());
       case ("batch", "exportImage"):
-        EnsureObjectWithFields(arguments, new HashSet<string>(["itemId", "resourceUri", "presetId"]), "command arguments");
-        return new ExportBatchImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "");
+        EnsureObjectWithFields(arguments, new HashSet<string>(["itemId", "resourceUri", "presetId", "presetBinding"]), "command arguments");
+        return new ExportBatchImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", ReadPresetBinding(arguments));
       case ("shell", "navigate"):
         EnsureObjectWithFields(arguments, RouteArgumentFields, "command arguments");
         return new NavigateWorkbenchCommand(
@@ -1366,6 +1366,17 @@ public static class WorkbenchBridgeCodec
     return uri.AbsoluteUri;
   }
 
+  private static ImageOutputBinding ReadPresetBinding(JsonElement arguments)
+  {
+    ImageOutputBinding binding = arguments.GetProperty("presetBinding").Deserialize<ImageOutputBinding>(EditorPreferencesStore.Json)
+      ?? throw new WorkbenchBridgeProtocolException("Missing output preset binding.");
+    if (binding.Preset is null || string.IsNullOrWhiteSpace(binding.Directory))
+      throw new WorkbenchBridgeProtocolException("Invalid output preset binding.");
+    try { (EditorPreferences.Default with { Output = binding.Preset }).Validate(); }
+    catch (InvalidDataException error) { throw new WorkbenchBridgeProtocolException("Invalid output preset binding.", error); }
+    return binding;
+  }
+
   private static string ParseAnnotationResourceUri(JsonElement arguments)
   {
     EnsureObjectWithFields(arguments, ResourceUriArgumentFields, "command arguments");
@@ -2041,7 +2052,9 @@ public static class WorkbenchBridgeCodec
       diagnostics.Milestones,
       diagnostics.DeviceEvidence,
     },
-    ThemeWorkbenchState theme => new { theme = theme.Theme.ToString().ToLowerInvariant() },
+    ThemeWorkbenchState theme => theme.EditorPreferences is null
+      ? (object)new { theme = theme.Theme.ToString().ToLowerInvariant() }
+      : new { theme = theme.Theme.ToString().ToLowerInvariant(), theme.EditorPreferences, theme.ImageOutputDirectory, theme.EditorPreferencesError },
     null => null,
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench state type is not supported."),

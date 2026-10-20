@@ -250,3 +250,28 @@ describe("composition exclusion projection", () => {
     ).toThrow(/64/);
   });
 });
+
+it("maps the same two reused image objects as the rendering layout", () => {
+  const state: EditorState = {
+    rotation: 0,
+    marks: [
+      exclude(1, 20, 10, 20, 10),
+      imported(30, 10),
+      { ...imported(50, 10), id: "copy" },
+    ],
+    composition: {
+      ...DEFAULT_COMPOSITION,
+      stitch: "horizontal",
+      assetIds: [asset],
+    },
+  };
+  const result = compositionExclusions(image, state, display, assets);
+  expect(result.size).toEqual({ width: 120, height: 40 });
+  expect(result.pixels).toContainEqual({ x: 80, y: 15, width: 20, height: 10 });
+  expect(result.pixels).toContainEqual({
+    x: 100,
+    y: 15,
+    width: 20,
+    height: 10,
+  });
+});

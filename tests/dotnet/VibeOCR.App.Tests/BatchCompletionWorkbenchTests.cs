@@ -176,11 +176,20 @@ public sealed class BatchCompletionWorkbenchTests
     Assert.NotNull(projected.ExportImage);
     harness.Batch.Items.Move(0, 1);
     WorkbenchAnnotationLease lease = await harness.StageImageAsync(first, token);
-    WorkbenchCommandOutcome exported = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(firstId, lease.ResourceUri.AbsoluteUri, "default"), token);
+    WorkbenchCommandOutcome exported = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(firstId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
     Assert.Null(exported.Error);
     Assert.Equal(first, File.ReadAllBytes(firstPath));
     Assert.Equal(first, File.ReadAllBytes(Path.Combine(harness.Root, "original_1.png")));
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
+    // 质量变化保持格式和尺寸兼容，仍须拒绝旧快照，不能按新设置混合写盘。
+    Assert.Null((await harness.Handler.ExecuteAsync(new SetEditorPreferencesCommand(
+      EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Quality: 0.7) }), token)).Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token)).Error);
+    WorkbenchAnnotationLease staleQuality = await harness.StageImageAsync(second, token);
+    Assert.NotNull((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, staleQuality.ResourceUri.AbsoluteUri, "default",
+      new(new(NameTemplate: "{name}"), harness.Root)), token)).Error);
+    Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(staleQuality));
+    Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
     prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token);
     Assert.Null(prepared.Error);
     projected = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
@@ -197,7 +206,7 @@ public sealed class BatchCompletionWorkbenchTests
     Assert.Null(configured.Error);
     Assert.Null((await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token)).Error);
     lease = await harness.StageImageAsync(second, token);
-    failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "default"), token);
+    failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
     Assert.NotNull(failed.Error);
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
     Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
@@ -236,7 +245,7 @@ public sealed class BatchCompletionWorkbenchTests
       new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage).AsTask(token)).DetachPixelData();
     Assert.Equal(new byte[] { 255, 0, 0, 255 }, pixels[..4]);
     WorkbenchAnnotationLease lease = await harness.StageImageAsync(png, token);
-    Assert.Null((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(id, lease.ResourceUri.AbsoluteUri, "default"), token)).Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(id, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token)).Error);
     Assert.Equal(png, File.ReadAllBytes(Path.Combine(harness.Root, "original.png")));
     Assert.Equal(original, File.ReadAllBytes(path));
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));

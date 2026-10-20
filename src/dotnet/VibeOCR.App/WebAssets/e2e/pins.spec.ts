@@ -600,6 +600,10 @@ test("composition pin snapshot save and reopen keep pixels, geometry, and sessio
     arguments: {
       resourceUri: "https://app.vibeocr/__annotation/" + "c".repeat(32),
       presetId: "default",
+      presetBinding: {
+        preset: DEFAULT_EDITOR_PREFERENCES.output,
+        directory: "C:/authorized-output",
+      },
       sessionId: sourceSession,
       revision: await lastRevision(),
     },

@@ -951,6 +951,14 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     return CurrentState();
   }
 
+  internal void ValidatePresetBinding(string presetId, ImageOutputBinding? binding)
+  {
+    if (binding is null || binding.Preset != EditorSettings.Preferences.Output ||
+      presetId != binding.Preset.Id ||
+      !string.Equals(binding.Directory, ValidOutputDirectory(), StringComparison.OrdinalIgnoreCase))
+      throw new InvalidDataException("导出期间输出预设或授权目录已变化，本次未保存；请重试。");
+  }
+
   internal async Task SavePresetImageAsync(WorkbenchAnnotationFile image, string presetId, string sourceName, int index, CancellationToken token)
   {
     ImageOutputPreset preset = EditorSettings.Preferences.Output;

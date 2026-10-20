@@ -1147,8 +1147,9 @@ public sealed class VibpProjectFileTests
     {
       byte[] source = PngBytes(6, 4), asset = PngBytes(2, 2), patch1 = PngBytes(3, 1), patch2 = PngBytes(1, 2);
       VibpProjectManifest original = FullManifest(source, asset, patch1, patch2);
-      var composition = new VibpComposition(20, "image", "#ffffff", "#123456", 5, 12, "16:9", "horizontal", [AssetId], AssetId, new("vertical", 25, 50));
-      VibpMark[] combinedMarks = [.. original.State.Marks,
+      var composition = new VibpComposition(20, "image", "#ffffff", "#123456", 5, 12, "16:9", "horizontal", [], AssetId, new("vertical", 25, 50), 0);
+      VibpMark originalImage = original.State.Marks.First(mark => mark.Tool == "image");
+      VibpMark[] combinedMarks = [.. original.State.Marks, originalImage with { Id = "mark-102" },
         new() { Id = "mark-100", Tool = "spotlight", Start = new() { X = 1, Y = 1 }, End = new() { X = 4, Y = 3 }, Regions = [new() { X = 1, Y = 1, Width = 3, Height = 2 }] },
         new() { Id = "mark-101", Tool = "magnifier", Start = new() { X = 0, Y = 0 }, End = new() { X = 6, Y = 4 }, Zoom = 4 }];
       VibpProjectManifest manifest = original with { State = original.State with { Composition = composition, Marks = combinedMarks } };
@@ -1164,9 +1165,23 @@ public sealed class VibpProjectFileTests
       Assert.Equal(4, archive.Manifest.State.Marks.Single(mark => mark.Id == "mark-101").Zoom);
       Assert.Equal(composition.Cut, archive.Manifest.State.Composition!.Cut);
       Assert.Equal(AssetId, archive.Manifest.State.Composition.BackgroundAssetId);
-      Assert.Equal(AssetId, Assert.Single(archive.Manifest.State.Composition.AssetIds));
+      Assert.Empty(archive.Manifest.State.Composition.AssetIds);
+      Assert.Equal(0, archive.Manifest.State.Composition.BackgroundStitchIndex);
+      Assert.Equal(2, archive.Manifest.State.Marks.Count(mark => mark.Tool == "image" && mark.AssetId == AssetId));
     }
     finally { Directory.Delete(directory, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(-1)]
+  [InlineData(17)]
+  [InlineData(0)]
+  public void CompositionRejectsInvalidOrContradictoryBackgroundMembership(int index)
+  {
+    var composition = new VibpComposition(0, "image", "#ffffff", "#ffffff", 0, 0, "free", "horizontal",
+      index == 0 ? [AssetId] : [], AssetId, BackgroundStitchIndex: index);
+    VibpMark mark = new() { Id = "mark-1", Tool = "image", AssetId = AssetId, Start = new() { X = 0, Y = 0 }, End = new() { X = 1, Y = 1 } };
+    Assert.Throws<VibpProjectFormatException>(() => VibpProjectRules.ValidateComposition(composition, [mark]));
   }
 
   [Fact]
@@ -1189,6 +1204,7 @@ public sealed class VibpProjectFileTests
       using (var reader = new StreamReader(archive.GetEntry("manifest.json")!.Open()))
         text = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
       Assert.DoesNotContain("backgroundAssetId", text);
+      Assert.DoesNotContain("backgroundStitchIndex", text);
       Assert.DoesNotContain("\"cut\"", text);
       using (JsonDocument parsed = JsonDocument.Parse(text))
       {

@@ -3,6 +3,7 @@ import { validateProjectRestore } from "./ImageCanvasEditor";
 import { describe, expect, it } from "vitest";
 import {
   compositionSize,
+  compositionLayout,
   DEFAULT_COMPOSITION,
   parseComposition,
   boundedCanvasSize,
@@ -108,4 +109,62 @@ it("retains editable composition when rotating the source image", () => {
   );
   expect(rotated.rotation).toBe(90);
   expect(rotated.composition).toEqual(composition);
+});
+
+it("counts every live image object through undo/delete and legacy project roundtrip", () => {
+  const assetId = "a".repeat(32);
+  const mark = {
+    id: "mark-1",
+    tool: "image" as const,
+    assetId,
+    start: { x: 0, y: 0 },
+    end: { x: 20, y: 10 },
+  };
+  const composition = {
+    ...DEFAULT_COMPOSITION,
+    stitch: "horizontal" as const,
+    assetIds: [assetId],
+  };
+  const assets = new Map([[assetId, { naturalWidth: 20, naturalHeight: 10 }]]);
+  const size = { width: 80, height: 40 };
+  for (const marks of [[mark], [mark, { ...mark, id: "mark-2" }], [mark]]) {
+    const body = buildContributionState(size, {
+      rotation: 0,
+      marks,
+      composition,
+    });
+    const restored = restoreEditorState(body.state, {
+      naturalSize: size,
+      savedCanvas: size,
+      displayCanvas: size,
+      rotation: 0,
+    });
+    const layout = compositionLayout(
+      size,
+      restored.composition!,
+      assets,
+      restored.marks,
+    );
+    expect(layout.placements).toHaveLength(marks.length + 1);
+    expect(layout.size.width).toBe(80 + marks.length * 20);
+  }
+});
+
+it("persists explicit background membership and rejects contradictory membership metadata", () => {
+  const backgroundAssetId = "a".repeat(32);
+  const value = {
+    ...DEFAULT_COMPOSITION,
+    background: "image" as const,
+    backgroundAssetId,
+    backgroundStitchIndex: 1,
+  };
+  expect(parseComposition(JSON.parse(JSON.stringify(value)))).toEqual(value);
+  for (const patch of [
+    { backgroundStitchIndex: -1 },
+    { backgroundStitchIndex: 0.5 },
+    { backgroundStitchIndex: 17 },
+    { background: "solid" },
+    { assetIds: [backgroundAssetId] },
+  ])
+    expect(() => parseComposition({ ...value, ...patch })).toThrow();
 });

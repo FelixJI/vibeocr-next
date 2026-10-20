@@ -4,6 +4,7 @@ export interface CanvasComposition {
   readonly color: string;
   readonly endColor: string;
   readonly backgroundAssetId?: string;
+  readonly backgroundStitchIndex?: number;
   readonly shadow: number;
   readonly radius: number;
   readonly ratio: "free" | "1:1" | "4:3" | "16:9" | "9:16";
@@ -41,6 +42,7 @@ export function parseComposition(
     "color",
     "endColor",
     "backgroundAssetId",
+    "backgroundStitchIndex",
     "shadow",
     "radius",
     "ratio",
@@ -72,6 +74,16 @@ export function parseComposition(
         !/^[a-f0-9]{32}$/.test(input.backgroundAssetId)))
   )
     throw new Error("工程排版数据无效");
+  if (
+    input.backgroundStitchIndex !== undefined &&
+    (!Number.isInteger(input.backgroundStitchIndex) ||
+      (input.backgroundStitchIndex as number) < 0 ||
+      (input.backgroundStitchIndex as number) > 16 ||
+      input.background !== "image" ||
+      !input.backgroundAssetId ||
+      input.assetIds.includes(input.backgroundAssetId))
+  )
+    throw new Error("背景拼接成员记录无效");
   if (input.background === "image" && !input.backgroundAssetId)
     throw new Error("背景图未选择");
   if (input.cut !== undefined) {
@@ -158,6 +170,7 @@ export function compositionLayout(
   source: { width: number; height: number },
   settings: CanvasComposition,
   assets?: ReadonlyMap<string, { naturalWidth: number; naturalHeight: number }>,
+  imageMarks?: readonly { tool: string; assetId?: string }[],
 ): CompositionLayout {
   parseComposition(settings);
   const cut = settings.cut
@@ -194,11 +207,17 @@ export function compositionLayout(
     for (const id of settings.assetIds) {
       const image = assets?.get(id);
       if (!image) throw new Error("拼接图片已失效，请重新导入");
-      sources.push({
-        assetId: id,
-        width: image.naturalWidth,
-        height: image.naturalHeight,
-      });
+      // 一个资源可被多个独立图片对象复用；每个存活对象保留一次拼接出现。
+      const count =
+        imageMarks?.filter(
+          (mark) => mark.tool === "image" && mark.assetId === id,
+        ).length ?? 1;
+      for (let index = 0; index < count; index++)
+        sources.push({
+          assetId: id,
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
     }
   const size = compositionSize(sources, settings);
   const horizontal = settings.stitch === "horizontal";
@@ -229,9 +248,10 @@ export function renderComposition(
   source: HTMLCanvasElement,
   settings: CanvasComposition | undefined,
   assets?: ReadonlyMap<string, HTMLImageElement>,
+  imageMarks?: readonly { tool: string; assetId?: string }[],
 ): HTMLCanvasElement {
   if (!settings) return source;
-  const layout = compositionLayout(source, settings, assets);
+  const layout = compositionLayout(source, settings, assets, imageMarks);
   let base = source;
   if (layout.cut) {
     const { axis, from, to } = layout.cut;

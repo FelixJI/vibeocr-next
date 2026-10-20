@@ -118,7 +118,10 @@ import {
   hitStrokePaths,
 } from "./annotationStrokeGeometry";
 import { BRIDGE_VERSION, ChromeWebViewTransport } from "../bridge/client";
-import { uploadAnnotatedImage } from "./annotationHandoff";
+import {
+  discardAnnotatedImage,
+  uploadAnnotatedImage,
+} from "./annotationHandoff";
 import {
   buildContributionState,
   contributionStateBytes,
@@ -2720,6 +2723,7 @@ export function ImageCanvasEditor({
           if (composition.background === "image")
             composition.background = "transparent";
           composition.backgroundAssetId = undefined;
+          composition.backgroundStitchIndex = undefined;
         }
         parseComposition(composition);
         next = { ...next, composition };
@@ -4967,6 +4971,7 @@ export function ImageCanvasEditor({
     });
     const resourceUri = await uploadAnnotatedImage(blob);
     if (textEditingRef.current || !exportContextUnchanged(frozen)) {
+      await discardAnnotatedImage(resourceUri);
       setOperationMessage(
         "导出期间内容或会话已变化，本次未发送；请在新画面重试。",
       );
@@ -5036,6 +5041,13 @@ export function ImageCanvasEditor({
     setIsExporting(true);
     const frozen = freezeExportContext();
     const preset = preferences.output;
+    const presetBinding = {
+      preset,
+      directory:
+        typeof editorSettings.imageOutputDirectory === "string"
+          ? editorSettings.imageOutputDirectory
+          : "",
+    };
     try {
       const blob = await exportCanvas(frozen.image, canvasRef.current, state, {
         format: preset.format,
@@ -5049,12 +5061,14 @@ export function ImageCanvasEditor({
       });
       const resourceUri = await uploadAnnotatedImage(blob);
       if (!exportContextUnchanged(frozen)) {
+        await discardAnnotatedImage(resourceUri);
         setOperationMessage("导出期间内容已变化，请重试。");
         return;
       }
       // pinEdit 预设输出与会话强绑定：无会话时直接拒绝，不发送会被宿主
       // fail-closed 拒绝的命令；其余两通道沿用可选绑定兼容契约。
       if (commandScope === "pinEdit" && !frozen.sessionId) {
+        await discardAnnotatedImage(resourceUri);
         setOperationMessage("贴图会话已失效，本次预设输出未发送，请重试。");
         return;
       }
@@ -5067,6 +5081,7 @@ export function ImageCanvasEditor({
               : "recognition.savePresetImage",
         resourceUri,
         presetId: preset.id,
+        presetBinding,
         ...(frozen.sessionId
           ? { sessionId: frozen.sessionId, revision: frozen.contentVersion }
           : {}),
@@ -5218,6 +5233,7 @@ export function ImageCanvasEditor({
           finalOutputSize(image, state, canvasSize(canvas)),
           state.composition,
           importAssetsRef.current,
+          state.marks,
         );
       } catch (error) {
         throw new Error(
@@ -7860,21 +7876,23 @@ export function ImageCanvasEditor({
         />
       )}
       {toolset === "full" && (
-        <EditorPreferencesPanel
-          key={JSON.stringify(preferences)}
-          value={preferences}
-          directory={
-            typeof editorSettings.imageOutputDirectory === "string"
-              ? editorSettings.imageOutputDirectory
-              : undefined
-          }
-          error={
-            typeof editorSettings.editorPreferencesError === "string"
-              ? editorSettings.editorPreferencesError
-              : undefined
-          }
-          actions={actions}
-        />
+        <fieldset className="editor-preferences-lock" disabled={isExporting}>
+          <EditorPreferencesPanel
+            key={JSON.stringify(preferences)}
+            value={preferences}
+            directory={
+              typeof editorSettings.imageOutputDirectory === "string"
+                ? editorSettings.imageOutputDirectory
+                : undefined
+            }
+            error={
+              typeof editorSettings.editorPreferencesError === "string"
+                ? editorSettings.editorPreferencesError
+                : undefined
+            }
+            actions={actions}
+          />
+        </fieldset>
       )}
       {toolset === "full" && (
         <details
@@ -9680,6 +9698,7 @@ export function validateProjectRestore(
       finalOutputSize(sourceImage, restored, savedCanvas),
       restored.composition,
       new Map([...(assets ?? [])].map(([id, asset]) => [id, asset.image])),
+      restored.marks,
     );
   }
   try {
@@ -10375,6 +10394,7 @@ async function exportCanvas(
     output,
     state.composition,
     options.imageAssets as ReadonlyMap<string, HTMLImageElement> | undefined,
+    state.marks,
   );
   if (options.bakeExclusions && exclusions) {
     const masked = composed.getContext("2d");

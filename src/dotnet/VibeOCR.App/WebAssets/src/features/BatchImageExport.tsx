@@ -4,7 +4,10 @@ import type { AppActions } from "../app/types";
 import { EditorPreferencesPanel } from "../components/EditorPreferencesPanel";
 import { editorPreferences } from "../components/editorPreferences";
 import { encodeImagePreset } from "../components/imagePresetEncoding";
-import { uploadAnnotatedImage } from "../components/annotationHandoff";
+import {
+  discardAnnotatedImage,
+  uploadAnnotatedImage,
+} from "../components/annotationHandoff";
 import { resource } from "./FeatureValues";
 
 type ImageReady =
@@ -71,6 +74,7 @@ export function BatchImageExport({
     let succeeded = 0,
       failed = 0,
       unavailable = 0;
+    let cleanupError = "";
     try {
       for (let index = 0; index < count && !stopped(); index++) {
         setProgress(
@@ -104,13 +108,31 @@ export function BatchImageExport({
           if (stopped()) break;
           const resourceUri = await uploadAnnotatedImage(blob);
           // 停止/卸载/会话更替后不再写入：上传返回后才检查，不发 batch.exportImage。
-          if (stopped()) break;
+          if (stopped()) {
+            try {
+              await discardAnnotatedImage(resourceUri);
+            } catch (error) {
+              cleanupError =
+                error instanceof Error
+                  ? error.message
+                  : "取消上传后的图片租约释放失败";
+              throw error;
+            }
+            break;
+          }
           if (
             await actions.run({
               type: "batch.exportImage",
               itemId: next.id,
               resourceUri,
               presetId: preferences.output.id,
+              presetBinding: {
+                preset: preferences.output,
+                directory:
+                  typeof settings.imageOutputDirectory === "string"
+                    ? settings.imageOutputDirectory
+                    : "",
+              },
             })
           )
             succeeded++;
@@ -124,7 +146,7 @@ export function BatchImageExport({
       }
       if (mounted.current)
         setProgress(
-          `${stopped() ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。${unavailable ? `其中 ${unavailable} 项格式解码不可用或图片内容损坏。` : ""}已成功文件保留；原图与已有文件未覆盖。`,
+          `${stopped() ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。${unavailable ? `其中 ${unavailable} 项格式解码不可用或图片内容损坏。` : ""}${cleanupError}已成功文件保留；原图与已有文件未覆盖。`,
         );
     } finally {
       if (mounted.current) {

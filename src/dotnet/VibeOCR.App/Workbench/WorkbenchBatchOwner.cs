@@ -134,11 +134,13 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
 
   private async Task<BatchWorkbenchState> ExportImageAsync(ExportBatchImageCommand command, CancellationToken token)
   {
-    using WorkbenchAnnotationFile image = annotationStore.Take(new Uri(command.ResourceUri));
-    BatchItemViewModel item = batch?.Items.FirstOrDefault(item => item.Id == command.ItemId)
-      ?? throw new InvalidDataException("批量图片项已被移除，未写入。");
     try
     {
+      try { settingsOwner.ValidatePresetBinding(command.PresetId, command.PresetBinding); }
+      catch { annotationStore.Revoke(new Uri(command.ResourceUri)); throw; }
+      using WorkbenchAnnotationFile image = annotationStore.Take(new Uri(command.ResourceUri));
+      BatchItemViewModel item = batch?.Items.FirstOrDefault(item => item.Id == command.ItemId)
+        ?? throw new InvalidDataException("批量图片项已被移除，未写入。");
       if (exportImageId != item.Id || exportImage is null) throw new InvalidDataException("批量图片授权已失效。");
       await settingsOwner.SavePresetImageAsync(image, command.PresetId, item.Name, exportImageIndex + 1, token);
       return BatchState(batch!);

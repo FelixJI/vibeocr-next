@@ -377,6 +377,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       ValidateScreenshotSession(channel, id, command.Revision ?? -1);
     }
+    try { settingsOwner.ValidatePresetBinding(command.PresetId, command.PresetBinding); }
+    catch { annotationStore.Revoke(new Uri(command.ResourceUri)); throw; }
     using WorkbenchAnnotationFile annotation = annotationStore.Take(new Uri(command.ResourceUri));
     await settingsOwner.SavePresetImageAsync(annotation, command.PresetId, channel.ViewModel?.CurrentInput?.DisplayName ?? "vibeocr", 1, token);
     return CurrentChannelState(channel);
