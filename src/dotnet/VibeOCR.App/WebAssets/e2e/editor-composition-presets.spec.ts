@@ -119,11 +119,14 @@ async function setup(
 ) {
   await page.route("https://app.vibeocr/**", async (route) => {
     const url = new URL(route.request().url());
+    // 后注册的代理优先匹配；租约释放交还给 beforeEach 的宿主路由。
+    if (url.pathname.startsWith("/__annotation/")) return route.fallback();
     const response = await page.request.get(
       `http://127.0.0.1:4174${url.pathname}${url.search}`,
     );
     await route.fulfill({ response });
   });
+
   const base = await png(page, size.width, size.height, true),
     imported = await png(page, 20, 10);
   const uploads: { contentType: string; bytes: Buffer }[] = [];
@@ -1236,6 +1239,9 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   await page.getByRole("button", { name: "文字识别", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(before + 1);
   expect(uploads.at(-1)!.bytes).toEqual(uploads[0]!.bytes);
+  await expect(
+    page.getByRole("heading", { name: "单次识别", exact: true }),
+  ).toBeVisible();
   const recognition = (await commands(page)).find(
     (command) => command.action === "recognizeScreenshotImage",
   )!;
@@ -1358,6 +1364,10 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
   await page.getByRole("button", { name: "文字识别", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(5);
   expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+  // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
+  await expect(
+    page.getByRole("heading", { name: "单次识别", exact: true }),
+  ).toBeVisible();
   const recognition = (await commands(page)).find(
     (command) => command.action === "recognizeScreenshotImage",
   )!;
@@ -1400,6 +1410,10 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
   await page.getByRole("button", { name: "文字识别", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(5);
   expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+  // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
+  await expect(
+    page.getByRole("heading", { name: "单次识别", exact: true }),
+  ).toBeVisible();
 });
 
 test("F239-03：仅排版编辑可从上排清除或重置，撤销恢复真实预览", async ({
@@ -1726,4 +1740,13 @@ test("预设明确失败回执逐次释放租约，成功回执不抢先丢弃",
   ).toBeVisible();
   expect(uploads).toBe(11);
   expect(discarded).toHaveLength(10);
+});
+
+test("宿主图片租约释放不被静态资源代理覆盖", async ({ page }) => {
+  await setup(page);
+  const status = await page.evaluate(async (url) => {
+    const response = await fetch(url, { method: "DELETE" });
+    return response.status;
+  }, annotation);
+  expect(status).toBe(204);
 });
