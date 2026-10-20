@@ -94,6 +94,22 @@ describe("背景图与拼接子集同步", () => {
         assetIds: ["b", "c", "d"],
       },
     },
+    {
+      label: "排版背景",
+      selected: "transparent",
+      initial: {
+        background: "image",
+        backgroundAssetId: "b",
+        backgroundStitchIndex: 0,
+        assetIds: ["c"],
+      },
+      expected: {
+        background: "transparent",
+        backgroundAssetId: undefined,
+        backgroundStitchIndex: undefined,
+        assetIds: ["b", "c"],
+      },
+    },
   ] as const)(
     "$label → $selected 只更新背景相关项",
     ({ label, selected, initial, expected }) => {

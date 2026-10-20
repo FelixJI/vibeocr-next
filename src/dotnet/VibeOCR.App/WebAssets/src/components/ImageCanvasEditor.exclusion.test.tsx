@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import type { AppActions } from "../app/types";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -415,12 +417,17 @@ describe("image editor exclusion regions", () => {
     // 贴上新修订发出；本测试要求拒绝且不发送识别命令。
     let resolveUpload: ((value: Response) => void) | undefined;
     const stubs = installCanvasStubs(900, 600);
-    const controlledFetch = vi.fn().mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
+    const controlledFetch = vi
+      .fn()
+      .mockImplementation((input: unknown, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          expect(input).toBe("/__annotation/0123456789abcdef0123456789abcdef");
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return new Promise<Response>((resolve) => {
           resolveUpload = resolve;
-        }),
-    );
+        });
+      });
     vi.stubGlobal("fetch", controlledFetch);
     const actions = createActions();
     const { unmount } = render(
@@ -468,6 +475,10 @@ describe("image editor exclusion regions", () => {
             "recognition.recognizeScreenshotImage",
         ),
       ).toHaveLength(0);
+      expect(controlledFetch).toHaveBeenCalledWith(
+        "/__annotation/0123456789abcdef0123456789abcdef",
+        { method: "DELETE" },
+      );
     } finally {
       unmount();
       stubs.restore();

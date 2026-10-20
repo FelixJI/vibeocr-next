@@ -11,6 +11,7 @@ import {
   parseComposition,
   boundedCanvasSize,
   compositionLayout,
+  pruneCompositionAssets,
 } from "./canvasComposition";
 import {
   Button,
@@ -35,7 +36,7 @@ import {
   useState,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
-import type { AppActions } from "../app/types";
+import type { AppAction, AppActions } from "../app/types";
 import type { ImageRecognitionMode } from "../features/ScreenshotSession";
 import { availabilityLabel } from "../features/FeatureValues";
 
@@ -2710,21 +2711,12 @@ export function ImageCanvasEditor({
     }
     try {
       if (next.composition) {
-        const alive = new Set(next.marks.map((mark) => mark.assetId));
-        const composition = {
-          ...next.composition,
-          assetIds: next.composition.assetIds.filter((id) => alive.has(id)),
-        };
-        if (
-          composition.backgroundAssetId &&
-          !alive.has(composition.backgroundAssetId)
-        ) {
-          // 仅 image 背景依赖该资产；陈旧绑定只解除引用，不重置纯色/渐变背景。
-          if (composition.background === "image")
-            composition.background = "transparent";
-          composition.backgroundAssetId = undefined;
-          composition.backgroundStitchIndex = undefined;
-        }
+        const alive = new Set(
+          next.marks.flatMap((mark) =>
+            mark.tool === "image" && mark.assetId ? [mark.assetId] : [],
+          ),
+        );
+        const composition = pruneCompositionAssets(next.composition, alive);
         parseComposition(composition);
         next = { ...next, composition };
       }
@@ -5072,7 +5064,7 @@ export function ImageCanvasEditor({
         setOperationMessage("贴图会话已失效，本次预设输出未发送，请重试。");
         return;
       }
-      const saved = await actions.run({
+      const command: AppAction = {
         type:
           commandScope === "imageEdit"
             ? "imageEdit.savePresetImage"
@@ -5085,11 +5077,20 @@ export function ImageCanvasEditor({
         ...(frozen.sessionId
           ? { sessionId: frozen.sessionId, revision: frozen.contentVersion }
           : {}),
-      });
+      };
+      const receipt = actions.runWithReceipt
+        ? await actions.runWithReceipt(command)
+        : (await actions.run(command))
+          ? "succeeded"
+          : "unconfirmed";
+      // 只有明确失败回执终结本次操作；连接/代际失效不能推断宿主已停止。
+      if (receipt === "rejected") await discardAnnotatedImage(resourceUri);
       setOperationMessage(
-        saved
+        receipt === "succeeded"
           ? "已按常用预设保存副本；已有文件不会被覆盖。"
-          : "预设输出未完成；原图和已保存副本保留，请查看宿主提示。",
+          : receipt === "rejected"
+            ? "预设输出未完成；原图和已保存副本保留，请查看宿主提示。"
+            : "预设保存结果尚未确认；请先查看输出目录或恢复连接，确认后再重试。",
       );
     } catch (error) {
       setOperationMessage(

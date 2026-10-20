@@ -17,6 +17,36 @@ export interface CanvasComposition {
   };
 }
 
+export function pruneCompositionAssets(
+  settings: CanvasComposition,
+  alive: ReadonlySet<string>,
+): CanvasComposition {
+  const removedBeforeBackground =
+    settings.backgroundStitchIndex === undefined
+      ? 0
+      : settings.assetIds
+          .slice(0, settings.backgroundStitchIndex)
+          .filter((id) => !alive.has(id)).length;
+  const composition = {
+    ...settings,
+    assetIds: settings.assetIds.filter((id) => alive.has(id)),
+    backgroundStitchIndex:
+      settings.backgroundStitchIndex === undefined
+        ? undefined
+        : settings.backgroundStitchIndex - removedBeforeBackground,
+  };
+  if (
+    composition.backgroundAssetId &&
+    !alive.has(composition.backgroundAssetId)
+  ) {
+    if (composition.background === "image")
+      composition.background = "transparent";
+    composition.backgroundAssetId = undefined;
+    composition.backgroundStitchIndex = undefined;
+  }
+  return composition;
+}
+
 export const DEFAULT_COMPOSITION: CanvasComposition = {
   margin: 0,
   background: "transparent",

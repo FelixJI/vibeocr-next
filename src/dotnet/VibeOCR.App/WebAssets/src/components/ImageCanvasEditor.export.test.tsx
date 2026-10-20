@@ -762,3 +762,67 @@ describe("output preset copy acknowledgement", () => {
     },
   );
 });
+
+describe("preset upload ownership after host acknowledgement", () => {
+  it.each(["succeeded", "rejected", "unconfirmed", "fallback"] as const)(
+    "cleans only the terminated rejected operation (%s)",
+    async (receipt) => {
+      stubCanvasStack();
+      let acknowledge!: (
+        value: "succeeded" | "rejected" | "unconfirmed",
+      ) => void;
+      const pending = new Promise<"succeeded" | "rejected" | "unconfirmed">(
+        (resolve) => {
+          acknowledge = resolve;
+        },
+      );
+      const runWithReceipt = vi.fn(() => pending);
+      const actions = {
+        ...createActions(),
+        runWithReceipt: receipt === "fallback" ? undefined : runWithReceipt,
+      };
+      if (receipt === "fallback") actions.run.mockResolvedValue(false);
+      render(
+        <ImageCanvasEditor
+          {...editorProps({ actions })}
+          editorSettings={{ imageOutputDirectory: "C:/authorized-output" }}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(/原图 64×32/)).toBeInTheDocument(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "按常用预设保存" }));
+      if (receipt !== "fallback") {
+        await waitFor(() => expect(runWithReceipt).toHaveBeenCalledOnce());
+        expect(
+          vi
+            .mocked(fetch)
+            .mock.calls.filter(([, init]) => init?.method === "DELETE"),
+        ).toHaveLength(0);
+        await act(async () => {
+          acknowledge(receipt);
+        });
+      }
+      await waitFor(() =>
+        expect(
+          screen.getByText(
+            receipt === "succeeded"
+              ? /已按常用预设保存副本/
+              : receipt === "rejected"
+                ? /预设输出未完成/
+                : /预设保存结果尚未确认/,
+          ),
+        ).toBeVisible(),
+      );
+      const deletes = vi
+        .mocked(fetch)
+        .mock.calls.filter(([, init]) => init?.method === "DELETE");
+      expect(deletes).toHaveLength(receipt === "rejected" ? 1 : 0);
+      if (receipt === "rejected")
+        expect(deletes[0]).toEqual([
+          "/__annotation/0123456789abcdef0123456789abcdef",
+          { method: "DELETE" },
+        ]);
+    },
+  );
+});

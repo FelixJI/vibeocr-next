@@ -129,7 +129,12 @@ export async function mountHost(
                   payload: {
                     revision,
                     ok: false,
-                    problem: { messageKey: "workbench.error.commandFailed" },
+                    problem: {
+                      code: "desktop_command_failed",
+                      category: "Internal",
+                      retryable: true,
+                      messageKey: "workbench.error.commandFailed",
+                    },
                   },
                 });
                 return;

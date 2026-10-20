@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   compositionSize,
   compositionLayout,
+  pruneCompositionAssets,
   DEFAULT_COMPOSITION,
   parseComposition,
   boundedCanvasSize,
@@ -167,4 +168,47 @@ it("persists explicit background membership and rejects contradictory membership
     { assetIds: [backgroundAssetId] },
   ])
     expect(() => parseComposition({ ...value, ...patch })).toThrow();
+});
+
+it("prunes members before the hidden background without moving its saved position", () => {
+  const [a, b, c] = ["a", "b", "c"].map((id) => id.repeat(32));
+  const original = {
+    ...DEFAULT_COMPOSITION,
+    background: "image" as const,
+    backgroundAssetId: b,
+    backgroundStitchIndex: 1,
+    stitch: "horizontal" as const,
+    assetIds: [a!, c!],
+  };
+  const pruned = pruneCompositionAssets(original, new Set([b!, c!]));
+  expect(pruned.assetIds).toEqual([c]);
+  expect(pruned.backgroundStitchIndex).toBe(0);
+  expect(pruneCompositionAssets(pruned, new Set([b!, c!]))).toEqual(pruned);
+  expect(original.backgroundStitchIndex).toBe(1); // 撤销持有的历史不被就地改写。
+  const size = { width: 80, height: 40 };
+  const marks = [b!, c!].map((assetId, index) => ({
+    id: "mark-" + (index + 1),
+    tool: "image" as const,
+    assetId,
+    start: { x: 0, y: 0 },
+    end: { x: 20, y: 10 },
+  }));
+  const body = buildContributionState(size, {
+    rotation: 0,
+    marks,
+    composition: pruned,
+  });
+  expect(
+    restoreEditorState(body.state, {
+      naturalSize: size,
+      savedCanvas: size,
+      displayCanvas: size,
+      rotation: 0,
+    }).composition,
+  ).toEqual(pruned);
+  expect(pruneCompositionAssets(pruned, new Set([c!]))).toMatchObject({
+    background: "transparent",
+    backgroundAssetId: undefined,
+    backgroundStitchIndex: undefined,
+  });
 });

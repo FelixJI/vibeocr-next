@@ -356,6 +356,20 @@ public sealed class WebWorkbenchHostPolicyTests
         Assert.False(owner.RevokeUploadedAnnotation(lease.ResourceUri));
         Assert.Throws<WorkbenchAnnotationAccessException>(() => store.Take(lease.ResourceUri));
       }
+      // Take已转移文件所有权：DELETE只能清掉上传记录，不能删除在途任务持有的文件。
+      WorkbenchAnnotationLease consumed = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+      owner.TrackAnnotationLease(consumed.ResourceUri);
+      using (WorkbenchAnnotationFile inFlight = store.Take(consumed.ResourceUri))
+      {
+        Assert.True(owner.RevokeUploadedAnnotation(consumed.ResourceUri));
+        Assert.True(File.Exists(inFlight.Path));
+        Assert.False(owner.RevokeUploadedAnnotation(consumed.ResourceUri));
+      }
+      // 绑定变化已由SettingsOwner拒绝并Revoke，第一次本宿主DELETE仍是成功no-op。
+      WorkbenchAnnotationLease revoked = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
+      owner.TrackAnnotationLease(revoked.ResourceUri);
+      store.Revoke(revoked.ResourceUri);
+      Assert.True(owner.RevokeUploadedAnnotation(revoked.ResourceUri));
       WorkbenchAnnotationLease foreign = await store.UploadPngAsync(new MemoryStream(VibpProjectFileTests.BuildPng(2, 2)), TestContext.Current.CancellationToken);
       other.TrackAnnotationLease(foreign.ResourceUri);
       Assert.False(owner.RevokeUploadedAnnotation(foreign.ResourceUri));

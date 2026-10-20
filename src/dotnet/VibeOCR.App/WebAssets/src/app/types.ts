@@ -215,6 +215,8 @@ export interface AppAction {
   readonly [argument: string]: unknown;
 }
 
+export type AppCommandReceipt = "succeeded" | "rejected" | "unconfirmed";
+
 export interface AppActions {
   readonly reportCapturePixels?: (
     scene: CaptureScene,
@@ -237,6 +239,7 @@ export interface AppActions {
     install: () => void,
   ) => boolean;
   readonly run: (action: AppAction) => Promise<boolean>;
+  readonly runWithReceipt?: (action: AppAction) => Promise<AppCommandReceipt>;
   readonly navigate: (route: AppRoute) => void;
   readonly setTheme: (theme: ThemePreference) => void;
 }

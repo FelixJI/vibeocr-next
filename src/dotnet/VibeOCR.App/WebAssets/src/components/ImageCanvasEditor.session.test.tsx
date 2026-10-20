@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import type { AppActions } from "../app/types";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -707,12 +709,15 @@ describe("screenshot session editor wiring", () => {
     }[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
-            pendingUploads.push({ resolve });
-          }),
-      ),
+      vi.fn((input: unknown, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          expect(input).toBe("/__annotation/0123456789abcdef0123456789abcdef");
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return new Promise<Response>((resolve) => {
+          pendingUploads.push({ resolve });
+        });
+      }),
     );
     const okUpload = () =>
       new Response(
@@ -865,7 +870,13 @@ describe("screenshot session editor wiring", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi.fn(() => uploadGate),
+      vi.fn((input: unknown, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          expect(input).toBe("/__annotation/0123456789abcdef0123456789abcdef");
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return uploadGate;
+      }),
     );
 
     const actions = createActions();

@@ -1,5 +1,6 @@
 import type {
   AppActions,
+  AppCommandReceipt,
   AppViewState,
   ProjectOpenHandoffState,
   ThemePreference,
@@ -121,6 +122,8 @@ export class WorkbenchWebRuntime {
     consumeProjectOpen: (token, sessionId, revision, install) =>
       this.consumeProjectOpen(token, sessionId, revision, install),
     run: ({ type, ...payload }) => this.runCommand(type, payload),
+    runWithReceipt: ({ type, ...payload }) =>
+      this.runCommandWithReceipt(type, payload),
     navigate: (route) => void this.navigateAfterPdfPreview(route),
     setTheme: (theme) => void this.runCommand("settings.setTheme", { theme }),
   };
@@ -474,14 +477,21 @@ export class WorkbenchWebRuntime {
     type: string,
     args: Record<string, unknown>,
   ): Promise<boolean> {
+    return (await this.runCommandWithReceipt(type, args)) === "succeeded";
+  }
+
+  private async runCommandWithReceipt(
+    type: string,
+    args: Record<string, unknown>,
+  ): Promise<AppCommandReceipt> {
     if (
       this.projectOpen &&
       type.startsWith("imageEdit.") &&
       type !== "imageEdit.releaseAssets"
     )
-      return false;
+      return "unconfirmed";
     const separator = type.indexOf(".");
-    if (separator < 1 || separator === type.length - 1) return false;
+    if (separator < 1 || separator === type.length - 1) return "unconfirmed";
     const command: HostCommand = {
       scope: type.slice(0, separator),
       action: type.slice(separator + 1),
@@ -495,7 +505,7 @@ export class WorkbenchWebRuntime {
       )
         await this.drainRetiringPdfPreview(args.documentId);
       const receipt = await this.bridge.execute(command);
-      if (generation !== this.startGeneration) return false;
+      if (generation !== this.startGeneration) return "unconfirmed";
       if (!receipt.ok) {
         const messageKey = receipt.problem?.messageKey;
         this.reportCommandProblem(
@@ -503,17 +513,17 @@ export class WorkbenchWebRuntime {
             ? messageKey
             : "workbench.error.commandFailed",
         );
-        return false;
+        return "rejected";
       }
       this.clearCommandProblem();
-      return true;
+      return "succeeded";
     } catch (error: unknown) {
-      if (generation !== this.startGeneration) return false;
+      if (generation !== this.startGeneration) return "unconfirmed";
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       this.onError(normalized);
       this.reportCommandProblem("workbench.error.bridgeUnavailable");
-      return false;
+      return "unconfirmed";
     }
   }
 

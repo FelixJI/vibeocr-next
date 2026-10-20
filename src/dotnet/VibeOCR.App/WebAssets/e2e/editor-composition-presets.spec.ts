@@ -1580,3 +1580,150 @@ test("预设上传期间锁住设置和目录，并发送开始时的语义快�
     },
   });
 });
+
+test("删除背景之前的拼接成员会同步索引，撤销与保存保留顺序", async ({
+  page,
+}) => {
+  const { state, imported, projects } = await setup(page);
+  const b = "5".repeat(32),
+    c = "6".repeat(32);
+  const second = await png(page, 30, 10, true),
+    third = await png(page, 40, 10);
+  await page.route("**/background-b.png", (route) =>
+    route.fulfill({ contentType: "image/png", body: second }),
+  );
+  await page.route("**/background-c.png", (route) =>
+    route.fulfill({ contentType: "image/png", body: third }),
+  );
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: {
+      requestId: "background-order",
+      sessionId: SESSION,
+      revision: 0,
+      items: [
+        {
+          kind: "image",
+          assetId: ASSET,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset.png",
+          byteLength: imported.length,
+          pixelWidth: 20,
+          pixelHeight: 10,
+        },
+        {
+          kind: "image",
+          assetId: b,
+          resourceUri: "https://app.vibeocr/__resource/background-b.png",
+          byteLength: second.length,
+          pixelWidth: 30,
+          pixelHeight: 10,
+        },
+        {
+          kind: "image",
+          assetId: c,
+          resourceUri: "https://app.vibeocr/__resource/background-c.png",
+          byteLength: third.length,
+          pixelWidth: 40,
+          pixelHeight: 10,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: {
+      sessionId: SESSION,
+      revision: 0,
+      requestId: "background-order",
+    },
+  });
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("多图拼接", { exact: true }).selectOption("horizontal");
+  await page.getByLabel("排版背景", { exact: true }).selectOption("image");
+  await page.getByLabel("排版背景图", { exact: true }).selectOption(b);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByLabel("选择标注对象", { exact: true }).selectOption("0");
+  await page.getByRole("button", { name: "删除对象", exact: true }).click();
+  await page.getByRole("button", { name: "保存工程", exact: true }).click();
+  await expect.poll(() => projects.length).toBe(1);
+  expect(
+    (projects[0] as { state: { composition: unknown } }).state.composition,
+  ).toMatchObject({
+    backgroundAssetId: b,
+    assetIds: [c],
+    backgroundStitchIndex: 0,
+  });
+  await page
+    .getByLabel("排版背景", { exact: true })
+    .selectOption("transparent");
+  const preview = page.getByAltText("排版输出预览");
+  await expect
+    .poll(async () => at(await previewPixels(preview), 82, 20))
+    .toEqual([255, 0, 0, 255]);
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await expect
+    .poll(() =>
+      preview.evaluate((image: HTMLImageElement) => image.naturalWidth),
+    )
+    .toBe(140);
+  await page.getByRole("button", { name: "重做", exact: true }).click();
+  await page
+    .getByLabel("排版背景", { exact: true })
+    .selectOption("transparent");
+  await expect
+    .poll(async () => at(await previewPixels(preview), 82, 20))
+    .toEqual([255, 0, 0, 255]);
+});
+
+test("预设明确失败回执逐次释放租约，成功回执不抢先丢弃", async ({ page }) => {
+  await setup(page, {
+    editorPreferences: DEFAULT_EDITOR_PREFERENCES,
+    imageOutputDirectory: "C:/authorized-output",
+  });
+  const active = new Set<string>();
+  const discarded: string[] = [];
+  let uploads = 0;
+  await page.route("**/__annotation", async (route) => {
+    if (active.size >= 8) {
+      await route.fulfill({ status: 429 });
+      return;
+    }
+    const uri =
+      "https://app.vibeocr/__annotation/" +
+      (++uploads).toString(16).padStart(32, "0");
+    active.add(new URL(uri).pathname);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: uri }),
+    });
+  });
+  await page.route("**/__annotation/*", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    expect(route.request().method()).toBe("DELETE");
+    expect(active.delete(path)).toBe(true);
+    discarded.push(path);
+    await route.fulfill({ status: 204 });
+  });
+  const save = page.getByRole("button", {
+    name: "按常用预设保存",
+    exact: true,
+  });
+  for (let index = 0; index < 10; index++) {
+    await rejectNextCommand(page);
+    await save.click();
+    await expect.poll(() => discarded.length).toBe(index + 1);
+    await expect(save).toBeEnabled();
+    expect(active.size).toBe(0);
+  }
+  await save.click();
+  await expect(
+    page.getByText("已按常用预设保存副本；已有文件不会被覆盖。", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(uploads).toBe(11);
+  expect(discarded).toHaveLength(10);
+});
