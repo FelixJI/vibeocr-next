@@ -355,6 +355,11 @@ for (const scope of ["imageEdit", "recognition"] as const) {
   });
 }
 
+// 等待仍在转发的资源代理结束，避免 teardown 提前释放 APIResponse。
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 test("图片编辑离开设置再返回释放满额资源并可再次导入", async ({
   page,
 }, info) => {

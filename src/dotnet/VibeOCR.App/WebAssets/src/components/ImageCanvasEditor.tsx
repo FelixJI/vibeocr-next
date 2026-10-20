@@ -2716,7 +2716,9 @@ export function ImageCanvasEditor({
           composition.backgroundAssetId &&
           !alive.has(composition.backgroundAssetId)
         ) {
-          composition.background = "transparent";
+          // 仅 image 背景依赖该资产；陈旧绑定只解除引用，不重置纯色/渐变背景。
+          if (composition.background === "image")
+            composition.background = "transparent";
           composition.backgroundAssetId = undefined;
         }
         parseComposition(composition);

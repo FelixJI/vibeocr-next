@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
 import {
   deferCommand,
@@ -44,29 +44,35 @@ async function png(page: Page, width: number, height: number, bands = false) {
 }
 async function pixels(page: Page, url: string) {
   return page.evaluate(async (url) => {
-    const existing = url.startsWith("blob:")
-      ? [...document.images].find((image) => image.src === url)
-      : undefined;
-    let image: HTMLImageElement | ImageBitmap;
-    if (existing) {
-      await existing.decode();
-      image = existing;
-    } else {
-      const blob = new Blob(
-        [
-          Uint8Array.from(atob(url.split(",")[1]!), (char) =>
-            char.charCodeAt(0),
-          ),
-        ],
-        { type: url.slice(5, url.indexOf(";")) },
-      );
-      image = await createImageBitmap(blob);
-    }
+    const blob = new Blob(
+      [Uint8Array.from(atob(url.split(",")[1]!), (char) => char.charCodeAt(0))],
+      { type: url.slice(5, url.indexOf(";")) },
+    );
+    const image = await createImageBitmap(blob);
     const canvas = document.createElement("canvas");
-    canvas.width =
-      image instanceof HTMLImageElement ? image.naturalWidth : image.width;
-    canvas.height =
-      image instanceof HTMLImageElement ? image.naturalHeight : image.height;
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(image, 0, 0);
+    image.close();
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      data: Array.from(
+        ctx.getImageData(0, 0, canvas.width, canvas.height).data,
+      ),
+    };
+  }, url);
+}
+// 预览采样直接持有当前 DOM 的 <img>：locator.evaluate 原子取元素并等
+// decode 就绪，不经 blob URL 字符串往返，避免两次 evaluate 之间预览重渲
+// 换 blob 后读到陈旧/已撤销引用。
+async function previewPixels(preview: Locator) {
+  return preview.evaluate(async (image: HTMLImageElement) => {
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
     const ctx = canvas.getContext("2d")!;
     ctx.drawImage(image, 0, 0);
     return {
@@ -76,7 +82,7 @@ async function pixels(page: Page, url: string) {
         ctx.getImageData(0, 0, canvas.width, canvas.height).data,
       ),
     };
-  }, url);
+  });
 }
 function at(image: { width: number; data: number[] }, x: number, y: number) {
   return image.data.slice(
@@ -169,6 +175,11 @@ async function setup(
   return { uploads, projects, state, imported };
 }
 
+// 等待仍在转发的资源代理结束，避免 teardown 提前释放 APIResponse。
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接与工程可编辑状态一致", async ({
   page,
 }, info) => {
@@ -186,10 +197,7 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
       preview.evaluate((image: HTMLImageElement) => image.naturalWidth),
     )
     .toBe(60);
-  const expected = await pixels(
-    page,
-    (await preview.getAttribute("src")) ?? "",
-  );
+  const expected = await previewPixels(preview);
   expect([expected.width, expected.height]).toEqual([60, 60]);
   expect(at(expected, 1, 1)).toEqual([17, 34, 51, 255]);
   expect(at(expected, 15, 20)).toEqual([255, 0, 0, 255]);
@@ -233,7 +241,7 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
       preview.evaluate((image: HTMLImageElement) => image.naturalWidth),
     )
     .toBe(107);
-  const rounded = await pixels(page, (await preview.getAttribute("src")) ?? "");
+  const rounded = await previewPixels(preview);
   expect(at(rounded, 0, 0)[3]).toBe(0);
   await page.getByLabel("排版阴影", { exact: true }).fill("5");
   await page.getByLabel("排版背景", { exact: true }).selectOption("gradient");
@@ -294,6 +302,73 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
     path: info.outputPath("composition.png"),
     fullPage: true,
   });
+});
+
+test("离开图像背景解除绑定：旧背景资产可拼接且删除对象不重置纯色背景", async ({
+  page,
+}) => {
+  const { uploads, state, imported } = await setup(page);
+  const preview = () => page.getByAltText("排版输出预览");
+  const width = () =>
+    preview().evaluate((image: HTMLImageElement) => image.naturalWidth);
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  await expect.poll(width).toBe(100);
+  const revision = (await commands(page))
+    .filter((command) => command.action === "notifyScreenshotRevision")
+    .at(-1)!.arguments.revision;
+  await sendState(page, "imageEdit", {
+    ...state,
+    screenshotSession: { ...state.screenshotSession, revision },
+    import: {
+      requestId: "background-unbind-import",
+      sessionId: SESSION,
+      revision,
+      items: [
+        {
+          kind: "image",
+          assetId: ASSET,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset.png",
+          byteLength: imported.length,
+          pixelWidth: 20,
+          pixelHeight: 10,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: {
+      sessionId: SESSION,
+      revision,
+      requestId: "background-unbind-import",
+    },
+  });
+  // 背景选 image：绑定导入资产后切回 solid，绑定须解除。
+  await page.getByLabel("排版背景", { exact: true }).selectOption("image");
+  await expect(page.getByLabel("排版背景图", { exact: true })).toBeVisible();
+  await expect.poll(width).toBe(100);
+  await page.getByLabel("排版背景", { exact: true }).selectOption("solid");
+  await page.getByLabel("背景起色", { exact: true }).fill("#112233");
+  // 旧背景资产必须仍可拼接（残留绑定会把它从拼接列表排除）。
+  await page.getByLabel("多图拼接", { exact: true }).selectOption("horizontal");
+  await expect.poll(width).toBe(120);
+  // 删除该图片对象：solid 背景不得被重置为 transparent，导出同源。
+  // （画布排版是开关，面板在删除前后始终打开。）
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await page.getByRole("button", { name: "全选对象", exact: true }).click();
+  await page.getByRole("button", { name: "删除对象", exact: true }).click();
+  await expect.poll(width).toBe(100);
+  const expected = await previewPixels(preview());
+  expect(at(expected, 5, 5)).toEqual([17, 34, 51, 255]);
+  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await expect.poll(() => uploads.length).toBe(1);
+  const exported = await pixels(
+    page,
+    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+  );
+  expect(exported).toEqual(expected);
 });
 
 test("常用预设只发送 ID，复制失败不关闭，成功 ack 后关闭；工具可发现且不抢输入", async ({
@@ -536,6 +611,213 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   await expect(
     page.getByRole("button", { name: "导出全部 Markdown" }),
   ).toBeVisible();
+});
+
+test("批量同项重试立即分类解码不可用，无关 batch 快照不被消费", async ({
+  page,
+}) => {
+  const source = await png(page, 80, 40);
+  const uploads: Buffer[] = [];
+  await page.route("**/batch-preset.png*", (route) =>
+    route.fulfill({ contentType: "image/png", body: source }),
+  );
+  await page.route("**/__annotation", async (route) => {
+    uploads.push(route.request().postDataBuffer()!);
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: annotation }),
+    });
+  });
+  const ITEM_A = SESSION,
+    ITEM_B = ASSET,
+    ITEM_C = "3".repeat(32);
+  const batch = {
+    isRunning: false,
+    itemCount: 3,
+    completedCount: 0,
+    failedCount: 0,
+    items: [],
+  };
+  const output = {
+    ...DEFAULT_EDITOR_PREFERENCES.output,
+    format: "image/png",
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "batch",
+    capabilities: ["batch.export", "batch.add", "batch.run"],
+    features: {
+      batch,
+      settings: {
+        editorPreferences: { ...DEFAULT_EDITOR_PREFERENCES, output },
+        imageOutputDirectory: "C:/authorized-output",
+      },
+    },
+  });
+  const button = page.getByRole("button", {
+    name: "按常用预设批量导出图片",
+    exact: true,
+  });
+  // 第一轮：item0 成功；等待期间插入一份宿主真实的无关 batch 快照
+  // （非 prepare 路径的 BatchState 不携带导出瞬态字段，仅有显式 null），
+  // 它不得被消费，exportImage 仍须绑定本次 prepare 结果的 item。
+  await button.click();
+  await expectCommand(page, {
+    scope: "batch",
+    action: "prepareImageExport",
+    arguments: { index: 0 },
+  });
+  await sendState(page, "batch", {
+    ...batch,
+    taskEngine: "rapid_text",
+    exportImage: null,
+    exportImageId: null,
+    exportImageError: null,
+  });
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: {
+      url: "/batch-preset.png?item=0",
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    exportImageId: ITEM_A,
+  });
+  await expectCommand(page, {
+    scope: "batch",
+    action: "exportImage",
+    arguments: {
+      itemId: ITEM_A,
+      resourceUri: annotation,
+      presetId: "default",
+    },
+  });
+  // 宿主 exportImage 回执后瞬态字段被清除：等待中的下一项不得消费它。
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: null,
+    exportImageId: null,
+    exportImageError: null,
+  });
+  await expectCommand(page, {
+    scope: "batch",
+    action: "prepareImageExport",
+    arguments: { index: 1 },
+  });
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: {
+      url: "/batch-preset.png?item=1",
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    exportImageId: ITEM_B,
+  });
+  await expectCommand(page, {
+    scope: "batch",
+    action: "exportImage",
+    arguments: {
+      itemId: ITEM_B,
+      resourceUri: annotation,
+      presetId: "default",
+    },
+  });
+  await expectCommand(page, {
+    scope: "batch",
+    action: "prepareImageExport",
+    arguments: { index: 2 },
+  });
+  // 轮末项 decode_unavailable：状态残留 exportImageId/error。
+  await sendState(page, "batch", {
+    ...batch,
+    exportImageId: ITEM_C,
+    exportImageError: "decode_unavailable",
+  });
+  await expect(
+    page.getByText(/输出完成：成功 2，失败\/非图片 1/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/其中 1 项格式解码不可用或图片内容损坏/),
+  ).toBeVisible();
+  expect(uploads.length).toBe(2);
+  // 第二轮：首项为上轮末项（同 id 同 error，仅快照对象更新）——须立即
+  // 分类为解码不可用，不得等 15s 超时记成通用失败。
+  await button.click();
+  await expect
+    .poll(
+      async () =>
+        (await commands(page)).filter(
+          (command) => command.action === "prepareImageExport",
+        ).length,
+    )
+    .toBe(4);
+  await sendState(page, "batch", {
+    ...batch,
+    exportImageId: ITEM_C,
+    exportImageError: "decode_unavailable",
+  });
+  await expect(page.getByText(/正在输出图片 2\/3/)).toBeVisible();
+  await expect
+    .poll(
+      async () =>
+        (await commands(page)).filter(
+          (command) => command.action === "prepareImageExport",
+        ).length,
+    )
+    .toBe(5);
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: {
+      url: "/batch-preset.png?item=r2",
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    exportImageId: ITEM_A,
+  });
+  await expect
+    .poll(
+      async () =>
+        (await commands(page)).filter(
+          (command) => command.action === "exportImage",
+        ).length,
+    )
+    .toBe(3);
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: null,
+    exportImageId: null,
+    exportImageError: null,
+  });
+  // 第二轮末项：另一项同样解码不可用，须与同项重试一样立即分类。
+  await expect
+    .poll(
+      async () =>
+        (await commands(page)).filter(
+          (command) => command.action === "prepareImageExport",
+        ).length,
+    )
+    .toBe(6);
+  await sendState(page, "batch", {
+    ...batch,
+    exportImageId: "4".repeat(32),
+    exportImageError: "decode_unavailable",
+  });
+  await expect(
+    page.getByText(/输出完成：成功 1，失败\/非图片 2/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/其中 2 项格式解码不可用或图片内容损坏/),
+  ).toBeVisible();
+  expect(uploads.length).toBe(3);
+  const exports = (await commands(page)).filter(
+    (command) => command.action === "exportImage",
+  );
+  expect(exports.map((command) => command.arguments.itemId)).toEqual([
+    ITEM_A,
+    ITEM_B,
+    ITEM_A,
+  ]);
 });
 
 test("排版最终像素在复制、贴图、OCR与取字一致，复用图片屏蔽传播且文字层过滤同坐标", async ({

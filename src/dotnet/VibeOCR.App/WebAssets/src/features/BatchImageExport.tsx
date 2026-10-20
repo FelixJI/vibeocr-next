@@ -30,21 +30,24 @@ export function BatchImageExport({
   const mounted = useRef(true);
   const [executing, setExecuting] = useState(false);
   const [progress, setProgress] = useState("");
-  const image = resource(state.exportImage);
-  const imageId =
-    typeof state.exportImageId === "string" ? state.exportImageId : undefined;
-  const decodeUnavailable = state.exportImageError === "decode_unavailable";
+  // 请求生命周期：每个 prepareImageExport 回执都重发一份新 batch 快照
+  // （即使 exportImageId/error 值与上轮相同）；以快照到达驱动消费，同项重试
+  // decode_unavailable 即时分类；非 prepare 路径的 BatchState 不携带导出
+  // 瞬态字段，不会误消费无关快照。
   useEffect(() => {
-    if (decodeUnavailable && imageId && waiting.current) {
-      const resolve = waiting.current;
+    if (!waiting.current) return;
+    const resolve = waiting.current;
+    const image = resource(state.exportImage);
+    const imageId =
+      typeof state.exportImageId === "string" ? state.exportImageId : undefined;
+    if (state.exportImageError === "decode_unavailable" && imageId) {
       waiting.current = undefined;
       resolve({ unavailable: true });
-    } else if (image && imageId && waiting.current) {
-      const resolve = waiting.current;
+    } else if (image && imageId) {
       waiting.current = undefined;
       resolve({ url: image.url, id: imageId });
     }
-  }, [image, imageId, decodeUnavailable]);
+  }, [state]);
   useEffect(() => {
     mounted.current = true;
     return () => {

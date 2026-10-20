@@ -72,12 +72,11 @@ export function CanvasCompositionPanel({
           onChange={(_, data) =>
             update({
               background: data.value as CanvasComposition["background"],
-              ...(data.value === "image"
-                ? {
-                    backgroundAssetId:
-                      settings.backgroundAssetId ?? assets[0]?.id,
-                  }
-                : {}),
+              // 仅 image 背景持有绑定；离开时解除，避免旧资产被拼接排除或删除时误重置背景。
+              backgroundAssetId:
+                data.value === "image"
+                  ? (settings.backgroundAssetId ?? assets[0]?.id)
+                  : undefined,
             })
           }
         >
@@ -169,8 +168,15 @@ export function CanvasCompositionPanel({
           onChange={(_, data) =>
             update({
               stitch: data.value as CanvasComposition["stitch"],
+              // 仅当背景仍为 image 时排除背景图；陈旧绑定不阻碍旧资产拼接。
               assetIds: assets
-                .filter((asset) => asset.id !== settings.backgroundAssetId)
+                .filter(
+                  (asset) =>
+                    !(
+                      settings.background === "image" &&
+                      asset.id === settings.backgroundAssetId
+                    ),
+                )
                 .map((asset) => asset.id),
             })
           }

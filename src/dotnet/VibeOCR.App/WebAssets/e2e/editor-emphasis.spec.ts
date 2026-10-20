@@ -214,6 +214,11 @@ async function previewPixels(page: Page, points: [number, number][]) {
 
 const gray = (x: number) => Math.round((x / 900) * 255);
 
+// 等待仍在转发的资源代理结束，避免 teardown 提前释放 APIResponse。
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: "wait" });
+});
+
 test("spotlight pixels: overlap equals single hole and letterbox stays transparent", async ({
   page,
 }) => {
