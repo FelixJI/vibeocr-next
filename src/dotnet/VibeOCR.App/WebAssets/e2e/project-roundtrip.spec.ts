@@ -1274,3 +1274,166 @@ for (const timeout of [false, true]) {
     },
   );
 }
+
+test("imageEdit: 恢复工程后预设上传在途卸载，只释放自身租约而不保存", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await proxyProductionAssets(page);
+  const source = await makePng(page, 80, 40, "#00ff00");
+  const sourceUrl = "https://app.vibeocr/__resource/retired-project-source";
+  const manifestUrl = "https://app.vibeocr/__resource/retired-project-manifest";
+  const manifest = {
+    schemaVersion: 1,
+    canvas: { width: 900, height: 600 },
+    source: {
+      mediaType: "image/png",
+      width: 80,
+      height: 40,
+      length: source.length,
+    },
+    assets: [],
+    state: { rotation: 0, marks: [], patches: [] },
+  };
+  await page.route(sourceUrl, (route) =>
+    route.fulfill({ contentType: "image/png", body: source }),
+  );
+  await page.route(manifestUrl, (route) =>
+    route.fulfill({
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(manifest),
+    }),
+  );
+  await mountHost(
+    page,
+    {
+      ...snapshot,
+      route: "imageEdit",
+      capabilities: ["recognition.annotation"],
+      features: {
+        imageEdit: { isBusy: false, statusCode: "recognition.ready" },
+        settings: { imageOutputDirectory: "C:/authorized-output" },
+      },
+    },
+    "https://app.vibeocr/",
+  );
+  await action(page, "打开工程");
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "openProject",
+    arguments: {},
+  });
+  await sendState(page, "imageEdit", {
+    isBusy: false,
+    statusCode: "recognition.ready",
+    projectOpen: {
+      pendingId: "c".repeat(32),
+      sessionId: "0".repeat(32),
+      revision: 0,
+      generation: 5,
+      manifest: {
+        url: manifestUrl,
+        mediaType: "application/json; charset=utf-8",
+        byteLength: JSON.stringify(manifest).length,
+      },
+      source: {
+        url: sourceUrl,
+        mediaType: "image/png",
+        byteLength: source.length,
+      },
+      assets: [],
+      patches: [],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackProjectOpen",
+    arguments: {
+      pendingId: "c".repeat(32),
+      sessionId: "0".repeat(32),
+      revision: 0,
+      generation: 5,
+    },
+  });
+  const restored = {
+    isBusy: false,
+    statusCode: "recognition.session",
+    input: {
+      url: sourceUrl,
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    screenshotSession: { sessionId: SESSION, revision: 0 },
+  };
+  await sendState(page, "imageEdit", restored);
+  await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  const resourceUri =
+    "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+  let release!: () => void;
+  let uploaded = false;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/__annotation", async (route) => {
+    uploaded = true;
+    await pending;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri }),
+    });
+  });
+  const discarded: string[] = [];
+  await page.route("**/__annotation/*", async (route) => {
+    expect(route.request().method()).toBe("DELETE");
+    discarded.push(route.request().url());
+    await route.fulfill({ status: 204 });
+  });
+  await action(page, "按常用预设保存");
+  await expect.poll(() => uploaded).toBe(true);
+  // 真实主页面导航卸载编辑器，宿主 imageEdit 会话仍保留。
+  await page.getByRole("link", { name: "单次识别", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "单次识别", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("toolbar", { name: "图片编辑工具", exact: true }),
+  ).toHaveCount(0);
+  release();
+  await expect.poll(() => discarded).toEqual([resourceUri]);
+  const saves = await page.evaluate(() =>
+    (
+      window as Window & {
+        __testHost: {
+          commands: { action: string }[];
+        };
+      }
+    ).__testHost.commands.filter(
+      (command) => command.action === "savePresetImage",
+    ),
+  );
+  expect(saves).toEqual([]);
+  // 返回同一会话仍能编辑，并可开始一项全新的预设输出。
+  await page.getByRole("link", { name: "图片编辑", exact: true }).click();
+  await expect(
+    page.getByRole("toolbar", { name: "图片编辑工具", exact: true }),
+  ).toBeVisible();
+  await action(page, "按常用预设保存");
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __testHost: {
+                commands: { action: string }[];
+              };
+            }
+          ).__testHost.commands.filter(
+            (command) => command.action === "savePresetImage",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  expect(discarded).toEqual([resourceUri]);
+});

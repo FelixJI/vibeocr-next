@@ -1,5 +1,5 @@
 import { DEFAULT_EDITOR_PREFERENCES } from "./editorPreferences";
-import { Profiler } from "react";
+import { Profiler, StrictMode } from "react";
 import {
   act,
   cleanup,
@@ -823,6 +823,78 @@ describe("preset upload ownership after host acknowledgement", () => {
           "/__annotation/0123456789abcdef0123456789abcdef",
           { method: "DELETE" },
         ]);
+    },
+  );
+});
+
+describe("restored project export lifecycle", () => {
+  it.each([false, true])(
+    "retires an upload on unmount without breaking StrictMode restoration (%s)",
+    async (strict) => {
+      stubCanvasStack();
+      const actions = {
+        ...createActions(),
+        runWithReceipt: vi.fn().mockResolvedValue("succeeded"),
+      };
+      const props = editorProps({ actions });
+      const image = new Image();
+      image.src = props.source;
+      const projectInstall = {
+        token: "restored-project",
+        sourceUrl: props.source,
+        sourceImage: image,
+        savedCanvas: { width: 900, height: 600 },
+        state: { rotation: 0, marks: [], patches: [] },
+        assets: new Map(),
+        patches: new Map(),
+      };
+      let release!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+      const fetchMock = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          init?.method === "DELETE"
+            ? Promise.resolve(new Response(null, { status: 204 }))
+            : pending,
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const editor = (
+        <ImageCanvasEditor
+          {...props}
+          projectInstall={projectInstall}
+          editorSettings={{ imageOutputDirectory: "C:/authorized-output" }}
+        />
+      );
+      const { unmount } = render(
+        strict ? <StrictMode>{editor}</StrictMode> : editor,
+      );
+      await waitFor(() => expect(screen.getByText(/工程已恢复/)).toBeVisible());
+      fireEvent.click(screen.getByRole("button", { name: "按常用预设保存" }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      unmount();
+      await act(async () => {
+        release(
+          new Response(
+            JSON.stringify({
+              resourceUri:
+                "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(fetchMock.mock.calls[1]).toEqual([
+        "/__annotation/0123456789abcdef0123456789abcdef",
+        { method: "DELETE" },
+      ]);
+      expect(actions.runWithReceipt).not.toHaveBeenCalled();
+      expect(actions.run).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "imageEdit.savePresetImage",
+        }),
+      );
     },
   );
 });

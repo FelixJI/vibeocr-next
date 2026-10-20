@@ -1164,6 +1164,7 @@ export function ImageCanvasEditor({
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const importGenerationRef = useRef(0);
   const importMountedRef = useRef(true);
+  const exportGenerationRef = useRef(0);
   const presentation = useRef<CapturePixelPresentation | undefined>(undefined);
   const backdropRef = useRef<HTMLImageElement>(null);
   useEffect(() => {
@@ -2558,6 +2559,8 @@ export function ImageCanvasEditor({
     const dupWorkerRef = dupmatchWorkerRef;
     return () => {
       importMountedRef.current = false;
+      // 同步使旧导出失效；StrictMode 重新 setup 也不能复活旧异步操作。
+      exportGenerationRef.current += 1;
       // StrictMode 的探测卸载会立即重新挂载；仅真实退役才释放宿主资源。
       queueMicrotask(() => {
         if (!importMountedRef.current) retireImportsRef.current();
@@ -4896,6 +4899,7 @@ export function ImageCanvasEditor({
 
   /** 操作开始时冻结的导出上下文；await 归来后必须逐项一致才允许发送。 */
   interface FrozenExportContext {
+    readonly generation: number;
     readonly key: string;
     readonly sessionId: string | undefined;
     readonly contentVersion: number;
@@ -4908,6 +4912,7 @@ export function ImageCanvasEditor({
 
   function freezeExportContext(): FrozenExportContext {
     return {
+      generation: exportGenerationRef.current,
       key: currentKeyRef.current,
       sessionId: sessionIdRef.current,
       contentVersion: contentRevisionRef.current,
@@ -4923,6 +4928,8 @@ export function ImageCanvasEditor({
     // 全部读 ref：上传期间用户切换格式/质量或几何编辑（含无会话的文件
     // 模式）都推进内容版本，旧像素不得贴上新设置发出。
     return (
+      importMountedRef.current &&
+      frozen.generation === exportGenerationRef.current &&
       frozen.key === currentKeyRef.current &&
       frozen.sessionId === sessionIdRef.current &&
       frozen.image === imageRef.current &&
