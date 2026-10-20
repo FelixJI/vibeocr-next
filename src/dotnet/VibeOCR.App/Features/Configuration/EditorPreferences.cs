@@ -39,7 +39,7 @@ public sealed record EditorPreferences(
 
 internal sealed record StoredEditorPreferences(EditorPreferences Preferences, string? Directory);
 
-internal static class EditorPreferencesStore
+internal static partial class EditorPreferencesStore
 {
   internal static readonly JsonSerializerOptions Json = new()
   {
@@ -47,6 +47,9 @@ internal static class EditorPreferencesStore
     UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     AllowDuplicateProperties = false,
   };
+
+  [GeneratedRegex("\\{(name|date|index)\\}", RegexOptions.CultureInvariant)]
+  private static partial Regex TemplateTokens();
 
   internal static StoredEditorPreferences Load(PortableLayout? layout)
   {
@@ -77,9 +80,15 @@ internal static class EditorPreferencesStore
 
   internal static string FileName(ImageOutputPreset preset, string sourceName, int index)
   {
-    string name = preset.NameTemplate.Replace("{name}", Path.GetFileNameWithoutExtension(sourceName), StringComparison.Ordinal)
-      .Replace("{date}", DateTime.Now.ToString("yyyyMMdd"), StringComparison.Ordinal)
-      .Replace("{index}", index.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    // 只对原模板做单次扫描：来源文件名等替换值里自带的 {index}/{date} 字面
+    // 文本不再被后续 Replace 展开（如 scan-{index}.png 必须原样保留）。
+    string name = TemplateTokens().Replace(preset.NameTemplate, match => match.Value switch
+    {
+      "{name}" => Path.GetFileNameWithoutExtension(sourceName),
+      "{date}" => DateTime.Now.ToString("yyyyMMdd"),
+      "{index}" => index.ToString(System.Globalization.CultureInfo.InvariantCulture),
+      _ => match.Value,
+    });
     name = new string(name.Select(ch => Path.GetInvalidFileNameChars().Contains(ch) ? '_' : ch).ToArray()).Trim(' ', '.');
     if (name.Length > 120) name = name[..120];
     if (string.IsNullOrWhiteSpace(name)) name = "vibeocr";

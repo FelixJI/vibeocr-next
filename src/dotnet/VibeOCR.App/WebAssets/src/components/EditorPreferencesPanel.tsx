@@ -51,12 +51,16 @@ export function EditorPreferencesPanel({
   const updateOutput = (patch: Partial<ImageOutputPreset>) =>
     setDraft({ ...draft, output: { ...draft.output, ...patch } });
   const dimensionsValid =
-    (draft.output.width === 0 && draft.output.height === 0) ||
-    (draft.output.width > 0 &&
-      draft.output.height > 0 &&
-      draft.output.width <= 16384 &&
-      draft.output.height <= 16384 &&
-      draft.output.width * draft.output.height <= 64_000_000);
+    // 宿主 Width/Height 为 int：非整数（800.5/NaN/Infinity）在前端即拒绝，
+    // 不发送必被宿主拒绝的设置；宽高均为 0 保持原尺寸的自动语义。
+    Number.isInteger(draft.output.width) &&
+    Number.isInteger(draft.output.height) &&
+    ((draft.output.width === 0 && draft.output.height === 0) ||
+      (draft.output.width > 0 &&
+        draft.output.height > 0 &&
+        draft.output.width <= 16384 &&
+        draft.output.height <= 16384 &&
+        draft.output.width * draft.output.height <= 64_000_000));
   return (
     <details className="recognition-options editor-preferences">
       <summary>输出预设与工具栏定制</summary>
@@ -207,7 +211,10 @@ export function EditorPreferencesPanel({
         </div>
       ))}
       {(conflict || !dimensionsValid) && (
-        <p role="alert">{conflict || "尺寸须同时为 0 或在支持范围内。"}</p>
+        <p role="alert">
+          {conflict ||
+            "尺寸须同时为 0（保留原尺寸）或为不超过 16384 的整数（≤64MP）。"}
+        </p>
       )}
       {error && <p role="alert">{error}</p>}
       {message && <p role="status">{message}</p>}

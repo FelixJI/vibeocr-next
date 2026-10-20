@@ -820,6 +820,246 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
   ]);
 });
 
+test("停止图片导出后上传完成也不写入", async ({ page }) => {
+  const source = await png(page, 80, 40);
+  await page.route("**/batch-preset.png*", (route) =>
+    route.fulfill({ contentType: "image/png", body: source }),
+  );
+  let releaseUpload!: () => void;
+  let uploadStarted = false;
+  const gate = new Promise<void>((resolve) => (releaseUpload = resolve));
+  await page.route("**/__annotation", async (route) => {
+    uploadStarted = true;
+    await gate;
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ resourceUri: annotation }),
+    });
+  });
+  const batch = {
+    isRunning: false,
+    itemCount: 1,
+    completedCount: 0,
+    failedCount: 0,
+    items: [],
+  };
+  const output = {
+    ...DEFAULT_EDITOR_PREFERENCES.output,
+    format: "image/png",
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "batch",
+    capabilities: ["batch.export", "batch.add", "batch.run"],
+    features: {
+      batch,
+      settings: {
+        editorPreferences: { ...DEFAULT_EDITOR_PREFERENCES, output },
+        imageOutputDirectory: "C:/authorized-output",
+      },
+    },
+  });
+  await page
+    .getByRole("button", { name: "按常用预设批量导出图片", exact: true })
+    .click();
+  await expectCommand(page, {
+    scope: "batch",
+    action: "prepareImageExport",
+    arguments: { index: 0 },
+  });
+  await sendState(page, "batch", {
+    ...batch,
+    exportImage: {
+      url: "/batch-preset.png?item=0",
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    exportImageId: SESSION,
+  });
+  // 上传已发出且被门挡住：此刻停止，再放行；停止后不得再发 batch.exportImage。
+  await expect.poll(() => uploadStarted).toBe(true);
+  await page.getByRole("button", { name: "停止图片导出", exact: true }).click();
+  releaseUpload();
+  await expect(page.getByText(/已停止：成功 0，失败\/非图片 0/)).toBeVisible();
+  expect(
+    (await commands(page)).filter(
+      (command) => command.action === "exportImage",
+    ),
+  ).toHaveLength(0);
+});
+
+test("上传中离开再启动批量导出，旧上传返回不写入也不干扰新运行", async ({
+  page,
+}) => {
+  const source = await png(page, 80, 40);
+  await page.route("**/batch-preset.png*", (route) =>
+    route.fulfill({ contentType: "image/png", body: source }),
+  );
+  const releases: (() => void)[] = [];
+  const newAnnotation =
+    "https://app.vibeocr/__annotation/abcdef0123456789abcdef0123456789";
+  await page.route("**/__annotation", async (route) => {
+    const index = releases.length;
+    await new Promise<void>((resolve) => releases.push(resolve));
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri: index === 0 ? annotation : newAnnotation,
+      }),
+    });
+  });
+  const batch = {
+    isRunning: false,
+    itemCount: 1,
+    completedCount: 0,
+    failedCount: 0,
+    items: [],
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "batch",
+    capabilities: ["batch.export", "batch.add", "batch.run"],
+    features: {
+      batch,
+      settings: {
+        editorPreferences: DEFAULT_EDITOR_PREFERENCES,
+        imageOutputDirectory: "C:/authorized-output",
+      },
+    },
+  });
+  const start = page.getByRole("button", {
+    name: "按常用预设批量导出图片",
+    exact: true,
+  });
+  const ready = {
+    ...batch,
+    exportImage: {
+      url: "/batch-preset.png",
+      mediaType: "image/png",
+      byteLength: source.length,
+    },
+    exportImageId: SESSION,
+  };
+  await start.click();
+  await expectCommand(page, {
+    scope: "batch",
+    action: "prepareImageExport",
+    arguments: { index: 0 },
+  });
+  await sendState(page, "batch", ready);
+  await expect.poll(() => releases.length).toBe(1);
+  await page.getByRole("button", { name: "停止图片导出", exact: true }).click();
+  await expect(start).toBeDisabled();
+  await sendState(page, "shell", { route: "settings" });
+  await expect(
+    page.getByRole("region", { name: "批量图片预设输出" }),
+  ).toHaveCount(0);
+  await sendState(page, "shell", { route: "batch" });
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect
+    .poll(
+      async () =>
+        (await commands(page)).filter(
+          (command) => command.action === "prepareImageExport",
+        ).length,
+    )
+    .toBe(2);
+  await sendState(page, "batch", ready);
+  await expect.poll(() => releases.length).toBe(2);
+  const oldResponse = page.waitForResponse("**/__annotation");
+  releases[0]!();
+  await (await oldResponse).finished();
+  releases[1]!();
+  await expect(
+    page.getByText(/输出完成：成功 1，失败\/非图片 0/),
+  ).toBeVisible();
+  expect(
+    (await commands(page)).filter(
+      (command) => command.action === "exportImage",
+    ),
+  ).toEqual([
+    {
+      scope: "batch",
+      action: "exportImage",
+      arguments: {
+        itemId: SESSION,
+        resourceUri: newAnnotation,
+        presetId: "default",
+      },
+    },
+  ]);
+});
+test("先拼接后图像背景同步拼接列表，换背景资产互换且离开时插回", async ({
+  page,
+}) => {
+  const { state, imported } = await setup(page);
+  const assetB = await png(page, 30, 10);
+  const ITEM_B = "5".repeat(32);
+  await page.route("**/composition-asset2.png", (route) =>
+    route.fulfill({ contentType: "image/png", body: assetB }),
+  );
+  const preview = page.getByAltText("排版输出预览");
+  const width = () =>
+    preview.evaluate((image: HTMLImageElement) => image.naturalWidth);
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: {
+      requestId: "bg-stitch-import",
+      sessionId: SESSION,
+      revision: 0,
+      items: [
+        {
+          kind: "image",
+          assetId: ASSET,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset.png",
+          byteLength: imported.length,
+          pixelWidth: 20,
+          pixelHeight: 10,
+        },
+        {
+          kind: "image",
+          assetId: ITEM_B,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset2.png",
+          byteLength: assetB.length,
+          pixelWidth: 30,
+          pixelHeight: 10,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: {
+      sessionId: SESSION,
+      revision: 0,
+      requestId: "bg-stitch-import",
+    },
+  });
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  // 先拼接：两项全部进入（80+20+30+边距20=150）。
+  await page.getByLabel("多图拼接", { exact: true }).selectOption("horizontal");
+  await expect.poll(width).toBe(150);
+  // 后选图像背景：绑定 assets[0]，它从拼接列表移出（130），不再重复渲染。
+  await page.getByLabel("排版背景", { exact: true }).selectOption("image");
+  await expect(page.getByLabel("排版背景图", { exact: true })).toHaveValue(
+    ASSET,
+  );
+  await expect.poll(width).toBe(130);
+  // 换背景为另一资产：旧背景按对象顺序插回、新背景移出（120）。
+  await page.getByLabel("排版背景图", { exact: true }).selectOption(ITEM_B);
+  await expect.poll(width).toBe(120);
+  // 离开图像背景：绑定解除且背景资产插回拼接，恢复全量拼接（150）。
+  await page
+    .getByLabel("排版背景", { exact: true })
+    .selectOption("transparent");
+  await expect.poll(width).toBe(150);
+});
+
 test("排版最终像素在复制、贴图、OCR与取字一致，复用图片屏蔽传播且文字层过滤同坐标", async ({
   page,
 }) => {

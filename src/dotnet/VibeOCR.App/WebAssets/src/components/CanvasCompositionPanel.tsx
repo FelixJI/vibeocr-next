@@ -5,6 +5,30 @@ import {
   type CanvasComposition,
 } from "./canvasComposition";
 
+/** 背景变更时同步拼接列表：旧背景资产按对象顺序插回，新背景资产移出；
+ * 只增删受影响项，保留用户既有排序与子集。 */
+function restitchForBackground(
+  assetIds: readonly string[],
+  assets: readonly { id: string }[],
+  previous: string | undefined,
+  next: string | undefined,
+): readonly string[] {
+  if (previous === next) return assetIds;
+  let ids = assetIds.filter((id) => id !== next);
+  if (previous && !ids.includes(previous)) {
+    const order = new Map(assets.map((asset, index) => [asset.id, index]));
+    const at = order.get(previous) ?? assets.length;
+    const insertAt = ids.findIndex(
+      (id) => (order.get(id) ?? assets.length) > at,
+    );
+    ids =
+      insertAt === -1
+        ? [...ids, previous]
+        : [...ids.slice(0, insertAt), previous, ...ids.slice(insertAt)];
+  }
+  return ids;
+}
+
 export function CanvasCompositionPanel({
   value,
   assets,
@@ -69,16 +93,26 @@ export function CanvasCompositionPanel({
         <Select
           aria-label="排版背景"
           value={settings.background}
-          onChange={(_, data) =>
+          onChange={(_, data) => {
+            const background = data.value as CanvasComposition["background"];
+            const binding =
+              background === "image"
+                ? (settings.backgroundAssetId ?? assets[0]?.id)
+                : undefined;
             update({
-              background: data.value as CanvasComposition["background"],
+              background,
               // 仅 image 背景持有绑定；离开时解除，避免旧资产被拼接排除或删除时误重置背景。
-              backgroundAssetId:
-                data.value === "image"
-                  ? (settings.backgroundAssetId ?? assets[0]?.id)
+              backgroundAssetId: binding,
+              assetIds: restitchForBackground(
+                settings.assetIds,
+                assets,
+                settings.background === "image"
+                  ? settings.backgroundAssetId
                   : undefined,
-            })
-          }
+                binding,
+              ),
+            });
+          }}
         >
           <option value="transparent">透明</option>
           <option value="solid">纯色</option>
@@ -112,7 +146,17 @@ export function CanvasCompositionPanel({
           <Select
             aria-label="排版背景图"
             value={settings.backgroundAssetId ?? ""}
-            onChange={(_, data) => update({ backgroundAssetId: data.value })}
+            onChange={(_, data) =>
+              update({
+                backgroundAssetId: data.value,
+                assetIds: restitchForBackground(
+                  settings.assetIds,
+                  assets,
+                  settings.backgroundAssetId,
+                  data.value,
+                ),
+              })
+            }
           >
             {assets.map((asset) => (
               <option key={asset.id} value={asset.id}>

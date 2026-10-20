@@ -28,6 +28,9 @@ export function BatchImageExport({
   const waiting = useRef<((image: ImageReady) => void) | undefined>(undefined);
   const cancelled = useRef(false);
   const mounted = useRef(true);
+  // 会话令牌：新一轮开始时旧循环（含停止后仍在途的上传/命令）立即失效，
+  // 避免共享 cancel 标志被新运行重置后旧请求复活。
+  const runSession = useRef(0);
   const [executing, setExecuting] = useState(false);
   const [progress, setProgress] = useState("");
   // 请求生命周期：每个 prepareImageExport 回执都重发一份新 batch 快照
@@ -59,14 +62,17 @@ export function BatchImageExport({
   }, []);
   async function start() {
     if (busy || count === 0) return;
+    const session = ++runSession.current;
     cancelled.current = false;
     onBusy(true);
     setExecuting(true);
+    const stopped = () =>
+      cancelled.current || runSession.current !== session || !mounted.current;
     let succeeded = 0,
       failed = 0,
       unavailable = 0;
     try {
-      for (let index = 0; index < count && !cancelled.current; index++) {
+      for (let index = 0; index < count && !stopped(); index++) {
         setProgress(
           `正在输出图片 ${index + 1}/${count}；已成功 ${succeeded}，失败/非图片 ${failed}`,
         );
@@ -93,10 +99,12 @@ export function BatchImageExport({
             unavailable++;
             throw new Error("格式解码不可用或图片内容损坏");
           }
-          if (cancelled.current) break;
+          if (stopped()) break;
           const blob = await encodeImagePreset(next.url, preferences.output);
-          if (cancelled.current) break;
+          if (stopped()) break;
           const resourceUri = await uploadAnnotatedImage(blob);
+          // 停止/卸载/会话更替后不再写入：上传返回后才检查，不发 batch.exportImage。
+          if (stopped()) break;
           if (
             await actions.run({
               type: "batch.exportImage",
@@ -116,7 +124,7 @@ export function BatchImageExport({
       }
       if (mounted.current)
         setProgress(
-          `${cancelled.current ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。${unavailable ? `其中 ${unavailable} 项格式解码不可用或图片内容损坏。` : ""}已成功文件保留；原图与已有文件未覆盖。`,
+          `${stopped() ? "已停止" : "输出完成"}：成功 ${succeeded}，失败/非图片 ${failed}。${unavailable ? `其中 ${unavailable} 项格式解码不可用或图片内容损坏。` : ""}已成功文件保留；原图与已有文件未覆盖。`,
         );
     } finally {
       if (mounted.current) {

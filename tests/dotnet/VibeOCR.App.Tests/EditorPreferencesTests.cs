@@ -25,7 +25,8 @@ public sealed class EditorPreferencesTests : IDisposable
     EditorPreferences preferences = EditorPreferences.Default with
     {
       Output = new(NameTemplate: "{name}-{index}", Format: "image/jpeg", Width: 1200, Height: 800, CloseAfterCopy: true),
-      Hidden = ["pen"], Shortcuts = new Dictionary<string, string> { ["pen"] = "p" },
+      Hidden = ["pen"],
+      Shortcuts = new Dictionary<string, string> { ["pen"] = "p" },
     };
     EditorPreferencesStore.Save(layout, new(preferences, root));
     StoredEditorPreferences loaded = EditorPreferencesStore.Load(layout);
@@ -48,13 +49,15 @@ public sealed class EditorPreferencesTests : IDisposable
     string[] newTools = ["spotlight", "magnifier", "objectEraser"];
     EditorPreferences customized = EditorPreferences.Default with
     {
-      Hidden = newTools, Shortcuts = new Dictionary<string, string> { ["spotlight"] = "s", ["magnifier"] = "m", ["objectEraser"] = "e" },
+      Hidden = newTools,
+      Shortcuts = new Dictionary<string, string> { ["spotlight"] = "s", ["magnifier"] = "m", ["objectEraser"] = "e" },
     };
     EditorPreferencesStore.Save(layout, new(customized, root));
     Assert.Equal(23, EditorPreferencesStore.Load(layout).Preferences.Order.Count);
     EditorPreferences legacy = customized with
     {
-      Order = EditorPreferences.Tools.Except(newTools).Reverse().ToArray(), Hidden = ["pen"],
+      Order = EditorPreferences.Tools.Except(newTools).Reverse().ToArray(),
+      Hidden = ["pen"],
       Shortcuts = new Dictionary<string, string> { ["pen"] = "p" },
     };
     string content = JsonSerializer.Serialize(new { image_editor = new StoredEditorPreferences(legacy, root) }, EditorPreferencesStore.Json);
@@ -90,6 +93,18 @@ public sealed class EditorPreferencesTests : IDisposable
     string generated = EditorPreferencesStore.FileName(new(NameTemplate: "../{name}:{index}"), source, 2);
     Assert.Equal(generated, Path.GetFileName(generated));
     Assert.DoesNotContain(':', generated);
+  }
+
+  [Fact]
+  public void FileNameExpandsOnlyOriginalTemplateTokens()
+  {
+    // 来源文件名里的字面占位符不得被链式 Replace 再次展开。
+    Assert.Equal(
+      "scan-{name}-{index}-2.png",
+      EditorPreferencesStore.FileName(new(NameTemplate: "{name}-{index}"), "scan-{name}-{index}.png", 2));
+    Assert.Equal(
+      "3-a{date}b.png",
+      EditorPreferencesStore.FileName(new(NameTemplate: "{index}-{name}"), "a{date}b.png", 3));
   }
 
   [Fact]
