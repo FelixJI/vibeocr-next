@@ -1180,6 +1180,199 @@ def test_no_old_copy_rollback_restore_crash_reconverges(
     assert not (manager.root / env_id).exists()
 
 
+def test_create_refuses_unowned_preexisting_fixed_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 显式 environment_id（默认初始化）绕过磁盘碰撞检查：未归属的预存
+    # 固定目录必须拒绝，remember_path 不得把未知数据变成可删除归属
+    # （旧实现在此登记整树归属）。
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    pre = manager.root / "rapidocr-cpu"
+    pre.mkdir(parents=True)
+    (pre / "keep.txt").write_text("retain", encoding="utf-8")
+    with pytest.raises(ManagedEnvironmentError, match="already exists"):
+        manager.initialize_default()
+    assert (pre / "keep.txt").read_text(encoding="utf-8") == "retain"
+    assert "rapidocr-cpu" not in managed_cleanup.read_ledger(manager)["paths"]
+
+
+def test_create_reuses_owned_creation_leftover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 失败创建的遗留（ledger 已登记 revision 1）可续用，支持默认环境
+    # 失败可续建。
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    pre = manager.root / "rapidocr-cpu"
+    pre.mkdir(parents=True)
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, "rapidocr-cpu", 1, pre)
+    record = manager._create("默认环境", as_default=True, environment_id="rapidocr-cpu")
+    assert record is not None and record["id"] == "rapidocr-cpu"
+    assert (pre / "pyvenv.cfg").is_file()
+
+
+def test_journal_unlink_failure_keeps_protection_and_converges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 提交完成但 journal 删除被占用阻断：list/preview_cleanup 不得因
+    # unlink OSError 阻塞（旧实现在此逸出 OSError）；保护保留，解除后
+    # 下一次扫描收敛清除。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "占用日志"
+    live = manager.root / env_id
+    live.mkdir(parents=True)
+    (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": "占用日志",
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        data["environments"][env_id] = candidate
+        _atomic_json(manager._registry, data)
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+    handle = manager._journal_path(env_id).open("rb")
+    try:
+        listed = manager.list()
+        assert listed["environments"][0]["status"] == "installed"
+        assert manager._journal_path(env_id).is_file(), "占用期间保护保留"
+        manager.preview_cleanup()
+    finally:
+        handle.close()
+    assert manager.list()["environments"][0]["revision"] == 2
+    assert not manager._journal_path(env_id).exists()
+
+
+def test_post_rename_crash_recovery_registers_candidate_and_allows_reinstalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rename(staging→live) 后、remember_path(live) 前崩溃：重启恢复提交
+    # candidate 时必须幂等补写固定路径归属（旧实现不补写，后续多次安装
+    # 会把无归属候选当作未登记退役数据永久阻塞）。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "补写归属"
+    live = manager.root / env_id
+    live.mkdir(parents=True)
+    (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": "补写归属",
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["environments"][env_id] = expected
+        _atomic_json(manager._registry, data)
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+
+    listed = manager.list()
+    assert listed["environments"][0]["status"] == "installed"
+    assert not manager._journal_path(env_id).exists()
+    ledger = managed_cleanup.read_ledger(manager)
+    assert ledger["paths"][str(Path(env_id))]["revision"] == 2, "候选归属已补写"
+
+    # 连续两次重装均可回收费退役槽位，不再卡未登记数据。
+    for index, source in enumerate(("tuna-pypi", "pypi"), start=3):
+        plan = manager.preview_install(env_id, "rapidocr-cpu", (source,))
+        installed = manager.install(plan["plan_id"], env_id, "rapidocr-cpu", (source,))
+        assert installed["revision"] == index
+        assert installed["path"] == str(live)
+
+
+def test_reclaim_failure_keeps_retired_ownership_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 二次安装的退役回收因占用失败：回滚时 staging+live+retired 并存表示
+    # 未换入，不得逆映射 retired 归属；解除占用后重试可正常复用（旧实现
+    # 清掉 retired ledger，重试永远卡“未登记数据”）。
+    import shutil as _shutil
+
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "回收占用"
+    item = manager.create(env_id)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    retired = manager._retired_path(env_id)
+    assert retired.is_dir(), "首轮安装已产生退役槽位"
+
+    original_rmtree = _shutil.rmtree
+
+    def busy_rmtree(path, *args, **kwargs):
+        if Path(path) == retired:
+            raise PermissionError("retired in use")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(_shutil, "rmtree", busy_rmtree)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("pypi",))
+    with pytest.raises(PermissionError, match="retired in use"):
+        manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("pypi",))
+    # 归属未被逆映射，journal 已随回滚清除。
+    ledger = managed_cleanup.read_ledger(manager)
+    assert str(Path(".retired") / env_id) in ledger["paths"]
+    assert not manager._journal_path(env_id).exists()
+    assert (manager.root / env_id).is_dir()
+
+    monkeypatch.setattr(_shutil, "rmtree", original_rmtree)
+    installed = manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("pypi",))
+    assert installed["status"] == "installed"
+    assert installed["path"] == str(manager.root / env_id)
+    assert item["id"] == env_id
+
+
 def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

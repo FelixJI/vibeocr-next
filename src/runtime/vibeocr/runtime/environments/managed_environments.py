@@ -1483,6 +1483,22 @@ class ManagedEnvironmentStore:
             root = self._safe_path(
                 {"id": env_id, "kind": "venv", "path": env_id, "revision": 1}
             )
+            if root.exists() or root.is_symlink():
+                # 显式 environment_id 绕过磁盘碰撞检查：未归属的预存固定
+                # 目录一律拒绝（不把未知数据变成可删除归属）；仅当 ledger
+                # 已由本创建流程登记（revision 1 遗留）且无待清理删除时
+                # 可续用，支持失败重试续建。
+                ledger = managed_cleanup.read_ledger(self)
+                owner = ledger["paths"].get(env_id)
+                if (
+                    owner is None
+                    or owner["environment_id"] != env_id
+                    or owner["revision"] != 1
+                    or env_id in ledger["pending"]
+                ):
+                    raise ManagedEnvironmentError(
+                        "environment directory already exists"
+                    )
             managed_cleanup.remember_path(self, env_id, 1, root)
             base = self._base_python()
             result = subprocess.run(
@@ -1574,16 +1590,23 @@ class ManagedEnvironmentStore:
         retired = self._retired_path(env_id)
         try:
             if staging.exists() or staging.is_symlink():
-                if not (live.exists() or live.is_symlink()) and (
-                    retired.exists() or retired.is_symlink()
-                ):
-                    # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
-                    os.rename(retired, live)
-                # staging 存在：无论是否有旧副本（无旧副本场景回滚的
-                # live→staging 已完成、归属恢复被中断，或换入尚未开始），
-                # 归属恢复均幂等——按 candidate revision 撤销候选整树归属、
-                # 逆映射镜像；状态收敛后才清 journal。
-                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+                # live 缺失：回滚改名已完成（或无旧副本场景），幂等恢复
+                # 归属——按 candidate revision 撤销候选整树归属、逆映射镜像。
+                if not (live.exists() or live.is_symlink()):
+                    if retired.exists() or retired.is_symlink():
+                        # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
+                        os.rename(retired, live)
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                elif not (retired.exists() or retired.is_symlink()):
+                    # 回滚 retired→live 改名已完成、retired 已消失：补齐被
+                    # 中断的归属恢复。
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                # staging+live+retired 并存：换入未开始（如退役回收因占用
+                # 失败）：retired 归属仍有效，不逆映射，ledger 不变。
                 self._journal_path(env_id).unlink(missing_ok=True)
                 return
             if retired.exists() or retired.is_symlink():
@@ -1689,12 +1712,19 @@ class ManagedEnvironmentStore:
             data = self._read()
             record = data["environments"].get(env_id)
             if record is None:
-                # 环境已删除：目录归 cleanup ledger 处理，journal 无效。
-                self._journal_path(env_id).unlink(missing_ok=True)
+                # 环境已删除：目录归 cleanup ledger 处理，journal 无效；
+                # unlink 失败保留 journal 与保护，下次扫描重试。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return
             if record == candidate:
-                # 提交已完成，仅剩清理 journal。
-                self._journal_path(env_id).unlink(missing_ok=True)
+                # 提交已完成，仅剩清理 journal；unlink 失败同样保留保护。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return
             if record != expected:
                 # 注册表被外部修改：回滚目录，保留注册表现状。
@@ -1757,6 +1787,9 @@ class ManagedEnvironmentStore:
                     "a previous environment install was rolled back: relocated "
                     f"environment failed probe ({probe['reason']})"
                 )
+            # 换入改名后、归属登记前崩溃的候选：探针确认后幂等补写固定
+            # 路径归属，避免后续安装把无归属候选当作未登记退役数据卡死。
+            managed_cleanup.remember_path(self, env_id, candidate["revision"], live)
             data = self._read()
             if data["environments"].get(env_id) != expected:
                 self._rollback_swap(env_id, candidate["revision"])
@@ -1768,7 +1801,10 @@ class ManagedEnvironmentStore:
             if data["active_id"] == env_id:
                 data["active_revision"] += 1
             _atomic_json(self._registry, data)
-            self._journal_path(env_id).unlink(missing_ok=True)
+            try:
+                self._journal_path(env_id).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _recover_all_swaps(self) -> None:
         """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。
