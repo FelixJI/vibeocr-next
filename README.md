@@ -284,7 +284,7 @@ profile 锁保留在 `config/runtime/`。产品内部沿用 `runtime/backend/` �
 ## 参与贡献
 
 请先阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)、[源码阅读指南](docs/source-reading-guide.md) 和
-[Workbench 架构](docs/web-workbench-architecture.md)。UI 可见改动需要在 PR 附截图；提交使用 Conventional Commit。
+[Workbench 架构](docs/web-workbench-architecture.md)。提交使用 Conventional Commit。
 
 ## 许可证
 
