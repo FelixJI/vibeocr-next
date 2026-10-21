@@ -157,7 +157,7 @@ React `App` 按需加载各 feature 页面，`Pages.tsx` 仅保留兼容导出�
 ### WinUI 与 ViewModel
 
 从 App.xaml.cs、主窗口和目标 ViewModel 进入。关注 dispatcher/thread affinity、async command、窗口关闭
-和可观察状态。UI 可见改动需截图与 App tests。
+和可观察状态。UI 可见改动需运行相关 App tests。
 
 ### Platform 与 Protocol
 
