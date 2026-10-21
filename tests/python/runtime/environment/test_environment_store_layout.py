@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1371,6 +1372,184 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
     assert installed["status"] == "installed"
     assert installed["path"] == str(manager.root / env_id)
     assert item["id"] == env_id
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    """在测试临时目录内创建真实 Windows junction（mklink /J，免管理员）。"""
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("scenario", ["outside_empty", "dangling"])
+def test_retired_container_junction_cannot_capture_old_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    # 审阅复现现场：ledger 仅 live/staging 归属（无任何 retired 条目，不
+    # 被路径校验提前拦截），.retired 为指向外部的 junction 且 <id> 不存
+    # 在，journal pending。旧 _recover_pending_swap 先把旧副本改名出界再
+    # 因归属校验抛错；新实现必须在任何改名前拒绝：外部完全空、旧副本
+    # 与候选原位、journal 保留。dangling 目标（目标目录不存在）时
+    # exists/is_symlink 均为 False，仍必须凭 reparse 位拒绝。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "junction"
+    live = manager.root / env_id
+    staging = manager._staging_path(env_id)
+    outside = tmp_path / "outside-retired"
+    if scenario == "outside_empty":
+        outside.mkdir()
+    live.mkdir(parents=True)
+    (live / "old-copy.marker").write_text("only-copy", encoding="utf-8")
+    staging.mkdir(parents=True)
+    (staging / "pyvenv.cfg").write_text("", encoding="utf-8")
+    _make_junction(manager.root / ".retired", outside)
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": env_id,
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["environments"][env_id] = expected
+        _atomic_json(manager._registry, data)
+        managed_cleanup.remember_path(manager, env_id, 1, live)
+        managed_cleanup.remember_path(manager, env_id, 2, staging)
+        ledger = managed_cleanup.read_ledger(manager)
+        assert not any(key.startswith(".retired") for key in ledger["paths"])
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+    with manager._target_operation(env_id):
+        with pytest.raises(ManagedEnvironmentError, match="reparse|escapes"):
+            manager._recover_pending_swap(env_id)
+    if scenario == "outside_empty":
+        assert list(outside.iterdir()) == [], "外部目标完全未被写入"
+    else:
+        assert not (outside / env_id).exists(), "dangling 目标未被创建"
+    assert (live / "old-copy.marker").read_text(encoding="utf-8") == "only-copy"
+    assert (staging / "pyvenv.cfg").is_file()
+    assert manager._journal_path(env_id).is_file(), "journal 保留待收敛"
+
+
+def test_reclaim_empty_parent_rmdir_failure_keeps_evidence_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 已知空父容器 rmdir 因占用失败：ledger 必须保留子路径证据（用于
+    # 推导父目录归属），不得先 pop 落盘；解除占用后重入即可完成回收。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "f" * 8 + "8adbc0de" + "0" * 16
+    retired = manager._retired_path(env_id)
+    owned = retired / "revisions" / "1"
+    owned.mkdir(parents=True)
+    (owned / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, env_id, 1, owned)
+
+    revisions = retired / "revisions"
+    original_rmdir = Path.rmdir
+
+    def busy_rmdir(self: Path) -> None:
+        if Path(self) == revisions:
+            raise PermissionError("parent in use")
+        return original_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", busy_rmdir)
+    with RuntimeStoreLock(manager._lock):
+        with pytest.raises(PermissionError, match="parent in use"):
+            managed_cleanup.reclaim_retired(manager, env_id)
+        # 证据保留：子路径仍在 ledger，未因部分清理而丢失。
+        assert (
+            str(Path(".retired") / env_id / "revisions" / "1")
+            in (managed_cleanup.read_ledger(manager)["paths"])
+        )
+    monkeypatch.setattr(Path, "rmdir", original_rmdir)
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.reclaim_retired(manager, env_id)
+    assert not retired.exists()
+    assert (
+        str(Path(".retired") / env_id)
+        not in managed_cleanup.read_ledger(manager)["paths"]
+    )
+
+
+@pytest.mark.parametrize("scenario", ["unknown_empty_sibling", "empty_root"])
+def test_reclaim_retired_preserves_unknown_empty_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    # reclaim 只回收已登记子树及其可证明归属的空父容器：legacy 树里的
+    # 未知空目录必须保留并阻止槽位复用（旧实现把空目录全部 rmdir 掉后
+    # 静默放行）；无任何归属证据时空槽位根也 fail closed 保留；全归属
+    # 场景空父容器正常回收。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    from vibeocr.runtime.environments.runtime_installer import RuntimeInstallError
+
+    env_id = "e" * 8 + "8adbc0de" + "0" * 16
+    retired = manager._retired_path(env_id)
+    owned = retired / "revisions" / "1"
+    unknown_empty = retired / "revisions" / "999-unknown"
+    if scenario == "unknown_empty_sibling":
+        owned.mkdir(parents=True)
+        (owned / "pyvenv.cfg").write_text("", encoding="utf-8")
+        unknown_empty.mkdir()
+        with RuntimeStoreLock(manager._lock):
+            managed_cleanup.remember_path(manager, env_id, 1, owned)
+    else:
+        retired.mkdir(parents=True)
+    with RuntimeStoreLock(manager._lock):
+        with pytest.raises(RuntimeInstallError, match="未记录数据"):
+            managed_cleanup.reclaim_retired(manager, env_id)
+    if scenario == "unknown_empty_sibling":
+        # 已登记子树被删除；未知空目录与其父容器保留，阻止槽位复用。
+        assert not owned.exists()
+        assert unknown_empty.is_dir(), "未知空目录不得被回收"
+        assert (retired / "revisions").is_dir()
+    else:
+        # 无归属证据的空槽位根同样保留。
+        assert retired.is_dir(), "空槽位根不得被回收"
+
+    # 全归属场景：已登记子树与其空父容器正常回收，槽位可用。
+    shutil.rmtree(retired)
+    owned.mkdir(parents=True)
+    (owned / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, env_id, 1, retired / "revisions" / "1")
+        managed_cleanup.reclaim_retired(manager, env_id)
+    assert not retired.exists()
 
 
 def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(

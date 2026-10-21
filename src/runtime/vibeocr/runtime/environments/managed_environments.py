@@ -1577,6 +1577,32 @@ class ManagedEnvironmentStore:
             raise ManagedEnvironmentError("pending environment swap journal is invalid")
         return journal
 
+    def _guard_swap_slots(self, env_id: str) -> None:
+        """换入改名前验证槽位容器与目标路径不含 symlink/reparse point。
+
+        .staging/.retired 容器或对应 <id> 目标叶（含 rollback 场景中已存在
+        的叶）若为 junction/symlink，改名会把目录移出管理存储；必须在
+        任何改名（含 journal 写入）之前发现，并复用既有边界校验。
+        """
+        boundary = self.paths.store_root.resolve()
+        for container, leaf in (
+            (self.root / _SWAP_STAGING_ROOT, self._staging_path(env_id)),
+            (self.root / _SWAP_RETIRED_ROOT, self._retired_path(env_id)),
+        ):
+            for path in (container, leaf):
+                # dangling junction：exists/is_symlink 均为 False，但 lstat
+                # 属性含 reparse 位；_is_reparse 对缺失路径安全返回 False。
+                if path.is_symlink() or self._is_reparse(path):
+                    raise ManagedEnvironmentError(
+                        "swap slot path contains reparse point"
+                    )
+            current = leaf
+            while current != boundary:
+                parent = current.parent
+                if parent == current or not parent.resolve().is_relative_to(boundary):
+                    raise ManagedEnvironmentError("environment path escapes store")
+                current = parent
+
     def _rollback_swap(self, env_id: str, candidate_revision: int) -> None:
         """把换入事务的目录与归属改动恢复到事务前状态（可重入）。
 
@@ -1589,6 +1615,7 @@ class ManagedEnvironmentStore:
         staging = self._staging_path(env_id)
         retired = self._retired_path(env_id)
         try:
+            self._guard_swap_slots(env_id)
             if staging.exists() or staging.is_symlink():
                 # live 缺失：回滚改名已完成（或无旧副本场景），幂等恢复
                 # 归属——按 candidate revision 撤销候选整树归属、逆映射镜像。
@@ -1648,6 +1675,9 @@ class ManagedEnvironmentStore:
         retired = self._retired_path(env_id)
         if not staging.is_dir() or self._is_reparse(staging):
             raise ManagedEnvironmentError("swap candidate is missing or unsafe")
+        # 任何改名（含 journal 写入）前验证槽位容器与目标，防止目录被移出
+        # 存储。
+        self._guard_swap_slots(env_id)
         journal = {
             "schema_version": 1,
             "environment_id": env_id,
@@ -1682,7 +1712,12 @@ class ManagedEnvironmentStore:
                     next_action="repair_environment",
                 )
         except BaseException:
-            self._rollback_swap(env_id, candidate["revision"])
+            try:
+                self._rollback_swap(env_id, candidate["revision"])
+            except ManagedEnvironmentError:
+                # 回滚无法安全进行（如槽位路径为 reparse）：保留 journal，
+                # 不遮蔽原始错误，交由恢复逻辑收敛。
+                pass
             raise
         latest["environments"][env_id] = candidate
         if latest["active_id"] == env_id:
@@ -1735,6 +1770,7 @@ class ManagedEnvironmentStore:
                 )
             # journal 只在候选探针通过后写入：换入改名未完成时继续前滚。
             try:
+                self._guard_swap_slots(env_id)
                 if staging.exists() or staging.is_symlink():
                     if self._is_reparse(staging):
                         raise ManagedEnvironmentError(

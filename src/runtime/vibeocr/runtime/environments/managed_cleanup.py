@@ -223,7 +223,14 @@ def reclaim_retired(store: ManagedEnvironmentStore, env_id: str) -> None:
         and len(Path(key).parts) > len(retired_parts)
         and Path(key).parts[: len(retired_parts)] == retired_parts
     ]
-    dirty = False
+    if not owned:
+        # 无任何归属证据：即使槽位为空也保留并阻止复用，与未知空目录
+        # 同类边界；只有 owned 路径能证明父容器归属时才可清理。
+        raise RuntimeInstallError(
+            "退役槽位包含未记录数据；请先运行空间清理或手动检查该目录"
+        )
+    # 先删已登记子树；任何失败都不落 ledger，保留推导父容器归属的子路径
+    # 证据，解除占用后重入按磁盘现状继续。
     for key in sorted(owned, key=len, reverse=True):
         child = store.root / key
         if child.exists() or child.is_symlink():
@@ -231,28 +238,29 @@ def reclaim_retired(store: ManagedEnvironmentStore, env_id: str) -> None:
             if unsafe:
                 raise RuntimeInstallError(unsafe)
             shutil.rmtree(child)
-        ledger["paths"].pop(key, None)
-        dirty = True
-    if dirty:
-        _atomic_json(_ledger_path(store), ledger)
-    if retired.is_dir() and not store._is_reparse(retired):
-        for directory in sorted(
-            (path for path in retired.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts),
-            reverse=True,
-        ):
-            if store._is_reparse(directory):
-                continue
-            try:
-                directory.rmdir()
-            except OSError:
-                continue
+    # 只回收已登记路径可证明归属的空父容器；含未知内容（含空 sibling）
+    # 的容器保留，由末尾统一 fail closed。空容器 rmdir 因占用失败时同样
+    # 保留证据并阻止复用。
+    ancestors: set[Path] = set()
+    for key in owned:
+        parts = Path(key).parts
+        for depth in range(len(retired_parts) + 1, len(parts)):
+            ancestors.add(store.root.joinpath(*parts[:depth]))
+    for directory in sorted(ancestors, key=lambda path: len(path.parts), reverse=True):
+        if store._is_reparse(directory):
+            raise RuntimeInstallError("路径包含符号链接或 reparse point，受保护")
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
     if retired.exists() or retired.is_symlink():
         if any(retired.iterdir()):
             raise RuntimeInstallError(
                 "退役槽位包含未记录数据；请先运行空间清理或手动检查该目录"
             )
         retired.rmdir()
+    # 全部清理成功后原子落 ledger；失败路径均保留原登记。
+    for key in owned:
+        ledger["paths"].pop(key, None)
+    _atomic_json(_ledger_path(store), ledger)
 
 
 def read_ledger(store: ManagedEnvironmentStore) -> dict:
