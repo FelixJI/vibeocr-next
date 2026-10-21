@@ -17,7 +17,12 @@ def test_ci_runs_the_unified_full_quality_gate() -> None:
     assert "--phase finalize" in workflow
     assert "name: required" in workflow
     assert "python -m pip install" not in workflow
-    assert config["ci"]["bootstrap"][0][-3:] == ["uv", "sync", "--frozen"]
+    assert "scripts/check_release_plan.py" not in workflow
+    assert config["ci"]["bootstrap"][0][-2:] == [
+        "python",
+        "scripts/check_release_plan.py",
+    ]
+    assert config["ci"]["bootstrap"][1][-3:] == ["uv", "sync", "--frozen"]
     assert config["ci"]["quality"][0][-1] == "scripts/check_quality.py"
     assert {
         "tests/dotnet/VibeOCR.Contracts.Tests/VibeOCR.Contracts.Tests.csproj",

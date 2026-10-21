@@ -57,7 +57,8 @@ worker 仍在独立进程运行。
   普通启动、通用设置、纯截图编辑/复制保存和本地二维码工具不启动 Installer 或 Supervisor。
   并发计算请求共享准备，每个请求可独立取消；准备失败或取消保留输入供重试。
   “查看环境清单”仅只读检查已有环境，不初始化默认环境或启动计算服务。
-  默认环境使用 `state/environments/rapidocr-cpu`，按需准备的环境自动命名；已有名称和 UUID 目录继续兼容。
+  默认环境使用固定目录 `state/environments/rapidocr-cpu`，按需准备的环境自动命名，重装不再新增 revision 路径。
+  已有名称和 UUID 环境继续兼容，旧 revision 布局在重装时迁移；详见[环境路径与迁移说明](docs/managed-environment-paths.md)。
 - 在“设置 → 运行环境”选择识别组件和加速方式，查看对应用途与主要依赖；选择只查询兼容环境，
   不改变识别默认模式或当前任务。已有兼容环境可直接切换并启动验证；没有时，“准备此配置”
   自动准备目标环境并在常规页面展示简短确认，明确确认后才安装。完整包清单和路径是可选只读详情，
@@ -248,6 +249,13 @@ WebAssets 的 Node/npm 版本以 `.node-version` 与 WebAssets `package.json` �
 build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 client 与两侧测试。
 
 ## 发布资产
+
+发布 PR 只能在 `main` 上手动运行 CD、选择原有 bump 类型来创建或刷新。
+`main` 前进后，不使用 GitHub 的更新分支或合并 `main` 来同步 `automation/release`；
+必须重新运行同一准备流程，重新生成版本、changelog 和 `.release/plan.json`。
+CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `prepared_from_sha`
+与本次合并基线，不匹配时在安装依赖前失败；workflow 不另设发布校验入口。
+
 
 正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
 （`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`

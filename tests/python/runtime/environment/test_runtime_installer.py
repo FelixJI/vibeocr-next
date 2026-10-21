@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -967,11 +968,13 @@ def test_repair_after_failed_install_clears_stale_revision_failure_only_on_succe
 
     monkeypatch.setattr(manager, "_base_python", original_base_python)
     repaired = manager.repair_empty(item["id"])
-    # 失败安装残留 2、失败修复在 ledger 保留 3：成功修复取新号码 4。
-    assert repaired["revision"] == 4
-    assert repaired["path"].endswith(str(Path(item["id"]) / "revisions" / "4"))
-    assert (manager.root / item["id"] / "revisions" / "2").is_dir()
-    assert not (manager.root / item["id"] / "revisions" / "3").exists()
+    # 固定路径布局：修复在 staging 重建后换入固定路径；失败候选被回收，
+    # 旧损坏 venv 移入唯一退役槽位。
+    assert repaired["revision"] == 2
+    assert repaired["path"] == str(manager.root / item["id"])
+    assert (manager.root / item["id"]).is_dir()
+    assert not (manager.root / ".staging" / item["id"]).exists()
+    assert (manager.root / ".retired" / item["id"]).is_dir()
     assert repaired["last_install_failure"] is None
     assert (
         ManagedEnvironmentStore(
@@ -1818,14 +1821,18 @@ def test_named_install_rejects_native_import_failure_without_committing(
     assert surviving["status"] == "empty"
     assert surviving["revision"] == 1
     assert surviving["last_install_failure"]["reason_code"] == "engine_import_failed"
-    candidate = manager.root / item["id"] / "revisions" / "2"
+    candidate = manager._staging_path(item["id"])
     assert candidate.is_dir()
+    # 模拟旧实现把坏候选提交进注册表：候选换入固定路径，探针必须
+    # 在同一导入闭包上 fail closed。
+    shutil.rmtree(manager.root / item["id"])
+    os.rename(candidate, manager.root / item["id"])
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
     registry["environments"][item["id"]].pop("last_install_operation")
     registry["environments"][item["id"]].update(
         {
             "revision": 2,
-            "path": f"{item['id']}/revisions/{candidate.name}",
+            "path": item["id"],
             "status": "installed",
             "recipe": "rapidocr-cpu",
             "source_ids": ["tuna-pypi"],
@@ -1930,13 +1937,15 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
 
     # 若探针未覆盖真实闭包（旧实现），候选修订会被提交为已安装环境；
     # 模拟该状态时，list/prepare_switch 也必须按同一探针 fail closed。
-    candidate = manager.root / item["id"] / "revisions" / "2"
+    candidate = manager._staging_path(item["id"])
+    shutil.rmtree(manager.root / item["id"])
+    os.rename(candidate, manager.root / item["id"])
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
     registry["environments"][item["id"]].pop("last_install_operation")
     registry["environments"][item["id"]].update(
         {
             "revision": 2,
-            "path": f"{item['id']}/revisions/{candidate.name}",
+            "path": item["id"],
             "status": "installed",
             "recipe": "rapidocr-cpu",
             "source_ids": ["tuna-pypi"],

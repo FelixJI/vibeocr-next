@@ -795,13 +795,17 @@ def test_terminal_commit_rejects_late_cancellation(
     manager = _open(tmp_path, manifest, component, install_runner=lambda *_args: None)
     record = _write_record(manager, "a" * 32)
     plan = manager.preview_install(record["id"], "rapidocr-cpu")
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda args, **kwargs: subprocess.CompletedProcess(
+
+    def run(args, **kwargs):
+        result = subprocess.CompletedProcess(
             args, 1 if failure else 0, "", "natural failure"
-        ),
-    )
+        )
+        # 成功的 venv 调用需真实落盘候选目录：换入事务依赖其存在。
+        if not failure and "venv" in args:
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+        return result
+
+    monkeypatch.setattr(subprocess, "run", run)
     _stub_installed_probe(manager, monkeypatch)
     if failure:
         with pytest.raises(ManagedEnvironmentError, match="natural failure"):
