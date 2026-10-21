@@ -1,5 +1,5 @@
 # Resolved for CPython 3.13 / Windows x64
-# Source-neutral lock command (uv 0.12.22):
+# Source-neutral lock command (uv 0.13.4):
 # uv pip compile config/runtime/win-x64-cu126/requirements.in --no-config --upgrade --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-cu126/requirements-win-x64-cu126.lock
 # Host includes Base and MinerU; Paddle has a separate interpreter.
 -r ../win-x64-base/requirements.in

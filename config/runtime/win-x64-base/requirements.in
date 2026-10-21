@@ -1,12 +1,12 @@
 # Resolved for CPython 3.13 / Windows x64
-# Source-neutral lock command (uv 0.12.22):
+# Source-neutral lock command (uv 0.13.4):
 # uv pip compile config/runtime/win-x64-base/requirements.in --no-config --upgrade --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-base/requirements-win-x64-base.lock
 #
 # base-offline 闭包（docs/ocr-engine-runtime-profiles-execution-plan.md §4.1）：
 # 随 Classic/Next Portable 携带、禁网可安装的必备闭包。只含 Backend/Protocol
 # 运行时、通用文本 OCR 缺省引擎与图片编解码；Paddle/MinerU/CUDA 等重型组件
 # 属于 full-cpu / full-cu126 附加闭包，不进入 base。
-pillow>=12.3.0
+pillow>=12.3.0,<13
 numpy>=2.3.5
 httpx>=0.28.1
 jsonschema>=4.25.0

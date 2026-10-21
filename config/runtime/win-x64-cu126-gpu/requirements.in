@@ -1,6 +1,6 @@
 # GPU-only install scope for CPython 3.13 / Windows x64.
 #
-# Source-neutral lock regeneration (uv 0.12.22; no user or repository config):
+# Source-neutral lock regeneration (uv 0.13.4; no user or repository config):
 # uv pip compile config/runtime/win-x64-cu126-gpu/requirements.in --no-config --upgrade --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-cu126-gpu/requirements-win-x64-cu126-gpu.lock
 #
 # Reuse the complete offline base; exclude PaddleOCR/MinerU/document parsing.
