@@ -144,6 +144,15 @@ _ENVIRONMENT_RESERVED_DIRECTORIES = frozenset(
 )
 # 默认环境的用途/设备即目录名：RapidOCR + CPU。
 _DEFAULT_ENVIRONMENT_SLUG = "rapidocr-cpu"
+# 固定路径布局：每个环境的 venv 直接位于 environments/<id>，不再嵌套
+# revisions/<N>，路径最短且升级前后不变。安装事务在 .staging/<id> 构建
+# 候选、提交时把旧 venv 移入 .retired/<id>（各一个固定槽位，绝不累积），
+# 再把候选换入固定路径并在最终位置复检探针。环境 id 不能以点开头，
+# 两个管理目录与任何环境目录天然不冲突；历史 <id>/revisions/<N[-hex]>
+# 记录照常读取，重新安装时自动迁移到固定路径，旧目录随 .retired 由
+# 空间清理回收。
+_SWAP_STAGING_ROOT = ".staging"
+_SWAP_RETIRED_ROOT = ".retired"
 
 
 def _is_reserved_directory_name(value: str) -> bool:
@@ -224,6 +233,7 @@ class ManagedEnvironmentStore:
         )
         self.root = self.paths.store_root / "environments"
         self._registry = self.paths.state_root / "environments.json"
+        self._swap_journal_root = self.paths.state_root / "environment-swaps"
         self._lock = self.paths.locks_root / "runtime-store.lock"
         self._references = self.paths.locks_root / "environment-references"
         # Tests may supply a synthetic trusted interpreter. Production extracts
@@ -724,9 +734,24 @@ class ManagedEnvironmentStore:
             relative = Path("runtime")
         else:
             relative = Path(record["path"])
-            if (
-                len(relative.parts) != 3
-                or relative.parts[:2] != (env_id, "revisions")
+            parts = relative.parts
+            if parts == (env_id,):
+                # 新固定路径：venv 就是 environments/<id> 本身。
+                pass
+            elif (
+                len(parts) >= 2
+                and parts[0] in (_SWAP_STAGING_ROOT, _SWAP_RETIRED_ROOT)
+                and parts[1] == env_id
+                and ".." not in parts
+                and all(parts)
+            ):
+                # 换入事务的候选/退役槽位（含退役镜像子路径）：供 cleanup
+                # ledger、staging 探针与恢复逻辑校验；注册表记录由
+                # _validate_registry 显式拒绝槽位路径。
+                pass
+            elif (
+                len(parts) != 3
+                or parts[:2] != (env_id, "revisions")
                 or not re.fullmatch(
                     rf"{record['revision']}(?:-[0-9a-f]{{16}}|-[0-9a-f]{{32}})?",
                     relative.parts[2],
@@ -822,6 +847,16 @@ class ManagedEnvironmentStore:
                 or not isinstance(record["kind"], str)
                 or record["kind"] not in {"legacy", "venv"}
                 or (env_id == "legacy") != (record["kind"] == "legacy")
+                # 注册表记录必须指向存活路径：固定路径或 legacy revisions
+                # 布局；换入槽位只属于事务与 ledger，不得成为环境记录。
+                # 类型前置：path 非 str 时直接落入后续结构化校验，不在
+                # Path() 上抛 TypeError。
+                or (
+                    record["kind"] == "venv"
+                    and isinstance(record["path"], str)
+                    and Path(record["path"]).parts[:1]
+                    in ((_SWAP_STAGING_ROOT,), (_SWAP_RETIRED_ROOT,))
+                )
                 or not isinstance(record["status"], str)
                 or record["status"] not in {"empty", "installed"}
                 or not isinstance(record["path"], str)
@@ -1284,6 +1319,8 @@ class ManagedEnvironmentStore:
         # unsupported 携带原因，unknown 只代表探测超时/未完成。探测不触碰
         # 注册表，在锁外执行，避免把 nvidia-smi 的超时预算计入存储锁。
         hardware = {"nvidia_driver": probe_nvidia_driver()}
+        # 先收敛可能被中断的固定路径换入，探针/路径才是真值。
+        self._recover_all_swaps()
         with RuntimeStoreLock(self._lock):
             data = self._read()
             catalog = self._source_catalog()
@@ -1411,6 +1448,12 @@ class ManagedEnvironmentStore:
             base = f"environment-{base}"
         base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
         taken = {record_id.casefold() for record_id in data["environments"]}
+        # 待完成删除仍占用 id：目录已删但 pending 引用仍在，复用会破坏
+        # ledger 校验，一律跳过。
+        taken.update(
+            pending_id.casefold()
+            for pending_id in managed_cleanup.read_ledger(self)["pending"]
+        )
         candidate = base
         suffix = 1
         while (
@@ -1444,13 +1487,24 @@ class ManagedEnvironmentStore:
                 raise ManagedEnvironmentError("environment name already exists")
             env_id = environment_id or self._new_environment_id(name, data)
             root = self._safe_path(
-                {
-                    "id": env_id,
-                    "kind": "venv",
-                    "path": str(Path(env_id) / "revisions" / "1"),
-                    "revision": 1,
-                }
+                {"id": env_id, "kind": "venv", "path": env_id, "revision": 1}
             )
+            if root.exists() or root.is_symlink():
+                # 显式 environment_id 绕过磁盘碰撞检查：未归属的预存固定
+                # 目录一律拒绝（不把未知数据变成可删除归属）；仅当 ledger
+                # 已由本创建流程登记（revision 1 遗留）且无待清理删除时
+                # 可续用，支持失败重试续建。
+                ledger = managed_cleanup.read_ledger(self)
+                owner = ledger["paths"].get(env_id)
+                if (
+                    owner is None
+                    or owner["environment_id"] != env_id
+                    or owner["revision"] != 1
+                    or env_id in ledger["pending"]
+                ):
+                    raise ManagedEnvironmentError(
+                        "environment directory already exists"
+                    )
             managed_cleanup.remember_path(self, env_id, 1, root)
             base = self._base_python()
             result = subprocess.run(
@@ -1469,7 +1523,7 @@ class ManagedEnvironmentStore:
                 "name": name,
                 "revision": 1,
                 "kind": "venv",
-                "path": str(Path(env_id) / "revisions" / "1"),
+                "path": env_id,
                 "status": "empty",
                 "python_version": self.manifest.python.version,
                 "abi": self.manifest.python.abi,
@@ -1483,95 +1537,321 @@ class ManagedEnvironmentStore:
             _atomic_json(self._registry, data)
             return self._public_record(record, probe, data)
 
-    def _next_revision(self, env_id: str, record: dict) -> int:
-        """在 store 锁与目标 operation 锁内推导下一个未占用的修订号。
+    def _staging_path(self, env_id: str) -> Path:
+        return self.root / _SWAP_STAGING_ROOT / env_id
 
-        跳过 cleanup ledger 已保留路径与磁盘既有目录（含旧 ``N-<hex>``
-        后缀目录的数字前缀），失败重试/修复因此不覆盖残留；ledger 读取
-        自带既有路径校验，新路径写入前仍经 remember_path 重新校验。
+    def _retired_path(self, env_id: str) -> Path:
+        return self.root / _SWAP_RETIRED_ROOT / env_id
+
+    def _journal_path(self, env_id: str) -> Path:
+        return self._swap_journal_root / f"{env_id}.json"
+
+    def _load_swap_journal(self, env_id: str) -> dict:
+        """读取并结构校验换入 journal；损坏时 fail closed，不做推断。"""
+        try:
+            journal = json.loads(self._journal_path(env_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ManagedEnvironmentError(
+                "pending environment swap journal is unreadable"
+            ) from exc
+        expected = journal.get("expected_record") if isinstance(journal, dict) else None
+        candidate = (
+            journal.get("candidate_record") if isinstance(journal, dict) else None
+        )
+        if (
+            not isinstance(journal, dict)
+            or set(journal)
+            != {
+                "schema_version",
+                "environment_id",
+                "expected_record",
+                "candidate_record",
+            }
+            or journal.get("schema_version") != 1
+            or journal.get("environment_id") != env_id
+            or not isinstance(expected, dict)
+            or expected.get("id") != env_id
+            or expected.get("kind") != "venv"
+            or type(expected.get("revision")) is not int
+            or not isinstance(candidate, dict)
+            or candidate.get("id") != env_id
+            or candidate.get("kind") != "venv"
+            or candidate.get("path") != env_id
+            or type(candidate.get("revision")) is not int
+            or candidate["revision"] != expected["revision"] + 1
+        ):
+            raise ManagedEnvironmentError("pending environment swap journal is invalid")
+        return journal
+
+    def _guard_swap_slots(self, env_id: str) -> None:
+        """换入改名前验证槽位容器与目标路径不含 symlink/reparse point。
+
+        .staging/.retired 容器或对应 <id> 目标叶（含 rollback 场景中已存在
+        的叶）若为 junction/symlink，改名会把目录移出管理存储；必须在
+        任何改名（含 journal 写入）之前发现，并复用既有边界校验。
         """
-        taken = {record["revision"]}
-        for relative, owner in managed_cleanup.read_ledger(self)["paths"].items():
-            parts = Path(relative).parts
-            if (
-                owner["environment_id"] != env_id
-                or len(parts) != 3
-                or parts[:2] != (env_id, "revisions")
-            ):
+        boundary = self.paths.store_root.resolve()
+        for container, leaf in (
+            (self.root / _SWAP_STAGING_ROOT, self._staging_path(env_id)),
+            (self.root / _SWAP_RETIRED_ROOT, self._retired_path(env_id)),
+        ):
+            for path in (container, leaf):
+                # dangling junction：exists/is_symlink 均为 False，但 lstat
+                # 属性含 reparse 位；_is_reparse 对缺失路径安全返回 False。
+                if path.is_symlink() or self._is_reparse(path):
+                    raise ManagedEnvironmentError(
+                        "swap slot path contains reparse point"
+                    )
+            current = leaf
+            while current != boundary:
+                parent = current.parent
+                if parent == current or not parent.resolve().is_relative_to(boundary):
+                    raise ManagedEnvironmentError("environment path escapes store")
+                current = parent
+
+    def _rollback_swap(self, env_id: str, candidate_revision: int) -> None:
+        """把换入事务的目录与归属改动恢复到事务前状态（可重入）。
+
+        仅移动本事务自己移动过的目录，不删除任何数据；回滚改名完成后
+        归属恢复可被中断重跑：凭 ledger 中的退役镜像区分“未开始”与
+        “已复位待恢复”。失败时保留 journal，由 _recover_pending_swap
+        继续收敛。
+        """
+        live = self.root / env_id
+        staging = self._staging_path(env_id)
+        retired = self._retired_path(env_id)
+        journal_path = self._journal_path(env_id)
+        try:
+            self._guard_swap_slots(env_id)
+            if staging.exists() or staging.is_symlink():
+                # live 缺失：回滚改名已完成（或无旧副本场景），幂等恢复
+                # 归属——按 candidate revision 撤销候选整树归属、逆映射镜像。
+                if not (live.exists() or live.is_symlink()):
+                    if retired.exists() or retired.is_symlink():
+                        # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
+                        os.rename(retired, live)
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                elif not (retired.exists() or retired.is_symlink()):
+                    # 回滚 retired→live 改名已完成、retired 已消失：补齐被
+                    # 中断的归属恢复。
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                # staging+live+retired 并存：换入未开始（如退役回收因占用
+                # 失败）：retired 归属仍有效，不逆映射，ledger 不变。
+                try:
+                    journal_path.unlink(missing_ok=True)
+                except OSError:
+                    pass  # 回滚未完成：journal 保留，下次恢复重试收敛
+                return
+            if retired.exists() or retired.is_symlink():
+                if live.exists() or live.is_symlink():
+                    # 换入已完成但注册表未提交：候选退回 staging 作残留，
+                    # 旧 venv 回到固定路径。
+                    os.rename(live, staging)
+                os.rename(retired, live)
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            elif live.exists() or live.is_symlink():
+                # 无任何旧副本（空环境原目录缺失）：失败候选同样退回
+                # staging 并撤销其整树归属，固定路径复位为事务前缺失状态；
+                # 只有状态收敛才清除 journal。
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(live, staging)
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            else:
+                return
+        except OSError:
+            return
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            pass  # 回滚未完成：journal 保留，下次恢复重试收敛
+
+    def _swap_fixed_candidate(
+        self, env_id: str, expected: dict, candidate: dict, latest: dict
+    ) -> dict:
+        """把已验证的候选 venv 换入固定路径 environments/<env_id>。
+
+        调用方持有目标 operation 锁与 store 锁，且注册表 staleness 已复核。
+        顺序：journal 落盘 → 陈旧 retired 回收 → 旧 venv 移入 .retired/<id>
+        → 候选从 .staging/<id> 换入固定路径 → 在最终位置复检探针 → 注册表
+        原子提交 → 清除 journal。venv 随目录迁移：入口按 ``python -m``
+        启动不依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；最终位置的
+        导入闭包复检兑底 relocation 破损。任一步失败：目录回滚、journal
+        清除、注册表保持旧记录（旧环境可用）；崩溃中断由 journal 在
+        _recover_pending_swap 中以注册表提交分界回滚收敛。
+        """
+        live = self.root / env_id
+        staging = self._staging_path(env_id)
+        retired = self._retired_path(env_id)
+        if not staging.is_dir() or self._is_reparse(staging):
+            raise ManagedEnvironmentError("swap candidate is missing or unsafe")
+        # 任何改名（含 journal 写入）前验证槽位容器与目标，防止目录被移出
+        # 存储。
+        self._guard_swap_slots(env_id)
+        journal = {
+            "schema_version": 1,
+            "environment_id": env_id,
+            "expected_record": expected,
+            "candidate_record": candidate,
+        }
+        _atomic_json(self._journal_path(env_id), journal)
+        try:
+            retired.parent.mkdir(parents=True, exist_ok=True)
+            managed_cleanup.reclaim_retired(self, env_id)
+            if live.exists() or live.is_symlink():
+                if self._is_reparse(live):
+                    raise ManagedEnvironmentError(
+                        "environment path contains reparse point"
+                    )
+                os.rename(live, retired)
+                # 只镜像既有归属：未知/未登记数据随目录移动但不获得
+                # 可删除归属（legacy 树可能含未知 siblings）。
+                managed_cleanup.retire_owned_paths(self, env_id, candidate["revision"])
+            os.rename(staging, live)
+            # 迁移环境首次获得固定路径归属；新布局环境刷新同路径归属。
+            managed_cleanup.remember_path(self, env_id, candidate["revision"], live)
+            # venv 随目录迁移后在最终固定路径复检：入口按 python -m 启动不
+            # 依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；导入闭包复检
+            # 兑底 relocation 破损（长路径 DLL load failed 等）。
+            relocated = self._probe(candidate)
+            if not relocated["healthy"]:
+                raise ManagedEnvironmentError(
+                    f"installed environment failed probe: {relocated['reason']}; "
+                    "check native dependencies and Portable path length",
+                    reason_code=relocated["reason"],
+                    next_action="repair_environment",
+                )
+        except BaseException:
+            try:
+                self._rollback_swap(env_id, candidate["revision"])
+            except ManagedEnvironmentError:
+                # 回滚无法安全进行（如槽位路径为 reparse）：保留 journal，
+                # 不遮蔽原始错误，交由恢复逻辑收敛。
+                pass
+            raise
+        latest["environments"][env_id] = candidate
+        if latest["active_id"] == env_id:
+            latest["active_revision"] += 1
+        # 注册表提交失败时不回滚目录：journal 保留，恢复逻辑按
+        # record==candidate 收尾、否则回滚，均可收敛。
+        _atomic_json(self._registry, latest)
+        try:
+            self._journal_path(env_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return relocated
+
+    def _recover_pending_swap(self, env_id: str) -> None:
+        """收敛上一次被中断的固定路径换入；调用方持有目标 operation 锁。"""
+        if not self._journal_path(env_id).exists():
+            return
+        with RuntimeStoreLock(self._lock):
+            if not self._journal_path(env_id).exists():
+                return
+            journal = self._load_swap_journal(env_id)
+            candidate = journal["candidate_record"]
+            data = self._read()
+            record = data["environments"].get(env_id)
+            if record is None:
+                # 环境已删除：目录归 cleanup ledger 处理，journal 无效；
+                # unlink 失败保留 journal 与保护，下次扫描重试。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
+            if record == candidate:
+                # 提交已完成，仅剩收尾；清除失败保留保护，下次重试。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
+            # 注册表是提交分界：未提交（无论注册表是否被外部修改）一律
+            # 保守回滚，不前滚候选；guard 先验证、数据保全，journal 仅由
+            # _rollback_swap 在收敛成功后清除，失败保留证据与保护，下次
+            # 扫描重试。
+            self._rollback_swap(env_id, candidate["revision"])
+            raise ManagedEnvironmentError(
+                "a previous environment install was rolled back; retry the operation"
+            )
+
+    def _recover_all_swaps(self) -> None:
+        """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。
+
+        恢复失败按环境隔离：换入/清理家族的 RuntimeInstallError（含
+        ManagedEnvironmentError，例如退役槽位存在未登记数据）保留 journal
+        与保护后跳过该环境，不阻塞其余环境的 list/清理；无关编程错误
+        （TypeError 等）照常上抛。
+        """
+        if not self._swap_journal_root.is_dir():
+            return
+        for journal in sorted(self._swap_journal_root.iterdir()):
+            try:
+                with self._target_operation(journal.stem):
+                    self._recover_pending_swap(journal.stem)
+            except RuntimeInstallError:
                 continue
-            stem = parts[2].split("-", 1)[0]
-            if stem.isdigit():
-                taken.add(int(stem))
-        revisions = self.root / env_id / "revisions"
-        if revisions.is_dir():
-            for child in revisions.iterdir():
-                stem = child.name.split("-", 1)[0]
-                if stem.isdigit():
-                    taken.add(int(stem))
-        revision = record["revision"] + 1
-        while revision in taken:
-            revision += 1
-        return revision
 
     def repair_empty(self, env_id: str) -> dict:
         """Recreate only an empty venv after a Portable path or Python ABI change."""
-        with self._target_operation(env_id), RuntimeStoreLock(self._lock):
-            data = self._read()
-            if environment_has_references(self._references, env_id):
-                raise ManagedEnvironmentError("environment has active jobs")
-            record = data["environments"].get(env_id)
-            if (
-                record is None
-                or record["kind"] != "venv"
-                or record["status"] != "empty"
-            ):
-                raise ManagedEnvironmentError(
-                    "only a managed empty environment can be repaired"
+        with self._target_operation(env_id):
+            self._recover_pending_swap(env_id)
+            with RuntimeStoreLock(self._lock):
+                data = self._read()
+                if environment_has_references(self._references, env_id):
+                    raise ManagedEnvironmentError("environment has active jobs")
+                record = data["environments"].get(env_id)
+                if (
+                    record is None
+                    or record["kind"] != "venv"
+                    or record["status"] != "empty"
+                ):
+                    raise ManagedEnvironmentError(
+                        "only a managed empty environment can be repaired"
+                    )
+                if self._probe(record)["healthy"]:
+                    return self._public_record(record, self._probe(record), data)
+                revision = record["revision"] + 1
+                staging = self._staging_path(env_id)
+                managed_cleanup.reclaim_slot(self, env_id, staging)
+                managed_cleanup.remember_path(self, env_id, revision, staging)
+                result = subprocess.run(
+                    [
+                        str(self._base_python()),
+                        "-I",
+                        "-m",
+                        "venv",
+                        "--copies",
+                        "--without-pip",
+                        str(staging),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 )
-            if self._probe(record)["healthy"]:
-                return self._public_record(record, self._probe(record), data)
-            revision = self._next_revision(env_id, record)
-            directory = str(revision)
-            root = self.root / env_id / "revisions" / directory
-            managed_cleanup.remember_path(self, env_id, revision, root)
-            result = subprocess.run(
-                [
-                    str(self._base_python()),
-                    "-I",
-                    "-m",
-                    "venv",
-                    "--copies",
-                    "--without-pip",
-                    str(root),
-                ],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode:
-                raise ManagedEnvironmentError("could not repair empty environment")
-            replacement = {
-                **{
-                    key: value
-                    for key, value in record.items()
-                    if key != "last_install_operation"
-                },
-                "revision": revision,
-                "path": str(Path(env_id) / "revisions" / directory),
-                "python_version": self.manifest.python.version,
-                "abi": self.manifest.python.abi,
-            }
-            probe = self._probe(replacement)
-            if not probe["healthy"]:
-                raise ManagedEnvironmentError(
-                    f"repaired environment failed probe: {probe['reason']}"
+                if result.returncode:
+                    raise ManagedEnvironmentError("could not repair empty environment")
+                replacement = {
+                    **{
+                        key: value
+                        for key, value in record.items()
+                        if key != "last_install_operation"
+                    },
+                    "revision": revision,
+                    "path": env_id,
+                    "python_version": self.manifest.python.version,
+                    "abi": self.manifest.python.abi,
+                }
+                # 探针在换入事务内于最终固定路径执行。
+                relocated = self._swap_fixed_candidate(
+                    env_id, record, replacement, data
                 )
-            data["environments"][env_id] = replacement
-            if data["active_id"] == env_id:
-                data["active_revision"] += 1
-            _atomic_json(self._registry, data)
-            return self._public_record(replacement, probe, data)
+                return self._public_record(replacement, relocated, data)
 
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
         if recipe == "rapidocr-cpu":
@@ -1886,6 +2166,7 @@ class ManagedEnvironmentStore:
             raise RuntimeInstallPlanStale("invalid environment plan")
         requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
         with self._target_operation(env_id):
+            self._recover_pending_swap(env_id)
             plan_path = self.paths.state_root / "environment-plans" / f"{env_id}.json"
             with RuntimeStoreLock(self._lock):
                 self._check_install_cancelled()
@@ -1944,13 +2225,14 @@ class ManagedEnvironmentStore:
                     for source in selection.effective_download_sources
                     if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
                 )
-                revision = self._next_revision(env_id, record)
-                directory = str(revision)
-                root = self.root / env_id / "revisions" / directory
-                # 推导已避开 ledger 与磁盘占用；守卫防越权并发写入。
-                if root.exists():
-                    raise ManagedEnvironmentError("candidate revision already exists")
-                managed_cleanup.remember_path(self, env_id, revision, root)
+                revision = record["revision"] + 1
+                staging = self._staging_path(env_id)
+                # 固定候选槽位被上次失败/中断的候选占用时按 ledger 记录
+                # 回收；退役槽位同步提前回收，存在未登记数据时在下载前
+                # fail closed。未知占用者不做推断归属。
+                managed_cleanup.reclaim_slot(self, env_id, staging)
+                managed_cleanup.reclaim_retired(self, env_id)
+                managed_cleanup.remember_path(self, env_id, revision, staging)
                 operation = {
                     "environment_revision": record["revision"],
                     "plan_id": plan_id,
@@ -1987,7 +2269,7 @@ class ManagedEnvironmentStore:
                         "venv",
                         "--copies",
                         "--without-pip",
-                        str(root),
+                        str(staging),
                     ],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -2002,7 +2284,7 @@ class ManagedEnvironmentStore:
                         next_action="check_directory_permissions",
                     )
                 self._check_install_cancelled()
-                self._install_runner(self._venv_python(root), scope, source.endpoint)
+                self._install_runner(self._venv_python(staging), scope, source.endpoint)
                 self._check_install_cancelled()
                 candidate = {
                     key: value
@@ -2012,7 +2294,7 @@ class ManagedEnvironmentStore:
                 candidate.update(
                     {
                         "revision": revision,
-                        "path": str(Path(env_id) / "revisions" / directory),
+                        "path": env_id,
                         "status": "installed",
                         "recipe": plan["recipe"],
                         # 安装时冻结的 scope 锁证据（旧记录缺省该键）。
@@ -2023,14 +2305,19 @@ class ManagedEnvironmentStore:
                     }
                 )
                 observer.set_phase("verify", "检查环境解释器与识别依赖；模型尚未下载")
-                probe = self._probe(candidate)
-                if not probe["healthy"]:
+                # 候选在 staging 槽位先行探针：发生在终态提交之前，可被
+                # 取消；换入后在最终固定路径再复检一次。
+                staged = self._probe(
+                    {**candidate, "path": str(Path(_SWAP_STAGING_ROOT) / env_id)}
+                )
+                if not staged["healthy"]:
                     raise ManagedEnvironmentError(
-                        f"installed environment failed probe: {probe['reason']}; "
+                        f"installed environment failed probe: {staged['reason']}; "
                         "check native dependencies and Portable path length",
-                        reason_code=probe["reason"],
+                        reason_code=staged["reason"],
                         next_action="repair_environment",
                     )
+                self._check_install_cancelled()
                 with RuntimeStoreLock(self._lock):
                     self._check_install_cancelled()
                     latest = self._read()
@@ -2050,10 +2337,9 @@ class ManagedEnvironmentStore:
                         )
                     if environment_has_references(self._references, env_id):
                         raise ManagedEnvironmentError("environment has active jobs")
-                    latest["environments"][env_id] = candidate
-                    if latest["active_id"] == env_id:
-                        latest["active_revision"] += 1
-                    _atomic_json(self._registry, latest)
+                    relocated = self._swap_fixed_candidate(
+                        env_id, record, candidate, latest
+                    )
                     self._install_terminal = True
             except Exception as error:
                 observer.finish(
@@ -2098,7 +2384,7 @@ class ManagedEnvironmentStore:
                     pass
                 raise
             observer.finish("succeeded", "依赖已验证并提交；模型与服务尚未启动")
-            return self._public_record(candidate, probe, latest)
+            return self._public_record(candidate, relocated, latest)
 
     def _install_scope(
         self, python: Path, scope: RuntimeInstallScope, endpoint: str
@@ -2233,32 +2519,33 @@ class ManagedEnvironmentStore:
                 self._switch_guarded = None
 
     def prepare_switch(self, env_id: str) -> dict:
-        target = (
+        with (
             nullcontext()
             if self._switch_guarded == env_id
             else self._target_operation(env_id)
-        )
-        with target, RuntimeStoreLock(self._lock):
-            data = self._read()
-            self._reject_referenced(data)
-            try:
-                record = data["environments"][env_id]
-            except KeyError as exc:
-                raise ManagedEnvironmentError("unknown environment") from exc
-            probe = self._probe(record)
-            if not probe["healthy"]:
-                raise ManagedEnvironmentError(
-                    f"target environment is unhealthy: {probe['reason']}"
-                )
-            return {
-                "environment_id": env_id,
-                "environment_revision": record["revision"],
-                "active_id": data["active_id"],
-                "active_revision": data["active_revision"],
-                "python": probe["python"],
-                "requires_supervisor": record["status"] == "installed",
-                "launch": self._launch(record, probe["python"]),
-            }
+        ):
+            self._recover_pending_swap(env_id)
+            with RuntimeStoreLock(self._lock):
+                data = self._read()
+                self._reject_referenced(data)
+                try:
+                    record = data["environments"][env_id]
+                except KeyError as exc:
+                    raise ManagedEnvironmentError("unknown environment") from exc
+                probe = self._probe(record)
+                if not probe["healthy"]:
+                    raise ManagedEnvironmentError(
+                        f"target environment is unhealthy: {probe['reason']}"
+                    )
+                return {
+                    "environment_id": env_id,
+                    "environment_revision": record["revision"],
+                    "active_id": data["active_id"],
+                    "active_revision": data["active_revision"],
+                    "python": probe["python"],
+                    "requires_supervisor": record["status"] == "installed",
+                    "launch": self._launch(record, probe["python"]),
+                }
 
     def commit_switch(
         self, prepared: dict, *, started_health: dict | None = None
@@ -2293,45 +2580,46 @@ class ManagedEnvironmentStore:
         with (
             nullcontext()
             if self._switch_guarded == prepared["environment_id"]
-            else self._target_operation(prepared["environment_id"]),
-            RuntimeStoreLock(self._lock),
+            else self._target_operation(prepared["environment_id"])
         ):
-            data = self._read()
-            self._reject_referenced(data)
-            env_id = prepared["environment_id"]
-            record = data["environments"].get(env_id)
-            if (
-                record is None
-                or record["revision"] != prepared["environment_revision"]
-                or data["active_revision"] != prepared["active_revision"]
-                or data["active_id"] != prepared["active_id"]
-            ):
-                raise ManagedEnvironmentError("environment switch is stale")
-            probe = self._probe(record)
-            if not probe["healthy"] or probe["python"] != prepared["python"]:
-                raise ManagedEnvironmentError(
-                    "target environment changed before switch"
-                )
-            if prepared["launch"] != self._launch(record, probe["python"]):
-                raise ManagedEnvironmentError("target launch changed before switch")
-            if record["status"] == "installed" and not self._verified_health(
-                started_health
-            ):
-                raise ManagedEnvironmentError("target Supervisor is not healthy")
-            if record["status"] == "empty" and started_health is not None:
-                raise ManagedEnvironmentError(
-                    "empty environment must not launch Supervisor"
-                )
-            if data["active_id"] != env_id:
-                data["active_id"] = env_id
-                data["active_revision"] += 1
-                _atomic_json(self._registry, data)
-            elif not self._registry.is_file():
-                _atomic_json(self._registry, data)
-            return {
-                "active_id": data["active_id"],
-                "active_revision": data["active_revision"],
-            }
+            self._recover_pending_swap(prepared["environment_id"])
+            with RuntimeStoreLock(self._lock):
+                data = self._read()
+                self._reject_referenced(data)
+                env_id = prepared["environment_id"]
+                record = data["environments"].get(env_id)
+                if (
+                    record is None
+                    or record["revision"] != prepared["environment_revision"]
+                    or data["active_revision"] != prepared["active_revision"]
+                    or data["active_id"] != prepared["active_id"]
+                ):
+                    raise ManagedEnvironmentError("environment switch is stale")
+                probe = self._probe(record)
+                if not probe["healthy"] or probe["python"] != prepared["python"]:
+                    raise ManagedEnvironmentError(
+                        "target environment changed before switch"
+                    )
+                if prepared["launch"] != self._launch(record, probe["python"]):
+                    raise ManagedEnvironmentError("target launch changed before switch")
+                if record["status"] == "installed" and not self._verified_health(
+                    started_health
+                ):
+                    raise ManagedEnvironmentError("target Supervisor is not healthy")
+                if record["status"] == "empty" and started_health is not None:
+                    raise ManagedEnvironmentError(
+                        "empty environment must not launch Supervisor"
+                    )
+                if data["active_id"] != env_id:
+                    data["active_id"] = env_id
+                    data["active_revision"] += 1
+                    _atomic_json(self._registry, data)
+                elif not self._registry.is_file():
+                    _atomic_json(self._registry, data)
+                return {
+                    "active_id": data["active_id"],
+                    "active_revision": data["active_revision"],
+                }
 
     @staticmethod
     def _verified_health(evidence: dict | None) -> bool:
@@ -2363,9 +2651,11 @@ class ManagedEnvironmentStore:
         )
 
     def preview_cleanup(self) -> dict:
+        self._recover_all_swaps()
         return managed_cleanup.preview_cleanup(self)
 
     def run_cleanup(self, plan_id: str, item_ids: list[str]) -> dict:
+        self._recover_all_swaps()
         return managed_cleanup.run_cleanup(self, plan_id, item_ids)
 
     def cancel_cleanup(self, acknowledge: Callable[[bool], None]) -> None:

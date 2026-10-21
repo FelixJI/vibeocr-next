@@ -10,6 +10,17 @@
         "python",
         "scripts/run_ci_command.py",
         "--label",
+        "release-plan",
+        "--timeout-seconds",
+        "60",
+        "--",
+        "python",
+        "scripts/check_release_plan.py"
+      ],
+      [
+        "python",
+        "scripts/run_ci_command.py",
+        "--label",
         "python-bootstrap",
         "--timeout-seconds",
         "300",

@@ -32,7 +32,9 @@ def test_only_owned_environment_paths_are_removed(tmp_path, monkeypatch):
     active = store.create("保留 CPU")
     store.commit_switch(store.prepare_switch(active["id"]))
     target = store.create("删除 GPU")
-    unknown = store.root / target["id"] / "revisions" / "999-unknown"
+    # 未知目录放在管理存储根下（不在任何已登记环境路径内）：
+    # 环境删除只删自己的固定路径，未知数据继续受保护。
+    unknown = store.root / "999-unknown"
     unknown.mkdir()
     (unknown / "private.txt").write_text("retain")
     assert (
@@ -371,10 +373,12 @@ def test_environment_and_residual_selection_does_not_double_count(
 
     store, _ = _manager(tmp_path, monkeypatch)
     target = store.create("重叠")
-    residual = store.root / target["id"] / "revisions" / "2-aaaaaaaaaaaaaaaa"
+    # 固定布局下的残留位于换入槽位（环境目录之外）：环境项覆盖
+    # 当前路径与全部已登记归属，重叠选择不得重复计数。
+    residual = store._staging_path(target["id"])
     with RuntimeStoreLock(store._lock):
         remember_path(store, target["id"], 2, residual)
-    residual.mkdir()
+    residual.mkdir(parents=True)
     (residual / "partial.bin").write_bytes(b"partial")
     plan = store.preview_cleanup()
     env = next(
