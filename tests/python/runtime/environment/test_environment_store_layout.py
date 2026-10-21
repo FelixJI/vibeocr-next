@@ -693,8 +693,8 @@ def test_rollback_ledger_restore_crash_reconverges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 崩溃窗口：回滚的 retired→live 改名完成、归属恢复（restore_owned_paths）
-    # 未执行时进程中断。重启后 list() 按注册表是否被外部修改分别回滚或
-    # 前滚，两者都必须移除/不迁移候选整树归属，未知 sibling 不获得归属。
+    # 未执行时进程中断。重启后 list() 按未提交一律回滚收敛，移除/不迁移
+    # 候选整树归属，未知 sibling 不获得归属。
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
@@ -759,8 +759,8 @@ def test_rollback_ledger_restore_crash_reconverges(
     assert str(Path(env_id) / "revisions" / "1") in ledger["paths"]
     assert (unknown / "private.txt").read_text(encoding="utf-8") == "retain"
 
-    # 分支二：注册表未变 → 恢复前滚完成安装；退役树只有镜像归属，
-    # 后续重装遇到未知 sibling fail closed 而不是删除。
+    # 分支二：注册表未变 → 同样以回滚收敛；随后重装遇到退役槽位未知
+    # sibling fail closed 而不是删除。
     os.rename(manager.root / env_id, retired)
     managed_cleanup.retire_owned_paths(manager, env_id, 1)
     os.rename(staging, manager.root / env_id)
@@ -792,15 +792,25 @@ def test_rollback_ledger_restore_crash_reconverges(
 
     listed = manager.list()
     environment = listed["environments"][0]
-    assert environment["status"] == "installed"
-    assert environment["revision"] == 2
-    assert environment["path"] == str(manager.root / env_id)
+    assert environment["status"] == "empty", "未提交一律回滚"
+    assert environment["revision"] == 1
     assert not manager._journal_path(env_id).exists()
     ledger = managed_cleanup.read_ledger(manager)
-    assert str(Path(".retired") / env_id) not in ledger["paths"]
-    assert str(Path(".retired") / env_id / "revisions" / "1") in ledger["paths"]
-    assert (retired / "revisions" / "999-unknown" / "private.txt").exists()
+    assert str(Path(env_id)) not in ledger["paths"], "候选整树归属撤销"
+    assert str(Path(env_id) / "revisions" / "1") in ledger["paths"]
+    assert staging.is_dir()
+    assert (unknown / "private.txt").read_text(encoding="utf-8") == "retain"
 
+    # 后续重装：退役槽位存在未知 sibling 时 fail closed，未知数据保留。
+    (retired / "revisions" / "1").mkdir(parents=True)
+    (retired / "revisions" / "1" / "pyvenv.cfg").write_text("", encoding="utf-8")
+    (retired / "revisions" / "999-unknown").mkdir()
+    (retired / "revisions" / "999-unknown" / "private.txt").write_text(
+        "retain", encoding="utf-8"
+    )
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, env_id, 1, staging)
+        managed_cleanup.remember_path(manager, env_id, 1, retired / "revisions" / "1")
     plan = manager.preview_install(env_id, "rapidocr-cpu", ("pypi",))
     with pytest.raises(RuntimeInstallError, match="退役槽位包含未记录数据"):
         manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("pypi",))
@@ -921,10 +931,11 @@ def test_rollback_crash_without_mirrors_revokes_candidate_root(
 def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 空环境原目录缺失、候选已换入后最终探针失败：无任何旧副本可复位时，
-    # 回滚也必须把失败候选退回 staging、撤销候选整树归属，状态收敛后才
-    # 清 journal（旧实现在此直接清 journal，失败候选留在固定路径）。
-    # 纯状态机构造，避免无必要的真实 venv 改名。
+    # 无旧副本场景：换入改名后崩溃（live=候选 stand-in、journal 在盘），
+    # 恢复回滚把失败候选退回 staging 并撤销整树归属，收敛后清 journal
+    # （旧实现在此直接清 journal，失败候选留在固定路径）；重试安装正常
+    # 成功。纯状态机构造，以 candidate.txt 标记候选 stand-in（真实 venv
+    # 不含该文件）。
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
@@ -932,16 +943,14 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
         install=lambda _python, _scope, _endpoint: None,
     )
     original = manager._probe
-    failures: list[int] = []
 
     def probe(record: dict) -> dict:
         result = original(record)
         if (
             record["status"] == "installed"
             and record["path"] == record["id"]
-            and not failures
+            and (manager.root / record["id"] / "candidate.txt").exists()
         ):
-            failures.append(record["revision"])
             return {**result, "healthy": False, "reason": "engine_import_failed"}
         return result
 
@@ -950,7 +959,7 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
     live = manager.root / env_id
     staging = manager._staging_path(env_id)
     live.mkdir(parents=True)
-    (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    (live / "candidate.txt").write_text("candidate", encoding="utf-8")
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         expected = {
@@ -965,7 +974,7 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
         }
         data["environments"][env_id] = expected
         _atomic_json(manager._registry, data)
-        # 换入完成现场：staging 与固定路径归属均已登记，旧副本不存在。
+        # 真实安装先登记 staging，换入后登记固定路径。
         managed_cleanup.remember_path(manager, env_id, 2, staging)
         managed_cleanup.remember_path(manager, env_id, 2, live)
         candidate = {
@@ -1004,10 +1013,9 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
 def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 恢复中 reclaim_retired 对未登记数据抛 RuntimeInstallError（非
-    # ManagedEnvironmentError）：不能阻塞 list/preview_cleanup/run_cleanup；
-    # 失败按环境隔离，journal 保留且该环境全部路径继续受保护（旧实现在
-    # 此让整个 list 抛错）。
+    # 恢复失败（如 journal 结构非法拋 RuntimeInstallError 家族）：不能
+    # 阻塞 list/preview_cleanup/run_cleanup；失败按环境隔离，journal 保留
+    # 且该环境全部路径继续受保护（旧实现在此让整个 list 抛错）。
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
@@ -1016,14 +1024,8 @@ def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
     )
     env_id = "未知退役"
     live = manager.root / env_id
-    staging = manager._staging_path(env_id)
-    retired = manager._retired_path(env_id)
     live.mkdir(parents=True)
     (live / "pyvenv.cfg").write_text("", encoding="utf-8")
-    staging.mkdir(parents=True)
-    (staging / "candidate.txt").write_text("candidate", encoding="utf-8")
-    retired.mkdir(parents=True)
-    (retired / "keep.txt").write_text("retain", encoding="utf-8")
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         expected = {
@@ -1038,19 +1040,15 @@ def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
         }
         data["environments"][env_id] = expected
         _atomic_json(manager._registry, data)
-        candidate = {
-            **expected,
-            "revision": 2,
-            "status": "installed",
-            "recipe": "rapidocr-cpu",
-        }
+        # 结构非法的 journal（候选 revision 不满足 expected+1）：恢复
+        # fail closed，不得阻塞其余环境。
         _atomic_json(
             manager._journal_path(env_id),
             {
                 "schema_version": 1,
                 "environment_id": env_id,
                 "expected_record": expected,
-                "candidate_record": candidate,
+                "candidate_record": expected,
             },
         )
 
@@ -1067,7 +1065,7 @@ def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
     # run_cleanup 因恢复异常报错。
     with pytest.raises(RuntimeInstallError, match="protected resources"):
         manager.run_cleanup(preview["plan_id"], [f"environment:{env_id}"])
-    assert (retired / "keep.txt").exists()
+    assert (live / "pyvenv.cfg").exists(), "环境数据不受影响"
 
 
 def test_registry_non_string_paths_fail_structured(
@@ -1269,7 +1267,7 @@ def test_journal_unlink_failure_keeps_protection_and_converges(
     assert not manager._journal_path(env_id).exists()
 
 
-def test_post_rename_crash_recovery_registers_candidate_and_allows_reinstalls(
+def test_post_rename_crash_recovery_rolls_back_and_allows_reinstalls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # rename(staging→live) 后、remember_path(live) 前崩溃：重启恢复提交
@@ -1283,8 +1281,13 @@ def test_post_rename_crash_recovery_registers_candidate_and_allows_reinstalls(
     )
     env_id = "补写归属"
     live = manager.root / env_id
+    staging = manager._staging_path(env_id)
     live.mkdir(parents=True)
     (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    # 真实安装先登记 staging 归属再构建；现场需包含该登记，回滚后候选
+    # 残留仍可被下次安装回收。
+    with RuntimeStoreLock(manager._lock):
+        managed_cleanup.remember_path(manager, env_id, 2, staging)
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         expected = {
@@ -1316,13 +1319,16 @@ def test_post_rename_crash_recovery_registers_candidate_and_allows_reinstalls(
         )
 
     listed = manager.list()
-    assert listed["environments"][0]["status"] == "installed"
+    assert listed["environments"][0]["status"] == "empty", "未提交一律回滚"
+    assert listed["environments"][0]["revision"] == 1
     assert not manager._journal_path(env_id).exists()
     ledger = managed_cleanup.read_ledger(manager)
-    assert ledger["paths"][str(Path(env_id))]["revision"] == 2, "候选归属已补写"
+    assert str(Path(env_id)) not in ledger["paths"], "候选归属已撤销"
+    assert staging.is_dir(), "候选退回 staging 槽位"
+    assert not live.exists(), "固定路径复位为事务前缺失状态"
 
-    # 连续两次重装均可回收费退役槽位，不再卡未登记数据。
-    for index, source in enumerate(("tuna-pypi", "pypi"), start=3):
+    # 无旧副本场景重试安装：槽位回收复用后正常成功，连续重装不卡。
+    for index, source in enumerate(("tuna-pypi", "pypi"), start=2):
         plan = manager.preview_install(env_id, "rapidocr-cpu", (source,))
         installed = manager.install(plan["plan_id"], env_id, "rapidocr-cpu", (source,))
         assert installed["revision"] == index
@@ -1552,6 +1558,388 @@ def test_reclaim_retired_preserves_unknown_empty_siblings(
     assert not retired.exists()
 
 
+def test_rollback_journal_unlink_failure_preserves_error_and_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 回滚完成但 journal 删除失败：原始探针错误不得被 unlink 的
+    # PermissionError 覆盖（旧实现），回滚意图持久化，下次 list 收敛后
+    # 不重新提交失败候选。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    original = manager._probe
+
+    def probe(record: dict) -> dict:
+        result = original(record)
+        if record["status"] == "installed" and record["path"] == record["id"]:
+            return {**result, "healthy": False, "reason": "engine_import_failed"}
+        return result
+
+    monkeypatch.setattr(manager, "_probe", probe)
+    env_id = "回滚意图"
+    item = manager.create(env_id)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    original_unlink = Path.unlink
+
+    def busy_unlink(self: Path, missing_ok: bool = False) -> None:
+        if Path(self) == manager._journal_path(env_id):
+            raise PermissionError("journal in use")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", busy_unlink)
+    try:
+        with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+            manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    finally:
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+    assert manager._journal_path(env_id).is_file(), "journal 删除失败后仍在盘"
+    assert (manager.root / env_id).is_dir(), "旧 venv 已复位"
+
+    listed = manager.list()
+    environment = listed["environments"][0]
+    assert environment["status"] == "empty", "失败候选不得被重新提交"
+    assert environment["revision"] == 1
+    assert not manager._journal_path(env_id).exists(), "解除占用后收敛清除"
+    assert environment["last_install_failure"]["reason_code"] == "engine_import_failed"
+    assert item["id"] == env_id
+
+
+def test_pending_delete_occupies_id_for_recreate_and_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 待完成删除仍占用 id 与槽位：同 id 重新创建/槽位回收不得破坏 ledger
+    # 校验（旧实现 id 复用 + reclaim 丢弃归属后 read_ledger 直接失效）。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "!id"
+    manager.create(env_id)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    retired = manager._retired_path(env_id)
+
+    original_rmtree = shutil.rmtree
+
+    def fail_retired(path, *args, **kwargs):
+        if Path(path) == retired:
+            raise PermissionError("retired in use")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_retired)
+    with pytest.raises(RuntimeInstallError):
+        manager.delete(env_id)
+    monkeypatch.setattr(shutil, "rmtree", original_rmtree)
+    assert env_id not in manager._read()["environments"]
+    ledger = managed_cleanup.read_ledger(manager)
+    assert env_id in ledger["pending"]
+
+    # 重新创建同名环境：自动 id 入口必须跳过被 pending 删除占用的 id。
+    recreated = manager.create(env_id)
+    assert recreated["id"] != env_id, "待删除 id 不得被复用"
+    plan = manager.preview_install(recreated["id"], "rapidocr-cpu", ("tuna-pypi",))
+    manager.install(plan["plan_id"], recreated["id"], "rapidocr-cpu", ("tuna-pypi",))
+    assert managed_cleanup.read_ledger(manager)["schema_version"] == 1
+    assert manager.list()["environments"][0]["id"] == recreated["id"]
+
+
+def test_delete_environment_recycles_owned_empty_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 删除 legacy 迁移环境：已登记叶证明的空父容器应被回收（旧实现遗留
+    # <id>/revisions 与 <id> 空壳）；未知空 sibling 必须保留。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+
+    def legacy(env_id: str, unknown: bool) -> None:
+        root = manager.root / env_id / "revisions" / "1"
+        root.mkdir(parents=True)
+        (root / "pyvenv.cfg").write_text("", encoding="utf-8")
+        if unknown:
+            empty = manager.root / env_id / "revisions" / "999-unknown"
+            empty.mkdir()
+        with RuntimeStoreLock(manager._lock):
+            data = manager._read()
+            data["environments"][env_id] = {
+                "id": env_id,
+                "name": env_id,
+                "revision": 1,
+                "kind": "venv",
+                "path": str(Path(env_id) / "revisions" / "1"),
+                "status": "empty",
+                "python_version": manager.manifest.python.version,
+                "abi": manager.manifest.python.abi,
+            }
+            _atomic_json(manager._registry, data)
+            managed_cleanup.remember_path(
+                manager, env_id, 1, manager.root / env_id / "revisions" / "1"
+            )
+
+    clean_id = "g" * 8 + "8adbc0de" + "0" * 16
+    legacy(clean_id, unknown=False)
+    manager.delete(clean_id)
+    assert not (manager.root / clean_id).exists(), "全归属环境目录应被完整回收"
+
+    sibling_id = "h" * 8 + "8adbc0de" + "0" * 16
+    legacy(sibling_id, unknown=True)
+    manager.delete(sibling_id)
+    assert (manager.root / sibling_id / "revisions" / "999-unknown").is_dir(), (
+        "未知空 sibling 保留"
+    )
+    assert (manager.root / sibling_id / "revisions").is_dir()
+
+
+def test_scan_treats_slot_container_regular_file_as_protected_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # .staging 为普通文件时预览不得对文件 iterdir 抛错，应作为受保护
+    # unknown 返回（旧实现 NotADirectoryError）。
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager.root.mkdir(parents=True, exist_ok=True)
+    (manager.root / ".staging").write_text("not a directory", encoding="utf-8")
+    preview = manager.preview_cleanup()
+    item = next(
+        item
+        for item in preview["items"]
+        if item["category"] == "unknown"
+        and any(path.endswith(".staging") for path in item["paths"])
+    )
+    assert not item["can_clean"]
+    assert (manager.root / ".staging").is_file()
+
+
+def test_recovery_rollback_rename_failure_keeps_journal_and_protection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 回滚改名（retired→live）被占用失败：恢复不得删除未完成回滚的
+    # journal 证据（旧实现在回滚后无条件 unlink），退役槽位里的唯一旧
+    # 副本继续受保护；解除占用后收敛。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "回滚占用"
+    staging = manager._staging_path(env_id)
+    retired = manager._retired_path(env_id)
+    staging.mkdir(parents=True)
+    (staging / "candidate.txt").write_text("candidate", encoding="utf-8")
+    retired.mkdir(parents=True)
+    (retired / "old.marker").write_text("only-copy", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": env_id,
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["environments"][env_id] = expected
+        _atomic_json(manager._registry, data)
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+    handle = (retired / "old.marker").open("rb")
+    try:
+        preview = manager.preview_cleanup()
+        assert manager._journal_path(env_id).is_file(), "journal 证据保留"
+        env_item = next(
+            item for item in preview["items"] if item["id"] == f"environment:{env_id}"
+        )
+        assert not env_item["can_clean"]
+        assert (retired / "old.marker").exists(), "唯一旧副本不受影响"
+    finally:
+        handle.close()
+    manager.list()
+    assert not manager._journal_path(env_id).exists(), "解除后收敛清除"
+    assert (manager.root / env_id).is_dir(), "旧 venv 复位固定路径"
+
+
+def test_failed_install_journal_occupancy_never_recommits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # journal 句柄被占用：回滚后的 unlink 被阻断，回滚仍完成；解除后
+    # 即使探针恢复健康，恢复也不得把失败候选重新提交（旧实现在
+    # record==expected 下前滚提交了失败候选）。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "占用提交"
+    item = manager.create(env_id)
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][env_id]["python_version"] = "3.13.0"
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    original = manager._probe
+    live_calls: list[str] = []
+
+    def probe(record: dict) -> dict:
+        result = original(record)
+        if record["path"] == record["id"]:
+            live_calls.append(record["revision"])
+            if len(live_calls) == 2:
+                return {
+                    **result,
+                    "healthy": False,
+                    "reason": "engine_import_failed",
+                }
+        return result
+
+    monkeypatch.setattr(manager, "_probe", probe)
+    journal_file = manager._journal_path(env_id)
+    handle_holder: list = []
+    original_unlink = Path.unlink
+
+    def busy_unlink(self: Path, missing_ok: bool = False) -> None:
+        if Path(self) == journal_file:
+            # 首次尝试清除 journal 时才占用句柄：journal 写入已完成，
+            # 后续 unlink/替换均被阻断。
+            if not handle_holder:
+                try:
+                    handle_holder.append(journal_file.open("rb"))
+                except OSError:
+                    pass
+            raise PermissionError("journal in use")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", busy_unlink)
+    try:
+        with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+            manager.repair_empty(env_id)
+    finally:
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+        for entry in handle_holder:
+            entry.close()
+    assert journal_file.is_file(), "回滚后 journal 仍在盘"
+    listed = manager.list()
+    environment = listed["environments"][0]
+    assert environment["revision"] == 1, "失败候选不得被重新提交"
+    assert environment["status"] == "empty"
+    assert not journal_file.exists(), "解除占用后收敛清除"
+    assert item["id"] == env_id
+
+
+def test_delete_prune_keeps_shared_slot_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 环境删除的空父回收不得删除公共 .staging/.retired 容器（旧实现会
+    # rmdir 空容器）；随后新环境创建/安装/换入仍完整可用。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "i" * 8 + "8adbc0de" + "0" * 16
+    legacy_root = manager.root / env_id / "revisions" / "1"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][env_id] = {
+            "id": env_id,
+            "name": env_id,
+            "revision": 1,
+            "kind": "venv",
+            "path": str(Path(env_id) / "revisions" / "1"),
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        _atomic_json(manager._registry, data)
+        managed_cleanup.remember_path(manager, env_id, 1, legacy_root)
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    manager.delete(env_id)
+    assert not (manager.root / env_id).exists(), "环境目录完整回收"
+    assert (manager.root / ".retired").is_dir(), "公共槽位容器不得被删除"
+
+    fresh = manager.create("新环境")
+    plan = manager.preview_install(fresh["id"], "rapidocr-cpu", ("tuna-pypi",))
+    installed = manager.install(
+        plan["plan_id"], fresh["id"], "rapidocr-cpu", ("tuna-pypi",)
+    )
+    assert installed["status"] == "installed"
+    assert installed["path"] == str(manager.root / fresh["id"])
+
+
+def test_delete_empty_parent_occupied_keeps_evidence_then_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 删除收尾的空父 rmdir 被占用：pending/paths 证据保留，解除后重删
+    # 即完成回收。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "j" * 8 + "8adbc0de" + "0" * 16
+    legacy_root = manager.root / env_id / "revisions" / "1"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][env_id] = {
+            "id": env_id,
+            "name": env_id,
+            "revision": 1,
+            "kind": "venv",
+            "path": str(Path(env_id) / "revisions" / "1"),
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        _atomic_json(manager._registry, data)
+        managed_cleanup.remember_path(manager, env_id, 1, legacy_root)
+    revisions = manager.root / env_id / "revisions"
+    original_rmdir = Path.rmdir
+
+    def busy_rmdir(self: Path) -> None:
+        if Path(self) == revisions:
+            raise PermissionError("parent in use")
+        return original_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", busy_rmdir)
+    with pytest.raises(RuntimeInstallError):
+        manager.delete(env_id)
+    ledger = managed_cleanup.read_ledger(manager)
+    assert env_id in ledger["pending"], "证据保留"
+    monkeypatch.setattr(Path, "rmdir", original_rmdir)
+    manager.delete(env_id)
+    assert not (manager.root / env_id).exists()
+    assert env_id not in managed_cleanup.read_ledger(manager)["pending"]
+
+
 def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1615,8 +2003,8 @@ def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
                 "candidate_record": candidate,
             },
         )
-    # 占住候选内部句柄：恢复的 staging→live 改名失败，journal 保留。
-    lock_file = staging / "pyvenv.cfg"
+    # 占住旧副本内部句柄：恢复的 retired→live 回滚改名失败，journal 保留。
+    lock_file = retired / "Scripts" / "python.exe"
     handle = lock_file.open("rb")
     try:
         preview = manager.preview_cleanup()
@@ -1636,20 +2024,22 @@ def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
         assert (manager._venv_python(retired)).is_file()
     finally:
         handle.close()
-    # 阻塞解除后恢复前滚完成，journal 清除；旧预览因冻结证据变化失效。
+    # 阻塞解除后回滚收敛，journal 清除；旧预览因冻结证据变化失效。
     listed = manager.list()
     assert not manager._journal_path(env_id).exists()
     assert listed["environments"][0]["status"] == "installed"
-    assert listed["environments"][0]["revision"] == 3
+    assert listed["environments"][0]["revision"] == 2
+    assert (manager._venv_python(manager.root / env_id)).is_file(), "旧副本复位"
     with pytest.raises(RuntimeInstallPlanStale, match="preview again"):
         manager.run_cleanup(preview["plan_id"], [f"environment:{env_id}"])
 
 
-def test_interrupted_fixed_path_swap_recovers_forward(
+def test_interrupted_fixed_path_swap_rolls_back_uncommitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 崩溃发生在换入改名完成之后、注册表提交之前：journal 落盘，下一次
-    # list() 前滚完成提交，环境落在固定路径且 journal 清除。
+    # 崩溃发生在换入改名完成之后、注册表提交之前：未提交一律保守回滚，
+    # 旧 venv 复位固定路径、候选退回 staging、journal 清除（旧实现在此
+    # 前滚提交候选）。
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
@@ -1691,11 +2081,12 @@ def test_interrupted_fixed_path_swap_recovers_forward(
 
     listed = manager.list()
     environment = listed["environments"][0]
-    assert environment["status"] == "installed"
-    assert environment["revision"] == 2
+    assert environment["status"] == "empty", "未提交回滚，不重新提交候选"
+    assert environment["revision"] == 1
     assert environment["path"] == str(manager.root / item["id"])
     assert not manager._journal_path(item["id"]).exists()
-    assert (manager.root / ".retired" / item["id"]).is_dir()
+    assert manager._venv_python(manager.root / item["id"]).is_file(), "旧 venv 复位"
+    assert (manager._staging_path(item["id"])).is_dir(), "候选退回 staging"
 
 
 def test_interrupted_fixed_path_swap_rolls_back_on_registry_divergence(

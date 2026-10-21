@@ -69,6 +69,44 @@ def _owned_path(store: ManagedEnvironmentStore, relative: str, owner: dict) -> P
     )
 
 
+def _pending_paths(ledger: dict) -> set[str]:
+    """待完成删除仍引用的相对路径集合。"""
+    return {
+        relative
+        for pending in ledger["pending"].values()
+        for relative in pending["paths"]
+    }
+
+
+def _prune_owned_empty_parents(store: ManagedEnvironmentStore, keys) -> None:
+    """按已登记叶路径回收可证明归属的空父容器。
+
+    仅清理 keys 的祖先目录且仅在为空时 rmdir：未知内容（含空 sibling）
+    的容器保留；公共槽位容器 .staging/.retired 不属于任何单环境，永不
+    清理。rmdir/reparse 失败上抛，保留归属证据供重试。
+    """
+    from vibeocr.runtime.environments.managed_environments import (
+        _SWAP_RETIRED_ROOT,
+        _SWAP_STAGING_ROOT,
+    )
+
+    ancestors: set[Path] = set()
+    for key in keys:
+        parts = Path(key).parts
+        for depth in range(1, len(parts)):
+            ancestors.add(store.root.joinpath(*parts[:depth]))
+    for directory in sorted(ancestors, key=lambda path: len(path.parts), reverse=True):
+        if len(directory.relative_to(store.root).parts) == 1 and directory.name in (
+            _SWAP_STAGING_ROOT,
+            _SWAP_RETIRED_ROOT,
+        ):
+            continue
+        if store._is_reparse(directory):
+            raise RuntimeInstallError("路径包含符号链接或 reparse point，受保护")
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+
+
 def reclaim_slot(store: ManagedEnvironmentStore, env_id: str, path: Path) -> None:
     """安装事务复用固定换入槽位（.staging/.retired 下每环境一个）。
 
@@ -79,6 +117,10 @@ def reclaim_slot(store: ManagedEnvironmentStore, env_id: str, path: Path) -> Non
     relative = str(path.relative_to(store.root))
     ledger = read_ledger(store)
     owner = ledger["paths"].get(relative)
+    if relative in _pending_paths(ledger):
+        # 待完成删除仍引用该槽位：回收会道成 pending 孤儿引用并破坏
+        # ledger 校验，fail closed。
+        raise RuntimeInstallError("候选槽位仍被待完成删除引用；请先完成空间清理")
     if owner is None:
         if path.exists() or path.is_symlink():
             raise RuntimeInstallError(
@@ -206,8 +248,11 @@ def reclaim_retired(store: ManagedEnvironmentStore, env_id: str) -> None:
         return
     relative = str(retired.relative_to(store.root))
     ledger = read_ledger(store)
+    pending_paths = _pending_paths(ledger)
     blanket = ledger["paths"].get(relative)
     if blanket is not None:
+        if relative in pending_paths:
+            raise RuntimeInstallError("退役槽位仍被待完成删除引用；请先完成空间清理")
         _entries, unsafe = _tree(store, retired)
         if unsafe:
             raise RuntimeInstallError(unsafe)
@@ -232,25 +277,15 @@ def reclaim_retired(store: ManagedEnvironmentStore, env_id: str) -> None:
     # 先删已登记子树；任何失败都不落 ledger，保留推导父容器归属的子路径
     # 证据，解除占用后重入按磁盘现状继续。
     for key in sorted(owned, key=len, reverse=True):
+        if key in pending_paths:
+            raise RuntimeInstallError("退役槽位仍被待完成删除引用；请先完成空间清理")
         child = store.root / key
         if child.exists() or child.is_symlink():
             _entries, unsafe = _tree(store, child)
             if unsafe:
                 raise RuntimeInstallError(unsafe)
             shutil.rmtree(child)
-    # 只回收已登记路径可证明归属的空父容器；含未知内容（含空 sibling）
-    # 的容器保留，由末尾统一 fail closed。空容器 rmdir 因占用失败时同样
-    # 保留证据并阻止复用。
-    ancestors: set[Path] = set()
-    for key in owned:
-        parts = Path(key).parts
-        for depth in range(len(retired_parts) + 1, len(parts)):
-            ancestors.add(store.root.joinpath(*parts[:depth]))
-    for directory in sorted(ancestors, key=lambda path: len(path.parts), reverse=True):
-        if store._is_reparse(directory):
-            raise RuntimeInstallError("路径包含符号链接或 reparse point，受保护")
-        if directory.is_dir() and not any(directory.iterdir()):
-            directory.rmdir()
+    _prune_owned_empty_parents(store, owned)
     if retired.exists() or retired.is_symlink():
         if any(retired.iterdir()):
             raise RuntimeInstallError(
@@ -540,6 +575,20 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
                 )
                 continue
             if parent.name in (_SWAP_STAGING_ROOT, _SWAP_RETIRED_ROOT):
+                if not parent.is_dir():
+                    # 槽位容器是普通文件：作为受保护 unknown 展示，不得
+                    # 对文件 iterdir。
+                    items.append(
+                        _item(
+                            store,
+                            f"unknown:{parent.name}",
+                            "unknown",
+                            parent.name,
+                            [parent],
+                            "未知或外部文件受保护",
+                        )
+                    )
+                    continue
                 # 换入槽位容器：逐子目录展示，未记录的占用者不授予所有权。
                 for path in parent.iterdir():
                     if path not in claimed:
@@ -919,9 +968,15 @@ def run_cleanup(
                 continue
             paths = [store.paths.store_root / relative for relative in item["paths"]]
             removed = 0
+            deleted_keys: list[str] = []
+            deferred = False
             try:
                 if item["category"] == "environment" or item_id.startswith("pending:"):
                     paths = _unregister(store, item["environment_id"], data, ledger)
+                    deleted_keys = [str(path.relative_to(store.root)) for path in paths]
+                    # 环境删除收尾：延迟落 ledger，先证明空父容器收尾成功，
+                    # 失败保留 pending/paths 归属证据供重试。
+                    deferred = True
                 for path in paths:
                     before, unsafe = _tree(store, path)
                     if unsafe:
@@ -944,13 +999,22 @@ def run_cleanup(
                         )
                     if path.is_relative_to(store.root):
                         relative = str(path.relative_to(store.root))
+                        if not deferred:
+                            ledger["paths"].pop(relative, None)
+                            _atomic_json(_ledger_path(store), ledger)
+                if deferred:
+                    # 先回收已登记叶证明的空父容器（失败保留证据并上抛，
+                    # 重入按磁盘现状继续）；成功后才一次性提交 ledger 与
+                    # pending 移除。未知非空/未知空 sibling 保留。
+                    _prune_owned_empty_parents(store, deleted_keys)
+                    for relative in deleted_keys:
                         ledger["paths"].pop(relative, None)
                         pending = ledger["pending"].get(item["environment_id"])
                         if pending and relative in pending["paths"]:
                             pending["paths"].remove(relative)
                             if not pending["paths"]:
                                 del ledger["pending"][item["environment_id"]]
-                        _atomic_json(_ledger_path(store), ledger)
+                    _atomic_json(_ledger_path(store), ledger)
                 results.append(
                     {
                         "id": item_id,
@@ -994,6 +1058,19 @@ def run_cleanup(
 
 def delete_environment(store: ManagedEnvironmentStore, env_id: str) -> None:
     preview = preview_cleanup(store)
-    result = run_cleanup(store, preview["plan_id"], [f"environment:{env_id}"])
+    items = {item["id"]: item for item in preview["items"]}
+    # 与预览同源选择：优先注册表环境项，首轮失败后只剩待完成删除项时
+    # 续用 pending 项；保持 can_clean 门禁，不绕过保护。
+    chosen = next(
+        (
+            items[candidate_id]
+            for candidate_id in (f"environment:{env_id}", f"pending:{env_id}")
+            if candidate_id in items and items[candidate_id]["can_clean"]
+        ),
+        None,
+    )
+    if chosen is None:
+        raise RuntimeInstallError("环境暂不可删除；请先完成空间清理或解除占用")
+    result = run_cleanup(store, preview["plan_id"], [chosen["id"]])
     if result["items"][0]["state"] != "deleted":
         raise RuntimeInstallError(result["items"][0]["detail"])

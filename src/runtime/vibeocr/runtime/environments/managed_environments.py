@@ -1448,6 +1448,12 @@ class ManagedEnvironmentStore:
             base = f"environment-{base}"
         base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
         taken = {record_id.casefold() for record_id in data["environments"]}
+        # 待完成删除仍占用 id：目录已删但 pending 引用仍在，复用会破坏
+        # ledger 校验，一律跳过。
+        taken.update(
+            pending_id.casefold()
+            for pending_id in managed_cleanup.read_ledger(self)["pending"]
+        )
         candidate = base
         suffix = 1
         while (
@@ -1614,6 +1620,7 @@ class ManagedEnvironmentStore:
         live = self.root / env_id
         staging = self._staging_path(env_id)
         retired = self._retired_path(env_id)
+        journal_path = self._journal_path(env_id)
         try:
             self._guard_swap_slots(env_id)
             if staging.exists() or staging.is_symlink():
@@ -1634,7 +1641,10 @@ class ManagedEnvironmentStore:
                     )
                 # staging+live+retired 并存：换入未开始（如退役回收因占用
                 # 失败）：retired 归属仍有效，不逆映射，ledger 不变。
-                self._journal_path(env_id).unlink(missing_ok=True)
+                try:
+                    journal_path.unlink(missing_ok=True)
+                except OSError:
+                    pass  # 回滚未完成：journal 保留，下次恢复重试收敛
                 return
             if retired.exists() or retired.is_symlink():
                 if live.exists() or live.is_symlink():
@@ -1654,7 +1664,10 @@ class ManagedEnvironmentStore:
                 return
         except OSError:
             return
-        self._journal_path(env_id).unlink(missing_ok=True)
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            pass  # 回滚未完成：journal 保留，下次恢复重试收敛
 
     def _swap_fixed_candidate(
         self, env_id: str, expected: dict, candidate: dict, latest: dict
@@ -1668,7 +1681,7 @@ class ManagedEnvironmentStore:
         启动不依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；最终位置的
         导入闭包复检兑底 relocation 破损。任一步失败：目录回滚、journal
         清除、注册表保持旧记录（旧环境可用）；崩溃中断由 journal 在
-        _recover_pending_swap 中前滚或回滚收敛。
+        _recover_pending_swap 中以注册表提交分界回滚收敛。
         """
         live = self.root / env_id
         staging = self._staging_path(env_id)
@@ -1723,7 +1736,7 @@ class ManagedEnvironmentStore:
         if latest["active_id"] == env_id:
             latest["active_revision"] += 1
         # 注册表提交失败时不回滚目录：journal 保留，恢复逻辑按
-        # record==expected 前滚或 record==candidate 清理，均可收敛。
+        # record==candidate 收尾、否则回滚，均可收敛。
         _atomic_json(self._registry, latest)
         try:
             self._journal_path(env_id).unlink(missing_ok=True)
@@ -1739,11 +1752,7 @@ class ManagedEnvironmentStore:
             if not self._journal_path(env_id).exists():
                 return
             journal = self._load_swap_journal(env_id)
-            expected = journal["expected_record"]
             candidate = journal["candidate_record"]
-            live = self.root / env_id
-            staging = self._staging_path(env_id)
-            retired = self._retired_path(env_id)
             data = self._read()
             record = data["environments"].get(env_id)
             if record is None:
@@ -1755,92 +1764,20 @@ class ManagedEnvironmentStore:
                     pass
                 return
             if record == candidate:
-                # 提交已完成，仅剩清理 journal；unlink 失败同样保留保护。
+                # 提交已完成，仅剩收尾；清除失败保留保护，下次重试。
                 try:
                     self._journal_path(env_id).unlink(missing_ok=True)
                 except OSError:
                     pass
                 return
-            if record != expected:
-                # 注册表被外部修改：回滚目录，保留注册表现状。
-                self._rollback_swap(env_id, candidate["revision"])
-                raise ManagedEnvironmentError(
-                    "a previous environment install was interrupted and rolled "
-                    "back; retry the operation"
-                )
-            # journal 只在候选探针通过后写入：换入改名未完成时继续前滚。
-            try:
-                self._guard_swap_slots(env_id)
-                if staging.exists() or staging.is_symlink():
-                    if self._is_reparse(staging):
-                        raise ManagedEnvironmentError(
-                            "swap candidate contains reparse point"
-                        )
-                    if live.exists() or live.is_symlink():
-                        # 换入未开始（live 仍是旧 venv）：retired 若存在是更早
-                        # 换入的陈旧残留，先回收再让位。
-                        managed_cleanup.reclaim_retired(self, env_id)
-                        if self._is_reparse(live):
-                            raise ManagedEnvironmentError(
-                                "environment path contains reparse point"
-                            )
-                        retired.parent.mkdir(parents=True, exist_ok=True)
-                        os.rename(live, retired)
-                        managed_cleanup.retire_owned_paths(
-                            self, env_id, candidate["revision"]
-                        )
-                    elif not (retired.exists() or retired.is_symlink()):
-                        # 无旧副本且 live 缺失：候选仍在 staging，不存在可
-                        # 前滚的旧状态；唯一安全收敛是完成回滚（撤销候选
-                        # 归属、清除 journal），由用户重试安装。
-                        self._rollback_swap(env_id, candidate["revision"])
-                        raise ManagedEnvironmentError(
-                            "a previous environment install was rolled back; "
-                            "retry the operation"
-                        )
-                    else:
-                        # 崩溃发生在改名之后：补齐可能缺失的归属镜像
-                        # （丢弃回滚中断遗留的候选整树归属）。
-                        managed_cleanup.retire_owned_paths(
-                            self, env_id, candidate["revision"]
-                        )
-                    os.rename(staging, live)
-                    managed_cleanup.remember_path(
-                        self, env_id, candidate["revision"], live
-                    )
-                if not (live.exists() or live.is_symlink()):
-                    raise ManagedEnvironmentError(
-                        "pending environment swap is incomplete"
-                    )
-                probe = self._probe(candidate)
-            except OSError as exc:
-                raise ManagedEnvironmentError(
-                    "pending environment swap could not complete"
-                ) from exc
-            if not probe["healthy"]:
-                self._rollback_swap(env_id, candidate["revision"])
-                raise ManagedEnvironmentError(
-                    "a previous environment install was rolled back: relocated "
-                    f"environment failed probe ({probe['reason']})"
-                )
-            # 换入改名后、归属登记前崩溃的候选：探针确认后幂等补写固定
-            # 路径归属，避免后续安装把无归属候选当作未登记退役数据卡死。
-            managed_cleanup.remember_path(self, env_id, candidate["revision"], live)
-            data = self._read()
-            if data["environments"].get(env_id) != expected:
-                self._rollback_swap(env_id, candidate["revision"])
-                raise ManagedEnvironmentError(
-                    "a previous environment install was interrupted and rolled "
-                    "back; retry the operation"
-                )
-            data["environments"][env_id] = candidate
-            if data["active_id"] == env_id:
-                data["active_revision"] += 1
-            _atomic_json(self._registry, data)
-            try:
-                self._journal_path(env_id).unlink(missing_ok=True)
-            except OSError:
-                pass
+            # 注册表是提交分界：未提交（无论注册表是否被外部修改）一律
+            # 保守回滚，不前滚候选；guard 先验证、数据保全，journal 仅由
+            # _rollback_swap 在收敛成功后清除，失败保留证据与保护，下次
+            # 扫描重试。
+            self._rollback_swap(env_id, candidate["revision"])
+            raise ManagedEnvironmentError(
+                "a previous environment install was rolled back; retry the operation"
+            )
 
     def _recover_all_swaps(self) -> None:
         """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。
