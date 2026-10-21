@@ -9,7 +9,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
-UV_VERSION = "0.12.22"
+UV_VERSION = "0.13.4"
 
 
 def uv_executable() -> Path:

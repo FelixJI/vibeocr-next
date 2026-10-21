@@ -1,6 +1,6 @@
 # Standalone MinerU host, without RapidOCR, PaddleOCR or Torch.
 # ONNX Runtime is pulled transitively by MinerU's document pipeline.
-pillow>=12.3.0
+pillow>=12.3.0,<13
 numpy>=2.3.5
 httpx>=0.28.1
 jsonschema>=4.25.0

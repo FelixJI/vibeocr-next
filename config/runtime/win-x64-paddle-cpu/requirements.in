@@ -1,7 +1,7 @@
 # Source-neutral Windows/Python 3.13 lock regeneration (uv):
 # uv pip compile config/runtime/win-x64-paddle-cpu/requirements.in --no-config --upgrade --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-paddle-cpu/requirements-win-x64-paddle-cpu.lock
 # Separate Paddle site-packages: never install RapidOCR/MinerU here.
-pillow>=12.3.0
+pillow>=12.3.0,<13
 numpy>=2.3.5
 httpx>=0.28.1
 jsonschema>=4.25.0
