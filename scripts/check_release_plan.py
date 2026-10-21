@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -35,16 +35,12 @@ def verify(root: Path, *, event: str, source_sha: str, head_ref: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--event", required=True, choices=("pull_request", "push"))
-    parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--head-ref", default="")
-    args = parser.parse_args()
+    # Project adapter invoked by automation.py's declared bootstrap stage.
     verify(
-        Path(__file__).resolve().parents[1],
-        event=args.event,
-        source_sha=args.source_sha,
-        head_ref=args.head_ref,
+        Path(os.environ["AUTOMATION_PROJECT_ROOT"]),
+        event=os.environ["AUTOMATION_EVENT"],
+        source_sha=os.environ["AUTOMATION_SOURCE_SHA"],
+        head_ref=os.environ.get("GITHUB_HEAD_REF", ""),
     )
 
 

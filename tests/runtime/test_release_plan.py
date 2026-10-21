@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -86,3 +89,64 @@ def test_ordinary_pr_does_not_require_a_release_plan(repository):
         source_sha=git("rev-parse", "HEAD"),
         head_ref="codex/fix",
     )
+
+
+@pytest.mark.parametrize("advance_main", [False, True])
+def test_automation_cli_checks_plan_before_dependency_bootstrap(
+    repository, advance_main
+):
+    root, git = repository
+    source = Path(__file__).parents[2]
+    config = json.loads((source / ".ci/project.json").read_text(encoding="utf-8"))
+    gate = config["ci"]["bootstrap"][0]
+    assert gate[-2:] == ["python", "scripts/check_release_plan.py"]
+    (root / "scripts").mkdir()
+    for script in (source / "scripts").glob("automation*.py"):
+        shutil.copyfile(script, root / "scripts" / script.name)
+    for name in ("run_ci_command.py", "check_release_plan.py"):
+        shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
+    (root / "version.txt").write_text("0.1.0", encoding="utf-8")
+    config["release"]["version_sources"] = [{"kind": "text", "path": "version.txt"}]
+    config["ci"] = {
+        "bootstrap": [
+            [sys.executable if part == "python" else part for part in gate],
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('bootstrap-reached').touch()",
+            ],
+        ]
+    }
+    (root / ".ci").mkdir()
+    (root / ".ci/project.json").write_text(json.dumps(config), encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "configure automation")
+    prepare(root, git)
+    git("switch", "main")
+    if advance_main:
+        (root / "app.txt").write_text("advance main", encoding="utf-8")
+        git("commit", "-am", "advance main")
+        git("switch", "automation/release")
+        git("merge", "--no-ff", "main", "-m", "merge without prepare")
+        git("switch", "main")
+    git("merge", "--no-ff", "automation/release", "-m", "PR merge")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/automation.py",
+            "ci",
+            "--event",
+            "pull_request",
+            "--source-sha",
+            git("rev-parse", "HEAD"),
+        ],
+        cwd=root,
+        env=os.environ | {"GITHUB_HEAD_REF": "automation/release", "PYTHONUTF8": "1"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert (result.returncode == 0) == (not advance_main), result.stderr
+    assert (root / "bootstrap-reached").exists() == (not advance_main)
+    if advance_main:
+        assert "刷新 automation/release" in result.stderr

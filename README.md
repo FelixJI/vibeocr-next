@@ -253,7 +253,8 @@ build。WebView2 bridge 变更必须同步更新桌面 handler/codec、前端 cl
 发布 PR 只能在 `main` 上手动运行 CD、选择原有 bump 类型来创建或刷新。
 `main` 前进后，不使用 GitHub 的更新分支或合并 `main` 来同步 `automation/release`；
 必须重新运行同一准备流程，重新生成版本、changelog 和 `.release/plan.json`。
-CI 会核对计划的 `prepared_from_sha` 与本次合并基线，不匹配即拒绝继续构建。
+CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `prepared_from_sha`
+与本次合并基线，不匹配时在安装依赖前失败；workflow 不另设发布校验入口。
 
 
 正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
