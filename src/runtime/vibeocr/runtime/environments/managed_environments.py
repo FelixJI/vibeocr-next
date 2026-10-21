@@ -849,8 +849,11 @@ class ManagedEnvironmentStore:
                 or (env_id == "legacy") != (record["kind"] == "legacy")
                 # 注册表记录必须指向存活路径：固定路径或 legacy revisions
                 # 布局；换入槽位只属于事务与 ledger，不得成为环境记录。
+                # 类型前置：path 非 str 时直接落入后续结构化校验，不在
+                # Path() 上抛 TypeError。
                 or (
                     record["kind"] == "venv"
+                    and isinstance(record["path"], str)
                     and Path(record["path"]).parts[:1]
                     in ((_SWAP_STAGING_ROOT,), (_SWAP_RETIRED_ROOT,))
                 )
@@ -1571,24 +1574,16 @@ class ManagedEnvironmentStore:
         retired = self._retired_path(env_id)
         try:
             if staging.exists() or staging.is_symlink():
-                if not (live.exists() or live.is_symlink()):
-                    if retired.exists() or retired.is_symlink():
-                        # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位，
-                        # 镜像归属记录逆映射回原路径。
-                        os.rename(retired, live)
-                        managed_cleanup.restore_owned_paths(
-                            self, env_id, candidate_revision
-                        )
-                    else:
-                        return
-                else:
-                    # 无论是否存在退役镜像：有镜像说明回滚改名已完成而归属
-                    # 恢复被中断，补齐逆映射；无镜像（registry-only 旧环境）
-                    # 也必须撤销候选整树归属——按 candidate revision 限定，
-                    # 原 fixed root 归属（revision 更小）不会被误撤。
-                    managed_cleanup.restore_owned_paths(
-                        self, env_id, candidate_revision
-                    )
+                if not (live.exists() or live.is_symlink()) and (
+                    retired.exists() or retired.is_symlink()
+                ):
+                    # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
+                    os.rename(retired, live)
+                # staging 存在：无论是否有旧副本（无旧副本场景回滚的
+                # live→staging 已完成、归属恢复被中断，或换入尚未开始），
+                # 归属恢复均幂等——按 candidate revision 撤销候选整树归属、
+                # 逆映射镜像；状态收敛后才清 journal。
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
                 self._journal_path(env_id).unlink(missing_ok=True)
                 return
             if retired.exists() or retired.is_symlink():
@@ -1598,6 +1593,15 @@ class ManagedEnvironmentStore:
                     os.rename(live, staging)
                 os.rename(retired, live)
                 managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            elif live.exists() or live.is_symlink():
+                # 无任何旧副本（空环境原目录缺失）：失败候选同样退回
+                # staging 并撤销其整树归属，固定路径复位为事务前缺失状态；
+                # 只有状态收敛才清除 journal。
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(live, staging)
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            else:
+                return
         except OSError:
             return
         self._journal_path(env_id).unlink(missing_ok=True)
@@ -1720,8 +1724,13 @@ class ManagedEnvironmentStore:
                             self, env_id, candidate["revision"]
                         )
                     elif not (retired.exists() or retired.is_symlink()):
+                        # 无旧副本且 live 缺失：候选仍在 staging，不存在可
+                        # 前滚的旧状态；唯一安全收敛是完成回滚（撤销候选
+                        # 归属、清除 journal），由用户重试安装。
+                        self._rollback_swap(env_id, candidate["revision"])
                         raise ManagedEnvironmentError(
-                            "pending environment swap is incomplete"
+                            "a previous environment install was rolled back; "
+                            "retry the operation"
                         )
                     else:
                         # 崩溃发生在改名之后：补齐可能缺失的归属镜像
@@ -1762,14 +1771,20 @@ class ManagedEnvironmentStore:
             self._journal_path(env_id).unlink(missing_ok=True)
 
     def _recover_all_swaps(self) -> None:
-        """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。"""
+        """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。
+
+        恢复失败按环境隔离：换入/清理家族的 RuntimeInstallError（含
+        ManagedEnvironmentError，例如退役槽位存在未登记数据）保留 journal
+        与保护后跳过该环境，不阻塞其余环境的 list/清理；无关编程错误
+        （TypeError 等）照常上抛。
+        """
         if not self._swap_journal_root.is_dir():
             return
         for journal in sorted(self._swap_journal_root.iterdir()):
             try:
                 with self._target_operation(journal.stem):
                     self._recover_pending_swap(journal.stem)
-            except ManagedEnvironmentError:
+            except RuntimeInstallError:
                 continue
 
     def repair_empty(self, env_id: str) -> dict:

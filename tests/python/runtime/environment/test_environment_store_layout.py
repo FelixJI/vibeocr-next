@@ -917,6 +917,269 @@ def test_rollback_crash_without_mirrors_revokes_candidate_root(
     assert ledger["paths"][str(Path(item["id"]))]["revision"] == 1
 
 
+def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 空环境原目录缺失、候选已换入后最终探针失败：无任何旧副本可复位时，
+    # 回滚也必须把失败候选退回 staging、撤销候选整树归属，状态收敛后才
+    # 清 journal（旧实现在此直接清 journal，失败候选留在固定路径）。
+    # 纯状态机构造，避免无必要的真实 venv 改名。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    original = manager._probe
+    failures: list[int] = []
+
+    def probe(record: dict) -> dict:
+        result = original(record)
+        if (
+            record["status"] == "installed"
+            and record["path"] == record["id"]
+            and not failures
+        ):
+            failures.append(record["revision"])
+            return {**result, "healthy": False, "reason": "engine_import_failed"}
+        return result
+
+    monkeypatch.setattr(manager, "_probe", probe)
+    env_id = "无旧副本"
+    live = manager.root / env_id
+    staging = manager._staging_path(env_id)
+    live.mkdir(parents=True)
+    (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": "无旧副本",
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["environments"][env_id] = expected
+        _atomic_json(manager._registry, data)
+        # 换入完成现场：staging 与固定路径归属均已登记，旧副本不存在。
+        managed_cleanup.remember_path(manager, env_id, 2, staging)
+        managed_cleanup.remember_path(manager, env_id, 2, live)
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+
+    listed = manager.list()
+    assert listed["environments"][0]["status"] == "empty"
+    assert not manager._journal_path(env_id).exists()
+    assert not live.exists(), "失败候选退回 staging，固定路径复位为缺失"
+    assert staging.is_dir(), "候选残留保留在 staging 槽位"
+    ledger = managed_cleanup.read_ledger(manager)
+    assert str(Path(env_id)) not in ledger["paths"], "候选整树归属已撤销"
+
+    # 无旧副本场景重试安装：槽位回收复用后正常成功。
+    plan = manager.preview_install(env_id, "rapidocr-cpu", ("tuna-pypi",))
+    installed = manager.install(plan["plan_id"], env_id, "rapidocr-cpu", ("tuna-pypi",))
+    assert installed["status"] == "installed"
+    assert installed["path"] == str(live)
+    assert not staging.exists()
+    assert not manager._journal_path(env_id).exists()
+
+
+def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 恢复中 reclaim_retired 对未登记数据抛 RuntimeInstallError（非
+    # ManagedEnvironmentError）：不能阻塞 list/preview_cleanup/run_cleanup；
+    # 失败按环境隔离，journal 保留且该环境全部路径继续受保护（旧实现在
+    # 此让整个 list 抛错）。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "未知退役"
+    live = manager.root / env_id
+    staging = manager._staging_path(env_id)
+    retired = manager._retired_path(env_id)
+    live.mkdir(parents=True)
+    (live / "pyvenv.cfg").write_text("", encoding="utf-8")
+    staging.mkdir(parents=True)
+    (staging / "candidate.txt").write_text("candidate", encoding="utf-8")
+    retired.mkdir(parents=True)
+    (retired / "keep.txt").write_text("retain", encoding="utf-8")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        expected = {
+            "id": env_id,
+            "name": "未知退役",
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["environments"][env_id] = expected
+        _atomic_json(manager._registry, data)
+        candidate = {
+            **expected,
+            "revision": 2,
+            "status": "installed",
+            "recipe": "rapidocr-cpu",
+        }
+        _atomic_json(
+            manager._journal_path(env_id),
+            {
+                "schema_version": 1,
+                "environment_id": env_id,
+                "expected_record": expected,
+                "candidate_record": candidate,
+            },
+        )
+
+    listed = manager.list()
+    assert listed["environments"][0]["id"] == env_id
+    assert manager._journal_path(env_id).is_file(), "journal 保留，恢复未收敛"
+    preview = manager.preview_cleanup()
+    env_item = next(
+        item for item in preview["items"] if item["id"] == f"environment:{env_id}"
+    )
+    assert not env_item["can_clean"]
+    assert "换入事务未收敛" in env_item["reason"]
+    # 同一预览可用：受 journal 保护的环境项拒绝被选中删除，而不是让
+    # run_cleanup 因恢复异常报错。
+    with pytest.raises(RuntimeInstallError, match="protected resources"):
+        manager.run_cleanup(preview["plan_id"], [f"environment:{env_id}"])
+    assert (retired / "keep.txt").exists()
+
+
+def test_registry_non_string_paths_fail_structured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # path 为 null/数字时必须保持结构化 invalid 契约，而不是在
+    # Path(record["path"]) 上抛 TypeError（旧实现在此抛 TypeError）。
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    for bad in (None, 123):
+        with RuntimeStoreLock(manager._lock):
+            data = manager._read()
+            data["environments"][str(bad)] = {
+                "id": str(bad),
+                "name": f"坏路径-{bad}",
+                "revision": 1,
+                "kind": "venv",
+                "path": bad,
+                "status": "empty",
+                "python_version": manager.manifest.python.version,
+                "abi": manager.manifest.python.abi,
+            }
+            manager._registry.parent.mkdir(parents=True, exist_ok=True)
+            manager._registry.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(
+            ManagedEnvironmentError, match="environment record is invalid"
+        ):
+            manager.list()
+        # 迭代间清理坏记录，避免 setup 阶段的 _read 提前抛错。
+        with RuntimeStoreLock(manager._lock):
+            raw = json.loads(manager._registry.read_text(encoding="utf-8"))
+            del raw["environments"][str(bad)]
+            manager._registry.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_no_old_copy_rollback_restore_crash_reconverges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 中断窗口：无旧副本回滚的 live→staging 改名已完成，
+    # restore_owned_paths/清 journal 前中断。再次进入 staging 存在、
+    # live/retired 缺失的现场：无论注册表是否被外部修改，恢复都必须
+    # 幂等撤销候选整树归属并清除 journal（旧实现永久保留 journal 与
+    # 候选 root 归属）。纯状态机构造，不跑真实 venv 安装。
+    manager, _calls = _manager(
+        tmp_path,
+        monkeypatch,
+        with_base_pack=False,
+        install=lambda _python, _scope, _endpoint: None,
+    )
+    env_id = "中断恢复"
+    staging = manager._staging_path(env_id)
+
+    def build_scene() -> None:
+        staging.mkdir(parents=True)
+        (staging / "candidate.txt").write_text("candidate", encoding="utf-8")
+        with RuntimeStoreLock(manager._lock):
+            data = manager._read()
+            expected = {
+                "id": env_id,
+                "name": "中断恢复",
+                "revision": 1,
+                "kind": "venv",
+                "path": env_id,
+                "status": "empty",
+                "python_version": manager.manifest.python.version,
+                "abi": manager.manifest.python.abi,
+            }
+            data["environments"][env_id] = expected
+            _atomic_json(manager._registry, data)
+            # 回滚改名已完成、归属未恢复：staging 与候选整树归属并存。
+            managed_cleanup.remember_path(manager, env_id, 2, staging)
+            managed_cleanup.remember_path(manager, env_id, 2, manager.root / env_id)
+            candidate = {
+                **expected,
+                "revision": 2,
+                "status": "installed",
+                "recipe": "rapidocr-cpu",
+            }
+            _atomic_json(
+                manager._journal_path(env_id),
+                {
+                    "schema_version": 1,
+                    "environment_id": env_id,
+                    "expected_record": expected,
+                    "candidate_record": candidate,
+                },
+            )
+
+    # 路径一：注册表未变 → 恢复以回滚收敛，不再卡在 incomplete。
+    build_scene()
+    listed = manager.list()
+    assert listed["environments"][0]["status"] == "empty"
+    assert not manager._journal_path(env_id).exists()
+    ledger = managed_cleanup.read_ledger(manager)
+    assert str(Path(env_id)) not in ledger["paths"], "候选整树归属已撤销"
+    assert staging.is_dir()
+    assert not (manager.root / env_id).exists()
+
+    # 路径二：注册表被外部修改 → 恢复同样以回滚收敛。
+    shutil.rmtree(staging)
+    build_scene()
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][env_id]["name"] = "改名后"
+        manager._registry.write_text(json.dumps(data), encoding="utf-8")
+    listed = manager.list()
+    assert listed["environments"][0]["name"] == "改名后"
+    assert not manager._journal_path(env_id).exists()
+    ledger = managed_cleanup.read_ledger(manager)
+    assert str(Path(env_id)) not in ledger["paths"]
+    assert staging.is_dir()
+    assert not (manager.root / env_id).exists()
+
+
 def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
