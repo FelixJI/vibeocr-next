@@ -1,4 +1,3 @@
-import { BatchImageExport } from "./BatchImageExport";
 import { Badge, Button, Input, ProgressBar } from "@fluentui/react-components";
 
 import {
@@ -9,7 +8,7 @@ import {
   FilePlus2,
   Play,
   ScanText,
-  Sheet,
+  FileText,
   Square,
   Trash2,
 } from "lucide-react";
@@ -86,9 +85,8 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const itemCount = numberValue(state.itemCount);
   const completed = numberValue(state.completedCount);
   const failed = numberValue(state.failedCount);
-  const [imageExporting, setImageExporting] = useState(false);
   const running = booleanValue(state.isRunning);
-  const queueLocked = running || imageExporting;
+  const queueLocked = running;
   const items = batchItems(state.items);
   const windowStart = Math.max(0, numberValue(state.windowStart));
   const engines = recognitionEngines(state.engines);
@@ -114,7 +112,6 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capability="batch.add"
             capabilities={viewState.capabilities}
             action={{ type: "batch.addFiles" }}
-            disabled={imageExporting}
             actions={actions}
             icon={<FilePlus2 aria-hidden="true" size={16} />}
           >
@@ -136,7 +133,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: running ? "batch.cancel" : "batch.clear" }}
             actions={actions}
-            disabled={itemCount === 0 || imageExporting}
+            disabled={itemCount === 0}
             icon={
               running ? (
                 <Square aria-hidden="true" size={16} />
@@ -158,14 +155,6 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
         }
         actions={actions}
         scope="batch"
-      />
-      <BatchImageExport
-        state={state}
-        settings={feature(viewState, "settings")}
-        count={itemCount}
-        actions={actions}
-        busy={queueLocked}
-        onBusy={setImageExporting}
       />
       <div className="collection-workspace">
         <Panel label="QUEUE" title="文件队列">
@@ -371,7 +360,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             action={{ type: "batch.exportAll", format: "docx" }}
             actions={actions}
-            icon={<Sheet aria-hidden="true" size={16} />}
+            icon={<FileText aria-hidden="true" size={16} />}
             disabled={completed === 0}
           >
             导出全部 Word

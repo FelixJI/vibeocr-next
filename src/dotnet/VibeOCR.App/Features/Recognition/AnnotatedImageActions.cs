@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
@@ -17,6 +18,11 @@ public interface IAnnotatedImagePlatform
 
 public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotatedImagePlatform
 {
+  private static long snapshotSequence;
+
+  internal static string NextSnapshotFileName() => string.Create(CultureInfo.InvariantCulture,
+    $"snapshot-{DateTime.Now:yyyyMMdd-HHmmssfff}-{Interlocked.Increment(ref snapshotSequence):D4}");
+
   public async Task CopyImageAsync(
     string sourcePath,
     CancellationToken cancellationToken)
@@ -86,7 +92,7 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     var picker = new FileSavePicker
     {
       SuggestedStartLocation = PickerLocationId.PicturesLibrary,
-      SuggestedFileName = "vibeocr-annotated",
+      SuggestedFileName = NextSnapshotFileName(),
     };
     bool jpeg = string.Equals(Path.GetExtension(sourcePath), ".jpg", StringComparison.OrdinalIgnoreCase);
     picker.FileTypeChoices.Add(jpeg ? "JPEG 图片" : "PNG 图片", [jpeg ? ".jpg" : ".png"]);

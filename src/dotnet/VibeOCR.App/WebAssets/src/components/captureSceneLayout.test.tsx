@@ -47,6 +47,36 @@ describe("截图原位编辑", () => {
     });
     unmount();
   });
+  it("工具栏和空白区域可取消，IME 与按键重复不关闭截图", () => {
+    const run = vi.fn().mockResolvedValue(true);
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+        canExport
+        canRecognize
+        source={scene.inputUrl}
+        captureScene={scene}
+        session={{ sessionId: "capture", revision: 0 }}
+      />,
+    );
+    const rectangle = screen.getByRole("button", { name: "矩形" });
+    fireEvent.click(rectangle);
+    fireEvent.keyDown(rectangle, { key: "Escape", isComposing: true });
+    expect(rectangle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.keyDown(rectangle, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "选择" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "Escape", repeat: true });
+    expect(run).not.toHaveBeenCalled();
+    fireEvent.contextMenu(document.body);
+    expect(run).toHaveBeenCalledWith({
+      type: "recognition.closeScreenshotSession",
+    });
+    unmount();
+  });
   it("把画布放回框选屏幕位置且保持 DPI 后的选区尺寸", () => {
     const { unmount } = render(
       <ImageCanvasEditor

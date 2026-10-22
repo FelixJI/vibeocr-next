@@ -70,7 +70,7 @@ describe("result image text overlay", () => {
     }) as HTMLImageElement;
     loadWithSize(image, 1000, 600);
 
-    const first = screen.getByText("高置信行").parentElement!;
+    const first = screen.getByLabelText("高置信行");
     expect(first).toHaveStyle({
       left: "0px",
       top: "0px",
@@ -78,7 +78,8 @@ describe("result image text overlay", () => {
       height: "60px",
     });
     expect(first).not.toHaveClass("low-confidence");
-    const low = screen.getByText("低置信行").parentElement!;
+    expect(first).toBeEmptyDOMElement();
+    const low = screen.getByLabelText("低置信行");
     expect(low).toHaveClass("low-confidence");
     expect(low).toHaveAttribute("title", "置信度: 58.0%");
   });
@@ -103,7 +104,7 @@ describe("result image text overlay", () => {
     }) as HTMLImageElement;
     loadWithSize(image, 1000, 500);
     const stage = container.querySelector(".result-image-stage") as HTMLElement;
-    const line = screen.getByText("行文本").parentElement!;
+    const line = screen.getByLabelText("行文本");
     expect(line).toHaveStyle({ width: "500px", height: "50px" });
 
     // 面板/窗口缩放：舞台 1:1 → 1:2 缩小，行框即时重投影。
@@ -137,7 +138,7 @@ describe("result image text overlay", () => {
     );
 
     // 键盘可达：聚焦行框后 Enter 开始编辑（原索引随行携带，不因无 bbox 行漂移）。
-    const trigger = screen.getByText("旧行文本").parentElement!;
+    const trigger = screen.getByLabelText("旧行文本");
     trigger.focus();
     await fireEvent.keyDown(trigger, { key: "Enter" });
     const editor = screen.getByRole("textbox", { name: "编辑第 2 行" });
@@ -183,7 +184,7 @@ describe("result image text overlay", () => {
       500,
     );
 
-    await fireEvent.dblClick(screen.getByText("旧行文本").parentElement!);
+    await fireEvent.dblClick(screen.getByLabelText("旧行文本"));
     await fireEvent.change(
       screen.getByRole("textbox", { name: "编辑第 1 行" }),
       {
@@ -220,5 +221,5 @@ it("keeps valid bbox lines when another result line has no bbox", () => {
     500,
   );
   expect(screen.queryByText("无位置")).not.toBeInTheDocument();
-  expect(screen.getByText("有位置")).toBeInTheDocument();
+  expect(screen.getByLabelText("有位置")).toBeInTheDocument();
 });

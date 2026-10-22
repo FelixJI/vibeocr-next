@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import "./ResultImageTextOverlay.css";
 import { LineEditor } from "./LineEditor";
@@ -39,13 +40,17 @@ interface Stage {
  */
 export function ResultImageTextOverlay({
   imageUrl,
+  fit = false,
   lines,
   onUpdateLine,
 }: {
   readonly imageUrl: string;
+  readonly fit?: boolean;
   readonly lines: readonly IndexedResultLine[];
   readonly onUpdateLine?: OverlayLineEditHandler;
 }) {
+  const [aspectRatio, setAspectRatio] = useState(1);
+  const [figure, setFigure] = useState<HTMLElement | null>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [stage, setStage] = useState<Stage | undefined>();
@@ -100,21 +105,37 @@ export function ResultImageTextOverlay({
 
   const decoded = stage;
   return (
-    <figure className="result-image-overlay" aria-label="识别结果图像校对">
-      <div className="result-image-stage" ref={stageRef}>
+    <figure
+      className={`result-image-overlay${fit ? " fit-preview" : ""}`}
+      ref={setFigure}
+      aria-label="识别结果图像校对"
+    >
+      <div
+        className="result-image-stage"
+        ref={stageRef}
+        style={
+          fit
+            ? { width: `min(100cqw, calc((100cqh - 48px) * ${aspectRatio}))` }
+            : undefined
+        }
+      >
         <img
           ref={imageRef}
           src={imageUrl}
-          alt="识别结果参考图"
-          onLoad={(event) =>
+          alt={lines.length ? "识别结果参考图" : "图片预览"}
+          onLoad={(event) => {
+            setAspectRatio(
+              event.currentTarget.naturalWidth /
+                event.currentTarget.naturalHeight,
+            );
             applyStage(
               event.currentTarget,
               event.currentTarget.parentElement?.clientWidth ||
                 event.currentTarget.naturalWidth,
               event.currentTarget.parentElement?.clientHeight ||
                 event.currentTarget.naturalHeight,
-            )
-          }
+            );
+          }}
           style={{ width: "100%" }}
         />
         {decoded &&
@@ -143,6 +164,28 @@ export function ResultImageTextOverlay({
               0,
               Math.min(box.top, Math.max(0, decoded.height - 140)),
             );
+            const editor =
+              editingThis && editable ? (
+                <div
+                  className="overlay-line-editor"
+                  style={
+                    fit
+                      ? undefined
+                      : { left: `${panelLeft}px`, top: `${panelTop}px` }
+                  }
+                >
+                  <LineEditor
+                    label={`编辑第 ${index + 1} 行`}
+                    initialText={line.text}
+                    onSubmit={async (newText) => {
+                      const applied = await submit({ line, index }, newText);
+                      if (applied) setEditing(undefined);
+                      return applied;
+                    }}
+                    onCancel={() => setEditing(undefined)}
+                  />
+                </div>
+              ) : null;
             return (
               <div key={index}>
                 <div
@@ -158,27 +201,11 @@ export function ResultImageTextOverlay({
                     width: `${box.width}px`,
                     height: `${box.height}px`,
                   }}
+                  aria-label={line.text}
                   {...trigger}
-                >
-                  <span className="overlay-line-text">{line.text}</span>
-                </div>
-                {editingThis && editable && (
-                  <div
-                    className="overlay-line-editor"
-                    style={{ left: `${panelLeft}px`, top: `${panelTop}px` }}
-                  >
-                    <LineEditor
-                      label={`编辑第 ${index + 1} 行`}
-                      initialText={line.text}
-                      onSubmit={async (newText) => {
-                        const applied = await submit({ line, index }, newText);
-                        if (applied) setEditing(undefined);
-                        return applied;
-                      }}
-                      onCancel={() => setEditing(undefined)}
-                    />
-                  </div>
-                )}
+                />
+                {editor &&
+                  (fit && figure ? createPortal(editor, figure) : editor)}
               </div>
             );
           })}

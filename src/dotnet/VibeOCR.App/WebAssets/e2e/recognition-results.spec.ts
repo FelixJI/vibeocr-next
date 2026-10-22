@@ -418,8 +418,10 @@ test("bbox proofreading edits through the frozen result image", async ({
   ).toHaveCount(0);
 
   // 双击行框编辑；宿主拒绝时保留草稿，重试成功后收起。
-  const line = page.locator(".overlay-line").filter({ hasText: "第一段行一" });
+  const line = page.getByLabel("第一段行一", { exact: true });
   await expect(line).toBeVisible();
+  await expect(line).toHaveText("");
+  await expect(line).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await line.dblclick();
   const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
   await editor.fill("改后的行文本");
@@ -440,7 +442,7 @@ test("bbox proofreading edits through the frozen result image", async ({
   await expect(page.getByRole("textbox", { name: "编辑第 1 行" })).toBeHidden();
 
   // 键盘路径：聚焦低置信行 + Enter 编辑，Escape 取消。
-  const lowLine = page.locator(".overlay-line").filter({ hasText: "低置信行" });
+  const lowLine = page.getByLabel("低置信行", { exact: true });
   await expect(lowLine).toHaveClass(/low-confidence/);
   await lowLine.focus();
   await page.keyboard.press("Enter");
@@ -466,4 +468,52 @@ test("bbox proofreading edits through the frozen result image", async ({
   await page.screenshot({
     path: testInfo.outputPath("bbox-resize.png"),
   });
+});
+
+test("long-image proofreading editor stays inside the preview viewport", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 640, height: 480 });
+  await mountRecognitionResults(page);
+  await page.route("/long-proof.svg", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="2400"><rect width="240" height="2400" fill="white"/></svg>',
+    }),
+  );
+  await page
+    .getByRole("img", { name: "识别结果参考图" })
+    .evaluate((image: HTMLImageElement) => {
+      image.src = "/long-proof.svg";
+    });
+  const line = page.getByLabel("第一段行一", { exact: true });
+  await expect
+    .poll(() =>
+      page
+        .getByRole("img", { name: "识别结果参考图" })
+        .evaluate((image: HTMLImageElement) => image.naturalHeight),
+    )
+    .toBe(2400);
+  await line.focus();
+  await page.keyboard.press("Enter");
+  const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
+  await editor.fill("长图校对");
+  await expect
+    .poll(() =>
+      page.locator(".overlay-line-editor").evaluate((panel) => {
+        const view = document
+          .querySelector("#recognition-preview .canvas-stage")!
+          .getBoundingClientRect();
+        const rect = panel.getBoundingClientRect();
+        return (
+          rect.left >= view.left &&
+          rect.right <= view.right &&
+          rect.top >= view.top &&
+          rect.bottom <= view.bottom
+        );
+      }),
+    )
+    .toBe(true);
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(editor).toBeHidden();
 });

@@ -13,6 +13,7 @@ import { RecognitionPage } from "./RecognitionPage";
 
 afterEach(() => {
   cleanup();
+  localStorage.removeItem("recognition.previewCollapsed");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -98,6 +99,59 @@ function setup(withResultImage: boolean) {
 }
 
 describe("recognition page result actions", () => {
+  it.each(["选图编辑", "粘贴编辑"])(
+    "%s succeeds into expanded editor; cancellation preserves preview",
+    async (label) => {
+      const { run, viewState, actions } = setup(false);
+      const { rerender } = render(
+        <RecognitionPage viewState={viewState} actions={actions} />,
+      );
+      const update = (recognition: Readonly<Record<string, unknown>>) =>
+        rerender(
+          <RecognitionPage
+            viewState={{ ...viewState, features: { recognition } }}
+            actions={actions}
+          />,
+        );
+      const initial = feature(viewState, "recognition");
+      fireEvent.click(screen.getByRole("button", { name: "收起图片预览" }));
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+      update({ ...initial, isBusy: true, statusCode: "recognition.running" });
+      expect(
+        screen.getByRole("button", { name: "展开图片预览" }),
+      ).toBeInTheDocument();
+      update({ ...initial, isBusy: false });
+      expect(
+        screen.getByRole("button", { name: "展开图片预览" }),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: label }));
+      await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+      update({ ...initial, isBusy: true, statusCode: "recognition.running" });
+      update({
+        ...initial,
+        isBusy: false,
+        statusCode: "recognition.session",
+        screenshotSession: {
+          sessionId: "0123456789abcdef0123456789abcdef",
+          revision: 0,
+        },
+      });
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "收起图片预览" }),
+        ).toBeInTheDocument(),
+      );
+      expect(screen.getByRole("button", { name: "编辑图片" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      expect(localStorage.getItem("recognition.previewCollapsed")).toBe(
+        "false",
+      );
+    },
+  );
+
   it("uses the frozen result image for proofreading, never the session input", async () => {
     const { viewState, actions } = setup(true);
     render(<RecognitionPage viewState={viewState} actions={actions} />);

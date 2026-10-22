@@ -11,7 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CapabilityGate } from "../components/CapabilityGate";
 
@@ -58,6 +58,8 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
   const [captionMode, setCaptionMode] = useState("off");
   const [captionText, setCaptionText] = useState("");
   const autoDecoded = useRef(0);
+  const [composing, setComposing] = useState(false);
+  const lastGenerated = useRef<string | undefined>(undefined);
   const state = feature(viewState, "qrcode");
   const generated = resource(state.generatedResource);
   const previewRevision =
@@ -83,6 +85,38 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
   ]);
   const results = qrResults(state.items);
   const isBusy = booleanValue(state.isBusy);
+  const canGenerate = viewState.capabilities.includes("qrcode.generate");
+  const generationKey = JSON.stringify([
+    qrText,
+    format,
+    captionMode,
+    captionText,
+  ]);
+  const generate = useCallback(() => {
+    lastGenerated.current = generationKey;
+    return actions.run({
+      type: "qrcode.generate",
+      text: qrText,
+      format,
+      captionMode,
+      captionText,
+    });
+  }, [actions, generationKey, qrText, format, captionMode, captionText]);
+  useEffect(() => {
+    if (
+      tab !== "generate" ||
+      !canGenerate ||
+      isBusy ||
+      composing ||
+      !qrText.trim() ||
+      lastGenerated.current === generationKey
+    )
+      return;
+    const timer = window.setTimeout(() => {
+      if (lastGenerated.current !== generationKey) void generate();
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [tab, canGenerate, isBusy, composing, qrText, generationKey, generate]);
   return (
     <Workspace
       eyebrow="CODE / 04"
@@ -102,7 +136,7 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
               title="等待输入"
               detail={
                 tab === "generate"
-                  ? "输入内容并生成后显示二维码。"
+                  ? "输入内容后自动生成二维码。"
                   : "粘贴或选择图片后显示定位预览。"
               }
             />
@@ -141,6 +175,8 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
               <label htmlFor="qr-content">输入内容</label>
               <textarea
                 id="qr-content"
+                onCompositionStart={() => setComposing(true)}
+                onCompositionEnd={() => setComposing(false)}
                 placeholder="输入要编码的内容"
                 value={qrText}
                 onChange={(event) => setQrText(event.target.value)}
@@ -160,6 +196,8 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                   <label htmlFor="qr-caption">独立说明</label>
                   <textarea
                     id="qr-caption"
+                    onCompositionStart={() => setComposing(true)}
+                    onCompositionEnd={() => setComposing(false)}
                     value={captionText}
                     onChange={(event) => setCaptionText(event.target.value)}
                   />
@@ -176,14 +214,15 @@ export function QrCodePage({ viewState, actions }: FeatureProps) {
                   captionMode,
                   captionText,
                 }}
-                actions={actions}
-                disabled={qrText.trim().length === 0 || isBusy}
+                actions={{ ...actions, run: generate }}
+                disabled={qrText.trim().length === 0 || isBusy || composing}
                 icon={<QrCode aria-hidden="true" size={16} />}
               >
                 生成图片
               </CapabilityGate>
               <p className="form-note">
-                二维码在本机直接生成，无需启动识别运行环境。
+                内容或设置修改后自动生成；连续输入停止 400
+                毫秒后更新，无需启动识别运行环境。
               </p>
             </div>
           ) : (

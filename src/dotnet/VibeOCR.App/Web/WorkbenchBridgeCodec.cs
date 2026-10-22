@@ -372,6 +372,7 @@ public static class WorkbenchBridgeCodec
     "recognition" => WorkbenchRoute.Recognition,
     "imageEdit" => WorkbenchRoute.ImageEdit,
     "batch" => WorkbenchRoute.Batch,
+    "imageConversion" => WorkbenchRoute.ImageConversion,
     "qrcode" => WorkbenchRoute.QrCode,
     "pdf" => WorkbenchRoute.Pdf,
     "settings" => WorkbenchRoute.Settings,
@@ -411,12 +412,12 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, new HashSet<string>(["resourceUri", "presetId", "presetBinding", "sessionId", "revision"]), "command arguments");
         return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", "pinEdit",
           ParseGuidArgument(arguments, "sessionId"), ParseContentRevision(arguments), ReadPresetBinding(arguments));
-      case ("batch", "prepareImageExport"):
+      case ("imageConversion", "prepareImageExport"):
         EnsureObjectWithFields(arguments, new HashSet<string>(["index"]), "command arguments");
-        return new PrepareBatchImageCommand(arguments.GetProperty("index").GetInt32());
-      case ("batch", "exportImage"):
+        return new PrepareImageConversionCommand(arguments.GetProperty("index").GetInt32());
+      case ("imageConversion", "exportImage"):
         EnsureObjectWithFields(arguments, new HashSet<string>(["itemId", "resourceUri", "presetId", "presetBinding"]), "command arguments");
-        return new ExportBatchImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", ReadPresetBinding(arguments));
+        return new ExportConvertedImageCommand(ParseGuidArgument(arguments, "itemId"), ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", ReadPresetBinding(arguments));
       case ("shell", "navigate"):
         EnsureObjectWithFields(arguments, RouteArgumentFields, "command arguments");
         return new NavigateWorkbenchCommand(
@@ -818,6 +819,22 @@ public static class WorkbenchBridgeCodec
         return new CopyAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
       case ("recognition", "saveAnnotatedImage"):
         return new SaveAnnotatedImageCommand(ParseAnnotationResourceUri(arguments));
+      case ("imageConversion", "addFiles"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new AddImageConversionFilesCommand();
+      case ("imageConversion", "clear"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new ClearImageConversionCommand();
+      case ("imageConversion", "removeItem"):
+        EnsureObjectWithFields(arguments, BatchItemArgumentFields, "command arguments");
+        return new RemoveImageConversionItemCommand(ParseGuidArgument(arguments, "itemId"));
+      case ("imageConversion", "moveItem"):
+        EnsureObjectWithFields(arguments, BatchMoveArgumentFields, "command arguments");
+        int imageDelta = arguments.GetProperty("delta").GetInt32();
+        if (imageDelta is not (-1 or 1)) throw new WorkbenchBridgeProtocolException("Invalid image move delta.");
+        return new MoveImageConversionItemCommand(ParseGuidArgument(arguments, "itemId"), imageDelta);
+      case ("imageConversion", "setWindow"):
+        return new SetImageConversionWindowCommand(ParseWindowStart(arguments));
       case ("batch", "addFiles"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new AddBatchFilesCommand();
@@ -1706,6 +1723,7 @@ public static class WorkbenchBridgeCodec
     WorkbenchRoute.Recognition => "recognition",
     WorkbenchRoute.ImageEdit => "imageEdit",
     WorkbenchRoute.Batch => "batch",
+    WorkbenchRoute.ImageConversion => "imageConversion",
     WorkbenchRoute.QrCode => "qrcode",
     WorkbenchRoute.Pdf => "pdf",
     WorkbenchRoute.Settings => "settings",
@@ -1854,6 +1872,7 @@ public static class WorkbenchBridgeCodec
       import = recognition.Import is null ? null : SerializeImportState(recognition.Import),
       importError = recognition.ImportError,
     },
+    ImageConversionWorkbenchState conversion => new { conversion.ItemCount, conversion.Items, conversion.WindowStart, conversion.ExportImage, conversion.ExportImageId, conversion.ExportImageError },
     BatchWorkbenchState batch => new
     {
       batch.IsRunning,
@@ -1861,7 +1880,6 @@ public static class WorkbenchBridgeCodec
       batch.CompletedCount,
       batch.FailedCount,
       items = batch.Items ?? [],
-      batch.ExportImage, batch.ExportImageId, batch.ExportImageError,
       batch.WindowStart,
       engines = batch.Engines ?? [],
       batch.TaskEngine,

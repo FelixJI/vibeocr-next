@@ -381,7 +381,10 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     catch { annotationStore.Revoke(new Uri(command.ResourceUri)); throw; }
     using WorkbenchAnnotationFile annotation = annotationStore.Take(new Uri(command.ResourceUri));
     await settingsOwner.SavePresetImageAsync(annotation, command.PresetId, channel.ViewModel?.CurrentInput?.DisplayName ?? "vibeocr", 1, token);
-    return CurrentChannelState(channel);
+    return channel.SceneEditing && command.SessionId is not null &&
+      channel.SessionId == command.SessionId && channel.Revision == command.Revision
+      ? CloseScreenshotSession(channel)
+      : CurrentChannelState(channel);
   }
 
   private async Task<RecognitionWorkbenchState> SaveAnnotatedImageAsync(
@@ -1707,13 +1710,15 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     // 快照语义：开始时校验会话/修订并冻结本次导出的 PNG，
     // 原生异步（剪贴板重试）期间允许该快照完成；出口只回报当前投影，
-    // 不回写旧会话状态。
+    // 仅结束仍匹配本次输出的截图现场。
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     string? historyKey = channel.HistoryCaptureKey;
     await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
     await RecordHistorySnapshotAsync(channel, annotation, historyKey, cancellationToken);
-    return CurrentChannelState(channel);
+    return channel.SceneEditing && channel.SessionId == command.SessionId && channel.Revision == command.Revision
+      ? CloseScreenshotSession(channel)
+      : CurrentChannelState(channel);
   }
 
   private async Task<WorkbenchState> SaveScreenshotImageAsync(
@@ -1722,7 +1727,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     CancellationToken cancellationToken)
   {
     // 与复制同一快照语义：FileSavePicker 等待期间允许冻结的导出落盘，
-    // 出口只回报当前投影，不回写旧会话状态。
+    // 仅结束仍匹配本次输出的截图现场，不影响后续新会话。
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
     using WorkbenchAnnotationFile annotation = TakeScreenshotAnnotation(command.ResourceUri);
     string? historyKey = channel.HistoryCaptureKey;
@@ -1731,7 +1736,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       throw new AnnotatedImageOperationCancelledException();
     }
     await RecordHistorySnapshotAsync(channel, annotation, historyKey, cancellationToken);
-    return CurrentChannelState(channel);
+    return channel.SceneEditing && channel.SessionId == command.SessionId && channel.Revision == command.Revision
+      ? CloseScreenshotSession(channel)
+      : CurrentChannelState(channel);
   }
 
   private WorkbenchState PinScreenshotImage(

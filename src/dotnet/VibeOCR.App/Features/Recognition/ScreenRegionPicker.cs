@@ -592,6 +592,7 @@ public sealed class ScreenRegionPicker(
     bool uiaTimedOut = false;
     bool confirming = false;
     IReadOnlyList<SmartControlCandidate> previewControls = [];
+    IReadOnlyList<PhysicalRectangle> previewEdges = [];
     List<SmartControlCandidate> VisibleControls(
       SmartScreenCandidates.Window window, IReadOnlyList<SmartControlCandidate> controls)
     {
@@ -652,7 +653,7 @@ public sealed class ScreenRegionPicker(
               SmartScreenCandidates.TryReadWindowBounds) &&
             candidates.ClipToCapture(window.Bounds, window) is { } clippedWindow)
         {
-          var regions = new List<PhysicalRectangle> { candidates.ToLocal(clippedWindow) };
+          var regions = new List<PhysicalRectangle>(previewEdges) { candidates.ToLocal(clippedWindow) };
           previewControls = VisibleControls(window, controls);
           foreach (SmartControlCandidate control in previewControls)
             regions.Add(candidates.ToLocal(control.Bounds));
@@ -682,19 +683,24 @@ public sealed class ScreenRegionPicker(
           SmartScreenCandidates.TryReadWindowBounds)
         ? candidates.ClipToCapture(window.Bounds, window) : null;
       // Repeated PointerMoved events must not discard the current Tab-selected control.
-      if (clipped is not null && window == hoveredWindow && point == hoveredPoint) return;
+      if ((window is null || clipped is not null) && window == hoveredWindow &&
+          point == hoveredPoint && session.ActiveSelection is not null) return;
       hoverGeneration++;
       previewControls = [];
       hoveredPoint = point;
+      previewEdges = ScreenEdgeCandidates.Find(pixels, desktop.Width, desktop.Height, desktop.Width * 4, local);
+      if (clipped is { } windowBounds)
+        previewEdges = previewEdges.Where(region => region != candidates.ToLocal(windowBounds)).ToArray();
+      session.ClearPreview();
       if (window is null || clipped is not { } bounds)
       {
         hoveredWindow = null;
-        session.ClearPreview();
+        session.SetPreview(previewEdges);
       }
       else
       {
         hoveredWindow = window;
-        session.SetPreview([candidates.ToLocal(bounds)]);
+        session.SetPreview([.. previewEdges, candidates.ToLocal(bounds)]);
         QueueControlQuery();
       }
     }
@@ -794,13 +800,13 @@ public sealed class ScreenRegionPicker(
         Render();
         return;
       }
-      if (accept && session.Selection is null && session.PreviewIndex > 0 &&
+      if (accept && session.Selection is null && session.PreviewIndex > previewEdges.Count &&
           hoveredWindow is { } controlWindow)
       {
         confirming = true;
         Render();
         long generation = hoverGeneration;
-        int selectedIndex = session.PreviewIndex - 1;
+        int selectedIndex = session.PreviewIndex - previewEdges.Count - 1;
         PhysicalRectangle? expected = session.ActiveSelection;
         IReadOnlyList<SmartControlCandidate> before = previewControls;
         IReadOnlyList<SmartControlCandidate> refreshed;
@@ -1051,7 +1057,8 @@ public sealed class ScreenRegionPicker(
       }
       string source = session.Selection is not null ? "手动" :
         session.ActiveSelection is null ? "" :
-        session.PreviewIndex == 0 ? "窗口候选" : $"控件候选 · 层级 {session.PreviewIndex}";
+        session.PreviewIndex < previewEdges.Count ? "边界区域" :
+        session.PreviewIndex == previewEdges.Count ? "窗口候选" : $"控件候选 · 层级 {session.PreviewIndex - previewEdges.Count}";
       // 尺寸标签末尾的 Enter 提示是原生 e2e 的 UIA 探针契约
       // （' · W × H px · Enter'），也向用户说明确认方式。
       sizeLabel.Text = rect is { } r

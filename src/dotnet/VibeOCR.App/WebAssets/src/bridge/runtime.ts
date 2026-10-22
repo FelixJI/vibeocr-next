@@ -30,6 +30,7 @@ const APP_ROUTES = new Set<AppRoute>([
   "recognition",
   "imageEdit",
   "batch",
+  "imageConversion",
   "qrcode",
   "pdf",
   "settings",

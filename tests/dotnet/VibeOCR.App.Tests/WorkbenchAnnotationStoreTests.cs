@@ -22,6 +22,17 @@ public sealed class WorkbenchAnnotationStoreTests : IDisposable
   }
 
   [Fact]
+  public void SnapshotNamesContainTimestampAndIncreasingSequence()
+  {
+    string first = AnnotatedImagePlatform.NextSnapshotFileName();
+    string second = AnnotatedImagePlatform.NextSnapshotFileName();
+    Assert.Matches(@"^snapshot-\d{8}-\d{9}-\d{4,}$", first);
+    Assert.Matches(@"^snapshot-\d{8}-\d{9}-\d{4,}$", second);
+    Assert.True(long.Parse(second.Split('-')[3], System.Globalization.CultureInfo.InvariantCulture) >
+      long.Parse(first.Split('-')[3], System.Globalization.CultureInfo.InvariantCulture));
+  }
+
+  [Fact]
   public async Task SaveWritesTheExactSnapshotAndCancellationKeepsExistingImage()
   {
     string source = Path.Combine(resourceRoot, "source.png");

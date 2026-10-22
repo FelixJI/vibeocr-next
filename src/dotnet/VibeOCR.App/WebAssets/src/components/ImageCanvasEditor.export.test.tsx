@@ -711,9 +711,14 @@ describe("editor export pixels and previews", () => {
 });
 
 describe("output preset copy acknowledgement", () => {
-  it.each([true, false])(
-    "closes only after successful host copy acknowledgement (%s)",
-    async (success) => {
+  it.each([
+    [true, false],
+    [false, false],
+    [true, true],
+    [false, true],
+  ])(
+    "closes only after successful host copy acknowledgement (success=%s, scene=%s)",
+    async (success, capture) => {
       stubCanvasStack();
       const actions = createActions();
       let acknowledge: ((value: boolean) => void) | undefined;
@@ -727,6 +732,25 @@ describe("output preset copy acknowledgement", () => {
       render(
         <ImageCanvasEditor
           {...editorProps({ actions })}
+          captureScene={
+            capture
+              ? {
+                  surfaceId: "surface",
+                  captureSessionId: "capture",
+                  inputUrl: "https://resource.vibeocr/source.png",
+                  inputRevision: 0,
+                  documentGeneration: 1,
+                  bootstrapGeneration: 1,
+                  initialTool: "select",
+                  x: 0,
+                  y: 0,
+                  width: 64,
+                  height: 32,
+                  desktopWidth: 1280,
+                  desktopHeight: 720,
+                }
+              : undefined
+          }
           editorSettings={{
             editorPreferences: {
               ...DEFAULT_EDITOR_PREFERENCES,
@@ -741,7 +765,11 @@ describe("output preset copy acknowledgement", () => {
       await waitFor(() =>
         expect(screen.getByText(/原图 64×32/)).toBeInTheDocument(),
       );
-      fireEvent.click(screen.getByRole("button", { name: "复制标注图" }));
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "复制标注图",
+        }),
+      );
       await waitFor(() => expect(acknowledge).toBeDefined());
       expect(actions.run).not.toHaveBeenCalledWith({
         type: "recognition.closeScreenshotSession",
@@ -749,7 +777,7 @@ describe("output preset copy acknowledgement", () => {
       await act(async () => {
         acknowledge!(success);
       });
-      if (success)
+      if (success && !capture)
         await waitFor(() =>
           expect(actions.run).toHaveBeenCalledWith({
             type: "recognition.closeScreenshotSession",

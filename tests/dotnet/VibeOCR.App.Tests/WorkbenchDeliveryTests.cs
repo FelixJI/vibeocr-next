@@ -88,6 +88,7 @@ public sealed class WorkbenchDeliveryTests(ITestOutputHelper output)
     WorkbenchState[] owners = [new ShellWorkbenchState(WorkbenchRoute.ImageEdit),
       new RecognitionWorkbenchState(true, "recognition.running"), new ImageEditWorkbenchState(false, "recognition.session"),
       new PinEditWorkbenchState(false, "pinEdit.session"),
+      new ImageConversionWorkbenchState(0, []),
       new BatchWorkbenchState(true, 40, 1, 0), new PdfWorkbenchState(true, "pdf.open", 64, 0),
       new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
       new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false),

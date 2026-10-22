@@ -27,7 +27,7 @@ public sealed partial class MainWindow : Window
 {
   // 默认/最小尺寸均为逻辑像素（DIP）；Web 布局还需适配扣除窗口边框后的可用尺寸。
   // 写入 AppWindow/WM_GETMINMAXINFO 前由 WindowGeometryPolicy 按 DPI 换算为物理像素。
-  private const int DefaultWidth = 1280;
+  private const int DefaultWidth = 1440;
   private const int DefaultHeight = 800;
   private const int MinWidth = 640;
   private const int MinHeight = 480;
@@ -564,6 +564,7 @@ public sealed partial class MainWindow : Window
       "recognition" => WorkbenchRoute.Recognition,
       "imageEdit" or "pinEdit" => WorkbenchRoute.ImageEdit,
       "batch" => WorkbenchRoute.Batch,
+      "imageConversion" => WorkbenchRoute.ImageConversion,
       "qrcode" => WorkbenchRoute.QrCode,
       "pdf" => WorkbenchRoute.Pdf,
       "settings" => WorkbenchRoute.Settings,
@@ -688,6 +689,7 @@ public sealed partial class MainWindow : Window
         command = application.CurrentRoute switch
         {
           WorkbenchRoute.Batch => new AddDroppedBatchFilesCommand(paths),
+          WorkbenchRoute.ImageConversion => new AddDroppedImageConversionFilesCommand(paths),
           WorkbenchRoute.QrCode => new DecodeDroppedQrCodeCommand(paths[0]),
           WorkbenchRoute.Pdf => new OpenDroppedPdfCommand(paths[0]),
           _ => new RecognizeDroppedFileCommand(paths[0]),

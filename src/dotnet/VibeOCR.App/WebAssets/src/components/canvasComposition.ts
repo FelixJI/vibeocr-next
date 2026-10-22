@@ -345,6 +345,7 @@ export function renderComposition(
   const output = canvas(layout.size.width, layout.size.height),
     ctx = output.getContext("2d");
   if (!ctx) throw new Error("排版画布不可用");
+  ctx.save();
   ctx.beginPath();
   ctx.roundRect(0, 0, output.width, output.height, settings.radius);
   ctx.clip();
@@ -384,5 +385,6 @@ export function renderComposition(
     ctx.drawImage(image, item.x, item.y);
     ctx.restore();
   }
+  ctx.restore();
   return output;
 }
