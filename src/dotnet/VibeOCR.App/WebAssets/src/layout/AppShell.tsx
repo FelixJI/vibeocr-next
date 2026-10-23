@@ -17,9 +17,13 @@ import {
   QrCode,
   Activity,
   MoonStar,
+  ImageDown,
+  PanelLeftClose,
+  PanelLeftOpen,
   ScanText,
   Settings,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router";
 
 import { CaptureButton } from "../components/CaptureButton";
@@ -36,6 +40,7 @@ const primaryNavigation = [
   ["recognition", "单次识别", ScanText],
   ["imageEdit", "图片编辑", ImageIcon],
   ["batch", "批量识别", Files],
+  ["imageConversion", "图像转换", ImageDown],
   ["qrcode", "二维码与条码", QrCode],
   ["pdf", "PDF", FileText],
 ] as const;
@@ -81,9 +86,24 @@ export function AppShell({
   theme,
   onThemeChange,
 }: AppShellProps) {
+  const [collapsed, setCollapsed] = useState(
+    () => window.matchMedia?.("(max-width: 1160px)").matches ?? false,
+  );
+  useEffect(() => {
+    const query = window.matchMedia?.("(max-width: 1160px)");
+    if (!query) return;
+    const resize = () => setCollapsed(query.matches);
+    query.addEventListener("change", resize);
+    return () => query.removeEventListener("change", resize);
+  }, []);
+  const toggleLabel = collapsed ? "展开侧边栏" : "收起侧边栏";
   return (
-    <div className="app-shell">
-      <aside className="navigation-rail" aria-label="主导航">
+    <div className={`app-shell${collapsed ? " is-navigation-collapsed" : ""}`}>
+      <aside
+        id="main-navigation"
+        className="navigation-rail"
+        aria-label="主导航"
+      >
         <div className="brand-lockup">
           <img className="brand-mark" src="./vibeocr-64.png" alt="" />
           <span>VibeOCR</span>
@@ -108,6 +128,21 @@ export function AppShell({
       </aside>
       <div className="shell-content">
         <Toolbar aria-label="应用命令" className="app-toolbar">
+          <Tooltip content={toggleLabel} relationship="label">
+            <ToolbarButton
+              aria-label={toggleLabel}
+              aria-expanded={!collapsed}
+              aria-controls="main-navigation"
+              onClick={() => setCollapsed((value) => !value)}
+              icon={
+                collapsed ? (
+                  <PanelLeftOpen aria-hidden="true" size={18} />
+                ) : (
+                  <PanelLeftClose aria-hidden="true" size={18} />
+                )
+              }
+            />
+          </Tooltip>
           <Badge
             appearance="tint"
             color="informative"

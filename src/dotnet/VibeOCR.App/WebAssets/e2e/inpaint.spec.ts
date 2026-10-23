@@ -116,6 +116,8 @@ async function mountWithUploadCapture(
       },
     },
   });
+  if (route === "recognition")
+    await page.getByRole("button", { name: "编辑图片", exact: true }).click();
 }
 
 /** 画布坐标（900×600 属性空间）→ 页面客户区坐标后拖拽。 */
@@ -283,6 +285,7 @@ test("cancel and re-edit during processing terminate the worker so late results 
     "inpaint-late.svg",
   );
   await mountWithUploadCapture(page, uploads, "inpaint-late.svg");
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
 
   await page.getByRole("button", { name: "去水印" }).click();
@@ -352,6 +355,7 @@ test("measures real browser processing wall time and responsiveness on a 4MP ima
     "inpaint-perf.svg",
   );
   await mountWithUploadCapture(page, uploads, "inpaint-perf.svg");
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
   await expect(page.getByText(/原图 2000×2000/)).toBeVisible();
 
@@ -580,6 +584,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
       },
     },
   });
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
 
   // 会话模式同一“去水印”入口：框选 → 预览 → 应用，推进会话修订。

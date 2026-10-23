@@ -92,6 +92,7 @@ for (const size of [
     for (const [route, name] of [
       ["recognition", "单次识别"],
       ["batch", "批量识别"],
+      ["imageConversion", "图像转换"],
       ["qrcode", "二维码与条码"],
       ["pdf", "PDF"],
       ["settings", "设置"],

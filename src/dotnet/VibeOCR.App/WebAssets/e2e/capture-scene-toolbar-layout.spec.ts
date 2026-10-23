@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { mountHost } from "./workbench-host";
+import { expectCommand, mountHost } from "./workbench-host";
 
 /** 截图现场两排工具栏的真实浏览器布局契约（最终方案）：
  *  1) 主排（图片编辑工具）承载全部绘图工具与操作（含取字/修补上下文
@@ -44,7 +44,7 @@ async function mountScene(
   await page.route("**/capture-scene.svg", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400"><rect width="900" height="400" fill="white"/><rect x="40" y="140" width="500" height="180" fill="#d5e5f4"/></svg>',
+      body: `<svg xmlns="http://www.w3.org/2000/svg" width="${geometry?.width ?? 900}" height="${geometry?.height ?? 400}"><rect width="100%" height="100%" fill="#d5e5f4"/></svg>`,
     }),
   );
   await page.route("**/__annotation", (route) =>
@@ -274,3 +274,138 @@ test("大选区（y=0、高接近视口）时工具栏钉底，输出设置翻�
   await panel.getByLabel("JPEG 质量").selectOption("0.85");
   await expect(panel.getByLabel("JPEG 质量")).toHaveValue("0.85");
 });
+
+test("选区覆盖工具栏时前景有实色背景，颜色面板在窄屏底部仍可操作", async ({
+  page,
+}) => {
+  await mountScene(page, 360, 480, { x: 0, y: 0, width: 2560, height: 1440 });
+  const stack = page.locator(".editor-toolbar-stack");
+  await expect(stack).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await page.getByRole("button", { name: "自定义颜色", exact: true }).click();
+  const popup = page.getByRole("dialog", { name: "自定义颜色", exact: true });
+  await expect(popup).toBeVisible();
+  const box = (await popup.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(360);
+  expect(box.y + box.height).toBeLessThanOrEqual(480);
+  await popup.getByLabel("十六进制颜色").fill("#123456");
+  await expect(
+    popup.getByRole("slider", { name: "红", exact: true }),
+  ).toHaveValue("18");
+  await page.screenshot({
+    path: test.info().outputPath("capture-color-panel.png"),
+  });
+  await page.keyboard.press("Escape");
+  await expect(popup).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "矩形", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+test("工具栏焦点的 Esc 先退工具，再退出现场", async ({ page }) => {
+  await mountScene(page, 1280, 720);
+  await page.getByLabel("线条宽度").focus();
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "矩形", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByLabel("图片检查画布")).toBeFocused();
+  await page.getByRole("button", { name: "矩形", exact: true }).focus();
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "选择", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Escape");
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "closeScreenshotSession",
+    arguments: {},
+  });
+});
+
+test("空白区域右键先退工具再退出现场", async ({ page }) => {
+  await mountScene(page, 1280, 720);
+  await page.mouse.click(10, 10, { button: "right" });
+  await expect(
+    page.getByRole("button", { name: "选择", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.mouse.click(10, 10, { button: "right" });
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "closeScreenshotSession",
+    arguments: {},
+  });
+});
+
+for (const [action, format] of [
+  ["复制标注图", "image/png"],
+  ["保存标注图", "image/png"],
+  ["保存标注图", "image/jpeg"],
+] as const) {
+  test(`圆角截图 ${action} ${format} 导出正确角落并支持撤销`, async ({
+    page,
+  }) => {
+    await mountScene(page, 1280, 720);
+    const uploads: Buffer[] = [];
+    await page.route("**/__annotation", (route) => {
+      const bytes = route.request().postDataBuffer();
+      if (bytes) uploads.push(bytes);
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resourceUri:
+            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+        }),
+      });
+    });
+    await page
+      .getByRole("combobox", { name: "截图圆角", exact: true })
+      .selectOption("40");
+    await expect(page.getByLabel("图片视口")).not.toHaveCSS(
+      "border-top-left-radius",
+      "0px",
+    );
+    await page.getByRole("button", { name: "撤销", exact: true }).click();
+    await expect(
+      page.getByRole("combobox", { name: "截图圆角", exact: true }),
+    ).toHaveValue("0");
+    await page.getByRole("button", { name: "重做", exact: true }).click();
+    if (format === "image/jpeg") {
+      await page.locator(".editor-output-settings > summary").click();
+      await page.getByLabel("输出格式").selectOption(format);
+      await page.locator(".editor-output-settings > summary").click();
+    }
+    await page.getByRole("button", { name: action, exact: true }).click();
+    await expect.poll(() => uploads.length).toBe(1);
+    const samples = await page.evaluate(async (base64) => {
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const image = await createImageBitmap(new Blob([bytes]));
+      const canvas = document.createElement("canvas");
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const context = canvas.getContext("2d")!;
+      context.drawImage(image, 0, 0);
+      image.close();
+      return {
+        width: canvas.width,
+        height: canvas.height,
+        corner: Array.from(context.getImageData(0, 0, 1, 1).data),
+        center: Array.from(
+          context.getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data,
+        ),
+      };
+    }, uploads[0]!.toString("base64"));
+    expect(samples.width).toBe(900);
+    expect(samples.height).toBe(400);
+    if (format === "image/png") expect(samples.corner[3]).toBe(0);
+    else {
+      expect(samples.corner[3]).toBe(255);
+      for (const channel of samples.corner.slice(0, 3))
+        expect(channel).toBeGreaterThanOrEqual(250);
+    }
+    for (const [index, value] of [213, 229, 244, 255].entries())
+      expect(Math.abs(samples.center[index]! - value)).toBeLessThanOrEqual(3);
+  });
+}

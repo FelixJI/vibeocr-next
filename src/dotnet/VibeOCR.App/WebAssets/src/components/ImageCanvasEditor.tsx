@@ -1,3 +1,4 @@
+import { EditorColorPicker } from "./EditorColorPicker";
 import { compositionExclusions } from "./compositionExclusions";
 import { CanvasCompositionPanel } from "./CanvasCompositionPanel";
 import { EditorPreferencesPanel } from "./EditorPreferencesPanel";
@@ -7,6 +8,7 @@ import {
   shortcutTool,
 } from "./editorPreferences";
 import {
+  DEFAULT_COMPOSITION,
   renderComposition,
   parseComposition,
   boundedCanvasSize,
@@ -757,8 +759,9 @@ interface ImageCanvasEditorProps {
     readonly lines: readonly IndexedResultLine[];
     readonly onUpdateLine?: OverlayLineEditHandler;
   };
-  /** 校对层是否激活：切换由宿主 UI 控制；无 proofread 数据时忽略。 */
+  /** 预览模式：有 proofread 数据时显示校对层，否则完整展示输入图片。 */
   readonly proofreadActive?: boolean;
+  readonly inactive?: boolean;
 }
 
 /** 属性下排样式面板：颜色/线宽/边框不透明度/填充开关/颜色/不透明度；
@@ -766,6 +769,7 @@ interface ImageCanvasEditorProps {
  * 所有变更经统一 onStyleChange 上交，荧光笔边框不透明度与自身 35% 透明
  * 相乘的语义由父级 draw 决定。 */
 function AnnotationStylePanel({
+  captureScene = false,
   showColorControl,
   showStrokeControls,
   showLineStyleControl,
@@ -788,6 +792,7 @@ function AnnotationStylePanel({
   onPickColor,
   onStyleChange,
 }: {
+  readonly captureScene?: boolean;
   readonly showColorControl: boolean;
   readonly showStrokeControls: boolean;
   readonly showLineStyleControl: boolean;
@@ -853,15 +858,23 @@ function AnnotationStylePanel({
               style={{ background: color }}
             />
           ))}
-          <input
-            aria-label="自定义颜色"
-            onChange={(event) =>
-              onStyleChange({ kind: "color", value: event.target.value })
-            }
-            title="自定义颜色"
-            type="color"
-            value={normalizeHexColor(activeStyleColor)}
-          />
+          {captureScene ? (
+            <EditorColorPicker
+              label="自定义颜色"
+              value={normalizeHexColor(activeStyleColor)}
+              onChange={(value) => onStyleChange({ kind: "color", value })}
+            />
+          ) : (
+            <input
+              aria-label="自定义颜色"
+              onChange={(event) =>
+                onStyleChange({ kind: "color", value: event.target.value })
+              }
+              title="自定义颜色"
+              type="color"
+              value={normalizeHexColor(activeStyleColor)}
+            />
+          )}
           <Button
             appearance="subtle"
             aria-label="屏幕取色"
@@ -1061,19 +1074,29 @@ function AnnotationStylePanel({
           </label>
           {activeFillEnabled && (
             <>
-              <input
-                aria-label="填充颜色"
-                className="editor-fill-color"
-                onChange={(event) =>
-                  onStyleChange({
-                    kind: "fillColor",
-                    value: event.target.value,
-                  })
-                }
-                title="填充颜色"
-                type="color"
-                value={normalizeHexColor(activeFillColor)}
-              />
+              {captureScene ? (
+                <EditorColorPicker
+                  label="填充颜色"
+                  value={normalizeHexColor(activeFillColor)}
+                  onChange={(value) =>
+                    onStyleChange({ kind: "fillColor", value })
+                  }
+                />
+              ) : (
+                <input
+                  aria-label="填充颜色"
+                  className="editor-fill-color"
+                  onChange={(event) =>
+                    onStyleChange({
+                      kind: "fillColor",
+                      value: event.target.value,
+                    })
+                  }
+                  title="填充颜色"
+                  type="color"
+                  value={normalizeHexColor(activeFillColor)}
+                />
+              )}
               <label className="editor-style-control">
                 <span aria-hidden="true">填充不透明度</span>
                 <Input
@@ -1149,6 +1172,7 @@ export function ImageCanvasEditor({
   pinSnapshotApply = false,
   proofread,
   proofreadActive = false,
+  inactive = false,
 }: ImageCanvasEditorProps) {
   const commands = EDITOR_COMMANDS[commandScope];
   const preferences = editorPreferences(editorSettings.editorPreferences);
@@ -1159,7 +1183,7 @@ export function ImageCanvasEditor({
       ? ("imageEdit.saveProject" as const)
       : ("recognition.saveProject" as const);
   // 校对模式：同一图片区切换显示结果行框，编辑器其余 chrome 隐藏但状态保留。
-  const proofreading = !!proofread && proofreadActive;
+  const proofreading = proofreadActive;
   const captureGeometry = captureScene;
   const contentRevisionRef = useRef(session?.revision ?? 0);
   const importGenerationRef = useRef(0);
@@ -5008,6 +5032,7 @@ export function ImageCanvasEditor({
           });
       if (
         copied &&
+        !captureStyle &&
         preferences.output.closeAfterCopy &&
         exported.sessionId &&
         exported.sessionId === sessionIdRef.current &&
@@ -6129,6 +6154,66 @@ export function ImageCanvasEditor({
     return actions.run({ type: commands.closeScreenshotSession });
   }
 
+  // 现场取消覆盖工具栏、画布及空白区；弹层和 IME 先消费自己的取消。
+  useEffect(() => {
+    if (!captureStyle || !session) return;
+    const cancel = (event: KeyboardEvent | MouseEvent) => {
+      if (
+        event instanceof KeyboardEvent &&
+        (event.key !== "Escape" ||
+          event.repeat ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
+          event.shiftKey ||
+          isImeCompositionEvent(event))
+      )
+        return;
+      if (
+        event.defaultPrevented ||
+        textComposing.current ||
+        inactive ||
+        proofreading ||
+        interactionLocked ||
+        isExporting
+      )
+        return;
+      const target =
+        event.target instanceof HTMLElement ? event.target : undefined;
+      if (target?.closest('[role="dialog"], [role="menu"]')) return;
+      if (
+        target?.closest('input, textarea, select, [contenteditable="true"]')
+      ) {
+        if (event instanceof KeyboardEvent) {
+          event.preventDefault();
+          target.blur();
+          canvasRef.current?.focus();
+        }
+        return;
+      }
+      event.preventDefault();
+      if (copyMenu) {
+        setCopyMenu(undefined);
+      } else if (colorPickPendingRef.current) {
+        colorPickPendingRef.current = false;
+        setOperationMessage("已取消取色；标注颜色保持不变。");
+      } else if (textEdit || tool !== "select" || selectedMark !== undefined) {
+        cancelDrawing();
+        select(undefined);
+        setTool("select");
+      } else {
+        void closeSession();
+      }
+      canvasRef.current?.focus();
+    };
+    window.addEventListener("keydown", cancel);
+    window.addEventListener("contextmenu", cancel);
+    return () => {
+      window.removeEventListener("keydown", cancel);
+      window.removeEventListener("contextmenu", cancel);
+    };
+  });
+
   // 容器外的工作台控件也可调用文档命令；ref 保留最新回调。
   const documentCommandRef = useRef({
     save: pinSnapshotApply ? applyPinSnapshot : saveAnnotatedImage,
@@ -6136,7 +6221,7 @@ export function ImageCanvasEditor({
     canExport,
     isExporting,
     hasSession: !!session,
-    suspended: proofreading,
+    suspended: inactive || proofreading,
   });
   useEffect(() => {
     documentCommandRef.current = {
@@ -6145,7 +6230,7 @@ export function ImageCanvasEditor({
       canExport,
       isExporting,
       hasSession: !!session,
-      suspended: proofreading || interactionLocked,
+      suspended: inactive || proofreading || interactionLocked,
     };
   });
   useEffect(() => {
@@ -6374,6 +6459,7 @@ export function ImageCanvasEditor({
   // 父级仅以单一 onStyleChange 入口承接（选中标记就地改样式或更新默认值）。
   const stylePanel = (
     <AnnotationStylePanel
+      captureScene={!!captureStyle}
       activeArrowDouble={activeArrowDouble}
       activeArrowStyle={activeArrowStyle}
       activeCornerRadius={activeCornerRadius}
@@ -7369,6 +7455,10 @@ export function ImageCanvasEditor({
     select(undefined);
   }
 
+  const captureCornerRadius =
+    captureStyle && currentOutputSize
+      ? `${Math.min(50, ((state.composition?.radius ?? 0) / currentOutputSize.width) * 100)}% / ${Math.min(50, ((state.composition?.radius ?? 0) / currentOutputSize.height) * 100)}%`
+      : undefined;
   const copyAnnotatedButton = (
     <Button
       title="复制标注图"
@@ -7651,19 +7741,6 @@ export function ImageCanvasEditor({
         }
         // 文档命令由 window 消费，画布手势仍在本地处理。
         if (
-          captureStyle &&
-          session &&
-          event.key === "Escape" &&
-          tool === "select" &&
-          selectedMark === undefined &&
-          !isExporting &&
-          !["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
-        ) {
-          event.preventDefault();
-          void closeSession();
-          return;
-        }
-        if (
           event.code === "Space" &&
           !["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName)
         ) {
@@ -7694,7 +7771,10 @@ export function ImageCanvasEditor({
               }}
               onError={() => presentation.current?.fail("backgroundDecode")}
             />
-            <div className="capture-scene-mask" />
+            <div
+              className="capture-scene-mask"
+              style={{ borderRadius: captureCornerRadius }}
+            />
           </div>,
           document.body,
         )}
@@ -7709,6 +7789,46 @@ export function ImageCanvasEditor({
           }`}
         >
           {toolButtons}
+          {captureStyle && (
+            <label
+              className="editor-inline-control"
+              title="PNG 保留透明圆角；JPEG 使用输出背景色"
+            >
+              圆角
+              <Select
+                aria-label="截图圆角"
+                size="small"
+                value={String(state.composition?.radius ?? 0)}
+                disabled={isExporting || !!textEdit || interactionLocked}
+                onChange={(_, data) => {
+                  cancelDrawing();
+                  commit({
+                    ...state,
+                    composition: {
+                      ...(state.composition ?? DEFAULT_COMPOSITION),
+                      radius: Number(data.value),
+                    },
+                  });
+                }}
+              >
+                {[
+                  ...new Set([
+                    0,
+                    8,
+                    16,
+                    24,
+                    40,
+                    64,
+                    state.composition?.radius ?? 0,
+                  ]),
+                ].map((radius) => (
+                  <option key={radius} value={radius}>
+                    {radius === 0 ? "直角" : `${radius}px`}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
           {toolset === "full" && (
             <ToolbarButton
               aria-label="画布排版"
@@ -8088,6 +8208,7 @@ export function ImageCanvasEditor({
         tabIndex={0}
         style={{
           ["--editor-zoom" as string]: zoom,
+          borderRadius: captureCornerRadius,
           overflow: "auto",
           maxHeight: "70vh",
           position: "relative",
@@ -8102,6 +8223,7 @@ export function ImageCanvasEditor({
             return;
           }
           event.preventDefault();
+          event.stopPropagation();
           const bounds = event.currentTarget.getBoundingClientRect();
           setCopyMenu({
             x: event.clientX - bounds.left + event.currentTarget.scrollLeft,
@@ -8141,14 +8263,15 @@ export function ImageCanvasEditor({
           panStart.current = undefined;
         }}
       >
-        {proofreading && proofread ? (
+        {proofreading ? (
           // 左侧校对面：冻结参考图 + 结果行框投影；编辑画布仅隐藏，切换回
           // 编辑模式时未提交编辑与历史原样恢复。
           <ResultImageTextOverlay
-            key={proofread.bindingKey}
-            imageUrl={proofread.imageUrl}
-            lines={proofread.lines}
-            onUpdateLine={proofread.onUpdateLine}
+            key={proofread?.bindingKey ?? source}
+            imageUrl={proofread?.imageUrl ?? source ?? ""}
+            lines={proofread?.lines ?? []}
+            onUpdateLine={proofread?.onUpdateLine}
+            fit
           />
         ) : layerReady ? (
           <div
@@ -8209,6 +8332,7 @@ export function ImageCanvasEditor({
             opacity: captureStyle && !sourceSize ? 0 : undefined,
           }}
           onKeyDown={(event) => {
+            if (captureStyle && event.key === "Escape") return;
             // IME 组合（含标注文字输入结束前迟到的 229 键）不触发撤销/
             // 删除/手势取消；非组合行为保持不变。
             if (

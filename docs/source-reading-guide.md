@@ -21,6 +21,7 @@
 | 宿主：窗口、单实例与跨产品互斥、热键、剪贴板/文件授权 | C#/WinUI（`VibeOCR.App`、`VibeOCR.Platform`） | WinUI/Win32 原生；剪贴板/文件命令经 `App/Workbench` 暴露给 Web | 系统级集成与权限仲裁只能在原生层 |
 | 桌面工作流、应用权威状态与更新 | C#（`src/dotnet/VibeOCR.App/Features`、ViewModels） | ViewModel → Platform typed client；更新走 Velopack feed | 权威状态单点，UI 不复制协议/进程细节 |
 | Workbench 展示与局部编辑 | React/TypeScript（`WebAssets/src` 的 `features`/`components`） | WebView2 消息桥：`WebAssets/src/bridge` ↔ `App/Web` codec ↔ `App/Workbench` handler | 富交互迭代快；浏览器内容无直接系统/Runtime 权限 |
+| 图像转换（独立文件队列） | C# `WorkbenchImageConversionOwner` 持有输入授权与队列；React `ImageConversionPage` / `ImageConversionExport` 负责预设转换 | `imageConversion` 独立 bridge scope；文件选择、解码边界、资源租约及写盘仍由宿主校验 | 与批量 OCR 队列隔离，不启动识别运行环境；复用既有输出预设与不覆盖原图的保存规则 |
 | 二维码/条码生成、本地解码与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`、`VibeOCR.App/Inference/LocalQrCodeClient`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码/BitmapDecoder（≤4096 有界缩放，有界趟次）；不等待 Supervisor | 无需识别运行环境即可生成与解码，文件授权留在宿主 |
 | OCR/MinerU 推理、PDF/表格/导出、二维码兼容生成/解码 route | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`）；桌面已不消费解码 route | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；保留的兼容 wire 面不构成桌面依赖；本地 MinerU 4 无 language 上行通道，OCR 恒用内置 ch 模型（覆盖中英） |
 | 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |

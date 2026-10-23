@@ -10,6 +10,17 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Fact]
+  public void ImageConversionHasItsOwnRouteAndCommandsWithoutWebFilePaths()
+  {
+    Guid session = Guid.NewGuid();
+    Assert.IsType<AddImageConversionFilesCommand>(ParseForTest(CommandJson(session, "imageConversion", "addFiles", "{}"), session).Command);
+    Assert.IsType<PrepareImageConversionCommand>(ParseForTest(CommandJson(session, "imageConversion", "prepareImageExport", "{\"index\":0}"), session).Command);
+    Assert.Equal(WorkbenchRoute.ImageConversion, Assert.IsType<NavigateWorkbenchCommand>(ParseForTest(CommandJson(session, "shell", "navigate", "{\"route\":\"imageConversion\"}"), session).Command).Route);
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "imageConversion", "addFiles", "{\"path\":\"C:/private.png\"}"), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "batch", "prepareImageExport", "{\"index\":0}"), session));
+  }
+
+  [Fact]
   public void PresetOutputNeverAcceptsWebPathsAndRetainsSessionBinding()
   {
     Guid session = Guid.NewGuid();
@@ -47,17 +58,17 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   }
 
   [Fact]
-  public void BatchStateSerializesExportImageErrorForWebDecodeUnavailable()
+  public void ImageConversionStateSerializesExportImageErrorForWebDecodeUnavailable()
   {
     // F239-R3-01：批量图片预设的 decode_unavailable 必须经真实 bridge 进
     // wire，否则前端等不到状态只能逐项等 15s 超时。
-    var state = new BatchWorkbenchState(false, 2, 0, 1, [])
+    var state = new ImageConversionWorkbenchState(2, [])
     {
       ExportImageError = "decode_unavailable",
     };
     string json = WorkbenchBridgeCodec.SerializeState(
       Guid.NewGuid(),
-      new WorkbenchStateEnvelope(3, "batch", WorkbenchStateChange.Replace, state));
+      new WorkbenchStateEnvelope(3, "imageConversion", WorkbenchStateChange.Replace, state));
     using JsonDocument document = JsonDocument.Parse(json);
     JsonElement batch = document.RootElement.GetProperty("payload").GetProperty("state");
     Assert.Equal(
@@ -65,7 +76,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       batch.GetProperty("exportImageError").GetString());
     string idle = WorkbenchBridgeCodec.SerializeState(
       Guid.NewGuid(),
-      new WorkbenchStateEnvelope(4, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(false, 0, 0, 0, [])));
+      new WorkbenchStateEnvelope(4, "imageConversion", WorkbenchStateChange.Replace, new ImageConversionWorkbenchState(0, [])));
     Assert.Contains("\"exportImageError\":null", idle);
   }
 

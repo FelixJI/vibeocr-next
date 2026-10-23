@@ -136,6 +136,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     },
   });
 
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
   await expect(page.getByText(/原图 160×80/)).toBeVisible();

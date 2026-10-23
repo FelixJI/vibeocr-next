@@ -58,6 +58,7 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
       },
     },
   });
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(
     page.getByRole("toolbar", { name: "图片编辑工具" }),
   ).toBeVisible();
@@ -347,6 +348,7 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   await expect(
     page.getByRole("button", { name: "截图", exact: true }),
   ).toBeEnabled();
+  await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   // 识别面精简后无输出变换控件；键盘验证改用保留的显示缩放下拉。
   const zoom = page.getByRole("combobox", { name: "显示缩放" });
 

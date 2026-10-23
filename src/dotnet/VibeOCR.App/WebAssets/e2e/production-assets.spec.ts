@@ -144,3 +144,105 @@ test("failed production feature chunk recovers only after explicit document relo
   ).toEqual([]);
   expect(await page.evaluate(() => location.hash)).toContain("/pdf");
 });
+
+test("main workbench warms tabs silently and switches without a loading placeholder", async ({
+  page,
+}) => {
+  const loaded = new Set<string>();
+  page.on("requestfinished", (request) => {
+    const match =
+      /\/assets\/(RecognitionPage|ImageEditPage|ImageConversionPage|BatchPage|PdfPage|QrCodePage|SettingsPage|DiagnosticsPage)-/.exec(
+        request.url(),
+      );
+    if (match) loaded.add(match[1]!);
+  });
+  await mountHost(page, snapshot);
+  await expect.poll(() => loaded.size).toBe(8);
+  await page.evaluate(
+    () => new Promise<void>((resolve) => requestIdleCallback(() => resolve())),
+  );
+  await expect(
+    page.getByRole("heading", { level: 1, name: "PDF 工作台" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "页面加载失败" }),
+  ).toHaveCount(0);
+  await page.evaluate(() => {
+    document.documentElement.dataset.loadingFlash = "false";
+    const observer = new MutationObserver((records) => {
+      if (
+        records.some((record) =>
+          [...record.addedNodes].some(
+            (node) =>
+              node instanceof Element &&
+              (node.matches(".page-loading") ||
+                node.querySelector(".page-loading")),
+          ),
+        )
+      )
+        document.documentElement.dataset.loadingFlash = "true";
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+  await page.getByRole("link", { name: "PDF", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "PDF 工作台" }),
+  ).toBeVisible();
+  expect(await page.locator("html").getAttribute("data-loading-flash")).toBe(
+    "false",
+  );
+});
+
+test("background preload errors stay silent until that tab is opened", async ({
+  page,
+}) => {
+  let attempts = 0;
+  await page.route("**/assets/PdfPage-*.js", (route) => {
+    attempts++;
+    return route.abort("failed");
+  });
+  await mountHost(page, snapshot);
+  await expect.poll(() => attempts).toBe(1);
+  await expect(
+    page.getByRole("alert").filter({ hasText: "页面加载失败" }),
+  ).toHaveCount(0);
+  await page.getByRole("link", { name: "PDF", exact: true }).click();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "页面加载失败" }),
+  ).toBeVisible();
+  expect(attempts).toBe(1);
+});
+
+test("cold tab shows a responsive skeleton instead of plain loading text", async ({
+  page,
+}, testInfo) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/assets/PdfPage-*.js", async (route) => {
+    await gate;
+    await route.continue();
+  });
+  try {
+    await page.setViewportSize({ width: 640, height: 480 });
+    await mountHost(page, { ...snapshot, route: "pdf" }, "/#/pdf", false);
+    const skeleton = page.getByRole("status", { name: "页面加载中" });
+    await expect(skeleton).toBeVisible();
+    await expect(skeleton).toHaveAttribute("aria-busy", "true");
+    await expect(page.getByText("正在加载页面…", { exact: true })).toHaveCount(
+      0,
+    );
+    const box = await skeleton.boundingBox();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(640);
+    await page.screenshot({
+      path: testInfo.outputPath("page-loading-skeleton.png"),
+    });
+  } finally {
+    release();
+  }
+  await expect(
+    page.getByRole("heading", { level: 1, name: "PDF 工作台" }),
+  ).toBeVisible();
+  await expect(page.getByRole("status", { name: "页面加载中" })).toHaveCount(0);
+});

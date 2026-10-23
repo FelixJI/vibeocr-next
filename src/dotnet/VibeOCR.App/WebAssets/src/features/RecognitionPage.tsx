@@ -6,11 +6,13 @@ import {
   Download,
   FileSpreadsheet,
   ImagePlus,
-  Sheet,
+  FileText,
   Square,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 
-import { useEffect, useState } from "react";
+import { type CSSProperties, useEffect, useState } from "react";
 
 import {
   hasTextSelection,
@@ -33,6 +35,8 @@ import {
 } from "../components/resultTextModes";
 
 import { EmptyStage, Workspace } from "../components/Workspace";
+
+import type { AppActions } from "../app/types";
 
 import type { FeatureProps } from "./FeatureValues";
 
@@ -63,6 +67,28 @@ import { stringValue } from "./FeatureValues";
 export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // The host owns each capture's intent; this user preference survives keyed
   // editor remounts and only applies to sessions explicitly captured for text.
+  const [previewCollapsed, setPreviewCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("recognition.previewCollapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [previewRatio, setPreviewRatio] = useState(1.2);
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "recognition.previewCollapsed",
+        String(previewCollapsed),
+      );
+    } catch {
+      /* Storage may be disabled; retain the preference for this session. */
+    }
+  }, [previewCollapsed]);
+  const [pendingEdit, setPendingEdit] = useState<{
+    state: Readonly<Record<string, unknown>>;
+    sessionId?: string;
+  }>();
   const [autoTextPreference, setAutoTextPreference] = useState(true);
   // 左侧单一图片区承载编辑与校对：有带 bbox 的结果时默认展示校对层
   // （宿主 state.resultImage 冻结参考图，不用会话基准图冒充）；切换到
@@ -131,8 +157,33 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // 仅结果身份变化时恢复默认校对；同一结果的宿主更新不打断编辑。
   if (proofreadBindingKey !== proofread?.bindingKey) {
     setProofreadBindingKey(proofread?.bindingKey);
-    setLeftImageMode("proofread");
+    if (proofread) setLeftImageMode("proofread");
   }
+  // 命令回执只表示已接收；新会话才表示图片实际载入成功。
+  if (
+    pendingEdit &&
+    state !== pendingEdit.state &&
+    !booleanValue(state.isBusy)
+  ) {
+    setPendingEdit(undefined);
+    if (
+      session &&
+      session.sessionId !== pendingEdit.sessionId &&
+      state.statusCode === "recognition.session"
+    ) {
+      setPreviewCollapsed(false);
+      setLeftImageMode("edit");
+    }
+  }
+  const editActions: AppActions = {
+    ...actions,
+    run: async (action) => {
+      setPendingEdit({ state, sessionId: session?.sessionId });
+      const accepted = await actions.run(action);
+      if (!accepted) setPendingEdit(undefined);
+      return accepted;
+    },
+  };
   // Windows 常用命令：打开与工具栏按钮同一入口；Ctrl+C 仅在无文本选择、
   // 目标非输入控件且存在可复制结果时降级为复制识别结果（镜像页级唯一
   // 复制按钮：lines 结果按当前排版模式，其余 plain），不覆盖用户已有
@@ -186,11 +237,26 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   ]);
   return (
     <Workspace
+      className="recognition-workspace"
       eyebrow="WORKBENCH / 01"
       title="单次识别"
       description="截图、粘贴或拖入图片；在同一工作台检查与复制结果。"
       actions={
         <>
+          <Button
+            onClick={() => setPreviewCollapsed(!previewCollapsed)}
+            aria-expanded={!previewCollapsed}
+            aria-controls="recognition-preview"
+            icon={
+              previewCollapsed ? (
+                <PanelLeftOpen size={16} />
+              ) : (
+                <PanelLeftClose size={16} />
+              )
+            }
+          >
+            {previewCollapsed ? "展开图片预览" : "收起图片预览"}
+          </Button>
           <CapabilityGate
             appearance="secondary"
             capability="recognition.file"
@@ -223,7 +289,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capability="recognition.file"
             capabilities={viewState.capabilities}
             action={{ type: "recognition.openImageForEdit" }}
-            actions={actions}
+            actions={editActions}
             icon={<ImagePlus aria-hidden="true" size={16} />}
           >
             选图编辑
@@ -233,7 +299,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capability="recognition.clipboard"
             capabilities={viewState.capabilities}
             action={{ type: "recognition.pasteImageForEdit" }}
-            actions={actions}
+            actions={editActions}
             icon={<ClipboardPaste aria-hidden="true" size={16} />}
           >
             粘贴编辑
@@ -266,76 +332,101 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         enabled={viewState.capabilities.includes("recognition.engine")}
         actions={actions}
       />
-      <div className="inspection-grid">
-        <Panel label="INPUT / 01" title="输入图像">
-          {session?.sceneEditing ? (
-            <EmptyStage
-              title="正在截图现场编辑"
-              detail="请在截图现场窗口继续编辑当前图片。"
-            />
-          ) : input ? (
-            <>
-              {/* 单一左侧图片区的编辑/校对模式切换：明确当前视图；编辑器
-               * 始终挂载，切回编辑时未提交标注/历史原样恢复。 */}
-              {proofread ? (
-                <div
-                  aria-label="左侧视图模式"
-                  className="left-view-switch"
-                  role="group"
-                >
-                  <Button
-                    appearance={
-                      leftImageMode === "proofread" ? "primary" : "subtle"
-                    }
-                    aria-pressed={leftImageMode === "proofread"}
-                    onClick={() => setLeftImageMode("proofread")}
-                    size="small"
-                  >
-                    图像校对
-                  </Button>
-                  <Button
-                    appearance={leftImageMode === "edit" ? "primary" : "subtle"}
-                    aria-pressed={leftImageMode === "edit"}
-                    onClick={() => setLeftImageMode("edit")}
-                    size="small"
-                  >
-                    编辑图片
-                  </Button>
-                </div>
-              ) : null}
-              <ImageCanvasEditor
-                editorSettings={feature(viewState, "settings")}
-                key={session ? `session-${session.sessionId}` : undefined}
-                actions={actions}
-                canExport={viewState.capabilities.includes(
-                  "recognition.annotation",
-                )}
-                canRecognize={sessionCapable}
-                recognitionModes={imageRecognitionModes(state.recognitionModes)}
-                session={session}
-                source={input.url}
-                sourceByteLength={input.byteLength}
-                textLayer={textLayer}
-                systemImport={imageEditImport(state.import)}
-                autoText={
-                  session?.textSelectionRequested === true && autoTextPreference
-                }
-                showAutoTextPreference={
-                  session?.textSelectionRequested === true
-                }
-                onAutoTextChange={setAutoTextPreference}
-                toolset="recognition"
-                proofread={proofread}
-                proofreadActive={leftImageMode === "proofread"}
+      <div
+        className={`inspection-grid${previewCollapsed ? " preview-collapsed" : ""}`}
+        style={{ "--preview-weight": `${previewRatio}fr` } as CSSProperties}
+        onLoadCapture={(event) => {
+          const image = event.target;
+          if (
+            image instanceof HTMLImageElement &&
+            image.closest("#recognition-preview") &&
+            image.naturalHeight
+          )
+            setPreviewRatio(
+              Math.max(
+                0.55,
+                Math.min(1.5, image.naturalWidth / image.naturalHeight),
+              ),
+            );
+        }}
+      >
+        <div id="recognition-preview" hidden={previewCollapsed}>
+          <Panel label="INPUT / 01" title="输入图像">
+            {session?.sceneEditing ? (
+              <EmptyStage
+                title="正在截图现场编辑"
+                detail="请在截图现场窗口继续编辑当前图片。"
               />
-            </>
-          ) : (
-            <EmptyStage
-              title="等待图片"
-              detail="选择、粘贴、截图或直接拖入图片"
-            />
-          )}
-        </Panel>
+            ) : input ? (
+              <>
+                {/* 单一左侧图片区的编辑/校对模式切换：明确当前视图；编辑器
+                 * 始终挂载，切回编辑时未提交标注/历史原样恢复。 */}
+                {input ? (
+                  <div
+                    aria-label="左侧视图模式"
+                    className="left-view-switch"
+                    role="group"
+                  >
+                    <Button
+                      appearance={
+                        leftImageMode === "proofread" ? "primary" : "subtle"
+                      }
+                      aria-pressed={leftImageMode === "proofread"}
+                      onClick={() => setLeftImageMode("proofread")}
+                      size="small"
+                    >
+                      {proofread ? "图像校对" : "图片预览"}
+                    </Button>
+                    <Button
+                      appearance={
+                        leftImageMode === "edit" ? "primary" : "subtle"
+                      }
+                      aria-pressed={leftImageMode === "edit"}
+                      onClick={() => setLeftImageMode("edit")}
+                      size="small"
+                    >
+                      编辑图片
+                    </Button>
+                  </div>
+                ) : null}
+                <ImageCanvasEditor
+                  editorSettings={feature(viewState, "settings")}
+                  key={session ? `session-${session.sessionId}` : undefined}
+                  actions={actions}
+                  canExport={viewState.capabilities.includes(
+                    "recognition.annotation",
+                  )}
+                  canRecognize={sessionCapable}
+                  recognitionModes={imageRecognitionModes(
+                    state.recognitionModes,
+                  )}
+                  session={session}
+                  source={input.url}
+                  sourceByteLength={input.byteLength}
+                  textLayer={textLayer}
+                  systemImport={imageEditImport(state.import)}
+                  autoText={
+                    session?.textSelectionRequested === true &&
+                    autoTextPreference
+                  }
+                  showAutoTextPreference={
+                    session?.textSelectionRequested === true
+                  }
+                  onAutoTextChange={setAutoTextPreference}
+                  toolset="recognition"
+                  inactive={previewCollapsed}
+                  proofread={proofread}
+                  proofreadActive={leftImageMode === "proofread"}
+                />
+              </>
+            ) : (
+              <EmptyStage
+                title="等待图片"
+                detail="选择、粘贴、截图或直接拖入图片"
+              />
+            )}
+          </Panel>
+        </div>
         <Panel label="OUTPUT / 02" title="识别结果">
           {result || structured ? (
             <>
@@ -407,7 +498,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                         format === "xlsx" ? (
                           <FileSpreadsheet aria-hidden="true" size={16} />
                         ) : format === "docx" ? (
-                          <Sheet aria-hidden="true" size={16} />
+                          <FileText aria-hidden="true" size={16} />
                         ) : (
                           <Download aria-hidden="true" size={16} />
                         )
