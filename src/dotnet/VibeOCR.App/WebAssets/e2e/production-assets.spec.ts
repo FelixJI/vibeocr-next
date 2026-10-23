@@ -2,6 +2,36 @@ import { expect, test } from "@playwright/test";
 
 import { mountHost, snapshot } from "./workbench-host";
 
+test("Windows socket workaround preserves the locked Playwright feature defaults", async ({
+  playwright,
+}, testInfo) => {
+  const configuredArgs = testInfo.project.use.launchOptions?.args ?? [];
+  if (process.platform !== "win32") {
+    expect(configuredArgs).toEqual([]);
+    return;
+  }
+  const disabledFeatures: string[][] = [];
+  for (const args of [[], configuredArgs]) {
+    const browser = await playwright.chromium.launch({
+      args: ["--enable-automation", ...args],
+    });
+    try {
+      const session = await browser.newBrowserCDPSession();
+      const commandLine = await session.send("Browser.getBrowserCommandLine");
+      const featureArg = commandLine.arguments
+        .filter((arg) => arg.startsWith("--disable-features="))
+        .at(-1);
+      expect(featureArg).toBeDefined();
+      disabledFeatures.push(featureArg!.split("=")[1]!.split(","));
+    } finally {
+      await browser.close();
+    }
+  }
+  expect(new Set(disabledFeatures[1])).toEqual(
+    new Set([...disabledFeatures[0]!, "TcpPortRandomizationWin"]),
+  );
+});
+
 /**
  * 生产资产契约：workbench e2e 必须运行在预构建产物上，不得依赖 dev server
  * 的按需源码 transform（冷启动时该成本会占用用例导航预算，慢 runner 上导致
