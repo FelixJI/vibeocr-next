@@ -1591,10 +1591,11 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
     pdf_app, pdf_module, supervisor_token, monkeypatch
 ):
     import json
+
     from vibeocr.runtime.recognition.recognition_modes import (
-        RecognitionModeRegistry,
         ModeAvailability,
         RecognitionModeAvailability,
+        RecognitionModeRegistry,
     )
 
     pdf_module.recognition_mode_registry = RecognitionModeRegistry(

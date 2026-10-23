@@ -424,6 +424,17 @@ class PipelineCacheManager:
         self._wakeup_event.set()
         return existed
 
+    def release_for_replacement(self, pipeline_name: str) -> None:
+        """Close the serial owner's old instance while retaining its lease and pin.
+
+        A constructor change replaces the model protected by the current lease;
+        it does not end that use or remove the user's residency policy.
+        """
+        self._ensure_runtime_fields()
+        with self._state_lock:
+            self._release_one(pipeline_name, preserve_lease=True)
+        self._wakeup_event.set()
+
     def status(self) -> dict[str, object]:
         """Return an immutable wire-friendly snapshot of the real worker cache."""
         self._ensure_runtime_fields()
@@ -513,7 +524,7 @@ class PipelineCacheManager:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
-    def _release_one(self, pipeline_name: str) -> None:
+    def _release_one(self, pipeline_name: str, *, preserve_lease: bool = False) -> None:
         """释放单个管道；调用方已持有可重入 state lock。"""
         instance = self._service._pipelines.pop(pipeline_name, None)
         from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxPipeline
@@ -525,7 +536,8 @@ class PipelineCacheManager:
             # 与实例同步清理，避免残留签名让下复用判定误判。
             signatures.pop(pipeline_name, None)
         self._last_used.pop(pipeline_name, None)
-        self._active_counts.pop(pipeline_name, None)
+        if not preserve_lease:
+            self._active_counts.pop(pipeline_name, None)
         if self._is_paddle(pipeline_name) and not isinstance(
             instance, PaddleOnnxPipeline
         ):

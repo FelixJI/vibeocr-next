@@ -276,3 +276,128 @@ def test_factory_explicitly_disables_unselected_auxiliary_models(tmp_path, monke
     assert not observed["use_textline_orientation"]
     assert observed["engine_config"]["providers"] == ["CPUExecutionProvider"]
     pipeline.close()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize(
+    "changed", [dict(model_preset="medium"), dict(use_textline_orientation=True)]
+)
+def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
+    monkeypatch, pinned, changed
+):
+    from dataclasses import replace
+
+    from vibeocr.runtime.recognition import core
+    from vibeocr.runtime.recognition.core.pipelines import get_registry
+    from vibeocr.runtime.recognition.core.pipelines.registry import PipelineRegistry
+    from vibeocr.runtime.recognition.models.ocr_options import OCROptions
+    from vibeocr.runtime.recognition.ocr_service import OCRService
+    from vibeocr.runtime.recognition.pipeline_cache_manager import PipelineCacheManager
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    service = object.__new__(OCRService)
+    service._pipelines = {}
+    service._pipeline_signatures = {}
+    service._lock = threading.Lock()
+    manager = PipelineCacheManager(service, {"OCR": 1}, max_heavy=1, tick_interval=0.01)
+    service._cache_manager = manager
+    if pinned:
+        manager.configure_residency(
+            default_ttl_seconds=1,
+            pipelines=[SimpleNamespace(name="OCR", pinned=True, ttl_seconds=1)],
+        )
+    created = []
+    previous_runners = []
+    predicting = threading.Event()
+    finish = threading.Event()
+
+    def factory(_device, **kwargs):
+        if previous_runners:
+            assert all(runner.session is None for runner in previous_runners[-1])
+        assert manager.status()["pinned_pipelines"] == (["OCR"] if pinned else [])
+        assert manager._active_counts == {"OCR": 1}
+        snapshot = json.loads(kwargs["_onnx_request"])
+        native, runners = make_pipeline("CPUExecutionProvider", count=2)
+        # The current snapshots use 2/3/4 runners, so model exactly their selected owners.
+        nodes = native.paddlex_pipeline._pipeline
+        if "PP-LCNet_x1_0_doc_ori" in snapshot["models"]:
+            runner = SimpleNamespace(
+                session=Session("CPUExecutionProvider"), model_dir="docori"
+            )
+            runners.append(runner)
+            nodes.doc_preprocessor_pipeline = SimpleNamespace(
+                doc_ori_classify_model=SimpleNamespace(runner=runner)
+            )
+        if "PP-LCNet_x0_25_textline_ori" in snapshot["models"]:
+            runner = SimpleNamespace(
+                session=Session("CPUExecutionProvider"), model_dir="lineori"
+            )
+            runners.append(runner)
+            nodes.textline_orientation_model = SimpleNamespace(runner=runner)
+
+        def predict():
+            predicting.set()
+            assert finish.wait(2)
+            yield "text"
+
+        native.predict = predict
+        wrapped = onnx.PaddleOnnxPipeline(native, snapshot)
+        created.append(wrapped)
+        previous_runners.append(runners)
+        return wrapped
+
+    registry = PipelineRegistry()
+    registry.register(replace(get_registry().get("OCR"), create_pipeline=factory))
+    monkeypatch.setattr(core.pipelines, "get_registry", lambda: registry)
+    try:
+        with manager.lease("OCR"):
+            service.get_or_create_pipeline(
+                "OCR", OCROptions(use_doc_orientation_classify=False)
+            )
+        with manager.lease("OCR"):
+            options = OCROptions(use_doc_orientation_classify=False, **changed)
+            current = service.get_or_create_pipeline("OCR", options)
+            assert created[0].pipeline is None
+            assert manager.status()["active_counts"] == {"OCR": 1}
+            # Force an expired idle timestamp while the actual generator holds its run lock.
+            manager.touch("OCR", now=time.time() - 60)
+            worker = threading.Thread(target=lambda: list(current.predict()))
+            worker.start()
+            assert predicting.wait(1)
+            evicted = []
+            eviction = threading.Thread(
+                target=lambda: evicted.extend(manager.evict_idle(now=time.time() + 60))
+            )
+            eviction.start()
+            eviction.join(timeout=0.5)
+            assert not eviction.is_alive(), "TTL attempted to close an active session"
+            status = []
+            query = threading.Thread(target=lambda: status.append(manager.status()))
+            query.start()
+            query.join(timeout=0.5)
+            assert not query.is_alive(), (
+                "status blocked behind active prediction disposal"
+            )
+            assert status[0]["active_counts"] == {"OCR": 1}
+            assert not evicted
+            assert current.pipeline is not None
+            finish.set()
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+        completed_at = manager.get_last_used("OCR")
+        assert completed_at is not None and completed_at >= time.time() - 1
+        assert manager.evict_idle(now=completed_at + 0.5) == []
+        if pinned:
+            assert manager.evict_idle(now=completed_at + 2) == []
+            assert manager.status()["pinned_pipelines"] == ["OCR"]
+        else:
+            assert manager.evict_idle(now=completed_at + 2) == ["OCR"]
+    finally:
+        finish.set()
+        manager.shutdown()
+        manager.release(heavy_only=False, force=True)

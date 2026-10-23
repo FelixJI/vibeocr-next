@@ -775,7 +775,7 @@ class OCRService(metaclass=SingletonMeta):
         回退到旧式 _create_pipeline 以保持向后兼容。
 
         构造参数变化不能复用旧实例：以 spec.constructor_kwargs(options)
-        生成的签名比对缓存，签名不同则先经 cache_manager.release_one 释放
+        生成的签名比对缓存，签名不同则先经 cache_manager.release_for_replacement 释放
         旧实例（沿用既有 lease/TTL/容量预算，不新建平行缓存），再重建。
         调用方（worker 循环）串行调用，重建时不会有并发旧实例在用。
 
@@ -814,7 +814,7 @@ class OCRService(metaclass=SingletonMeta):
                             self._pipeline_signatures.get(pipeline_name),
                             signature,
                         )
-                        self.cache_manager.release_one(pipeline_name)
+                        self.cache_manager.release_for_replacement(pipeline_name)
                     self.cache_manager.prepare_load(pipeline_name)
                     _logger.debug(
                         "[get_or_create_pipeline] 创建管道 %s，已加载管道: %s",
