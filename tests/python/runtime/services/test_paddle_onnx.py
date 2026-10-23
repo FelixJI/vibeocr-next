@@ -456,3 +456,83 @@ def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
         finish.set()
         manager.shutdown()
         manager.release(heavy_only=False, force=True)
+
+
+@pytest.mark.parametrize("failure", ["missing", "rejected"])
+def test_cuda_plugin_failure_is_typed_before_any_factory_or_session(
+    tmp_path, monkeypatch, failure
+):
+    import sys
+
+    from vibeocr.runtime.recognition import rapid_devices
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cuda")
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    plugin = tmp_path / "incompatible.dll"
+    if failure == "rejected":
+        plugin.write_bytes(b"")
+    monkeypatch.setenv("VIBEOCR_ORT_CUDA_EP_DLL", str(plugin))
+    monkeypatch.delenv("VIBEOCR_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(rapid_devices, "_state", {})
+    monkeypatch.setenv("PATH", rapid_devices.os.environ.get("PATH", ""))
+    # The native loader is exercised separately; this unit seam needs no CUDA DLLs.
+    monkeypatch.setattr(
+        rapid_devices,
+        "_nvidia_dll_dirs",
+        lambda: ({"unused.dll": tmp_path / "unused.dll"}, []),
+    )
+    monkeypatch.setattr(
+        onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
+    )
+    calls = {"register": 0, "factory": 0, "session": 0}
+
+    def register(_name, path):
+        calls["register"] += 1
+        assert path == str(plugin)
+        raise RuntimeError("incompatible binary fixture")
+
+    def factory(**_kwargs):
+        calls["factory"] += 1
+        pytest.fail("rejected CUDA must not construct a CPU or Paddle pipeline")
+
+    def session(*_args, **_kwargs):
+        calls["session"] += 1
+        pytest.fail("rejected CUDA must not construct any ORT session")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(
+            register_execution_provider_library=register,
+            get_available_providers=lambda: ["CPUExecutionProvider"],
+            InferenceSession=session,
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=factory))
+    snapshot = onnx.freeze_request(
+        {"device": "cuda", "use_doc_orientation_classify": False}
+    )
+    with pytest.raises(onnx.PaddleOnnxError, match="CUDA DLL/plugin unavailable"):
+        onnx.create_pipeline(json.dumps(snapshot), local_models_only=True)
+    assert calls == {
+        "register": int(failure == "rejected"),
+        "factory": 0,
+        "session": 0,
+    }
+    assert rapid_devices._state == {"failed": True}
+
+
+def test_directml_absent_hardware_rejects_admission_before_model_preparation(
+    monkeypatch,
+):
+    from vibeocr.runtime.recognition import directml_devices
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
+    monkeypatch.setattr(directml_devices, "hardware_adapters", lambda: [])
+    monkeypatch.setattr(
+        onnx,
+        "prepare_models",
+        lambda *_a, **_kw: pytest.fail("missing hardware must not prepare models"),
+    )
+    with pytest.raises(onnx.PaddleOnnxError, match="hardware adapter unavailable"):
+        onnx.freeze_request({"device": "directml"})
