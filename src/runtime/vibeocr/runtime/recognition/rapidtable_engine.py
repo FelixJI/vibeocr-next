@@ -282,11 +282,12 @@ class RapidTableEngine:
             if boxes is not None and len(boxes) == len(table_model.cells):
                 enriched = []
                 for cell, box in zip(table_model.cells, boxes, strict=True):
-                    values = [float(v) for v in list(box)[:4]]
+                    values = [float(v) for v in box]
+                    xs, ys = values[::2], values[1::2]
                     enriched.append(
                         replace(
                             cell,
-                            bbox=(values[0], values[1], values[2], values[3]),
+                            bbox=(min(xs), min(ys), max(xs), max(ys)),
                             source_refs=(f"rapid-table:cell_box:{cell.cell_id}",),
                         )
                     )
@@ -405,7 +406,8 @@ class RapidTableEngine:
         img = PILImage.open(io.BytesIO(raw))
         if img.mode != "RGB":
             img = img.convert("RGB")
-        return np.array(img)
+        # RapidTable/内置 RapidOCR 将 ndarray 直接视为 BGR。
+        return np.array(img)[:, :, ::-1].copy()
 
 
 __all__ = [

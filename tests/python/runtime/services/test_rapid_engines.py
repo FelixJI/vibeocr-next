@@ -288,6 +288,25 @@ def test_rapid_table_cuda_fails_closed_without_provider(
     assert info.value.engine == "rapidtable"
 
 
+@pytest.mark.parametrize(
+    ("device", "cuda_ready", "expected"),
+    [
+        ("cpu", True, "cpu"),
+        ("auto", False, "cpu"),
+        ("auto", True, "cuda"),
+        ("cuda", True, "cuda"),
+    ],
+)
+def test_rapid_table_device_selection(
+    monkeypatch: pytest.MonkeyPatch, device: str, cuda_ready: bool, expected: str
+) -> None:
+    from vibeocr.runtime.recognition import rapidtable_engine
+
+    monkeypatch.setattr(rapidtable_engine, "cuda_provider_ready", lambda: cuda_ready)
+    selection = _FakeSelection("RAPID_TABLE", {"device": device})
+    assert rapidtable_engine._device_from_selection(selection) == expected
+
+
 def test_rapid_table_payload_matches_table_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -335,6 +354,45 @@ def test_rapid_table_payload_matches_table_contract(
     assert table.coordinate_space.value == "pixel"
     assert blocks[0]["table_body"].startswith("<table")
     assert payload["pipeline_type"] == "TABLE_RECOGNITION"
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        [10.0, 20.0, 90.0, 80.0],
+        [20.0, 20.0, 90.0, 30.0, 80.0, 80.0, 10.0, 70.0],
+    ],
+)
+def test_rapid_table_cell_bbox_contains_all_polygon_vertices(box: list[float]) -> None:
+    from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
+
+    result = types.SimpleNamespace(
+        pred_htmls=["<table><tr><td>Apple</td></tr></table>"],
+        cell_bboxes=[[box]],
+    )
+    payload = RapidTableEngine._result_to_payload(result, _FakeImage("t"))
+    cell = payload["content_list"][0]["table"]["cells"][0]
+    assert cell["bbox"] == [10.0, 20.0, 90.0, 80.0]
+
+
+@pytest.mark.parametrize("engine_name", ["RapidTableEngine", "RapidOcrEngine"])
+def test_rapid_image_decode_preserves_upstream_bgr_contract(engine_name: str) -> None:
+    import io
+
+    from PIL import Image
+    from vibeocr.runtime.recognition.rapidocr_engine import RapidOcrEngine
+    from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
+
+    image = Image.new("RGB", (2, 1))
+    image.putdata([(255, 17, 31), (23, 41, 249)])
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    engine_type = {
+        "RapidTableEngine": RapidTableEngine,
+        "RapidOcrEngine": RapidOcrEngine,
+    }[engine_name]
+    decoded = engine_type._to_ndarray(buffer.getvalue())
+    assert decoded.tolist() == [[[31, 17, 255], [249, 41, 23]]]
 
 
 # ---------------------------------------------------------------------------

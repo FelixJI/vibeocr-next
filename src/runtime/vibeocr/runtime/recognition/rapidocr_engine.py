@@ -473,7 +473,8 @@ class RapidOcrEngine:
         img = PILImage.open(io.BytesIO(raw))
         if img.mode != "RGB":
             img = img.convert("RGB")
-        return np.array(img)
+        # RapidOCR 将 ndarray 直接视为 BGR。
+        return np.array(img)[:, :, ::-1].copy()
 
 
 __all__ = [
