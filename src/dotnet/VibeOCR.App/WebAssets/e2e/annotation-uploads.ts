@@ -2,7 +2,10 @@ import { expect, type Page } from "@playwright/test";
 import type { HostCommand } from "../src/bridge/client";
 
 /** 每次上传对应独立租约；断言必须通过实际 bridge 命令的 token 找到像素。 */
-export async function recordAnnotationUploads(page: Page) {
+export async function recordAnnotationUploads(
+  page: Page,
+  scope = "recognition",
+) {
   const uploads = new Map<
     string,
     { resourceUri: string; contentType: string; body: Buffer }
@@ -27,28 +30,52 @@ export async function recordAnnotationUploads(page: Page) {
     await route.fulfill({ status: 204 });
     discarded.add(new URL(route.request().url()).pathname);
   });
-  const commands = (action: string): Promise<HostCommand[]> =>
+  const commands = (
+    action: string,
+    targetScope = scope,
+  ): Promise<HostCommand[]> =>
     page.evaluate(
-      (action) =>
+      ({ action, scope }) =>
         (
           window as Window & { __testHost: { commands: HostCommand[] } }
         ).__testHost.commands.filter(
-          (command) =>
-            command.scope === "recognition" && command.action === action,
+          (command) => command.scope === scope && command.action === action,
         ),
-      action,
+      { action, scope: targetScope },
     );
   return {
     count: () => uploads.size,
     commands,
-    async submitted(action: string, index = 0) {
+    async submitted(action: string, index = 0, targetScope = scope) {
       await expect
-        .poll(async () => (await commands(action)).length)
+        .poll(async () => (await commands(action, targetScope)).length)
         .toBe(index + 1);
-      const command = (await commands(action))[index]!;
+      const command = (await commands(action, targetScope))[index]!;
       const upload = uploads.get(String(command.arguments.resourceUri));
       expect(upload, `${action} 必须消费自己的上传租约`).toBeDefined();
       return { ...upload!, command };
+    },
+    async forRevision(action: string, revision: number) {
+      const matching = async () =>
+        (await commands(action)).filter(
+          (command) => command.arguments.revision === revision,
+        );
+      await expect.poll(async () => (await matching()).length).toBe(1);
+      const command = (await matching())[0]!;
+      const upload = uploads.get(String(command.arguments.resourceUri));
+      expect(upload, `${action} 必须消费当前修订的上传租约`).toBeDefined();
+      return { ...upload!, command };
+    },
+    async currentText() {
+      const revision =
+        (await commands("notifyScreenshotRevision")).at(-1)?.arguments
+          .revision ?? 0;
+      const upload = await this.forRevision(
+        "prepareScreenshotTextLayer",
+        Number(revision),
+      );
+      await this.waitForDiscard(upload.resourceUri);
+      return upload;
     },
     async waitForDiscard(resourceUri: string) {
       await expect
