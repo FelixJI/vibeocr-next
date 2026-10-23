@@ -176,9 +176,13 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   );
   // 主排承载全部工具与操作，始终单行（过宽时容器内滚动）。
   expect(actionRows).toBe(1);
+  // 现场工具按钮按用户要求以纯中文文字呈现（无 SVG 图标）。
   await expect(
     page.getByRole("button", { name: "矩形", exact: true }),
-  ).toHaveText("");
+  ).toHaveText("矩形");
+  await expect(
+    page.getByRole("button", { name: "矩形", exact: true }).locator("svg"),
+  ).toHaveCount(0);
   // 截图现场不出现裁剪按钮：选区四边/四角拖拽即裁剪。
   await expect(
     page.getByRole("button", { name: "裁剪", exact: true }),

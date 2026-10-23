@@ -18,6 +18,7 @@ class OCRPipeline(Enum):
     PADDLEOCR_VL = "PaddleOCR-VL"
     TABLE_RECOGNITION = "TABLE_RECOGNITION"
     FORMULA_RECOGNITION = "FORMULA_RECOGNITION"
+    RAPID_TABLE = "RAPID_TABLE"
 
     @property
     def display_name(self) -> str:
@@ -43,6 +44,7 @@ class RecognitionMode(StrEnum):
     MINERU_DOCUMENT = "mineru_document"
     PADDLE_TABLE = "paddle_table"
     PADDLE_FORMULA = "paddle_formula"
+    RAPID_TABLE = "rapid_table"
 
 
 class RecognitionModeFamily(StrEnum):
@@ -149,6 +151,7 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
         "cache_kind": "routed",
         "description": "文字识别执行管道；具体语义由识别模式和引擎共同确定",
         "supported_options": [
+            "device",
             "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
@@ -220,6 +223,15 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
             "use_ocr_results_with_table_cells",
         ],
     },
+    OCRPipeline.RAPID_TABLE: {
+        "display_name": "表格结构识别（RapidTable）",
+        "short_name": "表格R",
+        "preloadable": False,
+        "heavy": False,
+        "cache_kind": "rapid",
+        "description": "轻量表格结构识别（RapidTable + RapidOCR），基础运行时自带",
+        "supported_options": ["device"],
+    },
     OCRPipeline.FORMULA_RECOGNITION: {
         "display_name": "数学公式识别（PaddleOCR）",
         "short_name": "公式",
@@ -264,6 +276,10 @@ _MINERU_PARSE_METHODS = ("auto", "txt", "ocr")
 _MINERU_BACKENDS = ("hybrid-engine", "vlm-engine", "pipeline")
 _MINERU_EFFORTS = ("medium", "high")
 
+# Rapid 系引擎设备选项（rapidocr 文本 OCR 与 RapidTable 表格识别）：
+# cuda 必须真实 provider 就绪，auto 仅在就绪时选 GPU，否则 CPU。
+DEVICE_VALUES = ("auto", "cpu", "cuda")
+
 
 def _bool_spec(name: str) -> PipelineOptionSpec:
     return PipelineOptionSpec(name=name, kind=_BOOL)
@@ -278,6 +294,10 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
             "use_doc_unwarping",
             "use_textline_orientation",
         )
+    }
+    | {
+        # 仅 engine 缺省或 rapidocr 合法（parser 执行组合门禁）。
+        "device": PipelineOptionSpec("device", _ENUM, choices=DEVICE_VALUES)
     },
     OCRPipeline.PP_STRUCTURE_V3: {
         name: _bool_spec(name)
@@ -327,6 +347,9 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
             "use_ocr_results_with_table_cells",
         )
     },
+    OCRPipeline.RAPID_TABLE: {
+        "device": PipelineOptionSpec("device", _ENUM, choices=DEVICE_VALUES)
+    },
     OCRPipeline.FORMULA_RECOGNITION: {
         "use_doc_orientation_classify": _bool_spec("use_doc_orientation_classify"),
         "use_doc_unwarping": _bool_spec("use_doc_unwarping"),
@@ -360,7 +383,7 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         display_name="快速 OCR（RapidOCR）",
         short_name="快速文字",
         description="随基础运行时提供的轻量文字识别，无需下载高级模型。",
-        supported_options=(),
+        supported_options=("device",),
     ),
     RecognitionMode.WINDOWS_TEXT: RecognitionModeDefinition(
         mode=RecognitionMode.WINDOWS_TEXT,
@@ -384,8 +407,11 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         display_name="通用 OCR（PaddleOCR）",
         short_name="通用文字",
         description="基于 PaddleOCR 模型的通用文字识别，需要高级组件。",
-        supported_options=tuple(
-            _PIPELINE_METADATA[OCRPipeline.OCR]["supported_options"]
+        supported_options=(
+            "local_models_only",
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_textline_orientation",
         ),
     ),
     RecognitionMode.PADDLE_STRUCTURE: RecognitionModeDefinition(
@@ -458,6 +484,18 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
             _PIPELINE_METADATA[OCRPipeline.FORMULA_RECOGNITION]["supported_options"]
         ),
     ),
+    RecognitionMode.RAPID_TABLE: RecognitionModeDefinition(
+        mode=RecognitionMode.RAPID_TABLE,
+        family=RecognitionModeFamily.SPECIALIZED,
+        pipeline=OCRPipeline.RAPID_TABLE,
+        engine=None,
+        provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
+        lifecycle=_UNMANAGED_LIFECYCLE,
+        display_name="表格结构识别（RapidTable）",
+        short_name="表格结构R",
+        description="随基础运行时提供的轻量表格结构识别；模型就绪即可用。",
+        supported_options=("device",),
+    ),
 }
 
 
@@ -524,6 +562,7 @@ def is_option_supported(pipeline: OCRPipeline, option_name: str) -> bool:
 
 
 __all__ = [
+    "DEVICE_VALUES",
     "FORMULA_RECOGNITION_BATCH_SIZE_RANGE",
     "FORMULA_RECOGNITION_MODEL_NAMES",
     "OCRPipeline",

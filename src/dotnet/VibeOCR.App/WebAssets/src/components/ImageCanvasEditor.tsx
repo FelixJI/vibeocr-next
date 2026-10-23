@@ -879,13 +879,16 @@ function AnnotationStylePanel({
             appearance="subtle"
             aria-label="屏幕取色"
             disabled={eyedropperBusy}
-            icon={<ToolbarIcon name="pipette" />}
+            icon={captureScene ? undefined : <ToolbarIcon name="pipette" />}
             onClick={onPickColor}
             size="small"
             title={
               eyedropperAvailable ? "屏幕取色" : "取色：点击后在画布上取样颜色"
             }
-          />
+          >
+            {/* 截图现场纯文字（无 SVG 图标）；普通页保持图标按钮。 */}
+            {captureScene ? "取色" : undefined}
+          </Button>
         </div>
       )}
       {showStrokeControls && (
@@ -6296,7 +6299,7 @@ export function ImageCanvasEditor({
           appearance={tool === value ? "primary" : "subtle"}
           aria-label={TOOL_LABELS[value]}
           title={TOOL_LABELS[value]}
-          icon={icon ? <ToolbarIcon name={icon} /> : undefined}
+          icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
           aria-pressed={tool === value}
           key={value}
           onClick={() => {
@@ -6304,14 +6307,9 @@ export function ImageCanvasEditor({
             setTool(value);
           }}
         >
-          {/* 现场以图标为主；马赛克/模糊为用户确认的效果预览入口，带短标签。 */}
-          {captureStyle
-            ? icon
-              ? value === "mosaic" || value === "blur"
-                ? TOOL_LABELS[value]
-                : undefined
-              : TOOL_LABELS[value]
-            : TOOL_LABELS[value]}
+          {/* 截图现场按用户要求全部以简短中文文字呈现，不渲染图标；
+              普通页保持图标+文字。 */}
+          {TOOL_LABELS[value]}
         </ToolbarButton>
       );
     });
@@ -6495,11 +6493,11 @@ export function ImageCanvasEditor({
       tool === "magnifier") && (
       <ToolbarButton
         aria-label="重置属性"
-        icon={<ToolbarIcon name="refresh" />}
+        icon={captureStyle ? undefined : <ToolbarIcon name="refresh" />}
         title="重置当前工具属性为默认值"
         onClick={resetToolAttributes}
       >
-        {captureStyle ? undefined : "重置属性"}
+        重置属性
       </ToolbarButton>
     );
   // 已绘马赛克/模糊区域的强度就地编辑：选择工具选中该类标记时，
@@ -6955,7 +6953,7 @@ export function ImageCanvasEditor({
         session && (
           <ToolbarButton
             aria-label="取消准备文字层"
-            icon={<ToolbarIcon name="exit" />}
+            icon={captureStyle ? undefined : <ToolbarIcon name="exit" />}
             title="取消准备文字层"
             onClick={() =>
               void actions.run({
@@ -6965,7 +6963,7 @@ export function ImageCanvasEditor({
               })
             }
           >
-            {captureStyle ? undefined : "取消准备"}
+            取消准备
           </ToolbarButton>
         )}
       {tool === "textSelect" &&
@@ -6975,17 +6973,17 @@ export function ImageCanvasEditor({
           <ToolbarButton
             aria-label="重新准备文字层"
             disabled={!canRecognize}
-            icon={<ToolbarIcon name="refresh" />}
+            icon={captureStyle ? undefined : <ToolbarIcon name="refresh" />}
             title="重新准备文字层"
             onClick={() => setPrepareNonce((nonce) => nonce + 1)}
           >
-            {captureStyle ? undefined : "重新准备"}
+            重新准备
           </ToolbarButton>
         )}
       {tool === "textSelect" && selectionText.length > 0 && session && (
         <Button
           appearance="primary"
-          icon={<ToolbarIcon name="copy" />}
+          icon={captureStyle ? undefined : <ToolbarIcon name="copy" />}
           size="small"
           onPointerDown={() => {
             const text = readLayerSelection();
@@ -6999,7 +6997,7 @@ export function ImageCanvasEditor({
             void copySelectedText(frozen);
           }}
         >
-          {captureStyle ? undefined : "复制所选"}
+          复制所选
         </Button>
       )}
     </>
@@ -7018,53 +7016,53 @@ export function ImageCanvasEditor({
         disabled={
           inpaintMaskPixelCount === 0 || inpaintBusy || !!inpaintPreview
         }
-        icon={<ToolbarIcon name="preview" />}
+        icon={captureStyle ? undefined : <ToolbarIcon name="preview" />}
         title="预览修补"
         onClick={startInpaintPreview}
       >
-        {captureStyle ? undefined : "预览修补"}
+        预览修补
       </ToolbarButton>
       {inpaintBusy ? (
         <ToolbarButton
           aria-label="取消修补"
-          icon={<ToolbarIcon name="exit" />}
+          icon={captureStyle ? undefined : <ToolbarIcon name="exit" />}
           title="取消修补"
           onClick={() => cancelInpaintPending("已取消修补；当前图片未被修改。")}
         >
-          {captureStyle ? undefined : "取消修补"}
+          取消修补
         </ToolbarButton>
       ) : inpaintPreview ? (
         <>
           <ToolbarButton
             appearance="primary"
             aria-label="应用修补"
-            icon={<ToolbarIcon name="confirm" />}
+            icon={captureStyle ? undefined : <ToolbarIcon name="confirm" />}
             title="应用修补"
             onClick={applyInpaintPreview}
           >
-            {captureStyle ? undefined : "应用修补"}
+            应用修补
           </ToolbarButton>
           <ToolbarButton
             aria-label="放弃修补预览"
-            icon={<ToolbarIcon name="exit" />}
+            icon={captureStyle ? undefined : <ToolbarIcon name="exit" />}
             title="放弃修补预览"
             onClick={() =>
               cancelInpaintPending("已放弃修补预览；当前图片未被修改。")
             }
           >
-            {captureStyle ? undefined : "放弃预览"}
+            放弃预览
           </ToolbarButton>
         </>
       ) : inpaintSelection || inpaintMaskPixelCount > 0 ? (
         <ToolbarButton
           aria-label="清除修补选区"
-          icon={<ToolbarIcon name="exit" />}
+          icon={captureStyle ? undefined : <ToolbarIcon name="exit" />}
           title="清除修补选区"
           onClick={() =>
             cancelInpaintPending("已清除修补掩膜与选区；当前图片未被修改。")
           }
         >
-          {captureStyle ? undefined : "清除选区"}
+          清除选区
         </ToolbarButton>
       ) : null}
     </>
@@ -7369,7 +7367,7 @@ export function ImageCanvasEditor({
   const rotateControl = (
     <ToolbarButton
       title="旋转 90°"
-      icon={<ToolbarIcon name="rotate" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="rotate" />}
       aria-label="旋转 90°"
       onClick={() => {
         // 整图旋转：进行中的折线/裁剪/修补草稿坐标随旋转失效，统一放弃，
@@ -7393,35 +7391,35 @@ export function ImageCanvasEditor({
           return;
       }}
     >
-      {captureStyle ? undefined : "旋转 90°"}
+      旋转 90°
     </ToolbarButton>
   );
   const undoButton = (
     <ToolbarButton
       title="撤销"
-      icon={<ToolbarIcon name="undo" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="undo" />}
       aria-label="撤销"
       disabled={historyIndex === 0 || !!textEdit}
       onClick={undo}
     >
-      {captureStyle ? undefined : "撤销"}
+      撤销
     </ToolbarButton>
   );
   const redoButton = (
     <ToolbarButton
       title="重做"
-      icon={<ToolbarIcon name="redo" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="redo" />}
       aria-label="重做"
       disabled={historyIndex >= history.length - 1 || !!textEdit}
       onClick={redo}
     >
-      {captureStyle ? undefined : "重做"}
+      重做
     </ToolbarButton>
   );
   const clearExclusionsButton = (
     <ToolbarButton
       title="清空屏蔽"
-      icon={<ToolbarIcon name="clearExclusions" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="clearExclusions" />}
       aria-label="清空屏蔽"
       disabled={
         !hasExclusions ||
@@ -7429,7 +7427,7 @@ export function ImageCanvasEditor({
       }
       onClick={clearExclusions}
     >
-      {captureStyle ? undefined : "清空屏蔽"}
+      清空屏蔽
     </ToolbarButton>
   );
 
@@ -7462,49 +7460,49 @@ export function ImageCanvasEditor({
   const copyAnnotatedButton = (
     <Button
       title="复制标注图"
-      icon={<ToolbarIcon name="copy" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="copy" />}
       aria-label="复制标注图"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void copyAnnotatedImage()}
     >
-      {captureStyle ? undefined : "复制标注图"}
+      复制标注图
     </Button>
   );
   const copyExcludedButton = hasExclusions && (
     <Button
       title="复制屏蔽副本"
-      icon={<ToolbarIcon name="copyExcluded" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="copyExcluded" />}
       aria-label="复制屏蔽副本"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void copyAnnotatedImage(true)}
     >
-      {captureStyle ? undefined : "复制屏蔽副本"}
+      复制屏蔽副本
     </Button>
   );
   const saveAnnotatedButton = (
     <Button
       title="保存标注图"
-      icon={<ToolbarIcon name="save" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="save" />}
       aria-label="保存标注图"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void saveAnnotatedImage()}
     >
-      {captureStyle ? undefined : "保存标注图"}
+      保存标注图
     </Button>
   );
   const saveExcludedButton = hasExclusions && (
     <Button
       title="保存屏蔽副本"
-      icon={<ToolbarIcon name="saveExcluded" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="saveExcluded" />}
       aria-label="保存屏蔽副本"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void saveAnnotatedImage(true)}
     >
-      {captureStyle ? undefined : "保存屏蔽副本"}
+      保存屏蔽副本
     </Button>
   );
   const saveProjectButton = session && (
@@ -7533,13 +7531,13 @@ export function ImageCanvasEditor({
   const pinButton = session && !pinSnapshotApply && (
     <Button
       title="贴图"
-      icon={<ToolbarIcon name="pin" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="pin" />}
       aria-label="贴图"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void pinCurrentImage()}
     >
-      {captureStyle ? undefined : "贴图"}
+      贴图
     </Button>
   );
   const imageModes: readonly ImageRecognitionMode[] = recognitionModes?.length
@@ -7590,40 +7588,40 @@ export function ImageCanvasEditor({
     ) : (
       <Button
         title="识别当前图"
-        icon={<ToolbarIcon name="textRecognition" />}
+        icon={captureStyle ? undefined : <ToolbarIcon name="textRecognition" />}
         aria-label="识别当前图"
         appearance="primary"
         size="small"
         disabled={!canRecognize || isExporting || !!textEdit}
         onClick={() => void recognizeCurrentImage()}
       >
-        {captureStyle ? undefined : "识别当前图"}
+        识别当前图
       </Button>
     ));
   const closeSessionButton = session && (
     <Button
       title={pinSnapshotApply ? "放弃更改" : "结束会话"}
-      icon={<ToolbarIcon name="exit" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="exit" />}
       aria-label={pinSnapshotApply ? "放弃更改" : "结束会话"}
       appearance="transparent"
       size="small"
       disabled={isExporting}
       onClick={() => void closeSession()}
     >
-      {captureStyle ? undefined : pinSnapshotApply ? "放弃更改" : "结束会话"}
+      {pinSnapshotApply ? "放弃更改" : "结束会话"}
     </Button>
   );
   const clearEditsButton = (
     <Button
       title="清除编辑"
-      icon={<ToolbarIcon name="clear" />}
+      icon={captureStyle ? undefined : <ToolbarIcon name="clear" />}
       aria-label="清除编辑"
       appearance="transparent"
       size="small"
       disabled={!hasEdits || state.marks.some((mark) => mark.locked)}
       onClick={clearEdits}
     >
-      {captureStyle ? undefined : "清除编辑"}
+      清除编辑
     </Button>
   );
 
@@ -7634,9 +7632,11 @@ export function ImageCanvasEditor({
       <MenuTrigger disableButtonEnhancement>
         <ToolbarButton
           aria-label="更多操作"
-          icon={<ToolbarIcon name="more" />}
+          icon={captureStyle ? undefined : <ToolbarIcon name="more" />}
           title="更多操作"
-        />
+        >
+          {captureStyle ? "更多操作" : undefined}
+        </ToolbarButton>
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
@@ -7653,7 +7653,9 @@ export function ImageCanvasEditor({
           ))}
           <MenuItem
             disabled={!hasExclusions}
-            icon={<ToolbarIcon name="clearExclusions" />}
+            icon={
+              captureStyle ? undefined : <ToolbarIcon name="clearExclusions" />
+            }
             onClick={clearExclusions}
           >
             清空屏蔽
@@ -7662,14 +7664,18 @@ export function ImageCanvasEditor({
             <>
               <MenuItem
                 disabled={!canExport || isExporting || !!textEdit}
-                icon={<ToolbarIcon name="copyExcluded" />}
+                icon={
+                  captureStyle ? undefined : <ToolbarIcon name="copyExcluded" />
+                }
                 onClick={() => void copyAnnotatedImage(true)}
               >
                 复制屏蔽副本
               </MenuItem>
               <MenuItem
                 disabled={!canExport || isExporting || !!textEdit}
-                icon={<ToolbarIcon name="saveExcluded" />}
+                icon={
+                  captureStyle ? undefined : <ToolbarIcon name="saveExcluded" />
+                }
                 onClick={() => void saveAnnotatedImage(true)}
               >
                 保存屏蔽副本
@@ -7678,7 +7684,7 @@ export function ImageCanvasEditor({
           )}
           <MenuItem
             disabled={!hasEdits}
-            icon={<ToolbarIcon name="clear" />}
+            icon={captureStyle ? undefined : <ToolbarIcon name="clear" />}
             onClick={clearEdits}
           >
             清除编辑
@@ -8028,7 +8034,8 @@ export function ImageCanvasEditor({
           open={captureStyle ? undefined : true}
         >
           <summary aria-label="输出设置" title="输出设置">
-            <ToolbarIcon name="settings" />
+            {/* 截图现场纯文字入口；普通页保持齿轮图标。 */}
+            {captureStyle ? "输出设置" : <ToolbarIcon name="settings" />}
           </summary>
           <Toolbar
             aria-label="输出设置"

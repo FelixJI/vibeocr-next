@@ -47,11 +47,21 @@ class InputItem:
 
 @dataclass(frozen=True, slots=True)
 class AdapterCapability:
-    """What an adapter promises about real batching."""
+    """What an adapter promises about real batching.
+
+    ``real_batch`` promises one *native* multi-input call per ``recognize_many``;
+    adapters must never claim it without upstream multi-image inference.
+    ``parallel_compute`` is the weaker promise that one ``recognize_many``
+    call may fan a microbatch out to bounded engine-internal workers (still
+    per-item native calls, e.g. independent RapidOCR instances): the executor
+    treats the whole call as one recovery unit exactly like a real batch.
+    """
 
     name: str
     real_batch: bool
     """True if one ``recognize_many`` call maps to one native multi-input call."""
+    parallel_compute: bool = False
+    """True if the engine parallelizes one call across bounded workers."""
     max_compute_batch: int = 8
     """Upper bound on a compute microbatch (VRAM/sampler-derived)."""
     per_item_vram_mb: int = 0
@@ -153,10 +163,10 @@ class BudgetPlanner:
     ) -> list[ComputeBatch]:
         """Split a transport batch into compute microbatches.
 
-        If the adapter does not support real batching, each item is its own
-        microbatch (we never lie about batch size).
+        If the adapter supports neither real nor bounded-parallel batching, each
+        item is its own microbatch (we never lie about batch size).
         """
-        if not capability.real_batch:
+        if not capability.real_batch and not capability.parallel_compute:
             return [ComputeBatch((item,)) for item in items]
         cap = max(1, capability.max_compute_batch)
         # Further constrain by VRAM if known.

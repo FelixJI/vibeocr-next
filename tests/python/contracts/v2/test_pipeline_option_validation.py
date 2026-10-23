@@ -21,6 +21,22 @@ def _selection(pipeline_id: str, options: dict) -> dict:
     }
 
 
+@pytest.mark.parametrize("device", ["auto", "cpu", "cuda"])
+@pytest.mark.parametrize("engine", [None, "rapidocr"])
+def test_rapidocr_device_selection_reaches_options(device: str, engine: str | None):
+    payload = _selection("OCR", {"device": device})
+    if engine is not None:
+        payload["engine"] = engine
+    assert parse_pipeline_selection(payload).options == {"device": device}
+
+
+@pytest.mark.parametrize("engine", ["windows", "paddleocr"])
+def test_other_text_engines_reject_rapid_device_selection(engine: str):
+    payload = {**_selection("OCR", {"device": "cpu"}), "engine": engine}
+    with pytest.raises(ContractError, match="only valid for the rapidocr engine"):
+        parse_pipeline_selection(payload)
+
+
 # ---------------------------------------------------------------------------
 # 布尔选项：不接受 int 0/1、字符串
 # ---------------------------------------------------------------------------

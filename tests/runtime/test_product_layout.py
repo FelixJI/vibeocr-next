@@ -364,6 +364,33 @@ def test_load_product_layout_rejects_safe_but_noncanonical_paths(
 
 
 @pytest.mark.parametrize("present", [True, False])
+def test_stage_requires_declared_rapid_cuda_environment_lock(
+    tmp_path: Path, present: bool
+) -> None:
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    lock = (
+        Path(__file__).parents[2]
+        / "config/runtime/win-x64-rapid-cu13/requirements-win-x64-rapid-cu13.lock"
+    )
+    manifest["rapid_cuda_environment"] = {
+        "lock": lock.name,
+        "sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    product = tmp_path / "VibeOCR"
+    if not present:
+        with pytest.raises(ProductLayoutError, match="closure file is unavailable"):
+            stage_product_layout(product_root=product, **inputs)
+        return
+    (backend / lock.name).write_bytes(lock.read_bytes())
+    stage_product_layout(product_root=product, **inputs)
+    assert (product / "runtime/backend" / lock.name).read_bytes() == lock.read_bytes()
+
+
+@pytest.mark.parametrize("present", [True, False])
 def test_stage_requires_declared_paddle_environment_lock(
     tmp_path: Path, present: bool
 ) -> None:

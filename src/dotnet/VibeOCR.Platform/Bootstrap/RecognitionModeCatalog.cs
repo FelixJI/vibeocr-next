@@ -80,6 +80,14 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             [Wire.RecognitionModeId.PaddleFormula] = Paddle(
                 Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.FORMULARECOGNITION),
+            // RapidTable 表格识别：独立 RAPID_TABLE 管线（engine-only-OCR
+            // 不变量保留），依赖随 base 离线闭包分发，unmanaged 惰性加载。
+            [Wire.RecognitionModeId.RapidTable] = Mode(
+                Wire.RecognitionModeFamily.Specialized,
+                Wire.ExecutionPipelineId.RAPIDTABLE,
+                null,
+                Wire.RecognitionModeProvisioning.BaseRuntime,
+                Wire.RecognitionModeLifecycleKind.Unmanaged),
         };
 
     public static RecognitionModeCatalog FromWire(Wire.RecognitionModeCatalog catalog)
@@ -170,6 +178,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
         Wire.RecognitionModeId.MineruDocument => "mineru_document",
         Wire.RecognitionModeId.PaddleTable => "paddle_table",
         Wire.RecognitionModeId.PaddleFormula => "paddle_formula",
+        Wire.RecognitionModeId.RapidTable => "rapid_table",
         _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown recognition mode."),
     };
 
@@ -188,6 +197,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
         Wire.ExecutionPipelineId.PaddleOCRVL => "PaddleOCR-VL",
         Wire.ExecutionPipelineId.MinerU => "MinerU",
         Wire.ExecutionPipelineId.TABLERECOGNITION => "TABLE_RECOGNITION",
+        Wire.ExecutionPipelineId.RAPIDTABLE => "RAPID_TABLE",
         Wire.ExecutionPipelineId.FORMULARECOGNITION => "FORMULA_RECOGNITION",
         _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown execution pipeline."),
     };

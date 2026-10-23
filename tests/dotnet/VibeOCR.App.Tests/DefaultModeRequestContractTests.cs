@@ -165,6 +165,52 @@ public sealed class DefaultModeRequestContractTests
   }
 
   [Fact]
+  public async Task RapidTableDeviceOptionSubmitsOnPdfWire()
+  {
+    // PDF 入口与单次/批量共享同一 device 冻结链：显式 rapid_table 任务携带
+    // options.device=cuda，不静默改 CPU。
+    var fake = new RecordingClient
+    {
+      Health = DeviceHealth(),
+      Settings = new SettingsSnapshot
+      {
+        Extra = new Dictionary<string, JsonElement>
+        {
+          ["default_recognition_mode"] = JsonSerializer.SerializeToElement("windows_text"),
+        },
+      },
+    };
+    var pdf = new PdfViewModel(fake, new StubPdfSource());
+    await using TestHarness harness = await Harness(fake, pdf: pdf);
+    PdfWorkbenchState? deviceState = null;
+    harness.Handler.StateChanged += state =>
+    {
+      if (state is PdfWorkbenchState pdfState) deviceState = pdfState;
+    };
+    Assert.Null((await harness.Handler.ExecuteAsync(
+      new SetModeDeviceCommand("rapid_table", "cuda"),
+      TestContext.Current.CancellationToken)).Error);
+    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "rapid_table")
+      .Options!["device"].GetString());
+    Assert.Null((await harness.Handler.ExecuteAsync(
+      new SetPdfTaskEngineCommand("rapid_table"),
+      TestContext.Current.CancellationToken)).Error);
+    WorkbenchCommandOutcome opened = await harness.Handler.ExecuteAsync(
+      new OpenDroppedPdfCommand("scan.pdf"), TestContext.Current.CancellationToken);
+    Assert.Null(opened.Error);
+
+    WorkbenchCommandOutcome ocr = await harness.Handler.ExecuteAsync(
+      new OcrPdfPagesCommand(), TestContext.Current.CancellationToken);
+    Assert.Null(ocr.Error);
+    await fake.WaitSubmittedAsync();
+
+    SubmitRequest request = Assert.Single(fake.Submissions);
+    Assert.Equal("RAPID_TABLE", request.Pipeline.PipelineId);
+    Assert.Null(request.Pipeline.Engine);
+    Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
+  }
+
+  [Fact]
   public async Task ColdStartRecognitionWaitsForCatalogAndSubmitsCommittedDefault()
   {
     // 冷启动竞态回归：未 attach 时不得以空快照冻结提交参数；输入先采集，
@@ -648,6 +694,28 @@ public sealed class DefaultModeRequestContractTests
     return path;
   }
 
+  private static Wire.Health DeviceHealth()
+  {
+    Wire.Health health = RequestHealth(mineruReady: false);
+    Wire.RecognitionModeCatalog catalog = health.CapabilityDescriptors!
+      .Single(descriptor => descriptor.RecognitionModeCatalog is not null)
+      .RecognitionModeCatalog!;
+    return health with
+    {
+      CapabilityDescriptors = [.. health.CapabilityDescriptors!.Select(descriptor =>
+        descriptor.RecognitionModeCatalog is null ? descriptor : descriptor with
+        {
+          RecognitionModeCatalog = catalog with
+          {
+            Modes = [.. catalog.Modes.Select(mode =>
+              mode.Id == Wire.RecognitionModeId.RapidTable
+                ? mode with { SupportedOptions = ["device"] }
+                : mode)],
+          },
+        })],
+    };
+  }
+
   private static RecordingClient Client(
     string defaultMode,
     bool mineruReady = false) => new()
@@ -749,6 +817,8 @@ public sealed class DefaultModeRequestContractTests
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleFormula,
               Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.RapidTable,
+              Wire.RecognitionModeAvailability.Ready),
           ],
         },
       },
@@ -813,6 +883,10 @@ public sealed class DefaultModeRequestContractTests
         Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
+        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool notReady = availability != Wire.RecognitionModeAvailability.Ready;

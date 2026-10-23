@@ -234,6 +234,7 @@ def build_runtime_manifest(
     runtime_packs: dict[str, list[Path]] | None = None,
     paddle_locks: dict[str, Path] | None = None,
     mineru_cpu_lock: Path | None = None,
+    rapid_cuda_lock: Path | None = None,
 ) -> Path:
     if not _STABLE_SEMVER.fullmatch(version):
         raise ValueError("version must be stable SemVer")
@@ -271,6 +272,9 @@ def build_runtime_manifest(
     if mineru_cpu_lock is not None:
         mineru_cpu_lock = mineru_cpu_lock.resolve(strict=True)
         validate_requirements_lock(mineru_cpu_lock, profile="win-x64-mineru-cpu")
+    if rapid_cuda_lock is not None:
+        rapid_cuda_lock = rapid_cuda_lock.resolve(strict=True)
+        validate_requirements_lock(rapid_cuda_lock, profile="win-x64-rapid-cu13")
     cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
     validate_requirements_lock(
         cu126_gpu_lock, profile="win-x64-cu126", paddle_isolated=bool(paddle_locks)
@@ -301,6 +305,11 @@ def build_runtime_manifest(
     copied_mineru_cpu = (
         _copy_exact(mineru_cpu_lock, output_dir)
         if mineru_cpu_lock is not None
+        else None
+    )
+    copied_rapid_cuda = (
+        _copy_exact(rapid_cuda_lock, output_dir)
+        if rapid_cuda_lock is not None
         else None
     )
 
@@ -370,6 +379,16 @@ def build_runtime_manifest(
             for profile in PROFILE_NAMES
         },
         "capabilities": sorted(set(capabilities)),
+        **(
+            {
+                "rapid_cuda_environment": {
+                    "lock": copied_rapid_cuda.name,
+                    "sha256": sha256_file(copied_rapid_cuda),
+                }
+            }
+            if copied_rapid_cuda is not None
+            else {}
+        ),
         "build_workflow": build_workflow,
     }
     manifest_path = output_dir / "runtime-manifest.json"
@@ -389,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paddle-cpu-lock", type=Path, required=True)
     parser.add_argument("--paddle-cu126-lock", type=Path, required=True)
     parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
+    parser.add_argument("--rapid-cuda-lock", type=Path, required=True)
     parser.add_argument("--python-archive", type=Path, required=True)
     parser.add_argument("--python-version", default="3.13.16")
     parser.add_argument(
@@ -431,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             "win-x64-cu126": args.paddle_cu126_lock,
         },
         mineru_cpu_lock=args.mineru_cpu_lock,
+        rapid_cuda_lock=args.rapid_cuda_lock,
         python_archive=args.python_archive,
         python_version=args.python_version,
         python_source_url=args.python_source_url,

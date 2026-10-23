@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Literal, NotRequired, Required, TypedDict
 
 DownloadSourceKind = str
-ExecutionPipelineId = Literal['OCR', 'PP-StructureV3', 'MinerU', 'PaddleOCR-VL', 'TABLE_RECOGNITION', 'FORMULA_RECOGNITION']
+ExecutionPipelineId = Literal['OCR', 'PP-StructureV3', 'MinerU', 'PaddleOCR-VL', 'TABLE_RECOGNITION', 'FORMULA_RECOGNITION', 'RAPID_TABLE']
 MineruOcrMode = Literal['auto', 'txt', 'ocr']
 MineruTierAvailability = Literal['ready', 'preparation_required', 'unavailable']
 MineruTierId = Literal['flash', 'basic', 'standard', 'advanced']
@@ -13,7 +13,7 @@ OcrEngineId = Literal['rapidocr', 'windows', 'paddleocr']
 ProgressPhase = Literal['load', 'render', 'ocr', 'write', 'detect', 'correct', 'delete', 'save', 'export', 'compress']
 RecognitionModeAvailability = Literal['ready', 'preparation_required', 'unavailable']
 RecognitionModeFamily = Literal['text', 'document', 'specialized']
-RecognitionModeId = Literal['rapid_text', 'windows_text', 'paddle_text', 'paddle_structure', 'paddle_document_vl', 'mineru_document', 'paddle_table', 'paddle_formula']
+RecognitionModeId = Literal['rapid_text', 'windows_text', 'paddle_text', 'paddle_structure', 'paddle_document_vl', 'mineru_document', 'paddle_table', 'paddle_formula', 'rapid_table']
 RecognitionModeLifecycleKind = Literal['unmanaged', 'model_residency', 'process_keep_alive']
 RecognitionModeProvisioning = Literal['base_runtime', 'operating_system', 'advanced_component']
 RecognitionResourceKind = Literal['model', 'process']

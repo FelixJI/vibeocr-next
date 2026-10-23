@@ -378,6 +378,21 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
                 "engine is only valid for the plain-text OCR pipeline; use "
                 "OCR_ENGINE_NOT_VALID_FOR_PIPELINE semantics"
             )
+    # device 选项组合门禁：rapidocr 系设备选项只对 rapidocr 引擎（含缺省
+    # 默认 rapidocr）合法；windows/paddleocr 携带 device 时 fail closed。
+    if (
+        pipeline is OCRPipeline.OCR
+        and "device" in options
+        and engine
+        not in (
+            None,
+            OcrEngine.RAPIDOCR,
+        )
+    ):
+        raise ContractError(
+            "device option is only valid for the rapidocr engine; "
+            "reject with VALIDATION_ERROR semantics"
+        )
     mineru = None
     if "mineru" in payload:
         if payload["mineru"] is None:

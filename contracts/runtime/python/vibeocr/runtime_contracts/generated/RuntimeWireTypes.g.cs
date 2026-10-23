@@ -19,7 +19,9 @@ public enum ExecutionPipelineId
     [JsonStringEnumMemberName("TABLE_RECOGNITION")]
     TABLERECOGNITION,
     [JsonStringEnumMemberName("FORMULA_RECOGNITION")]
-    FORMULARECOGNITION
+    FORMULARECOGNITION,
+    [JsonStringEnumMemberName("RAPID_TABLE")]
+    RAPIDTABLE
 }
 
 public sealed class ExecutionPipelineIdJsonConverter : JsonStringEnumConverter<ExecutionPipelineId>
@@ -252,7 +254,9 @@ public enum RecognitionModeId
     [JsonStringEnumMemberName("paddle_table")]
     PaddleTable,
     [JsonStringEnumMemberName("paddle_formula")]
-    PaddleFormula
+    PaddleFormula,
+    [JsonStringEnumMemberName("rapid_table")]
+    RapidTable
 }
 
 public sealed class RecognitionModeIdJsonConverter : JsonStringEnumConverter<RecognitionModeId>

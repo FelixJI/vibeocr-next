@@ -187,10 +187,15 @@ def _build_paddle_executor(
     if engine_registry is not None:
         resolver = engine_resolver or OcrEngineResolver(registry=engine_registry)
 
+        from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
+
+        rapid_table_engine = RapidTableEngine()
+
         def routing_factory() -> Any:
             return OcrEngineRoutingAdapter(
                 fallback_factory=(_paddle_adapter_factory if paddle_fallback else None),
                 resolver=resolver,
+                rapid_table_factory=lambda: rapid_table_engine,
             )
 
         adapter_factory = routing_factory
@@ -293,6 +298,7 @@ def _build_recognition_mode_registry(
     engine_resolver: OcrEngineResolver,
     use_paddle: bool,
     use_mineru: bool,
+    rapid_table_probe: Callable[[], Any] | None = None,
 ) -> RecognitionModeRegistry:
     """把实时 engine/component 探针投影成单一 Recognition Mode 目录。"""
     from vibeocr.runtime.recognition.recognition_modes import (
@@ -321,7 +327,28 @@ def _build_recognition_mode_registry(
             return True
         return _mineru_available()
 
+    def rapid_table_availability() -> ModeAvailability:
+        """RAPID_TABLE：包随 base 闭包；模型就绪即可用（缺模型=待准备）。"""
+        if rapid_table_probe is None:
+            return ModeAvailability(
+                RecognitionModeAvailability.UNAVAILABLE,
+                reason_code="engine_not_installed",
+            )
+        reason = rapid_table_probe()
+        if reason is None:
+            return ModeAvailability(RecognitionModeAvailability.READY)
+        if reason == "model_not_prepared":
+            return ModeAvailability(
+                RecognitionModeAvailability.PREPARATION_REQUIRED,
+                reason_code=reason,
+            )
+        return ModeAvailability(
+            RecognitionModeAvailability.UNAVAILABLE, reason_code=reason
+        )
+
     def availability(definition) -> ModeAvailability:  # type: ignore[no-untyped-def]
+        if definition.mode_id is RecognitionModeId.RAPID_TABLE:
+            return rapid_table_availability()
         if definition.engine is not None:
             descriptors = {
                 descriptor.engine_id.value: descriptor
@@ -477,10 +504,14 @@ def build_supervisor(
         from vibeocr.runtime.recognition.ocr_engines import OcrEngineResolver
 
         engine_resolver = OcrEngineResolver(registry=engine_registry)
+        from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
+
+        mode_rapid_table_engine = RapidTableEngine()
         recognition_mode_registry = _build_recognition_mode_registry(
             engine_resolver=engine_resolver,
             use_paddle=want_paddle,
             use_mineru=want_mineru,
+            rapid_table_probe=mode_rapid_table_engine.probe_reason,
         )
         exec_impl = _build_composite_executor(
             use_paddle=want_paddle,

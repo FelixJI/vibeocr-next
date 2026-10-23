@@ -4,8 +4,8 @@
 #
 # base-offline 闭包（docs/ocr-engine-runtime-profiles-execution-plan.md §4.1）：
 # 随 Classic/Next Portable 携带、禁网可安装的必备闭包。只含 Backend/Protocol
-# 运行时、通用文本 OCR 缺省引擎与图片编解码；Paddle/MinerU/CUDA 等重型组件
-# 属于 full-cpu / full-cu126 附加闭包，不进入 base。
+# 运行时、RapidOCR/RapidTable 与图片编解码；Paddle/MinerU/CUDA 等重型组件
+# 属于显式选择的附加闭包，不进入 base。RapidTable 模型随 base pack 携带。
 pillow>=12.3.0,<13
 numpy>=2.3.5
 httpx>=0.28.1
@@ -30,7 +30,8 @@ opencv-python>=4.10.0.84
 # RapidOCR：缺省引擎，wheel 内置 PP-OCRv6 模型。onnxruntime 由本仓显式
 # 锁定——rapidocr 的 metadata 不声明它，运行时动态导入。
 rapidocr>=3.9.2,<4
-onnxruntime>=1.22
+rapid-table==3.0.2
+onnxruntime==1.30.0
 # Windows Media OCR adapter（pywinrt projection）；系统 OCR/语言包由
 # Windows 动态提供。winsdk 是 sdist-only 的 scikit-build 包，不适合离线
 # wheel 闭包；改用带 win_amd64 wheel 的 winrt-runtime + 组件包。

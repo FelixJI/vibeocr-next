@@ -46,7 +46,7 @@ def test_old_imports_still_work():
     opts = OCROptions()
     assert opts.pipeline == OCRPipeline.OCR
     all_pipelines = get_all_pipelines()
-    assert len(all_pipelines) == 6
+    assert len(all_pipelines) == 7
 
 
 def test_ocr_service_get_or_create():

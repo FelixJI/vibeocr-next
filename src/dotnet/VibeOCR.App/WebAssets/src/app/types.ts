@@ -207,6 +207,7 @@ export type AppActionType =
   | "settings.retryRuntimeMaintenance"
   | "recognition.setTaskEngine"
   | "recognition.setOptions"
+  | "recognition.setDeviceOption"
   | "pdf.setTaskEngine"
   | "update.check"
   | "update.download"

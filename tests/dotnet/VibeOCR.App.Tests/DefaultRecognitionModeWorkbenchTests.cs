@@ -462,6 +462,8 @@ public sealed class DefaultRecognitionModeWorkbenchTests
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleFormula,
               Wire.RecognitionModeAvailability.Ready),
+            Mode(Wire.RecognitionModeId.RapidTable,
+              Wire.RecognitionModeAvailability.Ready),
           ],
         },
       },
@@ -506,6 +508,10 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
+        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

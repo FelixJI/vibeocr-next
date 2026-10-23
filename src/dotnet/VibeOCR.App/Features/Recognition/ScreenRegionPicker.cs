@@ -78,9 +78,7 @@ public enum ScreenshotSelectionAction
 /// 引擎名等细节放 Hint（仅 Tooltip）；文字条目的 ModeId 为设置已提交的
 /// 持久默认模式 id，禁用时不携带可提交的 id（空串）且 availability 使用
 /// default_missing/default_invalid/catalog_unavailable 稳定词汇；IconKey
-/// 指向 <see cref="ScreenshotToolbarIcons"/> 的稳定字形图标键，由宿主随
-/// 语义提供；图标走系统图标字体默认族（旧 Windows 回退 Segoe MDL2
-/// Assets）。
+/// 保留为宿主投影的稳定语义键；选区动作栏以中文文字呈现。
 /// </summary>
 public sealed record ScreenshotRecognitionModeEntry(
     string ModeId,
@@ -230,23 +228,24 @@ public sealed class ScreenRegionPicker(
 
     /// <summary>
     /// 普通入口动作栏：编辑工具按钮（label、进入现场编辑的 initialTool、
-    /// 图标键、tooltip）。tool 取值与 Web ImageCanvasEditor 的工具 id 跨语言
+    /// tooltip）。tool 取值与 Web ImageCanvasEditor 的工具 id 跨语言
     /// 契约一致，不得随意改名（未知 id 会被 Web 静默回退到选择工具）。
+    /// 动作栏按钮全部以简短中文文字呈现，不渲染图标。
     /// </summary>
-    internal static readonly (string Label, string Tool, string IconKey, string Tip)[] SelectionEditToolRow =
+    internal static readonly (string Label, string Tool, string Tip)[] SelectionEditToolRow =
     [
-      ("矩形", "rectangle", "rectangle", "矩形：拖拽绘制矩形框"),
-      ("椭圆", "ellipse", "ellipse", "椭圆：拖拽绘制椭圆"),
-      ("箭头", "arrow", "arrow", "箭头：拖拽绘制箭头"),
-      ("画笔", "pen", "pen", "画笔：自由手绘线条"),
-      ("荧光笔", "highlighter", "highlighter", "荧光笔：半透明涂抹高亮"),
-      ("文字", "text", "text", "文字：点击后输入文字标注"),
-      ("序号", "numbering", "numbering", "序号：依次点击标注编号"),
-      ("马赛克", "mosaic", "mosaic", "马赛克：像素块遮挡"),
-      ("模糊", "blur", "blur", "模糊：高斯模糊遮挡"),
-      ("屏蔽", "exclude", "exclude", "屏蔽：白块遮挡敏感区域（不进识别）"),
-      ("去水印", "inpaint", "inpaint", "去水印：框选后智能修补"),
-      ("取字", "textSelect", "textSelect", "取字：选择截图中的文字"),
+      ("矩形", "rectangle", "矩形：拖拽绘制矩形框"),
+      ("椭圆", "ellipse", "椭圆：拖拽绘制椭圆"),
+      ("箭头", "arrow", "箭头：拖拽绘制箭头"),
+      ("画笔", "pen", "画笔：自由手绘线条"),
+      ("荧光笔", "highlighter", "荧光笔：半透明涂抹高亮"),
+      ("文字", "text", "文字：点击后输入文字标注"),
+      ("序号", "numbering", "序号：依次点击标注编号"),
+      ("马赛克", "mosaic", "马赛克：像素块遮挡"),
+      ("模糊", "blur", "模糊：高斯模糊遮挡"),
+      ("屏蔽", "exclude", "屏蔽：白块遮挡敏感区域（不进识别）"),
+      ("去水印", "inpaint", "去水印：框选后智能修补"),
+      ("取字", "textSelect", "取字：选择截图中的文字"),
     ];
 
     private const long MaximumCaptureBytes = 256L << 20;
@@ -545,23 +544,13 @@ public sealed class ScreenRegionPicker(
     canvas.Children.Add(sizeLabel);
     sizeLabel.IsHitTestVisible = false;
     canvas.Children.Add(panelBorder);
-    Button AddButton(string name, Action action, string iconKey, StackPanel row, string? tooltip = null)
+    Button AddButton(string name, Action action, StackPanel row, string? tooltip = null)
     {
-      bool showLabel = iconKey is "mosaic" or "blur";
-      UIElement content = ScreenshotToolbarIcons.CreateIcon(iconKey);
-      if (showLabel)
-      {
-        var labeledIcon = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-        labeledIcon.Children.Add(content);
-        labeledIcon.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center });
-        content = labeledIcon;
-      }
       var button = new Button
       {
-        Content = content,
-        Width = showLabel ? double.NaN : 32,
+        Content = new TextBlock { Text = name },
         Height = 32,
-        Padding = new Thickness(showLabel ? 6 : 0, 0, showLabel ? 6 : 0, 0),
+        Padding = new Thickness(8, 0, 8, 0),
       };
       AutomationProperties.SetName(button, name);
       ToolTipService.SetToolTip(button, tooltip ?? name);
@@ -915,22 +904,21 @@ public sealed class ScreenRegionPicker(
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
     // 编辑工具和宿主提供的识别模式直接展示，选择工具后原位进入对应编辑状态。
-    // 原生与 Web 使用同一套 Tabler 矢量图标，按形状区分语义
-    // 并携带 tooltip；复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
+    // 按钮一律以简短中文文字区分语义并携带 tooltip 补充说明；
+    // 复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
     List<Button> selectionActionButtons = [];
     if (ordinary)
     {
-      foreach ((string label, string tool, string iconKey, string tip) in SelectionEditToolRow)
+      foreach ((string label, string tool, string tip) in SelectionEditToolRow)
       {
         selectionActionButtons.Add(
-          AddButton(label, () => { initialTool = tool; Finish(true); }, iconKey, toolbarRowMain, tip));
+          AddButton(label, () => { initialTool = tool; Finish(true); }, toolbarRowMain, tip));
       }
       AddSeparator(toolbarRowMain);
       if (modeEntries.Count == 0)
       {
         // 防御性兜底：宿主始终下发三个分类条目，此分支不应被走到。
-        var unavailable = AddButton("识别模式未就绪", () => { },
-          ScreenshotToolbarIcons.DefaultKey, toolbarRowMain);
+        var unavailable = AddButton("识别模式未就绪", () => { }, toolbarRowMain);
         unavailable.IsEnabled = false;
       }
       else
@@ -941,11 +929,11 @@ public sealed class ScreenRegionPicker(
           string modeId = entry.ModeId;
           Button item = AddButton(
             entry.DisplayName, () => Finish(true, ScreenshotSelectionAction.Recognize, modeId, entry.Intent),
-            entry.IconKey, toolbarRowMain);
+            toolbarRowMain);
           item.IsEnabled = ready;
           if (ready) selectionActionButtons.Add(item);
-          // 提示/高亮清晰：可点击时用宿主 Hint（文字图标携带引擎名），
-          // 禁用时同时携带图标名称与原因，指明在设置中修复。
+          // 提示/高亮清晰：可点击时用宿主 Hint（文字按钮携带引擎名），
+          // 禁用时同时携带名称与原因，指明在设置中修复。
           if (entry.Hint is { } hint && ready) ToolTipService.SetToolTip(item, hint);
           else if (!ready) ToolTipService.SetToolTip(item,
             $"{entry.DisplayName}：{UnavailableReason(entry.Availability)}");
@@ -953,34 +941,34 @@ public sealed class ScreenRegionPicker(
       }
       // 长截图复用当前选区，不再二次框选。
       selectionActionButtons.Add(AddButton("长截图",
-        () => Finish(true, ScreenshotSelectionAction.ScrollCapture), "scrollCapture", toolbarRowMain,
+        () => Finish(true, ScreenshotSelectionAction.ScrollCapture), toolbarRowMain,
         "长截图：滚动截取当前所选区域"));
       AddSeparator(toolbarRowMain);
       selectionActionButtons.Add(AddButton("复制", () => Finish(true, ScreenshotSelectionAction.Copy),
-        "copy", toolbarRowMain, "复制：复制所选区域图像"));
+        toolbarRowMain, "复制：复制所选区域图像"));
       selectionActionButtons.Add(AddButton("保存", () => Finish(true, ScreenshotSelectionAction.Save),
-        "save", toolbarRowMain, "保存：保存所选区域图像"));
+        toolbarRowMain, "保存：保存所选区域图像"));
       selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin),
-        "pin", toolbarRowMain, "钉图：将所选区域钉在桌面"));
+        toolbarRowMain, "钉图：将所选区域钉在桌面"));
       AddSeparator(toolbarRowMain);
       selectionActionButtons.Add(AddButton("设置", () => Finish(true, ScreenshotSelectionAction.OpenSettings),
-        "settings", toolbarRowMain, "设置：打开设置页"));
+        toolbarRowMain, "设置：打开设置页"));
     }
     else
     {
-      confirm = AddButton("确认", () => Finish(true), "confirm", toolbarRowMain);
-      undo = AddButton("撤销", session.Undo, "undo", toolbarRowMain);
-      redo = AddButton("重做", session.Redo, "redo", toolbarRowMain);
+      confirm = AddButton("确认", () => Finish(true), toolbarRowMain);
+      undo = AddButton("撤销", session.Undo, toolbarRowMain);
+      redo = AddButton("重做", session.Redo, toolbarRowMain);
     }
     StackPanel sessionRow = toolbarRowMain;
     AddSeparator(sessionRow);
     AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); },
-      "reselect", sessionRow, "重选：重新框选区域");
-    AddButton("退出", () => Finish(false), "exit", sessionRow, "退出：取消本次截图（Esc）");
+      sessionRow, "重选：重新框选区域");
+    AddButton("退出", () => Finish(false), sessionRow, "退出：取消本次截图（Esc）");
     var magnifierToggle = new Microsoft.UI.Xaml.Controls.Primitives.ToggleButton
     {
-      Content = ScreenshotToolbarIcons.CreateIcon("magnifier"),
-      Width = 32, Height = 32, Padding = new Thickness(0), IsChecked = true,
+      Content = new TextBlock { Text = "放大镜" },
+      Height = 32, Padding = new Thickness(8, 0, 8, 0), IsChecked = true,
     };
     AutomationProperties.SetName(magnifierToggle, "放大镜");
     ToolTipService.SetToolTip(magnifierToggle, "放大镜（M）");

@@ -11,6 +11,7 @@ from pathlib import Path
 from scripts.check_openapi_quality import (
     detect_breaking_changes,
     lint_document,
+    load_document,
 )
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -113,24 +114,22 @@ def test_cli_without_paths_lints_the_formal_protocol() -> None:
     assert "OpenAPI quality gate: OK" in result.stdout
 
 
-def test_formal_openapi_is_compatible_with_immutable_release_baseline() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/check_openapi_quality.py",
-            "--baseline",
-            str(RELEASE_BASELINE),
-            "--current",
-            str(FORMAL_OPENAPI),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "OpenAPI quality gate: OK" in result.stdout
+def test_formal_openapi_has_only_reviewed_release_baseline_delta() -> None:
+    # 语义审阅依据：docs/rapid-parallel-rapidtable-interface.md。
+    # 保留历史基线和比较器；仅批准这个候选请求值，不放行其他差异。
+    baseline = load_document(RELEASE_BASELINE)
+    current = load_document(FORMAL_OPENAPI)
+    assert detect_breaking_changes(baseline, current) == [
+        "POST /v2/jobs request multipart/form-data.manifest.pipeline.pipeline_id: "
+        "request enum added values ['RAPID_TABLE']"
+    ]
+    old_values = baseline["components"]["schemas"]["PipelineSelection"]["properties"][
+        "pipeline_id"
+    ]["enum"]
+    assert current["components"]["schemas"]["ExecutionPipelineId"]["enum"] == [
+        *old_values,
+        "RAPID_TABLE",
+    ]
 
 
 def test_lint_rejects_broken_refs_duplicate_operation_ids_and_invalid_schema() -> None:

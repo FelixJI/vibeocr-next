@@ -33,6 +33,7 @@ from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
     _extract_python_archive,
     _extract_runtime_pack,
+    _install_rapidtable_model,
     _load_component_lock,
     _local_install_requirements,
     _normalize_dist_name,
@@ -89,15 +90,17 @@ _OPERATION_OPTIONAL_KEYS = {"requested_source_ids", "effective_source_ids"}
 _FORBIDDEN_EMPTY = (
     "fastapi",
     "rapidocr",
+    "rapid-table",
     "paddleocr",
     "mineru",
     "torch",
     "onnxruntime",
 )
-# 六种锁定配方是 Runtime 的唯一权威目录：展示名、真实用途（识别类型）与
+# 锁定配方是 Runtime 的唯一权威目录：展示名、真实用途（识别类型）与
 # 设备要求沿 manifest scope 锁投影；C#/TS 只消费目录，不得重算依赖图。
 _RECIPE_IDS = (
     "rapidocr-cpu",
+    "rapidocr-cuda",
     "paddleocr-cpu",
     "paddleocr-cuda",
     "mineru-cpu",
@@ -105,17 +108,20 @@ _RECIPE_IDS = (
     "rapidocr+mineru-cuda",
 )
 _RECIPE_DISPLAY_NAMES = {
-    "rapidocr-cpu": "RapidOCR · CPU",
+    "rapidocr-cpu": "RapidOCR + RapidTable · CPU",
+    "rapidocr-cuda": "RapidOCR + RapidTable · NVIDIA CUDA",
     "paddleocr-cpu": "PaddleOCR · CPU",
     "paddleocr-cuda": "PaddleOCR · NVIDIA CUDA",
     "mineru-cpu": "MinerU · CPU",
-    "rapidocr+mineru-cpu": "RapidOCR + MinerU · CPU",
-    "rapidocr+mineru-cuda": "RapidOCR + MinerU · NVIDIA CUDA",
+    "rapidocr+mineru-cpu": "RapidOCR + RapidTable + MinerU · CPU",
+    "rapidocr+mineru-cuda": "RapidOCR + RapidTable + MinerU · NVIDIA CUDA",
 }
 # 探针运行 Supervisor 实际执行的引擎导入：不实例化引擎、不下载模型。
 # rapidocr 必须导入真实符号，包级 __init__ 惰性解析无法证明原生闭包可用。
+# 历史配方维持原引擎基线；新 RapidTable 的缺失由模式 availability 单独报告。
 _RECIPE_IMPORT_PROBES = {
     "rapidocr-cpu": "from rapidocr import RapidOCR",
+    "rapidocr-cuda": "from rapidocr import RapidOCR; from rapid_table import RapidTable; from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; assert cuda_provider_ready()",
     "paddleocr-cpu": "from paddleocr import PaddleOCR",
     "paddleocr-cuda": "from paddleocr import PaddleOCR",
     "mineru-cpu": "from mineru.parser.api_server import create_app",
@@ -344,6 +350,10 @@ class ManagedEnvironmentStore:
             environment["VIBEOCR_PRODUCT_CODE_ROOT"] = str(code_root)
         if record["kind"] == "venv":
             environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] = record["recipe"]
+            if record["recipe"] == "rapidocr-cuda":
+                environment["VIBEOCR_ORT_CUDA_EP_DLL"] = str(
+                    root / "providers" / "cuda" / "onnxruntime_providers_cuda.dll"
+                )
         # 模型来源偏好按既有官方 env 投影给 _launch 消费；解析只读注册表
         # （调用方已持有 store 锁）。原生 downloader 的实际端点未知，不伪造。
         environment.update(
@@ -1110,8 +1120,10 @@ class ManagedEnvironmentStore:
         if record["status"] == "installed":
             expected = {"fastapi"}
             recipe = record.get("recipe")
-            if recipe == "rapidocr-cpu":
+            if recipe in {"rapidocr-cpu", "rapidocr-cuda"}:
                 expected.update({"rapidocr", "onnxruntime"})
+                if recipe == "rapidocr-cuda":
+                    expected.update({"rapid-table", "nvidia-cudnn-cu13"})
             elif recipe == "paddleocr-cpu":
                 expected.update({"paddleocr", "paddlepaddle"})
             elif recipe == "paddleocr-cuda":
@@ -1126,6 +1138,15 @@ class ManagedEnvironmentStore:
                 return {
                     "healthy": False,
                     "reason": "engine_packages_missing",
+                    "python": str(python),
+                }
+            if (
+                "rapid-table" in expected
+                and not (root / "models" / "rapidtable" / "slanet-plus.onnx").is_file()
+            ):
+                return {
+                    "healthy": False,
+                    "reason": "engine_model_missing",
                     "python": str(python),
                 }
             import_probe = _RECIPE_IMPORT_PROBES.get(recipe)
@@ -1188,9 +1209,9 @@ class ManagedEnvironmentStore:
         if recipe.startswith("paddleocr"):
             return ["text", "table", "formula", "structure", "document_vl"]
         if recipe.startswith("rapidocr+mineru"):
-            return ["text", "document"]
-        if recipe == "rapidocr-cpu":
-            return ["text"]
+            return ["text", "rapid_table", "document"]
+        if recipe in {"rapidocr-cpu", "rapidocr-cuda"}:
+            return ["text", "rapid_table"]
         if recipe == "mineru-cpu":
             return ["document"]
         return []
@@ -1234,7 +1255,11 @@ class ManagedEnvironmentStore:
         dependency_state = (
             "missing"
             if probe["reason"]
-            in {"engine_packages_missing", "empty_environment_contaminated"}
+            in {
+                "engine_packages_missing",
+                "engine_model_missing",
+                "empty_environment_contaminated",
+            }
             else "unavailable"
             if probe["reason"] == "engine_import_failed"
             else record["status"]
@@ -1856,6 +1881,12 @@ class ManagedEnvironmentStore:
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
         if recipe == "rapidocr-cpu":
             return self.manifest.profiles["win-x64-base"].scopes[0], "cpu"
+        if recipe == "rapidocr-cuda":
+            if self.manifest.rapid_cuda_environment is None:
+                raise ManagedEnvironmentError(
+                    "Rapid CUDA recipe is absent from manifest"
+                )
+            return self.manifest.rapid_cuda_environment, "nvidia_cuda"
         if recipe == "mineru-cpu":
             scope = next(
                 (
@@ -1920,6 +1951,17 @@ class ManagedEnvironmentStore:
     def preview_install(
         self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
     ) -> dict:
+        if recipe == "rapidocr-cuda":
+            # NVIDIA CUDA minor-version compatibility: CUDA 13 requires R580.
+            # docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
+            driver = probe_nvidia_driver(minimum_version=(580, 0))
+            if driver["status"] != "ok":
+                raise ManagedEnvironmentError(
+                    "RapidOCR / RapidTable CUDA 13 需要 NVIDIA R580 或更新驱动；"
+                    f"当前驱动：{driver['driver_version'] or '不可用'}",
+                    reason_code=driver["reason_code"] or "nvidia_driver_unavailable",
+                    next_action="update_nvidia_driver",
+                )
         with self._target_operation(env_id), RuntimeStoreLock(self._lock):
             data = self._read()
             record = data["environments"].get(env_id)
@@ -2480,6 +2522,19 @@ class ManagedEnvironmentStore:
             observer.set_phase(
                 "runtime_wheel",
                 "安装内部 Runtime wheel（随产品提供，独立于目标依赖计数）",
+            )
+        if "rapidocr-base" in scope.component_ids:
+            self._check_install_cancelled()
+            _install_rapidtable_model(self.manifest, python.parent.parent, cache)
+        if scope.scope_id == "rapidocr-cuda":
+            from vibeocr.runtime.environments.rapid_assets import install_cuda_plugin
+
+            if observer is not None:
+                observer.set_phase("download", "准备锁定的 ONNX Runtime CUDA 13 插件")
+            install_cuda_plugin(
+                python.parent.parent,
+                cache / "rapid-assets",
+                self._check_install_cancelled,
             )
         _run_install_command(
             _uv_command(python, "install")

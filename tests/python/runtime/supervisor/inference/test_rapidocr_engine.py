@@ -154,8 +154,22 @@ class TestRecognizeMany:
         assert len(fake_rapidocr.instances) == 1
 
     def test_capabilities_are_conservative(self) -> None:
-        capability = RapidOcrEngine().capabilities()
+        engine = RapidOcrEngine()
+        capability = engine.capabilities()
         assert capability.real_batch is False
+        workers = engine.parallel_workers()
+        assert capability.parallel_compute is (workers > 1)
+        assert capability.max_compute_batch == (workers if workers > 1 else 1)
+
+    def test_capabilities_cuda_selection_disables_parallel(self) -> None:
+        capability = RapidOcrEngine().capabilities(
+            type(
+                "S",
+                (),
+                {"pipeline_id": "OCR", "options": {"device": "cuda"}},
+            )()
+        )
+        assert capability.parallel_compute is False
         assert capability.max_compute_batch == 1
 
 

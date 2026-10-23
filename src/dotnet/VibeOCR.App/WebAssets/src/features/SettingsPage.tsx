@@ -2445,8 +2445,9 @@ function EnvironmentRecommendation({
                 模型按需准备，实际执行设备尚未验证。
               </p>
               <p className="form-note">
-                CPU 适用于通用识别。GPU 仅作用于配方支持的组件；组合配方不代表
-                RapidOCR 使用 GPU，MinerU 的默认路径也不因包含 torch 就保证使用
+                CPU 适用于通用识别。GPU 仅作用于配方声明的组件：rapidocr-cuda 使
+                RapidOCR/RapidTable 以 CUDA 运行；rapidocr+mineru 组合中的
+                RapidOCR 仍为 CPU，MinerU 的默认路径也不因包含 torch 就保证使用
                 GPU。
               </p>
             </>

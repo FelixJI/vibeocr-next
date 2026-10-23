@@ -241,6 +241,7 @@ class RuntimeManifest:
     source_commit: str
     build_workflow: str
     raw: dict[str, Any]
+    rapid_cuda_environment: RuntimeInstallScope | None = None
 
 
 def sha256_file(path: Path) -> str:
@@ -416,6 +417,12 @@ def validate_requirements_lock(
         ):
             if forbidden in lowered:
                 raise ManifestError(f"base lock contains {forbidden}")
+    elif profile == "win-x64-rapid-cu13":
+        for required in ("rapidocr", "rapid-table", "onnxruntime", "nvidia-cudnn-cu13"):
+            if required not in lowered:
+                raise ManifestError(f"Rapid CUDA lock is missing {required}")
+        if "onnxruntime-gpu" in lowered or "torch==" in lowered:
+            raise ManifestError("Rapid CUDA lock contains another inference runtime")
     elif profile in ("win-x64-paddle-cpu", "win-x64-paddle-cu126"):
         declarations = "\n".join(entry[0].lower() for entry in entries)
         for forbidden in ("opencv-python==", "mineru==", "rapidocr=="):
@@ -839,6 +846,29 @@ def load_runtime_manifest(
         )
         if actual_executable_sha != installer_artifact.executable_sha256:
             raise ManifestError("Installer executable SHA-256 mismatch")
+    rapid_cuda = None
+    rapid_record = data.get("rapid_cuda_environment")
+    if rapid_record is not None:
+        if not isinstance(rapid_record, dict):
+            raise ManifestError("rapid_cuda_environment must be an object")
+        rapid_lock = manifest_path.parent / _relative_filename(
+            rapid_record.get("lock"), field="rapid_cuda_environment.lock"
+        )
+        rapid_sha = _sha256(
+            rapid_record.get("sha256"), field="rapid_cuda_environment.sha256"
+        )
+        if verify_artifacts:
+            if sha256_file(rapid_lock) != rapid_sha:
+                raise ManifestError("Rapid CUDA lock SHA-256 mismatch")
+            validate_requirements_lock(rapid_lock, profile="win-x64-rapid-cu13")
+        rapid_cuda = RuntimeInstallScope(
+            scope_id="rapidocr-cuda",
+            component_ids=("rapidocr-base", "runtime_host"),
+            lock_path=rapid_lock,
+            sha256=rapid_sha,
+            runtime_pack=(),
+            runtime_pack_sha256=(),
+        )
     return RuntimeManifest(
         path=manifest_path,
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
@@ -852,6 +882,7 @@ def load_runtime_manifest(
         source_commit=source_commit,
         build_workflow=workflow,
         raw=data,
+        rapid_cuda_environment=rapid_cuda,
     )
 
 

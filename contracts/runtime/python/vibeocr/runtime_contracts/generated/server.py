@@ -461,7 +461,8 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                    'paddle_document_vl',
                                                                                    'mineru_document',
                                                                                    'paddle_table',
-                                                                                   'paddle_formula'],
+                                                                                   'paddle_formula',
+                                                                                   'rapid_table'],
                                                                           'type': 'string'},
                                                                 'minItems': 1,
                                                                 'type': 'array',
@@ -495,7 +496,8 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                    'paddle_document_vl',
                                                                                    'mineru_document',
                                                                                    'paddle_table',
-                                                                                   'paddle_formula'],
+                                                                                   'paddle_formula',
+                                                                                   'rapid_table'],
                                                                           'type': 'string'},
                                                                          {'type': 'null'}]}},
                            'required': [],
@@ -644,7 +646,8 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                                                                        'paddle_document_vl',
                                                                                                                                        'mineru_document',
                                                                                                                                        'paddle_table',
-                                                                                                                                       'paddle_formula'],
+                                                                                                                                       'paddle_formula',
+                                                                                                                                       'rapid_table'],
                                                                                                                               'type': 'string'},
                                                                                                          'ttl_seconds': {'minimum': 0,
                                                                                                                          'type': ['integer',
@@ -3579,7 +3582,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                         'paddle_document_vl',
                                                                                                                                                                                         'mineru_document',
                                                                                                                                                                                         'paddle_table',
-                                                                                                                                                                                        'paddle_formula'],
+                                                                                                                                                                                        'paddle_formula',
+                                                                                                                                                                                        'rapid_table'],
                                                                                                                                                                                'type': 'string'},
                                                                                                                                                                         'lifecycle': {'additionalProperties': False,
                                                                                                                                                                                       'properties': {'kind': {'description': 'User-manageable '
@@ -3661,13 +3665,26 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                        'exposing '
                                                                                                                                                                                                        'this '
                                                                                                                                                                                                        'enum '
-                                                                                                                                                                                                       'directly.',
+                                                                                                                                                                                                       'directly. '
+                                                                                                                                                                                                       'RAPID_TABLE '
+                                                                                                                                                                                                       'is '
+                                                                                                                                                                                                       'the '
+                                                                                                                                                                                                       'lightweight '
+                                                                                                                                                                                                       'RapidTable '
+                                                                                                                                                                                                       'table-recognition '
+                                                                                                                                                                                                       'pipeline '
+                                                                                                                                                                                                       'carried '
+                                                                                                                                                                                                       'by '
+                                                                                                                                                                                                       'the '
+                                                                                                                                                                                                       'base '
+                                                                                                                                                                                                       'runtime.',
                                                                                                                                                                                         'enum': ['OCR',
                                                                                                                                                                                                  'PP-StructureV3',
                                                                                                                                                                                                  'MinerU',
                                                                                                                                                                                                  'PaddleOCR-VL',
                                                                                                                                                                                                  'TABLE_RECOGNITION',
-                                                                                                                                                                                                 'FORMULA_RECOGNITION'],
+                                                                                                                                                                                                 'FORMULA_RECOGNITION',
+                                                                                                                                                                                                 'RAPID_TABLE'],
                                                                                                                                                                                         'type': 'string'},
                                                                                                                                                                         'provisioning': {'description': 'Where '
                                                                                                                                                                                                         'the '
@@ -3789,7 +3806,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                            'paddle_document_vl',
                                                                                                            'mineru_document',
                                                                                                            'paddle_table',
-                                                                                                           'paddle_formula'],
+                                                                                                           'paddle_formula',
+                                                                                                           'rapid_table'],
                                                                                                   'type': 'string'},
                                                                              'remaining_ttl_seconds': {'minimum': 0,
                                                                                                        'type': ['integer',
@@ -3855,7 +3873,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                              'paddle_document_vl',
                                                                                                              'mineru_document',
                                                                                                              'paddle_table',
-                                                                                                             'paddle_formula'],
+                                                                                                             'paddle_formula',
+                                                                                                             'rapid_table'],
                                                                                                     'type': 'string'},
                                                                                'ttl_seconds': {'minimum': 0,
                                                                                                'type': ['integer',
@@ -4152,7 +4171,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                   'paddle_document_vl',
                                                                                                                                   'mineru_document',
                                                                                                                                   'paddle_table',
-                                                                                                                                  'paddle_formula'],
+                                                                                                                                  'paddle_formula',
+                                                                                                                                  'rapid_table'],
                                                                                                                          'type': 'string'},
                                                                                                     'ttl_seconds': {'minimum': 0,
                                                                                                                     'type': ['integer',
@@ -6239,13 +6259,26 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                  'exposing '
                                                                                                                                  'this '
                                                                                                                                  'enum '
-                                                                                                                                 'directly.',
+                                                                                                                                 'directly. '
+                                                                                                                                 'RAPID_TABLE '
+                                                                                                                                 'is '
+                                                                                                                                 'the '
+                                                                                                                                 'lightweight '
+                                                                                                                                 'RapidTable '
+                                                                                                                                 'table-recognition '
+                                                                                                                                 'pipeline '
+                                                                                                                                 'carried '
+                                                                                                                                 'by '
+                                                                                                                                 'the '
+                                                                                                                                 'base '
+                                                                                                                                 'runtime.',
                                                                                                                   'enum': ['OCR',
                                                                                                                            'PP-StructureV3',
                                                                                                                            'MinerU',
                                                                                                                            'PaddleOCR-VL',
                                                                                                                            'TABLE_RECOGNITION',
-                                                                                                                           'FORMULA_RECOGNITION'],
+                                                                                                                           'FORMULA_RECOGNITION',
+                                                                                                                           'RAPID_TABLE'],
                                                                                                                   'type': 'string'}},
                                                                                    'required': ['pipeline_id',
                                                                                                 'options_version',
@@ -6819,7 +6852,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                       'paddle_document_vl',
                                                                                                       'mineru_document',
                                                                                                       'paddle_table',
-                                                                                                      'paddle_formula'],
+                                                                                                      'paddle_formula',
+                                                                                                      'rapid_table'],
                                                                                              'type': 'string'},
                                                                         'remaining_ttl_seconds': {'minimum': 0,
                                                                                                   'type': ['integer',
@@ -6885,7 +6919,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                         'paddle_document_vl',
                                                                                                         'mineru_document',
                                                                                                         'paddle_table',
-                                                                                                        'paddle_formula'],
+                                                                                                        'paddle_formula',
+                                                                                                        'rapid_table'],
                                                                                                'type': 'string'},
                                                                           'ttl_seconds': {'minimum': 0,
                                                                                           'type': ['integer',
@@ -7387,7 +7422,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                   'paddle_document_vl',
                                                                                                                                   'mineru_document',
                                                                                                                                   'paddle_table',
-                                                                                                                                  'paddle_formula'],
+                                                                                                                                  'paddle_formula',
+                                                                                                                                  'rapid_table'],
                                                                                                                          'type': 'string'},
                                                                                                     'ttl_seconds': {'minimum': 0,
                                                                                                                     'type': ['integer',
@@ -7448,7 +7484,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                       'paddle_document_vl',
                                                                                                       'mineru_document',
                                                                                                       'paddle_table',
-                                                                                                      'paddle_formula'],
+                                                                                                      'paddle_formula',
+                                                                                                      'rapid_table'],
                                                                                              'type': 'string'},
                                                                         'remaining_ttl_seconds': {'minimum': 0,
                                                                                                   'type': ['integer',
@@ -7514,7 +7551,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                         'paddle_document_vl',
                                                                                                         'mineru_document',
                                                                                                         'paddle_table',
-                                                                                                        'paddle_formula'],
+                                                                                                        'paddle_formula',
+                                                                                                        'rapid_table'],
                                                                                                'type': 'string'},
                                                                           'ttl_seconds': {'minimum': 0,
                                                                                           'type': ['integer',

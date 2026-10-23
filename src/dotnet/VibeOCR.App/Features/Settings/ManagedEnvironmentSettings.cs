@@ -727,10 +727,11 @@ public sealed class ManagedEnvironmentSettings(
         var catalog = new RuntimeSelectionService(health);
         string[] modeIds = environment.Recipe switch
         {
-            "rapidocr-cpu" => ["rapid_text"],
+            "rapidocr-cpu" or "rapidocr-cuda" => ["rapid_text", "rapid_table"],
             "paddleocr-cpu" or "paddleocr-cuda" => ["paddle_text"],
             "mineru-cpu" => ["mineru_document"],
-            "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" => ["rapid_text", "mineru_document"],
+            "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" =>
+                ["rapid_text", "rapid_table", "mineru_document"],
             _ => [],
         };
         RecognitionModeOption[] modes = [.. catalog.RecognitionModes.Where(mode =>

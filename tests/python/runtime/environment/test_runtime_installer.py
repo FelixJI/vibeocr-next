@@ -1324,8 +1324,11 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
         "rapidocr+mineru-cuda",
     ]
     entry = {item["id"]: item for item in catalog}
-    assert entry["rapidocr-cpu"]["display_name"] == "RapidOCR · CPU"
-    assert entry["rapidocr-cpu"]["configured_recognition_types"] == ["text"]
+    assert entry["rapidocr-cpu"]["display_name"] == "RapidOCR + RapidTable · CPU"
+    assert entry["rapidocr-cpu"]["configured_recognition_types"] == [
+        "text",
+        "rapid_table",
+    ]
     assert entry["rapidocr-cpu"]["accelerator"] == "cpu"
     assert entry["rapidocr-cpu"]["target_device"] == "cpu"
     assert entry["rapidocr-cpu"]["python_version"] == "3.13.16"
@@ -1793,7 +1796,10 @@ def test_named_install_rejects_native_import_failure_without_committing(
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        for name in ("fastapi", "rapidocr", "onnxruntime"):
+        model = python.parent.parent / "models/rapidtable/slanet-plus.onnx"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"model")
+        for name in ("fastapi", "rapidocr", "rapid-table", "onnxruntime"):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
@@ -1862,7 +1868,10 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        for name in ("fastapi", "rapidocr", "onnxruntime", "shapely"):
+        model = python.parent.parent / "models/rapidtable/slanet-plus.onnx"
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"model")
+        for name in ("fastapi", "rapidocr", "rapid-table", "onnxruntime", "shapely"):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
