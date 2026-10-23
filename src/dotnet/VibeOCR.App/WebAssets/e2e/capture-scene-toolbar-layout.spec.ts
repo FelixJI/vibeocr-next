@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { recordAnnotationUploads } from "./annotation-uploads";
 
 import {
   expectCommand,
@@ -360,19 +361,7 @@ for (const [action, format] of [
     page,
   }) => {
     await mountScene(page, 1280, 720);
-    const uploads: Buffer[] = [];
-    await page.route("**/__annotation", (route) => {
-      const bytes = route.request().postDataBuffer();
-      if (bytes) uploads.push(bytes);
-      return route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify({
-          resourceUri:
-            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-        }),
-      });
-    });
+    const uploads = await recordAnnotationUploads(page);
     await page.getByRole("button", { name: "截图直角，点击切换圆角" }).click();
     await expect(page.getByLabel("图片视口")).not.toHaveCSS(
       "border-top-left-radius",
@@ -389,7 +378,9 @@ for (const [action, format] of [
       await page.locator(".editor-output-settings > summary").click();
     }
     await page.getByRole("button", { name: action, exact: true }).click();
-    await expect.poll(() => uploads.length).toBe(1);
+    const exported = await uploads.submitted(
+      action === "复制标注图" ? "copyScreenshotImage" : "saveScreenshotImage",
+    );
     const samples = await page.evaluate(async (base64) => {
       const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
       const image = await createImageBitmap(new Blob([bytes]));
@@ -407,7 +398,7 @@ for (const [action, format] of [
           context.getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data,
         ),
       };
-    }, uploads[0]!.toString("base64"));
+    }, exported.body.toString("base64"));
     expect(samples.width).toBe(900);
     expect(samples.height).toBe(400);
     if (format === "image/png") expect(samples.corner[3]).toBe(0);

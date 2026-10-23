@@ -2,6 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
+import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
   width: number;
@@ -538,21 +539,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
 }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1280, height: 900 });
-  const uploads: { contentType: string; body: Buffer }[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({
-      contentType: route.request().headers()["content-type"] ?? "",
-      body: route.request().postDataBuffer() ?? Buffer.alloc(0),
-    });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page);
   await routeInpaintSource(
     page,
     '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48"><rect width="96" height="48" fill="#0aa05a"/><rect x="32" y="12" width="32" height="16" fill="#e020f0"/></svg>',
@@ -586,6 +573,11 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
   });
   await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
+  const initialText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    0,
+  );
+  await uploads.waitForDiscard(initialText.resourceUri);
 
   // 会话模式同一“去水印”入口：框选 → 预览 → 应用，推进会话修订。
   await page.getByRole("button", { name: "去水印" }).click();
@@ -602,15 +594,19 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
   });
 
   // 显式识别走会话导出路径：上传的识别输入包含已应用修补像素。
+  const appliedText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    1,
+  );
+  await uploads.waitForDiscard(appliedText.resourceUri);
   await page.getByRole("button", { name: "识别文字" }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const recognized = await uploads.submitted("recognizeScreenshotImage");
   await expectCommand(page, {
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
       modeId: "rapid_text",
-      resourceUri:
-        "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      resourceUri: recognized.resourceUri,
       sessionId: "inpaint-session-e2e",
       revision: 1,
       excludeBoxes: [],
@@ -618,8 +614,14 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
   });
   const recognitionInput = await decodeUpload(
     page,
-    uploads[0]!.body,
+    recognized.body,
     "image/png",
   );
   expectPixelNear(recognitionInput, 48, 20, [10, 160, 90]);
+  expect(uploads.count()).toBe(3);
+  expect(
+    (await uploads.commands("prepareScreenshotTextLayer")).map(
+      (command) => command.arguments.revision,
+    ),
+  ).toEqual([0, 1]);
 });

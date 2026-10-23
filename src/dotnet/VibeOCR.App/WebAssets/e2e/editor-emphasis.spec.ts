@@ -1,3 +1,4 @@
+import { recordAnnotationUploads } from "./annotation-uploads";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -39,19 +40,9 @@ async function setup(
   const svg = options.svg ?? GRADIENT_SVG;
   const natural = options.natural ?? { width: 900, height: 600 };
   await page.setViewportSize({ width: 1280, height: 900 });
-  const uploads: Buffer[] = [];
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
   const projects: unknown[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push(route.request().postDataBuffer()!);
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+
   await page.route("**/__project", async (route) => {
     projects.push(route.request().postDataJSON());
     await route.fulfill({
@@ -115,11 +106,14 @@ async function action(page: Page, name: string) {
   await page.getByRole("button", { name, exact: true }).click();
 }
 
-async function save(page: Page, uploads: Buffer[]) {
-  const count = uploads.length;
+async function save(
+  page: Page,
+  uploads: Awaited<ReturnType<typeof recordAnnotationUploads>>,
+) {
+  const count = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(count + 1);
-  return uploads[count]!;
+  const countUpload = await uploads.submitted("saveScreenshotImage", count);
+  return countUpload.body;
 }
 
 /** 保存 PNG 上采样；points 为输出自然像素坐标。 */
@@ -442,16 +436,9 @@ test("watermark: text and imported image opacity edit, undo, and project payload
   await page.route(imageUrl, (route) =>
     route.fulfill({ contentType: "image/png", body: importPng }),
   );
-  const uploads: Buffer[] = [];
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
   const projects: unknown[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push(route.request().postDataBuffer()!);
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({ resourceUri: "https://app.vibeocr/a" }),
-    });
-  });
+
   await page.route("**/__project", async (route) => {
     projects.push(route.request().postDataJSON());
     await route.fulfill({
@@ -850,15 +837,8 @@ test("F5b image watermark: real semi-transparent pixels blend with opacity", asy
   await page.route(imageUrl, (route) =>
     route.fulfill({ contentType: "image/png", body: importPng }),
   );
-  const uploads: Buffer[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push(route.request().postDataBuffer()!);
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({ resourceUri: "https://app.vibeocr/a" }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
+
   await mountHost(
     page,
     {
@@ -924,10 +904,10 @@ test("F5b image watermark: real semi-transparent pixels blend with opacity", asy
   const opacityInput = page.getByLabel("水印不透明度");
   await opacityInput.fill("50");
   await opacityInput.press("Enter");
-  const count = uploads.length;
+  const count = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(count + 1);
-  const png = uploads[count]!;
+  const countUpload = await uploads.submitted("saveScreenshotImage", count);
+  const png = countUpload.body;
   // 半透明红半 × 整体 50%：0.5×(0.5红+0.5白)+0.5白 = (255,191,191)；
   // 不透明蓝半 × 50% = (128,128,255)。旧实现若忽略 globalAlpha 会得到
   // (255,128,128)/(0,0,255)，若双重叠加会得到其它值。
@@ -982,16 +962,9 @@ test("F5c emphasis save-restore keeps spotlight/magnifier/watermark pixels", asy
   await page.route(imageUrl, (route) =>
     route.fulfill({ contentType: "image/png", body: importPng }),
   );
-  const uploads: Buffer[] = [];
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
   const projects: unknown[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push(route.request().postDataBuffer()!);
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({ resourceUri: "https://app.vibeocr/a" }),
-    });
-  });
+
   await page.route("**/__project", async (route) => {
     projects.push(route.request().postDataJSON());
     await route.fulfill({
@@ -1075,10 +1048,13 @@ test("F5c emphasis save-restore keeps spotlight/magnifier/watermark pixels", asy
   await action(page, "放大镜");
   await drag(page, 500, 150, 700, 300);
   // 保存前导出基准。
-  const countBefore = uploads.length;
+  const countBefore = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(countBefore + 1);
-  const before = uploads[countBefore]!;
+  const countBeforeUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    countBefore,
+  );
+  const before = countBeforeUpload.body;
   await action(page, "保存工程");
   await expect.poll(() => projects.length).toBe(1);
   const payload = projects[0] as {
@@ -1177,10 +1153,13 @@ test("F5c emphasis save-restore keeps spotlight/magnifier/watermark pixels", asy
   await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
   // 恢复后导出必须与保存前逐像素一致（含聚光灯遮罩/孔洞、放大镜采样、
   // 图片资产与水印透明度）。
-  const countAfter = uploads.length;
+  const countAfter = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(countAfter + 1);
-  const after = uploads[countAfter]!;
+  const countAfterUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    countAfter,
+  );
+  const after = countAfterUpload.body;
   const diff = await pixelDifference(page, before, after);
   expect(diff).toBe(0);
   const beforePath = testInfo.outputPath("emphasis-before-restore.png");
@@ -1552,16 +1531,22 @@ test("H3 masked copy keeps excluded content hidden even when sampled by magnifie
       return magenta;
     }, png.toString("base64"));
   // 普通导出：镜头正常采样并显示秘密内容（普通像素语义保留）。
-  const normalCount = uploads.length;
+  const normalCount = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(normalCount + 1);
-  const normalMagenta = await countMagenta(uploads[normalCount]!);
+  const normalCountUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    normalCount,
+  );
+  const normalMagenta = await countMagenta(normalCountUpload.body);
   expect(normalMagenta).toBeGreaterThan(0);
   // 屏蔽副本：任何位置都不得出现被屏蔽内容（含被镜采样搬运的位置）。
-  const maskedCount = uploads.length;
+  const maskedCount = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存屏蔽副本");
-  await expect.poll(() => uploads.length).toBe(maskedCount + 1);
-  const maskedMagenta = await countMagenta(uploads[maskedCount]!);
+  const maskedCountUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    maskedCount,
+  );
+  const maskedMagenta = await countMagenta(maskedCountUpload.body);
   expect(maskedMagenta).toBe(0);
 });
 
@@ -1629,21 +1614,8 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  const uploads: { contentType: string; body: Buffer }[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({
-      contentType: route.request().headers()["content-type"] ?? "",
-      body: route.request().postDataBuffer() ?? Buffer.alloc(0),
-    });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
+
   await page.route("**/leak-source.svg", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
@@ -1701,9 +1673,8 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
   };
   expect(pin.arguments?.excludeBoxes?.length).toBe(2);
   // 文字层输入：默认自动 prepare 上传为烘焙像素（镜内无洋红）。
-  const prepareCount = uploads.length;
   await action(page, "选择");
-  await expect.poll(() => uploads.length).toBeGreaterThan(prepareCount);
+  const textUpload = await uploads.currentText();
   const textLayerMagenta = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(
       new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
@@ -1728,12 +1699,16 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
         magenta += 1;
     }
     return magenta;
-  }, uploads[prepareCount]!.body.toString("base64"));
+  }, textUpload.body.toString("base64"));
   expect(textLayerMagenta).toBe(0);
   // 显式识别：上传普通像素 + excludeBoxes 必须包含镜内泄露区。
-  const recognizeCount = uploads.length;
+  const recognizeCount = (await uploads.commands("recognizeScreenshotImage"))
+    .length;
   await action(page, "识别文字");
-  await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
+  const recognizeCountUpload = await uploads.submitted(
+    "recognizeScreenshotImage",
+    recognizeCount,
+  );
   // 上传请求被收到早于响应解析和 bridge 发送，等待实际识别命令。
   const recognizeHandle = await page.waitForFunction(() =>
     (
@@ -1809,7 +1784,7 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
       return magenta;
     },
     {
-      base64: uploads[recognizeCount]!.body.toString("base64"),
+      base64: recognizeCountUpload.body.toString("base64"),
       boxes: recognizeBoxes!,
     },
   );
@@ -1861,33 +1836,29 @@ test("H3c lens straddling crop: out-of-crop exclusion source must not leak into 
       return magenta;
     }, png.toString("base64"));
   // 普通导出：镜正常显示被采样内容（60×200 洋红在输出 x0..40 处可见）。
-  const normalCount = uploads.length;
+  const normalCount = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(normalCount + 1);
-  expect(await countMagenta(uploads[normalCount]!)).toBeGreaterThan(0);
+  const normalCountUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    normalCount,
+  );
+  expect(await countMagenta(normalCountUpload.body)).toBeGreaterThan(0);
   // 屏蔽副本（烘焙）：泄露区必须被镜采样基底的屏蔽白块覆盖，全图无洋红。
-  const maskedCount = uploads.length;
+  const maskedCount = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存屏蔽副本");
-  await expect.poll(() => uploads.length).toBe(maskedCount + 1);
-  expect(await countMagenta(uploads[maskedCount]!)).toBe(0);
+  const maskedCountUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    maskedCount,
+  );
+  expect(await countMagenta(maskedCountUpload.body)).toBe(0);
 });
 
 test("H3d leak boxes derive from snapped natural exclusion source (fractional drag)", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  const uploads: { body: Buffer }[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({ body: route.request().postDataBuffer() ?? Buffer.alloc(0) });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
+
   await page.route("**/snap-source.svg", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
@@ -1931,9 +1902,12 @@ test("H3d leak boxes derive from snapped natural exclusion source (fractional dr
   await action(page, "裁剪");
   await drag(page, 650, 50, 900, 550); // 输出 250×500
   // 普通导出：泄露可见（洋红在输出 x≈0..40 处放大显示）。
-  const normalCount = uploads.length;
+  const normalCount = (await uploads.commands("saveScreenshotImage")).length;
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(normalCount + 1);
+  const normalCountUpload = await uploads.submitted(
+    "saveScreenshotImage",
+    normalCount,
+  );
   const normalMagenta = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(
       new Blob([Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))], {
@@ -1958,13 +1932,17 @@ test("H3d leak boxes derive from snapped natural exclusion source (fractional dr
         magenta += 1;
     }
     return magenta;
-  }, uploads[normalCount]!.body.toString("base64"));
+  }, normalCountUpload.body.toString("base64"));
   expect(normalMagenta).toBeGreaterThan(0);
   // 显式识别：按上传的 excludeBoxes 做宿主等效白化后必须零洋红——
   // raw 投影（未用权威 snapped 源）会留下 688.6..690 的洋红残列。
-  const recognizeCount = uploads.length;
+  const recognizeCount = (await uploads.commands("recognizeScreenshotImage"))
+    .length;
   await action(page, "识别文字");
-  await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
+  const recognizeCountUpload = await uploads.submitted(
+    "recognizeScreenshotImage",
+    recognizeCount,
+  );
   const boxes = await page.evaluate(
     () =>
       (
@@ -2022,7 +2000,7 @@ test("H3d leak boxes derive from snapped natural exclusion source (fractional dr
       }
       return magenta;
     },
-    { base64: uploads[recognizeCount]!.body.toString("base64"), boxes },
+    { base64: recognizeCountUpload.body.toString("base64"), boxes },
   );
   expect(hostMasked).toBe(0);
 });
@@ -2053,18 +2031,7 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
   );
   // 计数探针必须后于通配代理注册：Playwright 后注册优先，否则
   // /__annotation 被代理转给本地静态服务，保存上传永远不可见。
-  const uploads: { body: Buffer }[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({ body: route.request().postDataBuffer() ?? Buffer.alloc(0) });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
 
   // 工程恢复种子：64 个合法屏蔽 + 1 个放大镜（source 覆盖 4 个屏蔽块
   // → 4 个泄露框）：基础 64 + 泄露 4 = 68 > 桥上限 64，避免 64 次 UI 拖拽。
@@ -2135,6 +2102,12 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
     "https://app.vibeocr/",
   );
   await expect(page.getByText("原图 900×600")).toBeVisible();
+  const initialText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    0,
+  );
+  await uploads.waitForDiscard(initialText.resourceUri);
+  const initialUploads = uploads.count();
   await sendState(page, "imageEdit", {
     isBusy: false,
     statusCode: "recognition.completed",
@@ -2190,6 +2163,11 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
     recognitionModes: readyImageRecognitionModes,
   });
   await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
+  // 自动准备也必须在预算检查处拒绝，不产生新的上传。
+  await expect(
+    page.getByText("排版后的屏蔽区超过 64 个", { exact: false }),
+  ).toBeVisible();
+  expect(uploads.count()).toBe(initialUploads);
   // 超额：识别明确拒绝——不上传、不发送命令、明确提示。
   await action(page, "识别文字");
   await expect
@@ -2197,8 +2175,7 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
       page.getByText("排版后的屏蔽区超过 64 个", { exact: false }).count(),
     )
     .toBeGreaterThan(0);
-  await page.waitForTimeout(600);
-  expect(uploads.length).toBe(0);
+  expect(uploads.count()).toBe(initialUploads);
   const commandsAfterRecognize = await page.evaluate(
     () =>
       (window as unknown as { __testHost: { commands: { action?: string }[] } })
@@ -2211,8 +2188,7 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
   ).toBe(false);
   // 贴图入口同样拒绝且不发送命令。
   await action(page, "贴图");
-  await page.waitForTimeout(600);
-  expect(uploads.length).toBe(0);
+  expect(uploads.count()).toBe(initialUploads);
   const commandsAfterPin = await page.evaluate(
     () =>
       (window as unknown as { __testHost: { commands: { action?: string }[] } })
@@ -2227,7 +2203,8 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
     .poll(async () => page.getByLabel("选择标注对象").locator("option").count())
     .toBe(66); // 未选 + 64 屏蔽 + 1 放大镜
   await action(page, "保存标注图");
-  await expect.poll(() => uploads.length).toBe(1);
+  await uploads.submitted("saveScreenshotImage");
+  expect(uploads.count()).toBe(initialUploads + 1);
 });
 
 test("J2 source/session reset clears emphasis gesture drafts", async ({
