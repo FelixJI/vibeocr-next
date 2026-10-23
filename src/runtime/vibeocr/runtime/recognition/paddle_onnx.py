@@ -318,12 +318,13 @@ def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
     provider = snapshot["provider"]
     if provider not in ort.get_available_providers():
         raise PaddleOnnxError(f"Requested provider unavailable: {provider}")
-    engine_config = {
-        "providers": [provider],
-        "provider_options": [{"device_id": str(snapshot["device_id"])}]
-        if snapshot["device"] != "cpu"
-        else [{}],
-    }
+    provider_options = (
+        {"device_id": str(snapshot["device_id"])} if snapshot["device"] != "cpu" else {}
+    )
+    if snapshot["device"] == "cuda":
+        # cuDNN NCHW depthwise 1x7 fails on the frozen small_rec PDF batch; keep FP32 via NHWC.
+        provider_options["prefer_nhwc"] = "1"
+    engine_config = {"providers": [provider], "provider_options": [provider_options]}
     if snapshot["device"] == "directml":
         engine_config.update(enable_mem_pattern=False, execution_mode="sequential")
     model_arguments = {}

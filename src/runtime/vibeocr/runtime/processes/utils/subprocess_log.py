@@ -94,7 +94,8 @@ class SubprocessLogForwarder:
         级别原样转发,否则真实错误被折叠掉,只剩"退出码 1"无法定位。
         """
         # 入口先清洗 ANSI 控制码：彩色结构化行仍能被级别正则匹配，且控制码不入库。
-        text = strip_ansi(text)
+        # Windows ORT 的原生 UTF-16 stderr 在换行后遗留一个 NUL 前缀。
+        text = strip_ansi(text).lstrip("\x00")
         match = _STRUCTURED_LINE_RE.match(text)
         if match:
             self.flush()

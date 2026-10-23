@@ -278,6 +278,61 @@ def test_factory_explicitly_disables_unselected_auxiliary_models(tmp_path, monke
     pipeline.close()
 
 
+@pytest.mark.parametrize(
+    "recipe,device",
+    [("cpu", "cpu"), ("cuda", "cuda"), ("cuda", "cpu"), ("directml", "directml")],
+)
+def test_factory_cuda_layout_is_shared_by_all_models_and_isolated_from_other_devices(
+    tmp_path, monkeypatch, recipe, device
+):
+    import sys
+
+    from vibeocr.runtime.recognition import directml_devices, rapid_devices
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", f"paddleocr-ort-{recipe}")
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        directml_devices, "hardware_adapters", lambda: [{"device_id": 2}]
+    )
+    monkeypatch.setattr(rapid_devices, "setup_cuda_plugin", lambda: device == "cuda")
+    snapshot = onnx.freeze_request(
+        {"device": device, "use_doc_unwarping": True, "use_textline_orientation": True}
+    )
+    provider = snapshot["provider"]
+    monkeypatch.setattr(
+        onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(
+            get_available_providers=lambda: [provider],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
+    )
+    native, runners = make_pipeline(provider)
+    observed = {}
+
+    def factory(**kwargs):
+        observed.update(kwargs)
+        return native
+
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=factory))
+    pipeline = onnx.create_pipeline(json.dumps(snapshot))
+    config = observed["engine_config"]
+    expected = {} if device == "cpu" else {"device_id": str(snapshot["device_id"])}
+    if device == "cuda":
+        expected["prefer_nhwc"] = "1"
+    assert config["provider_options"] == [expected]
+    assert len(pipeline.sessions) == 5
+    assert all(runner.session.fallback_disabled for runner in runners)
+    if device == "directml":
+        assert config["enable_mem_pattern"] is False
+        assert config["execution_mode"] == "sequential"
+    pipeline.close()
+    assert all(runner.session is None for runner in runners)
+
+
 @pytest.mark.parametrize("pinned", [False, True])
 @pytest.mark.parametrize(
     "changed", [dict(model_preset="medium"), dict(use_textline_orientation=True)]

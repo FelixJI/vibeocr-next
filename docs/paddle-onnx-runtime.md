@@ -16,6 +16,10 @@
 
 PaddleX 的 `device="cpu"` 仅选择其编排入口，`engine_config.providers` 与 `provider_options` 才决定 ORT 执行设备。每个启用 runner 都检查实际首 EP 并关闭 ORT 的运行失败自动 fallback。日志区分请求 EP、available EP、各 session 的实际 EP/选项与模型目录。GPU 执行证据使用真实 profile 节点；shape/control 的必要 CPU 分区单独保留，不能据此宣称整图 GPU 或将整图 CPU 标为 GPU。
 
+CUDA 对所有启用模型统一设置官方 [`prefer_nhwc=1`](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#prefer_nhwc)，由 ORT 插入等价布局转换，保持原始 FP32 权重、输入尺寸和批量。固定 ORT 1.30 / cuDNN 9.27 在 RTX 4090 的 300dpi 合成 PDF 上，small_rec 的 NCHW 1×7 depthwise 卷积首批六行曾触发 CUDA error 700；独立同张量复现后，NHWC 路径真实 CUDA 节点执行完成。原失败任务保留终态，不重放；CPU、显式 CPU 和 DirectML 配置不受该布局选项影响。
+
+布局等价不表示浮点逐元素一致：同一六行张量与独立 CPU 比较，最大概率绝对差约 0.002355，原诊断 `rtol=1e-3, atol=1e-4` 的 allclose 未通过，CTC argmax 则全部一致。完整 PDF 两侧均为 17 行、方向 0；16 行文本一致，一行出现额外空格，最大归一化坐标差约 0.403（原图约 1px）、行置信度差约 0.0256。保留原 token、有效几何及 score 口径，不宣称输出完全相同或全文无误。
+
 DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁直到 predict generator 消费完毕。worker 的 stdio 请求继续串行。PaddleX 3.7.2 的 ONNX runner `close()` 为空，因此本地 owner 在 TTL、切档和退出时显式清除其全部 session 引用；不调用 Paddle allocator。原生崩溃、OOM 或 EP 失效终止当前任务，不进入通用 batch 重试；普通坏输入仍走既有隔离语义。已确认取消会停止自有 worker，下一新任务才可重建，绝不重放原任务。
 
 ## 模型、来源和完整性
@@ -40,7 +44,7 @@ C# `PaddleModeOptions` 是权威设置，TS 只展示 Runtime `supported_options
 
 在新结果产生前冻结：同硬件、相同合成输入和相同模型档位比较旧 Paddle 与 ORT；模型预下载后的新进程首个完整 OCR 为冷耗时，同进程五次暖耗时保留原始样本并取 median。记录首失败、依赖 wheel 下载体积、安装体积和进程峰值内存；可可靠获取时另列 GPU 显存。没有产品速度 SLO，不承诺固定加速比，不在看到结果后调整门槛。沿用 install 60 分钟、mode 40 分钟硬超时，超时即失败。
 
-主无辅助合成文本须完整返回 `VibeOCR 12345 TEST`。公开 smoke 保留 `paddle_smoke_fixtures.py` 的 `GOAL103|1120|2244` / `1120` token 与 score、bbox/polygon、方向合同；8 页 `document_orientation.pdf` 按既有 `expected_rotate` 判断。启用 UVDoc 的简单合成行已观察到首字偏差，不能据此声称全文无误，辅助路径必须用既有文档 token 和有效几何另行验收。
+主无辅助合成文本须完整返回 `VibeOCR 12345 TEST`。公开 smoke 保留 `paddle_smoke_fixtures.py` 的 `GOAL103|1120|2244`（既有 `Any`/`some`：命中任一配置 token）/ `1120` token 与 score、bbox/polygon、方向合同；8 页 `document_orientation.pdf` 按既有 `expected_rotate` 判断。启用 UVDoc 的简单合成行已观察到首字偏差，不能据此声称全文无误，辅助路径必须用既有文档 token 和有效几何另行验收。
 
 候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段只跑 `paddle_text`；`-InputKinds @('file','batch','pdf_text_layer')` 覆盖三个公开入口。默认 `-Provider legacy` 保留历史五模式 smoke。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
 

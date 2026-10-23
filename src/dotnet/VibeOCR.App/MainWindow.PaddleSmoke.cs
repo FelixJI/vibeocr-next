@@ -22,8 +22,8 @@ namespace VibeOCR.App;
 /// Goal #110 隔离候选专用五模式冒烟入口（VIBEOCR_SELF_TEST_SMOKE=paddle-modes-e2e）。
 /// 复用 ManagedEnvironmentSmoke/ScreenshotSmoke 的真实 helpers 与公共按钮/
 /// 选择入口；截图输入来自本进程创建的置顶合成窗口，文件/批量/PDF 输入
-/// 来自隔离根内的合成 fixture，不读取真实桌面内容。CPU/缺模型导致的真实拒绝按 blocked/failed 如实记录，
-/// 不伪造通过；GPU 仅在另有实证槽验证，本冒烟保持 UNVERIFIED。
+/// 来自隔离根内的合成 fixture，不读取真实桌面内容。配方由隔离参数选择，环境/模型拒绝按 blocked/failed 如实记录，
+/// 不伪造通过；请求设备不等于 GPU 执行，须核对真实 worker session 诊断。
 /// </summary>
 public sealed partial class MainWindow
 {
@@ -614,7 +614,18 @@ public sealed partial class MainWindow
       TimeSpan.FromMinutes(timeoutMinutes));
     if (terminal.Pages?.FirstOrDefault(page => page.Index == 0)
           ?.StatusCode != "pdf.page.done")
+    {
+      // broker 清理前保全真实失败 job，不把请求记录当作推理通过。
+      string? failedJobId = smokeLastJobId!();
+      var failedJob = string.IsNullOrWhiteSpace(failedJobId) ? null
+        : await session.Client.ObserveAsync(failedJobId, 0, CancellationToken.None);
+      paddleSmokePartialEvidence = new
+      {
+        input_kind = "pdf", mode, fixture_path = fixture, pdf = terminal,
+        submit_attempts = smokeSubmitAttempts!(), job_id = failedJobId, job = failedJob,
+      };
       throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
+    }
     object job = await ObservePaddleInputJobAsync(session, pipeline,
       optionName, optionValue, before, 1);
     if (textLayer && (!terminal.IsModified || terminal.Pages?.FirstOrDefault(page => page.Index == 0)?.AddedThisSession != true))
@@ -1109,6 +1120,7 @@ public sealed partial class MainWindow
       // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
       // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
       outcomes = observed.Outcomes,
+      events = observed.Events, observed.ThroughSequence, observed.More,
     };
   }
 
@@ -1199,6 +1211,7 @@ public sealed partial class MainWindow
   {
     bool succeeded = terminal.Result is not null;
     object? jobEvidence = null;
+    string requestedDevice = "auto";
     if (succeeded)
     {
       if (smokeSubmitAttempts!() != submitsBefore + 1 || string.IsNullOrWhiteSpace(jobId))
@@ -1210,6 +1223,8 @@ public sealed partial class MainWindow
         throw new InvalidOperationException(
           $"Job pipeline {pipelineId} does not match mode {mode} expectation {expectedPipeline}.");
       var options = observed.Snapshot.Pipeline?.Options;
+      if (options?.TryGetValue("device", out JsonElement deviceValue) == true)
+        requestedDevice = NormalizePaddleSmokeJson(deviceValue);
       bool optionConsumed = options is not null &&
         options.TryGetValue(optionName, out System.Text.Json.JsonElement value) &&
         NormalizePaddleSmokeJson(value) == optionValue;
@@ -1240,6 +1255,7 @@ public sealed partial class MainWindow
         // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
         // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
         outcomes = observed.Outcomes,
+        events = observed.Events, observed.ThroughSequence, observed.More,
       };
       // 失败兑底快照：后续 UI 验证/导出异常时，已获取的 job/outcomes 不
       // 随顶层 catch 只留 error 字符串而丢失；成功路径 health 合同不变。
@@ -1371,10 +1387,11 @@ public sealed partial class MainWindow
       {
         id = session.EnvironmentId,
         revision = session.Revision,
-        // 冒烟环境固定为 CPU recipe；GPU 状态保持 UNVERIFIED，不因硬件
-        // 可见而标记通过。
-        device = "cpu-recipe",
+        recipe = PaddleSmokeRecipe,
+        requested_device = requestedDevice,
+        // 请求和配方不能单独证明 GPU 执行，需核对真实 worker session。
         gpu = "UNVERIFIED",
+        gpu_evidence_note = "Verify actual session providers in worker diagnostics.",
       },
     };
   }

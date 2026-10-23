@@ -163,6 +163,24 @@ class TestAnsiBoundary:
         assert "\x1b" not in caplog.records[0].message
         assert "Downloads\\下载\\截图 01.png" in caplog.records[0].message
 
+    def test_native_utf16_newline_tail_keeps_next_structured_line(self, caplog):
+        forwarder = _make_forwarder()
+        # 实际 CUDA ORT stderr 的 UTF-16 换行尾部遗留 NUL，紧贴后续 Python 日志。
+        captured = "\x002026-10-23 23:43:26,952 [INFO] vibeocr.runtime.recognition.paddle_onnx: Paddle ONNX request=cuda"
+        with caplog.at_level(logging.DEBUG, logger="test.subprocess"):
+            for part in forwarder.split_mixed_lines(captured):
+                forwarder.forward(part)
+            forwarder.forward("\x00private document text")
+            forwarder.flush()
+        assert len(caplog.records) == 2
+        assert caplog.records[0].levelno == logging.INFO
+        assert "Paddle ONNX request=cuda" in caplog.records[0].message
+        assert "\x00" not in caplog.records[0].message
+        assert "已折叠" in caplog.records[1].message
+        assert not any(
+            "private document text" in record.message for record in caplog.records
+        )
+
     def test_colored_traceback_line_still_error(self, caplog):
         forwarder = _make_forwarder()
         with caplog.at_level(logging.DEBUG, logger="test.subprocess"):
