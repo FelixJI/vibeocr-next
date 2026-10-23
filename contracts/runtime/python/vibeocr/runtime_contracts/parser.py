@@ -387,12 +387,18 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
         not in (
             None,
             OcrEngine.RAPIDOCR,
+            OcrEngine.PADDLEOCR,
         )
     ):
         raise ContractError(
             "device option is only valid for the rapidocr engine; "
             "reject with VALIDATION_ERROR semantics"
         )
+    if pipeline is OCRPipeline.OCR:
+        if "model_preset" in options and engine is not OcrEngine.PADDLEOCR:
+            raise ContractError("model_preset requires the paddleocr engine")
+        if options.get("device") == "directml" and engine is not OcrEngine.PADDLEOCR:
+            raise ContractError("DirectML requires the paddleocr engine")
     mineru = None
     if "mineru" in payload:
         if payload["mineru"] is None:

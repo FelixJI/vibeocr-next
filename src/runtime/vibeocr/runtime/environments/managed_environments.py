@@ -103,6 +103,9 @@ _RECIPE_IDS = (
     "rapidocr-cuda",
     "paddleocr-cpu",
     "paddleocr-cuda",
+    "paddleocr-ort-cpu",
+    "paddleocr-ort-cuda",
+    "paddleocr-ort-directml",
     "mineru-cpu",
     "rapidocr+mineru-cpu",
     "rapidocr+mineru-cuda",
@@ -112,6 +115,9 @@ _RECIPE_DISPLAY_NAMES = {
     "rapidocr-cuda": "RapidOCR + RapidTable · NVIDIA CUDA",
     "paddleocr-cpu": "PaddleOCR · CPU",
     "paddleocr-cuda": "PaddleOCR · NVIDIA CUDA",
+    "paddleocr-ort-cpu": "PaddleOCR ONNX · CPU",
+    "paddleocr-ort-cuda": "PaddleOCR ONNX · NVIDIA CUDA",
+    "paddleocr-ort-directml": "PaddleOCR ONNX · Windows DirectML",
     "mineru-cpu": "MinerU · CPU",
     "rapidocr+mineru-cpu": "RapidOCR + RapidTable + MinerU · CPU",
     "rapidocr+mineru-cuda": "RapidOCR + RapidTable + MinerU · NVIDIA CUDA",
@@ -124,6 +130,9 @@ _RECIPE_IMPORT_PROBES = {
     "rapidocr-cuda": "from rapidocr import RapidOCR; from rapid_table import RapidTable; from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; assert cuda_provider_ready()",
     "paddleocr-cpu": "from paddleocr import PaddleOCR",
     "paddleocr-cuda": "from paddleocr import PaddleOCR",
+    "paddleocr-ort-cpu": "from paddleocr import PaddleOCR; import onnxruntime",
+    "paddleocr-ort-cuda": "from paddleocr import PaddleOCR; from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; assert cuda_provider_ready()",
+    "paddleocr-ort-directml": "from paddleocr import PaddleOCR; import onnxruntime; from vibeocr.runtime.recognition.directml_devices import hardware_adapters; assert 'DmlExecutionProvider' in onnxruntime.get_available_providers() and hardware_adapters()",
     "mineru-cpu": "from mineru.parser.api_server import create_app",
     "rapidocr+mineru-cpu": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
     "rapidocr+mineru-cuda": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
@@ -350,7 +359,10 @@ class ManagedEnvironmentStore:
             environment["VIBEOCR_PRODUCT_CODE_ROOT"] = str(code_root)
         if record["kind"] == "venv":
             environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] = record["recipe"]
-            if record["recipe"] == "rapidocr-cuda":
+            if record["recipe"].startswith("paddleocr-ort-"):
+                # Frozen source manifests own downloads; importing the catalog must stay offline.
+                environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+            if record["recipe"] in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
                 environment["VIBEOCR_ORT_CUDA_EP_DLL"] = str(
                     root / "providers" / "cuda" / "onnxruntime_providers_cuda.dll"
                 )
@@ -1124,6 +1136,33 @@ class ManagedEnvironmentStore:
                 expected.update({"rapidocr", "onnxruntime"})
                 if recipe == "rapidocr-cuda":
                     expected.update({"rapid-table", "nvidia-cudnn-cu13"})
+            elif recipe in self.manifest.paddle_onnx_environments:
+                ort = (
+                    "onnxruntime-directml"
+                    if recipe.endswith("directml")
+                    else "onnxruntime"
+                )
+                expected.update({"paddleocr", "paddlex", ort})
+                if recipe.endswith("cuda"):
+                    expected.add("nvidia-cudnn-cu13")
+                forbidden = {
+                    "paddlepaddle",
+                    "paddlepaddle-gpu",
+                    "torch",
+                    "torchvision",
+                    "transformers",
+                    "paddle2onnx",
+                }
+                if packages & forbidden or packages & {
+                    "onnxruntime",
+                    "onnxruntime-gpu",
+                    "onnxruntime-directml",
+                } != {ort}:
+                    return {
+                        "healthy": False,
+                        "reason": "engine_environment_contaminated",
+                        "python": str(python),
+                    }
             elif recipe == "paddleocr-cpu":
                 expected.update({"paddleocr", "paddlepaddle"})
             elif recipe == "paddleocr-cuda":
@@ -1206,6 +1245,8 @@ class ManagedEnvironmentStore:
     @staticmethod
     def _recipe_modes(recipe: str) -> list[str]:
         """配方 → 真实可用的识别类型（目录与公共记录共用同一投影）。"""
+        if recipe.startswith("paddleocr-ort-"):
+            return ["text"]
         if recipe.startswith("paddleocr"):
             return ["text", "table", "formula", "structure", "document_vl"]
         if recipe.startswith("rapidocr+mineru"):
@@ -1283,7 +1324,9 @@ class ManagedEnvironmentStore:
             "model_state": "not_checked" if installed else "not_applicable",
             "service_state": "not_started",
             "configured_recognition_types": modes,
-            "target_device": "cuda"
+            "target_device": "directml"
+            if recipe.endswith("directml")
+            else "cuda"
             if recipe.endswith("cuda")
             else "cpu"
             if recipe
@@ -1879,6 +1922,13 @@ class ManagedEnvironmentStore:
                 return self._public_record(replacement, relocated, data)
 
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
+        if recipe.startswith("paddleocr-ort-"):
+            scope = self.manifest.paddle_onnx_environments.get(recipe)
+            if scope is None:
+                raise ManagedEnvironmentError(
+                    "Paddle ONNX recipe is absent from manifest"
+                )
+            return scope, "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
         if recipe == "rapidocr-cpu":
             return self.manifest.profiles["win-x64-base"].scopes[0], "cpu"
         if recipe == "rapidocr-cuda":
@@ -1951,7 +2001,7 @@ class ManagedEnvironmentStore:
     def preview_install(
         self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
     ) -> dict:
-        if recipe == "rapidocr-cuda":
+        if recipe in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
             # NVIDIA CUDA minor-version compatibility: CUDA 13 requires R580.
             # docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
             driver = probe_nvidia_driver(minimum_version=(580, 0))
@@ -2009,6 +2059,13 @@ class ManagedEnvironmentStore:
                 != 1
             ):
                 raise ManagedEnvironmentError("one package index source is required")
+            if recipe.startswith("paddleocr-ort-") and any(
+                source.source_id == "paddleocr-bos"
+                for source in selection.effective_download_sources
+            ):
+                raise ManagedEnvironmentError(
+                    "Paddle ONNX requires Hugging Face or ModelScope; BOS assets are not bound"
+                )
             sources = self._source_entries(data, record, selection)
             for source in sources:
                 if source["kind"] == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX:
@@ -2081,7 +2138,11 @@ class ManagedEnvironmentStore:
                     "configured_recognition_types": self._recipe_modes(recipe),
                     "accelerator": accelerator,
                     "target_device": (
-                        "cuda" if accelerator == "nvidia_cuda" else "cpu"
+                        "directml"
+                        if recipe.endswith("directml")
+                        else "cuda"
+                        if accelerator == "nvidia_cuda"
+                        else "cpu"
                     ),
                     "python_version": self.manifest.python.version,
                     "abi": self.manifest.python.abi,
@@ -2526,7 +2587,7 @@ class ManagedEnvironmentStore:
         if "rapidocr-base" in scope.component_ids:
             self._check_install_cancelled()
             _install_rapidtable_model(self.manifest, python.parent.parent, cache)
-        if scope.scope_id == "rapidocr-cuda":
+        if scope.scope_id in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
             from vibeocr.runtime.environments.rapid_assets import install_cuda_plugin
 
             if observer is not None:

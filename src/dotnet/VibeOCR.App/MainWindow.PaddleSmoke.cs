@@ -28,8 +28,9 @@ namespace VibeOCR.App;
 public sealed partial class MainWindow
 {
   // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
-  private const string PaddleSmokeEnvironmentName = "paddle-smoke-cpu";
-  private const string PaddleSmokeRecipe = "paddleocr-cpu";
+  private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-cpu";
+  private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
+    ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
@@ -116,6 +117,8 @@ public sealed partial class MainWindow
         phase,
         stage = paddleSmokeStage,
         mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
+        recipe = PaddleSmokeRecipe,
+        model_preset = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET"),
         preview_path = previewPath,
         evidence,
       }));
@@ -207,12 +210,15 @@ public sealed partial class MainWindow
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
-    await SelectSmokeValueAsync("#environment-device-select", "cpu");
+    bool ort = PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal);
+    string device = PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal) ? "directml"
+      : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
+    await SelectSmokeValueAsync("#environment-component-select", ort ? "paddleocr-ort" : "paddleocr");
+    await SelectSmokeValueAsync("#environment-device-select", device);
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-cpu') && " +
+      $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
@@ -326,6 +332,12 @@ public sealed partial class MainWindow
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
 
+    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
+    {
+      WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand("paddle_text")), CancellationToken.None);
+      if (!selectedDefault.Ok) throw new InvalidOperationException("Isolated ORT default selection failed.");
+    }
     RecordPaddleSmokeStage($"select mode {mode}");
     await NavigateSmokeAsync("单次识别", "button");
     await WaitForPaddleModeAsync("#recognition-task-engine", mode);
@@ -368,6 +380,9 @@ public sealed partial class MainWindow
         TimeSpan.FromSeconds(15));
       await SelectSmokeValueAsync("#paddle_structure-use_chart_recognition", "true");
     }
+    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
+      await SelectSmokeValueAsync("#paddle_text-model-preset",
+        PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small");
     await ClickManagedSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
       "document.querySelector('details.recognition-options output')?.textContent" +
@@ -506,7 +521,7 @@ public sealed partial class MainWindow
     foreach (string path in new[] { fixture, second })
     {
       RecordPaddleSmokeStage($"batch add {Path.GetFileName(path)}");
-      await ClickManagedSmokeButtonAsync("添加图片");
+      await ClickManagedSmokeButtonAsync("添加文件");
       await CompletePaddleOpenPickerAsync(path);
     }
     BatchWorkbenchState queued = await WaitForPaddleBatchAsync(

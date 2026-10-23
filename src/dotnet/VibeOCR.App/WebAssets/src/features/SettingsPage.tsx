@@ -254,6 +254,8 @@ interface RecipeComponentCatalog {
 function recipeDeviceFromId(
   id: string,
 ): { base: string; device: string } | null {
+  if (id.endsWith("-directml"))
+    return { base: id.slice(0, -"-directml".length), device: "directml" };
   if (id.endsWith("-cpu"))
     return { base: id.slice(0, -"-cpu".length), device: "cpu" };
   if (id.endsWith("-cuda"))
@@ -263,6 +265,8 @@ function recipeDeviceFromId(
 
 // 目录展示名以“ · CPU”/“ · NVIDIA CUDA”结尾承载设备；组件标题仅做展示层去尾。
 function recipeTitleWithoutDevice(displayName: string): string {
+  if (displayName.endsWith(" · Windows DirectML"))
+    return displayName.slice(0, -" · Windows DirectML".length);
   if (displayName.endsWith(" · NVIDIA CUDA"))
     return displayName.slice(0, -" · NVIDIA CUDA".length);
   if (displayName.endsWith(" · CPU"))
@@ -293,8 +297,10 @@ function recipeComponentGroups(
     if (!device) continue;
     if (
       entries.length !== 1 ||
-      recipe.accelerator !== device.device ||
-      recipe.targetDevice !== (device.device === "cpu" ? "cpu" : "cuda")
+      recipe.accelerator !==
+        (device.device === "directml" ? "cpu" : device.device) ||
+      recipe.targetDevice !==
+        (device.device === "nvidia_cuda" ? "cuda" : device.device)
     ) {
       problems.push(`配方 ${key} 重复或设备信息冲突，已拒绝该组合。`);
       continue;
@@ -375,7 +381,13 @@ function managedEnvironmentSummary(
   if (environment.configuredRecognitionTypes?.length)
     parts.push(recognitionPurposeLabel(environment.configuredRecognitionTypes));
   if (environment.targetDevice)
-    parts.push(environment.targetDevice === "cuda" ? "GPU" : "CPU");
+    parts.push(
+      environment.targetDevice === "directml"
+        ? "DirectML"
+        : environment.targetDevice === "cuda"
+          ? "GPU"
+          : "CPU",
+    );
   if (parts.length === 0)
     parts.push(environment.status === "empty" ? "空环境" : "已安装依赖");
   return parts.join(" · ");
@@ -2419,7 +2431,11 @@ function EnvironmentRecommendation({
             >
               {[...(group?.byDevice.keys() ?? [])].map((key) => (
                 <option key={key} value={key}>
-                  {key === "nvidia_cuda" ? "NVIDIA GPU（CUDA）" : "CPU（通用）"}
+                  {key === "directml"
+                    ? "Windows GPU（DirectML）"
+                    : key === "nvidia_cuda"
+                      ? "NVIDIA GPU（CUDA）"
+                      : "CPU（通用）"}
                 </option>
               ))}
             </Select>

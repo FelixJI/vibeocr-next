@@ -515,14 +515,20 @@ class PipelineCacheManager:
     # ------------------------------------------------------------------
     def _release_one(self, pipeline_name: str) -> None:
         """释放单个管道；调用方已持有可重入 state lock。"""
-        self._service._pipelines.pop(pipeline_name, None)
+        instance = self._service._pipelines.pop(pipeline_name, None)
+        from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxPipeline
+
+        if isinstance(instance, PaddleOnnxPipeline):
+            instance.close()
         signatures = getattr(self._service, "_pipeline_signatures", None)
         if isinstance(signatures, dict):
             # 与实例同步清理，避免残留签名让下复用判定误判。
             signatures.pop(pipeline_name, None)
         self._last_used.pop(pipeline_name, None)
         self._active_counts.pop(pipeline_name, None)
-        if self._is_paddle(pipeline_name):
+        if self._is_paddle(pipeline_name) and not isinstance(
+            instance, PaddleOnnxPipeline
+        ):
             self._empty_cache()
 
     @staticmethod

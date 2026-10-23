@@ -6,6 +6,8 @@ export interface RecognitionEngineState {
   readonly availability: string;
   readonly requiresDownload: boolean;
   readonly isDefault?: boolean;
+  readonly taskModelPreset?: string | null;
+  readonly defaultModelPreset?: string | null;
   readonly lifecycleKind?: string;
   readonly supportsPreload?: boolean;
   readonly supportsTtl?: boolean;

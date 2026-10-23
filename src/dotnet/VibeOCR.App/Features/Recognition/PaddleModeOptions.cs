@@ -10,6 +10,8 @@ namespace VibeOCR.App.Features.Recognition;
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record PaddleModeOptions
 {
+    public string? ModelPreset { get; init; }
+    public string? Device { get; init; }
     public bool? UseDocOrientationClassify { get; init; }
     public bool? UseDocUnwarping { get; init; }
     public bool? UseTextlineOrientation { get; init; }
@@ -72,6 +74,10 @@ public sealed record PaddleModeOptions
     public IReadOnlyDictionary<string, JsonElement> ToWire(RecognitionModeOption mode)
     {
         ArgumentNullException.ThrowIfNull(mode);
+        if (ModelPreset is not null && ModelPreset is not ("tiny" or "small" or "medium"))
+            throw new ArgumentException("Unsupported Paddle model preset.");
+        if (Device is not null && Device is not ("auto" or "cpu" or "cuda" or "directml"))
+            throw new ArgumentException("Unsupported Paddle provider.");
         if (FormulaRecognitionBatchSize is < 1 or > 64)
             throw new ArgumentOutOfRangeException(nameof(FormulaRecognitionBatchSize));
         if (FormulaRecognitionModelName is not null &&
@@ -104,6 +110,8 @@ public sealed record PaddleModeOptions
         foreach (JsonProperty property in serialized.EnumerateObject())
         {
             if (!mode.SupportedOptions.Contains(property.Name, StringComparer.Ordinal)) continue;
+            if (property.Name == "model_preset" && property.Value.GetString() is not ("tiny" or "small" or "medium")) continue;
+            if (property.Name == "device" && property.Value.GetString() is not ("auto" or "cpu" or "cuda" or "directml")) continue;
             if (property.Name == "formula_recognition_batch_size" &&
                 (property.Value.GetInt32() is < 1 or > 64)) continue;
             if (property.Name == "formula_recognition_model_name" &&

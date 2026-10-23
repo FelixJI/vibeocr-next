@@ -123,6 +123,28 @@ export function TaskEngineSelector({
           ) : null;
         })}
       </Select>
+      {active?.supportedOptions?.includes("model_preset") && (
+        <div className="setting-row">
+          <label htmlFor={`${scope}-task-model-preset`}>本次模型档位</label>
+          <Select
+            id={`${scope}-task-model-preset`}
+            value={active.taskModelPreset ?? ""}
+            disabled={!enabled}
+            onChange={(_, data) =>
+              actions.run({
+                type: `${scope}.setTaskModelPreset`,
+                ...(data.value === "" ? {} : { preset: String(data.value) }),
+              })
+            }
+          >
+            <option value="">{`跟随默认（${active.defaultModelPreset ?? "small"}）`}</option>
+            <option value="tiny">tiny</option>
+            <option value="small">small</option>
+            <option value="medium">medium</option>
+          </Select>
+          <p className="form-note">仅影响后续提交，不改写已保存的默认档位。</p>
+        </div>
+      )}
       {active?.reasonCode && (
         <p className="form-note">当前环境：{active.reasonCode}</p>
       )}
@@ -151,30 +173,31 @@ export function TaskEngineSelector({
             actions={actions}
           />
         )}{" "}
-      {active?.supportedOptions?.includes("device") && (
-        <div className="setting-row">
-          <label htmlFor={`${scope}-mode-device`}>运行设备</label>
-          <Select
-            id={`${scope}-mode-device`}
-            value={modeDevice(active.options)}
-            disabled={!enabled}
-            onChange={(_, data) =>
-              actions.run({
-                type: "recognition.setDeviceOption",
-                modeId: active.engine,
-                device: String(data.value),
-              })
-            }
-          >
-            <option value="auto">自动（可用时用 GPU）</option>
-            <option value="cpu">CPU</option>
-            <option value="cuda">GPU（CUDA）</option>
-          </Select>
-          <p className="form-note">
-            GPU 需要 NVIDIA 显卡及 GPU 运行环境；不可用时会提示错误。
-          </p>
-        </div>
-      )}
+      {active?.supportedOptions?.includes("device") &&
+        !active.engine.startsWith("paddle_") && (
+          <div className="setting-row">
+            <label htmlFor={`${scope}-mode-device`}>运行设备</label>
+            <Select
+              id={`${scope}-mode-device`}
+              value={modeDevice(active.options)}
+              disabled={!enabled}
+              onChange={(_, data) =>
+                actions.run({
+                  type: "recognition.setDeviceOption",
+                  modeId: active.engine,
+                  device: String(data.value),
+                })
+              }
+            >
+              <option value="auto">自动（可用时用 GPU）</option>
+              <option value="cpu">CPU</option>
+              <option value="cuda">GPU（CUDA）</option>
+            </Select>
+            <p className="form-note">
+              GPU 需要 NVIDIA 显卡及 GPU 运行环境；不可用时会提示错误。
+            </p>
+          </div>
+        )}
       {lifecycleHint(active) ? (
         <p className="form-note">{lifecycleHint(active)}</p>
       ) : null}

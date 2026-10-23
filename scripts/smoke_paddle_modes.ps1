@@ -13,7 +13,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
                复制与 UI 保存导出。提交被拒 = blocked，真实 job 失败 =
                failed；两者都不是 passed，不盲重试。
 隔离环境固定使用 ASCII 名，避免验收依赖卷的 8.3 短名称设置；生产非 ASCII 路径策略不变。
-证据保留在隔离根；GPU 保持 UNVERIFIED。
+证据保留在隔离根；ORT 按所选 Provider 验证公开入口，真实 EP 节点另由原生 profile 证据确认。
 
 .PARAMETER ProductRoot
 候选目录（含 app\runtime\installer 布局，且不含 state/）。
@@ -25,7 +25,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 默认五种 paddle 模式；可用子集逐个交付。
 
 .PARAMETER InputKinds
-额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式。
+额外真实输入入口：legacy 的 file/batch 使用表格模式，pdf 使用文档结构模式；ORT 只使用文字模式。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
 pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
@@ -63,12 +63,22 @@ param(
     ),
     [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations", "pdf_editing", "pdf_workspace")]
     [string[]]$InputKinds = @(),
+    [ValidateSet("legacy", "cpu", "cuda", "directml")]
+    [string]$Provider = 'legacy',
+    [ValidateSet("tiny", "small", "medium")]
+    [string]$ModelPreset = 'small',
     [int]$ModeTimeoutMinutes = 40,
     [int]$InstallTimeoutMinutes = 60,
     [switch]$IncludeWireless
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Provider -ne 'legacy') {
+    if (-not $PSBoundParameters.ContainsKey('Modes')) { $Modes = @('paddle_text') }
+    if (@($Modes | Where-Object { $_ -ne 'paddle_text' }).Count) {
+        throw '#267 ORT smoke only supports paddle_text; structure/table belong to later tasks'
+    }
+}
 if ($Attempt -and -not $ResumeRoot) { throw 'Attempt 只能与 ResumeRoot 一起使用' }
 $attemptSuffix = if ($Attempt) { "-$Attempt" } else { '' }
 if ($ModeTimeoutMinutes -le 0 -or $InstallTimeoutMinutes -le 0) {
@@ -209,6 +219,7 @@ if (-not $isResume) {
 $previous = @{}
 foreach ($name in @(
     'VIBEOCR_SELF_TEST_SMOKE', 'VIBEOCR_SELF_TEST_INSTANCE',
+    'VIBEOCR_PADDLE_SMOKE_RECIPE', 'VIBEOCR_PADDLE_SMOKE_PRESET',
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
     'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE',
@@ -225,6 +236,8 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
     $env:VIBEOCR_SELF_TEST_SMOKE = 'paddle-modes-e2e'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_PADDLE_SMOKE_HEALTH = $healthPath
+    $env:VIBEOCR_PADDLE_SMOKE_RECIPE = if ($Provider -eq 'legacy') { 'paddleocr-cpu' } else { 'paddleocr-ort-' + $Provider }
+    $env:VIBEOCR_PADDLE_SMOKE_PRESET = $ModelPreset
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     foreach ($key in $extra.Keys) {
         Set-Item -Path ("Env:\" + $key) -Value $extra[$key]
@@ -277,7 +290,7 @@ try {
             'VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES' = "$InstallTimeoutMinutes"
         } 'paddle-install' ([Math]::Max($InstallTimeoutMinutes + 15, 30))
         if ($install.state -ne 'passed') {
-            throw "paddleocr-cpu install failed: $($install.error)"
+            throw "Paddle $Provider install failed: $($install.error)"
         }
         Write-Host "Install phase OK: environment=$($install.evidence.environment.name) recipe=$($install.evidence.environment.recipe)"
     }
@@ -333,7 +346,7 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $inputMode = if ($Provider -ne 'legacy') { 'paddle_text' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
         $fixtureName = if ($inputKind -eq 'pdf_workspace') { 'workspace-a/same.pdf' } elseif ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
         $phaseName = "paddle-input-$inputKind$attemptSuffix"
@@ -406,6 +419,6 @@ Write-Host ''
 Write-Host '==== Paddle 五模式冒烟汇总 ===='
 $results | Format-Table phase, mode, state, stage -AutoSize | Out-String | Write-Host
 Write-Host "隔离证据保留在: $smokeRoot （候选副本、fixtures、health JSON、UI 导出文件）"
-Write-Host 'GPU 状态: UNVERIFIED（本冒烟固定 CPU recipe；GPU 需另行真实槽位验证）'
+Write-Host "已请求配方: $Provider；模型档位: $ModelPreset。实际 session/EP 节点沿对应原生 profile 证据核对。"
 if ($exitCode -eq 0 -and $results.Count -gt 0) { Write-Host 'All requested modes PASSED.' }
 exit $exitCode

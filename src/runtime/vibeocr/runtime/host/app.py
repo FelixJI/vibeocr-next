@@ -253,13 +253,15 @@ def _extract_engine_selection(
 ) -> tuple[dict[str, Any], OcrEngine | None]:
     """从 wire pipeline selection 中抽出 engine 字段并严格解析。
 
-    Protocol 2.6.0 的 stdlib parser 尚不接受 ``engine`` 字段（wire schema
-    已允许）；本 seam 在边界处抽取、校验后回填 DTO，parser 升级后可移除。
+    保留 engine 的既有类型化错误映射；OCR 的 parser 同时需要已校验引擎，
+    才能验证该引擎专属的模型和设备选项。非 OCR 的 engine 仍在路由处拒绝。
     """
     pipeline = payload.get("pipeline")
     if not isinstance(pipeline, dict) or "engine" not in pipeline:
         return payload, None
     engine = parse_wire_engine(pipeline.pop("engine"))
+    if pipeline.get("pipeline_id") == "OCR":
+        pipeline["engine"] = engine.value
     return payload, engine
 
 

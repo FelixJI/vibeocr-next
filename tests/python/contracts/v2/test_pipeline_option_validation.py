@@ -30,7 +30,7 @@ def test_rapidocr_device_selection_reaches_options(device: str, engine: str | No
     assert parse_pipeline_selection(payload).options == {"device": device}
 
 
-@pytest.mark.parametrize("engine", ["windows", "paddleocr"])
+@pytest.mark.parametrize("engine", ["windows"])
 def test_other_text_engines_reject_rapid_device_selection(engine: str):
     payload = {**_selection("OCR", {"device": "cpu"}), "engine": engine}
     with pytest.raises(ContractError, match="only valid for the rapidocr engine"):
@@ -235,3 +235,23 @@ def test_mineru_options_accept_valid_values() -> None:
     )
     assert selection.options["lang_list"] == ["ch", "en"]
     assert selection.options["end_page_id"] is None
+
+
+@pytest.mark.parametrize("preset", ["tiny", "small", "medium"])
+@pytest.mark.parametrize("device", ["auto", "cpu", "cuda", "directml"])
+def test_paddle_onnx_selection_keeps_model_and_provider(preset, device):
+    payload = {
+        **_selection("OCR", {"model_preset": preset, "device": device}),
+        "engine": "paddleocr",
+    }
+    assert parse_pipeline_selection(payload).options == payload["options"]
+
+
+@pytest.mark.parametrize("engine", [None, "rapidocr", "windows"])
+@pytest.mark.parametrize("options", [{"model_preset": "small"}, {"device": "directml"}])
+def test_paddle_onnx_options_do_not_change_other_engines(engine, options):
+    payload = _selection("OCR", options)
+    if engine is not None:
+        payload["engine"] = engine
+    with pytest.raises(ContractError):
+        parse_pipeline_selection(payload)

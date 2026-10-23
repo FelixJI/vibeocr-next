@@ -545,6 +545,7 @@ public sealed record SetBatchItemPageRangeCommand(Guid ItemId, string? PageRange
 public sealed record SetBatchWindowCommand(int Start) : WorkbenchCommand;
 
 public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchCommand;
+public sealed record SetBatchTaskModelPresetCommand(string? Preset) : WorkbenchCommand;
 
 /// <summary>
 /// Set the task-level recognition mode for the PDF workbench; null clears the
@@ -552,6 +553,7 @@ public sealed record SetBatchTaskEngineCommand(string? Engine) : WorkbenchComman
 /// recognition and batch pages.
 /// </summary>
 public sealed record SetPdfTaskEngineCommand(string? Engine) : WorkbenchCommand;
+public sealed record SetPdfTaskModelPresetCommand(string? Preset) : WorkbenchCommand;
 
 public sealed record PdfBoundCommand(string DocumentId, WorkbenchCommand Command, long? Revision = null) : WorkbenchCommand;
 public sealed record ActivatePdfDocumentCommand : WorkbenchCommand;
@@ -760,6 +762,7 @@ public sealed record SetMineruRecognitionCommand(
 /// the override and delegates to the Runtime default.
 /// </summary>
 public sealed record SetTaskEngineCommand(string? Engine) : WorkbenchCommand;
+public sealed record SetTaskModelPresetCommand(string? Preset) : WorkbenchCommand;
 public sealed record SetRecognitionOptionsCommand(string ModeId, PaddleModeOptions Options) : WorkbenchCommand;
 
 /// <summary>
@@ -969,7 +972,9 @@ public sealed record RecognitionEngineChoice(
   IReadOnlyList<string>? SupportedOptions = null,
   IReadOnlyDictionary<string, System.Text.Json.JsonElement>? Options = null,
   string? ReasonCode = null,
-  bool IsDefault = false);
+  bool IsDefault = false,
+  string? TaskModelPreset = null,
+  string? DefaultModelPreset = null);
 
 public sealed record BatchWorkbenchState(
   bool IsRunning,
@@ -1133,7 +1138,9 @@ public sealed record SettingsEnvironmentSourceState(
   string Kind,
   string DisplayName,
   string Endpoint,
-  bool IsDefault = false);
+  bool IsDefault = false,
+  string? TaskModelPreset = null,
+  string? DefaultModelPreset = null);
 
 /// <summary>
 /// Runtime 权威配方目录投影（list.recipes）：用途/设备分组与 GPU 门禁在

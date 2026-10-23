@@ -235,6 +235,7 @@ def build_runtime_manifest(
     paddle_locks: dict[str, Path] | None = None,
     mineru_cpu_lock: Path | None = None,
     rapid_cuda_lock: Path | None = None,
+    paddle_onnx_locks: dict[str, Path] | None = None,
 ) -> Path:
     if not _STABLE_SEMVER.fullmatch(version):
         raise ValueError("version must be stable SemVer")
@@ -275,6 +276,11 @@ def build_runtime_manifest(
     if rapid_cuda_lock is not None:
         rapid_cuda_lock = rapid_cuda_lock.resolve(strict=True)
         validate_requirements_lock(rapid_cuda_lock, profile="win-x64-rapid-cu13")
+    paddle_onnx_locks = paddle_onnx_locks or {}
+    if paddle_onnx_locks and set(paddle_onnx_locks) != {"cpu", "cuda", "directml"}:
+        raise ValueError("Paddle ONNX locks must cover CPU/CUDA/DirectML")
+    for device, lock in paddle_onnx_locks.items():
+        validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
     cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
     validate_requirements_lock(
         cu126_gpu_lock, profile="win-x64-cu126", paddle_isolated=bool(paddle_locks)
@@ -313,8 +319,22 @@ def build_runtime_manifest(
         else None
     )
 
+    copied_paddle_onnx = {
+        device: _copy_exact(lock, output_dir)
+        for device, lock in paddle_onnx_locks.items()
+    }
     manifest = {
         "schema_version": 2,
+        **(
+            {
+                "paddle_onnx_environments": {
+                    device: {"lock": lock.name, "sha256": sha256_file(lock)}
+                    for device, lock in copied_paddle_onnx.items()
+                }
+            }
+            if copied_paddle_onnx
+            else {}
+        ),
         "product": {
             "component": "next",
             "repository": "FelixJI/vibeocr-next",
@@ -409,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paddle-cu126-lock", type=Path, required=True)
     parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
     parser.add_argument("--rapid-cuda-lock", type=Path, required=True)
+    for device in ("cpu", "cuda", "directml"):
+        parser.add_argument(f"--paddle-ort-{device}-lock", type=Path, required=True)
     parser.add_argument("--python-archive", type=Path, required=True)
     parser.add_argument("--python-version", default="3.13.16")
     parser.add_argument(
@@ -452,6 +474,10 @@ def main(argv: list[str] | None = None) -> int:
         },
         mineru_cpu_lock=args.mineru_cpu_lock,
         rapid_cuda_lock=args.rapid_cuda_lock,
+        paddle_onnx_locks={
+            device: getattr(args, f"paddle_ort_{device}_lock")
+            for device in ("cpu", "cuda", "directml")
+        },
         python_archive=args.python_archive,
         python_version=args.python_version,
         python_source_url=args.python_source_url,

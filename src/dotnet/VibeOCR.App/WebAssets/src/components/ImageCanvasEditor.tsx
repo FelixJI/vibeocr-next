@@ -8601,6 +8601,10 @@ function textLayerStatusLabel(
     case "textlayer.ready":
       return "在图片上拖动选择文字：支持行内中英文子串与跨行；Ctrl+C 或“复制所选”仅复制所选内容。";
     case "textlayer.unavailable":
+      if (layer.reason === "textlayer.selectionChanged")
+        return "识别档位、设备或环境已变化，请重新准备文字层。";
+      if (layer.reason === "textlayer.ortUnavailable")
+        return "当前档位和设备的本地模型尚未就绪或服务不可用；自动选字不会下载模型，请先用普通识别完成准备。";
       return layer.reason === "textlayer.serviceUnavailable"
         ? "本地识别服务尚未就绪；截图和贴图仍可用，连接恢复后可重新准备文字层。"
         : layer.reason === "textlayer.modeNotReady"

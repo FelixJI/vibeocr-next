@@ -728,7 +728,8 @@ public sealed class ManagedEnvironmentSettings(
         string[] modeIds = environment.Recipe switch
         {
             "rapidocr-cpu" or "rapidocr-cuda" => ["rapid_text", "rapid_table"],
-            "paddleocr-cpu" or "paddleocr-cuda" => ["paddle_text"],
+            "paddleocr-cpu" or "paddleocr-cuda" or "paddleocr-ort-cpu" or
+                "paddleocr-ort-cuda" or "paddleocr-ort-directml" => ["paddle_text"],
             "mineru-cpu" => ["mineru_document"],
             "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" =>
                 ["rapid_text", "rapid_table", "mineru_document"],

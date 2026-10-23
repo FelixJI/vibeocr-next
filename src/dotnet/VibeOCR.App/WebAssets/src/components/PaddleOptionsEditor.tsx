@@ -20,6 +20,8 @@ const BOOLEAN_OPTIONS = {
 
 type BooleanOption = keyof typeof BOOLEAN_OPTIONS;
 type Options = Partial<Record<BooleanOption, boolean>> & {
+  model_preset?: string;
+  device?: string;
   formula_recognition_batch_size?: number;
   formula_recognition_model_name?: string;
 };
@@ -40,6 +42,9 @@ function readOptions(value: unknown): Options {
   for (const key of Object.keys(BOOLEAN_OPTIONS) as BooleanOption[]) {
     if (typeof source[key] === "boolean") result[key] = source[key];
   }
+  if (typeof source.model_preset === "string")
+    result.model_preset = source.model_preset;
+  if (typeof source.device === "string") result.device = source.device;
   if (typeof source.formula_recognition_batch_size === "number")
     result.formula_recognition_batch_size =
       source.formula_recognition_batch_size;
@@ -82,6 +87,47 @@ export function PaddleOptionsEditor({
       <p className="form-note">
         默认值由当前环境提供；保存后用于新任务，运行中的任务保持原配置。
       </p>
+      {supportedOptions.includes("model_preset") && (
+        <div className="setting-row">
+          <label htmlFor={`${modeId}-model-preset`}>模型档位</label>
+          <Select
+            id={`${modeId}-model-preset`}
+            value={options.model_preset ?? "small"}
+            onChange={(_, data) => {
+              setDirty(true);
+              setOptions((current) => ({
+                ...current,
+                model_preset: data.value,
+              }));
+            }}
+          >
+            <option value="tiny">轻量</option>
+            <option value="small">均衡（默认）</option>
+            <option value="medium">高精度</option>
+          </Select>
+        </div>
+      )}
+      {supportedOptions.includes("device") && (
+        <div className="setting-row">
+          <label htmlFor={`${modeId}-provider`}>运行设备</label>
+          <Select
+            id={`${modeId}-provider`}
+            value={options.device ?? "auto"}
+            onChange={(_, data) => {
+              setDirty(true);
+              setOptions((current) => ({ ...current, device: data.value }));
+            }}
+          >
+            <option value="auto">跟随运行环境</option>
+            <option value="cpu">CPU</option>
+            <option value="cuda">NVIDIA CUDA</option>
+            <option value="directml">Windows DirectML</option>
+          </Select>
+          <p className="form-note">
+            CUDA 和 DirectML 需要对应的 ONNX 环境；不可用时会明确失败。
+          </p>
+        </div>
+      )}
       {(Object.keys(BOOLEAN_OPTIONS) as BooleanOption[])
         .filter((key) => supportedOptions.includes(key))
         .map((key) => (

@@ -9,6 +9,20 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Theory]
+  [InlineData("recognition", typeof(SetTaskModelPresetCommand))]
+  [InlineData("batch", typeof(SetBatchTaskModelPresetCommand))]
+  [InlineData("pdf", typeof(SetPdfTaskModelPresetCommand))]
+  public void TaskModelPresetBridgeHasClosedValuesAndExplicitInheritance(string scope, Type expected)
+  {
+    Guid session = Guid.NewGuid();
+    foreach (string arguments in new[] { "{}", "{\"preset\":\"tiny\"}", "{\"preset\":\"small\"}", "{\"preset\":\"medium\"}" })
+      Assert.IsType(expected, ParseForTest(CommandJson(session, scope, "setTaskModelPreset", arguments), session).Command);
+    foreach (string arguments in new[] { "{\"preset\":\"large\"}", "{\"preset\":null}", "{\"preset\":\"tiny\",\"path\":\"private\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+        ParseForTest(CommandJson(session, scope, "setTaskModelPreset", arguments), session));
+  }
+
   [Fact]
   public void ImageConversionHasItsOwnRouteAndCommandsWithoutWebFilePaths()
   {
@@ -445,6 +459,22 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       ParseForTest(
         json.Replace("\"recipe\": \"rapidocr+mineru-cuda\"", "\"environmentId\": \"abc\""),
         sessionId));
+  }
+
+  [Theory]
+  [InlineData("paddleocr-ort-cpu")]
+  [InlineData("paddleocr-ort-cuda")]
+  [InlineData("paddleocr-ort-directml")]
+  public void PaddleOnnxRecipesReachPrepareFindAndPreview(string recipe)
+  {
+    Guid session = Guid.NewGuid();
+    string arguments = JsonSerializer.Serialize(new { recipe });
+    Assert.Equal(recipe, Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(
+      CommandJson(session, "settings", "prepareEnvironment", arguments), session).Command).Recipe);
+    Assert.Equal(recipe, Assert.IsType<FindCompatibleEnvironmentCommand>(ParseForTest(
+      CommandJson(session, "settings", "findCompatibleEnvironment", arguments), session).Command).Recipe);
+    Assert.Equal(recipe, Assert.IsType<PreviewEnvironmentInstallCommand>(ParseForTest(
+      CommandJson(session, "settings", "previewEnvironmentInstall", JsonSerializer.Serialize(new { environmentId = "test", recipe })), session).Command).Recipe);
   }
 
   [Fact]

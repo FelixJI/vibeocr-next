@@ -24,6 +24,7 @@ public sealed class PdfDocumentEntry(PdfViewModel model)
   public HashSet<int> SelectedPages { get; } = [];
   public int WindowStart { get; set; }
   public string? TaskEngine { get; set; }
+  public string? TaskModelPreset { get; set; }
   public string? RequestedPath { get; set; }
   public PdfPreviewPosition Preview { get; set; } = new();
   public bool Closing { get; set; }

@@ -872,8 +872,12 @@ public static class WorkbenchBridgeCodec
         return new RemoveBatchItemCommand(ParseGuidArgument(arguments, "itemId"));
       case ("batch", "setWindow"):
         return new SetBatchWindowCommand(ParseWindowStart(arguments));
+      case ("batch", "setTaskModelPreset"):
+        return new SetBatchTaskModelPresetCommand(ParseTaskModelPreset(arguments));
       case ("batch", "setTaskEngine"):
         return new SetBatchTaskEngineCommand(ParseTaskEngine(arguments));
+      case ("pdf", "setTaskModelPreset"):
+        return new SetPdfTaskModelPresetCommand(ParseTaskModelPreset(arguments));
       case ("pdf", "setTaskEngine"):
         return new SetPdfTaskEngineCommand(ParseTaskEngine(arguments));
       case ("pdf", "activateDocument"):
@@ -1055,6 +1059,7 @@ public static class WorkbenchBridgeCodec
         string recipeEnvironmentId = ParseEnvironmentId(arguments);
         string? recipe = arguments.GetProperty("recipe").GetString();
         if (recipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
             "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         // sourceId 省略 → 本次显式“跟随环境/全局配置”；目录 id 由管理器校验，
@@ -1144,6 +1149,7 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? compatibleRecipe = arguments.GetProperty("recipe").GetString();
         if (compatibleRecipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
             "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new FindCompatibleEnvironmentCommand(compatibleRecipe);
@@ -1155,6 +1161,7 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? prepareRecipe = arguments.GetProperty("recipe").GetString();
         if (prepareRecipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
+            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
             "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new PrepareEnvironmentCommand(prepareRecipe);
@@ -1326,6 +1333,8 @@ public static class WorkbenchBridgeCodec
           .Deserialize<PaddleModeOptions>(PaddleModeOptions.JsonOptions)
           ?? throw new WorkbenchBridgeProtocolException("Recognition options must be an object.");
         return new SetRecognitionOptionsCommand(modeId, options);
+      case ("recognition", "setTaskModelPreset"):
+        return new SetTaskModelPresetCommand(ParseTaskModelPreset(arguments));
       case ("recognition", "setTaskEngine"):
         return new SetTaskEngineCommand(ParseTaskEngine(arguments));
       case ("recognition", "setDeviceOption"):
@@ -1680,6 +1689,17 @@ public static class WorkbenchBridgeCodec
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench floating toolbar edge is invalid."),
   };
+
+  private static string? ParseTaskModelPreset(JsonElement arguments)
+  {
+    bool hasPreset = !HasExactFields(arguments, EmptyFields);
+    EnsureObjectWithFields(arguments, hasPreset ? new HashSet<string> { "preset" } : EmptyFields,
+      "command arguments");
+    string? preset = hasPreset ? arguments.GetProperty("preset").GetString() : null;
+    if (hasPreset && preset is not ("tiny" or "small" or "medium"))
+      throw new WorkbenchBridgeProtocolException("Workbench task model preset is invalid.");
+    return preset;
+  }
 
   private static string? ParseTaskEngine(JsonElement arguments)
   {

@@ -48,12 +48,23 @@ class LocalModelsNotPrepared(ModelCacheError):
 
 
 @dataclass(frozen=True)
+class ModelFile:
+    path: str
+    size: int
+    algorithm: str
+    checksum: str
+    revision: str = ""
+
+
+@dataclass(frozen=True)
 class ModelAsset:
     namespace: str
     source: str
     repo_id: str
     local_name: str = ""
     required_paths: tuple[str, ...] = ("",)
+    revision: str = ""
+    files: tuple[ModelFile, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,21 @@ class PreparedModels:
     root: Path
     reused_bytes: int
     downloaded_bytes: int | None
+
+
+def _asset_request(asset: ModelAsset) -> dict:
+    request = {
+        "namespace": asset.namespace,
+        "source": asset.source,
+        "repo_id": asset.repo_id,
+        "local_name": asset.local_name,
+        "required_paths": list(asset.required_paths),
+    }
+    if asset.files:
+        request.update(
+            revision=asset.revision, files=[asdict(entry) for entry in asset.files]
+        )
+    return request
 
 
 def _relative(value: str, *, empty: bool = False) -> str:
@@ -251,6 +277,20 @@ def _legacy_hf_manifest(asset: ModelAsset, legacy_roots: Sequence[Path]) -> dict
 
 def _manifest(root: Path, asset: ModelAsset, legacy_roots: Sequence[Path]) -> dict:
     receipt = root / "provider-files.json"
+    if asset.files:
+        value = _validate_manifest(
+            {
+                "namespace": asset.namespace,
+                "source": asset.source,
+                "repo_id": asset.repo_id,
+                "revision": asset.revision,
+                "files": [asdict(entry) for entry in asset.files],
+            },
+            asset,
+        )
+        if not receipt.exists():
+            _atomic_json(receipt, value)
+        return value
     if receipt.exists():
         try:
             value = json.loads(receipt.read_text(encoding="utf-8"))
@@ -309,7 +349,7 @@ def _download(root: Path, asset: ModelAsset, manifest: dict, entry: dict) -> Pat
         asset.repo_id,
         "model",
         entry["path"],
-        revision=manifest["revision"],
+        revision=entry.get("revision") or manifest["revision"],
         cache_dir=cache,
         local_dir=local,
         expected_sha256=entry["checksum"],
@@ -324,6 +364,7 @@ def prepare_models(
     shared_root: Path | None = None,
     legacy_roots: Sequence[Path] = (),
     completion_marker: str | None = None,
+    local_only: bool = False,
 ) -> PreparedModels:
     """Prepare exactly the requested resources, then publish a private view.
 
@@ -335,10 +376,7 @@ def prepare_models(
     private_root = private_root.resolve()
     binding = private_root / "current.json"
     request = {
-        "assets": [
-            {**asdict(asset), "required_paths": list(asset.required_paths)}
-            for asset in assets
-        ],
+        "assets": [_asset_request(asset) for asset in assets],
         "completion_marker": completion_marker,
     }
     if completion_marker is not None:
@@ -365,6 +403,10 @@ def prepare_models(
                         None,
                     )
                     if imported is None:
+                        if local_only:
+                            raise LocalModelsNotPrepared(
+                                f"Local model is missing or damaged: {asset.repo_id}/{entry['path']}"
+                            )
                         imported = _download(root, asset, manifest, entry)
                         downloaded = True
                         if not _valid_file(imported, entry):
@@ -489,7 +531,7 @@ def _local_paddle_model(asset: ModelAsset, private: Path) -> Path:
         )
         current = json.loads((private / "current.json").read_text(encoding="utf-8"))
         expected = {
-            "assets": [{**asdict(asset), "required_paths": list(asset.required_paths)}],
+            "assets": [_asset_request(asset)],
             "completion_marker": None,
         }
         if not isinstance(current, dict) or current.get("request") != expected:

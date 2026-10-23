@@ -152,6 +152,7 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
         "description": "文字识别执行管道；具体语义由识别模式和引擎共同确定",
         "supported_options": [
             "device",
+            "model_preset",
             "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
@@ -297,7 +298,12 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
     }
     | {
         # 仅 engine 缺省或 rapidocr 合法（parser 执行组合门禁）。
-        "device": PipelineOptionSpec("device", _ENUM, choices=DEVICE_VALUES)
+        "device": PipelineOptionSpec(
+            "device", _ENUM, choices=(*DEVICE_VALUES, "directml")
+        ),
+        "model_preset": PipelineOptionSpec(
+            "model_preset", _ENUM, choices=("tiny", "small", "medium")
+        ),
     },
     OCRPipeline.PP_STRUCTURE_V3: {
         name: _bool_spec(name)
@@ -408,6 +414,8 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         short_name="通用文字",
         description="基于 PaddleOCR 模型的通用文字识别，需要高级组件。",
         supported_options=(
+            "model_preset",
+            "device",
             "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",

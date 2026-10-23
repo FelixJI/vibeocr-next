@@ -83,6 +83,7 @@ class JobRecord:
     source_item_ids: tuple[str, ...] = ()
     request_id: str | None = None
     pipeline: PipelineSelection | None = None
+    paddle_snapshot: dict | None = None
     purged: bool = False
     _next_seq: int = 1
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
@@ -409,6 +410,7 @@ class JobRegistry:
         source_item_ids: tuple[str, ...] = (),
         request_id: str | None = None,
         pipeline: PipelineSelection | None = None,
+        paddle_snapshot: dict | None = None,
         job_id: str | None = None,
     ) -> JobRecord:
         record = JobRecord(
@@ -426,6 +428,7 @@ class JobRegistry:
             source_item_ids=source_item_ids,
             request_id=request_id,
             pipeline=pipeline,
+            paddle_snapshot=paddle_snapshot,
         )
         record._retention_hook = self._terminal_hook  # type: ignore[method-assign]
         with self._lock:
@@ -528,6 +531,7 @@ class JobRegistry:
             source_item_ids=tuple(source_item_ids),
             request_id=source.request_id,
             pipeline=source.pipeline,
+            paddle_snapshot=source.paddle_snapshot,
             job_id=job_id,
         )
 

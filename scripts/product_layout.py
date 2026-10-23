@@ -420,6 +420,14 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
             _release_file_name(rapid_cuda.get("lock"), "rapid_cuda_environment.lock")
         )
 
+    ort = runtime_manifest.get("paddle_onnx_environments", {})
+    for device, record in _require_mapping(ort, "paddle_onnx_environments").items():
+        binding = _require_mapping(record, f"paddle_onnx_environments.{device}")
+        names.add(
+            _release_file_name(
+                binding.get("lock"), f"paddle_onnx_environments.{device}.lock"
+            )
+        )
     profiles = _require_mapping(runtime_manifest.get("profiles"), "profiles")
     base_packs: tuple[str, ...] | None = None
     for profile_name, value in profiles.items():

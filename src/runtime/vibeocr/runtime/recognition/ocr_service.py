@@ -16,6 +16,7 @@ from vibeocr.runtime.recognition.core.pipelines import OCRPipeline
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.models.ocr_options import OCROptions
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
+from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
 
 # 重新导出以保持向后兼容性
 __all__ = [
@@ -495,6 +496,8 @@ class OCRService(metaclass=SingletonMeta):
         if os.environ.get("VIBEOCR_USE_GPU", "").lower() != "true":
             _logger.info("[推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）")
             return "cpu"
+        if is_ort_environment():
+            return "cpu"
         try:
             import paddle
             import paddle.device as paddle_device
@@ -721,17 +724,29 @@ class OCRService(metaclass=SingletonMeta):
         if pipeline == OCRPipeline.OCR:
             from paddleocr import PaddleOCR
 
-            with paddle_model_cache():
+            with (
+                contextlib.nullcontext()
+                if is_ort_environment()
+                else paddle_model_cache()
+            ):
                 instance = PaddleOCR(device=device, **kwargs)
         elif pipeline == OCRPipeline.PP_STRUCTURE_V3:
             from paddleocr import PPStructureV3
 
-            with paddle_model_cache():
+            with (
+                contextlib.nullcontext()
+                if is_ort_environment()
+                else paddle_model_cache()
+            ):
                 instance = PPStructureV3(device=device, **kwargs)
         elif pipeline == OCRPipeline.PADDLEOCR_VL:
             from paddleocr import PaddleOCRVL
 
-            with paddle_model_cache():
+            with (
+                contextlib.nullcontext()
+                if is_ort_environment()
+                else paddle_model_cache()
+            ):
                 instance = PaddleOCRVL(device=device, **kwargs)  # type: ignore[call-arg]
         else:
             msg = f"不支持的管道类型: {pipeline}"
@@ -789,7 +804,8 @@ class OCRService(metaclass=SingletonMeta):
         if not _reusable():
             with self._lock:
                 if not _reusable():
-                    self._setup_cuda_dll_path()
+                    if not is_ort_environment():
+                        self._setup_cuda_dll_path()
                     if pipeline_name in self._pipelines:
                         _logger.info(
                             "[get_or_create_pipeline] 构造参数变化，释放并重建管道 %s"
@@ -813,7 +829,11 @@ class OCRService(metaclass=SingletonMeta):
                         device = self._get_device()
                         # CPU 设备的 mkldnn 启用与否由 _decide_enable_mkldnn
                         # 综合判定（指令集产品门槛 + 已验证版本范围）。
-                        enable_mkldnn = self._decide_enable_mkldnn(device)
+                        enable_mkldnn = (
+                            False
+                            if is_ort_environment()
+                            else self._decide_enable_mkldnn(device)
+                        )
                         kwargs = (
                             {"enable_mkldnn": enable_mkldnn} if device == "cpu" else {}
                         )
@@ -824,7 +844,11 @@ class OCRService(metaclass=SingletonMeta):
                                 options if options is not None else spec.options_class()
                             )
                             kwargs.update(spec.constructor_kwargs(resolved))
-                        with paddle_model_cache():
+                        with (
+                            contextlib.nullcontext()
+                            if is_ort_environment()
+                            else paddle_model_cache()
+                        ):
                             self._pipelines[pipeline_name] = spec.create_pipeline(
                                 device, **kwargs
                             )
@@ -1103,12 +1127,10 @@ class OCRService(metaclass=SingletonMeta):
             # 多边形与 bbox 同源、同像素空间，用同一 img_w/h 归一化（保持一致）。
             # _parse_single_result 直接透传 PaddleOCR 像素坐标，这里统一归一化。
             if block.polygon:
-                max_v = max(block.polygon)
-                if max_v > 1001:
-                    block.polygon = tuple(
-                        v / (img_w if i % 2 == 0 else img_h) * 1000
-                        for i, v in enumerate(block.polygon)
-                    )
+                block.polygon = tuple(
+                    v / (img_w if i % 2 == 0 else img_h) * 1000
+                    for i, v in enumerate(block.polygon)
+                )
         for cl_block in result.content_list:
             bbox = cl_block.get("bbox")
             if bbox and len(bbox) >= 4:

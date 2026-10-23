@@ -346,6 +346,8 @@ def _build_recognition_mode_registry(
             RecognitionModeAvailability.UNAVAILABLE, reason_code=reason
         )
 
+    from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
     def availability(definition) -> ModeAvailability:  # type: ignore[no-untyped-def]
         if definition.mode_id is RecognitionModeId.RAPID_TABLE:
             return rapid_table_availability()
@@ -364,7 +366,11 @@ def _build_recognition_mode_registry(
                     required_component="rapidocr-base",
                 )
             required_component = (
-                f"paddleocr-{suffix}"
+                (
+                    os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"]
+                    if is_ort_environment()
+                    else f"paddleocr-{suffix}"
+                )
                 if definition.mode_id is RecognitionModeId.PADDLE_TEXT
                 else None
             )
@@ -372,6 +378,12 @@ def _build_recognition_mode_registry(
                 descriptor.availability.value,
                 reason_code=descriptor.reason_code,
                 required_component=required_component,
+            )
+        if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
+            return ModeAvailability(
+                RecognitionModeAvailability.PREPARATION_REQUIRED,
+                reason_code="mode_requires_legacy_environment",
+                required_component=f"paddleocr-{suffix}",
             )
         is_mineru = definition.mode_id is RecognitionModeId.MINERU_DOCUMENT
         ready = mineru_document_ready() if is_mineru else use_paddle
@@ -384,7 +396,25 @@ def _build_recognition_mode_registry(
             required_component=None if ready else component,
         )
 
-    return RecognitionModeRegistry(availability_probe=availability)
+    from dataclasses import replace
+
+    defaults = RecognitionModeRegistry()
+    definitions = tuple(defaults.definition(mode) for mode in RecognitionModeId)
+    if not is_ort_environment():
+        definitions = tuple(
+            replace(
+                definition,
+                supported_options=tuple(
+                    option
+                    for option in definition.supported_options
+                    if option not in {"device", "model_preset"}
+                ),
+            )
+            if definition.mode_id is RecognitionModeId.PADDLE_TEXT
+            else definition
+            for definition in definitions
+        )
+    return RecognitionModeRegistry(definitions, availability_probe=availability)
 
 
 def _mineru_available() -> bool:

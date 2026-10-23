@@ -27,6 +27,8 @@ class OCROptions:
     pipeline: OCRPipeline = OCRPipeline.OCR
 
     # === 通用预处理选项（OCR + PP-StructureV3 共享）===
+    model_preset: str = "small"
+    device: str = "auto"
     local_models_only: bool = False  # 请求级模型策略，不准备或下载模型
     use_doc_orientation_classify: bool = True  # 文档方向分类（0/90/180/270度）
     use_doc_unwarping: bool = False  # 文档扭曲矫正（默认关闭：PDF 文字层场景多无此需求，开启每页多跑一个矫正网络）
@@ -89,6 +91,8 @@ class OCROptions:
             "pipeline": self.pipeline.value
             if hasattr(self.pipeline, "value")
             else self.pipeline,
+            "model_preset": self.model_preset,
+            "device": self.device,
             "local_models_only": self.local_models_only,
             "use_doc_orientation_classify": self.use_doc_orientation_classify,
             "use_doc_unwarping": self.use_doc_unwarping,
@@ -154,6 +158,8 @@ class OCROptions:
 
         return cls(
             pipeline=pipeline,
+            model_preset=data.get("model_preset", "small"),
+            device=data.get("device", "auto"),
             local_models_only=data.get("local_models_only", False),
             use_doc_orientation_classify=data.get("use_doc_orientation_classify", True),
             use_doc_unwarping=data.get("use_doc_unwarping", False),

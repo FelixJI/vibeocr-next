@@ -97,7 +97,9 @@ class PaddlePipelineAdapter:
     def _probe_descriptor() -> EngineDescriptor:
         """探测 paddle 可导入性；不触发模型加载。"""
         try:
-            __import__("paddle")
+            from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
+            __import__("onnxruntime" if is_ort_environment() else "paddle")
         except ImportError:
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
