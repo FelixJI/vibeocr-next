@@ -1,6 +1,7 @@
 import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 import { expectCommand, mountHost } from "./workbench-host";
+import { recordAnnotationUploads } from "./annotation-uploads";
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__annotation/*", (route) =>
@@ -58,7 +59,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
-  const uploads: Buffer[] = [];
+  const uploads = await recordAnnotationUploads(page);
   await page.route("**/__capture_background", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
@@ -71,18 +72,6 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400"><rect width="900" height="400" fill="white"/><text x="40" y="90" font-family="Arial" font-size="42" fill="#25364b">VibeOCR 截图现场编辑</text><rect x="40" y="140" width="500" height="180" fill="#d5e5f4"/><path d="M50 290 L130 260 L210 270 L290 180 L370 230 L450 165 L530 200" stroke="#2d76aa" stroke-width="6" fill="none"/></svg>',
     }),
   );
-  await page.route("**/__annotation", (route) => {
-    const bytes = route.request().postDataBuffer();
-    if (bytes) uploads.push(bytes);
-    return route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
   await mountHost(
     page,
     {
@@ -148,6 +137,14 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     .toEqual([{ type: "capture.pixelReady", inputUrl: "/capture-scene.svg" }]);
   const canvas = page.getByLabel("图片检查画布");
   await expect(canvas).toBeVisible();
+  // 固定自动准备先完成，显式保存不能依赖恰好早于400ms防抖。
+  const initialText = await uploads.submitted("prepareScreenshotTextLayer");
+  expect(initialText.command.arguments).toEqual({
+    resourceUri: initialText.resourceUri,
+    sessionId: "capture-scene",
+    revision: 0,
+  });
+  await uploads.waitForDiscard(initialText.resourceUri);
   await expect
     .poll(async () => {
       const box = await canvas.boundingBox();
@@ -180,7 +177,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         }),
       ).size,
   );
-  // 主排承载全部工具与操作，始终单行（过宽时容器内滚动）。
+  // 主排承载全部工具与操作，通过分组换行保持可达。
   expect(actionRows).toBeGreaterThan(1);
   // 现场工具按钮按用户要求以纯中文文字呈现（无 SVG 图标）。
   await expect(
@@ -253,23 +250,41 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     return Array.from(context.getImageData(200, 200, 1, 1).data);
   }, Array.from(screenshot));
   expect(visiblePixels).toEqual([213, 229, 244, 255]);
+  const editedText = await uploads.submitted("prepareScreenshotTextLayer", 1);
+  expect(editedText.command.arguments.revision).toBe(1);
+  await uploads.waitForDiscard(editedText.resourceUri);
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(1);
-  expect(uploads[0]?.readUInt32BE(16)).toBe(900);
-  expect(uploads[0]?.readUInt32BE(20)).toBe(400);
+  const saved = await uploads.submitted("saveScreenshotImage");
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "saveScreenshotImage",
+    arguments: {
+      resourceUri: saved.resourceUri,
+      sessionId: "capture-scene",
+      revision: 1,
+    },
+  });
+  expect(saved.body.readUInt32BE(16)).toBe(900);
+  expect(saved.body.readUInt32BE(20)).toBe(400);
   await page.getByRole("button", { name: "识别文字" }).click();
+  const recognized = await uploads.submitted("recognizeScreenshotImage");
   await expectCommand(page, {
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
       modeId: "rapid_text",
-      resourceUri:
-        "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      resourceUri: recognized.resourceUri,
       sessionId: "capture-scene",
       revision: 1,
       excludeBoxes: [],
     },
   });
+  expect(uploads.count()).toBe(4);
+  expect(
+    (await uploads.commands("prepareScreenshotTextLayer")).map(
+      (command) => command.arguments.revision,
+    ),
+  ).toEqual([0, 1]);
   await canvas.press("Escape");
   await canvas.press("Escape");
   await expectCommand(page, {
@@ -282,7 +297,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
 /** 共享的截图现场挂载：细纹理 SVG + 上传采集；返回画布与上传缓冲。 */
 async function mountSceneForExport(page: Page, svg: string) {
   await page.setViewportSize({ width: 1280, height: 720 });
-  const uploads: Buffer[] = [];
+  const uploads = await recordAnnotationUploads(page);
   await page.route("**/__capture_background", (route) =>
     route.fulfill({
       contentType: "image/svg+xml",
@@ -292,18 +307,6 @@ async function mountSceneForExport(page: Page, svg: string) {
   await page.route("**/capture-scene.svg", (route) =>
     route.fulfill({ contentType: "image/svg+xml", body: svg }),
   );
-  await page.route("**/__annotation", (route) => {
-    const bytes = route.request().postDataBuffer();
-    if (bytes) uploads.push(bytes);
-    return route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
   await mountHost(
     page,
     {
@@ -391,9 +394,9 @@ test("拖动选区边角调整裁剪并写入真实导出", async ({ page }) => 
   await page.mouse.move(547, 200);
   await page.mouse.up();
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(1);
-  expect(uploads[0]?.readUInt32BE(16)).toBe(800);
-  expect(uploads[0]?.readUInt32BE(20)).toBe(400);
+  const saved = await uploads.submitted("saveScreenshotImage");
+  expect(saved.body.readUInt32BE(16)).toBe(800);
+  expect(saved.body.readUInt32BE(20)).toBe(400);
 });
 
 test("马赛克强度与常用色影响真实导出", async ({ page }) => {
@@ -409,7 +412,7 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
 
   // 基线：无效果导出。
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const original = await uploads.submitted("saveScreenshotImage");
 
   // 马赛克弱/强：同一区域不同强度必须产生不同的真实导出字节。
   await page.getByRole("button", { name: "马赛克", exact: true }).click();
@@ -421,20 +424,20 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("1");
   await mosaicRegion();
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(2);
+  const weak = await uploads.submitted("saveScreenshotImage", 1);
   await page.getByRole("button", { name: "撤销" }).click();
   await page.getByLabel("马赛克与模糊强度").press("End");
   await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("3");
   await mosaicRegion();
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(3);
+  const strong = await uploads.submitted("saveScreenshotImage", 2);
 
-  expect(uploads[0]?.readUInt32BE(16)).toBe(900);
-  expect(uploads[1]?.readUInt32BE(16)).toBe(900);
-  expect(uploads[2]?.readUInt32BE(16)).toBe(900);
-  expect(uploads[1]?.equals(uploads[0]!)).toBe(false);
-  expect(uploads[2]?.equals(uploads[1]!)).toBe(false);
-  expect(uploads[2]?.equals(uploads[0]!)).toBe(false);
+  expect(original.body.readUInt32BE(16)).toBe(900);
+  expect(weak.body.readUInt32BE(16)).toBe(900);
+  expect(strong.body.readUInt32BE(16)).toBe(900);
+  expect(weak.body.equals(original.body)).toBe(false);
+  expect(strong.body.equals(weak.body)).toBe(false);
+  expect(strong.body.equals(original.body)).toBe(false);
 
   // 常用色色板：导出像素携带所选颜色（#1f6feb = rgb(31,111,235)）。
   // 色板随颜色工具的属性排出现：先切矩形再选色。
@@ -446,8 +449,8 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   await page.mouse.move(560, 240, { steps: 3 });
   await page.mouse.up();
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(4);
-  const decoded = await decodeUpload(page, uploads[3]!);
+  const colored = await uploads.submitted("saveScreenshotImage", 3);
+  const decoded = await decodeUpload(page, colored.body);
   expect(decoded.width).toBe(900);
   expect(pixelAt(decoded, 700, 100)).toEqual([31, 111, 235]);
   expect(pixelAt(decoded, 40, 60)).toEqual([153, 170, 187]);

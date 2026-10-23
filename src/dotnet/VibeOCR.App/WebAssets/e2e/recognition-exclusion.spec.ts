@@ -2,6 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
+import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
   width: number;
@@ -85,21 +86,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  const uploads: { contentType: string; body: Buffer }[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({
-      contentType: route.request().headers()["content-type"] ?? "",
-      body: route.request().postDataBuffer() ?? Buffer.alloc(0),
-    });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page);
   await page.route("**/recognition-exclusion-source.svg", (route) =>
     route.fulfill({
       status: 200,
@@ -140,6 +127,14 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
   await expect(page.getByText(/原图 160×80/)).toBeVisible();
+  // 固定自动准备先完成，再验证显式识别/保存各自的上传。
+  const initialText = await uploads.submitted("prepareScreenshotTextLayer");
+  expect(initialText.command.arguments).toEqual({
+    resourceUri: initialText.resourceUri,
+    sessionId: "exclusion-e2e",
+    revision: 0,
+  });
+  await uploads.waitForDiscard(initialText.resourceUri);
 
   // 先编辑后识别入口：识别面专用 recognition 命令（宿主在 recognition
   // scope 创建同一会话/修订），不再借用 imageEdit scope；直接识别入口不变。
@@ -176,15 +171,27 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await expect(
     page.getByRole("button", { name: "保存屏蔽副本" }),
   ).toBeVisible();
+  // 默认文字层也遵守屏蔽语义，且完成租约释放后再做显式操作。
+  const maskedText = await uploads.submitted("prepareScreenshotTextLayer", 1);
+  expect(maskedText.command.arguments.revision).toBe(1);
+  await uploads.waitForDiscard(maskedText.resourceUri);
+  const textInput = await decodeUpload(
+    page,
+    maskedText.body,
+    maskedText.contentType,
+  );
+  expect(pixelAt(textInput, 40, 40)).toEqual([255, 255, 255]);
+  expect(textInput.pixels[(40 * textInput.width + 40) * 4 + 3]).toBe(255);
+  expect(pixelAt(textInput, 120, 40)).toEqual([224, 32, 32]);
 
   // 识别当前图：上传的是未烘焙遮罩的普通最终像素；白色遮罩 OCR 输入
   // 由宿主按 excludeBoxes 生成（C# 单测覆盖），不在上传副本里烧白。
   await page.getByRole("button", { name: "识别文字" }).click();
-  await expect.poll(() => uploads.length).toBe(1);
-  expect(uploads[0]!.contentType).toBe("image/png");
+  const recognized = await uploads.submitted("recognizeScreenshotImage");
+  expect(recognized.contentType).toBe("image/png");
   const recognitionInput = await decodeUpload(
     page,
-    uploads[0]!.body,
+    recognized.body,
     "image/png",
   );
   expect(recognitionInput.width).toBe(160);
@@ -220,8 +227,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
         action: "recognizeScreenshotImage",
         arguments: expect.objectContaining({
           modeId: "rapid_text",
-          resourceUri:
-            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+          resourceUri: recognized.resourceUri,
           sessionId: "exclusion-e2e",
           revision: 1,
           excludeBoxes: [expect.any(Object)],
@@ -232,17 +238,19 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
 
   // 普通保存：原图像素保留，屏蔽区不写入。
   await page.getByRole("button", { name: "保存标注图" }).click();
-  await expect.poll(() => uploads.length).toBe(2);
-  const normalSave = await decodeUpload(page, uploads[1]!.body, "image/png");
+  const saved = await uploads.submitted("saveScreenshotImage");
+  const normalSave = await decodeUpload(page, saved.body, "image/png");
   expect(pixelAt(normalSave, 40, 40)).toEqual([16, 16, 16]);
   expect(pixelAt(normalSave, 120, 40)).toEqual([224, 32, 32]);
 
   // 显式屏蔽副本导出：真实白色像素，与识别输入一致。
   await page.getByRole("button", { name: "保存屏蔽副本" }).click();
-  await expect.poll(() => uploads.length).toBe(3);
-  const maskedSave = await decodeUpload(page, uploads[2]!.body, "image/png");
+  const masked = await uploads.submitted("saveScreenshotImage", 1);
+  const maskedSave = await decodeUpload(page, masked.body, "image/png");
   expect(pixelAt(maskedSave, 40, 40)).toEqual([255, 255, 255]);
+  expect(maskedSave.pixels[(40 * maskedSave.width + 40) * 4 + 3]).toBe(255);
   expect(pixelAt(maskedSave, 120, 40)).toEqual([224, 32, 32]);
+  expect(uploads.count()).toBe(5);
 
   // 补第二个排除区覆盖剩余区域：整图被屏蔽时拒绝识别且不产生新上传。
   await canvas.scrollIntoViewIfNeeded();
@@ -257,14 +265,26 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     action: "notifyScreenshotRevision",
     arguments: { sessionId: "exclusion-e2e", revision: 2 },
   });
+  // 等自动准备的整图屏蔽终态：前面所有上传/DELETE 已完成，无在途请求混入。
+  await expect(
+    page.getByText(
+      "整张图都在屏蔽区内：没有可取文字，已取消文字层准备；可撤销后重试。",
+    ),
+  ).toBeVisible();
+  expect(
+    (await uploads.commands("prepareScreenshotTextLayer")).map(
+      (command) => command.arguments.revision,
+    ),
+  ).toEqual([0, 1]);
+  const beforeRefusedRecognition = uploads.count();
   await page.getByRole("button", { name: "识别文字" }).click();
   await expect(
     page.getByText(
       "整张图都在屏蔽区内：没有可识别内容，已取消本次识别；原图与屏蔽区保持不变，可撤销后重试。",
     ),
   ).toBeVisible();
-  await page.waitForTimeout(300);
-  expect(uploads.length).toBe(3);
+  expect(uploads.count()).toBe(beforeRefusedRecognition);
+  expect(await uploads.commands("recognizeScreenshotImage")).toHaveLength(1);
 
   // 撤销第二个排除区后可再次识别（新修订）。
   await page.getByRole("button", { name: "撤销" }).click();
@@ -273,8 +293,18 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     action: "notifyScreenshotRevision",
     arguments: { sessionId: "exclusion-e2e", revision: 3 },
   });
+  const restoredText = await uploads.submitted("prepareScreenshotTextLayer", 2);
+  expect(restoredText.command.arguments.revision).toBe(3);
+  await uploads.waitForDiscard(restoredText.resourceUri);
   await page.getByRole("button", { name: "识别文字" }).click();
-  await expect.poll(() => uploads.length).toBe(4);
-  const retryInput = await decodeUpload(page, uploads[3]!.body, "image/png");
+  const retried = await uploads.submitted("recognizeScreenshotImage", 1);
+  expect(retried.command.arguments.revision).toBe(3);
+  const retryInput = await decodeUpload(page, retried.body, "image/png");
   expect(pixelAt(retryInput, 120, 40)).toEqual([224, 32, 32]);
+  expect(uploads.count()).toBe(7);
+  expect(
+    (await uploads.commands("prepareScreenshotTextLayer")).map(
+      (command) => command.arguments.revision,
+    ),
+  ).toEqual([0, 1, 3]);
 });
