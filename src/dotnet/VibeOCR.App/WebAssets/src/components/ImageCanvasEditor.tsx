@@ -1,4 +1,5 @@
 import { EditorColorPicker } from "./EditorColorPicker";
+import { editorTextBox } from "./editorTextLayerGeometry";
 import { compositionExclusions } from "./compositionExclusions";
 import { CanvasCompositionPanel } from "./CanvasCompositionPanel";
 import { EditorPreferencesPanel } from "./EditorPreferencesPanel";
@@ -52,6 +53,8 @@ import {
   annotationStrokeWidth,
   constrainBoxDrag,
   constrainLineDrag,
+  cropAdjustBase,
+  ANNOTATION_HANDLE_HIT_RADIUS,
   exclusionDisplayPoints,
   finalOutputSize,
   imageTransform,
@@ -267,6 +270,13 @@ const TOOL_LABELS: Readonly<Record<Tool, string>> = {
   crop: "裁剪",
   inpaint: "去水印",
   dupmatch: "重复匹配",
+};
+const TOOL_HINTS: Readonly<Partial<Record<Tool, string>>> = {
+  select: "选择和编辑标注对象；拖选图片中的文字可复制",
+  hand: "平移画布（也可按住空格拖动），不移动标注对象",
+  text: "文字：在图片上添加普通文字标注",
+  callout: "说明：添加带引线的文字气泡，从指向位置拖到文字位置",
+  dupmatch: "重复匹配：框选水印等重复内容，查找相似副本后批量遮挡",
 };
 
 /** 图标语义需用户确认后才新增：直线/折线暂无矢量图标，用清晰文字按钮，
@@ -721,6 +731,7 @@ interface ImageCanvasEditorProps {
   readonly actions: AppActions;
   readonly canExport: boolean;
   readonly canRecognize: boolean;
+  readonly recognitionBusy?: boolean;
   readonly recognitionModes?: readonly ImageRecognitionMode[];
   readonly source: string;
   readonly captureScene?: CaptureScene;
@@ -1156,6 +1167,7 @@ export function ImageCanvasEditor({
   editorSettings = {},
   canExport,
   canRecognize,
+  recognitionBusy = false,
   recognitionModes,
   source,
   sourceByteLength,
@@ -1167,8 +1179,6 @@ export function ImageCanvasEditor({
   installProject,
   interactionLocked = false,
   autoText: autoTextProp,
-  showAutoTextPreference = true,
-  onAutoTextChange,
   onRecognitionSubmitted,
   toolset = "full",
   commandScope = "recognition",
@@ -1180,6 +1190,7 @@ export function ImageCanvasEditor({
   const commands = EDITOR_COMMANDS[commandScope];
   const preferences = editorPreferences(editorSettings.editorPreferences);
   const [compositionOpen, setCompositionOpen] = useState(false);
+  const lastCaptureRadius = useRef(16);
   // #233 工程保存命令：scene/识别面发 recognition.*，普通编辑页发 imageEdit.*。
   const projectSaveCommand =
     commandScope === "imageEdit"
@@ -1214,6 +1225,20 @@ export function ImageCanvasEditor({
     };
     // The attempt belongs to this bootstrap/input, not later annotation revisions.
   }, [captureScene, source, session?.sessionId, actions]);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [toolsHeight, setToolsHeight] = useState(184);
+  useLayoutEffect(() => {
+    if (!captureGeometry || typeof ResizeObserver === "undefined") return;
+    const element = editorRef.current;
+    if (!element) return;
+    const measure = () => setToolsHeight(element.scrollHeight + 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    for (const child of element.children)
+      if (!child.classList.contains("canvas-stage")) observer.observe(child);
+    return () => observer.disconnect();
+  });
   const [sceneViewport, setSceneViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -1232,6 +1257,7 @@ export function ImageCanvasEditor({
     captureGeometry,
     sceneViewport.width,
     sceneViewport.height,
+    toolsHeight,
   );
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [displayCanvas, setDisplayCanvas] = useState<HTMLCanvasElement | null>(
@@ -1326,7 +1352,8 @@ export function ImageCanvasEditor({
     const scene = captureScene;
     const initial = scene?.initialTool;
     // 截图现场没有裁剪工具按钮：初始工具不得落在 crop 上。
-    if (scene && initial === "crop") return "select";
+    if (initial === "textSelect" || (scene && initial === "crop"))
+      return "select";
     return TOOL_ORDER.find((value) => value === initial) ?? "select";
   });
   const [zoom, setZoom] = useState(1);
@@ -1599,7 +1626,7 @@ export function ImageCanvasEditor({
   }
   // 本地修订：编辑提交即时推进，不等宿主回显；文字层绑定据此立即失效。
   const [localRevision, setLocalRevision] = useState(session?.revision ?? 0);
-  const [localAutoText, setLocalAutoText] = useState(false);
+  const localAutoText = !pinSnapshotApply;
   // 输出设置属于会话内容的一部分：改动推进修订、使旧文字层/识别结果失效，
   // 但不入编辑历史（撤销只回退几何编辑，含尺寸变更）。
   const [outputFormat, setOutputFormat] =
@@ -1618,18 +1645,19 @@ export function ImageCanvasEditor({
     captureStyle
       ? ""
       : session
-        ? "纯截图会话：标注后可复制、保存或显式识别当前图；不会自动提交 OCR。"
+        ? "截图会话：自动准备可选文字；标注后可复制、保存或主动生成识别结果。"
         : "标注只影响复制或保存的图片副本，不会重新识别。",
   );
   const state = history[historyIndex] ?? EMPTY;
   const hasExclusions = state.marks.some(isExclusionMark);
 
-  // 取字模式：仅当宿主层就绪且绑定与当前本地修订一致时展示；
+  // 自动选字：仅当宿主层就绪且绑定与当前本地修订一致时展示；
   // 显示的图像就是识别输入的同一最终 PNG，不拿旧层映射。
   const layerImageRef = textLayer?.image;
   const layerImageUrl = layerImageRef?.url;
   const layerReady =
-    tool === "textSelect" &&
+    (tool === "select" || tool === "textSelect") &&
+    !spaceHeld &&
     textLayer?.status === "textlayer.ready" &&
     !!textLayer.binding &&
     textLayer.binding.sessionId === session?.sessionId &&
@@ -1965,7 +1993,7 @@ export function ImageCanvasEditor({
         );
 
         const canvas = canvasRef.current;
-        if (!canvas || layerReady) return;
+        if (!canvas) return;
         if (captureScene && !canvas.getContext("2d")) {
           presentation.current?.fail("draw");
           return;
@@ -2094,7 +2122,7 @@ export function ImageCanvasEditor({
         );
         if (cropDraft.current) {
           drawCropPreview(canvas, cropDraft.current);
-        } else if (captureGeometry && !layerReady) {
+        } else if (captureGeometry) {
           // 截图现场：选区即当前裁剪范围；无已提交裁剪时在四边/四角绘制闲置手柄。
           drawSceneCropHandles(canvas, state.crop);
         }
@@ -2150,7 +2178,7 @@ export function ImageCanvasEditor({
           );
       }
     };
-    if (!layerReady) scheduleDraw();
+    scheduleDraw();
   });
 
   useLayoutEffect(() => {
@@ -2670,27 +2698,38 @@ export function ImageCanvasEditor({
     nonce: -1,
   });
   const prepareInFlight = useRef(false);
+  const [prepareCompletion, setPrepareCompletion] = useState(0);
 
-  async function prepareTextLayer() {
+  async function prepareTextLayer(attemptKey: string, nonce: number) {
     if (!session || prepareInFlight.current || exportInProgressRef.current) {
       return;
     }
-    if (refuseIfFullyMasked("textLayer")) return;
     prepareInFlight.current = true;
+    lastAttempt.current = { key: attemptKey, nonce };
     try {
+      if (refuseIfFullyMasked("textLayer")) return;
       // 文字层与识别同源：屏蔽区写入白色像素，被屏蔽文字不可进入可选层。
       const exported = await exportFinalImageIfUnchanged(true);
       if (!exported) return;
-      await actions.run({
+      const command: AppAction = {
         type: commands.prepareScreenshotTextLayer,
         sessionId: exported.sessionId,
         revision: exported.revision,
         resourceUri: exported.resourceUri,
-      });
+      };
+      const receipt = actions.runWithReceipt
+        ? await actions.runWithReceipt(command)
+        : (await actions.run(command))
+          ? "succeeded"
+          : "unconfirmed";
+      // Start 在回执前同步 Take；只清理已确认命令遗留的未消费租约。
+      if (receipt !== "unconfirmed")
+        await discardAnnotatedImage(exported.resourceUri);
     } catch {
       setOperationMessage("无法导出或提交文字层准备，请重试。");
     } finally {
       prepareInFlight.current = false;
+      setPrepareCompletion((completion) => completion + 1);
     }
   }
 
@@ -2699,13 +2738,19 @@ export function ImageCanvasEditor({
       !session ||
       !canRecognize ||
       isExporting ||
-      (!autoText && tool !== "textSelect")
+      !autoText ||
+      pinSnapshotApply ||
+      proofreading ||
+      inactive ||
+      interactionLocked
     ) {
       return;
     }
     // 同一绑定已有任何宿主状态（含 preparing/ready/unavailable/cancelled）
     // 不再自动重复提交；重试只能通过工具重入/手动按钮推进 nonce。
-    if (layerBindingKey === currentLayerKey) {
+    const explicitRetry =
+      prepareNonce > 0 && lastAttempt.current.nonce !== prepareNonce;
+    if (layerBindingKey === currentLayerKey && !explicitRetry) {
       return;
     }
     const attemptKey = `${currentLayerKey}:${imageRevision}`;
@@ -2716,8 +2761,7 @@ export function ImageCanvasEditor({
       return;
     }
     const timer = setTimeout(() => {
-      lastAttempt.current = { key: attemptKey, nonce: prepareNonce };
-      void prepareTextLayer();
+      void prepareTextLayer(attemptKey, prepareNonce);
     }, 400);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2725,7 +2769,12 @@ export function ImageCanvasEditor({
     sessionKeyForLayer,
     localRevision,
     prepareNonce,
+    prepareCompletion,
     autoText,
+    pinSnapshotApply,
+    proofreading,
+    inactive,
+    interactionLocked,
     tool,
     canRecognize,
     isExporting,
@@ -6004,13 +6053,17 @@ export function ImageCanvasEditor({
       measuredSize && measuredSize.image === layerImage && layerImage
         ? measuredSize.size
         : layerImage
-          ? { width: layerImage.naturalWidth, height: layerImage.naturalHeight }
+          ? {
+              width: canvasRef.current?.clientWidth || layerImage.naturalWidth,
+              height:
+                canvasRef.current?.clientHeight || layerImage.naturalHeight,
+            }
           : undefined,
     [measuredSize, layerImage],
   );
   useEffect(() => {
     if (!layerReady || !layerImage) return undefined;
-    const element = stageRef.current;
+    const element = canvasRef.current;
     if (!element || typeof ResizeObserver === "undefined") return undefined;
     // 布局尺寸优先；无布局环境回退为最终 PNG 自然尺寸（1:1 显示）。
     const observer = new ResizeObserver(() => {
@@ -6093,9 +6146,19 @@ export function ImageCanvasEditor({
     undefined,
   );
   const readLayerSelection = useCallback(() => {
-    const root = stageRef.current?.querySelector(".image-text-layer");
     const current = document.getSelection();
     const range = current?.rangeCount ? current.getRangeAt(0) : undefined;
+    const root = Array.from(
+      editorRef.current?.querySelectorAll(".image-text-layer") ?? [],
+    ).find(
+      (layer) =>
+        current?.anchorNode &&
+        current.focusNode &&
+        range &&
+        layer.contains(current.anchorNode) &&
+        layer.contains(current.focusNode) &&
+        layer.contains(range.commonAncestorContainer),
+    );
     return layerSelectionKey &&
       root &&
       range &&
@@ -6283,8 +6346,7 @@ export function ImageCanvasEditor({
   // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪）。快捷键
   // 与隐藏菜单复用同一判断，不让隐藏入口绕过上下文限制。
   const toolAvailable = (value: string) =>
-    (!pinSnapshotApply || value !== "textSelect") &&
-    !(captureStyle && value === "crop");
+    value !== "textSelect" && !(captureStyle && value === "crop");
   const hiddenTools = orderedTools.filter(
     (value) => preferences.hidden.includes(value) && toolAvailable(value),
   );
@@ -6298,7 +6360,7 @@ export function ImageCanvasEditor({
         <ToolbarButton
           appearance={tool === value ? "primary" : "subtle"}
           aria-label={TOOL_LABELS[value]}
-          title={TOOL_LABELS[value]}
+          title={TOOL_HINTS[value] ?? TOOL_LABELS[value]}
           icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
           aria-pressed={tool === value}
           key={value}
@@ -6926,29 +6988,10 @@ export function ImageCanvasEditor({
     </label>
   );
 
-  // 自动取字偏好：仅随取字工具在属性排显示；偏好状态本身（autoText/
-  // onAutoTextChange）不受工具切换影响，切回取字时恢复勾选。
-  const autoTextControl = session &&
-    showAutoTextPreference &&
-    tool === "textSelect" && (
-      <label className="editor-style-control">
-        <input
-          aria-label="自动取字"
-          checked={autoText}
-          onChange={(event) => {
-            setLocalAutoText(event.target.checked);
-            onAutoTextChange?.(event.target.checked);
-          }}
-          type="checkbox"
-        />
-        <span aria-hidden="true">自动取字</span>
-      </label>
-    );
-
   // 取字上下文操作（按钮，非属性）：主排按工具显示。
   const textLayerControls = (
     <>
-      {tool === "textSelect" &&
+      {(tool === "select" || tool === "textSelect") &&
         textLayer?.status === "textlayer.preparing" &&
         session && (
           <ToolbarButton
@@ -6966,7 +7009,7 @@ export function ImageCanvasEditor({
             取消准备
           </ToolbarButton>
         )}
-      {tool === "textSelect" &&
+      {(tool === "select" || tool === "textSelect") &&
         (textLayer?.status === "textlayer.unavailable" ||
           textLayer?.status === "textlayer.failed" ||
           textLayer?.status === "textlayer.cancelled") && (
@@ -6980,26 +7023,28 @@ export function ImageCanvasEditor({
             重新准备
           </ToolbarButton>
         )}
-      {tool === "textSelect" && selectionText.length > 0 && session && (
-        <Button
-          appearance="primary"
-          icon={captureStyle ? undefined : <ToolbarIcon name="copy" />}
-          size="small"
-          onPointerDown={() => {
-            const text = readLayerSelection();
-            copyButtonSelection.current = text
-              ? { text, key: layerSelectionKey }
-              : undefined;
-          }}
-          onClick={() => {
-            const frozen = copyButtonSelection.current;
-            copyButtonSelection.current = undefined;
-            void copySelectedText(frozen);
-          }}
-        >
-          复制所选
-        </Button>
-      )}
+      {(tool === "select" || tool === "textSelect") &&
+        selectionText.length > 0 &&
+        session && (
+          <Button
+            appearance="primary"
+            icon={captureStyle ? undefined : <ToolbarIcon name="copy" />}
+            size="small"
+            onPointerDown={() => {
+              const text = readLayerSelection();
+              copyButtonSelection.current = text
+                ? { text, key: layerSelectionKey }
+                : undefined;
+            }}
+            onClick={() => {
+              const frozen = copyButtonSelection.current;
+              copyButtonSelection.current = undefined;
+              void copySelectedText(frozen);
+            }}
+          >
+            复制所选
+          </Button>
+        )}
     </>
   );
 
@@ -7569,8 +7614,18 @@ export function ImageCanvasEditor({
       imageModes.map((mode) => (
         <Button
           key={mode.displayName}
-          title={mode.hint ?? mode.displayName}
-          aria-label={mode.displayName}
+          title={
+            recognitionBusy
+              ? "正在识别，请稍候"
+              : (unavailableModeHints.find((hint) =>
+                  hint.startsWith(mode.displayName),
+                ) ??
+                mode.hint ??
+                mode.displayName)
+          }
+          aria-label={
+            mode.displayName === "文字识别" ? "识别文字" : mode.displayName
+          }
           appearance="primary"
           size="small"
           disabled={
@@ -7578,24 +7633,25 @@ export function ImageCanvasEditor({
             isExporting ||
             !!textEdit ||
             mode.availability !== "ready" ||
-            !mode.modeId
+            !mode.modeId ||
+            recognitionBusy
           }
           onClick={() => void recognizeCurrentImage(mode.modeId)}
         >
-          {mode.displayName}
+          {mode.displayName === "文字识别" ? "识别文字" : mode.displayName}
         </Button>
       ))
     ) : (
       <Button
-        title="识别当前图"
+        title={recognitionBusy ? "正在识别，请稍候" : "识别当前图片中的文字"}
         icon={captureStyle ? undefined : <ToolbarIcon name="textRecognition" />}
-        aria-label="识别当前图"
+        aria-label="识别文字"
         appearance="primary"
         size="small"
-        disabled={!canRecognize || isExporting || !!textEdit}
+        disabled={!canRecognize || recognitionBusy || isExporting || !!textEdit}
         onClick={() => void recognizeCurrentImage()}
       >
-        识别当前图
+        识别文字
       </Button>
     ));
   const closeSessionButton = session && (
@@ -7711,11 +7767,11 @@ export function ImageCanvasEditor({
     !!watermarkOpacityControl ||
     !!objectEraserHint ||
     !!inpaintMaskModeControl ||
-    !!dupmatchCandidateControls ||
-    !!autoTextControl;
+    !!dupmatchCandidateControls;
 
   return (
     <div
+      ref={editorRef}
       className={`canvas-editor${
         captureStyle ? " capture-scene-editor" : ""
       }${proofreading ? " is-proofreading" : ""}`}
@@ -7794,138 +7850,129 @@ export function ImageCanvasEditor({
             captureStyle ? " editor-toolbar-scene-primary" : ""
           }`}
         >
-          {toolButtons}
-          {captureStyle && (
-            <label
-              className="editor-inline-control"
-              title="PNG 保留透明圆角；JPEG 使用输出背景色"
-            >
-              圆角
-              <Select
-                aria-label="截图圆角"
-                size="small"
-                value={String(state.composition?.radius ?? 0)}
+          <div className="editor-tools-group">{toolButtons}</div>
+          <div className="editor-actions-group">
+            {captureStyle && (
+              <ToolbarButton
+                aria-label={
+                  state.composition?.radius
+                    ? "截图圆角，点击切换直角"
+                    : "截图直角，点击切换圆角"
+                }
+                aria-pressed={!!state.composition?.radius}
+                title="切换截图直角/圆角；PNG 保留透明圆角，JPEG 使用输出背景色"
                 disabled={isExporting || !!textEdit || interactionLocked}
-                onChange={(_, data) => {
+                onClick={() => {
                   cancelDrawing();
+                  const radius = state.composition?.radius ?? 0;
+                  if (radius > 0) lastCaptureRadius.current = radius;
                   commit({
                     ...state,
                     composition: {
                       ...(state.composition ?? DEFAULT_COMPOSITION),
-                      radius: Number(data.value),
+                      radius: radius > 0 ? 0 : lastCaptureRadius.current,
                     },
                   });
                 }}
               >
-                {[
-                  ...new Set([
-                    0,
-                    8,
-                    16,
-                    24,
-                    40,
-                    64,
-                    state.composition?.radius ?? 0,
-                  ]),
-                ].map((radius) => (
-                  <option key={radius} value={radius}>
-                    {radius === 0 ? "直角" : `${radius}px`}
-                  </option>
-                ))}
-              </Select>
-            </label>
-          )}
-          {toolset === "full" && (
-            <ToolbarButton
-              aria-label="画布排版"
-              aria-pressed={compositionOpen}
-              onClick={() => setCompositionOpen((open) => !open)}
-            >
-              排版
-            </ToolbarButton>
-          )}
-          {toolset === "full" && (compositionOpen || state.composition) && (
-            <ToolbarButton
-              aria-label="重置排版"
-              disabled={!state.composition || isExporting || !!textEdit}
-              onClick={() => {
-                cancelDrawing();
-                commit({ ...state, composition: undefined });
-              }}
-            >
-              重置排版
-            </ToolbarButton>
-          )}
-          {textLayerControls}
-          {inpaintOperations}
-          {dupmatchOperations}
-          {objectActionControls}
-          {spotlightAddRegionControl}
-          {rotateControl}
-          {resetAttributesControl}
-          {contentMark && !textEdit && (
-            <ToolbarButton
-              aria-label="编辑文字"
-              onClick={() => beginTextEdit(selectedMark!)}
-            >
-              编辑文字
-            </ToolbarButton>
-          )}
-          {textEdit && (
-            <>
-              <ToolbarButton aria-label="完成文字编辑" onClick={finishTextEdit}>
-                完成文字
-              </ToolbarButton>
-              <ToolbarButton
-                aria-label="取消文字编辑"
-                onClick={() => {
-                  cancelDrawing();
-                  setOperationMessage("已取消文字编辑，原文字保留。");
-                }}
-              >
-                取消文字
-              </ToolbarButton>
-            </>
-          )}
-          {activeFontTool === "numbering" &&
-            state.marks.some((mark) => mark.tool === "numbering") && (
-              <ToolbarButton
-                aria-label="重新编号"
-                disabled={state.marks.some(
-                  (mark) => mark.tool === "numbering" && mark.locked,
-                )}
-                onClick={renumber}
-              >
-                重新编号
+                {state.composition?.radius ? "圆角" : "直角"}
               </ToolbarButton>
             )}
-          {captureStyle ? null : clearExclusionsButton}
-          {undoButton}
-          {redoButton}
-          {copyAnnotatedButton}
-          {captureStyle ? null : copyExcludedButton}
-          {saveAnnotatedButton}
-          {toolset === "full" && (
-            <ToolbarButton
-              disabled={
-                !canExport ||
-                isExporting ||
-                !!textEdit ||
-                !editorSettings.imageOutputDirectory
-              }
-              onClick={() => void saveWithPreset()}
-            >
-              按常用预设保存
-            </ToolbarButton>
-          )}
-          {captureStyle ? null : saveExcludedButton}
-          {pinSnapshotApply ? null : saveProjectButton}
-          {applyPinSnapshotButton}
-          {pinButton}
-          {pinSnapshotApply ? null : recognizeButton}
-          {closeSessionButton}
-          {captureStyle ? null : clearEditsButton}
-          {moreActionsMenu}
+            {toolset === "full" && (
+              <ToolbarButton
+                aria-label="画布排版"
+                aria-pressed={compositionOpen}
+                onClick={() => setCompositionOpen((open) => !open)}
+              >
+                排版
+              </ToolbarButton>
+            )}
+            {toolset === "full" && (compositionOpen || state.composition) && (
+              <ToolbarButton
+                aria-label="重置排版"
+                disabled={!state.composition || isExporting || !!textEdit}
+                onClick={() => {
+                  cancelDrawing();
+                  commit({ ...state, composition: undefined });
+                }}
+              >
+                重置排版
+              </ToolbarButton>
+            )}
+            {textLayerControls}
+            {inpaintOperations}
+            {dupmatchOperations}
+            {objectActionControls}
+            {spotlightAddRegionControl}
+            {rotateControl}
+            {resetAttributesControl}
+            {contentMark && !textEdit && (
+              <ToolbarButton
+                aria-label="编辑文字"
+                onClick={() => beginTextEdit(selectedMark!)}
+              >
+                编辑文字
+              </ToolbarButton>
+            )}
+            {textEdit && (
+              <>
+                <ToolbarButton
+                  aria-label="完成文字编辑"
+                  onClick={finishTextEdit}
+                >
+                  完成文字
+                </ToolbarButton>
+                <ToolbarButton
+                  aria-label="取消文字编辑"
+                  onClick={() => {
+                    cancelDrawing();
+                    setOperationMessage("已取消文字编辑，原文字保留。");
+                  }}
+                >
+                  取消文字
+                </ToolbarButton>
+              </>
+            )}
+            {activeFontTool === "numbering" &&
+              state.marks.some((mark) => mark.tool === "numbering") && (
+                <ToolbarButton
+                  aria-label="重新编号"
+                  disabled={state.marks.some(
+                    (mark) => mark.tool === "numbering" && mark.locked,
+                  )}
+                  onClick={renumber}
+                >
+                  重新编号
+                </ToolbarButton>
+              )}
+            {captureStyle ? null : clearExclusionsButton}
+            {undoButton}
+            {redoButton}
+            {copyAnnotatedButton}
+            {captureStyle ? null : copyExcludedButton}
+            {saveAnnotatedButton}
+            {toolset === "full" && (
+              <ToolbarButton
+                disabled={
+                  !canExport ||
+                  isExporting ||
+                  !!textEdit ||
+                  !editorSettings.imageOutputDirectory
+                }
+                onClick={() => void saveWithPreset()}
+              >
+                按常用预设保存
+              </ToolbarButton>
+            )}
+            {captureStyle ? null : saveExcludedButton}
+            {pinSnapshotApply ? null : saveProjectButton}
+            {applyPinSnapshotButton}
+            {pinButton}
+            {pinSnapshotApply ? null : recognizeButton}
+            {closeSessionButton}
+            {captureStyle ? null : clearEditsButton}
+            {moreActionsMenu}
+          </div>
         </Toolbar>
         {session && !canRecognize && !pinSnapshotApply && (
           <p className="form-note">
@@ -7933,10 +7980,13 @@ export function ImageCanvasEditor({
           </p>
         )}
         {session && unavailableModeHints.length > 0 && (
-          <p className="form-note">
-            {unavailableModeHints.join("；")}
-            。请在设置中检查运行环境与默认识别类型。
-          </p>
+          <details className="editor-recognition-status">
+            <summary>识别未就绪</summary>
+            <p>
+              {unavailableModeHints.join("；")}
+              。请在设置中检查运行环境与默认识别类型。
+            </p>
+          </details>
         )}
         {settingsRowActive ? (
           <Toolbar
@@ -7976,7 +8026,6 @@ export function ImageCanvasEditor({
             {magnifierZoomControl}
             {watermarkOpacityControl}
             {objectEraserHint}
-            {autoTextControl}
             {inpaintMaskModeControl}
             {inpaintBrushSizeControl}
             {inpaintCompareControl}
@@ -7986,6 +8035,19 @@ export function ImageCanvasEditor({
       </div>
       {compositionOpen && toolset === "full" && (
         <CanvasCompositionPanel
+          selectableText={
+            layerReady && layerImage && textLayer?.binding && session
+              ? {
+                  image: layerImage,
+                  activeSession: {
+                    sessionId: session.sessionId,
+                    revision: localRevision,
+                  },
+                  binding: textLayer.binding,
+                  lines: visibleLayerLines,
+                }
+              : undefined
+          }
           value={state.composition}
           revision={contentRevisionRef.current}
           assets={[
@@ -8009,6 +8071,14 @@ export function ImageCanvasEditor({
           }
         />
       )}
+      {state.composition &&
+        (state.composition.stitch !== "none" ||
+          state.composition.background === "image" ||
+          state.composition.cut) && (
+          <p className="editor-composition-text-hint">
+            选择模式下，拼接和背景中的完整文字可在“排版”的输出预览中选择复制。
+          </p>
+        )}
       {toolset === "full" && (
         <fieldset className="editor-preferences-lock" disabled={isExporting}>
           <EditorPreferencesPanel
@@ -8190,7 +8260,7 @@ export function ImageCanvasEditor({
               } · 识别、复制与保存使用原始像素的 PNG。`
             : "图片解码完成后显示原图尺寸。"}
       </p>
-      {tool === "textSelect" && textLayerHint && (
+      {(tool === "select" || tool === "textSelect") && textLayerHint && (
         <p className="editor-guidance">{textLayerHint}</p>
       )}
       <label className="editor-style-control">
@@ -8225,7 +8295,7 @@ export function ImageCanvasEditor({
           // 校对模式：右键/选区交互归校对层，编辑器不拦截。
           if (proofreading) return;
           const text = readLayerSelection();
-          if (tool !== "textSelect" || !text) {
+          if ((tool !== "select" && tool !== "textSelect") || !text) {
             setCopyMenu(undefined);
             return;
           }
@@ -8282,19 +8352,12 @@ export function ImageCanvasEditor({
           />
         ) : layerReady ? (
           <div
-            className="image-text-frame"
+            className="image-text-frame editor-selectable-text"
             ref={stageRef}
             style={{
-              margin: "0 auto",
-              position: "relative",
+              aspectRatio: `${captureGeometry?.width ?? projectFrame?.width ?? 900} / ${captureGeometry?.height ?? projectFrame?.height ?? 600}`,
             }}
           >
-            <img
-              alt="截图最终画面"
-              className="inspection-canvas"
-              src={layerImageUrl}
-              style={{ width: "100%" }}
-            />
             {layerImage && stageSize && textLayer?.binding && session ? (
               <ImageTextLayer
                 activeSession={{
@@ -8304,6 +8367,22 @@ export function ImageCanvasEditor({
                 binding={textLayer.binding}
                 lines={visibleLayerLines}
                 viewport={{ image: layerImage, size: stageSize }}
+                layoutBox={(bbox) => {
+                  const image = imageRef.current;
+                  const canvas = canvasRef.current;
+                  return image && canvas
+                    ? editorTextBox(
+                        bbox,
+                        image,
+                        state,
+                        canvasSize(canvas),
+                        stageSize,
+                        importAssetsRef.current,
+                        canvas.getContext("2d") ?? undefined,
+                        !!captureGeometry,
+                      )
+                    : undefined;
+                }}
               />
             ) : null}
           </div>
@@ -8328,7 +8407,7 @@ export function ImageCanvasEditor({
             aspectRatio: captureStyle
               ? `${captureGeometry?.width} / ${captureGeometry?.height}`
               : `${projectFrame?.width ?? 900} / ${projectFrame?.height ?? 600}`,
-            display: layerReady || proofreading ? "none" : "block",
+            display: proofreading ? "none" : "block",
             cursor: panning
               ? "grab"
               : tool === "select"
@@ -8514,7 +8593,7 @@ function textLayerStatusLabel(
   layer: ScreenshotTextLayerState | undefined,
 ): string | undefined {
   if (!layer) {
-    return "取字模式：进入或新截图后自动用本地轻量文字引擎准备可选文字层。";
+    return "自动选字：进入或新截图后自动用本地轻量文字引擎准备可选文字层。";
   }
   switch (layer.status) {
     case "textlayer.preparing":
@@ -8604,9 +8683,9 @@ function drawSceneCropHandles(
 ) {
   const context = canvas.getContext("2d");
   if (!context) return;
-  const area = crop
-    ? clampRect(normalizedRect(crop), canvasSize(canvas))
-    : { x: 0, y: 0, ...canvasSize(canvas) };
+  const base = cropAdjustBase({ crop }, canvasSize(canvas), true);
+  if (!base) return;
+  const area = clampRect(normalizedRect(base), canvasSize(canvas));
   if (area.width <= 0 || area.height <= 0) return;
   drawHandleSquares(context, area, "#f38b35");
 }
@@ -9268,9 +9347,6 @@ const EXCLUSION_RESIZE_HANDLES = [
 
 type ExclusionResizeHandle = (typeof EXCLUSION_RESIZE_HANDLES)[number];
 
-/** 手柄在未归一化 start/end 矩形上的命中半径（画布内都坐标）。 */
-const EXCLUSION_HANDLE_RADIUS = 12;
-
 function exclusionHandlePoint(
   area: ReturnType<typeof normalizedRect>,
   handle: ExclusionResizeHandle,
@@ -9304,28 +9380,12 @@ function rectResizeHandle(
     const point = exclusionHandlePoint(area, handle);
     const distance = Math.hypot(at.x - point.x, at.y - point.y);
     // 严格小于：等距 tie 保留先遍历到的手柄，行为稳定可预测。
-    if (distance <= EXCLUSION_HANDLE_RADIUS && distance < bestDistance) {
+    if (distance <= ANNOTATION_HANDLE_HIT_RADIUS && distance < bestDistance) {
       best = handle;
       bestDistance = distance;
     }
   }
   return best;
-}
-
-/** 可拖拽调整裁剪的基准矩形：已提交裁剪优先；截图现场无裁剪时为整幅选区。 */
-function cropAdjustBase(
-  state: EditorState,
-  size: CanvasSize,
-  scene: boolean,
-): { readonly start: Point; readonly end: Point } | undefined {
-  if (state.crop) return state.crop;
-  if (scene) {
-    return {
-      start: { x: 0, y: 0 },
-      end: { x: size.width, y: size.height },
-    };
-  }
-  return undefined;
 }
 
 /** 拖动 start/end 矩形的边/角：反向拖拽自动翻转，不产生负尺寸。 */
@@ -9474,7 +9534,10 @@ function endpointHandle(mark: Mark, at: Point): "start" | "end" | undefined {
   if (isFontMark(mark)) at = transformTextPoint(mark, at, true);
   const toStart = Math.hypot(at.x - mark.start.x, at.y - mark.start.y);
   const toEnd = Math.hypot(at.x - mark.end.x, at.y - mark.end.y);
-  if (toStart > EXCLUSION_HANDLE_RADIUS && toEnd > EXCLUSION_HANDLE_RADIUS)
+  if (
+    toStart > ANNOTATION_HANDLE_HIT_RADIUS &&
+    toEnd > ANNOTATION_HANDLE_HIT_RADIUS
+  )
     return undefined;
   return toStart <= toEnd ? "start" : "end";
 }

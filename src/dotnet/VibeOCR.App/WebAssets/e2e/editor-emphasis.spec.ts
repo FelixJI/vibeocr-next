@@ -1700,9 +1700,9 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
     arguments?: { excludeBoxes?: unknown[] };
   };
   expect(pin.arguments?.excludeBoxes?.length).toBe(2);
-  // 文字层输入：取字工具触发的 prepare 上传为烘焙像素（镜内无洋红）。
+  // 文字层输入：默认自动 prepare 上传为烘焙像素（镜内无洋红）。
   const prepareCount = uploads.length;
-  await action(page, "取字");
+  await action(page, "选择");
   await expect.poll(() => uploads.length).toBeGreaterThan(prepareCount);
   const textLayerMagenta = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(
@@ -1732,7 +1732,7 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
   expect(textLayerMagenta).toBe(0);
   // 显式识别：上传普通像素 + excludeBoxes 必须包含镜内泄露区。
   const recognizeCount = uploads.length;
-  await action(page, "文字识别");
+  await action(page, "识别文字");
   await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
   // 上传请求被收到早于响应解析和 bridge 发送，等待实际识别命令。
   const recognizeHandle = await page.waitForFunction(() =>
@@ -1963,7 +1963,7 @@ test("H3d leak boxes derive from snapped natural exclusion source (fractional dr
   // 显式识别：按上传的 excludeBoxes 做宿主等效白化后必须零洋红——
   // raw 投影（未用权威 snapped 源）会留下 688.6..690 的洋红残列。
   const recognizeCount = uploads.length;
-  await action(page, "文字识别");
+  await action(page, "识别文字");
   await expect.poll(() => uploads.length).toBe(recognizeCount + 1);
   const boxes = await page.evaluate(
     () =>
@@ -2191,7 +2191,7 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
   });
   await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
   // 超额：识别明确拒绝——不上传、不发送命令、明确提示。
-  await action(page, "文字识别");
+  await action(page, "识别文字");
   await expect
     .poll(() =>
       page.getByText("排版后的屏蔽区超过 64 个", { exact: false }).count(),

@@ -63,7 +63,7 @@ function pixelAt(image: DecodedImage, x: number, y: number): number[] {
 }
 
 for (const [label, modeId] of [
-  ["文字识别", "rapid_text"],
+  ["识别文字", "rapid_text"],
   ["表格识别", "paddle_table"],
   ["公式识别", "paddle_formula"],
 ]) {

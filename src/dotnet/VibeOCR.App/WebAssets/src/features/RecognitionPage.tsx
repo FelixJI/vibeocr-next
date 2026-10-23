@@ -89,7 +89,6 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
     state: Readonly<Record<string, unknown>>;
     sessionId?: string;
   }>();
-  const [autoTextPreference, setAutoTextPreference] = useState(true);
   // 左侧单一图片区承载编辑与校对：有带 bbox 的结果时默认展示校对层
   // （宿主 state.resultImage 冻结参考图，不用会话基准图冒充）；切换到
   // 编辑仅隐藏画布，编辑器不卸载，未提交编辑状态不丢失。
@@ -396,6 +395,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   canExport={viewState.capabilities.includes(
                     "recognition.annotation",
                   )}
+                  recognitionBusy={booleanValue(state.isBusy)}
                   canRecognize={sessionCapable}
                   recognitionModes={imageRecognitionModes(
                     state.recognitionModes,
@@ -405,14 +405,6 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   sourceByteLength={input.byteLength}
                   textLayer={textLayer}
                   systemImport={imageEditImport(state.import)}
-                  autoText={
-                    session?.textSelectionRequested === true &&
-                    autoTextPreference
-                  }
-                  showAutoTextPreference={
-                    session?.textSelectionRequested === true
-                  }
-                  onAutoTextChange={setAutoTextPreference}
                   toolset="recognition"
                   inactive={previewCollapsed}
                   proofread={proofread}

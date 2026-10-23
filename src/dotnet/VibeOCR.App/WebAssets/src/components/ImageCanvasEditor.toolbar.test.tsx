@@ -477,7 +477,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "重做",
       "复制标注图",
       "保存标注图",
-      "识别当前图",
+      "识别文字",
       "贴图",
       "结束会话",
       "更多操作",
@@ -538,7 +538,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "重做",
       "复制标注图",
       "保存标注图",
-      "识别当前图",
+      "识别文字",
       "贴图",
       "结束会话",
       "更多操作",
@@ -610,34 +610,61 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     unmount();
   });
 
-  it("自动取字偏好仅随取字工具显示：切换工具属性排隐藏/恢复，偏好保留", () => {
+  it("默认准备文字层，工具栏不再提供取字工具或自动取字开关", () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
         canExport
         canRecognize
-        source="https://app.vibeocr/__resource/screenshot.bmp"
+        source={scene.inputUrl}
         captureScene={scene}
         session={{ sessionId: "capture", revision: 0 }}
       />,
     );
-    const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    // 会话带取字偏好，但初始选择工具：偏好不撑开属性排。
+    expect(screen.queryByRole("button", { name: "取字" })).toBeNull();
+    expect(screen.queryByLabelText("自动取字")).toBeNull();
+    expect(screen.getByRole("button", { name: "识别文字" })).toBeVisible();
     expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
-    // 切到取字：自动取字偏好出现在属性排并可勾选。
-    fireEvent.click(main.getByRole("button", { name: "取字" }));
-    const settings = within(
-      screen.getByRole("toolbar", { name: "当前工具设置" }),
+  });
+
+  it("本地引擎未就绪时不循环自动提交，显式重试可重新准备同一修订", async () => {
+    stubCanvasStack();
+    const actions = createActions();
+    render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport
+        canRecognize
+        source={scene.inputUrl}
+        session={{ sessionId: "capture", revision: 0 }}
+        textLayer={{
+          status: "textlayer.unavailable",
+          binding: { sessionId: "capture", revision: 0 },
+        }}
+      />,
     );
-    const checkbox = settings.getByLabelText("自动取字");
-    expect(checkbox).not.toBeChecked();
-    fireEvent.click(checkbox);
-    expect(settings.getByLabelText("自动取字")).toBeChecked();
-    // 切回选择：属性排隐藏；切回取字：偏好恢复勾选（状态未丢）。
-    fireEvent.click(main.getByRole("button", { name: "选择" }));
-    expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
-    fireEvent.click(main.getByRole("button", { name: "取字" }));
-    expect(screen.getByLabelText("自动取字")).toBeChecked();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(actions.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新准备文字层" }));
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "recognition.prepareScreenshotTextLayer",
+          revision: 0,
+        }),
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          command.type === "recognition.prepareScreenshotTextLayer",
+      ),
+    ).toHaveLength(1);
   });
 
   it("两排中的所有按钮均有可访问名称（图标按钮不裸露）", () => {
@@ -731,7 +758,7 @@ describe("普通编辑页同构：工具+操作上排、属性下排", () => {
       "复制标注图",
       "保存标注图",
       "贴图",
-      "识别当前图",
+      "识别文字",
       "结束会话",
       "清除编辑",
     ]) {

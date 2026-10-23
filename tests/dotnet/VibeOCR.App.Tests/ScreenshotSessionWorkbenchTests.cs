@@ -732,8 +732,10 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  [Fact]
-  public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask()
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask(bool initiallyAttached)
   {
     string root = TemporaryRoot();
     try
@@ -746,12 +748,20 @@ public sealed class ScreenshotSessionWorkbenchTests
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
       var pins = new List<WorkbenchAnnotationFile>();
+      bool attached = initiallyAttached;
+      int preparations = 0;
       await using var handler = CreateHandler(
         recognition, root, broker, annotationStore, settings,
-        inferenceAttached: () => true,
+        inferenceAttached: () => attached,
         supervisorInstanceId: () => "sup-pin",
         textLayerRecognitionFactory: () => textRecognition,
-        pinScreenshot: (file, _, _, _, _) => pins.Add(file));
+        pinScreenshot: (file, _, _, _, _) => pins.Add(file),
+        ensureRuntimeReady: _ =>
+        {
+          preparations++;
+          attached = true;
+          return Task.CompletedTask;
+        });
       try
       {
         using var capturedAwaiter = new RecognitionStateAwaiter(
@@ -782,6 +792,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path,
           TestContext.Current.CancellationToken);
         Assert.Single(inference.Requests);
+        Assert.Equal(1, preparations);
 
         string secondPath = pins[1].Path;
         pins[0].Dispose();
@@ -2195,7 +2206,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         settings,
         inferenceAttached: () => true,
         supervisorInstanceId: () => "sup-text",
-        textLayerRecognitionFactory: () => textRecognition);
+        textLayerRecognitionFactory: () => textRecognition,
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("自动文字层不得安装或启动 Runtime"));
 
       Guid sessionId;
       using (var capturedAwaiter = new RecognitionStateAwaiter(
@@ -2321,13 +2333,15 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  [Fact]
-  public async Task PrepareTextLayerWithoutReadyLocalModeReportsUnavailable()
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task PrepareTextLayerWithoutReadyLocalModeReportsUnavailable(bool attached)
   {
     string root = TemporaryRoot();
     try
     {
-      var inference = new TextLayerRecognitionClient(rapidReady: false, windowsReady: false);
+      var inference = new TextLayerRecognitionClient(rapidReady: !attached, windowsReady: !attached);
       var inputs = new FixedCaptureInput();
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
@@ -2339,7 +2353,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         broker,
         annotationStore,
         settings,
-        inferenceAttached: () => true);
+        inferenceAttached: () => attached,
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("自动文字层不得安装或启动 Runtime"));
 
       using (var capturedAwaiter = new RecognitionStateAwaiter(
         handler,
@@ -2358,7 +2373,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         RecognitionWorkbenchState unavailable = Assert.IsType<RecognitionWorkbenchState>(
           Assert.Single(prepared.States));
         Assert.Equal("textlayer.unavailable", unavailable.TextLayer?.Status);
-        Assert.Equal("textlayer.modeNotReady", unavailable.TextLayer?.Reason);
+        Assert.Equal(attached ? "textlayer.modeNotReady" : "textlayer.serviceUnavailable", unavailable.TextLayer?.Reason);
         Assert.Null(unavailable.TextLayer?.Image);
         Assert.Equal(0, inference.SubmitCalls);
         // 不可用时不消费上传租约，也不隐式准备依赖。
@@ -3780,7 +3795,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     string[] expectedTools =
     [
       "rectangle", "ellipse", "arrow", "pen", "highlighter", "text",
-      "numbering", "mosaic", "blur", "exclude", "inpaint", "textSelect",
+      "numbering", "mosaic", "blur", "exclude", "inpaint",
     ];
     Assert.Equal(expectedTools, ScreenRegionPicker.SelectionEditToolRow.Select(entry => entry.Tool));
     Assert.All(ScreenRegionPicker.SelectionEditToolRow, entry =>

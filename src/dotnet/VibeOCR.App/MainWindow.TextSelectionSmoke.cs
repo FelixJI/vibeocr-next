@@ -83,7 +83,7 @@ public sealed partial class MainWindow
           !firstLayer.Lines.Any(line => line.Text.Any(c => c is >= '一' and <= '龥')) ||
           !firstLayer.Lines.Any(line => line.Text.Contains("Vibe", StringComparison.OrdinalIgnoreCase)))
         throw new InvalidOperationException("Real local OCR did not produce bilingual text once.");
-      await ClickSmokeButtonAsync("取字");
+      await ClickSmokeButtonAsync("选择");
       await WaitForWebConditionAsync("document.querySelectorAll('.image-text-glyphs').length > 0");
       string evidenceRoot = Path.GetDirectoryName(path)!;
       string editorPreview = Path.Combine(evidenceRoot, "text-selection-editor.png");
@@ -306,6 +306,12 @@ public sealed partial class MainWindow
       Close();
     }
   }
+
+  private Task<RecognitionWorkbenchState> WaitForAutomaticTextLayerAsync(RecognitionScreenshotSessionState session) =>
+    WaitForScreenshotStateAsync(state =>
+      state.TextLayer?.Binding is { } binding && binding.SessionId == session.SessionId &&
+      binding.Revision == session.Revision && state.TextLayer.Status != "textlayer.preparing",
+      TimeSpan.FromMinutes(35));
 
   private async Task<RecognitionTextLayerState> WaitForReadyTextLayerAsync(long revision)
   {

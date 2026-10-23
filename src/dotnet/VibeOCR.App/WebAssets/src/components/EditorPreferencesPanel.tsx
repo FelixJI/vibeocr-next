@@ -161,64 +161,66 @@ export function EditorPreferencesPanel({
           <p>
             工具快捷键仅在编辑器内选择工具，支持单个英文字母，不影响全局快捷键；输入框内不触发。
           </p>
-          {draft.order.map((tool, index) => (
-            <div key={tool} className="editor-style-control">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={!draft.hidden.includes(tool)}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      hidden: event.target.checked
-                        ? draft.hidden.filter((item) => item !== tool)
-                        : [...draft.hidden, tool],
-                    })
-                  }
+          {draft.order.map((tool, index) =>
+            tool === "textSelect" ? null : (
+              <div key={tool} className="editor-style-control">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={!draft.hidden.includes(tool)}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        hidden: event.target.checked
+                          ? draft.hidden.filter((item) => item !== tool)
+                          : [...draft.hidden, tool],
+                      })
+                    }
+                  />
+                  {LABELS[tool]}
+                </label>
+                <Button
+                  aria-label={`上移${LABELS[tool]}工具`}
+                  disabled={index === 0}
+                  onClick={() => {
+                    const order = [...draft.order];
+                    [order[index - 1], order[index]] = [
+                      order[index]!,
+                      order[index - 1]!,
+                    ];
+                    setDraft({ ...draft, order });
+                  }}
+                >
+                  上移
+                </Button>
+                <Button
+                  aria-label={`下移${LABELS[tool]}工具`}
+                  disabled={index === draft.order.length - 1}
+                  onClick={() => {
+                    const order = [...draft.order];
+                    [order[index], order[index + 1]] = [
+                      order[index + 1]!,
+                      order[index]!,
+                    ];
+                    setDraft({ ...draft, order });
+                  }}
+                >
+                  下移
+                </Button>
+                <Input
+                  aria-label={`${LABELS[tool]}工具快捷键`}
+                  maxLength={1}
+                  value={draft.shortcuts[tool] ?? ""}
+                  onChange={(_, data) => {
+                    const shortcuts = { ...draft.shortcuts };
+                    if (data.value) shortcuts[tool] = data.value.toLowerCase();
+                    else delete shortcuts[tool];
+                    setDraft({ ...draft, shortcuts });
+                  }}
                 />
-                {LABELS[tool]}
-              </label>
-              <Button
-                aria-label={`上移${LABELS[tool]}工具`}
-                disabled={index === 0}
-                onClick={() => {
-                  const order = [...draft.order];
-                  [order[index - 1], order[index]] = [
-                    order[index]!,
-                    order[index - 1]!,
-                  ];
-                  setDraft({ ...draft, order });
-                }}
-              >
-                上移
-              </Button>
-              <Button
-                aria-label={`下移${LABELS[tool]}工具`}
-                disabled={index === draft.order.length - 1}
-                onClick={() => {
-                  const order = [...draft.order];
-                  [order[index], order[index + 1]] = [
-                    order[index + 1]!,
-                    order[index]!,
-                  ];
-                  setDraft({ ...draft, order });
-                }}
-              >
-                下移
-              </Button>
-              <Input
-                aria-label={`${LABELS[tool]}工具快捷键`}
-                maxLength={1}
-                value={draft.shortcuts[tool] ?? ""}
-                onChange={(_, data) => {
-                  const shortcuts = { ...draft.shortcuts };
-                  if (data.value) shortcuts[tool] = data.value.toLowerCase();
-                  else delete shortcuts[tool];
-                  setDraft({ ...draft, shortcuts });
-                }}
-              />
-            </div>
-          ))}
+              </div>
+            ),
+          )}
         </>
       )}
       {(conflict || !dimensionsValid) && (

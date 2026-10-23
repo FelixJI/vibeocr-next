@@ -1,7 +1,28 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import type { AppSnapshot } from "../src/bridge/client";
-import { mountHost } from "./workbench-host";
+import { expectCommand, mountHost, sendState } from "./workbench-host";
+
+/** 自动文字层导出使用真实 PNG，只有宿主上传/租约边界被模拟。 */
+async function mockTextLayerUploads(page: Page) {
+  let discarded = 0;
+  await page.route("**/__annotation", (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        resourceUri:
+          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+      }),
+    }),
+  );
+  await page.route("**/__annotation/*", async (route) => {
+    expect(route.request().method()).toBe("DELETE");
+    discarded += 1;
+    await route.fulfill({ status: 204 });
+  });
+  return () => discarded;
+}
 
 /** 经真实 bridge 通道装载视图状态（生产构建同样可用）；
  *  runtimeLabel 随 diagnostics 投影（无诊断 → “应用启动中…”），
@@ -35,6 +56,7 @@ test("1280x800 light recognition workspace", async ({ page }) => {
 
 test("1280x800 light annotation workspace with guidance", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
+  await mockTextLayerUploads(page);
   await mount(page, {
     revision: 2,
     route: "recognition",
@@ -65,6 +87,10 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
   await expect(
     page.getByText(/拖拽框选“屏蔽”区，识别时忽略其中内容/),
   ).toBeVisible();
+  await expect(page.getByText(/^自动选字：/)).toBeVisible();
+  await expect(
+    page.getByText("无法导出或提交文字层准备，请重试。"),
+  ).toHaveCount(0);
   await expect(page).toHaveScreenshot("annotation-light-1280x800.png", {
     fullPage: true,
   });
@@ -318,6 +344,20 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
   page,
 }) => {
   await page.setViewportSize({ width: 1024, height: 900 });
+  const discarded = await mockTextLayerUploads(page);
+  const recognition = {
+    isBusy: false,
+    statusCode: "recognition.session",
+    screenshotSession: {
+      sessionId: "0123456789abcdef0123456789abcdef",
+      revision: 0,
+    },
+    input: {
+      url: "/vibeocr-64.png",
+      mediaType: "image/png",
+      byteLength: 4096,
+    },
+  };
   await mount(page, {
     revision: 4,
     route: "recognition",
@@ -330,25 +370,40 @@ test("1024px screenshot session keeps editing and keyboard controls usable", asy
       "recognition.annotation",
     ],
     features: {
-      recognition: {
-        isBusy: false,
-        statusCode: "recognition.session",
-        screenshotSession: {
-          sessionId: "0123456789abcdef0123456789abcdef",
-          revision: 0,
-        },
-        input: {
-          url: "/vibeocr-64.png",
-          mediaType: "image/png",
-          byteLength: 4096,
-        },
-      },
+      recognition,
     },
   });
   await expect(
     page.getByRole("button", { name: "截图", exact: true }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "编辑图片", exact: true }).click();
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "prepareScreenshotTextLayer",
+    arguments: {
+      sessionId: recognition.screenshotSession.sessionId,
+      revision: 0,
+      resourceUri:
+        "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
+    },
+  });
+  // 无已就绪引擎目录：宿主返回明确终态，截图不依赖防抖/上传的时间窗口。
+  await sendState(page, "recognition", {
+    ...recognition,
+    textLayer: {
+      status: "textlayer.unavailable",
+      binding: {
+        sessionId: recognition.screenshotSession.sessionId,
+        revision: 0,
+      },
+      reason: "textlayer.modeNotReady",
+    },
+  });
+  await expect(page.getByText(/^本地轻量文字引擎未就绪；/)).toBeVisible();
+  await expect.poll(discarded).toBe(1);
+  await expect(
+    page.getByText("无法导出或提交文字层准备，请重试。"),
+  ).toHaveCount(0);
   // 识别面精简后无输出变换控件；键盘验证改用保留的显示缩放下拉。
   const zoom = page.getByRole("combobox", { name: "显示缩放" });
 

@@ -406,7 +406,9 @@ public sealed partial class MainWindow
     await WaitForCanvasAsync();
 
     RecordPaddleSmokeStage($"recognize {mode}");
-    await ClickSmokeButtonAsync("识别当前图");
+    await WaitForAutomaticTextLayerAsync(captured.ScreenshotSession!);
+    submitsBefore = smokeSubmitAttempts();
+    await ClickSmokeButtonAsync("识别文字");
     RecognitionWorkbenchState terminal;
     using (var cancellation = new CancellationTokenSource(
       TimeSpan.FromMinutes(timeoutMinutes)))

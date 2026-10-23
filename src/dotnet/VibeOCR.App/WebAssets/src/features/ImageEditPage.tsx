@@ -48,7 +48,6 @@ import {
 import { StatusLine } from "./FeaturePanels";
 
 export function ImageEditPage({ viewState, actions }: FeatureProps) {
-  const [autoTextPreference, setAutoTextPreference] = useState(true);
   const [projectMessage, setProjectMessage] = useState<string>();
   const [pinInstall, setPinInstall] = useState<EditorProjectInstall>();
   const pinInstalledRef = useRef<string | undefined>(undefined);
@@ -340,7 +339,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
     <Workspace
       eyebrow={scene ? "CAPTURE" : "IMAGE"}
       title={scene ? "截图现场编辑" : pin ? "贴图编辑" : "图片编辑"}
-      description="本地编辑、缩放与真实格式转换；识别仅在明确点击时执行。"
+      description="本地编辑与格式转换；自动准备可选文字，识别结果由你主动生成。"
       actions={
         <>
           {!scene && !pin && (
@@ -426,6 +425,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
             viewState.capabilities.includes("recognition.annotation") &&
             (!pin || !projectOpen || activePinInstall !== undefined)
           }
+          recognitionBusy={busy}
           canRecognize={
             !pin &&
             viewState.capabilities.includes("recognition.screenshotSession")
@@ -445,11 +445,6 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
             handoff !== undefined ||
             (pin && projectOpen !== undefined && activePinInstall === undefined)
           }
-          autoText={
-            session?.textSelectionRequested === true && autoTextPreference
-          }
-          showAutoTextPreference={session?.textSelectionRequested === true}
-          onAutoTextChange={setAutoTextPreference}
           commandScope={scene ? "recognition" : pin ? "pinEdit" : "imageEdit"}
           pinSnapshotApply={pin}
           // 纯编辑不展示识别结果；显式识别提交成功后导航到识别承载面。

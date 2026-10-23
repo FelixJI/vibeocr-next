@@ -4,7 +4,9 @@
 
 单次识别、批量识别和 PDF 页面选择 RapidOCR 文字或 RapidTable 表格模式后，可在“运行设备”中选择自动、CPU 或 GPU（CUDA）。设备偏好按模式保存；CPU 批量并行由 Runtime 自动控制，无需配置线程数。使用 Rapid GPU 时，在运行环境设置中准备并选用“RapidOCR + RapidTable · NVIDIA CUDA”。
 
-截图框选栏和进入截图编辑后的工具栏均使用中文文字按钮；窄屏通过工具栏横向滚动访问后面的操作。
+截图编辑工具栏按工具、属性和操作分组折行，背景高度随内容调整；圆角/直角由同一个按钮切换。识别文字、表格和公式使用明确的操作按钮。
+
+“文字”添加普通文字标注，“说明”添加带引线的说明；“选择”操作标注对象，“手形”平移画布；“重复匹配”查找与选定样本相似的重复区域。默认准备可选文字，不再单列“取字”工具：只使用已就绪的本地识别服务，不自动安装或启动环境。复杂排版中的副本和背景文字可在既有排版输出预览中选择。
 
 ## 接口
 
@@ -39,6 +41,7 @@
 
 * RapidTable 3.0.2 CPU 与 CUDA（生产插件路径）均验证：合成 3×3 表格 → 9 单元格、HTML 文字正确、cell bbox 像素坐标齐全。
 * 生产 adapter GPU 全链路（`RapidTableEngine`/`RapidOcrEngine` device=cuda，隔离 profile venv）验证通过：RapidTable 9 cells 正确、RapidOCR 两图输出一致（9 行）、cuda 能力为单实例非并行。
+* Review 修复后，两引擎各运行 CPU/CUDA/auto 三组真实推理：RapidOCR 的三个会话、RapidTable 的结构与内嵌 OCR 共四个会话在首次推理前已创建，前后均保持所选主 EP。CUDA 会话仍可将部分形状算子放在 CPU，不代表全部算子均使用 GPU。图像输入按锁定上游契约转为连续 BGR，单元格框使用全部顶点的外接矩形。
 * 在隔离 venv 完成 70 包 `pip sync`+`pip check` 与生产 `cuda_provider_ready` 探针、安装兼容回归 17 项通过。
 
 ## 协议增量审阅
@@ -49,13 +52,21 @@
 
 历史 baseline、通用比较器和默认 CLI 严格行为不变。正式契约测试要求诊断结果恰好为上述单项，并检查请求枚举恰好等于旧集合加 `RAPID_TABLE`；任何额外差异、删除值或额外新值仍失败。这不是零差异兼容声明，也不把候选文件冒充已发布 baseline。
 
-## 本地验证（2026-10-23）
+## 首轮实现验证（2026-10-23，工具栏紧凑化之前）
 
 * Python 全量：3526 项通过；两项 Windows 临时目录重命名出现 `WinError 5`，原断言单独复查均通过。Ruff、生成一致性、OpenAPI 与协议 conformance 检查通过。
 * Web：773 项单元测试通过；最后文字化改动的 24 项定向单元测试通过。浏览器全量 242 项通过、1 项预览解码失败，原测试复查通过；最终界面的 46 项截图、贴图、工作台与窄屏布局回归全部通过。未以更新截图基线或放宽断言消除失败。
 * C#：Contracts 111 项、HTTP Client 24 项通过，新增模式、设备偏好回显及截图管道定向验证通过。App 全量仍有 6 项原生截图 UI 测试因 Windows 拒绝前台激活而未通过；不将此轮本地检查表述为完整 CI 门禁全绿。
 * 已用真实 CPU 和 NVIDIA GPU 验证生产识别 adapter，实测范围与数据见上文。
 * 最终 `pwsh -File scripts/build-release.ps1` 与 `uv run --frozen python scripts/release_smoke.py` 通过，包含真实 WebView 启动、Velopack Portable full 更新 E2E、精确资产集与包内 Runtime 验证。候选位于本地 `build/rapid-artifacts/`，不代表正式发布。
+## Review 与工具栏整改验证（2026-10-23）
+
+* Runtime 定向回归 58 项通过；几何与颜色回归在旧实现上失败。CPU/CUDA/auto 六组生产 adapter 推理通过。
+* 完整质量入口的 Ruff、生成一致性、OpenAPI 与协议检查通过；Python 3539 passed、17 skipped、2 deselected，仅一项临时目录重命名遇到 Windows `WinError 5`。该原测试单独复查通过，完整入口未一次全绿。
+* Web 全量格式、Lint、类型检查和 782 项单测通过。浏览器全量 247 passed、两项旧视觉基线失败；核对新旧界面、补齐默认文字层的测试模拟响应后，仅更新两张受影响基线，原测试复查通过。
+* 独立审阅发现的对象选框重绘、初始裁剪手柄避让、慢上传后新修订漏准备均补充旧实现失败的回归。裁剪与标注手柄共用 12px 命中边界；最后对象边界增量 13 项单测、此前 2 项真实边界拖动和上述 2 项视觉测试通过；构建及 `verify_web_assets.py` 通过。
+* C# 定向 12 项通过，覆盖自动文字层不准备运行环境、显式贴图取字保持准备能力及会话去重。原生 GUI smoke 本轮未重跑，完整打包与桌面 GUI 门禁以本次提交的 PR CI 为准。
+
 ## 未验证范围
 
 * RapidTable 多 worker 并行（表格任务多为单图，单实例保序，不开启）。

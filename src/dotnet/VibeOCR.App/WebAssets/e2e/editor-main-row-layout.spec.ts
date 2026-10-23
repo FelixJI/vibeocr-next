@@ -73,7 +73,7 @@ test("窄面板：主排按钮单行文字、图标24px、单行滚动到末尾�
   expect(squashed).toEqual([]);
 
   // 中文标签按钮（识别当前图）内容单行：按钮高度与短标签按钮一致量级。
-  const recognize = main.getByRole("button", { name: "文字识别" });
+  const recognize = main.getByRole("button", { name: "识别文字" });
   const recognizeHeight = await recognize.evaluate(
     (element) => element.getBoundingClientRect().height,
   );

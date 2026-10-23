@@ -2,6 +2,12 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 import { expectCommand, mountHost } from "./workbench-host";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/__annotation/*", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+});
+
 interface DecodedImage {
   width: number;
   height: number;
@@ -175,7 +181,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
       ).size,
   );
   // 主排承载全部工具与操作，始终单行（过宽时容器内滚动）。
-  expect(actionRows).toBe(1);
+  expect(actionRows).toBeGreaterThan(1);
   // 现场工具按钮按用户要求以纯中文文字呈现（无 SVG 图标）。
   await expect(
     page.getByRole("button", { name: "矩形", exact: true }),
@@ -251,7 +257,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]?.readUInt32BE(16)).toBe(900);
   expect(uploads[0]?.readUInt32BE(20)).toBe(400);
-  await page.getByRole("button", { name: "文字识别" }).click();
+  await page.getByRole("button", { name: "识别文字" }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "recognizeScreenshotImage",

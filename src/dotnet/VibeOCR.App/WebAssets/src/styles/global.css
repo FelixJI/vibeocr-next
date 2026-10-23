@@ -1147,8 +1147,9 @@ select {
   /* 顶部对齐：两排内容高于高度窗口时滚动从首排可达（居中会把顶部溢出卷成不可达）。 */
   align-items: flex-start;
   gap: 4px;
-  width: max-content;
+  width: min(760px, calc(100vw - var(--capture-tools-left)));
   max-width: calc(100vw - var(--capture-tools-left));
+  box-sizing: border-box;
 }
 .capture-scene-editor > .editor-toolbar-stack {
   flex-basis: 100%;
@@ -1172,6 +1173,74 @@ select {
 .editor-toolbar-main > * {
   flex-shrink: 0;
   white-space: nowrap;
+}
+.editor-tools-group,
+.editor-actions-group {
+  display: contents;
+}
+.editor-tools-group > *,
+.editor-actions-group > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.capture-scene-editor .editor-toolbar-main {
+  flex-direction: column;
+  align-items: stretch;
+  overflow: visible;
+}
+.capture-scene-editor .editor-tools-group,
+.capture-scene-editor .editor-actions-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  white-space: normal;
+}
+.capture-scene-editor .editor-actions-group {
+  border-top: 1px solid var(--colorNeutralStroke2);
+  padding-top: 6px;
+  margin-top: 5px;
+}
+.capture-scene-editor .editor-toolbar button {
+  min-height: 28px;
+  padding-inline: 5px;
+  white-space: nowrap;
+}
+.editor-recognition-status {
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
+}
+.editor-recognition-status summary {
+  cursor: pointer;
+}
+.editor-recognition-status p {
+  margin: 4px 0;
+}
+.composition-output-frame {
+  position: relative;
+  width: max-content;
+  max-width: 100%;
+  grid-column: 1 / -1;
+}
+.composition-output-frame > img {
+  display: block;
+}
+.editor-composition-text-hint {
+  font-size: 12px;
+  margin: 4px 0;
+  max-width: 100%;
+}
+.canvas-stage > .editor-selectable-text {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 1;
+}
+.capture-scene-editor .canvas-stage > .editor-selectable-text {
+  left: 0;
+  transform: none;
 }
 .editor-toolbar-main svg {
   flex: none;

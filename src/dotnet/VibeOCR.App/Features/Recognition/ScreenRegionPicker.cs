@@ -245,7 +245,6 @@ public sealed class ScreenRegionPicker(
       ("模糊", "blur", "模糊：高斯模糊遮挡"),
       ("屏蔽", "exclude", "屏蔽：白块遮挡敏感区域（不进识别）"),
       ("去水印", "inpaint", "去水印：框选后智能修补"),
-      ("取字", "textSelect", "取字：选择截图中的文字"),
     ];
 
     private const long MaximumCaptureBytes = 256L << 20;

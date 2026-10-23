@@ -2265,10 +2265,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         existing.SessionId == command.SessionId.ToString("N") && existing.Revision == command.Revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready")
       return SessionState(channel, false, SessionStatusCode(channel));
-    if (ensureRuntimeReady is null || inferenceAttached?.Invoke() != false)
+    if (inferenceAttached?.Invoke() != false)
       await selectionPolicy.EnsureSelectionLoadedAsync(cancellationToken);
-    if ((ensureRuntimeReady is null && inferenceAttached?.Invoke() == false) ||
-        (settingsOwner.CurrentModel?.RecognitionSelection is not null && FindReadyLocalTextMode(out _) is null))
+    if (inferenceAttached?.Invoke() == false || FindReadyLocalTextMode(out _) is null)
     {
       _ = FindReadyLocalTextMode(out string? reason);
       channel.TextLayer = new RecognitionTextLayerState("textlayer.unavailable",
@@ -2303,8 +2302,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         mediaType = annotation.MediaType;
       }
       else png = pinnedPng;
-      if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(ct))
-        throw new OperationCanceledException(ct);
+      // 自动文字层只使用已连接服务；不能借提交入口安装或启动运行环境。
+      if (!await selectionPolicy.EnsureSelectionLoadedAsync(ct))
+      {
+        if (generation == Volatile.Read(ref channel.TextGeneration))
+          PublishTextLayerState(channel, "textlayer.unavailable", "textlayer.serviceUnavailable");
+        return;
+      }
       ct.ThrowIfCancellationRequested();
       if (generation != Volatile.Read(ref channel.TextGeneration)) return;
       ValidateScreenshotSession(channel, command.SessionId, command.Revision);
@@ -2357,6 +2361,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         binding.SessionId == sessionId.ToString("N") &&
         binding.Revision == revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready") return null;
+      // 贴图菜单是显式用户动作，保留准备 Runtime 的既有行为。
+      if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+        throw new PinnedTextPreparationException("本地识别服务尚未就绪。");
       byte[] activePng = await File.ReadAllBytesAsync(imagePath, cancellationToken);
       WorkbenchState? started = await PrepareScreenshotTextLayerAsync(
         channel,

@@ -1200,7 +1200,7 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
     expect(rect.x + rect.width).toBeLessThanOrEqual(1000);
     expect(rect.y + rect.height).toBeLessThanOrEqual(1000);
   }
-  await page.getByRole("button", { name: "取字", exact: true }).click();
+  await page.getByRole("button", { name: "选择", exact: true }).click();
   await expect
     .poll(async () =>
       (await commands(page)).some(
@@ -1240,13 +1240,17 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
       ],
     },
   });
-  await expect(page.getByText("kept", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator(".composition-output-frame")
+      .getByText("kept", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("masked base", { exact: true })).toHaveCount(0);
   await expect(page.getByText("masked reused", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("排版背景", { exact: true }).selectOption("image");
   const before = uploads.length;
-  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect(
     page.getByText(/整张图都在屏蔽区内：没有可识别内容/),
   ).toBeVisible();
@@ -1254,7 +1258,7 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   await page
     .getByLabel("排版背景", { exact: true })
     .selectOption("transparent");
-  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(before + 1);
   expect(uploads.at(-1)!.bytes).toEqual(uploads[0]!.bytes);
   await expect(
@@ -1341,7 +1345,7 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     expect(rect.x + rect.width).toBeLessThanOrEqual(1000);
     expect(rect.y + rect.height).toBeLessThanOrEqual(1000);
   }
-  await page.getByRole("button", { name: "取字", exact: true }).click();
+  await page.getByRole("button", { name: "选择", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(4);
   const masked = await pixels(
     page,
@@ -1372,14 +1376,18 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
       ],
     },
   });
-  await expect(page.getByText("lens-kept", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator(".composition-output-frame")
+      .getByText("lens-kept", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("lens-masked", { exact: true })).toHaveCount(0);
   await page.screenshot({
     path: info.outputPath("composition-magnifier-mask.png"),
     fullPage: true,
   });
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(5);
   expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
   // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
@@ -1412,20 +1420,20 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
     return size;
   }, uploads[0]!.bytes.toString("base64"));
   expect(dimensions).toEqual([20000, 100]);
-  await page.getByRole("button", { name: "取字", exact: true }).click();
+  await page.getByRole("button", { name: "选择", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(4);
   expect(uploads[3]!.bytes).toEqual(uploads[0]!.bytes);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByRole("button", { name: "画布排版", exact: true }).click();
   await page.getByLabel("排版边距", { exact: true }).fill("1");
-  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect(page.getByText(/排版输出超出上限/).first()).toBeVisible();
   expect(uploads.length).toBe(4);
   await page
     .getByRole("toolbar", { name: "图片编辑工具", exact: true })
     .getByRole("button", { name: "重置排版", exact: true })
     .click();
-  await page.getByRole("button", { name: "文字识别", exact: true }).click();
+  await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(5);
   expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
   // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
@@ -1767,4 +1775,109 @@ test("宿主图片租约释放不被静态资源代理覆盖", async ({ page }) 
     return response.status;
   }, annotation);
   expect(status).toBe(204);
+});
+
+test("完整排版预览默认可选副本和背景文字，修改后旧层立即失效", async ({
+  page,
+}) => {
+  const { state, imported } = await setup(
+    page,
+    {},
+    { width: 800, height: 400 },
+  );
+  await sendState(page, "imageEdit", {
+    ...state,
+    import: {
+      requestId: "text-composition",
+      sessionId: SESSION,
+      revision: 0,
+      items: [
+        {
+          kind: "image",
+          assetId: ASSET,
+          resourceUri: "https://app.vibeocr/__resource/composition-asset.png",
+          byteLength: imported.length,
+          pixelWidth: 20,
+          pixelHeight: 10,
+        },
+      ],
+    },
+  });
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "ackImport",
+    arguments: {
+      sessionId: SESSION,
+      revision: 0,
+      requestId: "text-composition",
+    },
+  });
+  await page.getByRole("button", { name: "画布排版", exact: true }).click();
+  await page.getByLabel("排版边距", { exact: true }).fill("10");
+  await page.getByLabel("多图拼接", { exact: true }).selectOption("horizontal");
+  const preview = page.getByAltText("排版输出预览");
+  await expect
+    .poll(() => preview.evaluate((img: HTMLImageElement) => img.naturalWidth))
+    .toBe(840);
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  const revision = (await commands(page))
+    .filter((c) => c.action === "notifyScreenshotRevision")
+    .at(-1)!.arguments.revision;
+  const bytes = await preview.evaluate((img: HTMLImageElement) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext("2d")!.drawImage(img, 0, 0);
+    return canvas.toDataURL("image/png").split(",")[1]!;
+  });
+  await page.route("**/composed-text.png", (route) =>
+    route.fulfill({
+      contentType: "image/png",
+      body: Buffer.from(bytes, "base64"),
+    }),
+  );
+  await sendState(page, "imageEdit", {
+    ...state,
+    screenshotSession: { sessionId: SESSION, revision },
+    textLayer: {
+      status: "textlayer.ready",
+      binding: { sessionId: SESSION, revision },
+      image: {
+        url: "https://app.vibeocr/__resource/composed-text.png",
+        mediaType: "image/png",
+        byteLength: bytes.length,
+      },
+      lines: [
+        { text: "原图文字", x1: 100, y1: 100, x2: 400, y2: 200 },
+        { text: "副本与背景文字", x1: 965, y1: 100, x2: 995, y2: 200 },
+      ],
+    },
+  });
+  const output = page.locator(".composition-output-frame");
+  await expect(output.getByText("原图文字", { exact: true })).toBeVisible();
+  const copyLine = output.getByText("副本与背景文字", { exact: true });
+  await expect(copyLine).toBeVisible();
+  await copyLine.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = document.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.screenshot({
+    path: test.info().outputPath("composition-selectable-text.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "复制所选", exact: true }).click();
+  await expectCommand(page, {
+    scope: "imageEdit",
+    action: "copyScreenshotSelection",
+    arguments: { sessionId: SESSION, revision, text: "副本与背景文字" },
+  });
+  await page.getByLabel("排版边距", { exact: true }).fill("20");
+  await expect(output.locator(".image-text-layer")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "复制所选", exact: true }),
+  ).toHaveCount(0);
 });

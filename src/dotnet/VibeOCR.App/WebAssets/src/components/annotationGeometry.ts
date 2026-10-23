@@ -150,6 +150,21 @@ export interface CanvasSize {
   readonly height: number;
 }
 
+/** 标注/裁剪手柄的命中半径，包含边界；单位为画布坐标。 */
+export const ANNOTATION_HANDLE_HIT_RADIUS = 12;
+
+/** 已提交裁剪优先；截图现场初始裁剪基准是整幅选区。 */
+export function cropAdjustBase(
+  state: Pick<EditorState, "crop">,
+  size: CanvasSize,
+  scene: boolean,
+): EditorState["crop"] {
+  if (state.crop) return state.crop;
+  return scene
+    ? { start: { x: 0, y: 0 }, end: { x: size.width, y: size.height } }
+    : undefined;
+}
+
 /** 左上角 + 宽高的轴对齐矩形；屏蔽几何的公共交换形状。 */
 export interface Rect {
   readonly x: number;
