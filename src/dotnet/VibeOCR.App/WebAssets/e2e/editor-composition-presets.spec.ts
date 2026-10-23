@@ -70,25 +70,44 @@ async function pixels(page: Page, url: string) {
     };
   }, url);
 }
-// 预览采样直接持有当前 DOM 的 <img>：locator.evaluate 原子取元素并等
-// decode 就绪，不经 blob URL 字符串往返，避免两次 evaluate 之间预览重渲
-// 换 blob 后读到陈旧/已撤销引用。
+// 在 load 回调中同步采样当前 DOM 图片，避免 decode 被换 src 取消。
 async function previewPixels(preview: Locator) {
-  return preview.evaluate(async (image: HTMLImageElement) => {
-    await image.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(image, 0, 0);
-    return {
-      width: canvas.width,
-      height: canvas.height,
-      data: Array.from(
-        ctx.getImageData(0, 0, canvas.width, canvas.height).data,
+  return preview.evaluate(
+    (image: HTMLImageElement) =>
+      new Promise<{ width: number; height: number; data: number[] }>(
+        (resolve, reject) => {
+          const clear = () => {
+            image.removeEventListener("load", sample);
+            image.removeEventListener("error", fail);
+          };
+          const fail = () => {
+            clear();
+            reject(new Error("排版输出预览加载失败"));
+          };
+          const sample = () => {
+            clear();
+            if (!image.naturalWidth) return fail();
+            const canvas = document.createElement("canvas");
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            const ctx = canvas.getContext("2d")!;
+            ctx.drawImage(image, 0, 0);
+            resolve({
+              width: canvas.width,
+              height: canvas.height,
+              data: Array.from(
+                ctx.getImageData(0, 0, canvas.width, canvas.height).data,
+              ),
+            });
+          };
+          if (image.complete) sample();
+          else {
+            image.addEventListener("load", sample);
+            image.addEventListener("error", fail);
+          }
+        },
       ),
-    };
-  });
+  );
 }
 function at(image: { width: number; data: number[] }, x: number, y: number) {
   return image.data.slice(

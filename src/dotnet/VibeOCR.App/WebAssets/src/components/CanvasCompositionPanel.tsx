@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Input, Select } from "@fluentui/react-components";
 import {
   DEFAULT_COMPOSITION,
@@ -52,27 +52,45 @@ export function CanvasCompositionPanel({
     width?: number;
     height?: number;
   }>({});
+  // 新预览加载前旧图仍可见，不能在渲染任务被替换时撤销其 URL。
+  const liveUrlRef = useRef<string | undefined>(undefined);
+  const retiredUrlsRef = useRef<string[]>([]);
   const renderCurrent = useEffectEvent(render);
   useEffect(() => {
-    let cancelled = false,
-      url: string | undefined;
+    let cancelled = false;
     void renderCurrent()
       .then((blob) => {
         if (cancelled) return;
-        url = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(blob);
+        if (liveUrlRef.current) retiredUrlsRef.current.push(liveUrlRef.current);
+        liveUrlRef.current = url;
         setPreview({ url });
       })
       .catch((error: unknown) => {
-        if (!cancelled)
-          setPreview({
-            error: error instanceof Error ? error.message : "排版预览失败",
-          });
+        if (cancelled) return;
+        setPreview({
+          error: error instanceof Error ? error.message : "排版预览失败",
+        });
       });
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [value, revision]);
+  useEffect(() => {
+    if (preview.url) return;
+    if (liveUrlRef.current) URL.revokeObjectURL(liveUrlRef.current);
+    liveUrlRef.current = undefined;
+    for (const retired of retiredUrlsRef.current.splice(0))
+      URL.revokeObjectURL(retired);
+  }, [preview.url]);
+  useEffect(
+    () => () => {
+      if (liveUrlRef.current) URL.revokeObjectURL(liveUrlRef.current);
+      for (const retired of retiredUrlsRef.current.splice(0))
+        URL.revokeObjectURL(retired);
+    },
+    [],
+  );
   const update = (patch: Partial<CanvasComposition>) =>
     onChange({ ...settings, ...patch });
   return (
@@ -296,9 +314,12 @@ export function CanvasCompositionPanel({
       ) : preview.url ? (
         <img
           onLoad={(event) => {
+            if (event.currentTarget.src !== liveUrlRef.current) return;
             const width = event.currentTarget.naturalWidth,
               height = event.currentTarget.naturalHeight;
             setPreview((current) => ({ ...current, width, height }));
+            for (const retired of retiredUrlsRef.current.splice(0))
+              URL.revokeObjectURL(retired);
           }}
           alt="排版输出预览"
           src={preview.url}
