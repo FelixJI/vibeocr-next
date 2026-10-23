@@ -259,6 +259,39 @@ public sealed class PdfViewModelSupervisorTests
   }
 
   [Fact]
+  public async Task PaddleOnnxPdfPresetAndProviderFreezeBeforeRendering()
+  {
+    var gate = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var fake = new FakePdfInference { PendingRender = gate.Task };
+    var viewModel = new PdfViewModel(fake, new StubPdfSource());
+    var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
+      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      ["model_preset", "device"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode,
+      new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
+    await viewModel.OpenPathAsync("test.pdf", TestContext.Current.CancellationToken);
+    Task running = viewModel.StartOcrAsync([0, 1], false, TestContext.Current.CancellationToken);
+    Assert.Equal(1, fake.RenderCalls);
+    Assert.Equal(0, fake.SubmitCalls);
+    viewModel.SetRecognitionMode(mode,
+      new PaddleModeOptions { ModelPreset = "tiny", Device = "directml" });
+    gate.SetResult([1, 2, 3]);
+    await running;
+
+    SubmitRequest first = Assert.IsType<SubmitRequest>(fake.LastRequest);
+    Assert.Equal(1, fake.SubmitCalls);
+    Assert.Equal(2, first.Items.Count);
+    Assert.Equal("medium", first.Pipeline.Options["model_preset"].GetString());
+    Assert.Equal("cpu", first.Pipeline.Options["device"].GetString());
+    Assert.All(viewModel.Pages, page => Assert.Equal(PdfPageState.Done, page.State));
+    await viewModel.StartOcrAsync([0], false, TestContext.Current.CancellationToken);
+    Assert.Equal(2, fake.SubmitCalls);
+    Assert.Equal("tiny", fake.LastRequest!.Pipeline.Options["model_preset"].GetString());
+    Assert.Equal("directml", fake.LastRequest.Pipeline.Options["device"].GetString());
+    Assert.Equal("medium", first.Pipeline.Options["model_preset"].GetString());
+  }
+
+  [Fact]
   public async Task RecognitionModeRoutesPdfPagesThroughItsBoundPipeline()
   {
     var fake = new FakePdfInference();

@@ -57,6 +57,50 @@ public sealed class BatchViewModelSupervisorTests
     }
 
     [Fact]
+    public async Task PaddleOnnxBatchPresetAndProviderFreezeBeforeInputLoading()
+    {
+        string root = NewTempDirectory();
+        try
+        {
+            var gate = new TaskCompletionSource<(byte[] Data, string MediaType)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var files = new FakeBatchFileSource { PendingRead = gate.Task };
+            var fake = new FakeBatchInferenceClient();
+            var viewModel = new BatchViewModel(fake, files);
+            var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
+                OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+                ["model_preset", "device"], "model_residency", true, true, true, true);
+            viewModel.SetRecognitionMode(mode,
+                options: new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
+            viewModel.AddFiles([CreateTempInput(root, "a", ".png"), CreateTempInput(root, "b", ".png")]);
+            Task running = viewModel.StartAsync(TestContext.Current.CancellationToken);
+            await files.ReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(0, fake.SubmitCalls);
+            viewModel.SetRecognitionMode(mode,
+                options: new PaddleModeOptions { ModelPreset = "tiny", Device = "directml" });
+            gate.SetResult(([1, 2, 3], "image/png"));
+            await running;
+
+            SubmitRequest first = Assert.Single(fake.Jobs).Request;
+            Assert.Equal(2, first.Items.Count);
+            Assert.Equal("medium", first.Pipeline.Options["model_preset"].GetString());
+            Assert.Equal("cpu", first.Pipeline.Options["device"].GetString());
+            Assert.Equal(2, viewModel.CompletedCount);
+            viewModel.AddFiles([CreateTempInput(root, "c", ".png")]);
+            await viewModel.StartAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(2, fake.SubmitCalls);
+            Assert.Single(fake.Jobs[1].Request.Items);
+            Assert.Equal("tiny", fake.Jobs[1].Request.Pipeline.Options["model_preset"].GetString());
+            Assert.Equal("directml", fake.Jobs[1].Request.Pipeline.Options["device"].GetString());
+            Assert.Equal("medium", first.Pipeline.Options["model_preset"].GetString());
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SupervisorPathContinuesOnPerItemFailure()
     {
         // Item 1 fails (ErrorCode set); items 0 and 2 still complete.
@@ -720,10 +764,14 @@ public sealed class BatchViewModelSupervisorTests
         public Task<IReadOnlyList<string>> PickFilesAsync(CancellationToken cancellationToken)
             => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 
+        public Task<(byte[] Data, string MediaType)>? PendingRead { get; init; }
+        public TaskCompletionSource ReadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public Task<(byte[] Data, string MediaType)> ReadAsync(string path, CancellationToken cancellationToken)
         {
+            ReadEntered.TrySetResult();
             if (_readFailures.TryGetValue(path, out Exception? failure)) throw failure;
-            return Task.FromResult((File.ReadAllBytes(path), BatchCommands.MediaType(Path.GetExtension(path))));
+            return PendingRead ?? Task.FromResult((File.ReadAllBytes(path), BatchCommands.MediaType(Path.GetExtension(path))));
         }
     }
 
