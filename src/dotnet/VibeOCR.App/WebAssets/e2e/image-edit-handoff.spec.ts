@@ -1,3 +1,4 @@
+import { recordAnnotationUploads } from "./annotation-uploads";
 import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -72,21 +73,8 @@ for (const [label, modeId] of [
   }, testInfo) => {
     test.setTimeout(120_000);
     await page.setViewportSize({ width: 1280, height: 900 });
-    const uploads: { contentType: string; body: Buffer }[] = [];
-    await page.route("**/__annotation", async (route) => {
-      uploads.push({
-        contentType: route.request().headers()["content-type"] ?? "",
-        body: route.request().postDataBuffer() ?? Buffer.alloc(0),
-      });
-      await route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify({
-          resourceUri:
-            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-        }),
-      });
-    });
+    const uploads = await recordAnnotationUploads(page, "imageEdit");
+
     // 80×40：左半透明、右半红；旋转 90° 后输出 40×80。
     await page.route("**/handoff-source.svg", (route) =>
       route.fulfill({
@@ -174,8 +162,10 @@ for (const [label, modeId] of [
     });
     // 显式识别：上传未烘焙普通最终像素 + 归一化排除框。
     await page.getByRole("button", { name: label }).click();
-    await expect.poll(() => uploads.length).toBe(1);
-    expect(uploads[0]!.contentType).toBe("image/png");
+    const recognizedUpload = await uploads.submitted(
+      "recognizeScreenshotImage",
+    );
+    expect(recognizedUpload.contentType).toBe("image/png");
     // 上传被接收不代表响应已返回；交接命令在取得资源 URI 后才会发出。
     await expectCommand(page, {
       scope: "imageEdit",
@@ -198,7 +188,7 @@ for (const [label, modeId] of [
       ),
     );
     expect(recognizeCommand?.arguments.excludeBoxes).toHaveLength(1);
-    const frozenBytes = uploads[0]!.body;
+    const frozenBytes = recognizedUpload.body;
     const frozen = await decodeUpload(page, frozenBytes, "image/png");
     expect(frozen.width).toBe(40);
     expect(frozen.height).toBe(80);
@@ -238,8 +228,12 @@ for (const [label, modeId] of [
 
     // 导出普通图：内容/方向/尺寸与冻结基准一致（清空遮罩不改变像素）。
     await page.getByRole("button", { name: "保存标注图" }).click();
-    await expect.poll(() => uploads.length).toBe(2);
-    const exported = await decodeUpload(page, uploads[1]!.body, "image/png");
+    const savedUpload = await uploads.submitted(
+      "saveScreenshotImage",
+      0,
+      "recognition",
+    );
+    const exported = await decodeUpload(page, savedUpload.body, "image/png");
     expect(exported.width).toBe(40);
     expect(exported.height).toBe(80);
     expect(exported.pixels).toEqual(frozen.pixels);

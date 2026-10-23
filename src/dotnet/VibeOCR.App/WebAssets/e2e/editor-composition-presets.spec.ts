@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
+import { recordAnnotationUploads } from "./annotation-uploads";
 import {
   deferCommand,
   expectCommand,
@@ -148,7 +149,7 @@ async function setup(
 
   const base = await png(page, size.width, size.height, true),
     imported = await png(page, 20, 10);
-  const uploads: { contentType: string; bytes: Buffer }[] = [];
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
   const projects: Record<string, unknown>[] = [];
   await page.route("**/composition-source.png", (route) =>
     route.fulfill({ contentType: "image/png", body: base }),
@@ -156,17 +157,6 @@ async function setup(
   await page.route("**/composition-asset.png", (route) =>
     route.fulfill({ contentType: "image/png", body: imported }),
   );
-  await page.route("**/__annotation", async (route) => {
-    uploads.push({
-      contentType: route.request().headers()["content-type"] ?? "",
-      bytes: route.request().postDataBuffer()!,
-    });
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({ resourceUri: annotation }),
-    });
-  });
   await page.route("**/__project", async (route) => {
     projects.push(route.request().postDataJSON() as Record<string, unknown>);
     await route.fulfill({
@@ -200,6 +190,8 @@ async function setup(
   await expect(
     page.getByText(new RegExp(`原图 ${size.width}×${size.height}`)),
   ).toBeVisible();
+  const automatic = await uploads.forRevision("prepareScreenshotTextLayer", 0);
+  await uploads.waitForDiscard(automatic.resourceUri);
   return { uploads, projects, state, imported };
 }
 
@@ -231,10 +223,10 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
   expect(at(expected, 15, 20)).toEqual([255, 0, 0, 255]);
   expect(at(expected, 45, 20)).toEqual([0, 0, 255, 255]);
   await page.getByRole("button", { name: "保存标注图", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const savedUpload = await uploads.submitted("saveScreenshotImage");
   const exported = await pixels(
     page,
-    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${savedUpload.body.toString("base64")}`,
   );
   expect(exported).toEqual(expected);
   await page.getByRole("button", { name: "撤销", exact: true }).click();
@@ -391,10 +383,10 @@ test("离开图像背景解除绑定：旧背景资产可拼接且删除对象�
   const expected = await previewPixels(preview());
   expect(at(expected, 5, 5)).toEqual([17, 34, 51, 255]);
   await page.getByRole("button", { name: "保存标注图", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const savedUpload = await uploads.submitted("saveScreenshotImage");
   const exported = await pixels(
     page,
-    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${savedUpload.body.toString("base64")}`,
   );
   expect(exported).toEqual(expected);
 });
@@ -459,18 +451,18 @@ test("常用预设绑定语义快照，复制失败不关闭，成功 ack 后关
     fullPage: true,
   });
   await presetSave.click();
-  await expect.poll(() => uploads.length).toBe(1);
-  expect(uploads[0]!.contentType).toBe("image/jpeg");
+  const presetUpload = await uploads.submitted("savePresetImage");
+  expect(presetUpload.contentType).toBe("image/jpeg");
   const image = await pixels(
     page,
-    `data:image/jpeg;base64,${uploads[0]!.bytes.toString("base64")}`,
+    `data:image/jpeg;base64,${presetUpload.body.toString("base64")}`,
   );
   expect([image.width, image.height]).toEqual([40, 20]);
   await expectCommand(page, {
     scope: "imageEdit",
     action: "savePresetImage",
     arguments: {
-      resourceUri: annotation,
+      resourceUri: presetUpload.resourceUri,
       presetId: "default",
       presetBinding: {
         preset: preferences.output,
@@ -1166,17 +1158,17 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
     )
     .toBe(80);
   await page.getByRole("button", { name: "复制标注图", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const ordinaryUpload = await uploads.submitted("copyScreenshotImage");
   const normal = await pixels(
     page,
-    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${ordinaryUpload.body.toString("base64")}`,
   );
   expect([normal.width, normal.height]).toEqual([80, 60]);
   expect(at(normal, 25, 30)).toEqual([255, 0, 0, 255]);
   expect(at(normal, 65, 30)).toEqual([0, 255, 0, 255]);
   await page.getByRole("button", { name: "贴图", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(2);
-  expect(uploads[1]!.bytes).toEqual(uploads[0]!.bytes);
+  const pinUpload = await uploads.submitted("pinScreenshotImage");
+  expect(pinUpload.body).toEqual(ordinaryUpload.body);
   const pin = (await commands(page)).find(
     (command) => command.action === "pinScreenshotImage",
   )!;
@@ -1208,16 +1200,16 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
       ),
     )
     .toBe(true);
-  await expect.poll(() => uploads.length).toBe(3);
+  const textUpload = await uploads.currentText();
   const masked = await pixels(
     page,
-    `data:image/png;base64,${uploads[2]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${textUpload.body.toString("base64")}`,
   );
   expect(at(masked, 25, 30)).toEqual([255, 255, 255, 255]);
   expect(at(masked, 65, 30)).toEqual([255, 255, 255, 255]);
   expect(at(masked, 15, 30)).toEqual(at(normal, 15, 30));
   await page.route("**/composition-layer.png", (route) =>
-    route.fulfill({ contentType: "image/png", body: uploads[2]!.bytes }),
+    route.fulfill({ contentType: "image/png", body: textUpload.body }),
   );
   const revision = (await commands(page))
     .filter((command) => command.action === "notifyScreenshotRevision")
@@ -1231,7 +1223,7 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
       image: {
         url: "https://app.vibeocr/composition-layer.png",
         mediaType: "image/png",
-        byteLength: uploads[2]!.bytes.length,
+        byteLength: textUpload.body.length,
       },
       lines: [
         { text: "kept", x1: 120, y1: 350, x2: 200, y2: 500 },
@@ -1249,18 +1241,18 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   await expect(page.getByText("masked reused", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("排版背景", { exact: true }).selectOption("image");
-  const before = uploads.length;
+  const before = uploads.count();
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect(
     page.getByText(/整张图都在屏蔽区内：没有可识别内容/),
   ).toBeVisible();
-  expect(uploads.length).toBe(before);
+  expect(uploads.count()).toBe(before);
   await page
     .getByLabel("排版背景", { exact: true })
     .selectOption("transparent");
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(before + 1);
-  expect(uploads.at(-1)!.bytes).toEqual(uploads[0]!.bytes);
+  const recognizedUpload = await uploads.submitted("recognizeScreenshotImage");
+  expect(recognizedUpload.body).toEqual(ordinaryUpload.body);
   await expect(
     page.getByRole("heading", { name: "单次识别", exact: true }),
   ).toBeVisible();
@@ -1311,14 +1303,20 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
         .evaluate((image: HTMLImageElement) => image.naturalWidth),
     )
     .toBe(60);
+  const ordinary: Buffer[] = [];
   for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
     await page.getByRole("button", { name, exact: true }).click();
-    await expect.poll(() => uploads.length).toBe(index + 1);
-    if (index > 0) expect(uploads[index]!.bytes).toEqual(uploads[0]!.bytes);
+    const upload = await uploads.submitted(
+      ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
+        index
+      ]!,
+    );
+    ordinary.push(upload.body);
+    if (index > 0) expect(ordinary[index]).toEqual(ordinary[0]);
   }
   const normal = await pixels(
     page,
-    `data:image/png;base64,${uploads[0]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${ordinary[0]!.toString("base64")}`,
   );
   expect([normal.width, normal.height]).toEqual([60, 60]);
   expect(at(normal, 27, 30)).toEqual([0, 255, 0, 255]);
@@ -1346,15 +1344,15 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     expect(rect.y + rect.height).toBeLessThanOrEqual(1000);
   }
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(4);
+  const textUpload = await uploads.currentText();
   const masked = await pixels(
     page,
-    `data:image/png;base64,${uploads[3]!.bytes.toString("base64")}`,
+    `data:image/png;base64,${textUpload.body.toString("base64")}`,
   );
   expect(at(masked, 27, 30)).toEqual([255, 255, 255, 255]);
   expect(at(masked, 15, 30)).toEqual(at(normal, 15, 30));
   await page.route("**/lens-composition-layer.png", (route) =>
-    route.fulfill({ contentType: "image/png", body: uploads[3]!.bytes }),
+    route.fulfill({ contentType: "image/png", body: textUpload.body }),
   );
   const revision = (await commands(page))
     .filter((command) => command.action === "notifyScreenshotRevision")
@@ -1368,7 +1366,7 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
       image: {
         url: "https://app.vibeocr/lens-composition-layer.png",
         mediaType: "image/png",
-        byteLength: uploads[3]!.bytes.length,
+        byteLength: textUpload.body.length,
       },
       lines: [
         { text: "lens-kept", x1: 200, y1: 400, x2: 250, y2: 600 },
@@ -1388,8 +1386,8 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
   });
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(5);
-  expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+  const recognizedUpload = await uploads.submitted("recognizeScreenshotImage");
+  expect(recognizedUpload.body).toEqual(ordinary[0]!);
   // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
   await expect(
     page.getByRole("heading", { name: "单次识别", exact: true }),
@@ -1404,10 +1402,16 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
   page,
 }) => {
   const { uploads } = await setup(page, {}, { width: 20000, height: 100 });
+  const ordinary: Buffer[] = [];
   for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
     await page.getByRole("button", { name, exact: true }).click();
-    await expect.poll(() => uploads.length).toBe(index + 1);
-    if (index > 0) expect(uploads[index]!.bytes).toEqual(uploads[0]!.bytes);
+    const upload = await uploads.submitted(
+      ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
+        index
+      ]!,
+    );
+    ordinary.push(upload.body);
+    if (index > 0) expect(ordinary[index]).toEqual(ordinary[0]);
   }
   const dimensions = await page.evaluate(async (base64) => {
     const bitmap = await createImageBitmap(
@@ -1418,24 +1422,31 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
     const size = [bitmap.width, bitmap.height];
     bitmap.close();
     return size;
-  }, uploads[0]!.bytes.toString("base64"));
+  }, ordinary[0]!.toString("base64"));
   expect(dimensions).toEqual([20000, 100]);
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(4);
-  expect(uploads[3]!.bytes).toEqual(uploads[0]!.bytes);
+  const textUpload = await uploads.currentText();
+  expect(textUpload.body).toEqual(ordinary[0]!);
+  const beforeInvalidComposition = uploads.count();
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByRole("button", { name: "画布排版", exact: true }).click();
   await page.getByLabel("排版边距", { exact: true }).fill("1");
+  // 自动准备先在尺寸校验处拒绝；操作状态来自真实 prepare 终态，非预览报错。
+  await expect(page.locator(".editor-operation-status")).toContainText(
+    "排版输出超出上限",
+  );
+  expect(uploads.count()).toBe(beforeInvalidComposition);
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect(page.getByText(/排版输出超出上限/).first()).toBeVisible();
-  expect(uploads.length).toBe(4);
+  expect(uploads.count()).toBe(beforeInvalidComposition);
+  expect(await uploads.commands("recognizeScreenshotImage")).toHaveLength(0);
   await page
     .getByRole("toolbar", { name: "图片编辑工具", exact: true })
     .getByRole("button", { name: "重置排版", exact: true })
     .click();
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(5);
-  expect(uploads[4]!.bytes).toEqual(uploads[0]!.bytes);
+  const recognizedUpload = await uploads.submitted("recognizeScreenshotImage");
+  expect(recognizedUpload.body).toEqual(ordinary[0]!);
   // 收到上传不等于识别交接完成；等待导航落地后再清理异步资源路由。
   await expect(
     page.getByRole("heading", { name: "单次识别", exact: true }),
@@ -1545,12 +1556,12 @@ test("复制的图片对象逐份拼接，撤销与删除一份保持出现次�
     ),
   ).toHaveLength(2);
   await page.getByRole("button", { name: "保存标注图", exact: true }).click();
-  await expect.poll(() => uploads.length).toBe(1);
+  const savedUpload = await uploads.submitted("saveScreenshotImage");
   expect(
     (
       await pixels(
         page,
-        "data:image/png;base64," + uploads[0]!.bytes.toString("base64"),
+        "data:image/png;base64," + savedUpload.body.toString("base64"),
       )
     ).width,
   ).toBe(120);

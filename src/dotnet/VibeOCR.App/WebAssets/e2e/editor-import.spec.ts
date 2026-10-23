@@ -1,3 +1,4 @@
+import { recordAnnotationUploads } from "./annotation-uploads";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import type { HostCommand } from "../src/bridge/client";
@@ -93,18 +94,8 @@ for (const scope of ["imageEdit", "recognition"] as const) {
     await page.route("**/__resource/bad-png", (route) =>
       route.fulfill({ contentType: "image/png", body: "not a PNG" }),
     );
-    const uploads: Buffer[] = [];
-    await page.route("**/__annotation", async (route) => {
-      uploads.push(route.request().postDataBuffer()!);
-      await route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify({
-          resourceUri:
-            "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-        }),
-      });
-    });
+    const uploads = await recordAnnotationUploads(page, scope);
+
     const state = {
       isBusy: false,
       statusCode: "recognition.completed",
@@ -177,10 +168,10 @@ for (const scope of ["imageEdit", "recognition"] as const) {
     const list = page.getByLabel("选择标注对象");
     await expect(list.locator("option")).toHaveCount(3);
     const save = async (name: string, width = 900, height = 600) => {
-      const index = uploads.length;
+      const index = (await uploads.commands("saveScreenshotImage")).length;
       await action(page, "保存标注图");
-      await expect.poll(() => uploads.length).toBe(index + 1);
-      const png = uploads[index]!;
+      const savedUpload = await uploads.submitted("saveScreenshotImage", index);
+      const png = savedUpload.body;
       expect(png.readUInt32BE(16)).toBe(width);
       expect(png.readUInt32BE(20)).toBe(height);
       await writeFile(info.outputPath(`${name}.png`), png);
@@ -518,18 +509,8 @@ test("merge integration imported pixels survive cached preview, brush sampling a
   await page.route(imageUrl, (route) =>
     route.fulfill({ contentType: "image/png", body: image }),
   );
-  const uploads: Buffer[] = [];
-  await page.route("**/__annotation", async (route) => {
-    uploads.push(route.request().postDataBuffer()!);
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({
-        resourceUri:
-          "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef",
-      }),
-    });
-  });
+  const uploads = await recordAnnotationUploads(page, "imageEdit");
+
   const state = {
     isBusy: false,
     statusCode: "recognition.completed",
@@ -597,10 +578,10 @@ test("merge integration imported pixels survive cached preview, brush sampling a
     )
     .toEqual([255, 0, 0, 128]);
   const save = async () => {
-    const index = uploads.length;
+    const index = (await uploads.commands("saveScreenshotImage")).length;
     await action(page, "保存标注图");
-    await expect.poll(() => uploads.length).toBe(index + 1);
-    return uploads[index]!;
+    const savedUpload = await uploads.submitted("saveScreenshotImage", index);
+    return savedUpload.body;
   };
   const baseline = await save();
   await action(page, "矩形");
