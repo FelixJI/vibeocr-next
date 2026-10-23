@@ -19,7 +19,11 @@ test("workbench e2e loads prebuilt production assets without on-demand source tr
     if (url.origin === origin) sameOriginPaths.push(url.pathname);
   });
 
+  const requestListeners = page.listenerCount("request");
+  const errorListeners = page.listenerCount("pageerror");
   await mountHost(page, snapshot);
+  expect(page.listenerCount("request")).toBe(requestListeners);
+  expect(page.listenerCount("pageerror")).toBe(errorListeners);
 
   const transformed = sameOriginPaths.filter(
     (path) =>
@@ -115,7 +119,26 @@ test("failed production feature chunk recovers only after explicit document relo
   page.on("request", (request) => {
     if (request.isNavigationRequest()) documentRequests++;
   });
-  await mountHost(page, { ...snapshot, route: "pdf" }, "/#/pdf", false);
+  const reports: string[] = [];
+  const reportError = console.error;
+  const requestListeners = page.listenerCount("request");
+  const errorListeners = page.listenerCount("pageerror");
+  console.error = (...args: unknown[]) =>
+    reports.push(args.map(String).join(" "));
+  try {
+    await expect(
+      mountHost(page, { ...snapshot, route: "pdf" }, "/#/pdf"),
+    ).rejects.toThrow("toBeVisible");
+  } finally {
+    console.error = reportError;
+  }
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toContain("[mountHost]");
+  expect(reports[0]).toContain("页面加载失败");
+  expect(reports[0]).toContain("PdfPage-");
+  expect(reports[0]).toContain("net::ERR_FAILED");
+  expect(page.listenerCount("request")).toBe(requestListeners);
+  expect(page.listenerCount("pageerror")).toBe(errorListeners);
   await expect(
     page.getByRole("alert").filter({ hasText: "页面加载失败" }),
   ).toBeVisible();
@@ -143,6 +166,40 @@ test("failed production feature chunk recovers only after explicit document relo
     ),
   ).toEqual([]);
   expect(await page.evaluate(() => location.hash)).toContain("/pdf");
+});
+
+test("startup diagnostics remain bounded when DOM evaluation never settles", async ({
+  page,
+}) => {
+  test.setTimeout(5000);
+  const failure = new Error("controlled navigation failure");
+  const goto = page.goto;
+  const evaluate = page.evaluate;
+  const reportError = console.error;
+  const reports: string[] = [];
+  const requestListeners = page.listenerCount("request");
+  const errorListeners = page.listenerCount("pageerror");
+  page.goto = async (url, options) => {
+    await goto.call(page, url, options);
+    page.emit("pageerror", new Error("controlled pageerror"));
+    throw failure;
+  };
+  page.evaluate = () => new Promise<never>(() => {});
+  console.error = (...args: unknown[]) =>
+    reports.push(args.map(String).join(" "));
+  try {
+    await expect(mountHost(page, snapshot)).rejects.toBe(failure);
+  } finally {
+    page.goto = goto;
+    page.evaluate = evaluate;
+    console.error = reportError;
+  }
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toContain("DOM snapshot timed out after 1000ms");
+  expect(reports[0]).toContain("controlled pageerror");
+  expect(reports[0]).toContain("/assets/");
+  expect(page.listenerCount("request")).toBe(requestListeners);
+  expect(page.listenerCount("pageerror")).toBe(errorListeners);
 });
 
 test("main workbench warms tabs silently and switches without a loading placeholder", async ({
