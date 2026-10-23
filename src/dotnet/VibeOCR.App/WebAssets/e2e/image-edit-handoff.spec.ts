@@ -229,6 +229,7 @@ for (const [label, modeId] of [
 
     // 识别页：冻结基准保持已编辑普通像素（40×80，非原图 80×40），
     // 遮罩标记已重建且可清除；不再退回原图。
+    await page.getByRole("button", { name: "编辑图片", exact: true }).click();
     await expect(page.getByText(/原图 40×80/)).toBeVisible();
     const clearMask = page.getByRole("button", { name: "清空屏蔽" });
     await expect(clearMask).toBeEnabled();

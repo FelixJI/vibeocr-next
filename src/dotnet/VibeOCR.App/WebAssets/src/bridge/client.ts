@@ -21,6 +21,7 @@ export type AppRoute =
   | "recognition"
   | "imageEdit"
   | "batch"
+  | "imageConversion"
   | "qrcode"
   | "pdf"
   | "settings"
@@ -561,6 +562,7 @@ const STATE_SCOPES = new Set<string>([
   "imageEdit",
   "pinEdit",
   "batch",
+  "imageConversion",
   "pdf",
   "qrcode",
   "settings",
@@ -642,6 +644,7 @@ const APP_ROUTES = new Set<AppRoute>([
   "recognition",
   "imageEdit",
   "batch",
+  "imageConversion",
   "qrcode",
   "pdf",
   "settings",

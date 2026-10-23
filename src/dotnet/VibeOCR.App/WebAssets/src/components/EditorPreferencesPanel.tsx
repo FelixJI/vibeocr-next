@@ -39,7 +39,9 @@ export function EditorPreferencesPanel({
   directory,
   error,
   actions,
+  outputOnly = false,
 }: {
+  readonly outputOnly?: boolean;
   readonly value: EditorPreferences;
   readonly directory?: string;
   readonly error?: string;
@@ -68,7 +70,7 @@ export function EditorPreferencesPanel({
         draft.output.width * draft.output.height <= 64_000_000));
   return (
     <details className="recognition-options editor-preferences">
-      <summary>输出预设与工具栏定制</summary>
+      <summary>{outputOnly ? "输出预设" : "输出预设与工具栏定制"}</summary>
       <p>常用输出预设：用于单图和批量图片；JPEG 透明区域明确合成为白底。</p>
       <label>
         文件名模板
@@ -144,77 +146,81 @@ export function EditorPreferencesPanel({
         />
       </label>
       <p>宽高都为 0 时保留原尺寸；指定尺寸后按该尺寸输出，最大 64MP。</p>
-      <label>
-        <input
-          type="checkbox"
-          checked={draft.output.closeAfterCopy}
-          onChange={(event) =>
-            updateOutput({ closeAfterCopy: event.target.checked })
-          }
-        />
-        复制成功后关闭编辑会话
-      </label>
-      <p>
-        工具快捷键仅在编辑器内选择工具，支持单个英文字母，不影响全局快捷键；输入框内不触发。
-      </p>
-      {draft.order.map((tool, index) => (
-        <div key={tool} className="editor-style-control">
+      {!outputOnly && (
+        <>
           <label>
             <input
               type="checkbox"
-              checked={!draft.hidden.includes(tool)}
+              checked={draft.output.closeAfterCopy}
               onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  hidden: event.target.checked
-                    ? draft.hidden.filter((item) => item !== tool)
-                    : [...draft.hidden, tool],
-                })
+                updateOutput({ closeAfterCopy: event.target.checked })
               }
             />
-            {LABELS[tool]}
+            复制成功后关闭编辑会话
           </label>
-          <Button
-            aria-label={`上移${LABELS[tool]}工具`}
-            disabled={index === 0}
-            onClick={() => {
-              const order = [...draft.order];
-              [order[index - 1], order[index]] = [
-                order[index]!,
-                order[index - 1]!,
-              ];
-              setDraft({ ...draft, order });
-            }}
-          >
-            上移
-          </Button>
-          <Button
-            aria-label={`下移${LABELS[tool]}工具`}
-            disabled={index === draft.order.length - 1}
-            onClick={() => {
-              const order = [...draft.order];
-              [order[index], order[index + 1]] = [
-                order[index + 1]!,
-                order[index]!,
-              ];
-              setDraft({ ...draft, order });
-            }}
-          >
-            下移
-          </Button>
-          <Input
-            aria-label={`${LABELS[tool]}工具快捷键`}
-            maxLength={1}
-            value={draft.shortcuts[tool] ?? ""}
-            onChange={(_, data) => {
-              const shortcuts = { ...draft.shortcuts };
-              if (data.value) shortcuts[tool] = data.value.toLowerCase();
-              else delete shortcuts[tool];
-              setDraft({ ...draft, shortcuts });
-            }}
-          />
-        </div>
-      ))}
+          <p>
+            工具快捷键仅在编辑器内选择工具，支持单个英文字母，不影响全局快捷键；输入框内不触发。
+          </p>
+          {draft.order.map((tool, index) => (
+            <div key={tool} className="editor-style-control">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={!draft.hidden.includes(tool)}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
+                      hidden: event.target.checked
+                        ? draft.hidden.filter((item) => item !== tool)
+                        : [...draft.hidden, tool],
+                    })
+                  }
+                />
+                {LABELS[tool]}
+              </label>
+              <Button
+                aria-label={`上移${LABELS[tool]}工具`}
+                disabled={index === 0}
+                onClick={() => {
+                  const order = [...draft.order];
+                  [order[index - 1], order[index]] = [
+                    order[index]!,
+                    order[index - 1]!,
+                  ];
+                  setDraft({ ...draft, order });
+                }}
+              >
+                上移
+              </Button>
+              <Button
+                aria-label={`下移${LABELS[tool]}工具`}
+                disabled={index === draft.order.length - 1}
+                onClick={() => {
+                  const order = [...draft.order];
+                  [order[index], order[index + 1]] = [
+                    order[index + 1]!,
+                    order[index]!,
+                  ];
+                  setDraft({ ...draft, order });
+                }}
+              >
+                下移
+              </Button>
+              <Input
+                aria-label={`${LABELS[tool]}工具快捷键`}
+                maxLength={1}
+                value={draft.shortcuts[tool] ?? ""}
+                onChange={(_, data) => {
+                  const shortcuts = { ...draft.shortcuts };
+                  if (data.value) shortcuts[tool] = data.value.toLowerCase();
+                  else delete shortcuts[tool];
+                  setDraft({ ...draft, shortcuts });
+                }}
+              />
+            </div>
+          ))}
+        </>
+      )}
       {(conflict || !dimensionsValid) && (
         <p role="alert">
           {conflict ||
@@ -248,18 +254,21 @@ export function EditorPreferencesPanel({
           );
         }}
       >
-        保存预设与工具栏
+        {outputOnly ? "保存输出预设" : "保存预设与工具栏"}
       </Button>
       <Button
         onClick={async () => {
+          const reset = outputOnly
+            ? { ...draft, output: DEFAULT_EDITOR_PREFERENCES.output }
+            : DEFAULT_EDITOR_PREFERENCES;
           const saved = await actions.run({
             type: "settings.setEditorPreferences",
-            preferences: DEFAULT_EDITOR_PREFERENCES,
+            preferences: reset,
           });
-          if (saved) setDraft(DEFAULT_EDITOR_PREFERENCES);
+          if (saved) setDraft(reset);
         }}
       >
-        重置预设与工具栏
+        {outputOnly ? "重置输出预设" : "重置预设与工具栏"}
       </Button>
     </details>
   );

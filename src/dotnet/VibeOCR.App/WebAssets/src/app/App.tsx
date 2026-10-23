@@ -19,8 +19,10 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
+  type ComponentType,
 } from "react";
 import { AppShell } from "../layout/AppShell";
 import { vibeDarkTheme, vibeLightTheme } from "../theme/theme";
@@ -42,6 +44,10 @@ const featureLoaders = {
   ImageEditPage: () =>
     import("../features/ImageEditPage").then((module) => ({
       default: module.ImageEditPage,
+    })),
+  ImageConversionPage: () =>
+    import("../features/ImageConversionPage").then((module) => ({
+      default: module.ImageConversionPage,
     })),
   BatchPage: () =>
     import("../features/BatchPage").then((module) => ({
@@ -125,16 +131,32 @@ class FeatureModuleLoadError extends Error {
 function createFeaturePage(
   load: (typeof featureLoaders)[keyof typeof featureLoaders],
 ) {
-  return lazy(() =>
-    load().catch((error: unknown) => {
-      throw new FeatureModuleLoadError(error);
-    }),
-  );
+  type FeatureModule = {
+    default: ComponentType<{ actions: AppActions; viewState: AppViewState }>;
+  };
+  let loaded: FeatureModule | undefined;
+  let pending: Promise<FeatureModule> | undefined;
+  const preload = () =>
+    (pending ??= load()
+      .then((module) => {
+        loaded = module;
+        return module;
+      })
+      .catch((error: unknown) => {
+        throw new FeatureModuleLoadError(error);
+      }));
+  const LazyPage = lazy(preload);
+  return {
+    preload,
+    get Page() {
+      return loaded?.default ?? LazyPage;
+    },
+  };
 }
-
 const featurePages = {
   RecognitionPage: createFeaturePage(featureLoaders.RecognitionPage),
   ImageEditPage: createFeaturePage(featureLoaders.ImageEditPage),
+  ImageConversionPage: createFeaturePage(featureLoaders.ImageConversionPage),
   BatchPage: createFeaturePage(featureLoaders.BatchPage),
   PdfPage: createFeaturePage(featureLoaders.PdfPage),
   QrCodePage: createFeaturePage(featureLoaders.QrCodePage),
@@ -151,10 +173,65 @@ function FeatureRoute({
   actions: AppActions;
   viewState: AppViewState;
 }) {
-  const Page = featurePages[page];
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.hash.split("?")[1]);
+    if (query.has("scene") || query.has("pin") || query.has("formula")) return;
+    let stopped = false;
+    let idle: number | undefined;
+    let timer: number | undefined;
+    const remaining = Object.values(featurePages).filter(
+      (feature) => feature !== featurePages[page],
+    );
+    const schedule = () => {
+      if (stopped || remaining.length === 0) return;
+      const next = () => {
+        if (stopped) return;
+        // Preloading never mounts a page or runs its effects; errors surface only on navigation.
+        void remaining
+          .shift()!
+          .preload()
+          .catch(() => undefined)
+          .then(schedule);
+      };
+      if (window.requestIdleCallback)
+        idle = window.requestIdleCallback(next, { timeout: 1500 });
+      else timer = window.setTimeout(next, 100);
+    };
+    void featurePages[page].preload().then(schedule, () => undefined);
+    return () => {
+      stopped = true;
+      if (idle !== undefined) window.cancelIdleCallback(idle);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [page]);
+  const Page = useMemo(() => featurePages[page].Page, [page]);
   return (
     <FeatureLoadBoundary key={page} recover={actions.recoverFeatureAssets}>
-      <Suspense fallback={<div role="status">正在加载页面…</div>}>
+      <Suspense
+        fallback={
+          <div
+            className="page-loading"
+            role="status"
+            aria-label="页面加载中"
+            aria-busy="true"
+          >
+            <div className="page-loading-header" aria-hidden="true">
+              <span />
+              <span />
+            </div>
+            <div className="page-loading-actions" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="page-loading-content" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        }
+      >
         <Page actions={actions} viewState={viewState} />
       </Suspense>
     </FeatureLoadBoundary>
@@ -260,6 +337,16 @@ export function App({
               element={
                 <FeatureRoute
                   page="ImageEditPage"
+                  actions={actions}
+                  viewState={viewState}
+                />
+              }
+            />
+            <Route
+              path="imageConversion"
+              element={
+                <FeatureRoute
+                  page="ImageConversionPage"
                   actions={actions}
                   viewState={viewState}
                 />

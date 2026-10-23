@@ -158,6 +158,30 @@ public sealed class BatchCompletionWorkbenchTests
   }
 
   [Fact]
+  public async Task ImageConversionQueueIsIndependentAndRejectsDocumentsAtomically()
+  {
+    await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    string image = Path.Combine(harness.Root, "convert.png");
+    File.WriteAllBytes(image, VibpProjectFileTests.BuildPng(4, 3));
+    harness.Batch.AddFiles([Path.Combine(harness.Root, "recognize.png")]);
+    WorkbenchCommandOutcome added = await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([image]), token);
+    Assert.Null(added.Error);
+    Assert.Equal("imageConversion", Assert.Single(added.States).Scope);
+    Assert.Single(harness.Batch.Items);
+    Assert.Single(harness.Handler.ImageConversion.Items);
+    WorkbenchCommandOutcome rejected = await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([Path.Combine(harness.Root, "other.png"), Path.Combine(harness.Root, "document.pdf")]), token);
+    Assert.NotNull(rejected.Error);
+    Assert.Single(harness.Handler.ImageConversion.Items);
+    await harness.Handler.ExecuteAsync(new ClearBatchCommand(), token);
+    Assert.Single(harness.Handler.ImageConversion.Items);
+    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(0), token)).Error);
+    await harness.Handler.ExecuteAsync(new ClearImageConversionCommand(), token);
+    Assert.Empty(harness.Handler.ImageConversion.Items);
+    Assert.Empty(harness.Batch.Items);
+  }
+
+  [Fact]
   public async Task ImagePresetExportConsumesEachLeaseOncePreservesSourceAndFrozenQueueOrder()
   {
     await using var harness = await CompletionHarness.CreateAsync(new BatchRunClient(), outputPreset: true);
@@ -167,16 +191,16 @@ public sealed class BatchCompletionWorkbenchTests
     string subdirectory = Directory.CreateDirectory(Path.Combine(harness.Root, "second")).FullName;
     string secondPath = Path.Combine(subdirectory, "original.png");
     File.WriteAllBytes(firstPath, first); File.WriteAllBytes(secondPath, second);
-    harness.Batch.AddFiles([firstPath, secondPath]);
-    Guid firstId = harness.Batch.Items[0].Id, secondId = harness.Batch.Items[1].Id;
-    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([firstPath, secondPath]), token);
+    Guid firstId = harness.Handler.ImageConversion.Items[0].Id, secondId = harness.Handler.ImageConversion.Items[1].Id;
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(0), token);
     Assert.Null(prepared.Error);
-    BatchWorkbenchState projected = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    ImageConversionWorkbenchState projected = Assert.IsType<ImageConversionWorkbenchState>(Assert.Single(prepared.States));
     Assert.Equal(firstId, projected.ExportImageId);
     Assert.NotNull(projected.ExportImage);
-    harness.Batch.Items.Move(0, 1);
+    await harness.Handler.ExecuteAsync(new MoveImageConversionItemCommand(firstId, 1), token);
     WorkbenchAnnotationLease lease = await harness.StageImageAsync(first, token);
-    WorkbenchCommandOutcome exported = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(firstId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
+    WorkbenchCommandOutcome exported = await harness.Handler.ExecuteAsync(new ExportConvertedImageCommand(firstId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
     Assert.Null(exported.Error);
     Assert.Equal(first, File.ReadAllBytes(firstPath));
     Assert.Equal(first, File.ReadAllBytes(Path.Combine(harness.Root, "original_1.png")));
@@ -184,18 +208,18 @@ public sealed class BatchCompletionWorkbenchTests
     // 质量变化保持格式和尺寸兼容，仍须拒绝旧快照，不能按新设置混合写盘。
     Assert.Null((await harness.Handler.ExecuteAsync(new SetEditorPreferencesCommand(
       EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Quality: 0.7) }), token)).Error);
-    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token)).Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(1), token)).Error);
     WorkbenchAnnotationLease staleQuality = await harness.StageImageAsync(second, token);
-    Assert.NotNull((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, staleQuality.ResourceUri.AbsoluteUri, "default",
+    Assert.NotNull((await harness.Handler.ExecuteAsync(new ExportConvertedImageCommand(secondId, staleQuality.ResourceUri.AbsoluteUri, "default",
       new(new(NameTemplate: "{name}"), harness.Root)), token)).Error);
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(staleQuality));
     Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
-    prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token);
+    prepared = await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(1), token);
     Assert.Null(prepared.Error);
-    projected = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    projected = Assert.IsType<ImageConversionWorkbenchState>(Assert.Single(prepared.States));
     Assert.Equal(secondId, projected.ExportImageId);
     lease = await harness.StageImageAsync(second, token);
-    WorkbenchCommandOutcome failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "missing-preset"), token);
+    WorkbenchCommandOutcome failed = await harness.Handler.ExecuteAsync(new ExportConvertedImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "missing-preset"), token);
     Assert.NotNull(failed.Error);
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
     Assert.Equal(second, File.ReadAllBytes(secondPath));
@@ -204,13 +228,13 @@ public sealed class BatchCompletionWorkbenchTests
     WorkbenchCommandOutcome configured = await harness.Handler.ExecuteAsync(new SetEditorPreferencesCommand(
       EditorPreferences.Default with { Output = new(NameTemplate: "{name}", Width: 2, Height: 2) }), token);
     Assert.Null(configured.Error);
-    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(1), token)).Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(1), token)).Error);
     lease = await harness.StageImageAsync(second, token);
-    failed = await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
+    failed = await harness.Handler.ExecuteAsync(new ExportConvertedImageCommand(secondId, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token);
     Assert.NotNull(failed.Error);
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
     Assert.False(File.Exists(Path.Combine(harness.Root, "original_2.png")));
-    Assert.Equal(2, harness.Batch.Items.Count);
+    Assert.Equal(2, harness.Handler.ImageConversion.Items.Count);
   }
 
   // Pillow-generated two-frame/page samples: first red, then blue; original containers must remain intact.
@@ -225,11 +249,11 @@ public sealed class BatchCompletionWorkbenchTests
     byte[] original = Convert.FromBase64String(encoded);
     string path = Path.Combine(harness.Root, $"original.{extension}");
     File.WriteAllBytes(path, original);
-    harness.Batch.AddFiles([path]);
-    Guid id = Assert.Single(harness.Batch.Items).Id;
-    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([path]), token);
+    Guid id = Assert.Single(harness.Handler.ImageConversion.Items).Id;
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(0), token);
     Assert.Null(prepared.Error);
-    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    ImageConversionWorkbenchState state = Assert.IsType<ImageConversionWorkbenchState>(Assert.Single(prepared.States));
     Assert.Null(state.ExportImageError);
     Assert.Equal(id, state.ExportImageId);
     Assert.NotNull(state.ExportImage);
@@ -245,7 +269,7 @@ public sealed class BatchCompletionWorkbenchTests
       new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage).AsTask(token)).DetachPixelData();
     Assert.Equal(new byte[] { 255, 0, 0, 255 }, pixels[..4]);
     WorkbenchAnnotationLease lease = await harness.StageImageAsync(png, token);
-    Assert.Null((await harness.Handler.ExecuteAsync(new ExportBatchImageCommand(id, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token)).Error);
+    Assert.Null((await harness.Handler.ExecuteAsync(new ExportConvertedImageCommand(id, lease.ResourceUri.AbsoluteUri, "default", new(new(NameTemplate: "{name}"), harness.Root)), token)).Error);
     Assert.Equal(png, File.ReadAllBytes(Path.Combine(harness.Root, "original.png")));
     Assert.Equal(original, File.ReadAllBytes(path));
     Assert.Throws<WorkbenchAnnotationAccessException>(() => harness.TakeAnnotation(lease));
@@ -261,10 +285,10 @@ public sealed class BatchCompletionWorkbenchTests
     byte[] original = [.. jpeg[..2], .. exif, .. jpeg[2..]];
     string path = Path.Combine(harness.Root, "oriented.jpg");
     File.WriteAllBytes(path, original);
-    harness.Batch.AddFiles([path]);
-    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([path]), token);
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(0), token);
     Assert.Null(prepared.Error);
-    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
+    ImageConversionWorkbenchState state = Assert.IsType<ImageConversionWorkbenchState>(Assert.Single(prepared.States));
     Assert.Null(state.ExportImageError);
     byte[] png = await harness.ReadResourceAsync(state.ExportImage!, token);
     using var memory = new MemoryStream(png);
@@ -286,11 +310,11 @@ public sealed class BatchCompletionWorkbenchTests
     byte[] original = Convert.FromBase64String(encoded);
     string path = Path.Combine(harness.Root, $"format.{extension}");
     File.WriteAllBytes(path, original);
-    harness.Batch.AddFiles([path]);
-    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareBatchImageCommand(0), token);
+    await harness.Handler.ExecuteAsync(new AddDroppedImageConversionFilesCommand([path]), token);
+    WorkbenchCommandOutcome prepared = await harness.Handler.ExecuteAsync(new PrepareImageConversionCommand(0), token);
     Assert.Null(prepared.Error);
-    BatchWorkbenchState state = Assert.IsType<BatchWorkbenchState>(Assert.Single(prepared.States));
-    Assert.Equal(harness.Batch.Items[0].Id, state.ExportImageId);
+    ImageConversionWorkbenchState state = Assert.IsType<ImageConversionWorkbenchState>(Assert.Single(prepared.States));
+    Assert.Equal(harness.Handler.ImageConversion.Items[0].Id, state.ExportImageId);
     if (state.ExportImageError is not null)
     {
       Assert.Equal("decode_unavailable", state.ExportImageError);

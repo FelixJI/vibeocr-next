@@ -33,7 +33,7 @@ afterEach(cleanup);
 async function renderLoaded(element: React.ReactNode) {
   const result = renderImmediate(element);
   await waitFor(() =>
-    expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument(),
+    expect(screen.queryByLabelText("页面加载中")).not.toBeInTheDocument(),
   );
   return {
     ...result,
@@ -42,14 +42,14 @@ async function renderLoaded(element: React.ReactNode) {
         act(() => {
           result.rerender(next);
         });
-        expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument();
+        expect(screen.queryByLabelText("页面加载中")).not.toBeInTheDocument();
         return;
       }
       await act(async () => {
         result.rerender(next);
       });
       await waitFor(() =>
-        expect(screen.queryByText("正在加载页面…")).not.toBeInTheDocument(),
+        expect(screen.queryByLabelText("页面加载中")).not.toBeInTheDocument(),
       );
     },
   };

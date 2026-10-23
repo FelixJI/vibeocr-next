@@ -5,7 +5,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchStateMailbox(IReadOnlySet<string> scopes)
 {
   internal static readonly IReadOnlySet<string> AllScopes = new HashSet<string>(StringComparer.Ordinal)
-  { "shell", "recognition", "imageEdit", "pinEdit", "batch", "pdf", "qrcode", "settings", "update", "about", "diagnostics" };
+  { "shell", "recognition", "imageEdit", "imageConversion", "pinEdit", "batch", "pdf", "qrcode", "settings", "update", "about", "diagnostics" };
   private readonly Dictionary<string, WorkbenchStateEnvelope> latest = new(StringComparer.Ordinal);
   private readonly IReadOnlySet<string> projection = scopes.ToHashSet(StringComparer.Ordinal);
   private readonly Dictionary<string, WorkbenchStateEnvelope> settled = new(StringComparer.Ordinal);

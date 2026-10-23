@@ -1417,6 +1417,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public byte[]? CopiedBytes { get; private set; }
     public byte[]? SavedBytes { get; private set; }
+    public bool SaveAccepted { get; set; } = true;
     public TaskCompletionSource? OutputStarted;
     public TaskCompletionSource? OutputGate;
 
@@ -1432,7 +1433,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
       OutputStarted?.TrySetResult();
       if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
-      return true;
+      return SaveAccepted;
     }
 
     public string? CopiedText { get; private set; }
@@ -4490,7 +4491,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Equal(0, history.Projection(null).Count);
       history.SetEnabled(true);
       Guid session = Guid.Parse(state.ScreenshotSession!.SessionId);
-      for (int repeat = 0; repeat < 2; repeat++)
+      for (int repeat = 0; repeat < (sessionCommand ? 1 : 2); repeat++)
       {
         WorkbenchAnnotationLease lease = await annotations.UploadImageAsync(new MemoryStream(jpeg), "image/jpeg", TestContext.Current.CancellationToken);
         string uri = lease.ResourceUri.AbsoluteUri;
@@ -4672,6 +4673,52 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
+  [InlineData(false, 0, true)]
+  [InlineData(false, 1, true)]
+  [InlineData(true, 0, true)]
+  [InlineData(true, 1, true)]
+  [InlineData(true, 1, false)]
+  public async Task SceneOutputClosesMatchingSessionOnlyOnSuccess(bool save, int revision, bool accepted)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ThrowingSubmitClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput { Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8) });
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var platform = new RecordingAnnotatedImagePlatform { SaveAccepted = accepted };
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform, () => false);
+      using var captured = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+      var scene = await captured.Task;
+      Assert.True(scene.ScreenshotSession!.SceneEditing);
+      Guid session = Guid.Parse(scene.ScreenshotSession.SessionId);
+      if (revision > 0)
+        await handler.ExecuteAsync(new NotifyScreenshotSessionRevisionCommand(session, revision),
+          TestContext.Current.CancellationToken);
+      WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+      WorkbenchCommand command = save
+        ? new SaveScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, session, revision)
+        : new CopyScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, session, revision);
+      var outcome = await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+      if (!accepted)
+      {
+        Assert.NotNull(outcome.Error);
+        Assert.Equal(session, handler.CurrentImageSessionId);
+        Assert.NotNull(recognition.CurrentInput);
+        return;
+      }
+      Assert.Null(outcome.Error);
+      Assert.Equal(AnnotationPng, save ? platform.SavedBytes : platform.CopiedBytes);
+      Assert.Null(handler.CurrentImageSessionId);
+      Assert.Null(recognition.CurrentInput);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+  [Theory]
   [InlineData(false)]
   [InlineData(true)]
   public async Task LateOutputDoesNotAssignPreviousCaptureToNewHistoryKey(bool save)
@@ -4712,6 +4759,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       }
       finally { platform.OutputGate.TrySetResult(); }
       Assert.Null((await pending).Error);
+      Assert.NotNull(handler.CurrentImageSessionId);
+      Assert.NotEqual(firstSession, handler.CurrentImageSessionId);
       Assert.Equal(0, history.Projection(null).Count);
       Assert.Null(history.Projection(null).Error);
     }

@@ -13,6 +13,7 @@ public enum WorkbenchRoute
 {
   Recognition,
   ImageEdit,
+  ImageConversion,
   Batch,
   QrCode,
   Pdf,
@@ -675,8 +676,22 @@ public sealed record SetEditorPreferencesCommand(EditorPreferences Preferences) 
 public sealed record PickImageOutputDirectoryCommand : WorkbenchCommand;
 public sealed record ImageOutputBinding(ImageOutputPreset Preset, string Directory);
 public sealed record SavePresetImageCommand(string ResourceUri, string PresetId, string Scope, Guid? SessionId = null, long? Revision = null, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
-public sealed record PrepareBatchImageCommand(int Index) : WorkbenchCommand;
-public sealed record ExportBatchImageCommand(Guid ItemId, string ResourceUri, string PresetId, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
+public sealed record AddImageConversionFilesCommand : WorkbenchCommand;
+public sealed record AddDroppedImageConversionFilesCommand(IReadOnlyList<string> Paths) : WorkbenchCommand;
+public sealed record ClearImageConversionCommand : WorkbenchCommand;
+public sealed record RemoveImageConversionItemCommand(Guid ItemId) : WorkbenchCommand;
+public sealed record MoveImageConversionItemCommand(Guid ItemId, int Delta) : WorkbenchCommand;
+public sealed record SetImageConversionWindowCommand(int Start) : WorkbenchCommand;
+public sealed record ImageConversionItem(Guid Id, string Name);
+public sealed record ImageConversionWorkbenchState(int ItemCount, IReadOnlyList<ImageConversionItem> Items, int WindowStart = 0) : WorkbenchState
+{
+  public override string Scope => "imageConversion";
+  public WorkbenchResourceReference? ExportImage { get; init; }
+  public Guid? ExportImageId { get; init; }
+  public string? ExportImageError { get; init; }
+}
+public sealed record PrepareImageConversionCommand(int Index) : WorkbenchCommand;
+public sealed record ExportConvertedImageCommand(Guid ItemId, string ResourceUri, string PresetId, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
 
 public sealed record SetFloatingToolbarEnabledCommand(bool Enabled) : WorkbenchCommand;
 
@@ -958,10 +973,9 @@ public sealed record BatchWorkbenchState(
   IReadOnlyList<RecognitionEngineChoice>? Engines = null,
   string? TaskEngine = null,
   bool ExportIncomplete = false,
-  string? InputKindNotice = null, WorkbenchResourceReference? ExportImage = null, Guid? ExportImageId = null) : WorkbenchState
+  string? InputKindNotice = null) : WorkbenchState
 {
   public override string Scope => "batch";
-  public string? ExportImageError { get; init; }
 }
 
 public sealed record BatchWorkbenchItem(

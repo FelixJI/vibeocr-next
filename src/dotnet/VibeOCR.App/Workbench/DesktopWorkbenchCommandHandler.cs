@@ -24,6 +24,7 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal WorkbenchPdfOwner Pdf { get; }
   internal WorkbenchImageOwner Image { get; }
   internal WorkbenchBatchOwner Batch { get; }
+  internal WorkbenchImageConversionOwner ImageConversion { get; }
   internal WorkbenchSettingsOwner Settings { get; }
   internal WorkbenchQrCodeOwner QrCode { get; }
   internal WorkbenchSystemOwner System { get; }
@@ -37,6 +38,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "recognition.scrollCapture",
       "recognition.results",
       "recognition.annotation",
+      "imageConversion.convert",
       "batch.add",
       "batch.export",
       "batch.run",
@@ -137,7 +139,8 @@ public sealed class DesktopWorkbenchCommandHandler :
     Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker, pinSnapshotWriter, pinHistory);
     // 工程打开事务终止（取消/超时/替换）经既有状态邮箱发布终态，不触碰 UI 线程。
     Image.ProjectOpenTerminated += Image.OnProjectOpenTerminated;
-    Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations, annotationStore);
+    ImageConversion = new WorkbenchImageConversionOwner(windowHandle, Settings, Resources, annotationStore);
+    Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
     System = new WorkbenchSystemOwner(diagnostics, resourceRoot, shell, structuredClipboard, updateFactory, operations);
@@ -152,6 +155,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Image.ImageEditState(false, "recognition.ready"),
     Image.PinEditState(false, "pinEdit.ready"),
     Batch.CurrentBatchState(),
+    ImageConversion.CurrentState(),
     Pdf.EmptyPdfState(),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
     Settings.CurrentState(),
@@ -207,6 +211,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       WorkbenchState? state = command switch
       {
         _ when Image.Handles(command) => await Image.ExecuteAsync(command, cancellationToken),
+        _ when ImageConversion.Handles(command) => await ImageConversion.ExecuteAsync(command, cancellationToken),
         _ when Batch.Handles(command) => await Batch.ExecuteAsync(command, cancellationToken),
         _ when Pdf.Handles(command) => await Pdf.ExecuteAsync(command, cancellationToken),
         _ when QrCode.Handles(command) => await QrCode.ExecuteAsync(command, cancellationToken),
@@ -363,7 +368,7 @@ public sealed class DesktopWorkbenchCommandHandler :
           "workbench.error.clipboardBusy"));
     }
     catch (Exception error) when (
-      command is (SavePresetImageCommand or PrepareBatchImageCommand or ExportBatchImageCommand or PickImageOutputDirectoryCommand or SetEditorPreferencesCommand) &&
+      command is (AddDroppedImageConversionFilesCommand or SavePresetImageCommand or PrepareImageConversionCommand or ExportConvertedImageCommand or PickImageOutputDirectoryCommand or SetEditorPreferencesCommand) &&
       error is (InvalidDataException or global::System.Text.Json.JsonException or global::System.Runtime.InteropServices.COMException))
     {
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
@@ -404,7 +409,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (!operations.BeginDispose()) return;
     Image.Stop(); Batch.Stop(); Pdf.Stop(); QrCode.Stop(); Settings.Stop(); System.Stop();
     await operations.DrainAsync().ConfigureAwait(false);
-    Resources.Release(); Batch.Release(); Pdf.Release(); operations.Release();
+    ImageConversion.Release(); Resources.Release(); Batch.Release(); Pdf.Release(); operations.Release();
   }
 
   private void InvalidateImageRecognition() => Image.InvalidateScreenshotSessionRecognitionOnMaintenance();

@@ -12,7 +12,7 @@ import { resource } from "./FeatureValues";
 
 type ImageReady =
   { url: string; id: string } | { unavailable: true } | undefined;
-export function BatchImageExport({
+export function ImageConversionExport({
   state,
   settings,
   count,
@@ -36,9 +36,9 @@ export function BatchImageExport({
   const runSession = useRef(0);
   const [executing, setExecuting] = useState(false);
   const [progress, setProgress] = useState("");
-  // 请求生命周期：每个 prepareImageExport 回执都重发一份新 batch 快照
+  // 请求生命周期：每个 prepareImageExport 回执都重发一份新转换快照
   // （即使 exportImageId/error 值与上轮相同）；以快照到达驱动消费，同项重试
-  // decode_unavailable 即时分类；非 prepare 路径的 BatchState 不携带导出
+  // decode_unavailable 即时分类；非 prepare 路径的 转换状态 不携带导出
   // 瞬态字段，不会误消费无关快照。
   useEffect(() => {
     if (!waiting.current) return;
@@ -90,7 +90,7 @@ export function BatchImageExport({
             }, 15_000);
           });
           const prepared = await actions.run({
-            type: "batch.prepareImageExport",
+            type: "imageConversion.prepareImageExport",
             index,
           });
           if (!prepared) {
@@ -107,7 +107,7 @@ export function BatchImageExport({
           const blob = await encodeImagePreset(next.url, preferences.output);
           if (stopped()) break;
           const resourceUri = await uploadAnnotatedImage(blob);
-          // 停止/卸载/会话更替后不再写入：上传返回后才检查，不发 batch.exportImage。
+          // 停止/卸载/会话更替后不再写入：上传返回后才检查，不发 imageConversion.exportImage。
           if (stopped()) {
             try {
               await discardAnnotatedImage(resourceUri);
@@ -122,7 +122,7 @@ export function BatchImageExport({
           }
           if (
             await actions.run({
-              type: "batch.exportImage",
+              type: "imageConversion.exportImage",
               itemId: next.id,
               resourceUri,
               presetId: preferences.output.id,
@@ -161,7 +161,7 @@ export function BatchImageExport({
         disabled={busy || count === 0 || !settings.imageOutputDirectory}
         onClick={() => void start()}
       >
-        按常用预设批量导出图片
+        开始转换
       </Button>
       {executing && (
         <Button
@@ -174,11 +174,12 @@ export function BatchImageExport({
       )}
       <p>
         逐张转换格式、质量与尺寸；沿用输出目录/文件名模板，不套用编辑器排版。JPEG
-        透明区域合成白底。输出为静态图片，动画/多帧仅取首帧，多页图片仅取第一页；原文件保持不变。文档项保留并报告为非图片；缺少格式解码器时明确报错。
+        透明区域合成白底。输出为静态图片，动画/多帧仅取首帧，多页图片仅取第一页；原文件保持不变。缺少格式解码器时明确报错。
       </p>
       {progress && <p role="status">{progress}</p>}
       <fieldset className="editor-preferences-lock" disabled={executing}>
         <EditorPreferencesPanel
+          outputOnly
           key={JSON.stringify(preferences)}
           value={preferences}
           actions={actions}

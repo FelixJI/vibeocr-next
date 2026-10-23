@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 interface WorkspaceProps {
+  readonly className?: string;
   readonly eyebrow: string;
   readonly title: string;
   readonly description: string;
@@ -9,6 +10,7 @@ interface WorkspaceProps {
 }
 
 export function Workspace({
+  className,
   eyebrow,
   title,
   description,
@@ -16,7 +18,10 @@ export function Workspace({
   children,
 }: WorkspaceProps) {
   return (
-    <section className="workspace" aria-labelledby={`${title}-heading`}>
+    <section
+      className={`workspace ${className ?? ""}`}
+      aria-labelledby={`${title}-heading`}
+    >
       <header className="workspace-header">
         <div>
           <p className="eyebrow">{eyebrow}</p>

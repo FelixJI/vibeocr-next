@@ -298,6 +298,11 @@ input {
 .empty-stage span {
   font-size: 13px;
 }
+.image-conversion-workspace {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.55fr) minmax(0, 1fr);
+  gap: 14px;
+}
 .collection-workspace {
   display: grid;
   min-height: 430px;
@@ -879,6 +884,8 @@ html[data-capture-scene="true"] .workspace > .work-panel {
 .capture-scene-editor > :not(.canvas-stage) {
   position: relative;
   z-index: 1;
+  /* 画布可与工具栏重叠，背景必须与控件处于同一前景层。 */
+  background: var(--colorNeutralBackground1);
 }
 .capture-scene-editor .editor-guidance {
   display: none;
@@ -970,24 +977,25 @@ select {
   transition-duration: var(--vibe-motion-fast);
   transition-timing-function: var(--vibe-ease);
 }
+.app-shell.is-navigation-collapsed {
+  grid-template-columns: 52px minmax(0, 1fr);
+}
+.is-navigation-collapsed .brand-lockup {
+  padding: 0;
+  justify-content: center;
+}
+.is-navigation-collapsed .brand-lockup > :last-child,
+.is-navigation-collapsed .navigation-link span {
+  display: none;
+}
+.is-navigation-collapsed .navigation-link {
+  justify-content: center;
+  padding: 0;
+}
 @media (max-width: 1160px) {
-  .app-shell {
-    grid-template-columns: 52px minmax(0, 1fr);
-  }
-  .brand-lockup {
-    padding: 0;
-    justify-content: center;
-  }
-  .brand-lockup > :last-child,
-  .navigation-link span {
-    display: none;
-  }
-  .navigation-link {
-    justify-content: center;
-    padding: 0;
-  }
   .inspection-grid,
   .collection-workspace,
+  .image-conversion-workspace,
   .qr-workspace,
   .settings-grid,
   .diagnostics-grid {
@@ -1536,4 +1544,151 @@ select {
 .pin-history-actions {
   display: inline-flex;
   gap: 4px;
+}
+
+.editor-color-popup {
+  width: min(260px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+.editor-color-popup label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.editor-color-popup input {
+  min-width: 0;
+  width: 100%;
+}
+
+.page-loading {
+  display: grid;
+  gap: 20px;
+  padding: 4px;
+  max-width: 1200px;
+}
+.page-loading-header,
+.page-loading-actions,
+.page-loading-content {
+  display: flex;
+  gap: 12px;
+}
+.page-loading-header,
+.page-loading-content {
+  flex-direction: column;
+}
+.page-loading span {
+  display: block;
+  border-radius: 6px;
+  background: var(--colorNeutralBackground3);
+  animation: page-loading-pulse 1.6s ease-in-out infinite alternate;
+}
+.page-loading-header span:first-child {
+  width: min(220px, 70%);
+  height: 28px;
+}
+.page-loading-header span:last-child {
+  width: min(360px, 90%);
+  height: 14px;
+}
+.page-loading-actions span {
+  width: 96px;
+  max-width: 30%;
+  height: 32px;
+}
+.page-loading-content {
+  padding: 24px;
+  min-height: 240px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 10px;
+  background: var(--colorNeutralBackground1);
+}
+.page-loading-content span {
+  height: 14px;
+  width: 75%;
+}
+.page-loading-content span:nth-child(2) {
+  width: 90%;
+}
+.page-loading-content span:last-child {
+  width: 55%;
+}
+@keyframes page-loading-pulse {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-loading span {
+    animation: none;
+  }
+}
+
+/* Preview fits the available height; editing retains its explicit zoom controls. */
+.recognition-workspace {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.recognition-workspace > :not(.inspection-grid) {
+  flex-shrink: 0;
+}
+.recognition-workspace .inspection-grid {
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(0, var(--preview-weight, 1.2fr)) minmax(0, 1fr);
+}
+
+#recognition-preview {
+  min-width: 0;
+  min-height: 0;
+}
+#recognition-preview > .work-panel {
+  height: 100%;
+}
+.recognition-workspace .preview-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+.recognition-workspace .inspection-grid > .work-panel > .panel-content {
+  overflow: auto;
+}
+#recognition-preview .panel-content {
+  overflow: auto;
+}
+#recognition-preview .panel-content:has(.is-proofreading) {
+  overflow: hidden;
+}
+#recognition-preview .is-proofreading {
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+#recognition-preview .is-proofreading .canvas-stage {
+  min-height: 0;
+  height: 100%;
+  max-height: none !important;
+  overflow: hidden !important;
+}
+.fit-preview {
+  container-type: size;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+.fit-preview .result-image-stage {
+  flex: none;
+}
+.fit-preview figcaption {
+  max-height: 40px;
+  overflow: auto;
+  margin: 4px 0 0;
 }

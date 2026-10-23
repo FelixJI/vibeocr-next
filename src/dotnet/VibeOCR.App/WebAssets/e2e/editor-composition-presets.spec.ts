@@ -551,27 +551,25 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   };
   await mountHost(page, {
     ...snapshot,
-    route: "batch",
-    capabilities: ["batch.export", "batch.add", "batch.run"],
+    route: "imageConversion",
+    capabilities: ["imageConversion.convert"],
     features: {
-      batch,
+      imageConversion: batch,
       settings: {
         editorPreferences: { ...DEFAULT_EDITOR_PREFERENCES, output },
         imageOutputDirectory: "C:/authorized-output",
       },
     },
   });
-  await page
-    .getByRole("button", { name: "按常用预设批量导出图片", exact: true })
-    .click();
+  await page.getByRole("button", { name: "开始转换", exact: true }).click();
   for (const index of [0, 1, 2]) {
     await expectCommand(page, {
-      scope: "batch",
+      scope: "imageConversion",
       action: "prepareImageExport",
       arguments: { index },
     });
     if (index === 2) {
-      await sendState(page, "batch", {
+      await sendState(page, "imageConversion", {
         ...batch,
         exportImageId: "33333333333333333333333333333333",
         exportImageError: "decode_unavailable",
@@ -579,7 +577,7 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
       continue;
     }
     if (index === 1) await rejectNextCommand(page);
-    await sendState(page, "batch", {
+    await sendState(page, "imageConversion", {
       ...batch,
       exportImage: {
         url: `/batch-preset.png?item=${index}`,
@@ -589,7 +587,7 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
       exportImageId: index === 0 ? SESSION : ASSET,
     });
     await expectCommand(page, {
-      scope: "batch",
+      scope: "imageConversion",
       action: "exportImage",
       arguments: {
         itemId: index === 0 ? SESSION : ASSET,
@@ -624,6 +622,9 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "导出全部 Markdown" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "图像转换", exact: true }),
   ).toBeVisible();
 });
 
@@ -659,10 +660,10 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
   };
   await mountHost(page, {
     ...snapshot,
-    route: "batch",
-    capabilities: ["batch.export", "batch.add", "batch.run"],
+    route: "imageConversion",
+    capabilities: ["imageConversion.convert"],
     features: {
-      batch,
+      imageConversion: batch,
       settings: {
         editorPreferences: { ...DEFAULT_EDITOR_PREFERENCES, output },
         imageOutputDirectory: "C:/authorized-output",
@@ -670,7 +671,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
     },
   });
   const button = page.getByRole("button", {
-    name: "按常用预设批量导出图片",
+    name: "开始转换",
     exact: true,
   });
   // 第一轮：item0 成功；等待期间插入一份宿主真实的无关 batch 快照
@@ -678,18 +679,18 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
   // 它不得被消费，exportImage 仍须绑定本次 prepare 结果的 item。
   await button.click();
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "prepareImageExport",
     arguments: { index: 0 },
   });
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     taskEngine: "rapid_text",
     exportImage: null,
     exportImageId: null,
     exportImageError: null,
   });
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: {
       url: "/batch-preset.png?item=0",
@@ -699,7 +700,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
     exportImageId: ITEM_A,
   });
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "exportImage",
     arguments: {
       itemId: ITEM_A,
@@ -709,18 +710,18 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
     },
   });
   // 宿主 exportImage 回执后瞬态字段被清除：等待中的下一项不得消费它。
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: null,
     exportImageId: null,
     exportImageError: null,
   });
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "prepareImageExport",
     arguments: { index: 1 },
   });
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: {
       url: "/batch-preset.png?item=1",
@@ -730,7 +731,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
     exportImageId: ITEM_B,
   });
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "exportImage",
     arguments: {
       itemId: ITEM_B,
@@ -740,12 +741,12 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
     },
   });
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "prepareImageExport",
     arguments: { index: 2 },
   });
   // 轮末项 decode_unavailable：状态残留 exportImageId/error。
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImageId: ITEM_C,
     exportImageError: "decode_unavailable",
@@ -768,7 +769,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
         ).length,
     )
     .toBe(4);
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImageId: ITEM_C,
     exportImageError: "decode_unavailable",
@@ -782,7 +783,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
         ).length,
     )
     .toBe(5);
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: {
       url: "/batch-preset.png?item=r2",
@@ -799,7 +800,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
         ).length,
     )
     .toBe(3);
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: null,
     exportImageId: null,
@@ -814,7 +815,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
         ).length,
     )
     .toBe(6);
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImageId: "4".repeat(32),
     exportImageError: "decode_unavailable",
@@ -866,25 +867,23 @@ test("停止图片导出后上传完成也不写入", async ({ page }) => {
   };
   await mountHost(page, {
     ...snapshot,
-    route: "batch",
-    capabilities: ["batch.export", "batch.add", "batch.run"],
+    route: "imageConversion",
+    capabilities: ["imageConversion.convert"],
     features: {
-      batch,
+      imageConversion: batch,
       settings: {
         editorPreferences: { ...DEFAULT_EDITOR_PREFERENCES, output },
         imageOutputDirectory: "C:/authorized-output",
       },
     },
   });
-  await page
-    .getByRole("button", { name: "按常用预设批量导出图片", exact: true })
-    .click();
+  await page.getByRole("button", { name: "开始转换", exact: true }).click();
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "prepareImageExport",
     arguments: { index: 0 },
   });
-  await sendState(page, "batch", {
+  await sendState(page, "imageConversion", {
     ...batch,
     exportImage: {
       url: "/batch-preset.png?item=0",
@@ -893,7 +892,7 @@ test("停止图片导出后上传完成也不写入", async ({ page }) => {
     },
     exportImageId: SESSION,
   });
-  // 上传已发出且被门挡住：此刻停止，再放行；停止后不得再发 batch.exportImage。
+  // 上传已发出且被门挡住：此刻停止，再放行；停止后不得再发 imageConversion.exportImage。
   await expect.poll(() => uploadStarted).toBe(true);
   await page.getByRole("button", { name: "停止图片导出", exact: true }).click();
   const discarded = page.waitForRequest(
@@ -941,10 +940,10 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
   };
   await mountHost(page, {
     ...snapshot,
-    route: "batch",
-    capabilities: ["batch.export", "batch.add", "batch.run"],
+    route: "imageConversion",
+    capabilities: ["imageConversion.convert"],
     features: {
-      batch,
+      imageConversion: batch,
       settings: {
         editorPreferences: DEFAULT_EDITOR_PREFERENCES,
         imageOutputDirectory: "C:/authorized-output",
@@ -952,7 +951,7 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
     },
   });
   const start = page.getByRole("button", {
-    name: "按常用预设批量导出图片",
+    name: "开始转换",
     exact: true,
   });
   const ready = {
@@ -966,11 +965,11 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
   };
   await start.click();
   await expectCommand(page, {
-    scope: "batch",
+    scope: "imageConversion",
     action: "prepareImageExport",
     arguments: { index: 0 },
   });
-  await sendState(page, "batch", ready);
+  await sendState(page, "imageConversion", ready);
   await expect.poll(() => releases.length).toBe(1);
   await page.getByRole("button", { name: "停止图片导出", exact: true }).click();
   await expect(start).toBeDisabled();
@@ -978,7 +977,7 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
   await expect(
     page.getByRole("region", { name: "批量图片预设输出" }),
   ).toHaveCount(0);
-  await sendState(page, "shell", { route: "batch" });
+  await sendState(page, "shell", { route: "imageConversion" });
   await expect(start).toBeEnabled();
   await start.click();
   await expect
@@ -989,7 +988,7 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
         ).length,
     )
     .toBe(2);
-  await sendState(page, "batch", ready);
+  await sendState(page, "imageConversion", ready);
   await expect.poll(() => releases.length).toBe(2);
   const oldResponse = page.waitForResponse("**/__annotation");
   const discarded = page.waitForRequest(
@@ -1010,7 +1009,7 @@ test("上传中离开再启动批量导出，旧上传返回不写入也不干�
     ),
   ).toEqual([
     {
-      scope: "batch",
+      scope: "imageConversion",
       action: "exportImage",
       arguments: {
         itemId: SESSION,
