@@ -1516,3 +1516,119 @@ async def test_remote_mineru_preload_reports_actionable_configuration_error(
     assert [(item.method, item.url.path) for item in requests] == [
         ("POST", "/proxy/v1/uploads")
     ]
+
+
+@pytest.mark.parametrize(
+    "engine,preset,device,expected",
+    [
+        ("paddleocr", "tiny", "cpu", 200),
+        ("paddleocr", "small", "directml", 200),
+        ("paddleocr", "medium", "cuda", 200),
+        (None, "small", "cpu", 400),
+        ("rapidocr", "small", "cpu", 400),
+        ("rapidocr", None, "directml", 400),
+        ("unknown", "small", "cpu", 400),
+    ],
+)
+async def test_http_preserves_validated_engine_for_paddle_model_and_provider_options(
+    pdf_app, pdf_module, supervisor_token, engine, preset, device, expected, monkeypatch
+):
+    import json
+
+    from vibeocr.runtime.recognition import directml_devices
+    from vibeocr.runtime.recognition.recognition_modes import (
+        ModeAvailability,
+        RecognitionModeAvailability,
+        RecognitionModeRegistry,
+    )
+
+    pdf_module.recognition_mode_registry = RecognitionModeRegistry(
+        availability_probe=lambda _definition: ModeAvailability(
+            RecognitionModeAvailability.READY
+        )
+    )
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", f"paddleocr-ort-{device}")
+    monkeypatch.setattr(
+        directml_devices,
+        "hardware_adapters",
+        lambda: [{"device_id": 0, "name": "synthetic"}],
+    )
+
+    pipeline = {
+        "pipeline_id": "OCR",
+        "options_version": 1,
+        "options": {"device": device},
+    }
+    if engine is not None:
+        pipeline["engine"] = engine
+    if preset is not None:
+        pipeline["options"]["model_preset"] = preset
+    manifest = {
+        "schema_version": 2,
+        "request_id": "onnx-options",
+        "kind": "recognition",
+        "priority": "interactive",
+        "pipeline": pipeline,
+        "items": [
+            {
+                "client_item_key": "k",
+                "ordinal": 0,
+                "display_name": "a.png",
+                "source": {"type": "upload.v1", "attachment": "f"},
+            }
+        ],
+    }
+    async with _http(supervisor_token, pdf_app) as http:
+        response = await http.post(
+            "/v2/jobs",
+            data={"manifest": json.dumps(manifest)},
+            files={"f": ("a.png", b"synthetic", "image/png")},
+        )
+    assert response.status_code == expected, response.text
+
+
+async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
+    pdf_app, pdf_module, supervisor_token, monkeypatch
+):
+    import json
+
+    from vibeocr.runtime.recognition.recognition_modes import (
+        ModeAvailability,
+        RecognitionModeAvailability,
+        RecognitionModeRegistry,
+    )
+
+    pdf_module.recognition_mode_registry = RecognitionModeRegistry(
+        availability_probe=lambda _definition: ModeAvailability(
+            RecognitionModeAvailability.READY
+        )
+    )
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-cpu")
+    manifest = {
+        "schema_version": 2,
+        "request_id": "legacy-must-not-fallback",
+        "kind": "recognition",
+        "priority": "interactive",
+        "pipeline": {
+            "pipeline_id": "OCR",
+            "engine": "paddleocr",
+            "options_version": 1,
+            "options": {"model_preset": "tiny"},
+        },
+        "items": [
+            {
+                "client_item_key": "k",
+                "ordinal": 0,
+                "display_name": "a.png",
+                "source": {"type": "upload.v1", "attachment": "f"},
+            }
+        ],
+    }
+    async with _http(supervisor_token, pdf_app) as http:
+        response = await http.post(
+            "/v2/jobs",
+            data={"manifest": json.dumps(manifest)},
+            files={"f": ("a.png", b"synthetic", "image/png")},
+        )
+    assert response.status_code == 400
+    assert "matching managed ONNX environment" in response.text

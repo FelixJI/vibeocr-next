@@ -33,6 +33,9 @@ class OCROptions(BasePipelineOptions):
     use_doc_orientation_classify: bool = True
     use_doc_unwarping: bool = False
     use_textline_orientation: bool = False
+    model_preset: str = "small"
+    device: str = "auto"
+    local_models_only: bool = False
 
 
 def _create_ocr_pipeline(device: str, **kwargs: Any) -> Any:
@@ -45,6 +48,12 @@ def _create_ocr_pipeline(device: str, **kwargs: Any) -> Any:
     大显存卡 GPU 占用仅 20-40%；这里在 GPU 模式给一个较大的批量以喂满 GPU。
     调用方显式传入该参数时不覆盖。
     """
+    from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
+
+    if "_onnx_request" in kwargs:
+        request = kwargs.pop("_onnx_request")
+        kwargs.pop("enable_mkldnn", None)
+        return create_pipeline(request, **kwargs)
     from paddleocr import PaddleOCR
 
     if device == "gpu" and "text_recognition_batch_size" not in kwargs:
@@ -322,11 +331,17 @@ def _recognize_ocr(
     """通用 OCR 识别
 
     从 OCRService._recognize_ocr 和 _process_ocr_output_safe 迁移而来。
-    使用 service.get_or_create_pipeline("OCR") 获取管道实例。文本 OCR 无
+    使用 service.get_or_create_pipeline("OCR", options) 获取管道实例。文本 OCR 无
     块级图像，asset_sink 仅保持分发签名一致（不消费）。
     """
     _logger.debug("[_recognize_ocr] 获取 OCR 管道...")
-    pipeline = service.get_or_create_pipeline("OCR")
+    from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
+    pipeline = (
+        service.get_or_create_pipeline("OCR", options)
+        if is_ort_environment()
+        else service.get_or_create_pipeline("OCR")
+    )
     _logger.debug("[_recognize_ocr] 执行 predict...")
     try:
         output = pipeline.predict(
@@ -413,7 +428,13 @@ def _recognize_ocr_batch(
     """
     del asset_sinks
     _logger.debug("[_recognize_ocr_batch] 获取 OCR 管道...")
-    pipeline = service.get_or_create_pipeline("OCR")
+    from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
+    pipeline = (
+        service.get_or_create_pipeline("OCR", options)
+        if is_ort_environment()
+        else service.get_or_create_pipeline("OCR")
+    )
     _logger.debug("[_recognize_ocr_batch] 执行批量 predict (%d 张)...", len(images))
     import time as _time
 
@@ -490,6 +511,12 @@ def _recognize_ocr_batch(
     return results
 
 
+def _constructor_kwargs(options: Any) -> dict:
+    from vibeocr.runtime.recognition.paddle_onnx import constructor_kwargs
+
+    return constructor_kwargs(options)
+
+
 OCR_SPEC = PipelineSpec(
     name="OCR",
     display_name="通用 OCR",
@@ -498,4 +525,5 @@ OCR_SPEC = PipelineSpec(
     create_pipeline=_create_ocr_pipeline,
     recognize=_recognize_ocr,
     recognize_batch=_recognize_ocr_batch,
+    constructor_kwargs=_constructor_kwargs,
 )

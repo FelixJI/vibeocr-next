@@ -2265,6 +2265,59 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
+  public async Task OrtTextLayerUsesFrozenTaskPresetLocalModelsAndInvalidatesWhenPresetChanges()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new TextLayerRecognitionClient { OrtTextReady = true };
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+        inferenceAttached: () => true, supervisorInstanceId: () => "sup-ort",
+        textLayerRecognitionFactory: () => new RecognitionViewModel(inference, inputs),
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("Automatic ORT text must not install or start an environment"));
+      Assert.Null((await handler.ExecuteAsync(new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken)).Error);
+      Assert.Null((await handler.ExecuteAsync(new SetRecognitionOptionsCommand("paddle_text",
+        new PaddleModeOptions { ModelPreset = "medium", Device = "cpu", UseDocUnwarping = false }), TestContext.Current.CancellationToken)).Error);
+      await handler.ExecuteAsync(new SetTaskModelPresetCommand("tiny"), TestContext.Current.CancellationToken);
+      Guid id;
+      using (var captured = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.ScreenshotSession is not null))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
+        id = Guid.Parse((await captured.Task).ScreenshotSession!.SessionId);
+      }
+      async Task Prepare()
+      {
+        WorkbenchAnnotationLease upload = UploadAnnotation(annotations, AnnotationPng);
+        using var ready = new RecognitionStateAwaiter(handler, state => state.TextLayer?.Status == "textlayer.ready");
+        Assert.Null((await handler.ExecuteAsync(new PrepareScreenshotTextLayerCommand(upload.ResourceUri.AbsoluteUri, id, 0), TestContext.Current.CancellationToken)).Error);
+        Assert.Equal("paddle_text", (await ready.Task).TextLayer!.ModeId);
+      }
+      await Prepare();
+      SubmitRequest first = Assert.Single(inference.Requests);
+      Assert.Equal("tiny", first.Pipeline.Options["model_preset"].GetString());
+      Assert.Equal("cpu", first.Pipeline.Options["device"].GetString());
+      Assert.True(first.Pipeline.Options["local_models_only"].GetBoolean());
+      Assert.False(first.Pipeline.Options["use_doc_unwarping"].GetBoolean());
+      Assert.False(recognition.HasResult);
+      WorkbenchCommandOutcome changed = await handler.ExecuteAsync(new SetTaskModelPresetCommand("small"), TestContext.Current.CancellationToken);
+      Assert.Equal("textlayer.unavailable", Assert.IsType<RecognitionWorkbenchState>(Assert.Single(changed.States)).TextLayer!.Status);
+      Assert.Single(inference.Requests);
+      await Prepare();
+      Assert.Equal(2, inference.Requests.Count);
+      Assert.Equal("small", inference.Requests[1].Pipeline.Options["model_preset"].GetString());
+      Assert.Equal("tiny", first.Pipeline.Options["model_preset"].GetString());
+      Assert.Equal("paddle_text", recognition.TaskEngine);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task TextLayerPrefersUserTaskEngineAndIgnoresUserChangesAfterReady()
   {
     string root = TemporaryRoot();
@@ -3009,6 +3062,27 @@ public sealed class ScreenshotSessionWorkbenchTests
     bool rapidReady = true, bool windowsReady = true, bool noText = false)
     : TextModeHealthClient(rapidReady, windowsReady)
   {
+    public bool OrtTextReady { get; init; }
+
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = await base.GetHealthAsync(cancellationToken);
+      if (!OrtTextReady) return health;
+      return health with
+      {
+        CapabilityDescriptors = [.. health.CapabilityDescriptors!.Select(descriptor =>
+          descriptor.RecognitionModeCatalog is { } catalog ? descriptor with
+          {
+            RecognitionModeCatalog = catalog with
+            {
+              Modes = [.. catalog.Modes.Select(mode => mode.Id == Wire.RecognitionModeId.PaddleText
+                ? mode with { SupportedOptions = ["model_preset", "device", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"] }
+                : mode)],
+            },
+          } : descriptor)],
+      };
+    }
+
     public List<SubmitRequest> Requests { get; } = [];
     public List<IReadOnlyList<byte>> UploadedContent { get; } = [];
     public List<string?> UploadedMediaTypes { get; } = [];

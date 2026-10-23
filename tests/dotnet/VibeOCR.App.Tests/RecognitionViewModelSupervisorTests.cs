@@ -158,6 +158,69 @@ public sealed class RecognitionViewModelSupervisorTests
   }
 
   [Fact]
+  public void PaddleOnnxSavedDefaultsSurviveRestartWhileTransientPresetDoesNot()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-ort-options-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+      layout.EnsurePortableState();
+      var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
+        OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-directml",
+        ["model_preset", "device"], "model_residency", true, true, true, true);
+      new PaddleModeOptions { ModelPreset = "medium", Device = "directml" }.Save(layout, mode.Id);
+      var first = new VibeOCR.App.Workbench.WorkbenchSelectionOwner(null, null, layout, null!, () => null);
+      first.TaskModelPreset = "tiny";
+      Assert.Equal("tiny", first.GetWireOptions(mode)!["model_preset"].GetString());
+      var restarted = new VibeOCR.App.Workbench.WorkbenchSelectionOwner(null, null, layout, null!, () => null);
+      Assert.Null(restarted.TaskModelPreset);
+      Assert.Equal("medium", restarted.GetWireOptions(mode)!["model_preset"].GetString());
+      Assert.Equal("directml", restarted.GetWireOptions(mode)!["device"].GetString());
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public void TaskModelPresetOverrideDoesNotRewriteDefaultsOrOtherScopes()
+  {
+    var selection = new VibeOCR.App.Workbench.WorkbenchSelectionOwner(null, null, null, null!, () => null);
+    var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
+      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      ["model_preset", "device"], "model_residency", true, true, true, true);
+    selection.SetModeOptions(mode.Id, new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
+    selection.TaskModelPreset = "tiny";
+    Assert.Equal("tiny", selection.GetWireOptions(mode)!["model_preset"].GetString());
+    Assert.Equal("medium", selection.GetModeOptions(mode)!.ModelPreset);
+    Assert.Equal("medium", selection.GetTaskModeOptions(mode, null)!.ModelPreset);
+    Assert.Equal("small", selection.GetTaskModeOptions(mode, "small")!.ModelPreset);
+    selection.SetModeOptions(mode.Id, new PaddleModeOptions { ModelPreset = "small", Device = "cpu" });
+    Assert.Equal("tiny", selection.GetWireOptions(mode)!["model_preset"].GetString());
+    selection.TaskModelPreset = null;
+    Assert.Equal("small", selection.GetWireOptions(mode)!["model_preset"].GetString());
+    Assert.Throws<ArgumentException>(() => selection.GetTaskModeOptions(mode, "large"));
+  }
+
+  [Fact]
+  public async Task PaddleOnnxPresetAndProviderFreezeBeforeInputLoading()
+  {
+    var inference = new FakeInferenceClient("text");
+    var inputs = new StubInputService();
+    var viewModel = new RecognitionViewModel(inference, inputs);
+    var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
+      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      ["model_preset", "device"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
+    await viewModel.RecognizeViaSupervisorAsync(async ct =>
+    {
+      viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { ModelPreset = "tiny", Device = "directml" });
+      return await inputs.PickFileAsync(ct);
+    }, CancellationToken.None);
+    Assert.Equal("medium", inference.LastRequest!.Pipeline.Options["model_preset"].GetString());
+    Assert.Equal("cpu", inference.LastRequest.Pipeline.Options["device"].GetString());
+  }
+
+  [Fact]
   public async Task UnsupportedModeOptionRejectsSubmissionInsteadOfSilentDrop()
   {
     // 回归契约（#110 AC2）：绑定的选项含当前模式不支持的字段时，

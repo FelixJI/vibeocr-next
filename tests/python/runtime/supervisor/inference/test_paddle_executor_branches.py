@@ -785,3 +785,27 @@ def test_cancel_during_payload_iteration_returns_early(tmp_path: Path) -> None:
     executor.execute(record, staged)
     # The cancel is honoured → job ends in CANCELLED.
     assert record.snapshot().state is JobState.CANCELLED
+
+
+def test_onnx_native_failure_ends_unstarted_batches_without_replay(tmp_path):
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError
+
+    record = _make_job(JobRegistry(instance_id="t"), 3)
+
+    class BrokenNative:
+        calls = 0
+
+        def capabilities(self, options=None):
+            return AdapterCapability(name="OCR", real_batch=False, max_compute_batch=1)
+
+        def recognize_many(self, items, options=None):
+            self.calls += 1
+            raise PaddleOnnxError("provider lost")
+
+    adapter = BrokenNative()
+    PaddleExecutor(adapter_factory=lambda: adapter).execute(
+        record, _staged(3, tmp_path)
+    )
+    assert adapter.calls == 1
+    assert record.snapshot().state is JobState.FAILED
+    assert all(item.state is ItemState.FAILED for item in record.items)

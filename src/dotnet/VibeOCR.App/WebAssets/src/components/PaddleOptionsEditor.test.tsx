@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import { TaskEngineSelector } from "../features/TaskEngineSelection";
 import { PaddleOptionsEditor } from "./PaddleOptionsEditor";
 import { RecognitionPage } from "../features/Pages";
 import type { AppActions, AppViewState } from "../app/types";
@@ -160,3 +161,68 @@ it("keeps the save confirmation visible when the host echoes saved options", asy
   expect(screen.getByLabelText("文本行方向分类")).toHaveValue("true");
   expect(screen.getByText("识别参数").closest("details")).toBe(details);
 });
+
+it("defaults to balanced and saves an actual Paddle model/provider choice", async () => {
+  const run = vi.fn().mockResolvedValue(true);
+  const user = userEvent.setup();
+  render(
+    <PaddleOptionsEditor
+      modeId="paddle_text"
+      supportedOptions={["model_preset", "device"]}
+      values={{}}
+      actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+    />,
+  );
+  await user.click(screen.getByText("识别参数"));
+  expect(screen.getByLabelText("模型档位")).toHaveValue("small");
+  await user.selectOptions(screen.getByLabelText("模型档位"), "medium");
+  await user.selectOptions(screen.getByLabelText("运行设备"), "directml");
+  await user.click(screen.getByRole("button", { name: "保存参数" }));
+  expect(run).toHaveBeenCalledWith({
+    type: "recognition.setOptions",
+    modeId: "paddle_text",
+    options: { model_preset: "medium", device: "directml" },
+  });
+});
+
+it.each(["recognition", "batch", "pdf"] as const)(
+  "sends a transient model preset for %s without saving defaults",
+  async (scope) => {
+    const run = vi.fn().mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(
+      <TaskEngineSelector
+        scope={scope}
+        enabled
+        taskEngine={undefined}
+        engines={[
+          {
+            engine: "paddle_text",
+            displayName: "Paddle OCR",
+            selected: true,
+            isTaskOverride: false,
+            availability: "ready",
+            requiresDownload: false,
+            supportedOptions: ["model_preset"],
+            defaultModelPreset: "medium",
+            taskModelPreset: null,
+            options: { model_preset: "medium" },
+          },
+        ]}
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+    expect(
+      screen.getByRole("option", { name: "跟随默认（medium）" }),
+    ).toBeVisible();
+    await user.selectOptions(screen.getByLabelText("本次模型档位"), "tiny");
+    expect(run).toHaveBeenCalledExactlyOnceWith({
+      type: `${scope}.setTaskModelPreset`,
+      preset: "tiny",
+    });
+    await user.selectOptions(screen.getByLabelText("本次模型档位"), "");
+    expect(run).toHaveBeenLastCalledWith({
+      type: `${scope}.setTaskModelPreset`,
+    });
+  },
+);

@@ -337,6 +337,24 @@ class TestNormalizeResultBbox:
         OCRService._normalize_result_bbox(result, image=None)
         assert result.text_blocks[0].bbox == (1, 2, 3, 4)
 
+    def test_small_image_polygon_uses_same_coordinate_space_as_bbox(self):
+        result = OCRResult(
+            raw_text="x",
+            text_blocks=[
+                TextBlock(
+                    text="x",
+                    score=1.0,
+                    bbox=(40, 20, 200, 60),
+                    polygon=(40, 20, 200, 20, 200, 60, 40, 60),
+                )
+            ],
+        )
+        result.preproc_img_w, result.preproc_img_h = 400, 100
+        OCRService._normalize_result_bbox(result, image=None)
+        block = result.text_blocks[0]
+        assert block.bbox == (100, 200, 500, 600)
+        assert block.polygon == (100, 200, 500, 200, 500, 600, 100, 600)
+
     def test_polygon_normalized_when_large(self):
         """polygon 像素坐标 > 1001 时归一化到 [0,1000]。"""
         result = OCRResult(

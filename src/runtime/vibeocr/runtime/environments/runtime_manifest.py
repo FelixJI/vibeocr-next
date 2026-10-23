@@ -7,7 +7,7 @@ import json
 import re
 import zipfile
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Any
 from urllib.parse import unquote
@@ -242,6 +242,9 @@ class RuntimeManifest:
     build_workflow: str
     raw: dict[str, Any]
     rapid_cuda_environment: RuntimeInstallScope | None = None
+    paddle_onnx_environments: dict[str, RuntimeInstallScope] = field(
+        default_factory=dict
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -423,6 +426,36 @@ def validate_requirements_lock(
                 raise ManifestError(f"Rapid CUDA lock is missing {required}")
         if "onnxruntime-gpu" in lowered or "torch==" in lowered:
             raise ManifestError("Rapid CUDA lock contains another inference runtime")
+    elif profile.startswith("win-x64-paddle-ort-"):
+        device = profile.removeprefix("win-x64-paddle-ort-")
+        if device not in {"cpu", "cuda", "directml"}:
+            raise ManifestError(f"unsupported Paddle ONNX profile: {profile}")
+        packages = {entry[0].split("==")[0].lower() for entry in entries}
+        required = {"paddleocr", "paddlex", "opencv-contrib-python", "fastapi"}
+        ort = "onnxruntime-directml" if device == "directml" else "onnxruntime"
+        required.add(ort)
+        if device == "cuda":
+            required.add("nvidia-cudnn-cu13")
+        if not required <= packages:
+            raise ManifestError("Paddle ONNX lock lacks its declared closure")
+        if packages & {"onnxruntime", "onnxruntime-gpu", "onnxruntime-directml"} != {
+            ort
+        }:
+            raise ManifestError("Paddle ONNX lock must own one ORT namespace")
+        if packages & {
+            "paddlepaddle",
+            "paddlepaddle-gpu",
+            "torch",
+            "torchvision",
+            "transformers",
+            "paddle2onnx",
+            "onnx",
+            "rapidocr",
+            "mineru",
+        }:
+            raise ManifestError(
+                "Paddle ONNX lock contains another inference/training runtime"
+            )
     elif profile in ("win-x64-paddle-cpu", "win-x64-paddle-cu126"):
         declarations = "\n".join(entry[0].lower() for entry in entries)
         for forbidden in ("opencv-python==", "mineru==", "rapidocr=="):
@@ -869,6 +902,27 @@ def load_runtime_manifest(
             runtime_pack=(),
             runtime_pack_sha256=(),
         )
+    paddle_onnx = {}
+    ort_records = data.get("paddle_onnx_environments", {})
+    if not isinstance(ort_records, dict) or (
+        ort_records and set(ort_records) != {"cpu", "cuda", "directml"}
+    ):
+        raise ManifestError("Paddle ONNX environments must bind all three providers")
+    for device, record in ort_records.items():
+        if not isinstance(record, dict):
+            raise ManifestError("Paddle ONNX environment must be an object")
+        lock = manifest_path.parent / _relative_filename(
+            record.get("lock"), field="paddle_onnx.lock"
+        )
+        digest = _sha256(record.get("sha256"), field="paddle_onnx.sha256")
+        if verify_artifacts:
+            if sha256_file(lock) != digest:
+                raise ManifestError("Paddle ONNX lock SHA-256 mismatch")
+            validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
+        recipe = f"paddleocr-ort-{device}"
+        paddle_onnx[recipe] = RuntimeInstallScope(
+            recipe, (recipe,), lock, digest, (), ()
+        )
     return RuntimeManifest(
         path=manifest_path,
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
@@ -883,6 +937,7 @@ def load_runtime_manifest(
         build_workflow=workflow,
         raw=data,
         rapid_cuda_environment=rapid_cuda,
+        paddle_onnx_environments=paddle_onnx,
     )
 
 

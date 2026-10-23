@@ -329,6 +329,39 @@ class SupervisorModule:
         with self._lock:
             if self._draining or self._shutdown or self._runtime_maintenance:
                 raise ShutdownRequested("supervisor is draining")
+            from vibeocr.runtime.recognition.paddle_onnx import (
+                freeze_request,
+                is_ort_environment,
+            )
+
+            paddle_snapshot = None
+            is_paddle_text = (
+                pipeline is not None
+                and pipeline.pipeline_id == "OCR"
+                and getattr(pipeline.engine, "value", pipeline.engine) == "paddleocr"
+            )
+            if (
+                is_paddle_text
+                and not is_ort_environment()
+                and {"model_preset", "device"} & pipeline.options.keys()
+            ):
+                raise ContractError(
+                    "Paddle ONNX options require a matching managed ONNX environment"
+                )
+            if (
+                is_ort_environment()
+                and pipeline is not None
+                and pipeline.pipeline_id == "OCR"
+                and getattr(pipeline.engine, "value", pipeline.engine) == "paddleocr"
+            ):
+                from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError
+
+                try:
+                    paddle_snapshot = freeze_request(
+                        dict(pipeline.options), self._settings.download_source_ids
+                    )
+                except PaddleOnnxError as exc:
+                    raise ContractError(str(exc)) from exc
             # Allocate a job id first so staging lives under the real job dir.
             job_id = new_job_id()
             staged, items = self.stager.stage_job_with_item_errors(job_id, uploads)
@@ -362,6 +395,7 @@ class SupervisorModule:
                     job_id=job_id,
                     request_id=request_id,
                     pipeline=pipeline,
+                    paddle_snapshot=paddle_snapshot,
                 )
             except BaseException:
                 if self._managed_references is not None:
@@ -371,6 +405,8 @@ class SupervisorModule:
             try:
                 record.transition(JobState.QUEUED)
                 record.append_event("queued", detail={"item_count": len(items)})
+                if paddle_snapshot is not None:
+                    record.append_event("paddle_onnx_snapshot", detail=paddle_snapshot)
                 for item in items:
                     if item.state is not None and item.state.value == "failed":
                         record.commit_item_failure(

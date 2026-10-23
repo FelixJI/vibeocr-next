@@ -11,7 +11,7 @@ namespace VibeOCR.App.Workbench;
 
 internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Func<nint> windowHandle, WorkbenchSettingsOwner settingsOwner, WorkbenchResourcesOwner resources, WorkbenchSelectionOwner selectionPolicy, WorkbenchOperations operations)
 {
-  internal bool Handles(WorkbenchCommand command) => command is AddBatchFilesCommand or AddDroppedBatchFilesCommand or ExportBatchCommand or StartBatchCommand or CancelBatchCommand or ClearBatchCommand or MoveBatchItemCommand or RemoveBatchItemCommand or SetBatchItemPageRangeCommand or SetBatchWindowCommand or SetBatchTaskEngineCommand;
+  internal bool Handles(WorkbenchCommand command) => command is AddBatchFilesCommand or AddDroppedBatchFilesCommand or ExportBatchCommand or StartBatchCommand or CancelBatchCommand or ClearBatchCommand or MoveBatchItemCommand or RemoveBatchItemCommand or SetBatchItemPageRangeCommand or SetBatchWindowCommand or SetBatchTaskEngineCommand or SetBatchTaskModelPresetCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -28,12 +28,14 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     SetBatchItemPageRangeCommand range => SetBatchItemPageRange(range),
     SetBatchWindowCommand window => await SetBatchWindowAsync(window, cancellationToken),
     SetBatchTaskEngineCommand taskEngine => SetBatchTaskEngine(taskEngine),
+    SetBatchTaskModelPresetCommand preset => SetBatchTaskModelPreset(preset),
     _ => throw new InvalidOperationException("Unsupported Batch workbench command."),
   };
 
   private readonly Dictionary<Guid, (RecognizeResponse Result, WorkbenchResourceReference Reference)> batchStructured = [];
   private BatchViewModel? batch;
   private string? batchTaskEngine;
+  private string? batchTaskModelPreset;
   private bool batchExportIncomplete;
   private long batchGeneration;
   private CancellationTokenSource? batchPreparation;
@@ -186,6 +188,15 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     return await BatchStateAsync(batch, cancellationToken);
   }
 
+  private BatchWorkbenchState SetBatchTaskModelPreset(SetBatchTaskModelPresetCommand command)
+  {
+    WorkbenchSelectionOwner.ValidateTaskModelPreset(command.Preset);
+    batchTaskModelPreset = command.Preset;
+    batch ??= batchFactory();
+    SynchronizeBatchMode();
+    return BatchState(batch);
+  }
+
   private BatchWorkbenchState SetBatchTaskEngine(SetBatchTaskEngineCommand command)
   {
     batch ??= batchFactory();
@@ -227,7 +238,7 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     // 原生 Office 仅 flash 档可整篇解析：flash 可用性随配置一起冻结给
     // 批量任务，提交时按原生格式分组，不改 PDF/图片默认档。
     bool mineruFlashUsable = mode is not null && selection.IsMineruTierUsable(MineruTier.Flash);
-    batch.SetRecognitionMode(mode, config, selectionPolicy.GetModeOptions(mode), batchTaskEngine, mineruFlashUsable,
+    batch.SetRecognitionMode(mode, config, selectionPolicy.GetTaskModeOptions(mode, batchTaskModelPreset), batchTaskEngine, mineruFlashUsable,
       deviceOptions: selectionPolicy.GetDeviceOptions(mode));
   }
 
@@ -243,7 +254,7 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
   private IReadOnlyList<RecognitionEngineChoice>? BatchEngines()
   {
     string? defaultId = selectionPolicy.RuntimeDefaultModeId;
-    return selectionPolicy.RecognitionEngines()?.Select(choice => choice with
+    return selectionPolicy.RecognitionEngines(batchTaskModelPreset)?.Select(choice => choice with
     {
       // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
       Selected = choice.Engine == batchTaskEngine ||

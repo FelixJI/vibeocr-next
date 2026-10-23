@@ -109,3 +109,45 @@ def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch):
     assert observed["args"][:4] == [sys.executable, "-I", "-B", "-c"]
     assert "vibeocr.runtime.recognition.paddle_worker" in observed["args"][4]
     assert "PYTHONPATH" not in observed["env"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [None, "not-json", '{"error":"out of memory","error_type":"PaddleOnnxError"}'],
+)
+def test_onnx_worker_native_or_wire_failure_is_typed_and_discards_worker(
+    monkeypatch, reply
+):
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    process = MagicMock()
+    process.poll.return_value = None
+    adapter._process = process
+    adapter._responses.put(reply)
+    with pytest.raises(PaddleOnnxError):
+        adapter._exchange({"operation": "recognize"})
+    process.stdin.write.assert_called_once()
+    assert adapter._process is None
+
+
+def test_onnx_cancellation_stops_worker_and_ignores_late_reply(monkeypatch):
+    from vibeocr.runtime.recognition.paddle_onnx import (
+        PaddleOnnxCancelled,
+        request_snapshot,
+    )
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    process = MagicMock()
+    process.poll.return_value = None
+    adapter._process = process
+    adapter._responses.put('{"result": "late"}')
+    with (
+        request_snapshot(None, cancelled=lambda: True),
+        pytest.raises(PaddleOnnxCancelled),
+    ):
+        adapter._exchange({"operation": "recognize"})
+    assert adapter._process is None
+    assert adapter._responses.empty()

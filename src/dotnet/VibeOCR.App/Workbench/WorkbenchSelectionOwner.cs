@@ -11,6 +11,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
 {
   private readonly Dictionary<string, PaddleModeOptions> modeOptions = new(StringComparer.Ordinal);
   private readonly Dictionary<string, RapidDeviceOptions> modeDeviceOptions = new(StringComparer.Ordinal);
+  internal string? TaskModelPreset { get; set; }
   internal string? RuntimeDefaultModeId =>
     settingsOwner.CurrentModel?.RecognitionSelection?.DefaultRecognitionModeId;
 
@@ -49,7 +50,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
   /// override is IsTaskOverride; the committed runtime default is Selected
   /// while no override is present, and an empty choice still delegates to it.
   /// </summary>
-  internal IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines()
+  internal IReadOnlyList<RecognitionEngineChoice>? RecognitionEngines(string? taskModelPreset = null)
   {
     RecognitionSelectionSnapshot? engineSnapshot = settingsOwner.CurrentModel?.RecognitionSelection;
     RuntimeSelectionService? selection = engineSnapshot?.Catalog;
@@ -69,7 +70,10 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
         mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetProjectedOptions(mode), mode.ReasonCode,
-        IsDefault: mode.Id == defaultId))];
+        IsDefault: mode.Id == defaultId,
+        TaskModelPreset: taskModelPreset,
+        DefaultModelPreset: mode.SupportedOptions.Contains("model_preset", StringComparer.Ordinal)
+          ? GetModeOptions(mode)?.ModelPreset ?? "small" : null))];
     }
     bool isOverride = taskEngine is not null;
     return [.. selection.EngineOptions.Select(option => new RecognitionEngineChoice(
@@ -89,7 +93,8 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
   /// <summary>device 选项存取：支持面由目录 supported_options 真值门控，不在宿主重复模式清单。</summary>
   internal RapidDeviceOptions? GetDeviceOptions(RecognitionModeOption? mode)
   {
-    if (mode?.SupportedOptions.Contains("device", StringComparer.Ordinal) is not true) return null;
+    if (mode?.SupportedOptions.Contains("device", StringComparer.Ordinal) is not true ||
+        mode.Id.StartsWith("paddle_", StringComparison.Ordinal)) return null;
     if (!modeDeviceOptions.TryGetValue(mode.Id, out RapidDeviceOptions? options))
     {
       options = optionsLayout is null ? new() : RapidDeviceOptions.Load(optionsLayout, mode.Id);
@@ -103,7 +108,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
     RecognitionModeOption? mode)
   {
     if (mode is null) return null;
-    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetModeOptions(mode)?.ToWire(mode);
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetTaskModeOptions(mode, TaskModelPreset)?.ToWire(mode);
     IReadOnlyDictionary<string, System.Text.Json.JsonElement>? device = GetDeviceOptions(mode)?.ToWire(mode);
     if (paddle is null || paddle.Count == 0) return device is null || device.Count == 0 ? null : device;
     if (device is null || device.Count == 0) return paddle;
@@ -135,6 +140,22 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
       modeOptions.Add(mode.Id, options);
     }
     return options;
+  }
+
+  internal static void ValidateTaskModelPreset(string? preset)
+  {
+    if (preset is not null and not ("tiny" or "small" or "medium"))
+      throw new ArgumentException("Unsupported task model preset.");
+  }
+
+  internal PaddleModeOptions? GetTaskModeOptions(RecognitionModeOption? mode, string? preset)
+  {
+    ValidateTaskModelPreset(preset);
+    PaddleModeOptions? options = GetModeOptions(mode);
+    // A task override never writes the persisted default and only applies where declared.
+    return preset is not null && options is not null &&
+      mode?.SupportedOptions.Contains("model_preset", StringComparer.Ordinal) is true
+      ? options with { ModelPreset = preset } : options;
   }
 
   internal static bool TryProjectMineruConfig(

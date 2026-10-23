@@ -10,6 +10,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from vibeocr.runtime.recognition.ocr_engines import (
     EngineDescriptor,
 )
 from vibeocr.runtime.recognition.paddle_adapter import PADDLE_REQUIRED_COMPONENT
+from vibeocr.runtime.recognition.paddle_onnx import (
+    PaddleOnnxCancelled,
+    PaddleOnnxError,
+    cancelled,
+    current_snapshot,
+    is_ort_environment,
+)
 from vibeocr.runtime_contracts import (
     PipelineSelection,
     ResidencyStatus,
@@ -75,7 +83,14 @@ class PaddleProcessAdapter:
         if python is not None:
             try:
                 result = subprocess.run(
-                    [str(python), "-I", "-c", "import paddle, paddleocr"],
+                    [
+                        str(python),
+                        "-I",
+                        "-c",
+                        "from paddleocr import PaddleOCR; import onnxruntime"
+                        if is_ort_environment()
+                        else "import paddle, paddleocr",
+                    ],
                     capture_output=True,
                     timeout=60,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -170,19 +185,53 @@ class PaddleProcessAdapter:
         try:
             process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
             process.stdin.flush()
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
             self._stop()
+            if is_ort_environment():
+                raise PaddleOnnxError("Paddle ONNX worker request failed") from exc
             raise
+        deadline = time.monotonic() + timeout
         try:
-            line = self._responses.get(timeout=timeout)
+            while True:
+                if not is_ort_environment():
+                    line = self._responses.get(timeout=timeout)
+                    break
+                if cancelled():
+                    self._stop()
+                    raise PaddleOnnxCancelled("Paddle ONNX task cancelled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                try:
+                    line = self._responses.get(timeout=min(0.1, remaining))
+                    break
+                except queue.Empty:
+                    continue
         except queue.Empty as exc:
             self._stop()
+            if is_ort_environment():
+                raise PaddleOnnxError("Paddle ONNX worker deadline exceeded") from exc
             raise TimeoutError("Paddle worker deadline exceeded") from exc
         if line is None:
             self._stop()
+            if is_ort_environment():
+                raise PaddleOnnxError("Paddle ONNX worker exited before replying")
             raise RuntimeError("Paddle worker exited before replying")
-        response = json.loads(line)
+        try:
+            response = json.loads(line)
+            if not isinstance(response, dict) or not (
+                {"result", "error"} & response.keys()
+            ):
+                raise ValueError("Paddle worker response is invalid")
+        except (ValueError, TypeError) as exc:
+            self._stop()
+            if is_ort_environment():
+                raise PaddleOnnxError("Paddle ONNX worker response is invalid") from exc
+            raise
         if "error" in response:
+            if response.get("error_type") == "PaddleOnnxError":
+                self._stop()
+                raise PaddleOnnxError(response["error"])
             if response.get("error_type") == "LocalModelsNotPrepared":
                 raise LocalModelsNotPrepared(response["error"])
             raise RuntimeError(response["error"])
@@ -217,6 +266,9 @@ class PaddleProcessAdapter:
             "recognize",
             items=wire_items,
             options=(options or PipelineSelection("OCR")).to_payload(),
+            snapshot=current_snapshot(dict(options.options) if options else {})
+            if is_ort_environment()
+            else None,
         )
         if not isinstance(result, list):
             raise RuntimeError("Invalid Paddle worker result")
@@ -272,6 +324,8 @@ class PaddleProcessAdapter:
 
     def _stop(self) -> None:
         process, self._process = self._process, None
+        # Reader threads retain their own old queue; late replies cannot cross generations.
+        self._responses = queue.Queue()
         if process is not None:
             if process.poll() is None:
                 process.terminate()

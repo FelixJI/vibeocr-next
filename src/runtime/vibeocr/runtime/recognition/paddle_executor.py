@@ -35,6 +35,7 @@ from vibeocr.runtime.jobs.scheduler import DeviceScheduler
 from vibeocr.runtime.recognition.mineru_api import MineruCancelled
 from vibeocr.runtime.recognition.mineru_config import MineruConfigError
 from vibeocr.runtime.recognition.ocr_engines import OcrEngineError
+from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxCancelled, PaddleOnnxError
 from vibeocr.runtime_contracts import (
     TERMINAL_JOB_STATES,
     CancelMode,
@@ -189,6 +190,16 @@ class AdapterExecutor:
                     options=options,
                     policy=self._recovery_policy_factory(),
                 )
+            except PaddleOnnxError as exc:
+                # Native/provider failure ends this submission, including unstarted batches.
+                self._fail_items(
+                    record,
+                    items,
+                    error_code=ErrorCode.BACKEND_UNAVAILABLE.value,
+                    error=str(exc),
+                    detail={"reason": "paddle_onnx_failed"},
+                )
+                break
             finally:
                 self._scheduler.release(lease)
 
@@ -226,7 +237,13 @@ class AdapterExecutor:
     def _recognize_many(
         self, record: Any, items: list[InputItem], options: Any
     ) -> list[dict[str, Any]]:
-        return self.adapter.recognize_many(items, options=options)
+        from vibeocr.runtime.recognition.paddle_onnx import request_snapshot
+
+        with request_snapshot(
+            getattr(record, "paddle_snapshot", None),
+            cancelled=lambda: record.cancel_requested_at is not None,
+        ):
+            return self.adapter.recognize_many(items, options=options)
 
     def _execute_with_recovery(
         self,
@@ -250,6 +267,12 @@ class AdapterExecutor:
                 detail={"reason": "local_models_not_prepared"},
             )
             return
+        except PaddleOnnxCancelled:
+            self._cancel_non_terminal_items(record)
+            return
+        except PaddleOnnxError:
+            # Propagate through any bad-input isolation already in progress.
+            raise
         except OcrEngineError as exc:
             # 引擎选择失败是确定性错误：直接按协议错误码标记本批 item，
             # 不进入 bisect/backoff 恢复路径，也不切换引擎。

@@ -20,7 +20,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       if (entry is null)
       {
         if (bound.DocumentId != pdfWorkspace.EmptyDocumentId || pdfWorkspace.Active is not null ||
-          bound.Command is not (SetPdfTaskEngineCommand or SetPdfProcessingSettingsCommand) || pdfExitReview)
+          bound.Command is not (SetPdfTaskEngineCommand or SetPdfTaskModelPresetCommand or SetPdfProcessingSettingsCommand) || pdfExitReview)
           throw new InvalidOperationException("文档已关闭");
       }
       else
@@ -44,11 +44,12 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   internal void RestoreContext(PdfDocumentEntry? previous) => pdfContext.Value = previous;
   internal WorkbenchState? NormalizeOutcome(WorkbenchState? state) => state is PdfWorkbenchState && ActivePdf is { } active && !ReferenceEquals(pdf, active) ? PdfState(active) : state;
 
-  internal bool Handles(WorkbenchCommand command) => command is SetPdfTaskEngineCommand or ActivatePdfDocumentCommand or SavePdfAsCommand or ExportPdfDocumentsCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand or OpenPdfCommand or OpenDroppedPdfCommand or RotatePdfCommand or OrientPdfCommand or CorrectPdfOrientationCommand or InsertPdfBlankCommand or InsertPdfFromCommand or MovePdfPageCommand or ClosePdfCommand or DeletePdfPagesCommand or OcrPdfPagesCommand or AddPdfTextLayersCommand or DeletePdfTextLayersCommand or CancelPdfCommand or SetPdfProcessingSettingsCommand or SavePdfCommand or SelectPdfPagesCommand or SelectAllPdfPagesCommand or SelectPdfPageCommand or SetCurrentPdfPageCommand or UpdatePdfBlockTextCommand or RetryPdfPageInspectCommand or SetPdfWindowCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetPdfTaskEngineCommand or SetPdfTaskModelPresetCommand or ActivatePdfDocumentCommand or SavePdfAsCommand or ExportPdfDocumentsCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand or OpenPdfCommand or OpenDroppedPdfCommand or RotatePdfCommand or OrientPdfCommand or CorrectPdfOrientationCommand or InsertPdfBlankCommand or InsertPdfFromCommand or MovePdfPageCommand or ClosePdfCommand or DeletePdfPagesCommand or OcrPdfPagesCommand or AddPdfTextLayersCommand or DeletePdfTextLayersCommand or CancelPdfCommand or SetPdfProcessingSettingsCommand or SavePdfCommand or SelectPdfPagesCommand or SelectAllPdfPagesCommand or SelectPdfPageCommand or SetCurrentPdfPageCommand or UpdatePdfBlockTextCommand or RetryPdfPageInspectCommand or SetPdfWindowCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
     SetPdfTaskEngineCommand pdfTaskEngine => SetPdfTaskEngine(pdfTaskEngine),
+    SetPdfTaskModelPresetCommand preset => SetPdfTaskModelPreset(preset),
     ActivatePdfDocumentCommand => await ActivatePdfAsync(PdfEntry!, cancellationToken),
     SavePdfAsCommand => await SavePdfAsync(cancellationToken, true),
     ExportPdfDocumentsCommand export => await ExportPdfDocumentsAsync(export, cancellationToken),
@@ -105,6 +106,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private long pdfPageResourceGeneration;
   private string pdfPageInspectStatus = "pdf.inspect.none";
   private readonly Dictionary<int, (RecognizeResponse Result, WorkbenchResourceReference Reference)> pdfStructured = [];
+  private string? pdfTaskModelPreset { get => PdfEntry?.TaskModelPreset; set { if (PdfEntry is { } entry) entry.TaskModelPreset = value; } }
   private string? pdfTaskEngine { get => PdfEntry?.TaskEngine; set { if (PdfEntry is { } entry) entry.TaskEngine = value; } }
   private PdfViewModel? pdf { get => PdfEntry?.Model; set { if (value is not null) { var entry = pdfWorkspace.For(value) ?? pdfWorkspace.Add(value); pdfContext.Value = entry; } } }
   private long pdfGeneration;
@@ -130,8 +132,17 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       ? snapshot.MineruConfigFor(mode?.Id)
       : WorkbenchSelectionOwner.TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    pdf.SetRecognitionMode(mode, selectionPolicy.GetModeOptions(mode), pdfTaskEngine,
+    pdf.SetRecognitionMode(mode, selectionPolicy.GetTaskModeOptions(mode, pdfTaskModelPreset), pdfTaskEngine,
       deviceOptions: selectionPolicy.GetDeviceOptions(mode));
+  }
+
+  private PdfWorkbenchState SetPdfTaskModelPreset(SetPdfTaskModelPresetCommand command)
+  {
+    WorkbenchSelectionOwner.ValidateTaskModelPreset(command.Preset);
+    pdf ??= CreatePdfViewModel();
+    pdfTaskModelPreset = command.Preset;
+    SynchronizePdfMode();
+    return PdfState(pdf);
   }
 
   private PdfWorkbenchState SetPdfTaskEngine(SetPdfTaskEngineCommand command)
@@ -711,7 +722,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private IReadOnlyList<RecognitionEngineChoice>? PdfEngines()
   {
     string? defaultId = selectionPolicy.RuntimeDefaultModeId;
-    return selectionPolicy.RecognitionEngines()?.Select(choice => choice with
+    return selectionPolicy.RecognitionEngines(pdfTaskModelPreset)?.Select(choice => choice with
     {
       // IsDefault 从目录投影继承；Selected 仅显式选择或（未覆盖时）默认。
       Selected = choice.Engine == pdfTaskEngine ||

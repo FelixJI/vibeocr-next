@@ -22,14 +22,15 @@ namespace VibeOCR.App;
 /// Goal #110 隔离候选专用五模式冒烟入口（VIBEOCR_SELF_TEST_SMOKE=paddle-modes-e2e）。
 /// 复用 ManagedEnvironmentSmoke/ScreenshotSmoke 的真实 helpers 与公共按钮/
 /// 选择入口；截图输入来自本进程创建的置顶合成窗口，文件/批量/PDF 输入
-/// 来自隔离根内的合成 fixture，不读取真实桌面内容。CPU/缺模型导致的真实拒绝按 blocked/failed 如实记录，
-/// 不伪造通过；GPU 仅在另有实证槽验证，本冒烟保持 UNVERIFIED。
+/// 来自隔离根内的合成 fixture，不读取真实桌面内容。配方由隔离参数选择，环境/模型拒绝按 blocked/failed 如实记录，
+/// 不伪造通过；请求设备不等于 GPU 执行，须核对真实 worker session 诊断。
 /// </summary>
 public sealed partial class MainWindow
 {
   // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
-  private const string PaddleSmokeEnvironmentName = "paddle-smoke-cpu";
-  private const string PaddleSmokeRecipe = "paddleocr-cpu";
+  private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-cpu";
+  private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
+    ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
@@ -116,6 +117,8 @@ public sealed partial class MainWindow
         phase,
         stage = paddleSmokeStage,
         mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
+        recipe = PaddleSmokeRecipe,
+        model_preset = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET"),
         preview_path = previewPath,
         evidence,
       }));
@@ -207,12 +210,15 @@ public sealed partial class MainWindow
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-component-select", "paddleocr");
-    await SelectSmokeValueAsync("#environment-device-select", "cpu");
+    bool ort = PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal);
+    string device = PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal) ? "directml"
+      : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
+    await SelectSmokeValueAsync("#environment-component-select", ort ? "paddleocr-ort" : "paddleocr");
+    await SelectSmokeValueAsync("#environment-device-select", device);
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-cpu') && " +
+      $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
@@ -326,6 +332,12 @@ public sealed partial class MainWindow
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
 
+    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
+    {
+      WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand("paddle_text")), CancellationToken.None);
+      if (!selectedDefault.Ok) throw new InvalidOperationException("Isolated ORT default selection failed.");
+    }
     RecordPaddleSmokeStage($"select mode {mode}");
     await NavigateSmokeAsync("单次识别", "button");
     await WaitForPaddleModeAsync("#recognition-task-engine", mode);
@@ -368,6 +380,9 @@ public sealed partial class MainWindow
         TimeSpan.FromSeconds(15));
       await SelectSmokeValueAsync("#paddle_structure-use_chart_recognition", "true");
     }
+    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
+      await SelectSmokeValueAsync("#paddle_text-model-preset",
+        PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small");
     await ClickManagedSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
       "document.querySelector('details.recognition-options output')?.textContent" +
@@ -506,7 +521,7 @@ public sealed partial class MainWindow
     foreach (string path in new[] { fixture, second })
     {
       RecordPaddleSmokeStage($"batch add {Path.GetFileName(path)}");
-      await ClickManagedSmokeButtonAsync("添加图片");
+      await ClickManagedSmokeButtonAsync("添加文件");
       await CompletePaddleOpenPickerAsync(path);
     }
     BatchWorkbenchState queued = await WaitForPaddleBatchAsync(
@@ -599,7 +614,18 @@ public sealed partial class MainWindow
       TimeSpan.FromMinutes(timeoutMinutes));
     if (terminal.Pages?.FirstOrDefault(page => page.Index == 0)
           ?.StatusCode != "pdf.page.done")
+    {
+      // broker 清理前保全真实失败 job，不把请求记录当作推理通过。
+      string? failedJobId = smokeLastJobId!();
+      var failedJob = string.IsNullOrWhiteSpace(failedJobId) ? null
+        : await session.Client.ObserveAsync(failedJobId, 0, CancellationToken.None);
+      paddleSmokePartialEvidence = new
+      {
+        input_kind = "pdf", mode, fixture_path = fixture, pdf = terminal,
+        submit_attempts = smokeSubmitAttempts!(), job_id = failedJobId, job = failedJob,
+      };
       throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
+    }
     object job = await ObservePaddleInputJobAsync(session, pipeline,
       optionName, optionValue, before, 1);
     if (textLayer && (!terminal.IsModified || terminal.Pages?.FirstOrDefault(page => page.Index == 0)?.AddedThisSession != true))
@@ -1094,6 +1120,7 @@ public sealed partial class MainWindow
       // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
       // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
       outcomes = observed.Outcomes,
+      events = observed.Events, observed.ThroughSequence, observed.More,
     };
   }
 
@@ -1184,6 +1211,7 @@ public sealed partial class MainWindow
   {
     bool succeeded = terminal.Result is not null;
     object? jobEvidence = null;
+    string requestedDevice = "auto";
     if (succeeded)
     {
       if (smokeSubmitAttempts!() != submitsBefore + 1 || string.IsNullOrWhiteSpace(jobId))
@@ -1195,6 +1223,8 @@ public sealed partial class MainWindow
         throw new InvalidOperationException(
           $"Job pipeline {pipelineId} does not match mode {mode} expectation {expectedPipeline}.");
       var options = observed.Snapshot.Pipeline?.Options;
+      if (options?.TryGetValue("device", out JsonElement deviceValue) == true)
+        requestedDevice = NormalizePaddleSmokeJson(deviceValue);
       bool optionConsumed = options is not null &&
         options.TryGetValue(optionName, out System.Text.Json.JsonElement value) &&
         NormalizePaddleSmokeJson(value) == optionValue;
@@ -1225,6 +1255,7 @@ public sealed partial class MainWindow
         // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
         // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
         outcomes = observed.Outcomes,
+        events = observed.Events, observed.ThroughSequence, observed.More,
       };
       // 失败兑底快照：后续 UI 验证/导出异常时，已获取的 job/outcomes 不
       // 随顶层 catch 只留 error 字符串而丢失；成功路径 health 合同不变。
@@ -1356,10 +1387,11 @@ public sealed partial class MainWindow
       {
         id = session.EnvironmentId,
         revision = session.Revision,
-        // 冒烟环境固定为 CPU recipe；GPU 状态保持 UNVERIFIED，不因硬件
-        // 可见而标记通过。
-        device = "cpu-recipe",
+        recipe = PaddleSmokeRecipe,
+        requested_device = requestedDevice,
+        // 请求和配方不能单独证明 GPU 执行，需核对真实 worker session。
         gpu = "UNVERIFIED",
+        gpu_evidence_note = "Verify actual session providers in worker diagnostics.",
       },
     };
   }

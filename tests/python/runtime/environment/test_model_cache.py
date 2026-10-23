@@ -1154,3 +1154,92 @@ def test_native_adapter_cold_hot_offline_missing_and_repair(
             }
         )
     )
+
+
+@pytest.mark.parametrize("fault", ["missing", "unreachable", "interrupted", "checksum"])
+def test_frozen_onnx_cache_fault_preserves_previous_view_and_recovers(
+    tmp_path, monkeypatch, fault
+):
+    # The synthetic upstream fixture produces the authoritative download listing.
+    payloads = {
+        "inference.onnx": b"synthetic onnx bytes",
+        "inference.yml": b"synthetic config",
+    }
+    asset = cache.ModelAsset(
+        "paddlex-onnx-3.7.2",
+        "modelscope",
+        "synthetic/model_onnx",
+        "model",
+        tuple(payloads),
+        "fixed-upstream-revision",
+        tuple(
+            cache.ModelFile(
+                name,
+                len(data),
+                "sha256",
+                hashlib.sha256(data).hexdigest(),
+                "fixed-file-revision",
+            )
+            for name, data in payloads.items()
+        ),
+    )
+    attempts = []
+    failure = None
+
+    def download(_root, actual, _manifest, entry):
+        assert actual.source == "modelscope"
+        assert actual.revision == "fixed-upstream-revision"
+        attempts.append(entry["path"])
+        path = tmp_path / "upstream-transport" / entry["path"]
+        path.parent.mkdir(exist_ok=True)
+        if failure == "unreachable":
+            raise ConnectionError("synthetic explicit source unreachable")
+        if failure == "interrupted":
+            path.write_bytes(b"partial")
+            raise InterruptedError("synthetic interrupted transport")
+        path.write_bytes(
+            b"corrupt" if failure == "checksum" else payloads[entry["path"]]
+        )
+        return path
+
+    monkeypatch.setattr(cache, "_download", download)
+    shared = tmp_path / "shared"
+    private = tmp_path / "private"
+    first = cache.prepare_models([asset], private, shared_root=shared)
+    binding = private / "current.json"
+    previous = binding.read_text()
+    cached = cache._asset_root(shared, asset) / "payload/inference.onnx"
+    cached.unlink()
+    failure = fault
+    before = len(attempts)
+    expected_error = {
+        "missing": cache.LocalModelsNotPrepared,
+        "unreachable": ConnectionError,
+        "interrupted": InterruptedError,
+        "checksum": cache.ModelCacheError,
+    }[fault]
+    with pytest.raises(expected_error):
+        cache.prepare_models(
+            [asset], private, shared_root=shared, local_only=fault == "missing"
+        )
+    assert binding.read_text() == previous
+    assert (first.root / "model/inference.onnx").read_bytes() == payloads[
+        "inference.onnx"
+    ]
+    assert (first.root / "model/inference.yml").read_bytes() == payloads[
+        "inference.yml"
+    ]
+    if fault == "missing":
+        assert len(attempts) == before, "local-only must not invoke a transport"
+    failure = None
+    repaired = cache.prepare_models([asset], private, shared_root=shared)
+    assert (repaired.root / "model/inference.onnx").read_bytes() == payloads[
+        "inference.onnx"
+    ]
+    assert cached.read_bytes() == payloads["inference.onnx"]
+    offline_attempts = len(attempts)
+    assert (
+        cache.prepare_models([asset], private, shared_root=shared, local_only=True).root
+        == repaired.root
+    )
+    assert len(attempts) == offline_attempts

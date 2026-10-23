@@ -28,7 +28,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SavePresetImageCommand or SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or SetModeDeviceCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SavePresetImageCommand or SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetTaskModelPresetCommand or SetRecognitionOptionsCommand or SetModeDeviceCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -152,6 +152,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       save,
       cancellationToken),
     SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
+    SetTaskModelPresetCommand preset => SetTaskModelPreset(preset),
     SetRecognitionOptionsCommand options => SetRecognitionOptions(options),
     SetModeDeviceCommand device => SetModeDevice(device),
     PasteImageEditSystemContentCommand => await StartSystemPasteAsync(
@@ -230,6 +231,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     /// <summary>冻结显示基准附带的归一化排除框：仅供前端初始重建屏蔽标记。</summary>
     public IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes = [];
     public RecognitionTextLayerState? TextLayer;
+    public TextLayerSelection? TextSelection;
     public long TextGeneration;
     public RecognitionViewModel? TextLayerViewModel;
     public CancellationTokenSource? TextPreparation;
@@ -471,7 +473,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     "recognition.modeUnavailable",
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionInput,
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionResult,
-    selectionPolicy.RecognitionEngines(),
+    selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
     recognitionChannel.ViewModel?.TaskEngine,
     CurrentScreenshotSession(recognitionChannel),
     Import: Volatile.Read(ref recognitionImport.PendingDescriptor),
@@ -520,7 +522,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       statusCode,
       recognitionChannel.SessionInput,
       recognitionChannel.SessionResult,
-      selectionPolicy.RecognitionEngines(),
+      selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
       recognitionChannel.ViewModel?.TaskEngine,
       CurrentScreenshotSession(recognitionChannel),
       TextLayer: recognitionChannel.TextLayer,
@@ -558,6 +560,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     channel.TextLayerViewModel?.Cancel();
     if (channel.TextLayer?.Image is { } image) resources.ReleaseResource(image);
     channel.TextLayer = null;
+    channel.TextSelection = null;
     if (editedRevision is { } revision && channel.SessionId is { } id)
       ScreenshotTextLayerInvalidated?.Invoke(id, revision);
   }
@@ -1519,7 +1522,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       }
       // 动作栏合同：仅 ready 模式可提交；目录在菜单渲染后变化（环境切换）
       // 或需要准备的模式一律拒绝，不自动触发依赖准备/下载。
-      RecognitionEngineChoice? chosen = selectionPolicy.RecognitionEngines()?
+      RecognitionEngineChoice? chosen = selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset)?
         .FirstOrDefault(entry => entry.Engine == modeId);
       if (chosen is not { Availability: "ready" })
       {
@@ -2261,7 +2264,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     _ = channel.ViewModel ??= recognitionFactory();
     ValidateScreenshotSession(channel, command.SessionId, command.Revision);
-    if (channel.TextLayer?.Binding is { } existing &&
+    if (TextLayerSelectionMatches(channel.TextSelection) && channel.TextLayer?.Binding is { } existing &&
         existing.SessionId == command.SessionId.ToString("N") && existing.Revision == command.Revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready")
       return SessionState(channel, false, SessionStatusCode(channel));
@@ -2276,6 +2279,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         null, supervisorInstanceId(), null);
       return SessionState(channel, false, SessionStatusCode(channel));
     }
+    if (!TextLayerSelectionMatches(channel.TextSelection)) InvalidateScreenshotTextLayer(channel);
+    channel.TextSelection = FreezeTextLayerSelection(FindReadyLocalTextMode(out _));
     var preparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operations.Token);
     channel.TextPreparation = preparation;
     long generation = Interlocked.Increment(ref channel.TextGeneration);
@@ -2313,9 +2318,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation != Volatile.Read(ref channel.TextGeneration)) return;
       ValidateScreenshotSession(channel, command.SessionId, command.Revision);
       RecognitionModeOption? mode = FindReadyLocalTextMode(out string? reason);
-      if (mode is null)
+      if (mode is null || !TextLayerSelectionMatches(channel.TextSelection))
       {
-        PublishTextLayerState(channel, "textlayer.unavailable", reason);
+        PublishTextLayerState(channel, "textlayer.unavailable", reason ?? "textlayer.selectionChanged");
         return;
       }
       string instance = supervisorInstanceId() ?? string.Empty;
@@ -2357,7 +2362,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       recognitionChannel;
     if (channel.SessionId == sessionId && channel.Revision == revision)
     {
-      if (channel.TextLayer?.Binding is { } binding &&
+      if (TextLayerSelectionMatches(channel.TextSelection) && channel.TextLayer?.Binding is { } binding &&
         binding.SessionId == sessionId.ToString("N") &&
         binding.Revision == revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready") return null;
@@ -2383,14 +2388,15 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     byte[] png = await File.ReadAllBytesAsync(imagePath, cancellationToken);
     string serviceInstance = supervisorInstanceId() ?? string.Empty;
     RecognitionViewModel viewModel = textLayerRecognitionFactory();
+    TextLayerSelection? frozen = FreezeTextLayerSelection(mode);
     viewModel.SetRecognitionMode(mode);
     await viewModel.RecognizeCapturedInputAsync(
       new RecognitionInput(png, Path.GetExtension(imagePath) == ".jpg" ? "image/jpeg" : "image/png", "pinned-text-layer" + Path.GetExtension(imagePath), "screenshot-text"),
-      cancellationToken);
+      cancellationToken, TextLayerSubmitSelection(mode, frozen));
     cancellationToken.ThrowIfCancellationRequested();
     if ((supervisorInstanceId() ?? string.Empty) != serviceInstance ||
         inferenceAttached?.Invoke() == false ||
-        FindReadyLocalTextMode(out _)?.Id != mode.Id)
+        FindReadyLocalTextMode(out _)?.Id != mode.Id || !TextLayerSelectionMatches(frozen))
       throw new PinnedTextPreparationException("本地识别服务或引擎已变化，请重新取字。");
     if (viewModel.Result is null)
       throw new PinnedTextPreparationException("贴图取字未完成，请重试。");
@@ -2424,7 +2430,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         return;
       }
       RecognitionModeOption? mode = FindReadyLocalTextMode(out _);
-      if (mode?.Id != modeId)
+      if (mode?.Id != modeId || !TextLayerSelectionMatches(channel.TextSelection))
       {
         // 目录变化（模式不再 ready）：不静默换引擎冒充同一次准备。
         PublishTextLayerState(channel, "textlayer.unavailable", "textlayer.modeNotReady");
@@ -2433,8 +2439,10 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       RecognitionViewModel viewModel = channel.TextLayerViewModel ??=
         textLayerRecognitionFactory();
       // 独立提交通道：不读写用户任务级 TaskEngine/SetRecognitionMode。
+      TextLayerSelection? frozen = channel.TextSelection;
       viewModel.SetRecognitionMode(mode);
-      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken);
+      await viewModel.RecognizeCapturedInputAsync(input, cancellationToken,
+        TextLayerSubmitSelection(mode, frozen));
       if (deferredSelection)
       {
         try
@@ -2456,7 +2464,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         return;
       }
       if (channel.SessionId != sessionId || channel.Revision != revision ||
-        (supervisorInstanceId() ?? string.Empty) != serviceInstance)
+        (supervisorInstanceId() ?? string.Empty) != serviceInstance || !TextLayerSelectionMatches(frozen))
       {
         viewModel.InvalidateResult();
         PublishTextLayerState(channel, "textlayer.expired", null);
@@ -2468,8 +2476,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           channel,
           viewModel.TerminalState is JobState.Cancelled
             ? "textlayer.cancelled"
-            : "textlayer.failed",
-          null);
+            : frozen?.Options is not null ? "textlayer.unavailable" : "textlayer.failed",
+          frozen?.Options is not null ? "textlayer.ortUnavailable" : null);
         return;
       }
       IReadOnlyList<RecognitionTextLayerLine>? lines =
@@ -2490,7 +2498,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation != Volatile.Read(ref channel.TextGeneration) ||
         channel.SessionId != sessionId ||
         channel.Revision != revision ||
-        (supervisorInstanceId() ?? string.Empty) != serviceInstance)
+        (supervisorInstanceId() ?? string.Empty) != serviceInstance || !TextLayerSelectionMatches(frozen))
       {
         resources.ReleaseResource(image);
         return;
@@ -2593,6 +2601,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       reason = "textlayer.noCatalog";
       return null;
     }
+    string? effective = WorkbenchSelectionOwner.EffectiveModeIdOrDefault(
+      settingsOwner.CurrentModel?.RecognitionSelection, recognitionChannel.ViewModel?.TaskEngine, false);
+    RecognitionModeOption? ort = selection.RecognitionModes.FirstOrDefault(mode =>
+      mode.Id == effective && mode.Id == "paddle_text" && mode.Availability == "ready" &&
+      mode.SupportedOptions.Contains("model_preset", StringComparer.Ordinal));
+    if (ort is not null) return ort;
     RecognitionModeOption? preferred = null;
     RecognitionModeOption? fallback = null;
     bool anyTextMode = false;
@@ -2788,7 +2802,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       statusCode,
       input,
       result,
-      selectionPolicy.RecognitionEngines(),
+      selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
       recognitionChannel.ViewModel?.TaskEngine,
       CurrentScreenshotSession(recognitionChannel),
       StructuredResult: structured,
@@ -2838,7 +2852,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           try
           {
             await selectionPolicy.EnsureSelectionLoadedAsync(cancellationToken);
-            state = state with { Engines = selectionPolicy.RecognitionEngines() };
+            state = state with { Engines = selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset) };
           }
           catch (OperationCanceledException)
           {
@@ -3462,6 +3476,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     if (optionsLayout is not null) command.Options.Save(optionsLayout, mode.Id);
     selectionPolicy.SetModeOptions(mode.Id, command.Options);
     SynchronizeRecognitionMode();
+    InvalidateChangedOrtTextLayers();
     synchronizeBatchMode();
     return CurrentRecognitionState();
   }
@@ -3507,10 +3522,20 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       "The runtime does not provide a recognition selection catalog.");
   }
 
+  private RecognitionWorkbenchState SetTaskModelPreset(SetTaskModelPresetCommand command)
+  {
+    WorkbenchSelectionOwner.ValidateTaskModelPreset(command.Preset);
+    selectionPolicy.TaskModelPreset = command.Preset;
+    SynchronizeRecognitionMode();
+    InvalidateChangedOrtTextLayers();
+    return CurrentRecognitionState();
+  }
+
   private RecognitionWorkbenchState SetTaskEngine(SetTaskEngineCommand command)
   {
     _ = RecognitionVm;
     ApplyTaskEngine(command.Engine);
+    InvalidateChangedOrtTextLayers();
     return recognitionChannel.SessionId is not null
       ? SessionRecognitionState(RecognitionVm.IsBusy, SessionStatusCode(recognitionChannel))
       : RecognitionState(false, RecognitionStatusCode(RecognitionVm));
@@ -3541,7 +3566,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       ? snapshot.MineruConfigFor(mode?.Id)
       : WorkbenchSelectionOwner.TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    viewModel.SetRecognitionMode(mode, config, selectionPolicy.GetModeOptions(mode),
+    viewModel.SetRecognitionMode(mode, config, selectionPolicy.GetTaskModeOptions(mode, selectionPolicy.TaskModelPreset),
       deviceOptions: selectionPolicy.GetDeviceOptions(mode));
   }
 
@@ -3597,6 +3622,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   {
     RecognitionViewModel viewModel = RecognitionVm;
     SynchronizeRecognitionMode();
+    InvalidateChangedOrtTextLayers();
     RecognitionWorkbenchState current = await CurrentRecognitionStateAsync(
       "recognition.ready", cancellationToken);
     bool isBusy = viewModel.IsBusy;
@@ -3605,7 +3631,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       StatusCode = WorkbenchImageOwner.RecognitionStatusCode(viewModel, isBusy),
       IsBusy = isBusy,
-      Engines = selectionPolicy.RecognitionEngines(),
+      Engines = selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
       TaskEngine = viewModel.TaskEngine,
     });
   }

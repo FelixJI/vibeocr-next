@@ -54,7 +54,10 @@ def main() -> None:
                         for item in request["items"]
                     ]
                     options = parse_pipeline_selection(request["options"])
-                    result = adapter.recognize_many(items, options=options)
+                    from vibeocr.runtime.recognition.paddle_onnx import request_snapshot
+
+                    with request_snapshot(request.get("snapshot")):
+                        result = adapter.recognize_many(items, options=options)
                 elif operation == "capabilities":
                     result = asdict(
                         adapter.capabilities(
