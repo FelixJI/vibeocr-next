@@ -632,6 +632,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
             Mode(Wire.RecognitionModeId.MineruDocument, mineru: true),
             Mode(Wire.RecognitionModeId.PaddleTable),
             Mode(Wire.RecognitionModeId.PaddleFormula),
+            Mode(Wire.RecognitionModeId.RapidTable),
           ],
         },
       },
@@ -667,6 +668,9 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     // 目录如实保持 preparation_required（本地组件缺失/远程未验证 tier），

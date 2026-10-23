@@ -10,7 +10,7 @@ export interface CaptureSceneGeometry {
 }
 
 /** 现场浮动工具的宽度预算（DIP）：工具栏左缘钳制的唯一事实源。 */
-const TOOLS_WIDTH_BUDGET = 880;
+const TOOLS_WIDTH_BUDGET = 760;
 /** 输出设置面板的翻转决策预算（换行后约 3 行控件的估算高度）。 */
 const SETTINGS_PANEL_BUDGET = 132;
 
@@ -18,6 +18,7 @@ export function captureSceneStyle(
   geometry: CaptureSceneGeometry | undefined,
   viewportWidth: number,
   viewportHeight: number,
+  measuredToolsHeight = 184,
 ): Record<string, string> | undefined {
   if (!geometry) return undefined;
   const values = [
@@ -49,11 +50,8 @@ export function captureSceneStyle(
     y = geometry.y * sy;
   const width = geometry.width * sx,
     height = geometry.height * sy;
-  // 两排工具栏（主操作一排 + 样式一排）的最大高度预算：两行小尺寸
-  // 控件加内边距约 84px，64px 单排时代的预算会触发内部滚动。窄视口
-  // （<900px）时两排各自换行、行数增多，放宽到 144px 避免主操作排被
-  // 卷进折叠区；仍由宿主滚动容器兑底。
-  const toolHeight = Math.min(viewportWidth < 900 ? 144 : 96, viewportHeight);
+  // 使用实际内容高度决定上下翻转；初帧预算在 ResizeObserver 回报后收敛。
+  const toolHeight = Math.min(measuredToolsHeight, viewportHeight);
   const below = y + height + 8;
   const toolTop =
     below + toolHeight <= viewportHeight

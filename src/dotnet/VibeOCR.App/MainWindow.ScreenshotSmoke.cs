@@ -106,13 +106,15 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Edited screenshot session disappeared.");
       int orangeAfter = await WaitForOrangePixelsAsync(orangeBefore);
       if (edited.ScreenshotSession?.SessionId != captured.ScreenshotSession?.SessionId ||
-          smokeSubmitAttempts() != 0 ||
+          edited.Result is not null ||
           smokeStartupEnsureAttempts() != ensureAfterCapture)
       {
-        throw new InvalidOperationException("Editing changed session or started OCR/install.");
+        throw new InvalidOperationException("Editing changed session, published a recognition result or installed Runtime.");
       }
 
-      await ClickSmokeButtonAsync("识别当前图");
+      await WaitForAutomaticTextLayerAsync(editedSession);
+      int submitsBeforeRecognition = smokeSubmitAttempts();
+      await ClickSmokeButtonAsync("识别文字");
       RecognitionWorkbenchState recognized = await WaitForScreenshotStateAsync(
         state => !state.IsBusy && state.Result is not null,
         TimeSpan.FromMinutes(35));
@@ -120,7 +122,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Recognized screenshot session disappeared.");
       if (recognizedSession.SessionId != editedSession.SessionId ||
           recognizedSession.Revision != editedSession.Revision ||
-          smokeSubmitAttempts() != 1 ||
+          smokeSubmitAttempts() != submitsBeforeRecognition + 1 ||
           smokeStartupEnsureAttempts() != ensureAfterCapture ||
           string.IsNullOrWhiteSpace(smokeLastJobId()))
       {
@@ -151,6 +153,8 @@ public sealed partial class MainWindow
         task_id = smokeLastJobId(),
         submit_attempts_after_capture = 0,
         submit_attempts_after_recognition = smokeSubmitAttempts(),
+        automatic_text_submit_attempts = submitsBeforeRecognition,
+        explicit_recognition_submit_attempts = smokeSubmitAttempts() - submitsBeforeRecognition,
         startup_ensure_attempts_before_capture = ensureBeforeCapture,
         startup_ensure_attempts_after_capture = ensureAfterCapture,
         startup_ensure_attempts_after_recognition = smokeStartupEnsureAttempts(),

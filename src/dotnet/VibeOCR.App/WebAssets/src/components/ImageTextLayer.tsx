@@ -7,6 +7,7 @@ import {
   layoutTextBox,
   type ImageTextLine,
   type ImageTextLineBinding,
+  type ImageTextBox,
 } from "./imageTextLayerGeometry";
 import { confidenceLabel, isLowConfidence } from "./resultTextModes";
 
@@ -34,6 +35,9 @@ export interface ImageTextLayerProps {
   /** 已按阅读顺序整理的 OCR 行（root 用 toImageTextLines 解析宿主数据）。 */
   readonly lines: readonly ImageTextLine[];
   readonly viewport: ImageTextLayerViewport;
+  readonly layoutBox?: (
+    bbox: ImageTextLine["bbox"],
+  ) => ImageTextBox | undefined;
 }
 
 /**
@@ -52,6 +56,7 @@ export function ImageTextLayer({
   binding,
   lines,
   viewport,
+  layoutBox,
 }: ImageTextLayerProps) {
   // 行文本卸载后 Selection 节点可能游离出文档；保留最后一次挂载的
   // 容器引用，才能对游离树判定 contains 并清掉可复制的旧选区。
@@ -59,18 +64,23 @@ export function ImageTextLayer({
   const active = isLineBindingActive(binding, activeSession);
 
   useEffect(() => {
-    if (active) return;
     // 防御：主流引擎会在移除选中节点时折叠选区（复制为空），但若
     // 引擎保留指向游离旧 DOM 的 Range，则主动清除；层外选区不碰。
-    const root = lastLinesRoot.current;
-    const selection = root?.ownerDocument.getSelection();
-    if (!root || !selection) return;
-    for (let index = 0; index < selection.rangeCount; index += 1) {
-      if (root.contains(selection.getRangeAt(index).commonAncestorContainer)) {
-        selection.removeAllRanges();
-        return;
+    const clearSelection = () => {
+      const root = lastLinesRoot.current;
+      const selection = root?.ownerDocument.getSelection();
+      if (!root || !selection) return;
+      for (let index = 0; index < selection.rangeCount; index += 1) {
+        if (
+          root.contains(selection.getRangeAt(index).commonAncestorContainer)
+        ) {
+          selection.removeAllRanges();
+          return;
+        }
       }
-    }
+    };
+    if (!active) clearSelection();
+    return clearSelection;
   }, [active]);
 
   const { image, size } = viewport;
@@ -78,7 +88,9 @@ export function ImageTextLayer({
     () =>
       active
         ? lines.map((line, index) => {
-            const box = layoutTextBox(line.bbox, image, size);
+            const box = layoutBox
+              ? layoutBox(line.bbox)
+              : layoutTextBox(line.bbox, image, size);
             return box ? (
               <FittedLine
                 key={index}
@@ -89,7 +101,7 @@ export function ImageTextLayer({
             ) : null;
           })
         : null,
-    [active, lines, image, size],
+    [active, lines, image, size, layoutBox],
   );
   if (!active) return null;
   return (

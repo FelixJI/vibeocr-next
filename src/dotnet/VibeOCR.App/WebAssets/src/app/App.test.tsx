@@ -2462,6 +2462,87 @@ describe("AppShell", () => {
     ).toBeVisible();
     unmount();
   });
+  it("groups rapid_table with table modes and persists its device option", async () => {
+    window.location.hash = "#/recognition";
+    const user = userEvent.setup();
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const engines = [
+      {
+        engine: "rapid_table",
+        displayName: "表格结构识别（RapidTable）",
+        selected: true,
+        isTaskOverride: true,
+        availability: "ready",
+        requiresDownload: false,
+        lifecycleKind: "unmanaged",
+        supportsPreload: false,
+        supportsTtl: false,
+        supportsPinning: false,
+        supportsRelease: false,
+        supportedOptions: ["device"],
+        options: { device: "cpu" },
+      },
+      {
+        engine: "paddle_table",
+        displayName: "表格结构识别（PaddleOCR）",
+        selected: false,
+        isTaskOverride: false,
+        availability: "preparation_required",
+        requiresDownload: false,
+        supportedOptions: [],
+      },
+    ];
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 31,
+      route: "recognition",
+      theme: "light",
+      capabilities: ["recognition.engine", "recognition.capture"],
+      features: {
+        recognition: {
+          isBusy: false,
+          statusCode: "recognition.ready",
+          taskEngine: "rapid_table",
+          engines,
+        },
+      },
+      runtimeLabel: "原生宿主已连接",
+    };
+
+    const { unmount } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
+    const select = screen.getByLabelText("本次识别模式") as HTMLSelectElement;
+    const tableGroup = [...select.querySelectorAll("optgroup")].find(
+      (group) => group.label === "表格",
+    );
+    expect(tableGroup).toBeDefined();
+    const grouped = [...tableGroup!.children].map(
+      (option) => (option as HTMLOptionElement).value,
+    );
+    expect(grouped).toEqual(["rapid_table", "paddle_table"]);
+    expect(
+      screen.getByText("该模式不提供模型预热、TTL、固定驻留或释放控制。"),
+    ).toBeVisible();
+    const deviceSelect = screen.getByLabelText("运行设备");
+    expect(deviceSelect).toHaveValue("cpu");
+    await user.selectOptions(deviceSelect, "cuda");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.setDeviceOption",
+      modeId: "rapid_table",
+      device: "cuda",
+    });
+    expect(
+      screen.getByText(
+        "GPU 需要 NVIDIA 显卡及 GPU 运行环境；不可用时会提示错误。",
+      ),
+    ).toBeVisible();
+    unmount();
+  });
   it("shows runtime package counts and bounded text logs across remount without installing", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {

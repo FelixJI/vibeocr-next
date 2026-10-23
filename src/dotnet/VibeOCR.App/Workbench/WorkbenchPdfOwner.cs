@@ -130,7 +130,8 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       ? snapshot.MineruConfigFor(mode?.Id)
       : WorkbenchSelectionOwner.TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    pdf.SetRecognitionMode(mode, selectionPolicy.GetModeOptions(mode), pdfTaskEngine);
+    pdf.SetRecognitionMode(mode, selectionPolicy.GetModeOptions(mode), pdfTaskEngine,
+      deviceOptions: selectionPolicy.GetDeviceOptions(mode));
   }
 
   private PdfWorkbenchState SetPdfTaskEngine(SetPdfTaskEngineCommand command)

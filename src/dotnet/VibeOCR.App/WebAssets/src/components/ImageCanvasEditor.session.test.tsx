@@ -41,7 +41,7 @@ describe("screenshot session editor wiring", () => {
         }}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "取字" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
     expect(screen.getByText("图片中没有可选择的文字。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重新准备文字层" })).toBeNull();
     unmount();
@@ -161,7 +161,7 @@ describe("screenshot session editor wiring", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "识别当前图" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "识别文字" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "结束会话" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.closeScreenshotSession",
@@ -270,6 +270,12 @@ describe("screenshot session editor wiring", () => {
         "/__annotation",
         expect.objectContaining({ method: "POST" }),
       );
+      await waitFor(() =>
+        expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+          "/__annotation/0123456789abcdef0123456789abcdef",
+          { method: "DELETE" },
+        ),
+      );
       unmount();
     } finally {
       Object.defineProperty(
@@ -341,15 +347,13 @@ describe("screenshot session editor wiring", () => {
       />,
     );
     try {
-      fireEvent.click(screen.getByRole("button", { name: "取字" }));
-      const finalImage = await screen.findByAltText("截图最终画面");
-      expect(finalImage).toHaveAttribute(
-        "src",
-        "https://app.vibeocr/__resource/final.png",
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
+      await waitFor(() =>
+        expect(document.querySelector(".image-text-layer")).not.toBeNull(),
       );
       // 画布退让：标注手势不与选字手势叠在同一个表面上。
       expect(screen.getByLabelText("图片检查画布")).toHaveStyle({
-        display: "none",
+        display: "block",
       });
       await waitFor(() =>
         expect(screen.getByText("你好世界")).toBeInTheDocument(),
@@ -473,7 +477,6 @@ describe("screenshot session editor wiring", () => {
     const { unmount } = render(
       <ImageCanvasEditor
         actions={actions}
-        autoText={true}
         canExport={true}
         canRecognize={true}
         source="https://app.vibeocr/__resource/capture.png"
@@ -520,7 +523,7 @@ describe("screenshot session editor wiring", () => {
       });
       // 本地修订即时失效：最终 PNG 视图立即退场，不亮旧层冒充。
       await waitFor(() =>
-        expect(screen.queryByAltText("截图最终画面")).toBeNull(),
+        expect(document.querySelector(".image-text-layer")).toBeNull(),
       );
       // 自动取字：新修订重新导出并准备（同修订只一次）。
       await waitFor(

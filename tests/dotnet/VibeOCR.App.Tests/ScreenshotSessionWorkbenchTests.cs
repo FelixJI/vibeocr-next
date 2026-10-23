@@ -252,13 +252,13 @@ public sealed class ScreenshotSessionWorkbenchTests
       textLayerRecognitionFactory,
       pinScreenshot, ensureRuntimeReady: ensureRuntimeReady, pinHistory: pinHistory);
 
-  private sealed class CompletedImageSelectionClient : SelectionSubmitClient
+  private class CompletedImageSelectionClient : SelectionSubmitClient
   {
     protected override Dictionary<string, JsonElement> OutcomePayload()
     {
       Dictionary<string, JsonElement> payload = base.OutcomePayload();
       string pipeline = Requests[^1].Pipeline.PipelineId;
-      if (pipeline == "TABLE_RECOGNITION")
+      if (pipeline is "TABLE_RECOGNITION" or "RAPID_TABLE")
         payload["content_list"] = JsonSerializer.SerializeToElement(new[]
         {
           new { type = "table", html = "<table><tr><td>selection text</td></tr></table>" },
@@ -271,6 +271,32 @@ public sealed class ScreenshotSessionWorkbenchTests
           new { text = "selection text", bbox = new[] { 0, 0, 1000, 1000 } },
         });
       return payload;
+    }
+  }
+
+  /// <summary>rapid_table 目录声明 device 选项的识别提交客户端。</summary>
+  private sealed class RapidTableDeviceClient : CompletedImageSelectionClient
+  {
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = await base.GetHealthAsync(cancellationToken);
+      Wire.RecognitionModeCatalog catalog = health.CapabilityDescriptors!
+        .Single(descriptor => descriptor.RecognitionModeCatalog is not null)
+        .RecognitionModeCatalog!;
+      return health with
+      {
+        CapabilityDescriptors = [.. health.CapabilityDescriptors!.Select(descriptor =>
+          descriptor.RecognitionModeCatalog is null ? descriptor : descriptor with
+          {
+            RecognitionModeCatalog = catalog with
+            {
+              Modes = [.. catalog.Modes.Select(mode =>
+                mode.Id == Wire.RecognitionModeId.RapidTable
+                  ? mode with { SupportedOptions = ["device"] }
+                  : mode)],
+            },
+          })],
+      };
     }
   }
 
@@ -401,9 +427,11 @@ public sealed class ScreenshotSessionWorkbenchTests
   [Theory]
   [InlineData("recognition", "rapid_text", "OCR", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", true)]
+  [InlineData("recognition", "rapid_table", "RAPID_TABLE", true)]
   [InlineData("recognition", "paddle_formula", "FORMULA_RECOGNITION", true)]
   [InlineData("imageEdit", "rapid_text", "OCR", true)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", true)]
+  [InlineData("imageEdit", "rapid_table", "RAPID_TABLE", true)]
   [InlineData("imageEdit", "paddle_formula", "FORMULA_RECOGNITION", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", false)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", false)]
@@ -466,11 +494,54 @@ public sealed class ScreenshotSessionWorkbenchTests
         new WorkbenchStateEnvelope(1, "recognition", WorkbenchStateChange.Replace, result)));
       JsonElement modes = wire.RootElement.GetProperty("payload").GetProperty("state").GetProperty("recognitionModes");
       Assert.Equal(3, modes.GetArrayLength());
-      Assert.Equal("paddle_table", modes[1].GetProperty("modeId").GetString());
+      Assert.Equal("rapid_table", modes[1].GetProperty("modeId").GetString());
       Assert.Equal("paddle_formula", modes[2].GetProperty("modeId").GetString());
       Assert.Equal(AnnotationPng.LongLength, result.Input!.ByteLength);
     }
     finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task RapidTableDeviceOptionFailsClosedPersistsAndSubmitsOnTheWire()
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new RapidTableDeviceClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+        inferenceAttached: () => true);
+
+      // 目录未声明 device 的模式 fail closed 拒绝，不落到目录外字段。
+      WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+        new SetModeDeviceCommand("paddle_formula", "cuda"), TestContext.Current.CancellationToken);
+      Assert.Equal("recognition_options_invalid", refused.Error?.Code);
+      Assert.Empty(inference.Requests);
+
+      Assert.Null((await handler.ExecuteAsync(
+        new SetModeDeviceCommand("rapid_table", "cuda"), TestContext.Current.CancellationToken)).Error);
+
+      using var captured = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), TestContext.Current.CancellationToken);
+      RecognitionWorkbenchState session = await captured.Task;
+      WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+      using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.Result is not null);
+      Assert.Null((await handler.ExecuteAsync(ParseImageRecognitionCommand("recognition",
+        Guid.Parse(session.ScreenshotSession!.SessionId), session.ScreenshotSession.Revision, lease.ResourceUri.AbsoluteUri, "rapid_table"),
+        TestContext.Current.CancellationToken)).Error);
+      RecognitionWorkbenchState result = await completed.Task;
+      SubmitRequest request = Assert.Single(inference.Requests);
+      Assert.Equal("RAPID_TABLE", request.Pipeline.PipelineId);
+      Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
+      Assert.Null(request.Pipeline.Engine);
+      Assert.NotNull(result.StructuredResult);
+    }
+    finally { Directory.Delete(root, recursive: true); }
   }
 
   [Theory]
@@ -661,8 +732,10 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  [Fact]
-  public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask()
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task TwoPinsOwnIndependentImagesAndShareOneExplicitTextTask(bool initiallyAttached)
   {
     string root = TemporaryRoot();
     try
@@ -675,12 +748,20 @@ public sealed class ScreenshotSessionWorkbenchTests
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
       var pins = new List<WorkbenchAnnotationFile>();
+      bool attached = initiallyAttached;
+      int preparations = 0;
       await using var handler = CreateHandler(
         recognition, root, broker, annotationStore, settings,
-        inferenceAttached: () => true,
+        inferenceAttached: () => attached,
         supervisorInstanceId: () => "sup-pin",
         textLayerRecognitionFactory: () => textRecognition,
-        pinScreenshot: (file, _, _, _, _) => pins.Add(file));
+        pinScreenshot: (file, _, _, _, _) => pins.Add(file),
+        ensureRuntimeReady: _ =>
+        {
+          preparations++;
+          attached = true;
+          return Task.CompletedTask;
+        });
       try
       {
         using var capturedAwaiter = new RecognitionStateAwaiter(
@@ -711,6 +792,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path,
           TestContext.Current.CancellationToken);
         Assert.Single(inference.Requests);
+        Assert.Equal(1, preparations);
 
         string secondPath = pins[1].Path;
         pins[0].Dispose();
@@ -2124,7 +2206,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         settings,
         inferenceAttached: () => true,
         supervisorInstanceId: () => "sup-text",
-        textLayerRecognitionFactory: () => textRecognition);
+        textLayerRecognitionFactory: () => textRecognition,
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("自动文字层不得安装或启动 Runtime"));
 
       Guid sessionId;
       using (var capturedAwaiter = new RecognitionStateAwaiter(
@@ -2250,13 +2333,15 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  [Fact]
-  public async Task PrepareTextLayerWithoutReadyLocalModeReportsUnavailable()
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task PrepareTextLayerWithoutReadyLocalModeReportsUnavailable(bool attached)
   {
     string root = TemporaryRoot();
     try
     {
-      var inference = new TextLayerRecognitionClient(rapidReady: false, windowsReady: false);
+      var inference = new TextLayerRecognitionClient(rapidReady: !attached, windowsReady: !attached);
       var inputs = new FixedCaptureInput();
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
@@ -2268,7 +2353,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         broker,
         annotationStore,
         settings,
-        inferenceAttached: () => true);
+        inferenceAttached: () => attached,
+        ensureRuntimeReady: _ => throw new Xunit.Sdk.XunitException("自动文字层不得安装或启动 Runtime"));
 
       using (var capturedAwaiter = new RecognitionStateAwaiter(
         handler,
@@ -2287,7 +2373,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         RecognitionWorkbenchState unavailable = Assert.IsType<RecognitionWorkbenchState>(
           Assert.Single(prepared.States));
         Assert.Equal("textlayer.unavailable", unavailable.TextLayer?.Status);
-        Assert.Equal("textlayer.modeNotReady", unavailable.TextLayer?.Reason);
+        Assert.Equal(attached ? "textlayer.modeNotReady" : "textlayer.serviceUnavailable", unavailable.TextLayer?.Reason);
         Assert.Null(unavailable.TextLayer?.Image);
         Assert.Equal(0, inference.SubmitCalls);
         // 不可用时不消费上传租约，也不隐式准备依赖。
@@ -2761,6 +2847,9 @@ public sealed class ScreenshotSessionWorkbenchTests
                 TextMode(Wire.RecognitionModeId.PaddleFormula,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
+                TextMode(Wire.RecognitionModeId.RapidTable,
+                  Wire.RecognitionModeAvailability.Ready,
+                  null),
               ],
             },
           },
@@ -2848,6 +2937,10 @@ public sealed class ScreenshotSessionWorkbenchTests
           Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
           Wire.RecognitionModeProvisioning.AdvancedComponent,
           Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+          Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+          Wire.RecognitionModeProvisioning.BaseRuntime,
+          Wire.RecognitionModeLifecycleKind.Unmanaged),
         _ => throw new ArgumentOutOfRangeException(nameof(id)),
       };
       return new Wire.RecognitionModeDescriptor
@@ -3414,7 +3507,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         entry.DisplayName == "文字识别" && entry.IconKey == "textRecognition" &&
         entry.Hint!.Contains("Windows OCR（系统内置）", StringComparison.Ordinal));
       Assert.Contains(entries, entry =>
-        entry.ModeId == "paddle_table" && entry.DisplayName == "表格识别" &&
+        entry.ModeId == "rapid_table" && entry.DisplayName == "表格识别" &&
         entry.Availability == "ready" && entry.IconKey == "tableRecognition" && entry.Hint is null);
       Assert.Contains(entries, entry =>
         entry.ModeId == "paddle_formula" && entry.DisplayName == "公式识别" &&
@@ -3490,7 +3583,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Equal("ready", text.Availability);
       Assert.Equal("文字识别", text.DisplayName);
       Assert.Contains(SettingsViewModel.DisplayName(defaultId), text.Hint!, StringComparison.Ordinal);
-      Assert.Equal(("paddle_table", "表格识别", "tableRecognition"),
+      Assert.Equal(("rapid_table", "表格识别", "tableRecognition"),
         (entries[1].ModeId, entries[1].DisplayName, entries[1].IconKey));
       Assert.Equal(("paddle_formula", "公式识别", "formulaRecognition"),
         (entries[2].ModeId, entries[2].DisplayName, entries[2].IconKey));
@@ -3529,11 +3622,66 @@ public sealed class ScreenshotSessionWorkbenchTests
     Assert.Equal("", text.ModeId);
     Assert.Equal("default_invalid", text.Availability);
     Assert.Equal("文字识别", text.DisplayName);
-    // 表格/公式图标照常按目录分类可用。
-    Assert.Equal("paddle_table", entries[1].ModeId);
+    // 表格/公式图标照常按目录分类可用（ready RapidTable 优先于 Paddle）。
+    Assert.Equal("rapid_table", entries[1].ModeId);
     Assert.Equal("ready", entries[1].Availability);
     Assert.Equal("paddle_formula", entries[2].ModeId);
     Assert.Equal("ready", entries[2].Availability);
+  }
+
+  [Fact]
+  public async Task SelectionMenuTableEntryPrefersRapidTableByCatalogAvailability()
+  {
+    // 表格图标路由只消费目录真值：ready RapidTable > ready PaddleTable >
+    // preparation_required RapidTable > preparation_required PaddleTable；
+    // 两者均不可用时透传首个表格模式的目录状态，绝不读取文字默认。
+    ScreenshotRecognitionModeEntry TableEntry(
+      Wire.RecognitionModeAvailability rapid,
+      Wire.RecognitionModeAvailability paddle)
+    {
+      Wire.Health health = new SelectionCatalogClient().GetHealthAsync(
+        TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+      Wire.RecognitionModeCatalog catalog = health.CapabilityDescriptors!
+        .Single(descriptor => descriptor.RecognitionModeCatalog is not null)
+        .RecognitionModeCatalog!;
+      Wire.RecognitionModeCatalog mutated = catalog with
+      {
+        Modes = [.. catalog.Modes.Select(mode => mode.Id switch
+        {
+          Wire.RecognitionModeId.RapidTable => mode with { Availability = rapid },
+          Wire.RecognitionModeId.PaddleTable => mode with { Availability = paddle },
+          _ => mode,
+        })],
+      };
+      RuntimeSelectionService selection = new(health with
+      {
+        CapabilityDescriptors = [.. health.CapabilityDescriptors!.Select(descriptor =>
+          descriptor.RecognitionModeCatalog is null
+            ? descriptor
+            : descriptor with { RecognitionModeCatalog = mutated })],
+      });
+      return DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(
+        new RecognitionSelectionSnapshot(selection, RuntimeDefaultModeBinding.Bound, "rapid_text"))[1];
+    }
+
+    Assert.Equal(("rapid_table", "ready"),
+      (TableEntry(Wire.RecognitionModeAvailability.Ready, Wire.RecognitionModeAvailability.Ready).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Ready, Wire.RecognitionModeAvailability.Ready).Availability));
+    Assert.Equal(("paddle_table", "ready"),
+      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Ready).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Ready).Availability));
+    Assert.Equal(("rapid_table", "preparation_required"),
+      (TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.Unavailable).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.Unavailable).Availability));
+    Assert.Equal(("paddle_table", "preparation_required"),
+      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.PreparationRequired).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.PreparationRequired).Availability));
+    Assert.Equal(("rapid_table", "preparation_required"),
+      (TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.PreparationRequired).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.PreparationRequired).Availability));
+    Assert.Equal(("rapid_table", "unavailable"),
+      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Unavailable).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Unavailable).Availability));
   }
 
   [Fact]
@@ -3595,8 +3743,9 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>
-  /// 选区动作栏图标契约：目录键全部解析为共用的 24×24 矢量路径
-  /// 矢量路径；易混淆组（文字/表格/公式、马赛克/模糊、画笔/荧光笔）
+  /// 共用图标目录契约（Web 编辑器工具栏/浮动工具栏消费；原生选区动作栏
+  /// 已按用户要求改为纯中文文字，不再渲染图标）：目录键全部解析为共用的
+  /// 24×24 矢量路径；易混淆组（文字/表格/公式、马赛克/模糊、画笔/荧光笔）
   /// 必须互不相同，不靠颜色区分。路径来源见
   /// <see cref="ScreenshotToolbarIcons"/>（与 Web 共用同一图标源）。
   /// </summary>
@@ -3636,9 +3785,9 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   /// <summary>
-  /// 主排编辑工具的 initialTool 词汇与 Web
+  /// 选区动作栏改为纯中文文字：主排编辑工具的 initialTool 词汇与 Web
   /// ImageCanvasEditor 工具 id 一致（未知 id 会被 Web 静默回退到选择工具，
-  /// 原生改名必须在同一变更中同步两侧）；上排固定动作键全部可解析。
+  /// 原生改名必须在同一变更中同步两侧）；按钮 label/tooltip 必须非空。
   /// </summary>
   [Fact]
   public void SelectionToolbarMatchesWebEditorToolVocabulary()
@@ -3646,25 +3795,20 @@ public sealed class ScreenshotSessionWorkbenchTests
     string[] expectedTools =
     [
       "rectangle", "ellipse", "arrow", "pen", "highlighter", "text",
-      "numbering", "mosaic", "blur", "exclude", "inpaint", "textSelect",
+      "numbering", "mosaic", "blur", "exclude", "inpaint",
     ];
     Assert.Equal(expectedTools, ScreenRegionPicker.SelectionEditToolRow.Select(entry => entry.Tool));
-    Assert.All(ScreenRegionPicker.SelectionEditToolRow, entry =>
-      Assert.True(ScreenshotToolbarIcons.HasIcon(entry.IconKey), $"工具缺图标：{entry.IconKey}"));
     Assert.All(ScreenRegionPicker.SelectionEditToolRow, entry =>
     {
       Assert.False(string.IsNullOrWhiteSpace(entry.Label));
       Assert.False(string.IsNullOrWhiteSpace(entry.Tip));
     });
-    // 上排：识别三类（宿主动态下发，键由 IconKey 默认 textRecognition 兜底）
-    // 加长截图/输出/会话控制的固定键全部可解析。
-    Assert.All(
-      new[] { "scrollCapture", "settings", "copy", "save", "pin", "reselect", "exit", "magnifier" },
-      key => Assert.True(ScreenshotToolbarIcons.HasIcon(key), $"上排缺图标：{key}"));
+    // 上排固定动作（识别三类/长截图/复制/保存/钉图/设置/重选/退出/放大镜）
+    // 与直接入口（确认/撤销/重做）在 picker 内以中文文字内联创建，无图标键。
   }
 
   [Theory]
-  [InlineData(ScreenshotRecognitionIntent.Table, "TABLE_RECOGNITION")]
+  [InlineData(ScreenshotRecognitionIntent.Table, "RAPID_TABLE")]
   [InlineData(ScreenshotRecognitionIntent.Formula, "FORMULA_RECOGNITION")]
   public async Task ColdScreenshotCategoryResolvesOnlyAfterExplicitPreparation(
     ScreenshotRecognitionIntent intent, string pipeline)

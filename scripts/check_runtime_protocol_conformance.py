@@ -429,6 +429,7 @@ async def _selection_http_checks() -> None:
         }
         if mode_execution != {
             "rapid_text": ("OCR", "rapidocr", "base_runtime", "unmanaged"),
+            "rapid_table": ("RAPID_TABLE", None, "base_runtime", "unmanaged"),
             "windows_text": ("OCR", "windows", "operating_system", "unmanaged"),
             "paddle_text": (
                 "OCR",

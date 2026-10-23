@@ -103,11 +103,6 @@ function stubCanvasStack() {
   );
 }
 
-/** 按钮/菜单项内矢量图标的 path 数据（区分不同图标）。 */
-function iconPathOf(element: HTMLElement): string | null {
-  return element.querySelector("svg path")?.getAttribute("d") ?? null;
-}
-
 describe("截图现场主排（全部工具+操作）与属性下排", () => {
   it.each([undefined, scene])(
     "常用预设保存操作只在主排，属性/输出行不承载操作（现场=%s）",
@@ -482,7 +477,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "重做",
       "复制标注图",
       "保存标注图",
-      "识别当前图",
+      "识别文字",
       "贴图",
       "结束会话",
       "更多操作",
@@ -518,7 +513,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     expect(main.queryByLabelText("修补掩膜绘制方式")).toBeNull();
   });
 
-  it("两排按钮统一 Tabler 描边矢量图标；更多菜单按可用状态收纳低频操作", () => {
+  it("截图现场主排为纯中文文字（无 SVG 图标）；更多菜单按可用状态收纳低频操作", () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -531,7 +526,8 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       />,
     );
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    // 主排按钮均为描边矢量图标（stroke、无填充），无文本裸按钮。
+    // 现场主排按用户要求全部为简短中文文字：不渲染任何 SVG 图标，
+    // 可见文字与可访问名一致，不再依赖图标形状区分语义。
     for (const name of [
       "选择",
       "矩形",
@@ -542,16 +538,14 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "重做",
       "复制标注图",
       "保存标注图",
-      "识别当前图",
+      "识别文字",
       "贴图",
       "结束会话",
       "更多操作",
     ]) {
-      const icon = main.getByRole("button", { name }).querySelector("svg");
-      expect(icon).not.toBeNull();
-      expect(icon).toHaveAttribute("viewBox", "0 0 24 24");
-      expect(icon).toHaveAttribute("fill", "none");
-      expect(icon).toHaveAttribute("stroke", "currentColor");
+      const button = main.getByRole("button", { name });
+      expect(button.querySelector("svg"), name).toBeNull();
+      expect(button.textContent?.trim(), name).toBe(name);
     }
     // 打开更多菜单：无屏蔽/无编辑时清空屏蔽与清除编辑禁用，屏蔽副本不出现。
     fireEvent.click(main.getByRole("button", { name: "更多操作" }));
@@ -565,11 +559,8 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     );
     expect(screen.queryByRole("menuitem", { name: "复制屏蔽副本" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "保存屏蔽副本" })).toBeNull();
-    // 图标语义可区分：工具“屏蔽”与菜单“清空屏蔽”不共用同一矢量。
-    expect(iconPathOf(clearExclusionsItem)).toBeTruthy();
-    expect(iconPathOf(clearExclusionsItem)).not.toBe(
-      iconPathOf(main.getByRole("button", { name: "屏蔽" })),
-    );
+    // 现场菜单项同样不渲染图标，仅文字。
+    expect(clearExclusionsItem.querySelector("svg")).toBeNull();
     // 再次点击触发器关闭菜单：菜单项从无障碍树移除。
     fireEvent.click(main.getByRole("button", { name: "更多操作" }));
     expect(
@@ -577,7 +568,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("屏蔽分支：屏蔽副本收入更多菜单并走会话命令；主排按钮保持图标+可访问名", async () => {
+  it("屏蔽分支：屏蔽副本收入更多菜单并走会话命令；主排按钮为纯文字标签", async () => {
     stubCanvasStack();
     const actions = createActions();
     const { unmount } = render(
@@ -597,10 +588,10 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     );
     await act(async () => {});
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    // 现场主排不渲染纯文本标签，避免拉长图标行；入口仍是可访问名可达。
-    expect(main.getByRole("button", { name: "复制标注图" }).textContent).toBe(
-      "",
-    );
+    // 现场主排以文字呈现：可见文字即标签，无 SVG 图标，入口可访问名可达。
+    const copyAnnotated = main.getByRole("button", { name: "复制标注图" });
+    expect(copyAnnotated.textContent).toBe("复制标注图");
+    expect(copyAnnotated.querySelector("svg")).toBeNull();
     fireEvent.click(main.getByRole("button", { name: "更多操作" }));
     // 冻结基准回显屏蔽区后：清空屏蔽可用，屏蔽副本入口出现并可发起命令。
     expect(
@@ -619,34 +610,61 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     unmount();
   });
 
-  it("自动取字偏好仅随取字工具显示：切换工具属性排隐藏/恢复，偏好保留", () => {
+  it("默认准备文字层，工具栏不再提供取字工具或自动取字开关", () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
         canExport
         canRecognize
-        source="https://app.vibeocr/__resource/screenshot.bmp"
+        source={scene.inputUrl}
         captureScene={scene}
         session={{ sessionId: "capture", revision: 0 }}
       />,
     );
-    const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    // 会话带取字偏好，但初始选择工具：偏好不撑开属性排。
+    expect(screen.queryByRole("button", { name: "取字" })).toBeNull();
+    expect(screen.queryByLabelText("自动取字")).toBeNull();
+    expect(screen.getByRole("button", { name: "识别文字" })).toBeVisible();
     expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
-    // 切到取字：自动取字偏好出现在属性排并可勾选。
-    fireEvent.click(main.getByRole("button", { name: "取字" }));
-    const settings = within(
-      screen.getByRole("toolbar", { name: "当前工具设置" }),
+  });
+
+  it("本地引擎未就绪时不循环自动提交，显式重试可重新准备同一修订", async () => {
+    stubCanvasStack();
+    const actions = createActions();
+    render(
+      <ImageCanvasEditor
+        actions={actions}
+        canExport
+        canRecognize
+        source={scene.inputUrl}
+        session={{ sessionId: "capture", revision: 0 }}
+        textLayer={{
+          status: "textlayer.unavailable",
+          binding: { sessionId: "capture", revision: 0 },
+        }}
+      />,
     );
-    const checkbox = settings.getByLabelText("自动取字");
-    expect(checkbox).not.toBeChecked();
-    fireEvent.click(checkbox);
-    expect(settings.getByLabelText("自动取字")).toBeChecked();
-    // 切回选择：属性排隐藏；切回取字：偏好恢复勾选（状态未丢）。
-    fireEvent.click(main.getByRole("button", { name: "选择" }));
-    expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
-    fireEvent.click(main.getByRole("button", { name: "取字" }));
-    expect(screen.getByLabelText("自动取字")).toBeChecked();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(actions.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新准备文字层" }));
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "recognition.prepareScreenshotTextLayer",
+          revision: 0,
+        }),
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          command.type === "recognition.prepareScreenshotTextLayer",
+      ),
+    ).toHaveLength(1);
   });
 
   it("两排中的所有按钮均有可访问名称（图标按钮不裸露）", () => {
@@ -740,7 +758,7 @@ describe("普通编辑页同构：工具+操作上排、属性下排", () => {
       "复制标注图",
       "保存标注图",
       "贴图",
-      "识别当前图",
+      "识别文字",
       "结束会话",
       "清除编辑",
     ]) {

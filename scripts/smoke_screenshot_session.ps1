@@ -119,7 +119,8 @@ try {
         -not $health.session_id -or $health.revision -lt 1 -or
         -not $health.task_id -or -not $health.ocr_visible -or
         $health.submit_attempts_after_capture -ne 0 -or
-        $health.submit_attempts_after_recognition -ne 1 -or
+        $health.explicit_recognition_submit_attempts -ne 1 -or
+        $health.submit_attempts_after_recognition -ne ($health.automatic_text_submit_attempts + 1) -or
         $health.startup_ensure_attempts_after_capture -ne
             $health.startup_ensure_attempts_before_capture -or
         $health.startup_ensure_attempts_after_capture -ne

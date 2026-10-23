@@ -412,6 +412,13 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
     installer = _require_mapping(runtime_manifest.get("installer"), "installer")
     names.add(_release_file_name(python.get("archive"), "python.archive"))
     names.add(_release_file_name(installer.get("archive"), "installer.archive"))
+    if "rapid_cuda_environment" in runtime_manifest:
+        rapid_cuda = _require_mapping(
+            runtime_manifest["rapid_cuda_environment"], "rapid_cuda_environment"
+        )
+        names.add(
+            _release_file_name(rapid_cuda.get("lock"), "rapid_cuda_environment.lock")
+        )
 
     profiles = _require_mapping(runtime_manifest.get("profiles"), "profiles")
     base_packs: tuple[str, ...] | None = None

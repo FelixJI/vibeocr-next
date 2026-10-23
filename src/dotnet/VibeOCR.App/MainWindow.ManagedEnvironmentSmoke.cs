@@ -434,7 +434,9 @@ public sealed partial class MainWindow
       editorSurface: true);
     await WaitForCanvasAsync();
     RecordManagedSmokeStage($"recognize {environment.Name}");
-    await ClickSmokeButtonAsync("识别当前图");
+    await WaitForAutomaticTextLayerAsync(capturedState.ScreenshotSession!);
+    before = smokeSubmitAttempts();
+    await ClickSmokeButtonAsync("识别文字");
     await WaitForScreenshotStateAsync(state =>
     {
       if (!state.IsBusy && state.StatusCode is "recognition.cancelled" or

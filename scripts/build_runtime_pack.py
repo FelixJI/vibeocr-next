@@ -36,6 +36,12 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "runtime"))
 sys.path.insert(0, str(REPO_ROOT / "contracts" / "runtime" / "python"))
 
 from vibeocr.runtime.environments.network_detector import get_pip_mirror  # noqa: E402
+from vibeocr.runtime.environments.rapid_assets import (  # noqa: E402
+    RAPIDTABLE_MODEL,
+    RAPIDTABLE_MODEL_SHA256,
+    RAPIDTABLE_MODEL_URL,
+    pinned_download,
+)
 from vibeocr.runtime.environments.runtime_manifest import (  # noqa: E402
     ManifestError,
     validate_requirements_lock,
@@ -213,6 +219,17 @@ def build_runtime_pack(
     if missing:
         raise RuntimeError(f"runtime pack is missing wheels for: {missing}")
 
+    model = (
+        pinned_download(
+            RAPIDTABLE_MODEL_URL,
+            work_dir / "models" / RAPIDTABLE_MODEL,
+            RAPIDTABLE_MODEL_SHA256,
+            lambda: None,
+        )
+        if profile == "win-x64-base"
+        else None
+    )
+
     # 分片:单 wheel 不可再分,超过 max_part_bytes 的 wheel 独占一片。
     # wheel 本身已是 deflate 容器,直接以文件大小做贪心装箱即可。
     parts: list[list[Path]] = []
@@ -260,6 +277,10 @@ def build_runtime_pack(
                 )
                 requirements_info.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(requirements_info, pack_requirements.encode("utf-8"))
+                if model is not None:
+                    info = zipfile.ZipInfo(model.name, date_time=_FIXED_ZIP_DATE_TIME)
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(info, model.read_bytes())
             for wheel in part_files:
                 info = zipfile.ZipInfo(wheel.name, date_time=_FIXED_ZIP_DATE_TIME)
                 info.compress_type = zipfile.ZIP_DEFLATED

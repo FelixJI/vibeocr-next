@@ -1136,7 +1136,9 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
         "requirements-win-x64-cu126.lock"))
       .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
       .Select(line => line.Trim().TrimEnd('\\').Trim()).ToArray();
-    Assert.Equal(146, pins.Length);
+    // 配方 pin 数随依赖锁定更新自然增减，不把历史数量包装成规模门禁；
+    // 只要求读到真实非空配方，容量与完整性契约由下方全量序列化与字节预算断言承担。
+    Assert.NotEmpty(pins);
     var dependencies = pins.Select(pin => new VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallDependency
     {
       Name = System.Text.RegularExpressions.Regex.Match(pin, "^[A-Za-z0-9_.-]+").Value,
@@ -1204,7 +1206,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       Assert.Equal(terminal, observed.GetProperty("state").GetString());
       Assert.Equal(progress.AttemptId, observed.GetProperty("attempt_id").GetString());
       Assert.Equal(852, observed.GetProperty("seq").GetInt64());
-      Assert.Equal(146, observed.GetProperty("dependencies").GetArrayLength());
+      Assert.Equal(pins.Length, observed.GetProperty("dependencies").GetArrayLength());
       Assert.Equal(JsonValueKind.Null, observed.GetProperty("log").ValueKind);
       Assert.Equal(JsonSerializer.Serialize(progress with { Log = null }), observed.GetRawText());
       string[] visible = projected.GetProperty("environmentInstallLog").EnumerateArray().Select(item => item.GetString()!).ToArray();

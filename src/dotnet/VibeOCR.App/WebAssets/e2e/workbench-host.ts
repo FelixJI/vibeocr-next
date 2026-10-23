@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Page, type Request } from "@playwright/test";
 import type {
   AppSnapshot,
   BridgeEnvelope,
@@ -153,13 +153,65 @@ export async function mountHost(
       },
     });
   }, snapshot);
-  await page.goto(entryPath);
-  if (!waitForFeature) return;
-  if (entryPath.includes("?scene=1"))
-    await expect(
-      page.getByRole("toolbar", { name: "图片编辑工具" }),
-    ).toBeVisible();
-  else await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  const pageErrors: string[] = [];
+  const requests: Request[] = [];
+  const onPageError = (error: Error) => pageErrors.push(error.message);
+  const onRequest = (request: Request) => {
+    if (["document", "script", "stylesheet"].includes(request.resourceType()))
+      requests.push(request);
+  };
+  page.on("pageerror", onPageError);
+  page.on("request", onRequest);
+  try {
+    await page.goto(entryPath);
+    if (!waitForFeature) return;
+    if (entryPath.includes("?scene=1"))
+      await expect(
+        page.getByRole("toolbar", { name: "图片编辑工具" }),
+      ).toBeVisible();
+    else await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  } catch (error) {
+    const nodeState = {
+      url: page.url(),
+      pageErrors: [...pageErrors],
+      requests: requests.map((request) => ({
+        url: request.url(),
+        failure: request.failure()?.errorText,
+        timing: request.timing(),
+      })),
+    };
+    let documentState: Record<string, unknown>;
+    let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      documentState = await Promise.race([
+        page.evaluate(() => ({
+          readyState: document.readyState,
+          rootText: document
+            .getElementById("root")
+            ?.textContent?.slice(0, 8000),
+          featureLoading: !!document.querySelector('[aria-label="页面加载中"]'),
+        })),
+        new Promise<never>((_, reject) => {
+          diagnosticTimer = setTimeout(
+            () => reject(new Error("DOM snapshot timed out after 1000ms")),
+            1000,
+          );
+        }),
+      ]);
+    } catch (diagnosticError) {
+      documentState = { documentError: String(diagnosticError) };
+    } finally {
+      clearTimeout(diagnosticTimer);
+    }
+    console.error(
+      "[mountHost]",
+      JSON.stringify({ ...nodeState, ...documentState }),
+    );
+    throw error;
+  } finally {
+    page.off("pageerror", onPageError);
+    page.off("request", onRequest);
+  }
 }
 
 type TestHostWindow = Window & {

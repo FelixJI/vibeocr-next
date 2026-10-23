@@ -112,7 +112,7 @@ describe("截图原位编辑", () => {
       screen.getByRole("button", { name: "保存标注图" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "识别当前图" }),
+      screen.getByRole("button", { name: "识别文字" }),
     ).toBeInTheDocument();
     unmount();
   });
@@ -124,11 +124,11 @@ describe("截图原位编辑", () => {
     )!;
     expect(style["--capture-x"]).toBe("1000px");
     expect(style["--capture-y"]).toBe("500px");
-    expect(style["--capture-tools-left"]).toBe("400px");
+    expect(style["--capture-tools-left"]).toBe("520px");
     // 两排工具栏（主操作+样式）高度预算 96px：优先放在选区下方，
     // 放不下时改到选区上方（y - 96 - 8）。
-    expect(style["--capture-tools-height"]).toBe("96px");
-    expect(style["--capture-tools-top"]).toBe("396px");
+    expect(style["--capture-tools-height"]).toBe("184px");
+    expect(style["--capture-tools-top"]).toBe("308px");
   });
   it("两排工具栏的预算足够容纳主操作与样式两行控件", () => {
     // 窄视口也不再把预算压到两行以下（剩余由排内换行+宿主滚动兑底）。
@@ -138,7 +138,7 @@ describe("截图原位编辑", () => {
     // 窄视口（<900px）两排换行后行数增多，预算自适应放宽到 144px，
     // 避免主操作排被卷进覆盖层折叠区。
     expect(captureSceneStyle(scene, 640, 720)!["--capture-tools-height"]).toBe(
-      "144px",
+      "184px",
     );
   });
   it("选区几乎全屏、工具栏钉底时输出设置翻转到覆盖层上方且完整在视口内", () => {
@@ -149,9 +149,9 @@ describe("截图原位编辑", () => {
       1280,
       720,
     )!;
-    expect(style["--capture-tools-top"]).toBe("624px");
+    expect(style["--capture-tools-top"]).toBe("536px");
     // 624+96+4+132 放不下 → 翻转到覆盖层上方：488 + 132 = 620 ≤ 720。
-    expect(style["--capture-settings-top"]).toBe("488px");
+    expect(style["--capture-settings-top"]).toBe("400px");
     expect(style["--capture-settings-max-height"]).toBe("132px");
   });
   it("普通图片编辑不使用截图屏幕几何，拒绝超出冻结桌面的选区", () => {

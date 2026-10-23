@@ -745,6 +745,7 @@ public sealed class MineruConnectionWorkbenchTests
             Mode(Wire.RecognitionModeId.MineruDocument, ready, unavailable),
             Mode(Wire.RecognitionModeId.PaddleTable, ready),
             Mode(Wire.RecognitionModeId.PaddleFormula, ready),
+            Mode(Wire.RecognitionModeId.RapidTable, ready),
           ],
         },
       },
@@ -780,6 +781,9 @@ public sealed class MineruConnectionWorkbenchTests
       Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

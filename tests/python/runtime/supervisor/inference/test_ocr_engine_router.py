@@ -331,3 +331,84 @@ class TestExecutorFailFast:
         assert "ocr_engine_rejected" in event_names
         # 不进入恢复路径：没有 recovery_decision 事件。
         assert "recovery_decision" not in event_names
+
+    def test_rapid_table_unready_cuda_fails_items_through_real_engine(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """RAPID_TABLE + device=cuda 且 CUDA 未就绪：真实引擎经 executor 映射为
+        per-item OCR_ENGINE_UNAVAILABLE（reason device_provider_unavailable），
+        capabilities 阶段不抛错、无恢复重试。"""
+        import sys as _sys
+        import types as _types
+
+        from vibeocr.runtime.jobs.registry import JobRegistry
+        from vibeocr.runtime.recognition import rapidtable_engine
+        from vibeocr.runtime.recognition.ocr_engine_router import (
+            OcrEngineRoutingAdapter,
+        )
+        from vibeocr.runtime.recognition.paddle_executor import AdapterExecutor
+
+        monkeypatch.setitem(
+            _sys.modules, "rapid_table", _types.ModuleType("rapid_table")
+        )
+        monkeypatch.setattr(rapidtable_engine, "resolve_model_path", lambda: object())
+        monkeypatch.setattr(rapidtable_engine, "cuda_provider_ready", lambda: False)
+
+        registry = JobRegistry(instance_id="t-rapid-table")
+        record = registry.create(
+            kind=JobKind.RECOGNITION,
+            priority=JobPriority.INTERACTIVE,
+            items=[
+                JobItem(
+                    item_id="it-0",
+                    display_name="table.png",
+                    state=ItemState.QUEUED,
+                )
+            ],
+            progress_total=1,
+            pipeline=PipelineSelection(
+                pipeline_id="RAPID_TABLE", options={"device": "cuda"}
+            ),
+        )
+        record.transition(JobState.QUEUED)
+
+        def _staged_pngs_local(items: list[Any], base: Any) -> list[Any]:
+            import io
+
+            from PIL import Image
+            from vibeocr.runtime.jobs.staging import StagedInput
+
+            buffer = io.BytesIO()
+            Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+            png = buffer.getvalue()
+            staged = []
+            for index, item in enumerate(items):
+                path = base / f"rapid-table-{index}.png"
+                path.write_bytes(png)
+                staged.append(
+                    StagedInput(
+                        item_id=item.item_id,
+                        display_name=item.display_name,
+                        path=path,
+                        size_bytes=len(png),
+                    )
+                )
+            return staged
+
+        staged = _staged_pngs_local(record.items, tmp_path)
+
+        engine = rapidtable_engine.RapidTableEngine()
+        router = OcrEngineRoutingAdapter(
+            fallback_factory=None,
+            resolver=OcrEngineResolver(registry=OcrEngineRegistry([])),
+            rapid_table_factory=lambda: engine,
+        )
+        executor = AdapterExecutor(adapter_factory=lambda: router, device="cpu:0")
+        executor.execute(record, staged)
+        assert list(record.item_errors.values()) == ["OCR_ENGINE_UNAVAILABLE"]
+        reject = next(
+            event for event in record.events if event.stage == "ocr_engine_rejected"
+        )
+        assert reject.detail["reason_code"] == "device_provider_unavailable"
+        assert reject.detail["engine"] == "rapidtable"
+        assert "recovery_decision" not in [event.stage for event in record.events]

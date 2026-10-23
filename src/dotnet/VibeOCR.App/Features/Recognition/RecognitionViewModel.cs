@@ -34,6 +34,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     private RecognitionModeOption? _taskRecognitionMode;
     private MineruConfig? _taskMineruConfig;
     private PaddleModeOptions? _taskOptions;
+    private RapidDeviceOptions? _taskDeviceOptions;
 
     public RecognitionViewModel(
         IInferenceClient inference,
@@ -82,9 +83,11 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
     public void SetRecognitionMode(
         RecognitionModeOption? taskMode,
         MineruConfig? mineruConfig = null,
-        PaddleModeOptions? options = null)
+        PaddleModeOptions? options = null,
+        RapidDeviceOptions? deviceOptions = null)
     {
         _taskOptions = taskMode is null ? null : options;
+        _taskDeviceOptions = taskMode is null ? null : deviceOptions;
         _taskRecognitionMode = taskMode;
         _taskMineruConfig = taskMode is null ? null : mineruConfig;
     }
@@ -343,11 +346,16 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         // ToWire；不支持或越界字段在这里明确拒绝整个提交，不静默丢弃后
         // 仍提交（#110 AC2）。状态展示过滤走 ProjectWire，与此分开。
         IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = frozenSelection?.Options;
-        if (frozenSelection is null && recognize && !deferFreeze && _taskOptions is not null)
+        if (frozenSelection is null && recognize && !deferFreeze && (_taskOptions is not null || _taskDeviceOptions is not null))
         {
             try
             {
-                options = _taskOptions.ToWire(_taskRecognitionMode!);
+                var merged = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
+                if (_taskOptions is not null)
+                    foreach (var pair in _taskOptions.ToWire(_taskRecognitionMode!)) merged.Add(pair.Key, pair.Value);
+                if (_taskDeviceOptions is not null)
+                    foreach (var pair in _taskDeviceOptions.ToWire(_taskRecognitionMode!)) merged.Add(pair.Key, pair.Value);
+                options = merged;
             }
             catch (ArgumentException error)
             {

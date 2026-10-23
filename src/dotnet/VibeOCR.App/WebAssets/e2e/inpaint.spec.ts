@@ -602,7 +602,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
   });
 
   // 显式识别走会话导出路径：上传的识别输入包含已应用修补像素。
-  await page.getByRole("button", { name: "文字识别" }).click();
+  await page.getByRole("button", { name: "识别文字" }).click();
   await expect.poll(() => uploads.length).toBe(1);
   await expectCommand(page, {
     scope: "recognition",

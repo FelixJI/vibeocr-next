@@ -28,7 +28,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   public event Action<Guid, long>? ScreenshotSessionDetached;
   public event Action<Guid, long>? ScreenshotTextLayerInvalidated;
   public event Action<RecognitionTextLayerState?>? ScreenshotTextLayerChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SavePresetImageCommand or SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SavePresetImageCommand or SelectRecognitionImageCommand or RecognizeDroppedFileCommand or ReadRecognitionClipboardCommand or CaptureRecognitionScreenCommand or SelectImageEditFileCommand or ReadImageEditClipboardCommand or OpenDroppedImageEditFileCommand or OpenRecognitionImageForEditCommand or PasteRecognitionImageForEditCommand or CaptureScreenshotSessionCommand or CaptureScreenshotTextSessionCommand or CaptureScrollingScreenshotCommand or CloseScreenshotSessionCommand or CloseImageEditSessionCommand or ClosePinEditSessionCommand or NotifyScreenshotSessionRevisionCommand or NotifyImageEditRevisionCommand or NotifyPinEditRevisionCommand or CopyScreenshotImageCommand or CopyImageEditImageCommand or CopyPinEditImageCommand or SaveScreenshotImageCommand or SaveImageEditImageCommand or SavePinEditImageCommand or PinScreenshotImageCommand or PinImageEditImageCommand or RecognizeScreenshotImageCommand or RecognizeImageEditImageCommand or PrepareScreenshotTextLayerCommand or PrepareImageEditTextLayerCommand or CancelScreenshotTextLayerCommand or CancelImageEditTextLayerCommand or CopyScreenshotSelectionCommand or CopyImageEditSelectionCommand or CopyPinEditAnnotatedImageCommand or SavePinEditAnnotatedImageCommand or ApplyPinEditSnapshotCommand or RejectPinProjectRestoreCommand or AckPinEditImportCommand or RejectPinEditImportCommand or ReleasePinEditAssetsCommand or SetPinHistoryEnabledCommand or ListPinHistoryCommand or ReopenPinHistoryEntryCommand or DeletePinHistoryEntryCommand or ClearPinHistoryCommand or ShowPinManagerCommand or CancelRecognitionCommand or CopyRecognitionResultCommand or CopyStructuredResultCommand or CopyRecognitionLinesCommand or CopyStructuredCellsCommand or UpdateRecognitionLineCommand or ExportRecognitionResultCommand or CopyAnnotatedImageCommand or CopyImageEditAnnotatedImageCommand or SaveAnnotatedImageCommand or SaveImageEditAnnotatedImageCommand or SetTaskEngineCommand or SetRecognitionOptionsCommand or SetModeDeviceCommand or PasteImageEditSystemContentCommand or PasteScreenshotSystemContentCommand or ImportDroppedImageEditContentCommand or ImportDroppedScreenshotContentCommand or AckImageEditImportCommand or AckScreenshotImportCommand or RejectImageEditImportCommand or RejectScreenshotImportCommand or ReleaseImageEditAssetsCommand or ReleaseScreenshotAssetsCommand or SaveImageEditProjectCommand or SaveScreenshotProjectCommand or OpenImageEditProjectCommand or AckImageEditProjectOpenCommand or RejectImageEditProjectOpenCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -153,6 +153,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       cancellationToken),
     SetTaskEngineCommand taskEngine => SetTaskEngine(taskEngine),
     SetRecognitionOptionsCommand options => SetRecognitionOptions(options),
+    SetModeDeviceCommand device => SetModeDevice(device),
     PasteImageEditSystemContentCommand => await StartSystemPasteAsync(
       imageEditChannel, imageEditImport, cancellationToken),
     PasteScreenshotSystemContentCommand => await StartSystemPasteAsync(
@@ -1452,7 +1453,28 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           mode.Id, label, mode.Availability, mode.ReasonCode, iconKey)
         // 验证后的目录必然声明全部稳定模式；缺失时按目录不可用禁用。
         : new ScreenshotRecognitionModeEntry("", label, "unavailable", null, iconKey);
-    entries.Add(SpecializedEntry(modes, "TABLE_RECOGNITION", "表格识别", "tableRecognition"));
+
+    // 表格语义有两个稳定模式；目录真值决定指向：ready RapidTable >
+    // ready Paddle > preparation_required（RapidTable 先）；不读文字默认。
+    static ScreenshotRecognitionModeEntry TableEntry(
+      IReadOnlyList<RecognitionModeOption> modes)
+    {
+      const string rapidPipeline = "RAPID_TABLE";
+      const string paddlePipeline = "TABLE_RECOGNITION";
+      RecognitionModeOption[] tableModes = [.. modes
+        .Where(mode => mode.Family == "specialized" &&
+          (mode.PipelineId == rapidPipeline || mode.PipelineId == paddlePipeline))
+        .OrderBy(mode => mode.PipelineId == rapidPipeline ? 0 : 1)];
+      RecognitionModeOption? chosen =
+        tableModes.FirstOrDefault(mode => mode.Availability == "ready") ??
+        tableModes.FirstOrDefault(mode => mode.Availability == "preparation_required") ??
+        tableModes.FirstOrDefault();
+      return chosen is { } mode
+        ? new ScreenshotRecognitionModeEntry(
+          mode.Id, "表格识别", mode.Availability, mode.ReasonCode, "tableRecognition")
+        : new ScreenshotRecognitionModeEntry("", "表格识别", "unavailable", null, "tableRecognition");
+    }
+    entries.Add(TableEntry(modes));
     entries.Add(SpecializedEntry(modes, "FORMULA_RECOGNITION", "公式识别", "formulaRecognition"));
     return entries;
   }
@@ -1808,7 +1830,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         throw new RecognitionModeUnavailableException("当前运行环境未声明所选识别模式；请检查设置。");
       return new FrozenImageRecognitionSelection(mode?.Id,
         new RecognitionSubmitSelection(mode?.PipelineId ?? "OCR", mode?.Engine,
-          snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetModeOptions(mode)?.ToWire(mode!)));
+          snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetWireOptions(mode)));
     }
     if (explicitMode)
       throw new RecognitionModeUnavailableException("识别目录未就绪；请在设置中连接并准备运行环境。");
@@ -2243,10 +2265,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         existing.SessionId == command.SessionId.ToString("N") && existing.Revision == command.Revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready")
       return SessionState(channel, false, SessionStatusCode(channel));
-    if (ensureRuntimeReady is null || inferenceAttached?.Invoke() != false)
+    if (inferenceAttached?.Invoke() != false)
       await selectionPolicy.EnsureSelectionLoadedAsync(cancellationToken);
-    if ((ensureRuntimeReady is null && inferenceAttached?.Invoke() == false) ||
-        (settingsOwner.CurrentModel?.RecognitionSelection is not null && FindReadyLocalTextMode(out _) is null))
+    if (inferenceAttached?.Invoke() == false || FindReadyLocalTextMode(out _) is null)
     {
       _ = FindReadyLocalTextMode(out string? reason);
       channel.TextLayer = new RecognitionTextLayerState("textlayer.unavailable",
@@ -2281,8 +2302,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         mediaType = annotation.MediaType;
       }
       else png = pinnedPng;
-      if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(ct))
-        throw new OperationCanceledException(ct);
+      // 自动文字层只使用已连接服务；不能借提交入口安装或启动运行环境。
+      if (!await selectionPolicy.EnsureSelectionLoadedAsync(ct))
+      {
+        if (generation == Volatile.Read(ref channel.TextGeneration))
+          PublishTextLayerState(channel, "textlayer.unavailable", "textlayer.serviceUnavailable");
+        return;
+      }
       ct.ThrowIfCancellationRequested();
       if (generation != Volatile.Read(ref channel.TextGeneration)) return;
       ValidateScreenshotSession(channel, command.SessionId, command.Revision);
@@ -2335,6 +2361,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         binding.SessionId == sessionId.ToString("N") &&
         binding.Revision == revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready") return null;
+      // 贴图菜单是显式用户动作，保留准备 Runtime 的既有行为。
+      if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(cancellationToken))
+        throw new PinnedTextPreparationException("本地识别服务尚未就绪。");
       byte[] activePng = await File.ReadAllBytesAsync(imagePath, cancellationToken);
       WorkbenchState? started = await PrepareScreenshotTextLayerAsync(
         channel,
@@ -3436,6 +3465,23 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     synchronizeBatchMode();
     return CurrentRecognitionState();
   }
+
+  /// <summary>目录声明 device 才接受；cuda 不可用时由 Runtime fail closed，桌面不推导也不降 CPU。</summary>
+  private RecognitionWorkbenchState SetModeDevice(SetModeDeviceCommand command)
+  {
+    settingsOwner.EnsureModel();
+    RecognitionModeOption mode = settingsOwner.EnsureModel().RecognitionSelection?.Catalog.FindRecognitionMode(command.ModeId)
+      ?? throw new InvalidOperationException("Recognition mode is absent from this environment.");
+    if (!mode.SupportedOptions.Contains("device", StringComparer.Ordinal))
+      throw new ArgumentException($"Mode {mode.Id} does not support device.");
+    var options = new RapidDeviceOptions { Device = command.Device };
+    options.ToWire(mode);
+    if (optionsLayout is not null) options.Save(optionsLayout, mode.Id);
+    selectionPolicy.SetDeviceOptions(mode.Id, options);
+    SynchronizeRecognitionMode();
+    synchronizeBatchMode();
+    return CurrentRecognitionState();
+  }
   /// <summary>
   /// 任务级模式/引擎严格 resolve：不可用即抛出，不回退默认；普通截图
   /// 动作栏的显式 typed 意图与设置页任务模式选择共用同一语义。
@@ -3495,7 +3541,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       ? snapshot.MineruConfigFor(mode?.Id)
       : WorkbenchSelectionOwner.TryProjectMineruConfig(snapshot, mode?.Id, out MineruConfig? projected)
         ? projected : null;
-    viewModel.SetRecognitionMode(mode, config, selectionPolicy.GetModeOptions(mode));
+    viewModel.SetRecognitionMode(mode, config, selectionPolicy.GetModeOptions(mode),
+      deviceOptions: selectionPolicy.GetDeviceOptions(mode));
   }
 
   private static string RecognitionStatusCode(

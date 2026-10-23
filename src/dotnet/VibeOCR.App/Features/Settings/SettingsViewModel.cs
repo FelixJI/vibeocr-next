@@ -1041,6 +1041,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         "mineru_document" => "深度文档解析（MinerU）",
         "paddle_table" => "表格结构识别（PaddleOCR）",
         "paddle_formula" => "数学公式识别（PaddleOCR）",
+        "rapid_table" => "表格结构识别（RapidTable）",
         _ => mode,
     };
 

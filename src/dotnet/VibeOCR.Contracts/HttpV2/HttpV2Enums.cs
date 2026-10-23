@@ -148,6 +148,7 @@ public enum RecognitionMode
     [JsonStringEnumMemberName("mineru_document")] MineruDocument,
     [JsonStringEnumMemberName("paddle_table")] PaddleTable,
     [JsonStringEnumMemberName("paddle_formula")] PaddleFormula,
+    [JsonStringEnumMemberName("rapid_table")] RapidTable,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<RecognitionResourceKind>))]

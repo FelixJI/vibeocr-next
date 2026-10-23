@@ -76,6 +76,13 @@ EXPECTED_MODES = {
         "advanced_component",
         "model_residency",
     ),
+    "rapid_table": (
+        "specialized",
+        "RAPID_TABLE",
+        None,
+        "base_runtime",
+        "unmanaged",
+    ),
 }
 
 EXPECTED_LIFECYCLE = {
@@ -87,6 +94,7 @@ EXPECTED_LIFECYCLE = {
     "mineru_document": ("process_keep_alive", True, True, False, True),
     "paddle_table": ("model_residency", True, True, True, True),
     "paddle_formula": ("model_residency", True, True, True, True),
+    "rapid_table": ("unmanaged", False, False, False, False),
 }
 
 
@@ -201,6 +209,7 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
         "mineru_document": "深度文档解析（MinerU）",
         "paddle_table": "表格结构识别（PaddleOCR）",
         "paddle_formula": "数学公式识别（PaddleOCR）",
+        "rapid_table": "表格结构识别（RapidTable）",
     }
     for mode in RecognitionMode:
         definition = get_recognition_mode_definition(mode)
@@ -212,10 +221,9 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
         assert definition.provisioning == expected[3]
         assert definition.lifecycle.kind == expected[4]
 
-    assert (
-        get_recognition_mode_definition(RecognitionMode.RAPID_TEXT).supported_options
-        == ()
-    )
+    assert get_recognition_mode_definition(
+        RecognitionMode.RAPID_TEXT
+    ).supported_options == ("device",)
     assert (
         get_recognition_mode_definition(RecognitionMode.WINDOWS_TEXT).supported_options
         == ()

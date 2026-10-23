@@ -1,16 +1,19 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { expectCommand, mountHost } from "./workbench-host";
+import {
+  expectCommand,
+  mountHost,
+  readyImageRecognitionModes,
+  sendState,
+} from "./workbench-host";
 
-/** 截图现场两排工具栏的真实浏览器布局契约（最终方案）：
- *  1) 主排（图片编辑工具）承载全部绘图工具与操作（含取字/修补上下文
- *     操作、复制/保存/识别/撤销等），始终单行；过宽时容器内水平滚动
- *     保持可达，不把工具/操作挪去下排；
- *  2) 下排（当前工具设置）仅当前工具的颜色/线宽/字号/强度等参数与
- *     自动取字偏好，无属性时收起，且位于主排下方；
- *  3) 窄视口（360/640）：页面不横向溢出，主排可滚动到末尾按钮，
- *     下排可见且可交互（点色板、线宽选择器出现）。
- *  只锁定几何契约，不做视觉基线（基线由主代理维护）。 */
+/** 工具/操作分组换行，内容高度决定浮层位置；窄屏与高 DPI 保持动作可达。 */
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/__annotation/*", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+});
 
 const sceneGeometry = {
   surfaceId: "surface",
@@ -33,6 +36,7 @@ async function mountScene(
   width: number,
   height: number,
   geometry?: Partial<typeof sceneGeometry>,
+  ready = true,
 ) {
   await page.setViewportSize({ width, height });
   await page.route("**/__capture_background", (route) =>
@@ -68,6 +72,7 @@ async function mountScene(
       capabilities: ["recognition.annotation", "recognition.screenshotSession"],
       features: {
         recognition: {
+          recognitionModes: ready ? readyImageRecognitionModes : [],
           isBusy: false,
           statusCode: "recognition.session",
           input: {
@@ -86,9 +91,10 @@ async function mountScene(
     "/#/imageEdit?scene=1",
   );
   // initialTool=rectangle：主排与属性下排（当前工具设置）同时就绪。
-  await expect(
-    page.getByRole("toolbar", { name: "当前工具设置" }),
-  ).toBeVisible();
+  if (geometry?.initialTool !== "select")
+    await expect(
+      page.getByRole("toolbar", { name: "当前工具设置" }),
+    ).toBeVisible();
 }
 
 /** 主排内按钮的视觉行数（按按钮中心 y 去重；滚动不改变单行）。 */
@@ -137,9 +143,7 @@ async function toolbarWithinViewport(page: Page): Promise<boolean> {
   });
 }
 
-test("宽视口：主排（工具+操作）单行、位于属性下排上方，页面不横向溢出", async ({
-  page,
-}) => {
+test("宽视口：工具与操作分组换行，属性下排位于背景内", async ({ page }) => {
   await mountScene(page, 1280, 720);
   const main = page.getByRole("toolbar", { name: "图片编辑工具" });
   const settings = page.getByRole("toolbar", { name: "当前工具设置" });
@@ -161,7 +165,7 @@ test("宽视口：主排（工具+操作）单行、位于属性下排上方，�
     type: "main-row-width",
     description: `${mainWidth.toFixed(1)}px`,
   });
-  expect(await mainRowCount(page)).toBe(1);
+  expect(await mainRowCount(page)).toBeGreaterThan(1);
   // 页面与工具栏盒均不横向溢出。
   expect(
     await page.evaluate(
@@ -169,10 +173,14 @@ test("宽视口：主排（工具+操作）单行、位于属性下排上方，�
     ),
   ).toBe(true);
   expect(await toolbarWithinViewport(page)).toBe(true);
+  await expectContentsContained(page);
+  await page.screenshot({
+    path: test.info().outputPath("capture-toolbar-ready.png"),
+  });
 });
 
 for (const width of [640, 360]) {
-  test(`窄视口 ${width}px：主排单行可滚动到末尾，下排属性可见可交互`, async ({
+  test(`窄视口 ${width}px：工具和动作自动换行，识别与下排属性可见可交互`, async ({
     page,
   }) => {
     await mountScene(page, width, 720);
@@ -191,8 +199,9 @@ for (const width of [640, 360]) {
       ),
     ).toBe(true);
     expect(await toolbarWithinViewport(page)).toBe(true);
+    await expectContentsContained(page);
     // 主排保持单行，且滚动到最右后末尾按钮（更多）可达。
-    expect(await mainRowCount(page)).toBe(1);
+    expect(await mainRowCount(page)).toBeGreaterThan(1);
     expect(await mainRowScrollableToEnd(page)).toBe(true);
     // 下排可见且可交互：点选常用色；线宽选择器在属性排且不出视口。
     const settings = page.getByRole("toolbar", { name: "当前工具设置" });
@@ -204,6 +213,9 @@ for (const width of [640, 360]) {
     await expect(widthSelect).toBeVisible();
     const selectBox = await widthSelect.boundingBox();
     expect(selectBox!.x + selectBox!.width).toBeLessThanOrEqual(width + 0.5);
+    await page.screenshot({
+      path: test.info().outputPath(`capture-toolbar-${width}.png`),
+    });
   });
 }
 
@@ -262,7 +274,8 @@ test("大选区（y=0、高接近视口）时工具栏钉底，输出设置翻�
   await mountScene(page, 1280, 720, { y: 0, height: 1360 });
   const overlay = page.locator(".capture-scene-editor");
   const overlayBox = await overlay.boundingBox();
-  expect(Math.abs(overlayBox!.y - 624)).toBeLessThanOrEqual(1);
+  expect(overlayBox!.y).toBeGreaterThanOrEqual(0);
+  expect(overlayBox!.y + overlayBox!.height).toBeLessThanOrEqual(720);
   await page.locator(".editor-output-settings > summary").click();
   const panel = page.getByRole("toolbar", { name: "输出设置" });
   await expect(panel).toBeVisible();
@@ -360,17 +373,15 @@ for (const [action, format] of [
         }),
       });
     });
-    await page
-      .getByRole("combobox", { name: "截图圆角", exact: true })
-      .selectOption("40");
+    await page.getByRole("button", { name: "截图直角，点击切换圆角" }).click();
     await expect(page.getByLabel("图片视口")).not.toHaveCSS(
       "border-top-left-radius",
       "0px",
     );
     await page.getByRole("button", { name: "撤销", exact: true }).click();
     await expect(
-      page.getByRole("combobox", { name: "截图圆角", exact: true }),
-    ).toHaveValue("0");
+      page.getByRole("button", { name: "截图直角，点击切换圆角" }),
+    ).toHaveAttribute("aria-pressed", "false");
     await page.getByRole("button", { name: "重做", exact: true }).click();
     if (format === "image/jpeg") {
       await page.locator(".editor-output-settings > summary").click();
@@ -407,5 +418,208 @@ for (const [action, format] of [
     }
     for (const [index, value] of [213, 229, 244, 255].entries())
       expect(Math.abs(samples.center[index]! - value)).toBeLessThanOrEqual(3);
+  });
+}
+
+async function expectContentsContained(page: Page) {
+  await expect(
+    page.getByRole("button", { name: "识别文字", exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page.locator(".capture-scene-editor").evaluate((editor) => {
+      const box = editor.getBoundingClientRect();
+      return [
+        ...editor.querySelectorAll<HTMLElement>(
+          ".editor-toolbar-stack button, .editor-toolbar-settings input, .editor-toolbar-settings select",
+        ),
+      ].every((child) => {
+        const rect = child.getBoundingClientRect();
+        return (
+          rect.top >= box.top &&
+          rect.bottom <= box.bottom + 1 &&
+          rect.left >= box.left &&
+          rect.right <= box.right + 1
+        );
+      });
+    }),
+  ).toBe(true);
+}
+
+test("未就绪时保留明确文字识别按钮与可展开原因", async ({ page }) => {
+  await mountScene(page, 1280, 720, undefined, false);
+  await expect(
+    page.getByRole("button", { name: "识别文字", exact: true }),
+  ).toBeDisabled();
+  await expectContentsContained(page);
+  await page.screenshot({
+    path: test.info().outputPath("capture-toolbar-unavailable.png"),
+  });
+  await page.getByText("识别未就绪", { exact: true }).click();
+  await expect(page.getByText(/识别目录未就绪/)).toBeVisible();
+  await expectContentsContained(page);
+});
+
+test.describe("高 DPI", () => {
+  test.use({ deviceScaleFactor: 2 });
+  test("短屏工具栏随内容高度翻转且所有动作仍可达", async ({ page }) => {
+    await mountScene(page, 640, 480, { y: 0, height: 1360 });
+    await expectContentsContained(page);
+    const bounds = (await page.locator(".capture-scene-editor").boundingBox())!;
+    expect(bounds.y).toBeGreaterThanOrEqual(0);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(480);
+    await page.screenshot({
+      path: test.info().outputPath("capture-toolbar-dpi2.png"),
+    });
+  });
+});
+
+test("默认文字可拖选，绘图和对象拖动优先，修订变化立即移除旧层", async ({
+  page,
+}) => {
+  await mountScene(page, 1280, 720, { initialTool: "select" });
+  const layerState = (revision: number) => ({
+    isBusy: false,
+    recognitionModes: readyImageRecognitionModes,
+    input: {
+      url: "/capture-scene.svg",
+      mediaType: "image/png",
+      byteLength: 4096,
+    },
+    screenshotSession: {
+      sessionId: "toolbar-layout",
+      revision,
+      sceneEditing: true,
+    },
+    textLayer: {
+      status: "textlayer.ready",
+      binding: { sessionId: "toolbar-layout", revision },
+      image: {
+        url: "/capture-scene.svg",
+        mediaType: "image/png",
+        byteLength: 4096,
+      },
+      lines: [
+        { text: "可选文字测试", x1: 100, y1: 100, x2: 500, y2: 200 },
+        { text: "另一行文字", x1: 100, y1: 700, x2: 500, y2: 800 },
+      ],
+    },
+  });
+  await sendState(page, "recognition", layerState(0));
+  const first = page
+    .locator(".editor-selectable-text")
+    .getByText("可选文字测试", { exact: true });
+  await expect(first).toBeVisible();
+  await expect.poll(async () => (await first.boundingBox())?.y).toBe(120);
+  const line = (await first.boundingBox())!;
+  await page.mouse.move(line.x + 1, line.y + line.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(line.x + line.width - 1, line.y + line.height / 2, {
+    steps: 8,
+  });
+  await page.mouse.up();
+  await expect
+    .poll(() => page.evaluate(() => document.getSelection()?.toString()))
+    .not.toBe("");
+  const canvas = page.getByLabel("图片检查画布");
+  await expect(canvas).toBeVisible();
+  const box = (await canvas.boundingBox())!;
+  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await expect(page.locator(".image-text-layer")).toHaveCount(0);
+  await page.mouse.move(box.x + 40, box.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 260, box.y + 60, { steps: 4 });
+  await page.mouse.up();
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "notifyScreenshotRevision",
+    arguments: { sessionId: "toolbar-layout", revision: 1 },
+  });
+  await page.getByRole("button", { name: "选择", exact: true }).click();
+  await sendState(page, "recognition", layerState(1));
+  await expect(first).toHaveCount(0);
+  await expect(page.getByText("另一行文字", { exact: true })).toBeVisible();
+  await page.mouse.move(box.x + 80, box.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 100, box.y + 20, { steps: 4 });
+  await page.mouse.up();
+  await expectCommand(page, {
+    scope: "recognition",
+    action: "notifyScreenshotRevision",
+    arguments: { sessionId: "toolbar-layout", revision: 2 },
+  });
+  await expect(page.locator(".image-text-layer")).toHaveCount(0);
+});
+
+for (const inset of [10, 12]) {
+  test(`就绪文字层避让初始裁剪顶边，${inset}px 命中处允许真实拖动`, async ({
+    page,
+  }) => {
+    await mountScene(page, 1280, 720, { initialTool: "select", width: 800 });
+    await sendState(page, "recognition", {
+      isBusy: false,
+      recognitionModes: readyImageRecognitionModes,
+      input: {
+        url: "/capture-scene.svg",
+        mediaType: "image/png",
+        byteLength: 4096,
+      },
+      screenshotSession: {
+        sessionId: "toolbar-layout",
+        revision: 0,
+        sceneEditing: true,
+      },
+      textLayer: {
+        status: "textlayer.ready",
+        binding: { sessionId: "toolbar-layout", revision: 0 },
+        image: {
+          url: "/capture-scene.svg",
+          mediaType: "image/png",
+          byteLength: 4096,
+        },
+        lines: [
+          { text: "顶边中央文字", x1: 450, y1: 20, x2: 550, y2: 70 },
+          { text: "中部可选文字", x1: 100, y1: 300, x2: 400, y2: 400 },
+        ],
+      },
+    });
+    await expect(page.getByText("中部可选文字", { exact: true })).toBeVisible();
+    await expect(page.getByText("顶边中央文字", { exact: true })).toHaveCount(
+      0,
+    );
+    const canvas = page.getByLabel("图片检查画布");
+    await expect
+      .poll(() =>
+        canvas.evaluate((element: HTMLCanvasElement) => {
+          const data = element
+            .getContext("2d")!
+            .getImageData(element.width / 2 - 5, 0, 10, 6).data;
+          let orange = 0;
+          for (let i = 0; i < data.length; i += 4)
+            if (
+              data[i]! > 180 &&
+              data[i + 1]! > 70 &&
+              data[i + 1]! < 200 &&
+              data[i + 2]! < 100
+            )
+              orange++;
+          return orange;
+        }),
+      )
+      .toBeGreaterThan(0);
+    const box = (await canvas.boundingBox())!;
+    const logicalHeight = await canvas.evaluate(
+      (element: HTMLCanvasElement) => element.height,
+    );
+    const startY = box.y + (inset * box.height) / logicalHeight;
+    await page.mouse.move(box.x + box.width / 2, startY);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2, startY + 30, { steps: 6 });
+    await page.mouse.up();
+    await expectCommand(page, {
+      scope: "recognition",
+      action: "notifyScreenshotRevision",
+      arguments: { sessionId: "toolbar-layout", revision: 1 },
+    });
+    await expect(page.locator(".image-text-layer")).toHaveCount(0);
   });
 }

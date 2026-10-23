@@ -169,7 +169,7 @@ public sealed class RuntimeSelectionServiceTests
 
         Assert.True(service.SupportsRecognitionModes);
         Assert.Empty(service.EngineOptions);
-        Assert.Equal(8, service.RecognitionModes.Count);
+        Assert.Equal(9, service.RecognitionModes.Count);
 
         RecognitionModeOption rapid = service.SelectRecognitionMode("rapid_text");
         Assert.Equal("OCR", rapid.PipelineId);
@@ -602,6 +602,10 @@ public sealed class RuntimeSelectionServiceTests
                 Wire.ExecutionPipelineId.FORMULARECOGNITION, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            Mode(Wire.RecognitionModeId.RapidTable, Wire.RecognitionModeFamily.Specialized,
+                Wire.ExecutionPipelineId.RAPIDTABLE, null,
+                Wire.RecognitionModeProvisioning.BaseRuntime,
+                Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
         ],
     };
 

@@ -262,7 +262,7 @@ describe("image editor exclusion regions", () => {
       await drawOnCanvas({ x: 0, y: 0 }, { x: 900, y: 300 });
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "识别当前图" }));
+        fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
       });
       await waitFor(() => expect(stubs.fetch).toHaveBeenCalledTimes(1));
       expect(actions.run).toHaveBeenCalledWith({
@@ -294,7 +294,7 @@ describe("image editor exclusion regions", () => {
         revision: 2,
       });
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "识别当前图" }));
+        fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
       });
       expect(
         screen.getByText(
@@ -359,7 +359,7 @@ describe("image editor exclusion regions", () => {
       // 缩放后的排除区覆盖整图：识别被拒绝且无上传。这证明手柄缩放真实
       // 改变了排除几何，而不只是界面预览。
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "识别当前图" }));
+        fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
       });
       expect(
         screen.getByText(
@@ -447,7 +447,7 @@ describe("image editor exclusion regions", () => {
       fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
       await drawOnCanvas({ x: 0, y: 0 }, { x: 100, y: 100 });
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "识别当前图" }));
+        fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
       });
       // 上法在途时扩大掩膜：修订推进，旧导出必须被丢弃。
       await drawOnCanvas({ x: 0, y: 0 }, { x: 900, y: 600 });
@@ -513,13 +513,13 @@ describe("image editor exclusion regions", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
       // 修订 0 的层与当前修订一致：取字模式下可见。
-      fireEvent.click(screen.getByRole("button", { name: "取字" }));
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
       expect(await screen.findByText("旧图文字")).toBeInTheDocument();
 
       // 排除区变更推进修订：旧层立即失效，行文本从 DOM 移除。
       fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
-      fireEvent.click(screen.getByRole("button", { name: "取字" }));
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       });
@@ -635,7 +635,7 @@ describe("image editor exclusion regions", () => {
       });
       fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
-      fireEvent.click(screen.getByRole("button", { name: "取字" }));
+      fireEvent.click(screen.getByRole("button", { name: "选择" }));
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 60));
       });

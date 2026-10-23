@@ -129,6 +129,19 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
                 "supports_release": True,
             },
         ),
+        "rapid_table": (
+            "specialized",
+            "RAPID_TABLE",
+            None,
+            "base_runtime",
+            {
+                "kind": "unmanaged",
+                "supports_preload": False,
+                "supports_ttl": False,
+                "supports_pinning": False,
+                "supports_release": False,
+            },
+        ),
     }
 
 

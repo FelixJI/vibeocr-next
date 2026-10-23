@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -206,6 +207,165 @@ function allCalls(): RecordedCall[] {
 }
 
 describe("截图现场工具栏与裁剪交互", () => {
+  it("文字层就绪后键盘全选和对象列表取消会刷新可见八点手柄", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const props = editorProps({ autoText: false });
+    const { rerender, unmount } = await renderEditor(props);
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 150 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "" },
+    });
+    rerender(
+      <ImageCanvasEditor
+        {...props}
+        textLayer={{
+          status: "textlayer.ready",
+          binding: { sessionId: "session-a", revision: 1 },
+          image: { url: "/ready.png", mediaType: "image/png", byteLength: 100 },
+          lines: [],
+        }}
+      />,
+    );
+    await act(async () => {});
+    harness.flush();
+    const calls = state.canvases.find(
+      (entry) => entry.element === canvas,
+    )!.calls;
+    calls.length = 0;
+    fireEvent.keyDown(canvas, { key: "a", ctrlKey: true });
+    harness.flush();
+    expect(
+      calls.filter((call) => call.op === "strokeRect").map((call) => call.args),
+    ).toContainEqual([96, 146, 8, 8]);
+    calls.length = 0;
+    fireEvent.change(screen.getByLabelText("选择标注对象"), {
+      target: { value: "" },
+    });
+    harness.flush();
+    expect(
+      calls.filter((call) => call.op === "strokeRect").map((call) => call.args),
+    ).not.toContainEqual([96, 146, 8, 8]);
+    unmount();
+  });
+
+  it("就绪文字层保留初始选区裁剪手柄，顶部文字避让后可拖动裁剪", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    const harness = stubAnimationFrames();
+    const { actions, unmount } = await renderEditor({
+      captureScene,
+      autoText: false,
+      textLayer: {
+        status: "textlayer.ready",
+        binding: { sessionId: "session-a", revision: 0 },
+        image: { url: "/ready.png", mediaType: "image/png", byteLength: 100 },
+        lines: [{ text: "顶部中央文字", x1: 450, y1: 0, x2: 550, y2: 50 }],
+      },
+    });
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 800, 400);
+    harness.flush();
+    const calls = state.canvases.find(
+      (entry) => entry.element === canvas,
+    )!.calls;
+    expect(
+      calls.filter((call) => call.op === "strokeRect").map((call) => call.args),
+    ).toContainEqual([396, -4, 8, 8]);
+    expect(screen.queryByText("顶部中央文字")).toBeNull();
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 400, clientY: 4 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 104 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 400, clientY: 104 });
+    harness.flush();
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.notifyScreenshotRevision",
+      sessionId: "session-a",
+      revision: 1,
+    });
+    expect(
+      calls.filter((call) => call.op === "strokeRect").map((call) => call.args),
+    ).toContainEqual([0, 100, 800, 300]);
+    unmount();
+  });
+
+  it("旧文字层上传超过防抖窗口后，编辑到新修订仍只准备最新画面", async () => {
+    stubCanvasStack();
+    stubAnimationFrames();
+    let finishFirst!: (response: Response) => void;
+    const firstUpload = new Promise<Response>((resolve) => {
+      finishFirst = resolve;
+    });
+    let uploads = 0;
+    const fetchMock = vi.fn((_url: string, options?: RequestInit) => {
+      if (options?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      uploads += 1;
+      return uploads === 1
+        ? firstUpload
+        : Promise.resolve(
+            new Response(
+              JSON.stringify({
+                resourceUri:
+                  "https://app.vibeocr/__annotation/22222222222222222222222222222222",
+              }),
+              { status: 201 },
+            ),
+          );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { actions, unmount } = await renderEditor();
+    await waitFor(() => expect(uploads).toBe(1));
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 150 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    expect(uploads).toBe(1);
+    await act(async () => {
+      finishFirst(
+        new Response(
+          JSON.stringify({
+            resourceUri:
+              "https://app.vibeocr/__annotation/11111111111111111111111111111111",
+          }),
+          { status: 201 },
+        ),
+      );
+    });
+    await waitFor(
+      () =>
+        expect(actions.run).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "recognition.prepareScreenshotTextLayer",
+            revision: 1,
+          }),
+        ),
+      { timeout: 2000 },
+    );
+    expect(
+      vi
+        .mocked(actions.run)
+        .mock.calls.map(([command]) => command)
+        .filter(
+          (command) =>
+            command.type === "recognition.prepareScreenshotTextLayer",
+        ),
+    ).toEqual([expect.objectContaining({ revision: 1 })]);
+    expect(uploads).toBe(2);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/__annotation/11111111111111111111111111111111",
+      { method: "DELETE" },
+    );
+    unmount();
+  });
+
   it("截图现场不出现裁剪按钮，普通编辑仍保留", async () => {
     stubCanvasStack({ width: 800, height: 400 });
     stubAnimationFrames();

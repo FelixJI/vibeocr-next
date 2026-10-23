@@ -37,6 +37,7 @@ PIPELINE_NAMES = {
     "PaddleOCR-VL",
     "TABLE_RECOGNITION",
     "FORMULA_RECOGNITION",
+    "RAPID_TABLE",  # RapidTable 轻量表格识别（首次构造加载模型，标记成功跳过重复冷启动）
     "MinerU",  # 文档解析（首次使用需下载模型，标记成功以跳过重复下载）
 }
 
@@ -53,6 +54,7 @@ LOCAL_MARKABLE_PIPELINES = frozenset(
         "PaddleOCR-VL",
         "TABLE_RECOGNITION",
         "FORMULA_RECOGNITION",
+        "RAPID_TABLE",
     }
 )
 

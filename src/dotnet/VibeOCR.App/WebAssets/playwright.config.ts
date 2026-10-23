@@ -15,6 +15,33 @@ export default defineConfig({
     // 视觉快照必须可复现：系统 Edge 会在开发机与 runner 之间自动分叉
     // （基线由 Edge 155 生成、CI runner 是 Edge 154，文字光栅化差异导致
     // 快照 13% 假差异），因此使用随 npm 锁定版本的 bundled Chromium。
+    launchOptions: {
+      // shortcut: 绕过 Chromium 153 Windows 端口随机化缺陷，上游修复后移除：https://issues.chromium.org/issues/572515601
+      args:
+        process.platform === "win32"
+          ? [
+              // 同名参数会覆盖 Playwright 1.63 的默认值；保留它们并由浏览器契约检查漂移。
+              `--disable-features=${[
+                "AvoidUnnecessaryBeforeUnloadCheckSync",
+                "DestroyProfileOnBrowserClose",
+                "DialMediaRouteProvider",
+                "GlobalMediaControls",
+                "HttpsUpgrades",
+                "LensOverlay",
+                "MediaRouter",
+                "PaintHolding",
+                "ThirdPartyStoragePartitioning",
+                "BlockOriginHeaderModificationOnRedirect",
+                "Translate",
+                "AutoDeElevate",
+                "OptimizationHints",
+                "msForceBrowserSignIn",
+                "msEdgeUpdateLaunchServicesPreferredVersion",
+                "TcpPortRandomizationWin",
+              ].join(",")}`,
+            ]
+          : [],
+    },
     colorScheme: "light",
     reducedMotion: "reduce",
     screenshot: "only-on-failure",

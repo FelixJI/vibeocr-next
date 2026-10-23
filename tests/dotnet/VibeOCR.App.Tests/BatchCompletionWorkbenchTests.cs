@@ -21,6 +21,36 @@ namespace VibeOCR.App.Tests;
 public sealed class BatchCompletionWorkbenchTests
 {
   [Fact]
+  public async Task RapidTableDeviceOptionSubmitsOnBatchWire()
+  {
+    // 批量入口与单次/截图共享同一 device 冻结链：显式 rapid_table 任务携带
+    // options.device=cuda，不静默改 CPU。
+    var client = new BatchRunClient();
+    await using var harness = await CompletionHarness.CreateAsync(client);
+    CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+
+    Assert.Null((await harness.Handler.ExecuteAsync(new RefreshRuntimeCommand(),
+      cancellationToken)).Error);
+    BatchWorkbenchState? deviceState = null;
+    harness.Handler.StateChanged += state =>
+    {
+      if (state is BatchWorkbenchState batchState) deviceState = batchState;
+    };
+    Assert.Null((await harness.Handler.ExecuteAsync(
+      new SetModeDeviceCommand("rapid_table", "cuda"), cancellationToken)).Error);
+    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "rapid_table")
+      .Options!["device"].GetString());
+    Assert.Null((await harness.Handler.ExecuteAsync(
+      new SetBatchTaskEngineCommand("rapid_table"), cancellationToken)).Error);
+    harness.Batch.AddFiles([TempPng(harness.Root, "table")]);
+    Assert.True((await harness.StartAsync(cancellationToken)).Ok);
+    await client.WaitSubmittedAsync(cancellationToken);
+    Assert.Equal("RAPID_TABLE", client.LastRequest!.Pipeline.PipelineId);
+    Assert.Null(client.LastRequest.Pipeline.Engine);
+    Assert.Equal("cuda", client.LastRequest.Pipeline.Options["device"].GetString());
+  }
+
+  [Fact]
   public async Task SuccessfulBatchRunsPublishExactlyOneTerminalEachWithoutMailboxResync()
   {
     var client = new BatchRunClient();
@@ -612,12 +642,15 @@ public sealed class BatchCompletionWorkbenchTests
 
     public int Submissions { get; private set; }
 
+    public SubmitRequest? LastRequest { get; private set; }
+
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,
       IReadOnlyDictionary<string, SubmitUpload> uploads,
       CancellationToken cancellationToken)
     {
       Submissions++;
+      LastRequest = request;
       items = request.Items.Select((item, index) => new JobItem
       {
         ItemId = $"it-{index}",
@@ -728,6 +761,8 @@ public sealed class BatchCompletionWorkbenchTests
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleFormula,
               Wire.RecognitionModeAvailability.PreparationRequired),
+            Mode(Wire.RecognitionModeId.RapidTable,
+              Wire.RecognitionModeAvailability.Ready),
           ],
         },
       },
@@ -772,6 +807,10 @@ public sealed class BatchCompletionWorkbenchTests
         Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
+      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
+        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
+        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool notReady = availability != Wire.RecognitionModeAvailability.Ready;
@@ -786,7 +825,7 @@ public sealed class BatchCompletionWorkbenchTests
       Availability = availability,
       ReasonCode = notReady ? "runtime_component_missing" : null,
       RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-cpu") : null,
-      SupportedOptions = [],
+      SupportedOptions = id == Wire.RecognitionModeId.RapidTable ? ["device"] : [],
       Lifecycle = new Wire.RecognitionModeLifecycle
       {
         Kind = lifecycle,

@@ -3103,14 +3103,15 @@
       },
       "ExecutionPipelineId": {
         "type": "string",
-        "description": "Stable legacy execution-pipeline identifiers. Products present RecognitionModeId values instead of exposing this enum directly.",
+        "description": "Stable legacy execution-pipeline identifiers. Products present RecognitionModeId values instead of exposing this enum directly. RAPID_TABLE is the lightweight RapidTable table-recognition pipeline carried by the base runtime.",
         "enum": [
           "OCR",
           "PP-StructureV3",
           "MinerU",
           "PaddleOCR-VL",
           "TABLE_RECOGNITION",
-          "FORMULA_RECOGNITION"
+          "FORMULA_RECOGNITION",
+          "RAPID_TABLE"
         ]
       },
       "RecognitionModeAvailability": {
@@ -3140,7 +3141,8 @@
           "paddle_document_vl",
           "mineru_document",
           "paddle_table",
-          "paddle_formula"
+          "paddle_formula",
+          "rapid_table"
         ]
       },
       "RecognitionModeLifecycleKind": {

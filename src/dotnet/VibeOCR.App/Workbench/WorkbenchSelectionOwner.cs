@@ -10,6 +10,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, WorkbenchSettingsOwner settingsOwner, Func<string?> currentTaskEngine)
 {
   private readonly Dictionary<string, PaddleModeOptions> modeOptions = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, RapidDeviceOptions> modeDeviceOptions = new(StringComparer.Ordinal);
   internal string? RuntimeDefaultModeId =>
     settingsOwner.CurrentModel?.RecognitionSelection?.DefaultRecognitionModeId;
 
@@ -67,7 +68,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
         TryProjectMineruConfig(engineSnapshot, mode.Id, out _) ? mode.Availability : "unavailable",
         mode.Availability == "preparation_required" && mode.RequiredComponent is not null,
         mode.LifecycleKind,
-        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetModeOptions(mode)?.ProjectWire(mode), mode.ReasonCode,
+        mode.SupportsPreload, mode.SupportsTtl, mode.SupportsPinning, mode.SupportsRelease, mode.Family, mode.SupportedOptions, GetProjectedOptions(mode), mode.ReasonCode,
         IsDefault: mode.Id == defaultId))];
     }
     bool isOverride = taskEngine is not null;
@@ -82,6 +83,48 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
   }
 
   internal void SetModeOptions(string modeId, PaddleModeOptions options) => modeOptions[modeId] = options;
+
+  internal void SetDeviceOptions(string modeId, RapidDeviceOptions options) => modeDeviceOptions[modeId] = options;
+
+  /// <summary>device 选项存取：支持面由目录 supported_options 真值门控，不在宿主重复模式清单。</summary>
+  internal RapidDeviceOptions? GetDeviceOptions(RecognitionModeOption? mode)
+  {
+    if (mode?.SupportedOptions.Contains("device", StringComparer.Ordinal) is not true) return null;
+    if (!modeDeviceOptions.TryGetValue(mode.Id, out RapidDeviceOptions? options))
+    {
+      options = optionsLayout is null ? new() : RapidDeviceOptions.Load(optionsLayout, mode.Id);
+      modeDeviceOptions.Add(mode.Id, options);
+    }
+    return options;
+  }
+
+  /// <summary>提交冻结点合并投影：两类选项严格 ToWire，不支持/越界在此拒绝（#110 AC2）。</summary>
+  internal IReadOnlyDictionary<string, System.Text.Json.JsonElement>? GetWireOptions(
+    RecognitionModeOption? mode)
+  {
+    if (mode is null) return null;
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetModeOptions(mode)?.ToWire(mode);
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? device = GetDeviceOptions(mode)?.ToWire(mode);
+    if (paddle is null || paddle.Count == 0) return device is null || device.Count == 0 ? null : device;
+    if (device is null || device.Count == 0) return paddle;
+    var merged = new Dictionary<string, System.Text.Json.JsonElement>(paddle, StringComparer.Ordinal);
+    foreach (var pair in device) merged.Add(pair.Key, pair.Value);
+    return merged;
+  }
+
+  /// <summary>状态展示合并投影：各自按目录过滤，不支持字段回退默认显示。</summary>
+  internal IReadOnlyDictionary<string, System.Text.Json.JsonElement>? GetProjectedOptions(
+    RecognitionModeOption? mode)
+  {
+    if (mode is null) return null;
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetModeOptions(mode)?.ProjectWire(mode);
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? device = GetDeviceOptions(mode)?.ProjectWire(mode);
+    if (paddle is null || paddle.Count == 0) return device is null || device.Count == 0 ? null : device;
+    if (device is null || device.Count == 0) return paddle;
+    var merged = new Dictionary<string, System.Text.Json.JsonElement>(paddle, StringComparer.Ordinal);
+    foreach (var pair in device) merged.Add(pair.Key, pair.Value);
+    return merged;
+  }
 
   internal PaddleModeOptions? GetModeOptions(RecognitionModeOption? mode)
   {
@@ -212,8 +255,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
       ? null
       : selection.SelectRecognitionMode(defaultId);
     MineruConfig? config = mode is null ? null : snapshot.MineruConfigFor(mode.Id);
-    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options =
-      mode is null ? null : GetModeOptions(mode)?.ToWire(mode);
+    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? options = GetWireOptions(mode);
     return new RecognitionSubmitSelection(
       mode?.PipelineId ?? "OCR", mode?.Engine, config, options);
   };

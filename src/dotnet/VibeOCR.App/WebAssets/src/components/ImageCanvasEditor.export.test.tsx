@@ -374,7 +374,9 @@ describe("editor export pixels and previews", () => {
   it("does not auto-encode a second preview after edits settle", async () => {
     vi.useFakeTimers();
     stubCanvasStack();
-    const { unmount } = render(<ImageCanvasEditor {...editorProps()} />);
+    const { unmount } = render(
+      <ImageCanvasEditor {...editorProps()} autoText={false} />,
+    );
     await vi.advanceTimersByTimeAsync(800);
     expect(state.toBlobCalls).toBe(0);
     expect(screen.queryByAltText("最终输出预览")).toBeNull();
@@ -412,7 +414,7 @@ describe("editor export pixels and previews", () => {
   });
 
   it.each([
-    ["文字识别", "rapid_text"],
+    ["识别文字", "rapid_text"],
     ["表格识别", "paddle_table"],
     ["公式识别", "paddle_formula"],
   ])(
@@ -522,10 +524,10 @@ describe("editor export pixels and previews", () => {
         {...{ recognitionModes: [] }}
       />,
     );
-    for (const label of ["文字识别", "表格识别", "公式识别"])
+    for (const label of ["识别文字", "表格识别", "公式识别"])
       expect(await screen.findByRole("button", { name: label })).toBeDisabled();
     expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "识别当前图" })).toBeNull();
+    expect(screen.getByRole("button", { name: "识别文字" })).toBeDisabled();
     expect(state.toBlobCalls).toBe(0);
     unmount();
   });
@@ -540,7 +542,7 @@ describe("editor export pixels and previews", () => {
       />,
     );
     const recognize = await screen.findByRole("button", {
-      name: "识别当前图",
+      name: "识别文字",
     });
     fireEvent.click(recognize);
     await waitFor(() => expect(submitted).toHaveBeenCalledTimes(1));
@@ -576,7 +578,7 @@ describe("editor export pixels and previews", () => {
     // 图像显示区约在 y∈[75,525]（64×32 等比居中）；拖拽须落在图像内。
     fireEvent.pointerDown(canvas, { pointerId: 9, clientX: 100, clientY: 200 });
     fireEvent.pointerUp(canvas, { pointerId: 9, clientX: 300, clientY: 400 });
-    fireEvent.click(await screen.findByRole("button", { name: "识别当前图" }));
+    fireEvent.click(await screen.findByRole("button", { name: "识别文字" }));
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -619,7 +621,7 @@ describe("editor export pixels and previews", () => {
         expect(screen.getByRole("button", { name: "清空屏蔽" })).toBeEnabled(),
       { timeout: 4000 },
     );
-    fireEvent.click(screen.getByRole("button", { name: "识别当前图" }));
+    fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith(
         expect.objectContaining({

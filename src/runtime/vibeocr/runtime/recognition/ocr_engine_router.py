@@ -20,23 +20,35 @@ from collections.abc import Callable
 from typing import Any
 
 from vibeocr.runtime.recognition.ocr_engines import OCR_PIPELINE_ID, OcrEngineResolver
+from vibeocr.runtime.recognition.pipeline_contracts import OCRPipeline
 from vibeocr.runtime_contracts import PipelineSelection, ResidencyStatus
 
 logger = logging.getLogger(__name__)
 
+RAPID_TABLE_PIPELINE_ID = OCRPipeline.RAPID_TABLE.value
+
 
 class OcrEngineRoutingAdapter:
-    """RECOGNITION 通用入口：OCR pipeline 按 engine 路由，其余直达 fallback。"""
+    """RECOGNITION 通用入口：OCR pipeline 按 engine 路由，其余直达 fallback。
+
+    ``RAPID_TABLE`` pipeline（RapidTable 表格结构识别）经可选的
+    ``rapid_table_factory`` 惰性构建独立引擎，不进入 paddle fallback，
+    也不占用 OcrEngine 枚举（engine-only-OCR 不变量保留）。
+    """
 
     def __init__(
         self,
         *,
         fallback_factory: Callable[[], Any] | None,
         resolver: OcrEngineResolver,
+        rapid_table_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._fallback_factory = fallback_factory
         self._fallback: Any = None
         self._fallback_lock = threading.Lock()
+        self._rapid_table_factory = rapid_table_factory
+        self._rapid_table: Any = None
+        self._rapid_table_lock = threading.Lock()
         self.resolver = resolver
 
     @property
@@ -49,6 +61,17 @@ class OcrEngineRoutingAdapter:
             if self._fallback is None:
                 self._fallback = self._fallback_factory()
         return self._fallback
+
+    @property
+    def rapid_table(self) -> Any:
+        if self._rapid_table_factory is None:
+            raise RuntimeError("RAPID_TABLE engine is not installed")
+        if self._rapid_table is not None:
+            return self._rapid_table
+        with self._rapid_table_lock:
+            if self._rapid_table is None:
+                self._rapid_table = self._rapid_table_factory()
+        return self._rapid_table
 
     # ------------------------------------------------------------------
     # 路由判定
@@ -75,6 +98,8 @@ class OcrEngineRoutingAdapter:
         pipeline_id, _ = self._selection_parts(options)
         if pipeline_id == OCR_PIPELINE_ID:
             return self._engine_for(options).capabilities(options)
+        if pipeline_id == RAPID_TABLE_PIPELINE_ID:
+            return self.rapid_table.capabilities(options)
         return self.fallback.capabilities(options)
 
     def recognize_many(
@@ -95,6 +120,13 @@ class OcrEngineRoutingAdapter:
             return engine.recognize_many(
                 items, options=options, compute_batch=compute_batch
             )
+        if pipeline_id == RAPID_TABLE_PIPELINE_ID:
+            logger.info(
+                "[Supervisor][Recognize] route=rapid-table items=%d", len(items)
+            )
+            return self.rapid_table.recognize_many(
+                items, options=options, compute_batch=compute_batch
+            )
         return self.fallback.recognize_many(
             items, options=options, compute_batch=compute_batch
         )
@@ -107,7 +139,9 @@ class OcrEngineRoutingAdapter:
         """拆分预加载：OCR 走默认引擎，其余 Paddle 管道走 fallback。"""
         wants_ocr = OCR_PIPELINE_ID in pipelines
         others = tuple(
-            name for name in pipelines if name not in {OCR_PIPELINE_ID, "MinerU"}
+            name
+            for name in pipelines
+            if name not in {OCR_PIPELINE_ID, "MinerU", RAPID_TABLE_PIPELINE_ID}
         )
         if others:
             self.fallback.preload(others)
@@ -115,6 +149,8 @@ class OcrEngineRoutingAdapter:
             engine = self.resolver.resolve(None)
             if engine is not self._fallback:
                 engine.preload((OCR_PIPELINE_ID,))
+        if RAPID_TABLE_PIPELINE_ID in pipelines and self._rapid_table_factory:
+            self.rapid_table.preload((RAPID_TABLE_PIPELINE_ID,))
         return self.residency_status()
 
     def residency_status(self) -> ResidencyStatus:
@@ -125,6 +161,8 @@ class OcrEngineRoutingAdapter:
     def release_idle(self, pipeline: str | None = None) -> ResidencyStatus:
         for engine in self.resolver.registry.engines():
             engine.release_idle(pipeline)
+        if self._rapid_table is not None:
+            self._rapid_table.release_idle(pipeline)
         if self._fallback is not None and self._fallback not in (
             self.resolver.registry.engines()
         ):
@@ -134,6 +172,8 @@ class OcrEngineRoutingAdapter:
     def configure_settings(self, snapshot: Any) -> None:
         for engine in self.resolver.registry.engines():
             engine.configure_settings(snapshot)
+        if self._rapid_table is not None:
+            self._rapid_table.configure_settings(snapshot)
         if self._fallback is not None and self._fallback not in (
             self.resolver.registry.engines()
         ):
@@ -148,6 +188,11 @@ class OcrEngineRoutingAdapter:
                     "[Supervisor][OcrEngines] close failed engine=%s",
                     getattr(engine, "engine_id", "?"),
                 )
+        if self._rapid_table is not None:
+            try:
+                self._rapid_table.close()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("[Supervisor][OcrEngines] close failed rapid_table")
         if self._fallback is not None and self._fallback not in (
             self.resolver.registry.engines()
         ):

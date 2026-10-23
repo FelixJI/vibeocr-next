@@ -220,6 +220,11 @@ public sealed class DesktopWorkbenchCommandHandler :
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
       state = Pdf.NormalizeOutcome(state);
+      if (command is SetModeDeviceCommand)
+      {
+        operations.Publish(Batch.CurrentBatchState());
+        await Pdf.RefreshCatalogStateAsync(cancellationToken);
+      }
       // A null state was already published before its background operation started.
       return new WorkbenchCommandOutcome(state is null ? [] : [state], null);
     }
@@ -243,7 +248,7 @@ public sealed class DesktopWorkbenchCommandHandler :
         "recognition_mode_unavailable", WorkbenchProblemCategory.Unavailable, true,
         "workbench.error.recognitionModeUnavailable"));
     }
-    catch (ArgumentException) when (command is SetRecognitionOptionsCommand)
+    catch (ArgumentException) when (command is SetRecognitionOptionsCommand or SetModeDeviceCommand)
     {
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
         "recognition_options_invalid", WorkbenchProblemCategory.InvalidCommand, false,

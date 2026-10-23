@@ -1,5 +1,6 @@
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Input, Select } from "@fluentui/react-components";
+import { ImageTextLayer, type ImageTextLayerProps } from "./ImageTextLayer";
 import {
   DEFAULT_COMPOSITION,
   type CanvasComposition,
@@ -38,12 +39,16 @@ export function CanvasCompositionPanel({
   onChange,
   render,
   revision,
+  selectableText,
 }: {
   readonly value?: CanvasComposition;
   readonly assets: readonly { id: string; label: string }[];
   readonly onChange: (value: CanvasComposition | undefined) => void;
   readonly render: () => Promise<Blob>;
   readonly revision: number;
+  readonly selectableText?: Omit<ImageTextLayerProps, "viewport"> & {
+    readonly image: HTMLImageElement;
+  };
 }) {
   const settings = value ?? DEFAULT_COMPOSITION;
   const [preview, setPreview] = useState<{
@@ -51,28 +56,61 @@ export function CanvasCompositionPanel({
     error?: string;
     width?: number;
     height?: number;
+    revision?: number;
   }>({});
+  const previewRef = useRef<HTMLImageElement>(null);
+  const [previewSize, setPreviewSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const element = previewRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() =>
+      setPreviewSize({
+        width: element.clientWidth,
+        height: element.clientHeight,
+      }),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [preview.url]);
+  // 新预览加载前旧图仍可见，不能在渲染任务被替换时撤销其 URL。
+  const liveUrlRef = useRef<string | undefined>(undefined);
+  const retiredUrlsRef = useRef<string[]>([]);
   const renderCurrent = useEffectEvent(render);
   useEffect(() => {
-    let cancelled = false,
-      url: string | undefined;
+    let cancelled = false;
     void renderCurrent()
       .then((blob) => {
         if (cancelled) return;
-        url = URL.createObjectURL(blob);
-        setPreview({ url });
+        const url = URL.createObjectURL(blob);
+        if (liveUrlRef.current) retiredUrlsRef.current.push(liveUrlRef.current);
+        liveUrlRef.current = url;
+        setPreview({ url, revision });
       })
       .catch((error: unknown) => {
-        if (!cancelled)
-          setPreview({
-            error: error instanceof Error ? error.message : "排版预览失败",
-          });
+        if (cancelled) return;
+        setPreview({
+          error: error instanceof Error ? error.message : "排版预览失败",
+        });
       });
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [value, revision]);
+  useEffect(() => {
+    if (preview.url) return;
+    if (liveUrlRef.current) URL.revokeObjectURL(liveUrlRef.current);
+    liveUrlRef.current = undefined;
+    for (const retired of retiredUrlsRef.current.splice(0))
+      URL.revokeObjectURL(retired);
+  }, [preview.url]);
+  useEffect(
+    () => () => {
+      if (liveUrlRef.current) URL.revokeObjectURL(liveUrlRef.current);
+      for (const retired of retiredUrlsRef.current.splice(0))
+        URL.revokeObjectURL(retired);
+    },
+    [],
+  );
   const update = (patch: Partial<CanvasComposition>) =>
     onChange({ ...settings, ...patch });
   return (
@@ -294,16 +332,33 @@ export function CanvasCompositionPanel({
       {preview.error ? (
         <p role="alert">{preview.error}</p>
       ) : preview.url ? (
-        <img
-          onLoad={(event) => {
-            const width = event.currentTarget.naturalWidth,
-              height = event.currentTarget.naturalHeight;
-            setPreview((current) => ({ ...current, width, height }));
-          }}
-          alt="排版输出预览"
-          src={preview.url}
-          style={{ maxWidth: "100%", maxHeight: 360, objectFit: "contain" }}
-        />
+        <div className="composition-output-frame">
+          <img
+            ref={previewRef}
+            onLoad={(event) => {
+              if (event.currentTarget.src !== liveUrlRef.current) return;
+              const width = event.currentTarget.naturalWidth,
+                height = event.currentTarget.naturalHeight;
+              setPreview((current) => ({ ...current, width, height }));
+              for (const retired of retiredUrlsRef.current.splice(0))
+                URL.revokeObjectURL(retired);
+            }}
+            alt="排版输出预览"
+            src={preview.url}
+            style={{ maxWidth: "100%", maxHeight: 360, objectFit: "contain" }}
+          />
+          {selectableText &&
+            preview.revision === revision &&
+            preview.width === selectableText.image.naturalWidth &&
+            preview.height === selectableText.image.naturalHeight &&
+            previewSize.width > 0 &&
+            previewSize.height > 0 && (
+              <ImageTextLayer
+                {...selectableText}
+                viewport={{ image: selectableText.image, size: previewSize }}
+              />
+            )}
+        </div>
       ) : (
         <p>正在渲染预览……</p>
       )}
