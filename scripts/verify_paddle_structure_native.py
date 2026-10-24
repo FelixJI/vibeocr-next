@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import importlib.metadata
 import json
@@ -97,6 +98,28 @@ def _check_result(name, result, width, height):
             result.preproc_img_w,
             result.preproc_img_h,
         )
+        from vibeocr.runtime.recognition.ocr_service import OCRService
+
+        normalized = copy.deepcopy(result)
+        OCRService._normalize_result_bbox(normalized, image=None)
+        assert (normalized.image_width, normalized.image_height) == (width, height)
+        for raw, mapped in zip(
+            result.content_list, normalized.content_list, strict=True
+        ):
+            if raw.get("bbox") is not None:
+                expected = [
+                    value / (width if index % 2 == 0 else height) * 1000
+                    for index, value in enumerate(raw["bbox"])
+                ]
+                assert mapped["bbox"] == expected, (
+                    "normalized source space",
+                    mapped,
+                    expected,
+                )
+                assert all(0 <= value <= 1000 for value in mapped["bbox"])
+            assert mapped.get("table") == raw.get("table"), (
+                "canonical cell coordinates changed"
+            )
     if "no_table" in name:
         assert not tables, "ordinary prose became a table"
     elif "table_merged" in name:

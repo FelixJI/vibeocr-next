@@ -296,10 +296,57 @@ def _install_cell_topology(table_pipeline):
     table_pipeline.trans_cells_det_results_to_html = convert
 
 
+def _install_lossless_doc_rotation(preprocessor):
+    """Keep the pinned PaddleX preprocessing flow, replacing only right-angle resampling."""
+    import inspect
+    from types import FunctionType, MethodType
+
+    import numpy as np
+    from paddlex.inference.pipelines.doc_preprocessor.pipeline import (
+        _DocPreprocessorPipeline,
+        rotate_image,
+    )
+    from paddlex.inference.utils.benchmark import benchmark
+
+    node = _unwrap(preprocessor)
+    method = node.predict
+    original = inspect.unwrap(_DocPreprocessorPipeline.predict)
+    if (
+        not inspect.ismethod(method)
+        or inspect.unwrap(method.__func__) is not original
+        or original.__globals__.get("rotate_image") is not rotate_image
+        or "rotate_image" not in original.__code__.co_names
+    ):
+        raise PaddleOnnxError("Unsupported PaddleX document rotation boundary")
+
+    def rotate(image, angle):
+        if angle in (0, 90, 180, 270):
+            return np.ascontiguousarray(np.rot90(image, int(angle) // 90))
+        return rotate_image(image, angle)
+
+    # The official method has no rotation injection point. A private globals
+    # mapping keeps its reader, batching, validation and single UVDoc invocation
+    # unchanged without mutating the module, class, or any other pipeline owner.
+    scoped = FunctionType(
+        original.__code__,
+        {**original.__globals__, "rotate_image": rotate},
+        original.__name__,
+        original.__defaults__,
+        original.__closure__,
+    )
+    scoped.__kwdefaults__ = original.__kwdefaults__
+    scoped.__qualname__ = original.__qualname__
+    scoped.__annotations__ = original.__annotations__
+    node.predict = MethodType(benchmark.timeit(scoped), node)
+
+
 def _materialize_table_nodes(pipeline, snapshot):
     root = _unwrap(pipeline.paddlex_pipeline)
     if snapshot["pipeline_id"] == "OCR":
         return
+    preprocessor = getattr(root, "doc_preprocessor_pipeline", None)
+    if preprocessor is not None:
+        _install_lossless_doc_rotation(preprocessor)
     if snapshot["pipeline_id"] == "TABLE_RECOGNITION":
         # Unlike PPStructure, table_v2 does not forward layout kwargs from its
         # config. Set the official predictor options on this instance only.

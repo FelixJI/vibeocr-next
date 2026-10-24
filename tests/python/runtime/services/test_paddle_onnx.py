@@ -760,3 +760,86 @@ def test_table_materialization_activates_predictor_nms_despite_upstream_config_g
     )
     assert layout.layout_nms is True
     assert layout.layout_merge_bboxes_mode == "union"
+
+
+@pytest.mark.parametrize("angle", [0, 90, 180, 270, 13])
+def test_doc_rotation_is_lossless_scoped_and_keeps_single_preprocessing(
+    monkeypatch, angle
+):
+    import functools
+    import sys
+
+    import numpy as np
+
+    calls = []
+
+    def upstream_rotate(image, rotation):
+        calls.append(("upstream_rotate", rotation))
+        return image + 1
+
+    def orientation(value):
+        calls.append(("orientation", value))
+        return value
+
+    def unwarp(image):
+        calls.append(("unwarp", image.shape))
+        return image
+
+    namespace = {
+        "rotate_image": upstream_rotate,
+        "orientation": orientation,
+        "unwarp": unwarp,
+    }
+    exec(
+        "class Preprocessor:\n"
+        " def predict(self, image, angle=0, *, source='original'):\n"
+        "  angle = orientation(angle)\n"
+        "  rotated = rotate_image(image, angle)\n"
+        "  yield {'angle': angle, 'input_img': image, 'output_img': unwarp(rotated), 'source': source}\n",
+        namespace,
+    )
+    cls = namespace["Preprocessor"]
+    wrapped = []
+
+    def timeit(function):
+        wrapped.append(function)
+
+        @functools.wraps(function)
+        def measured(*args, **kwargs):
+            calls.append(("timer", True))
+            yield from function(*args, **kwargs)
+
+        return measured
+
+    cls.predict = timeit(cls.predict)
+    method_before = cls.predict
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.pipelines.doc_preprocessor.pipeline",
+        SimpleNamespace(_DocPreprocessorPipeline=cls, rotate_image=upstream_rotate),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.benchmark",
+        SimpleNamespace(benchmark=SimpleNamespace(timeit=timeit)),
+    )
+    owned, other = cls(), cls()
+    onnx._install_lossless_doc_rotation(owned)
+    image = np.arange(2 * 5 * 3, dtype=np.uint8).reshape(2, 5, 3)
+    result = next(owned.predict(image, angle, source="page-2"))
+    assert result["source"] == "page-2" and result["angle"] == angle
+    assert result["input_img"] is image
+    expected = np.rot90(image, angle // 90) if angle % 90 == 0 else image + 1
+    np.testing.assert_array_equal(result["output_img"], expected)
+    assert result["output_img"].flags.c_contiguous
+    assert [name for name, _ in calls].count("orientation") == 1
+    assert [name for name, _ in calls].count("unwarp") == 1
+    assert [name for name, _ in calls].count("timer") == 1
+    assert len(wrapped) == 2
+    assert namespace["rotate_image"] is upstream_rotate
+    assert cls.predict is method_before and other.predict.__func__ is method_before
+    np.testing.assert_array_equal(
+        next(other.predict(image, angle))["output_img"], image + 1
+    )
+    with pytest.raises(onnx.PaddleOnnxError, match="Unsupported PaddleX"):
+        onnx._install_lossless_doc_rotation(SimpleNamespace(predict=lambda: None))
