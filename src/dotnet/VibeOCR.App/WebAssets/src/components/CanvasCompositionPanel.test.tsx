@@ -261,6 +261,6 @@ describe("预览 blob URL 生命周期", () => {
     );
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     expect(img).not.toBeInTheDocument();
-    expect(revoked).toEqual([created.at(-1)]);
+    await waitFor(() => expect(revoked).toEqual([created.at(-1)]));
   });
 });

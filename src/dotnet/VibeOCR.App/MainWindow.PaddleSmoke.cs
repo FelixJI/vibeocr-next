@@ -330,10 +330,14 @@ public sealed partial class MainWindow
       await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
       await ClickManagedSmokeButtonAsync("查看环境清单");
     }
-    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
+    await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
+
+    // 离开设置页以结束只读兼容查询，再核对同一会话的完整就绪投影。
+    await NavigateSmokeAsync("单次识别", "button");
+    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
 
     if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
     {
@@ -342,7 +346,6 @@ public sealed partial class MainWindow
       if (!selectedDefault.Ok) throw new InvalidOperationException("Isolated ORT default selection failed.");
     }
     RecordPaddleSmokeStage($"select mode {mode}");
-    await NavigateSmokeAsync("单次识别", "button");
     await WaitForPaddleModeAsync("#recognition-task-engine", mode);
     string? availability = await PaddleSmokeDomTextAsync(
       "(() => { const o = Array.from(document.querySelector('#recognition-task-engine').options)" +
