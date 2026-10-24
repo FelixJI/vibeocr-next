@@ -87,6 +87,16 @@ def _check_result(name, result, width, height):
             assert 0 <= box[0] <= box[2] <= width and 0 <= box[1] <= box[3] <= height, (
                 box
             )
+    if name in ("table_merged_zh_en_90.png", "table_merged_zh_en_270.png"):
+        assert result.preproc_angle in (90, 270), (
+            "expected quarter-turn correction",
+            result.preproc_angle,
+        )
+        assert result.preproc_img_w > result.preproc_img_h > 0, (
+            "expected corrected landscape space",
+            result.preproc_img_w,
+            result.preproc_img_h,
+        )
     if "no_table" in name:
         assert not tables, "ordinary prose became a table"
     elif "table_merged" in name:

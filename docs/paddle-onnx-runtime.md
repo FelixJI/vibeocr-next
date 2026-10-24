@@ -32,7 +32,7 @@ DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁�
 | `small` / 均衡（默认） | PP-OCRv6_small_det | PP-OCRv6_small_rec |
 | `medium` / 高精度 | PP-OCRv6_medium_det | PP-OCRv6_medium_rec |
 
-模型名称用于官方 API；资源 repo 使用对应 `PaddlePaddle/<name>_onnx`。六主模型各包含 `inference.onnx`、`inference.yml`、`inference.json`。方向模型 PP-LCNet_x1_0_doc_ori、文本行方向 PP-LCNet_x0_25_textline_ori 和 UVDoc 各包含 ONNX/YAML，仅在该功能启用时准备。rec 字典内嵌各自 YAML；opset 为 det 14、rec 11、LCNet 7、UVDoc 16，模型 I/O 为 FP32。逐模型 IR/I/O 和外部权重声明保存在 `paddle_onnx_models.json`，当前清单十八个模型无外部权重文件。
+模型名称用于官方 API；资源 repo 使用对应 `PaddlePaddle/<name>_onnx`。六主模型各包含 `inference.onnx`、`inference.yml`、`inference.json`。方向模型 PP-LCNet_x1_0_doc_ori、文本行方向 PP-LCNet_x0_25_textline_ori 和 UVDoc 各包含 ONNX/YAML，仅在该功能启用时准备。rec 字典内嵌各自 YAML；opset 为 det 14、rec 11、LCNet 7、UVDoc 16，文字与辅助模型的浮点 I/O 为 FP32。逐模型 IR/I/O 和外部权重声明保存在 `paddle_onnx_models.json`，当前清单十八个模型无外部权重文件。新增结构模型的实际头信息为：plus-L、DocBlockLayout 与两个 RT-DETR 使用 IR 8/opset 16；三个表格结构模型使用 IR 8/opset 17；两个新增 LCNet 使用 IR 3/opset 7。浮点张量为 FP32，检测输出另含 INT32 数量，图内含 INT32/INT64/BOOL 控制张量；不能把所有输出统称 FP32。新增模型同时检查 initializer 与 Constant 属性中的外部数据声明。
 
 `src/runtime/vibeocr/runtime/environments/paddle_onnx_models.json` 是审阅冻结的外部来源清单：Hugging Face 固定 repo commit，LFS 文件的权威摘要为官方树中的 SHA-256，非 LFS 文件使用官方 Git blob SHA-1，不能称为上游 SHA-256。ModelScope 的权威摘要和每文件 revision 来自官方文件 API；下载逐文件固定 revision，不把 master 当不可变 commit。消费者是既有 `model_cache.prepare_models`：文件不符合权威长度/摘要就不提交私有视图，并保留旧视图。这里校验的是外部模型下载字节，未给本地派生配置另造 checksum。
 

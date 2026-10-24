@@ -1,6 +1,7 @@
 import sys
 from types import ModuleType
 
+import pytest
 from vibeocr.runtime.recognition.core.pipelines.pipeline_table import (
     TABLE_RECOGNITION_SPEC,
     TableRecognitionOptions,
@@ -1030,3 +1031,35 @@ class TestTablePureHelpers:
         assert _normalize_match_text("Hello World") == "helloworld"
         assert _normalize_match_text("  a\tb\n") == "ab"
         assert _normalize_match_text("") == ""
+
+
+@pytest.mark.parametrize("angle", [90, 270])
+@pytest.mark.parametrize("has_processed_image", [True, False])
+def test_rotated_table_uses_preprocessor_space_in_real_normalizer(
+    angle, has_processed_image
+):
+    import numpy as np
+    from vibeocr.runtime.recognition.ocr_service import OCRService
+
+    res = _make_table_result(
+        pred_html="<table><tr><td>Cell</td></tr></table>",
+        cell_box_list=[[20, 100, 80, 180]],
+    )
+    preprocessor = {"angle": angle}
+    if has_processed_image:
+        preprocessor["output_img"] = np.zeros((200, 100, 3), dtype=np.uint8)
+    res["doc_preprocessor_res"] = preprocessor
+    result = _recognize_table(
+        _FakeService([res]), image=None, options=TableRecognitionOptions()
+    )
+    assert result.preproc_angle == angle
+    assert (result.preproc_img_w, result.preproc_img_h) == (
+        (100, 200) if has_processed_image else (0, 0)
+    )
+    OCRService._normalize_result_bbox(result, np.zeros((100, 200, 3), dtype=np.uint8))
+    assert result.content_list[0]["bbox"] == [200, 500, 800, 900]
+    assert result.text_blocks[0].bbox == (200, 500, 800, 900)
+    assert (result.image_width, result.image_height) == (100, 200)
+    # Canonical cells still carry the real image-space provider coordinates.
+    assert result.content_list[0]["table"]["cells"][0]["bbox"] == [20, 100, 80, 180]
+    assert result.preprocessed_image is None

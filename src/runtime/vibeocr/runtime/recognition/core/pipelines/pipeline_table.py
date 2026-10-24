@@ -243,6 +243,16 @@ def _recognize_table(
         predict_kwargs["use_table_orientation_classify"],
     )
 
+    preproc_angle = 0
+    preproc_w = preproc_h = 0
+    if output_list:
+        dp_res = output_list[0].get("doc_preprocessor_res")
+        if dp_res is not None:
+            preproc_angle = dp_res.get("angle", 0)
+            out_arr = dp_res.get("output_img")
+            if out_arr is not None:
+                preproc_h, preproc_w = out_arr.shape[:2]
+
     text_blocks: list[TextBlock] = []
     # 上游 OCR 提供真实 rec_scores；表格结构块无置信度→None（不伪造）。
     text_with_scores: list[tuple[str, float | None]] = []
@@ -265,8 +275,8 @@ def _recognize_table(
 
         # 记录每个表格的外接框，用于后续过滤 overall_ocr_res 中的重复文本。
         # 注意：PaddleX 的 SingleTableRecognitionResult 不含 ``table_bbox``
-        # 字段，只有 ``cell_box_list``（各单元格 [x1,y1,x2,y2]，原图坐标系，
-        # 已在 post-processing 中 clip 到原图范围）。表格整体外接框需从
+        # 字段，只有 ``cell_box_list``（各单元格 [x1,y1,x2,y2]，预处理后图像坐标系，
+        # 已在 post-processing 中 clip 到该图像范围）。表格整体外接框需从
         # cell_box_list 的并集推导，否则过滤条件永远为空，overall_ocr_res
         # 里整图文字（含表格内文字）会被原样再展示一遍。
         table_match_regions: list[tuple[tuple[float, float, float, float], str]] = []
@@ -565,6 +575,9 @@ def _recognize_table(
         html_text="\n".join(part for part in html_parts if part),
         text_with_scores=text_with_scores,
         pipeline_type="TABLE_RECOGNITION",
+        preproc_angle=preproc_angle,
+        preproc_img_w=preproc_w,
+        preproc_img_h=preproc_h,
         text_blocks=text_blocks,
         content_list=content_list,
     )

@@ -822,6 +822,21 @@ def draw_wireless_dispatch(out: Path) -> dict[str, object]:
     }
 
 
+def draw_rotated_table_pages(out: Path) -> dict[str, object]:
+    entries = {}
+    with Image.open(out / "table_merged_zh_en.png") as original:
+        for angle in (90, 270):
+            name = f"table_merged_zh_en_{angle}.png"
+            original.rotate(angle, expand=True).save(out / name)
+            entries[name] = {
+                "rows": 5,
+                "columns": 4,
+                "input_rotation": angle,
+                "purpose": "non-square full-page table preprocessor coordinates",
+            }
+    return entries
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
@@ -845,6 +860,7 @@ def main() -> int:
     entries.update(draw_rotated_table_document(args.out))
     entries.update(draw_geometry_holdout(args.out))
     entries.update(draw_wireless_dispatch(args.out))
+    entries.update(draw_rotated_table_pages(args.out))
     if not args.skip_pdf:
         pdf = draw_document_pdf(args.out)
         if pdf is None:

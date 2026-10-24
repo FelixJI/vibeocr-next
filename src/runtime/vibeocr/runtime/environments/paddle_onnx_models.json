@@ -738,6 +738,51 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "PP-DocBlockLayout",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.1x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.1x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.1x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
       }
     },
     "PP-DocLayout_plus-L": {
@@ -779,6 +824,51 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "PP-DocLayout_plus-L",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.1x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.1x3x800x800"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.1x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
       }
     },
     "PP-LCNet_x1_0_table_cls": {
@@ -820,6 +910,34 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "PP-LCNet_x1_0_table_cls",
+        "ir_version": 3,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 7
+          }
+        ],
+        "initializer_types": [],
+        "tensor_types": [
+          "FLOAT",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x224x224"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "external_data": []
       }
     },
     "RT-DETR-L_wired_table_cell_det": {
@@ -861,6 +979,51 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "RT-DETR-L_wired_table_cell_det",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.2x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.2x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.2x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.2x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
       }
     },
     "RT-DETR-L_wireless_table_cell_det": {
@@ -902,6 +1065,51 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "RT-DETR-L_wireless_table_cell_det",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.0x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.0x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.0x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.0x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
       }
     },
     "SLANet_plus": {
@@ -943,6 +1151,44 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "SLANet_plus",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 17
+          }
+        ],
+        "initializer_types": [
+          "BOOL",
+          "FLOAT",
+          "INT64"
+        ],
+        "tensor_types": [
+          "BOOL",
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3xDynamicDimension.1xDynamicDimension.2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.3xDynamicDimension.4x8"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "FLOAT, DynamicDimension.5xDynamicDimension.6x50"
+          }
+        ],
+        "external_data": []
       }
     },
     "SLANeXt_wired": {
@@ -984,6 +1230,44 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "SLANeXt_wired",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 17
+          }
+        ],
+        "initializer_types": [
+          "BOOL",
+          "FLOAT",
+          "INT64"
+        ],
+        "tensor_types": [
+          "BOOL",
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x512x512"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1xDynamicDimension.2x8"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "FLOAT, DynamicDimension.3xDynamicDimension.4x50"
+          }
+        ],
+        "external_data": []
       }
     },
     "SLANeXt_wireless": {
@@ -1025,6 +1309,44 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "SLANeXt_wireless",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 17
+          }
+        ],
+        "initializer_types": [
+          "BOOL",
+          "FLOAT",
+          "INT64"
+        ],
+        "tensor_types": [
+          "BOOL",
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x512x512"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1xDynamicDimension.2x8"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "FLOAT, DynamicDimension.3xDynamicDimension.4x50"
+          }
+        ],
+        "external_data": []
       }
     },
     "PP-LCNet_x1_0_textline_ori": {
@@ -1066,6 +1388,34 @@
             }
           ]
         }
+      },
+      "metadata": {
+        "model": "PP-LCNet_x1_0_textline_ori",
+        "ir_version": 3,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 7
+          }
+        ],
+        "initializer_types": [],
+        "tensor_types": [
+          "FLOAT",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x80x160"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "external_data": []
       }
     }
   }
