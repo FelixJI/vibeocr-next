@@ -465,6 +465,30 @@ def draw_document_pdf(out: Path) -> dict[str, object] | None:
     }
 
 
+def draw_structure_pdfs(out: Path) -> dict[str, object]:
+    """Two distinct frozen raster pages per retained mode, at native 216 DPI."""
+    import pymupdf
+
+    entries = {}
+    for name, sources in {
+        "document_table_pages.pdf": ["table_merged_zh_en.png", "wireless_dispatch.png"],
+        "document_structure_pages.pdf": [
+            "document_mixed.png",
+            "document_columns_90.png",
+        ],
+    }.items():
+        with pymupdf.open() as document:
+            for source in sources:
+                with Image.open(out / source) as image:
+                    page = document.new_page(
+                        width=image.width / 3, height=image.height / 3
+                    )
+                    page.insert_image(page.rect, filename=str(out / source))
+            document.save(out / name, deflate=True)
+        entries[name] = {"pages": 2, "source_images": sources, "dpi": 216}
+    return entries
+
+
 def draw_orientation_pdf(out: Path) -> dict[str, object]:
     """八个扫描页：四个内容朝向分别叠加现有 /Rotate=0/90。"""
     import io
@@ -877,6 +901,7 @@ def main() -> int:
             }
             entries["document_orientation.pdf"] = draw_orientation_pdf(args.out)
             entries.update(draw_workspace_pdfs(args.out))
+            entries.update(draw_structure_pdfs(args.out))
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

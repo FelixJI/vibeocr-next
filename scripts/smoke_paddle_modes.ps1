@@ -25,7 +25,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 默认五种 paddle 模式；可用子集逐个交付。
 
 .PARAMETER InputKinds
-额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式（包括 ORT）。
+额外真实输入入口：file/batch 使用表格模式，pdf 按 Modes 中的表格/文档结构模式分别验证两页（包括 ORT）；无匹配模式时沿用文档结构默认。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
 pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
@@ -346,64 +346,75 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
-        $spec = $modeSpec[$inputMode]
-        $fixtureName = if ($inputKind -eq 'pdf_workspace') { 'workspace-a/same.pdf' } elseif ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
-        $phaseName = "paddle-input-$inputKind$attemptSuffix"
-        $healthPath = Join-Path $smokeRoot "$phaseName.json"
-        if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
-            $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
-            Write-Host "KEPT $phaseName state=$($health.state)"
-        } else {
-            foreach ($needed in @($fixtureName, 'table_wireless.png')) {
-                if (-not (Test-Path -LiteralPath (Join-Path $fixtures $needed) -PathType Leaf)) {
-                    throw "Input fixture missing: $needed"
+        $inputModes = if ($inputKind -eq 'pdf') { @($Modes | Where-Object { $_ -in @('paddle_table', 'paddle_structure') }) } elseif ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { @('paddle_text') } else { @('paddle_table') }
+        if ($inputKind -eq 'pdf' -and $inputModes.Count -eq 0) { $inputModes = @('paddle_structure') }
+        foreach ($inputMode in $inputModes) {
+            $spec = $modeSpec[$inputMode]
+            $fixtureName = if ($inputKind -eq 'pdf_workspace') { 'workspace-a/same.pdf' } elseif ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { if ($inputMode -eq 'paddle_table') { 'document_table_pages.pdf' } else { 'document_structure_pages.pdf' } } else { $spec.Fixture }
+            $inputSuffix = if ($inputKind -eq 'pdf') { "-$inputMode" } else { '' }
+            $phaseName = "paddle-input-$inputKind$inputSuffix$attemptSuffix"
+            $healthPath = Join-Path $smokeRoot "$phaseName.json"
+            if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+                $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                Write-Host "KEPT $phaseName state=$($health.state)"
+            } else {
+                foreach ($needed in @($fixtureName, 'table_wireless.png')) {
+                    if (-not (Test-Path -LiteralPath (Join-Path $fixtures $needed) -PathType Leaf)) {
+                        throw "Input fixture missing: $needed"
+                    }
                 }
+                $inputExports = Join-Path $exports "input-$inputKind$inputSuffix$attemptSuffix"
+                New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
+                $health = Invoke-PaddlePhase @{
+                    'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
+                    'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'pdf' } else { $inputKind })
+                    'VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE' = $(if ($inputKind -eq 'pdf_workspace') { '1' } else { '0' })
+                    'VIBEOCR_PADDLE_SMOKE_PDF_EDITING' = $(if ($inputKind -eq 'pdf_editing') { '1' } else { '0' })
+                    'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { '1' } else { '0' })
+                    'VIBEOCR_PADDLE_SMOKE_MODE' = $inputMode
+                    'VIBEOCR_PADDLE_SMOKE_PIPELINE' = $spec.Pipeline
+                    'VIBEOCR_PADDLE_SMOKE_FIXTURE' = (Join-Path $fixtures $fixtureName)
+                    'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE' = (Join-Path $fixtures 'table_wireless.png')
+                    'VIBEOCR_PADDLE_SMOKE_OPTION_NAME' = $(if ($inputKind -eq 'pdf_workspace') { 'use_doc_orientation_classify' } else { $spec.Option })
+                    'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE' = $(if ($inputKind -eq 'pdf_workspace') { 'true' } else { $spec.Value })
+                    'VIBEOCR_PADDLE_SMOKE_OPTION_KIND' = $spec.Kind
+                    'VIBEOCR_PADDLE_SMOKE_TOKENS' = $spec.Tokens
+                    'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS' = $spec.Export
+                    'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR' = $inputExports
+                    'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES' = "$ModeTimeoutMinutes"
+                } $phaseName ($ModeTimeoutMinutes + 10)
             }
-            $inputExports = Join-Path $exports "input-$inputKind$attemptSuffix"
-            New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
-            $health = Invoke-PaddlePhase @{
-                'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
-                'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'pdf' } else { $inputKind })
-                'VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE' = $(if ($inputKind -eq 'pdf_workspace') { '1' } else { '0' })
-                'VIBEOCR_PADDLE_SMOKE_PDF_EDITING' = $(if ($inputKind -eq 'pdf_editing') { '1' } else { '0' })
-                'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { '1' } else { '0' })
-                'VIBEOCR_PADDLE_SMOKE_MODE' = $inputMode
-                'VIBEOCR_PADDLE_SMOKE_PIPELINE' = $spec.Pipeline
-                'VIBEOCR_PADDLE_SMOKE_FIXTURE' = (Join-Path $fixtures $fixtureName)
-                'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE' = (Join-Path $fixtures 'table_wireless.png')
-                'VIBEOCR_PADDLE_SMOKE_OPTION_NAME' = $(if ($inputKind -eq 'pdf_workspace') { 'use_doc_orientation_classify' } else { $spec.Option })
-                'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE' = $(if ($inputKind -eq 'pdf_workspace') { 'true' } else { $spec.Value })
-                'VIBEOCR_PADDLE_SMOKE_OPTION_KIND' = $spec.Kind
-                'VIBEOCR_PADDLE_SMOKE_TOKENS' = $spec.Tokens
-                'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS' = $spec.Export
-                'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR' = $inputExports
-                'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES' = "$ModeTimeoutMinutes"
-            } $phaseName ($ModeTimeoutMinutes + 10)
+            $results += [pscustomobject]@{
+                phase = $phaseName; mode = $inputMode; fixture = $fixtureName
+                state = $health.state; stage = $health.stage; error = $health.error
+            }
+            # UI phase（health JSON）只证明应用内流程；导出 PDF 的最终校验
+            # （完整长句/尾标记/旧文不重复/未改块/取消草稿/扫描像素/空白页）
+            # 由仓库 helper 用锁定 pymupdf 执行，失败置总退出码非 0；报告写入
+            # 隔离根新文件，不覆盖任何原始 health 证据（Resume 已 passed 同样校验）。
+            if ($inputKind -in @('pdf_editing', 'pdf_workspace') -and $health.state -eq 'passed') {
+                Push-Location $repoRoot
+                try {
+                    $verificationArgs = @('--root', $smokeRoot, '--health', $healthPath)
+                    if ($Attempt) {
+                        $verificationArgs += @('--output', (Join-Path $smokeRoot "$phaseName-export-verification.json"))
+                    }
+                    if ($inputKind -eq 'pdf_workspace') { $verificationArgs += '--workspace' }
+                    uv run --frozen python (Join-Path $repoRoot 'scripts\verify_pdf_editing_export.py') @verificationArgs
+                    if ($LASTEXITCODE -ne 0) { throw "pdf_editing export verification failed (exit $LASTEXITCODE)" }
+                } finally { Pop-Location }
+                Write-Host "VERIFIED paddle-input-$inputKind export (pymupdf final verification)"
+            }
+            if ($inputKind -eq 'pdf' -and $health.state -eq 'passed') {
+                Push-Location $repoRoot
+                try {
+                    uv run --frozen python (Join-Path $repoRoot 'scripts/verify_paddle_pdf_structure.py') --root $smokeRoot --health $healthPath
+                    if ($LASTEXITCODE -ne 0) { throw "Structured PDF verification failed (exit $LASTEXITCODE)" }
+                } finally { Pop-Location }
+            }
+            Write-Host "$($health.state) $phaseName stage=$($health.stage) $($health.error)"
+            Set-PaddleOutcome $health.state
         }
-        $results += [pscustomobject]@{
-            phase = $phaseName; mode = $inputMode; fixture = $fixtureName
-            state = $health.state; stage = $health.stage; error = $health.error
-        }
-        # UI phase（health JSON）只证明应用内流程；导出 PDF 的最终校验
-        # （完整长句/尾标记/旧文不重复/未改块/取消草稿/扫描像素/空白页）
-        # 由仓库 helper 用锁定 pymupdf 执行，失败置总退出码非 0；报告写入
-        # 隔离根新文件，不覆盖任何原始 health 证据（Resume 已 passed 同样校验）。
-        if ($inputKind -in @('pdf_editing', 'pdf_workspace') -and $health.state -eq 'passed') {
-            Push-Location $repoRoot
-            try {
-                $verificationArgs = @('--root', $smokeRoot, '--health', $healthPath)
-                if ($Attempt) {
-                    $verificationArgs += @('--output', (Join-Path $smokeRoot "$phaseName-export-verification.json"))
-                }
-                if ($inputKind -eq 'pdf_workspace') { $verificationArgs += '--workspace' }
-                uv run --frozen python (Join-Path $repoRoot 'scripts\verify_pdf_editing_export.py') @verificationArgs
-                if ($LASTEXITCODE -ne 0) { throw "pdf_editing export verification failed (exit $LASTEXITCODE)" }
-            } finally { Pop-Location }
-            Write-Host "VERIFIED paddle-input-$inputKind export (pymupdf final verification)"
-        }
-        Write-Host "$($health.state) $phaseName stage=$($health.stage) $($health.error)"
-        Set-PaddleOutcome $health.state
     }
 } finally {
     foreach ($entry in $previous.GetEnumerator()) {
