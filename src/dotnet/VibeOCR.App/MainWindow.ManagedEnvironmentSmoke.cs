@@ -13,7 +13,7 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow
 {
-  private const string SmokeEnvironmentA = "RapidOCR · CPU";
+  private const string SmokeEnvironmentA = "RapidOCR + RapidTable · CPU";
   private const string SmokeEnvironmentB = "Smoke B";
   private string managedSmokeStage = "starting";
   private readonly List<object> managedInstallProgressEvidence = [];
@@ -114,7 +114,7 @@ public sealed partial class MainWindow
     // 快照前不得冒充任何设备（AC1）。
     await WaitForSmokeDomAsync(
       "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
-      "panel.textContent.includes('默认运行环境：RapidOCR · CPU（尚未启动）') && " +
+      $"panel.textContent.includes({JsonSerializer.Serialize($"默认运行环境：{SmokeEnvironmentA}（尚未启动）")}) && " +
       "!panel.querySelector('[role=progressbar]'); })()",
       TimeSpan.FromSeconds(30));
     await SaveManagedSmokePreviewAsync("environment-list");
