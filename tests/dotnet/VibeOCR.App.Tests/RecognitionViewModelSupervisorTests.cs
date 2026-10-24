@@ -181,6 +181,21 @@ public sealed class RecognitionViewModelSupervisorTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Theory]
+  [InlineData("paddle_text", "text", "OCR")]
+  [InlineData("paddle_table", "specialized", "TABLE_RECOGNITION")]
+  [InlineData("paddle_structure", "document", "PP-StructureV3")]
+  public void LegacyPaddleCatalogKeepsValidOptionsAndRejectsOrtOnlySavedValues(string id, string family, string pipeline)
+  {
+    var mode = new RecognitionModeOption(id, family, pipeline,
+      id == "paddle_text" ? OcrEngine.PaddleOcr : null, "advanced_component", "ready", null, "paddleocr-cpu",
+      ["use_doc_unwarping"], "model_residency", true, true, true, true);
+    var saved = new PaddleModeOptions { ModelPreset = "medium", Device = "cpu", UseDocUnwarping = true };
+    Assert.Equal(["use_doc_unwarping"], saved.ProjectWire(mode).Keys);
+    Assert.Throws<ArgumentException>(() => saved.ToWire(mode));
+    Assert.True(new PaddleModeOptions { UseDocUnwarping = true }.ToWire(mode)["use_doc_unwarping"].GetBoolean());
+  }
+
   [Fact]
   public void TaskModelPresetOverrideDoesNotRewriteDefaultsOrOtherScopes()
   {

@@ -610,6 +610,7 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
             item["id"]: item for item in descriptor["recognition_mode_catalog"]["modes"]
         }
         for mode in ("paddle_table", "paddle_structure"):
+            assert {"device", "model_preset"} <= set(entries[mode]["supported_options"])
             assert entries[mode]["availability"] == status.value
             assert entries[mode]["required_component"] == (None if ready else recipe)
             assert entries[mode]["reason_code"] == (
@@ -632,3 +633,55 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
         for mode in ("paddle_formula", "paddle_document_vl"):
             assert entries[mode]["availability"] == "preparation_required"
             assert entries[mode]["reason_code"] == "mode_requires_legacy_environment"
+
+
+@pytest.mark.parametrize("recipe", ["paddleocr-cpu", "paddleocr-cuda"])
+async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_options(
+    tmp_path, monkeypatch, recipe
+):
+    from vibeocr.runtime.host.composition import _build_recognition_mode_registry
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
+    module, _ = _module(tmp_path, [_FakeOcrEngine(OcrEngine.PADDLEOCR)])
+    module.recognition_mode_registry = _build_recognition_mode_registry(
+        engine_resolver=module.engine_resolver,
+        use_paddle=True,
+        use_mineru=False,
+    )
+    token = generate_session_token()
+    async with _client(create_app(module, token), token) as http:
+        health = (await http.get("/v2/health")).json()
+        descriptor = next(
+            item
+            for item in health["capability_descriptors"]
+            if item["name"] == "ocr.recognition-modes.v1"
+        )
+        entries = {
+            item["id"]: item for item in descriptor["recognition_mode_catalog"]["modes"]
+        }
+        for mode, pipeline, engine in (
+            ("paddle_text", "OCR", "paddleocr"),
+            ("paddle_table", "TABLE_RECOGNITION", None),
+            ("paddle_structure", "PP-StructureV3", None),
+        ):
+            assert not {"device", "model_preset"}.intersection(
+                entries[mode]["supported_options"]
+            )
+            assert "use_doc_unwarping" in entries[mode]["supported_options"]
+            saved = await http.put(
+                "/v2/settings",
+                json={
+                    "schema_version": 2,
+                    "residency": {"default_ttl_seconds": 300, "pipelines": []},
+                    "extra": {"default_recognition_mode": mode},
+                },
+            )
+            assert saved.status_code == 200, saved.text
+            manifest = json.loads(_manifest(engine=engine, pipeline=pipeline))
+            manifest["pipeline"]["options"] = {"use_doc_unwarping": False}
+            accepted = await _submit(http, json.dumps(manifest))
+            assert accepted.status_code == 200, accepted.text
+            for field, value in (("device", "cpu"), ("model_preset", "small")):
+                manifest["pipeline"]["options"] = {field: value}
+                rejected = await _submit(http, json.dumps(manifest))
+                assert rejected.status_code == 400, rejected.text

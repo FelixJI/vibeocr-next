@@ -426,7 +426,12 @@ def _build_recognition_mode_registry(
                     if option not in {"device", "model_preset"}
                 ),
             )
-            if definition.mode_id is RecognitionModeId.PADDLE_TEXT
+            if definition.mode_id
+            in {
+                RecognitionModeId.PADDLE_TEXT,
+                RecognitionModeId.PADDLE_TABLE,
+                RecognitionModeId.PADDLE_STRUCTURE,
+            }
             else definition
             for definition in definitions
         )

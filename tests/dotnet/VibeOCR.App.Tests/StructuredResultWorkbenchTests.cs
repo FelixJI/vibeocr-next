@@ -22,6 +22,20 @@ namespace VibeOCR.App.Tests;
 public sealed class StructuredResultWorkbenchTests
 {
   [Fact]
+  public void PdfSmokeRejectsStaleOrPartiallyToggledPageSelections()
+  {
+    var stale = new PdfWorkbenchState(false, "pdf.ready", 2, 0, SelectedPages: []);
+    var first = stale with { SelectedPages = [0] };
+    var accidentallyToggled = stale with { SelectedPages = [1] };
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(stale));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(first));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(accidentallyToggled));
+    var all = stale with { SelectedPages = [0, 1] };
+    Assert.True(MainWindow.PaddleSmokePdfHasBothPages(all));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(all with { IsBusy = true }));
+  }
+
+  [Fact]
   public void PdfSmokeProjectionChecksPageOwnershipAndEverySourceField()
   {
     using JsonDocument source = JsonDocument.Parse("""[{"type":"image","bbox":[1,2,3,4],"image":{"job_id":"job","item_id":"page0","asset_id":"asset"}}]""");

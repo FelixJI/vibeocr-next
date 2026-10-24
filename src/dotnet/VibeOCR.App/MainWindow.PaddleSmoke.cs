@@ -604,19 +604,27 @@ public sealed partial class MainWindow
         "(() => { const e=document.querySelector('input[name=renderDpi]'); e.closest('details').open=true; })()");
       await EnterSmokeTextAsync("input[name=renderDpi]", "216");
       await ClickManagedSmokeButtonAsync("保存 PDF 参数");
-      await WaitForPaddlePdfAsync(state => state.ProcessingSettings?.RenderDpi == 216, TimeSpan.FromSeconds(30));
+      opened = await WaitForPaddlePdfAsync(
+        state => !state.IsBusy && state.ProcessingSettings?.RenderDpi == 216 &&
+          state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     }
     if (structurePages && opened.PageCount != 2)
       throw new InvalidOperationException("Structured PDF smoke requires exactly two distinct pages.");
-    foreach (int index in pageIndexes)
+    if (structurePages)
     {
-      if (opened.SelectedPages?.Contains(index) == true) continue;
-      string selector = JsonSerializer.Serialize($"[aria-label=\"选择第 {index + 1} 页\"]");
-      await WaitForSmokeDomAsync($"!!document.querySelector({selector})", TimeSpan.FromSeconds(30));
-      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({selector}).click()");
-      opened = await WaitForPaddlePdfAsync(
-        state => state.SelectedPages?.Contains(index) == true, TimeSpan.FromSeconds(30));
+      RecordPaddleSmokeStage("pdf select both pages");
+      await ClickManagedSmokeButtonAsync("全选页面");
+      opened = await WaitForPaddlePdfAsync(PaddleSmokePdfHasBothPages, TimeSpan.FromSeconds(30));
     }
+    else if (opened.SelectedPages?.Contains(0) != true)
+    {
+      const string selector = "[aria-label=\"选择第 1 页\"]";
+      await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({JsonSerializer.Serialize(selector)}).click()");
+      opened = await WaitForPaddlePdfAsync(state => state.SelectedPages?.Contains(0) == true, TimeSpan.FromSeconds(30));
+    }
+    paddleSmokePartialEvidence = new { input_kind = "pdf", mode, fixture_path = fixture,
+      opened.PageCount, opened.SelectedPages, expected_pages = pageIndexes };
     int before = smokeSubmitAttempts!();
     bool textLayer = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER") == "1";
     if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
@@ -705,6 +713,9 @@ public sealed partial class MainWindow
       structured_inspected = inspected, pages = pageEvidence, text_layer = textLayer, copies, saved,
     };
   }
+
+  internal static bool PaddleSmokePdfHasBothPages(PdfWorkbenchState state) =>
+    !state.IsBusy && state.PageCount == 2 && state.SelectedPages?.SequenceEqual([0, 1]) == true;
 
   internal static void ValidatePaddlePdfProjection(
     JsonElement expected, JsonElement actual, string jobId, string itemId)
@@ -1148,6 +1159,7 @@ public sealed partial class MainWindow
     {
       string diagnostic = JsonSerializer.Serialize(last is null ? null : new {
         last.Phase, last.IsBusy, last.StatusCode, last.Revision, last.AddedCount, last.SelectedPage, last.TaskEngine,
+        last.PageCount, last.SelectedPages, pages = last.Pages?.Select(page => new { page.Index, page.StatusCode }),
       });
       throw new TimeoutException($"PDF state wait timed out after {timeout}. Last state: {diagnostic}", error);
     }
