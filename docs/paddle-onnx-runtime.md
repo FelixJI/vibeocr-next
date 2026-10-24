@@ -32,7 +32,7 @@ DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁�
 | `small` / 均衡（默认） | PP-OCRv6_small_det | PP-OCRv6_small_rec |
 | `medium` / 高精度 | PP-OCRv6_medium_det | PP-OCRv6_medium_rec |
 
-模型名称用于官方 API；资源 repo 使用对应 `PaddlePaddle/<name>_onnx`。六主模型各包含 `inference.onnx`、`inference.yml`、`inference.json`。方向模型 PP-LCNet_x1_0_doc_ori、文本行方向 PP-LCNet_x0_25_textline_ori 和 UVDoc 各包含 ONNX/YAML，仅在该功能启用时准备。rec 字典内嵌各自 YAML；opset 为 det 14、rec 11、LCNet 7、UVDoc 16，文字与辅助模型的浮点 I/O 为 FP32。逐模型 IR/I/O 和外部权重声明保存在 `paddle_onnx_models.json`，当前清单十八个模型无外部权重文件。新增结构模型的实际头信息为：plus-L、DocBlockLayout 与两个 RT-DETR 使用 IR 8/opset 16；三个表格结构模型使用 IR 8/opset 17；两个新增 LCNet 使用 IR 3/opset 7。浮点张量为 FP32，检测输出另含 INT32 数量，图内含 INT32/INT64/BOOL 控制张量；不能把所有输出统称 FP32。新增模型同时检查 initializer 与 Constant 属性中的外部数据声明。
+模型名称用于官方 API；资源 repo 使用对应 `PaddlePaddle/<name>_onnx`。六主模型各包含 `inference.onnx`、`inference.yml`、`inference.json`。方向模型 PP-LCNet_x1_0_doc_ori、文本行方向 PP-LCNet_x0_25_textline_ori 和 UVDoc 各包含 ONNX/YAML，仅在该功能启用时准备。rec 字典内嵌各自 YAML；opset 为 det 14、rec 11、LCNet 7、UVDoc 16，文字与辅助模型的浮点 I/O 为 FP32。逐模型 IR/I/O 和外部权重声明保存在 `paddle_onnx_models.json`，当前清单十七个模型无外部权重文件。新增结构模型的实际头信息为：plus-L、DocBlockLayout 与两个 RT-DETR 使用 IR 8/opset 16；两个表格结构模型使用 IR 8/opset 17；两个新增 LCNet 使用 IR 3/opset 7。浮点张量为 FP32，检测输出另含 INT32 数量，图内含 INT32/INT64/BOOL 控制张量；不能把所有输出统称 FP32。新增模型同时检查 initializer 与 Constant 属性中的外部数据声明。
 
 `src/runtime/vibeocr/runtime/environments/paddle_onnx_models.json` 是审阅冻结的外部来源清单：Hugging Face 固定 repo commit，LFS 文件的权威摘要为官方树中的 SHA-256，非 LFS 文件使用官方 Git blob SHA-1，不能称为上游 SHA-256。ModelScope 的权威摘要和每文件 revision 来自官方文件 API；下载逐文件固定 revision，不把 master 当不可变 commit。消费者是既有 `model_cache.prepare_models`：文件不符合权威长度/摘要就不提交私有视图，并保留旧视图。这里校验的是外部模型下载字节，未给本地派生配置另造 checksum。
 
@@ -57,15 +57,15 @@ C# `PaddleModeOptions` 是权威设置，TS 只展示 Runtime `supported_options
 
 ## 表格与文档结构的模型迁移
 
-独立表格定位改用官方 `PP-DocLayout_plus-L`（20 类、800 输入），不是旧 `PP-DocLayout-L`（23 类、640 输入）的等价替换。结构模式本来使用 plus-L，并继续使用 `PP-DocBlockLayout`。有线结构保持 `SLANeXt_wired`；独立表格的无线结构依赖为 `SLANeXt_wireless`，PPStructure 为 `SLANet_plus`，不统一替换。表格分类、wired/wireless RT-DETR cell detector、表格方向和嵌套 OCR 均纳入完整准备与 session 验证；嵌套 OCR 的检测阈值为 .4，顶层 OCR 为 .6，不能共享实例。结构行方向使用 x1_0 模型，普通文字路径使用 x0_25。
+独立表格定位改用官方 `PP-DocLayout_plus-L`（20 类、800 输入），不是旧 `PP-DocLayout-L`（23 类、640 输入）的等价替换。结构模式本来使用 plus-L，并继续使用 `PP-DocBlockLayout`。有线结构保持 `SLANeXt_wired`；两个模式的无线结构均使用官方 `SLANeXt_wireless`。PPStructure 从原 `SLANet_plus` 迁移权重，这是明确的模型变化，需要独立验证结构、文字关联和导出质量。表格分类、wired/wireless RT-DETR cell detector、表格方向和嵌套 OCR 均纳入完整准备与 session 验证；嵌套 OCR 的检测阈值为 .4，顶层 OCR 为 .6，不能共享实例。结构行方向使用 x1_0 模型，普通文字路径使用 x0_25。
 
-默认无线结果采用官方 `use_wireless_table_cells_trans_to_html=True`、`use_e2e_wireless_table_rec_model=False`：RT-DETR cell 框和 OCR 生成可编辑网格。上游构造器仍强制创建无线结构 session，但这条默认路径不执行它；不能据其存在宣称模型参与结果。独立表格保留公开 E2E 选项，验收脚本的 `--wireless-e2e` 单独覆盖该路径。原生报告区分默认未消费构造依赖与要求实际目标 EP 节点的角色；条件触发的嵌套 OCR 需要旋转表格输入覆盖。
+默认无线结果采用官方 `use_wireless_table_cells_trans_to_html=False`、`use_e2e_wireless_table_rec_model=False`：结构模型生成 HTML，RT-DETR 单元格框与 OCR 经官方匹配流程形成可编辑网格。无线结构与单元格检测模型均实际消费，逐角色要求目标 EP 执行证据；条件触发的嵌套 OCR 需要旋转表格输入覆盖。E2E/cellHTML 是内部 PaddleX 参数，当前公开 wire/UI 不暴露；验收脚本的 `--wireless-e2e` 仅用于内部路线诊断。
 
 独立 table_v2 未透传布局 NMS 配置，适配在该 layout 实例启用官方 NMS/union。两模式均先运行原布局后处理；原结果已有 table 时整页保持。仅零 table 时从同一次模型预测提取 table 类，按 .1 阈值、官方 NMS 和仅 table 集合的 large 包含过滤补救，非 table 输出保持。该迁移适配可能改变低置信表格召回，需保留无表负例、混合页和独立多表验证；不能称为旧模型等价输出。
 
 结构管线的文档方向纠正对 0/90/180/270 度使用无损像素转置，避免上游仿射插值改变边缘、影响表头定位。适配仅绑定当前文档预处理实例，复用锁定 PaddleX 的原校验、批处理、来源字段与计时包装；方向分类和 UVDoc 各执行一次，其他角度沿用官方旋转。若上游调用边界不匹配则明确拒绝，不修改模块或其他实例。返回角度与纠正图尺寸继续用于真实坐标归一化，canonical 单元格像素坐标保持原值。
 
-PaddleX 的 cell-to-HTML 使用固定 5px 聚类，去畸变后的边界漂移曾把真实 4 列拆成 5 列。ORT 适配先用单元格局部尺度约束的完整边界簇，再以真实相邻格的面对边证明必要合并；窄格两端不能同簇，中间真实格阻断相邻关系。复用 `TableModelV1` 的无重叠校验并要求完整网格覆盖。无法证明的缺格、冲突或过度漂移抛出 `PaddleOnnxError`，任务明确失败，不裁空列、不补造格子。只将私有边界索引坐标交给原 HTML 生成器，实际检测框、OCR 匹配与返回坐标保持原值。该方法是有界推断，不保证任意倾斜或不齐框都可恢复。
+默认路径复用官方结构模型与单元格匹配，不再自行从边界距离推断网格或注入私有几何索引。实际检测框、OCR 匹配坐标与既有 canonical 校验保持原职责。先前自研几何适配及其专属测试已移除，独立 6×3、5×5 与所有冻结真实输入质量合同继续验收。模型目录移除无消费者的 `SLANet_plus` 条目；历史十八模型准备/诊断证据保持历史事实，不删除既有模型缓存或健康环境。
 
 专用印章的构造、准备、预热和合法设置均退出结构模式。历史读取与直接导出在副本上过滤有明确 seal 类型/来源关联的结构块及专用裁图，并重建显示、复制、评分和导出投影；不删除数据库、原文件、混合记录或原始整页图片中的印章像素。无类型历史摘要不能可靠区分文字来源，保持原值；普通正文即使与印章同文也不按字符串猜测删除。
 

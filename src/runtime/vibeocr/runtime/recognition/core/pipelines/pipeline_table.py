@@ -128,7 +128,7 @@ class TableRecognitionOptions(BasePipelineOptions):
     text_det_unclip_ratio: float | None = None
     text_rec_score_thresh: float | None = None
     use_wired_table_cells_trans_to_html: bool = False
-    use_wireless_table_cells_trans_to_html: bool = True
+    use_wireless_table_cells_trans_to_html: bool = False
     use_e2e_wired_table_rec_model: bool = False
     use_e2e_wireless_table_rec_model: bool = False
     formula_recognition_batch_size: int = 1

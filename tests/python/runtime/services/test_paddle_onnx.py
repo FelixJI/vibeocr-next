@@ -555,7 +555,7 @@ def test_directml_absent_hardware_rejects_admission_before_model_preparation(
 
 @pytest.mark.parametrize(
     "pipeline_id,wireless",
-    [("TABLE_RECOGNITION", "SLANeXt_wireless"), ("PP-StructureV3", "SLANet_plus")],
+    [("TABLE_RECOGNITION", "SLANeXt_wireless"), ("PP-StructureV3", "SLANeXt_wireless")],
 )
 def test_retained_graph_prepares_every_role_without_retired_assets(
     monkeypatch, pipeline_id, wireless
@@ -702,44 +702,6 @@ def test_missing_table_layout_preserves_non_table_and_only_uses_model_candidates
     np.testing.assert_array_equal(raw, saved)
 
 
-def test_unproven_topology_is_typed_failure_through_structure_mapper():
-    from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
-        PPStructureV3Options,
-        _recognize_pp_structure,
-    )
-
-    table = SimpleNamespace(trans_cells_det_results_to_html=lambda cells: cells)
-    onnx._install_cell_topology(table)
-
-    class Pipeline:
-        def predict(self, **kwargs):
-            table.trans_cells_det_results_to_html(
-                [[0, 0, 100, 50], [100, 0, 200, 50], [0, 50, 100, 100]]
-            )
-            yield {}
-
-    service = SimpleNamespace(
-        get_or_create_pipeline=lambda *_args, **_kwargs: Pipeline()
-    )
-    with pytest.raises(onnx.PaddleOnnxError, match="missing or ambiguous"):
-        _recognize_pp_structure(service, "unused.png", PPStructureV3Options())
-
-
-def test_cell_html_adapter_only_passes_private_indexes_and_keeps_image_boxes():
-    boxes = [[17.0, 20.0, 117.0, 70.0], [117.5, 20.2, 217.5, 70.2]]
-    saved = [list(box) for box in boxes]
-    captured = []
-    table = SimpleNamespace(
-        trans_cells_det_results_to_html=lambda cells: (
-            captured.append(cells) or ["<table>"]
-        )
-    )
-    onnx._install_cell_topology(table)
-    assert table.trans_cells_det_results_to_html(boxes) == ["<table>"]
-    assert captured == [[[0, 0, 20, 20], [20, 0, 40, 20]]]
-    assert boxes == saved
-
-
 def test_table_materialization_activates_predictor_nms_despite_upstream_config_gap():
     layout = SimpleNamespace(
         post_op=lambda *args, **kwargs: [],
@@ -843,3 +805,59 @@ def test_doc_rotation_is_lossless_scoped_and_keeps_single_preprocessing(
     )
     with pytest.raises(onnx.PaddleOnnxError, match="Unsupported PaddleX"):
         onnx._install_lossless_doc_rotation(SimpleNamespace(predict=lambda: None))
+
+
+def test_structure_config_replaces_wireless_weight_before_model_admission(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    snapshot = onnx.freeze_request({}, pipeline_id="PP-StructureV3")
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference",
+        SimpleNamespace(
+            load_pipeline_config=lambda _name: {
+                "pipeline_name": "PP-StructureV3",
+                "SubModules": {
+                    "WirelessTableStructureRecognition": {"model_name": "SLANet_plus"},
+                    "WiredTableStructureRecognition": {"model_name": "SLANeXt_wired"},
+                },
+            }
+        ),
+    )
+    config, expected = onnx._structure_config(snapshot, tmp_path)
+    assert expected == ["SLANeXt_wireless", "SLANeXt_wired"]
+    assert config["SubModules"]["WirelessTableStructureRecognition"][
+        "model_dir"
+    ] == str(tmp_path / "SLANeXt_wireless")
+    assert "SLANet_plus" not in snapshot["models"]
+    assert "SLANet_plus" not in onnx.model_catalog()
+    assert len(onnx.model_catalog()) == 17
+
+
+def test_structure_predict_uses_both_official_wireless_models_by_default(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    native, _runners = make_pipeline("CPUExecutionProvider", count=2)
+    native.predict = lambda **kwargs: iter((kwargs,))
+    pipeline = onnx.PaddleOnnxPipeline(
+        native,
+        {
+            "provider": "CPUExecutionProvider",
+            "models": {"det": {}, "rec": {}},
+            "pipeline_id": "PP-StructureV3",
+        },
+    )
+    try:
+        options = next(pipeline.predict(input="fixture.png"))
+        assert options["use_e2e_wireless_table_rec_model"] is False
+        assert options["use_wireless_table_cells_trans_to_html"] is False
+    finally:
+        pipeline.close()

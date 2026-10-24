@@ -72,7 +72,7 @@ class OCROptions:
     wireless_table_model_name: str = "SLANeXt_wireless"
     wired_table_model_name: str = "SLANeXt_wired"
     use_wired_table_cells_trans_to_html: bool = False
-    use_wireless_table_cells_trans_to_html: bool = True
+    use_wireless_table_cells_trans_to_html: bool = False
     text_det_limit_side_len: int | None = None
     text_det_thresh: float | None = None
     text_det_box_thresh: float | None = None
@@ -204,7 +204,7 @@ class OCROptions:
                 "use_wired_table_cells_trans_to_html", False
             ),
             use_wireless_table_cells_trans_to_html=data.get(
-                "use_wireless_table_cells_trans_to_html", True
+                "use_wireless_table_cells_trans_to_html", False
             ),
             text_det_limit_side_len=data.get("text_det_limit_side_len"),
             text_det_thresh=data.get("text_det_thresh"),

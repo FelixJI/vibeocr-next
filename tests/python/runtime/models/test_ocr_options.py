@@ -171,7 +171,7 @@ class TestOCROptions:
         assert options.wireless_table_model_name == "SLANeXt_wireless"
         assert options.wired_table_model_name == "SLANeXt_wired"
         assert options.use_wired_table_cells_trans_to_html is False
-        assert options.use_wireless_table_cells_trans_to_html is True
+        assert options.use_wireless_table_cells_trans_to_html is False
         assert options.text_det_limit_side_len is None
         assert options.text_det_thresh is None
         assert options.text_det_box_thresh is None

@@ -122,9 +122,7 @@ def freeze_request(
                 (
                     "PP-LCNet_x1_0_table_cls",
                     "SLANeXt_wired",
-                    "SLANeXt_wireless"
-                    if pipeline_id == "TABLE_RECOGNITION"
-                    else "SLANet_plus",
+                    "SLANeXt_wireless",
                     "RT-DETR-L_wired_table_cell_det",
                     "RT-DETR-L_wireless_table_cell_det",
                 )
@@ -278,24 +276,6 @@ class _MissingTableLayoutPostprocess:
         ]
 
 
-def _install_cell_topology(table_pipeline):
-    from vibeocr.runtime.recognition.paddle_table_geometry import (
-        TableGeometryError,
-        topology_coordinates,
-    )
-
-    original = table_pipeline.trans_cells_det_results_to_html
-
-    def convert(cells):
-        try:
-            logical = topology_coordinates(cells)
-        except TableGeometryError as exc:
-            raise PaddleOnnxError(str(exc)) from exc
-        return original(logical)
-
-    table_pipeline.trans_cells_det_results_to_html = convert
-
-
 def _install_lossless_doc_rotation(preprocessor):
     """Keep the pinned PaddleX preprocessing flow, replacing only right-angle resampling."""
     import inspect
@@ -360,7 +340,6 @@ def _materialize_table_nodes(pipeline, snapshot):
         if root is None:
             return
         root = _unwrap(root)
-    _install_cell_topology(root)
     if snapshot["selections"]["use_table_orientation_classify"]:
         root.table_orientation_classify_model = root.create_model(
             root.table_orientation_classify_config
@@ -426,6 +405,8 @@ def _structure_config(snapshot, prepared):
                 )
             elif role == "LayoutDetection":
                 model["model_name"] = "PP-DocLayout_plus-L"
+            elif role == "WirelessTableStructureRecognition":
+                model["model_name"] = "SLANeXt_wireless"
             name = model["model_name"]
             if name not in snapshot["models"]:
                 raise PaddleOnnxError(f"Unprepared model in Paddle ONNX graph: {name}")
@@ -509,7 +490,7 @@ class PaddleOnnxPipeline:
                 if self.snapshot.get("pipeline_id") == "PP-StructureV3":
                     kwargs.update(dict.fromkeys(_RETIRED, False))
                     kwargs.setdefault("use_e2e_wireless_table_rec_model", False)
-                    kwargs.setdefault("use_wireless_table_cells_trans_to_html", True)
+                    kwargs.setdefault("use_wireless_table_cells_trans_to_html", False)
                 yield from self.pipeline.predict(*args, **kwargs)
             except Exception as exc:
                 if (

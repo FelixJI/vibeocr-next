@@ -343,12 +343,12 @@ def main():
     parser.add_argument(
         "--wireless-e2e",
         action="store_true",
-        help="Exercise the retained TABLE_RECOGNITION E2E option instead of default cell HTML",
+        help="Diagnose the internal TABLE_RECOGNITION E2E route; this is not a public wire/UI option",
     )
     parser.add_argument("--input", action="append")
     args = parser.parse_args()
     if args.wireless_e2e and args.mode != "TABLE_RECOGNITION":
-        parser.error("--wireless-e2e is only a public independent table option")
+        parser.error("--wireless-e2e is only an internal independent-table diagnostic")
     if args.output.exists():
         raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
@@ -400,7 +400,7 @@ def main():
             model_preset=args.preset,
             use_doc_unwarping=args.all_aux,
             use_e2e_wireless_table_rec_model=args.wireless_e2e,
-            use_wireless_table_cells_trans_to_html=not args.wireless_e2e,
+            use_wireless_table_cells_trans_to_html=False,
         )
         recognize = pipeline_table._recognize_table
         names = [
@@ -526,7 +526,7 @@ def main():
                                 options, "use_e2e_wireless_table_rec_model", False
                             ),
                             wireless_cell_html=getattr(
-                                options, "use_wireless_table_cells_trans_to_html", True
+                                options, "use_wireless_table_cells_trans_to_html", False
                             ),
                         )
                         profile = runner.session.end_profiling()
