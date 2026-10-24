@@ -419,7 +419,19 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage($"recognize {mode}");
     await WaitForAutomaticTextLayerAsync(captured.ScreenshotSession!);
     submitsBefore = smokeSubmitAttempts();
-    await ClickSmokeButtonAsync("识别文字");
+    string recognitionButton = mode switch
+    {
+      "paddle_table" => "表格识别",
+      "paddle_formula" => "公式识别",
+      _ => "识别文字",
+    };
+    RecognitionWorkbenchState ready = (await application.BootstrapAsync(CancellationToken.None))
+      .States.Select(item => item.State).OfType<RecognitionWorkbenchState>().Single();
+    string modeLabel = recognitionButton == "识别文字" ? "文字识别" : recognitionButton;
+    if (ready.RecognitionModes?.SingleOrDefault(entry => entry.DisplayName == modeLabel) is not { } entry ||
+        entry.ModeId != mode || entry.Availability != "ready")
+      throw new InvalidOperationException($"Public screenshot button does not target {mode}: {JsonSerializer.Serialize(ready.RecognitionModes)}");
+    await ClickSmokeButtonAsync(recognitionButton);
     RecognitionWorkbenchState terminal;
     using (var cancellation = new CancellationTokenSource(
       TimeSpan.FromMinutes(timeoutMinutes)))
