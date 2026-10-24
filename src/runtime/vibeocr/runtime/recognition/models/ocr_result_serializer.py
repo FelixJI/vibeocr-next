@@ -69,8 +69,8 @@ def text_block_to_dict(block: Any) -> dict[str, Any]:
 def ocr_result_to_payload(result: Any) -> dict[str, Any]:
     """Convert an OCR result to a JSON-native wire payload.
 
-    - ``dict`` inputs are returned unchanged so test fakes / pre-serialized
-      results keep working without conversion.
+    - ``dict`` inputs keep their shape; typed retired seals are projected out
+      without mutating pre-serialized results.
     - :class:`OCRResult` instances are serialized via :func:`text_block_to_dict`
       and the field set documented in this module's docstring.
 
@@ -80,7 +80,7 @@ def ocr_result_to_payload(result: Any) -> dict[str, Any]:
     """
     if isinstance(result, dict):
         _validate_table_blocks(result.get("content_list", ()))
-        return result
+        return project_retired_seals(result)
 
     # Duck-type an OCRResult: it must expose the core text fields. We avoid a
     # hard import so this works against either the client-py or backend copy
@@ -135,7 +135,7 @@ def ocr_result_to_payload(result: Any) -> dict[str, Any]:
         "image_width": int(getattr(result, "image_width", 0) or 0),
         "image_height": int(getattr(result, "image_height", 0) or 0),
     }
-    return payload
+    return project_retired_seals(payload)
 
 
 def ocr_result_from_payload(payload: dict[str, Any]) -> Any:
@@ -191,6 +191,97 @@ def ocr_result_from_payload(payload: dict[str, Any]) -> Any:
         preproc_angle=int(payload.get("preproc_angle", 0)),
         doc_orientation_angle=payload.get("doc_orientation_angle"),
     )
+
+
+def project_retired_seals(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read projection of old/new payloads; keep storage and source indexes intact."""
+    content = payload.get("content_list") or []
+    lines = payload.get("text_blocks") or []
+
+    def is_seal(block, key):
+        return isinstance(block, dict) and str(block.get(key, "")).lower() == "seal"
+
+    if not any(is_seal(block, "type") for block in content) and not any(
+        is_seal(block, "label") for block in lines
+    ):
+        return payload
+    seal_indexes = {
+        index for index, block in enumerate(content) if is_seal(block, "type")
+    }
+    seal_ids = {
+        block.get("block_id")
+        for block in content
+        if is_seal(block, "type") and block.get("block_id")
+    }
+
+    def retired_line(block):
+        return isinstance(block, dict) and (
+            is_seal(block, "label")
+            or block.get("content_index") in seal_indexes
+            or (
+                block.get("content_id") is not None
+                and block.get("content_id") in seal_ids
+            )
+        )
+
+    visible = {
+        **payload,
+        "content_list": [
+            {"type": "retired"} if index in seal_indexes else block
+            for index, block in enumerate(content)
+        ],
+        "text_blocks": [
+            {"label": "retired", "text": "", "content_index": -1}
+            if retired_line(block)
+            else block
+            for block in lines
+        ],
+    }
+    from vibeocr.runtime.documents.tables.reducer import build_result_projections
+
+    result = ocr_result_from_payload(visible)
+    projections = build_result_projections(result, discarded_types=frozenset({"seal"}))
+    if projections is None:
+        raise RuntimeError("Historical result projection was cancelled")
+    visible.update(zip(("raw_text", "markdown_text", "html_text"), projections))
+    if "text" in visible:
+        visible["text"] = projections[0]
+    # Unbound old score arrays cannot identify source blocks. Rebuild optional
+    # confidence projections from the remaining authoritative, labelled lines.
+    scores = [
+        [block.text, block.score]
+        for block in result.text_blocks
+        if block.text and block.score is not None
+    ]
+    visible["text_with_scores"] = scores
+    visible["low_confidence_items"] = [item for item in scores if item[1] < 0.80]
+    visible["avg_score"] = (
+        sum(item[1] for item in scores) / len(scores) if scores else 0.0
+    )
+
+    def image_names(blocks):
+        names = set()
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            for key in ("img_path", "image_path", "src"):
+                if isinstance(block.get(key), str):
+                    names.add(block[key])
+            ref = block.get("image")
+            if isinstance(ref, dict) and isinstance(ref.get("name"), str):
+                names.add(ref["name"])
+        return names
+
+    seal_images = image_names(content[index] for index in seal_indexes) - image_names(
+        visible["content_list"]
+    )
+    if isinstance(visible.get("images"), dict):
+        visible["images"] = {
+            key: value
+            for key, value in visible["images"].items()
+            if key not in seal_images
+        }
+    return visible
 
 
 def _validate_table_blocks(content_list: Any) -> None:

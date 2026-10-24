@@ -809,3 +809,36 @@ def test_onnx_native_failure_ends_unstarted_batches_without_replay(tmp_path):
     assert adapter.calls == 1
     assert record.snapshot().state is JobState.FAILED
     assert all(item.state is ItemState.FAILED for item in record.items)
+
+
+def test_unproven_cell_topology_fails_job_and_unstarted_items_without_replay(tmp_path):
+    from types import SimpleNamespace
+
+    from vibeocr.runtime.recognition.paddle_onnx import _install_cell_topology
+
+    table = SimpleNamespace(trans_cells_det_results_to_html=lambda cells: cells)
+    _install_cell_topology(table)
+    record = _make_job(JobRegistry(instance_id="topology"), 3)
+
+    class IncompleteTable:
+        calls = 0
+
+        def capabilities(self, options=None):
+            return AdapterCapability(
+                name="TABLE_RECOGNITION", real_batch=False, max_compute_batch=1
+            )
+
+        def recognize_many(self, items, options=None):
+            self.calls += 1
+            return table.trans_cells_det_results_to_html(
+                [[0, 0, 100, 50], [100, 0, 200, 50], [0, 50, 100, 100]]
+            )
+
+    adapter = IncompleteTable()
+    PaddleExecutor(adapter_factory=lambda: adapter).execute(
+        record, _staged(3, tmp_path)
+    )
+    assert adapter.calls == 1
+    assert record.snapshot().state is JobState.FAILED
+    assert all(item.state is ItemState.FAILED for item in record.items)
+    assert "missing or ambiguous" in str(record.snapshot())

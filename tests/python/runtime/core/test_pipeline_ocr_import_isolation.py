@@ -57,7 +57,11 @@ def test_create_ocr_pipeline_delegates_model_discovery_to_paddle(
             "pp_structure",
             "PPStructureV3",
             "layout_detection_model_dir",
-            {},
+            {
+                "use_formula_recognition": False,
+                "use_seal_recognition": False,
+                "use_chart_recognition": False,
+            },
         ),
         (
             _create_paddlocr_vl_pipeline,

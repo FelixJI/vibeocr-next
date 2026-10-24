@@ -104,6 +104,9 @@ class TableRecognitionOptions(BasePipelineOptions):
     """
 
     pipeline: str = "TABLE_RECOGNITION"
+    model_preset: str = "small"
+    device: str = "auto"
+    local_models_only: bool = False
     use_doc_orientation_classify: bool = True
     use_doc_unwarping: bool = False
     # 注意：wired/wireless 表格结构模型名是构造参数（TableRecognitionPipelineV2
@@ -125,9 +128,9 @@ class TableRecognitionOptions(BasePipelineOptions):
     text_det_unclip_ratio: float | None = None
     text_rec_score_thresh: float | None = None
     use_wired_table_cells_trans_to_html: bool = False
-    use_wireless_table_cells_trans_to_html: bool = False
+    use_wireless_table_cells_trans_to_html: bool = True
     use_e2e_wired_table_rec_model: bool = False
-    use_e2e_wireless_table_rec_model: bool = True
+    use_e2e_wireless_table_rec_model: bool = False
     formula_recognition_batch_size: int = 1
 
 
@@ -156,6 +159,12 @@ def _create_table_pipeline(device: str, **kwargs: Any) -> Any:
     # 创建前主动探测 paddlex[ocr] leaf 包。PaddleX 会把真因 DependencyError 包成
     # 无信息的 RuntimeError，此处提前拦截并报告具体缺失包，引导用户修复。
     _check_table_deps()
+    if "_onnx_request" in kwargs:
+        from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
+
+        request = kwargs.pop("_onnx_request")
+        kwargs.pop("enable_mkldnn", None)
+        return create_pipeline(request, **kwargs)
     from paddleocr import TableRecognitionPipelineV2
 
     try:
@@ -842,6 +851,12 @@ def _backfill_empty_table_cells(
     return new_html, consumed
 
 
+def _table_constructor_kwargs(options: Any) -> dict:
+    from vibeocr.runtime.recognition.paddle_onnx import constructor_kwargs
+
+    return constructor_kwargs(options)
+
+
 TABLE_RECOGNITION_SPEC = PipelineSpec(
     name="TABLE_RECOGNITION",
     display_name="表格识别",
@@ -849,4 +864,5 @@ TABLE_RECOGNITION_SPEC = PipelineSpec(
     options_class=TableRecognitionOptions,
     create_pipeline=_create_table_pipeline,
     recognize=_recognize_table,
+    constructor_kwargs=_table_constructor_kwargs,
 )

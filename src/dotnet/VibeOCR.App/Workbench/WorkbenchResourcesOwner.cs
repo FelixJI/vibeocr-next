@@ -88,6 +88,13 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
           json.Add(node);
           continue;
         }
+        if (item["type"] is JsonValue kind && kind.TryGetValue<string>(out string? type) &&
+            string.Equals(type, "seal", StringComparison.OrdinalIgnoreCase))
+        {
+          // Keep the source index stable for table/cell commands; publish no retired content or image.
+          json.Add(null);
+          continue;
+        }
         if (item["image"] is JsonObject asset)
         {
           // resource 只承载宿主发布的 opaque 资源引用：wire 原样携带的

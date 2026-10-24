@@ -25,7 +25,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 默认五种 paddle 模式；可用子集逐个交付。
 
 .PARAMETER InputKinds
-额外真实输入入口：legacy 的 file/batch 使用表格模式，pdf 使用文档结构模式；ORT 只使用文字模式。
+额外真实输入入口：file/batch 使用表格模式，pdf 使用文档结构模式（包括 ORT）。
 pdf_text_layer 使用文字 OCR，点击添加文字层并验证 dirty/保存状态；
 默认不运行；可与 Modes 空数组组合单独执行。
 pdf_editing 使用一次普通文字 OCR，验证高清检查、取消/切页、中英文长句校正、保存重开和按钮可达。
@@ -74,9 +74,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($Provider -ne 'legacy') {
-    if (-not $PSBoundParameters.ContainsKey('Modes')) { $Modes = @('paddle_text') }
-    if (@($Modes | Where-Object { $_ -ne 'paddle_text' }).Count) {
-        throw '#267 ORT smoke only supports paddle_text; structure/table belong to later tasks'
+    if (-not $PSBoundParameters.ContainsKey('Modes')) { $Modes = @('paddle_text', 'paddle_table', 'paddle_structure') }
+    if (@($Modes | Where-Object { $_ -notin @('paddle_text', 'paddle_table', 'paddle_structure') }).Count) {
+        throw 'ORT smoke only supports retained text/table/structure modes'
     }
 }
 if ($Attempt -and -not $ResumeRoot) { throw 'Attempt 只能与 ResumeRoot 一起使用' }
@@ -177,7 +177,7 @@ $modeSpec = @{
     }
     'paddle_structure' = @{
         Fixture = 'document_mixed.png'; Pipeline = 'PP-StructureV3'
-        Option = 'use_seal_recognition'; Value = 'true'; Kind = 'bool'
+        Option = 'use_textline_orientation'; Value = 'true'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Markdown|导出 Excel'
     }
     'paddle_document_vl' = @{
@@ -346,7 +346,7 @@ try {
         }
     }
     foreach ($inputKind in $InputKinds) {
-        $inputMode = if ($Provider -ne 'legacy') { 'paddle_text' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
+        $inputMode = if ($inputKind -in @('pdf_text_layer', 'pdf_operations', 'pdf_editing', 'pdf_workspace')) { 'paddle_text' } elseif ($inputKind -eq 'pdf') { 'paddle_structure' } else { 'paddle_table' }
         $spec = $modeSpec[$inputMode]
         $fixtureName = if ($inputKind -eq 'pdf_workspace') { 'workspace-a/same.pdf' } elseif ($inputKind -eq 'pdf_operations') { 'document_orientation.pdf' } elseif ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'document_scan.pdf' } elseif ($inputKind -eq 'pdf') { 'document_mixed.pdf' } else { $spec.Fixture }
         $phaseName = "paddle-input-$inputKind$attemptSuffix"

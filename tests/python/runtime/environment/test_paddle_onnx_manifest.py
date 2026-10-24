@@ -55,7 +55,11 @@ def test_generated_manifest_binds_three_locks_and_rejects_incomplete_or_changed_
         validate_requirements_lock(
             scope.lock_path, profile=recipe.replace("paddleocr", "win-x64-paddle")
         )
-        assert ManagedEnvironmentStore._recipe_modes(recipe) == ["text"]
+        assert ManagedEnvironmentStore._recipe_modes(recipe) == [
+            "text",
+            "table",
+            "structure",
+        ]
     data = json.loads(generated.read_text(encoding="utf-8"))
     del data["paddle_onnx_environments"]["directml"]
     generated.write_text(json.dumps(data), encoding="utf-8")

@@ -373,15 +373,8 @@ public sealed partial class MainWindow
     {
       await SelectSmokeValueAsync(optionSelector, optionValue);
     }
-    if (mode == "paddle_structure")
-    {
-      await WaitForSmokeDomAsync(
-        "!!document.querySelector('#paddle_structure-use_chart_recognition')",
-        TimeSpan.FromSeconds(15));
-      await SelectSmokeValueAsync("#paddle_structure-use_chart_recognition", "true");
-    }
     if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
-      await SelectSmokeValueAsync("#paddle_text-model-preset",
+      await SelectSmokeValueAsync($"#{mode}-model-preset",
         PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small");
     await ClickManagedSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
@@ -1100,14 +1093,10 @@ public sealed partial class MainWindow
     bool optionRecorded = selection?.Options is { } options &&
       options.TryGetValue(optionName, out JsonElement value) &&
       NormalizePaddleSmokeJson(value) == optionValue;
-    bool chartRecorded = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE") !=
-      "paddle_structure" || selection?.Options is { } chartOptions &&
-      chartOptions.TryGetValue("use_chart_recognition", out JsonElement chart) &&
-      NormalizePaddleSmokeJson(chart) == "true";
     if (selection?.PipelineId.ToString() != pipeline ||
         snapshot.EnvironmentId != session.EnvironmentId ||
         snapshot.EnvironmentRevision != session.Revision ||
-        !optionRecorded || !chartRecorded ||
+        !optionRecorded ||
         snapshot.Items.Count != itemCount || snapshot.Summary.Succeeded != itemCount ||
         snapshot.Summary.Failed != 0)
       throw new InvalidOperationException(
@@ -1228,14 +1217,12 @@ public sealed partial class MainWindow
       bool optionConsumed = options is not null &&
         options.TryGetValue(optionName, out System.Text.Json.JsonElement value) &&
         NormalizePaddleSmokeJson(value) == optionValue;
-      bool chartConsumed = mode != "paddle_structure" ||
-        options is not null &&
-        options.TryGetValue("use_chart_recognition", out JsonElement chart) &&
-        NormalizePaddleSmokeJson(chart) == "true";
-      if (!optionConsumed || !chartConsumed)
+      if (!optionConsumed)
         throw new InvalidOperationException(
-          $"Non-default options were not recorded on the job for {mode}: " +
-          $"{optionName}={optionValue}, chart={chartConsumed}.");
+          $"Non-default option was not recorded on the job for {mode}: {optionName}={optionValue}.");
+      if (mode == "paddle_structure" && options is not null &&
+          new[] { "use_formula_recognition", "use_seal_recognition", "use_chart_recognition" }.Any(options.ContainsKey))
+        throw new InvalidOperationException("Retired structure options were submitted.");
       if (observed.Snapshot.EnvironmentId != session.EnvironmentId ||
           observed.Snapshot.EnvironmentRevision != session.Revision)
         throw new InvalidOperationException($"Job environment binding mismatch for {jobId}.");

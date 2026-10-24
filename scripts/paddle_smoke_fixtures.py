@@ -530,6 +530,298 @@ def draw_workspace_pdfs(out: Path) -> dict[str, object]:
     return entries
 
 
+def draw_multicolumn(out: Path, *, skip_pdf: bool = False) -> dict[str, object]:
+    """Frozen before ORT inference: title, left column, right column, spanning footer."""
+    image, draw = new_page(1800, 2400)
+    heading, body = load_font(60), load_font(38)
+    draw.text((100, 100), "DOCUMENT COLUMN ORDER", font=heading, fill="black")
+    for x, y, title in (
+        (100, 350, "LEFT FIRST"),
+        (100, 1000, "LEFT SECOND"),
+        (980, 350, "RIGHT FIRST"),
+        (980, 1000, "RIGHT SECOND"),
+    ):
+        draw.text((x, y), title, font=heading, fill="black")
+        for line, text in enumerate(
+            (
+                "Document reading order matters.",
+                "This paragraph belongs to one",
+                "column. Preserve all its words.",
+                "The next paragraph follows below.",
+            )
+        ):
+            draw.text((x, y + 100 + line * 65), text, font=body, fill="black")
+    draw.text((100, 2100), "SPANNING FOOTER END OF DOCUMENT", font=body, fill="black")
+    image.save(out / "document_columns.png")
+    image.rotate(90, expand=True).save(out / "document_columns_90.png")
+    pdf_created = False
+    if not skip_pdf:
+        try:
+            import pymupdf
+        except ImportError:
+            pymupdf = None
+        if pymupdf is not None:
+            pdf_created = True
+    if pdf_created:
+        with pymupdf.open() as pdf:
+            for filename in ("document_columns.png", "document_columns_90.png"):
+                with Image.open(out / filename) as raster:
+                    page = pdf.new_page(width=raster.width, height=raster.height)
+                    page.insert_image(page.rect, filename=str(out / filename))
+            pdf.save(out / "document_columns.pdf")
+    return {
+        "width": 1800,
+        "height": 2400,
+        "columns": [[100, 820], [980, 1700]],
+        "reading_order": [
+            "DOCUMENT COLUMN ORDER",
+            "LEFT FIRST",
+            "LEFT SECOND",
+            "RIGHT FIRST",
+            "RIGHT SECOND",
+            "SPANNING FOOTER END OF DOCUMENT",
+        ],
+        "derived": ["document_columns_90.png"]
+        + (["document_columns.pdf"] if pdf_created else []),
+        "pdf_pages": 2 if pdf_created else 0,
+    }
+
+
+def draw_layout_validation(out: Path) -> dict[str, object]:
+    """Diagnostic samples frozen before threshold/cell-path adaptation."""
+    entries = {}
+    image, draw = new_page(1400, 1100)
+    rows = [
+        ["Product", "Units", "Amount"],
+        ["Notebook", "4", "28.00"],
+        ["Pencil", "12", "6.00"],
+        ["Folder", "3", "15.00"],
+    ]
+    for row, cells in enumerate(rows):
+        for column, value in enumerate(cells):
+            draw.text(
+                (130 + column * 390, 180 + row * 135),
+                value,
+                font=load_font(46),
+                fill="black",
+            )
+    image.save(out / "table_wireless_holdout.png")
+    entries["table_wireless_holdout.png"] = {"rows": 4, "columns": 3, "cells": rows}
+    for illustrated in (False, True):
+        image, draw = new_page(1400, 1600)
+        draw.text(
+            (100, 100), "DOCUMENT WITHOUT TABLES", font=load_font(54), fill="black"
+        )
+        for paragraph in range(3):
+            for line, value in enumerate(
+                (
+                    "This is a regular paragraph with flowing text.",
+                    "The document describes a journey through town.",
+                    "Its sentences have no row or column meaning.",
+                )
+            ):
+                draw.text(
+                    (100, 260 + paragraph * 300 + line * 65),
+                    value,
+                    font=load_font(40),
+                    fill="black",
+                )
+        if illustrated:
+            draw.ellipse(
+                (300, 1190, 1050, 1450), fill="#7da8d3", outline="#123456", width=8
+            )
+        name = "document_no_table.png" if illustrated else "text_no_table.png"
+        image.save(out / name)
+        entries[name] = {
+            "tables": 0,
+            "purpose": "paragraph/image false-positive holdout",
+        }
+    return entries
+
+
+def draw_final_wireless_validation(out: Path) -> dict[str, object]:
+    """Frozen after choosing threshold/NMS/cell path; no tuning on this sample."""
+    image, draw = new_page(1600, 1500)
+    draw.text((140, 100), "OFFICE STOCK REPORT", font=load_font(62), fill="black")
+    rows = [
+        ["Item", "Count"],
+        ["Screws", "24"],
+        ["Clips", "18"],
+        ["Pins", "36"],
+        ["Boxes", "5"],
+    ]
+    for row, cells in enumerate(rows):
+        draw.text((350, 330 + row * 155), cells[0], font=load_font(52), fill="black")
+        draw.text((1080, 330 + row * 155), cells[1], font=load_font(52), fill="black")
+    draw.text(
+        (140, 1280),
+        "Stock checked at the end of October.",
+        font=load_font(38),
+        fill="black",
+    )
+    name = "table_wireless_final.png"
+    image.save(out / name)
+    return {
+        name: {
+            "rows": 5,
+            "columns": 2,
+            "cells": rows,
+            "purpose": "final unseen layout after adaptation freeze",
+        }
+    }
+
+
+def draw_wireless_acceptance(out: Path) -> dict[str, object]:
+    """Final layout frozen after selecting cell-to-HTML; no further parameter tuning."""
+    image, draw = new_page(1800, 1100)
+    draw.text((120, 80), "MONTHLY PARTS ORDER", font=load_font(56), fill="black")
+    rows = [
+        ["Code", "Count", "Price", "Total"],
+        ["A100", "2", "8.50", "17.00"],
+        ["B200", "6", "3.00", "18.00"],
+        ["C300", "4", "5.25", "21.00"],
+        ["D400", "1", "9.00", "9.00"],
+    ]
+    for row, cells in enumerate(rows):
+        for column, value in enumerate(cells):
+            draw.text(
+                (120 + column * 390, 270 + row * 140),
+                value,
+                font=load_font(48),
+                fill="black",
+            )
+    name = "table_wireless_acceptance.png"
+    image.save(out / name)
+    return {
+        name: {
+            "rows": 5,
+            "columns": 4,
+            "cells": rows,
+            "purpose": "final unseen cell-to-HTML acceptance",
+        }
+    }
+
+
+def draw_rotated_table_document(out: Path) -> dict[str, object]:
+    """An upright document with a sideways table exercises nested table OCR."""
+    image, draw = new_page(2200, 2400)
+    draw.text(
+        (150, 120), "DOCUMENT WITH ROTATED TABLE", font=load_font(68), fill="black"
+    )
+    draw.text(
+        (150, 250),
+        "The document heading and footer remain upright.",
+        font=load_font(42),
+        fill="black",
+    )
+    with Image.open(out / "table_merged_zh_en.png") as source:
+        table = source.rotate(90, expand=True)
+        image.paste(table, ((2200 - table.width) // 2, 500))
+    draw.text((150, 2200), "DOCUMENT END", font=load_font(48), fill="black")
+    name = "document_table_merged_rotated.png"
+    image.save(out / name)
+    return {
+        name: {
+            "rows": 5,
+            "columns": 4,
+            "table_angle": 90,
+            "purpose": "nested table orientation/OCR execution",
+        }
+    }
+
+
+def draw_geometry_holdout(out: Path) -> dict[str, object]:
+    """Unseen layout frozen after bounded topology/NMS design, before inference."""
+    image, draw = new_page(1800, 1550)
+    draw.text((150, 100), "WAREHOUSE MATERIAL LIST", font=load_font(60), fill="black")
+    rows = [
+        ["Material", "Qty", "Shelf"],
+        ["Copper wire", "12", "A3"],
+        ["Steel bolts", "48", "B2"],
+        ["Rubber pads", "16", "C5"],
+        ["Glass tubes", "9", "D1"],
+        ["Paper rolls", "25", "E4"],
+    ]
+    for row, cells in enumerate(rows):
+        for column, value in enumerate(cells):
+            draw.text(
+                ([180, 1160, 1470][column], 330 + row * 150),
+                value,
+                font=load_font(48),
+                fill="black",
+            )
+    draw.text(
+        (150, 1380),
+        "Inventory verified by the warehouse team.",
+        font=load_font(38),
+        fill="black",
+    )
+    name = "table_wireless_geometry_holdout.png"
+    image.save(out / name)
+    return {
+        name: {
+            "rows": 6,
+            "columns": 3,
+            "cells": rows,
+            "purpose": "unseen unequal-width columns after geometry/NMS freeze",
+        }
+    }
+
+
+def draw_wireless_dispatch(out: Path) -> dict[str, object]:
+    """Independent five-column contract, frozen before its first inference."""
+
+    def font(size: int, *, bold: bool = False):
+        try:
+            return ImageFont.truetype(
+                "C:/Windows/Fonts/arialbd.ttf"
+                if bold
+                else "C:/Windows/Fonts/arial.ttf",
+                size,
+            )
+        except OSError:
+            return load_font(size)
+
+    image, draw = new_page(1600, 1280)
+    draw.text((85, 80), "WAREHOUSE DISPATCH", font=font(60, bold=True), fill="black")
+    rows = [
+        ["Code", "Item", "Qty", "Unit", "Total"],
+        ["A17", "Bolts", "6", "2.25", "13.50"],
+        ["B23", "Washers", "12", "0.40", "4.80"],
+        ["C08", "Hinges", "3", "8.50", "25.50"],
+        ["D42", "Cable", "8", "1.75", "14.00"],
+    ]
+    for row, values in enumerate(rows):
+        for column, value in enumerate(values):
+            draw.text(
+                (
+                    [85, 315, 855, 1005, 1245][column] + 18,
+                    [270, 410, 580, 730, 920][row],
+                ),
+                value,
+                font=font(42, bold=True) if row == 0 else font(48),
+                fill="black",
+            )
+    draw.text(
+        (85, 1140),
+        "Prepared for synthetic regression testing",
+        font=font(32),
+        fill="black",
+    )
+    name = "wireless_dispatch.png"
+    image.save(out / name)
+    return {
+        name: {
+            "rows": 5,
+            "columns": 5,
+            "cells": rows,
+            "title": "WAREHOUSE DISPATCH",
+            "title_may_be_separate_text": True,
+            "purpose": "independent unequal-row-height and narrow-quantity-column holdout",
+        }
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
@@ -546,6 +838,13 @@ def main() -> int:
     entries["table_wireless.png"] = draw_table(args.out, wireless=True)
     entries["formulas_multi.png"] = draw_formulas(args.out)
     entries["document_mixed.png"] = draw_document_mixed(args.out)
+    entries["document_columns.png"] = draw_multicolumn(args.out, skip_pdf=args.skip_pdf)
+    entries.update(draw_layout_validation(args.out))
+    entries.update(draw_final_wireless_validation(args.out))
+    entries.update(draw_wireless_acceptance(args.out))
+    entries.update(draw_rotated_table_document(args.out))
+    entries.update(draw_geometry_holdout(args.out))
+    entries.update(draw_wireless_dispatch(args.out))
     if not args.skip_pdf:
         pdf = draw_document_pdf(args.out)
         if pdf is None:

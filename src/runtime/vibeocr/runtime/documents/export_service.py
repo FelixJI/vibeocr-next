@@ -6,6 +6,7 @@
 import base64
 import io
 import logging
+from copy import copy
 from pathlib import Path
 
 from vibeocr.runtime.documents.tables.blocks import table_model_from_block
@@ -79,6 +80,34 @@ class ExportService:
             return False
 
         try:
+            if any(
+                isinstance(block, dict) and str(block.get("type", "")).lower() == "seal"
+                for block in result.content_list
+            ) or any(block.label.lower() == "seal" for block in result.text_blocks):
+                from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+                    ocr_result_from_payload,
+                    ocr_result_to_payload,
+                )
+
+                payload = ocr_result_to_payload(result)
+                projected = ocr_result_from_payload(payload)
+                result = copy(result)
+                for field in (
+                    "content_list",
+                    "text_blocks",
+                    "raw_text",
+                    "markdown_text",
+                    "html_text",
+                    "text_with_scores",
+                    "low_confidence_items",
+                    "avg_score",
+                ):
+                    setattr(result, field, getattr(projected, field))
+                result.images = {
+                    name: value
+                    for name, value in result.images.items()
+                    if name in payload["images"]
+                }
             output_path.parent.mkdir(parents=True, exist_ok=True)
             return exporter(result, output_path)
         except Exception as e:
@@ -154,7 +183,10 @@ class ExportService:
             )
             for block in content_list
         )
-        if has_structured_table:
+        if has_structured_table or any(
+            isinstance(block, dict) and block.get("type") == "seal"
+            for block in content_list
+        ):
             projections = build_result_projections(
                 result,
                 include_raw=False,
@@ -268,7 +300,10 @@ class ExportService:
                 block_type = block.get("type", "text")
                 text = block.get("text", "")
 
-                if block_type in DISCARDED_BLOCK_TYPES:
+                if block_type == "seal" or (
+                    result.pipeline_type != "PP-StructureV3"
+                    and block_type in DISCARDED_BLOCK_TYPES
+                ):
                     continue
                 if block_type == "title":
                     level = min(block.get("level", 1), 6)
@@ -416,7 +451,10 @@ class ExportService:
                 block_type = block.get("type", "text")
                 text = block.get("text", "")
 
-                if block_type in DISCARDED_BLOCK_TYPES:
+                if block_type == "seal" or (
+                    result.pipeline_type != "PP-StructureV3"
+                    and block_type in DISCARDED_BLOCK_TYPES
+                ):
                     continue
                 if block_type == "table":
                     table_captions = block.get("table_caption") or []
