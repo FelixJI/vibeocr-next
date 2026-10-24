@@ -338,7 +338,7 @@ public sealed partial class MainWindow
     if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
     {
       WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand("paddle_text")), CancellationToken.None);
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand(mode)), CancellationToken.None);
       if (!selectedDefault.Ok) throw new InvalidOperationException("Isolated ORT default selection failed.");
     }
     RecordPaddleSmokeStage($"select mode {mode}");
