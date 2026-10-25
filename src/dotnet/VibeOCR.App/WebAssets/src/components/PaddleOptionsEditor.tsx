@@ -7,9 +7,6 @@ const BOOLEAN_OPTIONS = {
   use_doc_unwarping: "文档去畸变",
   use_textline_orientation: "文本行方向分类",
   use_table_recognition: "识别表格",
-  use_formula_recognition: "识别公式",
-  use_seal_recognition: "识别印章",
-  use_chart_recognition: "识别图表",
   vl_use_layout_detection: "VL 版面检测",
   vl_use_chart_recognition: "VL 图表识别",
   vl_use_seal_recognition: "VL 印章识别",
@@ -86,6 +83,8 @@ export function PaddleOptionsEditor({
       <summary>识别参数</summary>
       <p className="form-note">
         默认值由当前环境提供；保存后用于新任务，运行中的任务保持原配置。
+        {modeId === "paddle_structure" &&
+          "结构模式保留普通公式与图表区域，不提供公式、图表或印章专用识别。"}
       </p>
       {supportedOptions.includes("model_preset") && (
         <div className="setting-row">

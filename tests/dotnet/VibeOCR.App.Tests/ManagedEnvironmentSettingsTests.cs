@@ -238,6 +238,28 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task FindCompatibleIsBusyWithoutChangingEnvironmentSnapshot()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    var snapshot = settings.Snapshot;
+    var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    manager.BeforeFind = () => pending.Task;
+
+    Task query = settings.FindCompatibleAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+
+    Assert.True(settings.IsBusy);
+    Assert.Same(snapshot, settings.Snapshot);
+    Assert.Equal(0, manager.CreateCalls);
+    Assert.Equal(0, manager.InstallCalls);
+    pending.SetResult();
+    await query;
+    Assert.False(settings.IsBusy);
+    Assert.Same(snapshot, settings.Snapshot);
+  }
+
+  [Fact]
   public async Task PrepareUsesCompatibilityWithoutCreatingOrInstalling()
   {
     var manager = new MutableManager();

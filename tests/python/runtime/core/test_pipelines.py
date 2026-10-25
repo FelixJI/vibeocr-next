@@ -51,9 +51,9 @@ class TestOCRPipeline:
         options = get_pipeline_supported_options(OCRPipeline.PP_STRUCTURE_V3)
         assert "use_doc_orientation_classify" in options
         assert "use_table_recognition" in options
-        assert "use_formula_recognition" in options
-        assert "use_seal_recognition" in options
-        assert "use_chart_recognition" in options
+        assert "use_formula_recognition" not in options
+        assert "use_seal_recognition" not in options
+        assert "use_chart_recognition" not in options
 
     def test_document_parsing_options(self):
         """文档解析应支持 MinerU 选项"""

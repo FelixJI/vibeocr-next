@@ -48,6 +48,11 @@ def test_result_asset_binding_read_and_export(tmp_path, kind):
         return SupervisorModule.resolve_result_asset(module, job, item, asset)
 
     asset_id = image["asset_id"]
+    if kind == "seal":
+        assert resolve("job-a", "it-0000", asset_id) is None
+        assert payload["content_list"][0] == block
+        assert (results_dir / f"it-0000-{asset_id}.png").is_file()
+        return
     data, media_type = resolve("job-a", "it-0000", asset_id)
     assert media_type == "image/png" and data.startswith(b"\x89PNG")
     assert resolve("job-b", "it-0000", asset_id) is None
@@ -157,3 +162,28 @@ async def test_result_asset_route_reuses_auth(pdf_app, pdf_module, supervisor_to
             headers={"Authorization": f"Bearer {supervisor_token}"},
         )
         assert invalid.status_code == 400
+
+
+def test_result_read_projects_legacy_mixed_payload_without_changing_record():
+    from copy import deepcopy
+
+    payload = {
+        "pipeline_type": "PP-StructureV3",
+        "raw_text": "stale-seal",
+        "markdown_text": "stale-seal",
+        "content_list": [
+            {"type": "text", "text": "kept"},
+            {"type": "Seal", "text": "stale-seal"},
+        ],
+    }
+    saved = deepcopy(payload)
+    record = SimpleNamespace(
+        items=[SimpleNamespace(item_id="item", display_name="mixed")],
+        results={"item": payload},
+        item_errors={},
+    )
+    module = SimpleNamespace(registry=SimpleNamespace(get=lambda _job_id: record))
+    first = SupervisorModule.result(module, "job")[0].payload
+    assert first == SupervisorModule.result(module, "job")[0].payload
+    assert first["raw_text"] == "kept" and "stale-seal" not in first["markdown_text"]
+    assert record.results["item"] == saved

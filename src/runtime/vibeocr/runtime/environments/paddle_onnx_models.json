@@ -698,6 +698,646 @@
           ]
         }
       }
+    },
+    "PP-DocBlockLayout": {
+      "repo_id": "PaddlePaddle/PP-DocBlockLayout_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "bcbfaadf1a9b7197def8c01337cd5bbbef261fbd",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "faeca9767c960700376a3dfc3cad1d2cdce3bb035b06287a69806e7430938288"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1619,
+              "algorithm": "git-sha1",
+              "checksum": "839c3a803bec5e9022bd987e62aa791ebf4fd39c"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "7f4ff38e7004ae5466a06ba452afb23f31122af5",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "faeca9767c960700376a3dfc3cad1d2cdce3bb035b06287a69806e7430938288"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1619,
+              "algorithm": "sha256",
+              "checksum": "3d3d5035825b1a2de3348c646e463798d85b9f8c7c5155a81757172261036e1b"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "PP-DocBlockLayout",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.1x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.1x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.1x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "PP-DocLayout_plus-L": {
+      "repo_id": "PaddlePaddle/PP-DocLayout_plus-L_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "feb74619326f634e0e883218598096a3733ad9f7",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129736329,
+              "algorithm": "sha256",
+              "checksum": "77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1838,
+              "algorithm": "git-sha1",
+              "checksum": "9a236587eae068a1e7906fd158f712dc41400563"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "2ea220bf7e5b8f82150f8046ffe2ef117575626b",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129736329,
+              "algorithm": "sha256",
+              "checksum": "77afb2caa74dd13240d087d2eced91d7fcd2caebd16006a0a66162fc8707ff0e"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1838,
+              "algorithm": "sha256",
+              "checksum": "d60f782a16f96afb27e8280399899a94c3e9ffc694ffb2f913ea00af1c522f1e"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "PP-DocLayout_plus-L",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.1x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.1x3x800x800"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.1x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "PP-LCNet_x1_0_table_cls": {
+      "repo_id": "PaddlePaddle/PP-LCNet_x1_0_table_cls_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "605f623b09f67a562bae77e781d5d5266f14905a",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 6777817,
+              "algorithm": "sha256",
+              "checksum": "f8e4cb1b58a29bebd36852edcb238b53e0acefa75116a8a4db443f13dbc72b0b"
+            },
+            {
+              "path": "inference.yml",
+              "size": 762,
+              "algorithm": "git-sha1",
+              "checksum": "45dabf8130517cbfa1acaf439809fd461ad13069"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "1905cfbf978f2e71a172952ef3af408d7135a605",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 6777817,
+              "algorithm": "sha256",
+              "checksum": "f8e4cb1b58a29bebd36852edcb238b53e0acefa75116a8a4db443f13dbc72b0b"
+            },
+            {
+              "path": "inference.yml",
+              "size": 762,
+              "algorithm": "sha256",
+              "checksum": "891b1f4b0ccddaf6aca0fce8c8a38e5ab5da9f62fb9adaa7c75e161ee03bb787"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "PP-LCNet_x1_0_table_cls",
+        "ir_version": 3,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 7
+          }
+        ],
+        "initializer_types": [],
+        "tensor_types": [
+          "FLOAT",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x224x224"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "RT-DETR-L_wired_table_cell_det": {
+      "repo_id": "PaddlePaddle/RT-DETR-L_wired_table_cell_det_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "b2c0720b5fe6f1c0dd40f8a7993a3f28e04252f8",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "bf5490020512a31f43813d90feadae9526a2c3474ffe807571f2c23594f5958f"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1630,
+              "algorithm": "git-sha1",
+              "checksum": "12e2375734e7c34de26ae979aa40b5424571fb42"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "e391a7530c3ae2f228b8b6573e223da87cb3f169",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "bf5490020512a31f43813d90feadae9526a2c3474ffe807571f2c23594f5958f"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1630,
+              "algorithm": "sha256",
+              "checksum": "edf6d6180f2b9e3e666c744ee5ded38a72c6ef9056cd193250e3e55ba268acef"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "RT-DETR-L_wired_table_cell_det",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.2x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.2x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.2x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.2x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "RT-DETR-L_wireless_table_cell_det": {
+      "repo_id": "PaddlePaddle/RT-DETR-L_wireless_table_cell_det_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "94c021be206064f0136ef1383fbd4b68b168fa61",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "47515940ec5c37156e09aa9acb20c4e7e22456cad6ce49473661f1762fb46a78"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1633,
+              "algorithm": "git-sha1",
+              "checksum": "acbe633a4a077a1558fdd8796c65bf8ff396d6ec"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "51b27c4f52c4bbfbf7d1571d2955c3f41e35c27e",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 129353461,
+              "algorithm": "sha256",
+              "checksum": "47515940ec5c37156e09aa9acb20c4e7e22456cad6ce49473661f1762fb46a78"
+            },
+            {
+              "path": "inference.yml",
+              "size": 1633,
+              "algorithm": "sha256",
+              "checksum": "f2d0f00ea42aacc162f72a35cf54330e392a7d669e9a1b43896d3bd77a512621"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "RT-DETR-L_wireless_table_cell_det",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 16
+          }
+        ],
+        "initializer_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "tensor_types": [
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "im_shape",
+            "type": "FLOAT, DynamicDimension.0x2"
+          },
+          {
+            "name": "image",
+            "type": "FLOAT, DynamicDimension.0x3x640x640"
+          },
+          {
+            "name": "scale_factor",
+            "type": "FLOAT, DynamicDimension.0x2"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, 300*DynamicDimension.0x6"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "INT32, Tile_2655_o0__d0"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "SLANeXt_wired": {
+      "repo_id": "PaddlePaddle/SLANeXt_wired_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "04356de883011f433f83e5098793f3a501a9af6e",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 367743373,
+              "algorithm": "sha256",
+              "checksum": "0a6e063b56e35a434eb6669eb2342113c6bd76a6ce5acaa0331f370c9e00732f"
+            },
+            {
+              "path": "inference.yml",
+              "size": 2066,
+              "algorithm": "git-sha1",
+              "checksum": "a9491bff55efffa29a39b952d2c9f73037c5a641"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "0efa68c0a36ecb849c8c8c25d6cd62e54489ff13",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 367743373,
+              "algorithm": "sha256",
+              "checksum": "0a6e063b56e35a434eb6669eb2342113c6bd76a6ce5acaa0331f370c9e00732f"
+            },
+            {
+              "path": "inference.yml",
+              "size": 2066,
+              "algorithm": "sha256",
+              "checksum": "abbbd1b4dc6b1a2e9cd34c035514da53a1a6b1ec267292b0b8802025650a33bf"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "SLANeXt_wired",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 17
+          }
+        ],
+        "initializer_types": [
+          "BOOL",
+          "FLOAT",
+          "INT64"
+        ],
+        "tensor_types": [
+          "BOOL",
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x512x512"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1xDynamicDimension.2x8"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "FLOAT, DynamicDimension.3xDynamicDimension.4x50"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "SLANeXt_wireless": {
+      "repo_id": "PaddlePaddle/SLANeXt_wireless_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "9207aaed01d1bbb0743af384bac5b0bd35869ba3",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 367743373,
+              "algorithm": "sha256",
+              "checksum": "5c79ee87cce6712f8f640394decce72157bd1df13c9bccf86d071bd07a6e9f97"
+            },
+            {
+              "path": "inference.yml",
+              "size": 2069,
+              "algorithm": "git-sha1",
+              "checksum": "41ecbc2cbea642d6cf964bd84b2bceaa9cfaf824"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "b16c65b7e90c61eef200477d9ebcd89151fb7ab5",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 367743373,
+              "algorithm": "sha256",
+              "checksum": "5c79ee87cce6712f8f640394decce72157bd1df13c9bccf86d071bd07a6e9f97"
+            },
+            {
+              "path": "inference.yml",
+              "size": 2069,
+              "algorithm": "sha256",
+              "checksum": "58d1d7fdffd3e58cfec98571b817ea012f2107d644bd4f8e4607fae84f1923a6"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "SLANeXt_wireless",
+        "ir_version": 8,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 17
+          }
+        ],
+        "initializer_types": [
+          "BOOL",
+          "FLOAT",
+          "INT64"
+        ],
+        "tensor_types": [
+          "BOOL",
+          "FLOAT",
+          "INT32",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x512x512"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1xDynamicDimension.2x8"
+          },
+          {
+            "name": "fetch_name_1",
+            "type": "FLOAT, DynamicDimension.3xDynamicDimension.4x50"
+          }
+        ],
+        "external_data": []
+      }
+    },
+    "PP-LCNet_x1_0_textline_ori": {
+      "repo_id": "PaddlePaddle/PP-LCNet_x1_0_textline_ori_onnx",
+      "sources": {
+        "huggingface": {
+          "revision": "ab0a240368421324ba1a1c35320e385ec324aefb",
+          "authority": "Hugging Face official repository tree: LFS SHA-256 or Git blob SHA-1",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 6777816,
+              "algorithm": "sha256",
+              "checksum": "38aa97cd4be591e0ad304e659f07ba30d946f27a63315433f6659c69c8778345"
+            },
+            {
+              "path": "inference.yml",
+              "size": 735,
+              "algorithm": "git-sha1",
+              "checksum": "61977592412f3529cf153ed9c904f6700cb8b9a6"
+            }
+          ]
+        },
+        "modelscope": {
+          "revision": "0802e285a18e44a6301ac7357a99e1378d23106b",
+          "authority": "ModelScope official repository tree SHA-256",
+          "files": [
+            {
+              "path": "inference.onnx",
+              "size": 6777816,
+              "algorithm": "sha256",
+              "checksum": "38aa97cd4be591e0ad304e659f07ba30d946f27a63315433f6659c69c8778345"
+            },
+            {
+              "path": "inference.yml",
+              "size": 735,
+              "algorithm": "sha256",
+              "checksum": "8d5120d0e1a30a9df7ed46aa9119da3796ed066777089d1c1d705f132d5e90f9"
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "model": "PP-LCNet_x1_0_textline_ori",
+        "ir_version": 3,
+        "opsets": [
+          {
+            "domain": "",
+            "version": 7
+          }
+        ],
+        "initializer_types": [],
+        "tensor_types": [
+          "FLOAT",
+          "INT64"
+        ],
+        "inputs": [
+          {
+            "name": "x",
+            "type": "FLOAT, DynamicDimension.0x3x80x160"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "fetch_name_0",
+            "type": "FLOAT, DynamicDimension.1x2"
+          }
+        ],
+        "external_data": []
+      }
     }
   }
 }

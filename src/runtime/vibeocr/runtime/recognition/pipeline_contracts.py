@@ -165,15 +165,15 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
         "preloadable": True,
         "heavy": True,
         "cache_kind": "paddle",
-        "description": "文档结构分析，支持表格、公式、印章、图表识别",
+        "description": "文档结构分析，保留正文、表格和普通图文区域；不提供公式、图表和印章专用识别",
         "supported_options": [
+            "device",
+            "model_preset",
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_textline_orientation",
             "use_table_recognition",
-            "use_formula_recognition",
-            "use_seal_recognition",
-            "use_chart_recognition",
         ],
     },
     OCRPipeline.DOCUMENT_PARSING: {
@@ -218,6 +218,9 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
         "cache_kind": "paddle",
         "description": "独立表格结构识别，支持有线和无线表格",
         "supported_options": [
+            "device",
+            "model_preset",
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_table_orientation_classify",
@@ -308,14 +311,20 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
     OCRPipeline.PP_STRUCTURE_V3: {
         name: _bool_spec(name)
         for name in (
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_textline_orientation",
             "use_table_recognition",
-            "use_formula_recognition",
-            "use_seal_recognition",
-            "use_chart_recognition",
         )
+    }
+    | {
+        "device": PipelineOptionSpec(
+            "device", _ENUM, choices=(*DEVICE_VALUES, "directml")
+        ),
+        "model_preset": PipelineOptionSpec(
+            "model_preset", _ENUM, choices=("tiny", "small", "medium")
+        ),
     },
     OCRPipeline.DOCUMENT_PARSING: {
         "parse_method": PipelineOptionSpec(
@@ -347,11 +356,20 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
     OCRPipeline.TABLE_RECOGNITION: {
         name: _bool_spec(name)
         for name in (
+            "local_models_only",
             "use_doc_orientation_classify",
             "use_doc_unwarping",
             "use_table_orientation_classify",
             "use_ocr_results_with_table_cells",
         )
+    }
+    | {
+        "device": PipelineOptionSpec(
+            "device", _ENUM, choices=(*DEVICE_VALUES, "directml")
+        ),
+        "model_preset": PipelineOptionSpec(
+            "model_preset", _ENUM, choices=("tiny", "small", "medium")
+        ),
     },
     OCRPipeline.RAPID_TABLE: {
         "device": PipelineOptionSpec("device", _ENUM, choices=DEVICE_VALUES)

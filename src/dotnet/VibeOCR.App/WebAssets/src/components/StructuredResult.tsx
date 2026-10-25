@@ -85,7 +85,12 @@ function blocksFrom(value: string): readonly BlockEntry[] {
   const entries: BlockEntry[] = [];
   parsed.forEach((item, index) => {
     if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-      entries.push({ block: item as Block, index });
+      if (
+        !["seal", "retired"].includes(
+          String((item as Block).type).toLowerCase(),
+        )
+      )
+        entries.push({ block: item as Block, index });
     }
   });
   return entries;
@@ -135,9 +140,7 @@ function tableCells(block: Block): Cell[] {
 function isTextBlock(block: Block): block is Block & { text: string } {
   return (
     typeof block.type === "string" &&
-    !["table", "formula", "lines", "image", "chart", "seal"].includes(
-      block.type,
-    ) &&
+    !["table", "formula", "lines", "image", "chart"].includes(block.type) &&
     typeof block.text === "string"
   );
 }
@@ -605,12 +608,7 @@ export function StructuredResult({
             </section>
           );
         }
-        if (
-          block.type === "image" ||
-          block.type === "chart" ||
-          block.type === "seal" ||
-          block.image
-        ) {
+        if (block.type === "image" || block.type === "chart" || block.image) {
           // 图片预览旁保留非空识别文本（图表内容/图片说明/印章文字），资产失效也不丢。
           const imageText =
             typeof block.text === "string" && block.text.length > 0

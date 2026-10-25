@@ -1245,8 +1245,12 @@ class ManagedEnvironmentStore:
     @staticmethod
     def _recipe_modes(recipe: str) -> list[str]:
         """配方 → 真实可用的识别类型（目录与公共记录共用同一投影）。"""
-        if recipe.startswith("paddleocr-ort-"):
-            return ["text"]
+        if recipe in {
+            "paddleocr-ort-cpu",
+            "paddleocr-ort-cuda",
+            "paddleocr-ort-directml",
+        }:
+            return ["text", "table", "structure"]
         if recipe.startswith("paddleocr"):
             return ["text", "table", "formula", "structure", "document_vl"]
         if recipe.startswith("rapidocr+mineru"):

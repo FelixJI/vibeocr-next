@@ -354,7 +354,7 @@ test("image block keeps text within panel bounds; line editor keeps native Enter
   await expect(image).toBeVisible();
   await expect(page.getByText("插图说明文字")).toBeVisible();
   await expect(page.getByText("无预览的图表内容")).toBeVisible();
-  await expect(page.getByText("无预览的印章文字")).toBeVisible();
+  await expect(page.getByText("无预览的印章文字")).toHaveCount(0);
   const resultPanel = page.getByRole("region", {
     name: "识别结果",
     exact: true,

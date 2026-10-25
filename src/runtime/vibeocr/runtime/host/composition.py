@@ -379,6 +379,22 @@ def _build_recognition_mode_registry(
                 reason_code=descriptor.reason_code,
                 required_component=required_component,
             )
+        if is_ort_environment() and definition.mode_id in {
+            RecognitionModeId.PADDLE_TABLE,
+            RecognitionModeId.PADDLE_STRUCTURE,
+        }:
+            descriptor = next(
+                descriptor
+                for descriptor in engine_resolver.probe_descriptors()
+                if descriptor.engine_id.value == "paddleocr"
+            )
+            return ModeAvailability(
+                descriptor.availability.value,
+                reason_code=descriptor.reason_code,
+                required_component=None
+                if descriptor.availability.value == "ready"
+                else os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"],
+            )
         if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             return ModeAvailability(
                 RecognitionModeAvailability.PREPARATION_REQUIRED,
@@ -410,7 +426,12 @@ def _build_recognition_mode_registry(
                     if option not in {"device", "model_preset"}
                 ),
             )
-            if definition.mode_id is RecognitionModeId.PADDLE_TEXT
+            if definition.mode_id
+            in {
+                RecognitionModeId.PADDLE_TEXT,
+                RecognitionModeId.PADDLE_TABLE,
+                RecognitionModeId.PADDLE_STRUCTURE,
+            }
             else definition
             for definition in definitions
         )

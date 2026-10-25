@@ -266,7 +266,9 @@ class PaddleProcessAdapter:
             "recognize",
             items=wire_items,
             options=(options or PipelineSelection("OCR")).to_payload(),
-            snapshot=current_snapshot(dict(options.options) if options else {})
+            snapshot=current_snapshot(
+                {**options.options, "pipeline": options.pipeline_id} if options else {}
+            )
             if is_ort_environment()
             else None,
         )

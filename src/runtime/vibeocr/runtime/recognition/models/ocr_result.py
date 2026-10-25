@@ -16,6 +16,7 @@ DISCARDED_BLOCK_TYPES = frozenset(
         "page_number",
         "page_footnote",
         "aside_text",
+        "seal",
     }
 )
 

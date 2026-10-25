@@ -11,6 +11,21 @@ import pytest
 from vibeocr.runtime.recognition import paddle_onnx as onnx
 
 
+@pytest.fixture(autouse=True)
+def runner_constructor_seam(monkeypatch):
+    import sys
+
+    class Runner:
+        def __init__(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.models.runners.onnxruntime_runner",
+        SimpleNamespace(ONNXRuntimeRunner=Runner),
+    )
+
+
 def test_admission_snapshot_keeps_source_models_environment_and_device(monkeypatch):
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "first")
@@ -536,3 +551,313 @@ def test_directml_absent_hardware_rejects_admission_before_model_preparation(
     )
     with pytest.raises(onnx.PaddleOnnxError, match="hardware adapter unavailable"):
         onnx.freeze_request({"device": "directml"})
+
+
+@pytest.mark.parametrize(
+    "pipeline_id,wireless",
+    [("TABLE_RECOGNITION", "SLANeXt_wireless"), ("PP-StructureV3", "SLANeXt_wireless")],
+)
+def test_retained_graph_prepares_every_role_without_retired_assets(
+    monkeypatch, pipeline_id, wireless
+):
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    snapshot = onnx.freeze_request(
+        {
+            "use_doc_orientation_classify": False,
+            "use_textline_orientation": pipeline_id == "PP-StructureV3",
+        },
+        pipeline_id=pipeline_id,
+    )
+    assert {
+        "PP-DocLayout_plus-L",
+        "PP-LCNet_x1_0_doc_ori",
+        "PP-LCNet_x1_0_table_cls",
+        "SLANeXt_wired",
+        wireless,
+        "RT-DETR-L_wired_table_cell_det",
+        "RT-DETR-L_wireless_table_cell_det",
+    } <= snapshot["models"].keys()
+    if pipeline_id == "PP-StructureV3":
+        assert {"PP-DocBlockLayout", "PP-LCNet_x1_0_textline_ori"} <= snapshot[
+            "models"
+        ].keys()
+    assert not any(
+        "seal" in name.lower() or "formula" in name.lower() or "chart" in name.lower()
+        for name in snapshot["models"]
+    )
+    with onnx.request_snapshot(snapshot):
+        kwargs = onnx.constructor_kwargs(SimpleNamespace(pipeline=pipeline_id))
+    assert kwargs["use_doc_orientation_classify"] is False
+    assert "PP-LCNet_x1_0_doc_ori" in json.loads(kwargs["_onnx_request"])["models"]
+
+
+def test_failed_partial_constructor_releases_only_its_thread_owned_sessions(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+
+    class Runner:
+        def __init__(self):
+            self.session = object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.models.runners.onnxruntime_runner",
+        SimpleNamespace(ONNXRuntimeRunner=Runner),
+    )
+    own, foreign = [], []
+
+    def factory(**_kwargs):
+        own.append(Runner())
+        thread = threading.Thread(target=lambda: foreign.append(Runner()))
+        thread.start()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        raise MemoryError("partial graph allocation")
+
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=factory))
+    original = Runner.__init__
+    with pytest.raises(onnx.PaddleOnnxError, match="partial graph"):
+        onnx.create_pipeline(json.dumps(onnx.freeze_request({})))
+    assert own[0].session is None
+    assert foreign[0].session is not None
+    assert Runner.__init__ is original
+
+
+def test_graph_validation_counts_duplicate_model_sessions_and_closes_all_on_mismatch(
+    monkeypatch,
+):
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    native, runners = make_pipeline("CPUExecutionProvider", count=2)
+    runners[0].model_dir = runners[1].model_dir = "shared-asset"
+    owned = onnx.PaddleOnnxPipeline(
+        native,
+        {"models": {"shared-asset": {}}, "provider": "CPUExecutionProvider"},
+        ["shared-asset", "shared-asset"],
+    )
+    assert len(owned.sessions) == 2
+    owned.close()
+    assert all(r.session is None for r in runners)
+    native, runners = make_pipeline("CPUExecutionProvider", count=2)
+    with pytest.raises(onnx.PaddleOnnxError, match="count mismatch"):
+        onnx.PaddleOnnxPipeline(
+            native, {"models": {}, "provider": "CPUExecutionProvider"}, ["model-0"]
+        )
+    assert all(r.session is None for r in runners)
+
+
+def test_missing_table_layout_keeps_baseline_table_and_non_table_outputs():
+    import numpy as np
+
+    table = {"cls_id": 8, "score": 0.9, "coordinate": [10, 20, 90, 80]}
+    image = {"cls_id": 1, "score": 0.8, "coordinate": [0, 90, 100, 150]}
+    original = [[table, image]]
+    calls = []
+
+    def upstream(*args, **kwargs):
+        calls.append(kwargs)
+        return original
+
+    wrapper = onnx._MissingTableLayoutPostprocess(upstream)
+    assert wrapper([{"boxes": np.array([[8, 0.1, 0, 0, 100, 200]])}], [{}]) is original
+    assert len(calls) == 1
+
+
+def test_missing_table_layout_preserves_non_table_and_only_uses_model_candidates():
+    import numpy as np
+
+    text = {"cls_id": 2, "score": 0.6, "coordinate": [0, 0, 10, 10]}
+    table = {"cls_id": 8, "score": 0.15, "coordinate": [0, 0, 10, 10]}
+    calls = []
+
+    def upstream(outputs, datas, **kwargs):
+        calls.append(kwargs)
+        return [[text]] if len(calls) == 1 else [[table]]
+
+    raw = np.array([[2, 0.6, 0, 0, 10, 10], [8, 0.15, 0, 0, 10, 10]])
+    saved = raw.copy()
+    result = onnx._MissingTableLayoutPostprocess(upstream)(
+        [{"boxes": raw}], [{}], threshold={2: 0.4, 8: 0.5}, layout_nms=True
+    )
+    assert result == [[text, table]] and result[0][0] is text
+    assert calls[0]["threshold"] == {2: 0.4, 8: 0.5}
+    assert calls[1]["layout_merge_bboxes_mode"] == "large"
+    np.testing.assert_array_equal(raw, saved)
+
+
+def test_table_materialization_activates_predictor_nms_despite_upstream_config_gap():
+    layout = SimpleNamespace(
+        post_op=lambda *args, **kwargs: [],
+        layout_nms=None,
+        layout_merge_bboxes_mode=None,
+    )
+    root = SimpleNamespace(
+        layout_det_model=layout,
+        trans_cells_det_results_to_html=lambda cells: cells,
+        general_ocr_pipeline=object(),
+    )
+    onnx._materialize_table_nodes(
+        SimpleNamespace(paddlex_pipeline=root),
+        {
+            "pipeline_id": "TABLE_RECOGNITION",
+            "selections": {"use_table_orientation_classify": False},
+        },
+    )
+    assert layout.layout_nms is True
+    assert layout.layout_merge_bboxes_mode == "union"
+
+
+@pytest.mark.parametrize("angle", [0, 90, 180, 270, 13])
+def test_doc_rotation_is_lossless_scoped_and_keeps_single_preprocessing(
+    monkeypatch, angle
+):
+    import functools
+    import sys
+
+    import numpy as np
+
+    calls = []
+
+    def upstream_rotate(image, rotation):
+        calls.append(("upstream_rotate", rotation))
+        return image + 1
+
+    def orientation(value):
+        calls.append(("orientation", value))
+        return value
+
+    def unwarp(image):
+        calls.append(("unwarp", image.shape))
+        return image
+
+    namespace = {
+        "rotate_image": upstream_rotate,
+        "orientation": orientation,
+        "unwarp": unwarp,
+    }
+    exec(
+        "class Preprocessor:\n"
+        " def predict(self, image, angle=0, *, source='original'):\n"
+        "  angle = orientation(angle)\n"
+        "  rotated = rotate_image(image, angle)\n"
+        "  yield {'angle': angle, 'input_img': image, 'output_img': unwarp(rotated), 'source': source}\n",
+        namespace,
+    )
+    cls = namespace["Preprocessor"]
+    wrapped = []
+
+    def timeit(function):
+        wrapped.append(function)
+
+        @functools.wraps(function)
+        def measured(*args, **kwargs):
+            calls.append(("timer", True))
+            yield from function(*args, **kwargs)
+
+        return measured
+
+    cls.predict = timeit(cls.predict)
+    method_before = cls.predict
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.pipelines.doc_preprocessor.pipeline",
+        SimpleNamespace(_DocPreprocessorPipeline=cls, rotate_image=upstream_rotate),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference.utils.benchmark",
+        SimpleNamespace(benchmark=SimpleNamespace(timeit=timeit)),
+    )
+    owned, other = cls(), cls()
+    onnx._install_lossless_doc_rotation(owned)
+    image = np.arange(2 * 5 * 3, dtype=np.uint8).reshape(2, 5, 3)
+    result = next(owned.predict(image, angle, source="page-2"))
+    assert result["source"] == "page-2" and result["angle"] == angle
+    assert result["input_img"] is image
+    expected = np.rot90(image, angle // 90) if angle % 90 == 0 else image + 1
+    np.testing.assert_array_equal(result["output_img"], expected)
+    assert result["output_img"].flags.c_contiguous
+    assert [name for name, _ in calls].count("orientation") == 1
+    assert [name for name, _ in calls].count("unwarp") == 1
+    assert [name for name, _ in calls].count("timer") == 1
+    assert len(wrapped) == 2
+    assert namespace["rotate_image"] is upstream_rotate
+    assert cls.predict is method_before and other.predict.__func__ is method_before
+    np.testing.assert_array_equal(
+        next(other.predict(image, angle))["output_img"], image + 1
+    )
+    with pytest.raises(onnx.PaddleOnnxError, match="Unsupported PaddleX"):
+        onnx._install_lossless_doc_rotation(SimpleNamespace(predict=lambda: None))
+
+
+def test_structure_config_replaces_wireless_weight_before_model_admission(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    snapshot = onnx.freeze_request({}, pipeline_id="PP-StructureV3")
+    monkeypatch.setitem(
+        sys.modules,
+        "paddlex.inference",
+        SimpleNamespace(
+            load_pipeline_config=lambda _name: {
+                "pipeline_name": "PP-StructureV3",
+                "SubModules": {
+                    "WirelessTableStructureRecognition": {"model_name": "SLANet_plus"},
+                    "WiredTableStructureRecognition": {"model_name": "SLANeXt_wired"},
+                },
+            }
+        ),
+    )
+    config, expected = onnx._structure_config(snapshot, tmp_path)
+    assert expected == ["SLANeXt_wireless", "SLANeXt_wired"]
+    assert config["SubModules"]["WirelessTableStructureRecognition"][
+        "model_dir"
+    ] == str(tmp_path / "SLANeXt_wireless")
+    assert "SLANet_plus" not in snapshot["models"]
+    assert "SLANet_plus" not in onnx.model_catalog()
+    assert len(onnx.model_catalog()) == 17
+
+
+def test_structure_predict_uses_both_official_wireless_models_by_default(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    native, _runners = make_pipeline("CPUExecutionProvider", count=2)
+    native.predict = lambda **kwargs: iter((kwargs,))
+    pipeline = onnx.PaddleOnnxPipeline(
+        native,
+        {
+            "provider": "CPUExecutionProvider",
+            "models": {"det": {}, "rec": {}},
+            "pipeline_id": "PP-StructureV3",
+        },
+    )
+    try:
+        options = next(pipeline.predict(input="fixture.png"))
+        assert options["use_e2e_wireless_table_rec_model"] is False
+        assert options["use_wireless_table_cells_trans_to_html"] is False
+    finally:
+        pipeline.close()

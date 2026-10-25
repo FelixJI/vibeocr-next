@@ -63,7 +63,7 @@ class TestPPStructureV3Options:
         opts = PPStructureV3Options()
         assert opts.pipeline == "PP-StructureV3"
         assert opts.use_table_recognition is True
-        assert opts.use_formula_recognition is True
+        assert opts.use_formula_recognition is False
         assert opts.use_seal_recognition is False
         assert opts.use_chart_recognition is False
 
@@ -292,12 +292,13 @@ def test_pp_structure_constructor_kwargs_map_module_gates():
         PPStructureV3Options(use_seal_recognition=True, use_chart_recognition=True)
     )
     assert kwargs == {
+        "use_textline_orientation": False,
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,
         "use_table_recognition": True,
-        "use_formula_recognition": True,
-        "use_seal_recognition": True,
-        "use_chart_recognition": True,
+        "use_formula_recognition": False,
+        "use_seal_recognition": False,
+        "use_chart_recognition": False,
     }
 
 
@@ -327,6 +328,6 @@ def test_pp_structure_options_reach_cache_and_predict():
     assert name == "PP-StructureV3"
     assert passed is opts
     # predict 同样消费六个开关 + textline
-    assert captured["predict"]["use_seal_recognition"] is True
+    assert captured["predict"]["use_seal_recognition"] is False
     assert captured["predict"]["use_table_recognition"] is True
     assert captured["predict"]["use_textline_orientation"] is False

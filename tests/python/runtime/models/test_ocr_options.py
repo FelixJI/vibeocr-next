@@ -128,7 +128,7 @@ class TestOCROptions:
         """测试 PP-StructureV3 选项默认值"""
         options = OCROptions()
         assert options.use_table_recognition is True
-        assert options.use_formula_recognition is True
+        assert options.use_formula_recognition is False
         assert options.use_seal_recognition is False
         assert options.use_chart_recognition is False
 
@@ -167,7 +167,7 @@ class TestOCROptions:
         """测试表格识别新增字段默认值"""
         options = OCROptions()
         assert options.use_e2e_wired_table_rec_model is False
-        assert options.use_e2e_wireless_table_rec_model is True
+        assert options.use_e2e_wireless_table_rec_model is False
         assert options.wireless_table_model_name == "SLANeXt_wireless"
         assert options.wired_table_model_name == "SLANeXt_wired"
         assert options.use_wired_table_cells_trans_to_html is False
@@ -230,7 +230,7 @@ class TestOCROptions:
         }
         options = OCROptions.from_dict(data)
         assert options.use_e2e_wired_table_rec_model is False
-        assert options.use_e2e_wireless_table_rec_model is True
+        assert options.use_e2e_wireless_table_rec_model is False
         assert options.text_det_limit_side_len is None
         assert options.formula_recognition_model_name is None
 

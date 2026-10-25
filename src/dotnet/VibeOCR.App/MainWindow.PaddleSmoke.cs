@@ -1,5 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using VibeOCR.App.Inference;
+using VibeOCR.App.Web;
 using Microsoft.UI.Windowing;
 using Microsoft.Web.WebView2.Core;
 using Windows.Storage;
@@ -327,19 +330,22 @@ public sealed partial class MainWindow
       await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
       await ClickManagedSmokeButtonAsync("查看环境清单");
     }
-    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
+    await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
       TimeSpan.FromMinutes(2));
 
+    // 离开设置页以结束只读兼容查询，再核对同一会话的完整就绪投影。
+    await NavigateSmokeAsync("单次识别", "button");
+    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
+
     if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
     {
       WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand("paddle_text")), CancellationToken.None);
+        new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand(mode)), CancellationToken.None);
       if (!selectedDefault.Ok) throw new InvalidOperationException("Isolated ORT default selection failed.");
     }
     RecordPaddleSmokeStage($"select mode {mode}");
-    await NavigateSmokeAsync("单次识别", "button");
     await WaitForPaddleModeAsync("#recognition-task-engine", mode);
     string? availability = await PaddleSmokeDomTextAsync(
       "(() => { const o = Array.from(document.querySelector('#recognition-task-engine').options)" +
@@ -373,15 +379,8 @@ public sealed partial class MainWindow
     {
       await SelectSmokeValueAsync(optionSelector, optionValue);
     }
-    if (mode == "paddle_structure")
-    {
-      await WaitForSmokeDomAsync(
-        "!!document.querySelector('#paddle_structure-use_chart_recognition')",
-        TimeSpan.FromSeconds(15));
-      await SelectSmokeValueAsync("#paddle_structure-use_chart_recognition", "true");
-    }
     if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
-      await SelectSmokeValueAsync("#paddle_text-model-preset",
+      await SelectSmokeValueAsync($"#{mode}-model-preset",
         PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small");
     await ClickManagedSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
@@ -423,7 +422,19 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage($"recognize {mode}");
     await WaitForAutomaticTextLayerAsync(captured.ScreenshotSession!);
     submitsBefore = smokeSubmitAttempts();
-    await ClickSmokeButtonAsync("识别文字");
+    string recognitionButton = mode switch
+    {
+      "paddle_table" => "表格识别",
+      "paddle_formula" => "公式识别",
+      _ => "识别文字",
+    };
+    RecognitionWorkbenchState ready = (await application.BootstrapAsync(CancellationToken.None))
+      .States.Select(item => item.State).OfType<RecognitionWorkbenchState>().Single();
+    string modeLabel = recognitionButton == "识别文字" ? "文字识别" : recognitionButton;
+    if (ready.RecognitionModes?.SingleOrDefault(entry => entry.DisplayName == modeLabel) is not { } entry ||
+        entry.ModeId != mode || entry.Availability != "ready")
+      throw new InvalidOperationException($"Public screenshot button does not target {mode}: {JsonSerializer.Serialize(ready.RecognitionModes)}");
+    await ClickSmokeButtonAsync(recognitionButton);
     RecognitionWorkbenchState terminal;
     using (var cancellation = new CancellationTokenSource(
       TimeSpan.FromMinutes(timeoutMinutes)))
@@ -588,32 +599,47 @@ public sealed partial class MainWindow
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(
       state => !state.IsBusy && state.PageCount > 0,
       TimeSpan.FromMinutes(2));
-    if (opened.SelectedPages is null || !opened.SelectedPages.Contains(0))
+    bool structurePages = mode is "paddle_table" or "paddle_structure";
+    int[] pageIndexes = structurePages ? [0, 1] : [0];
+    if (structurePages)
     {
-      await WaitForSmokeDomAsync(
-        "!!document.querySelector('[aria-label=\"选择第 1 页\"]')",
-        TimeSpan.FromSeconds(30));
-      string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        "(() => { const e=document.querySelector('[aria-label=\"选择第 1 页\"]'); " +
-        "if(!e) return false; e.click(); return true; })()");
-      if (clicked != "true")
-        throw new InvalidOperationException("First PDF page selection is unavailable.");
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "(() => { const e=document.querySelector('input[name=renderDpi]'); e.closest('details').open=true; })()");
+      await EnterSmokeTextAsync("input[name=renderDpi]", "216");
+      await ClickManagedSmokeButtonAsync("保存 PDF 参数");
       opened = await WaitForPaddlePdfAsync(
-        state => state.SelectedPages?.Contains(0) == true,
-        TimeSpan.FromSeconds(30));
+        state => !state.IsBusy && state.ProcessingSettings?.RenderDpi == 216 &&
+          state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     }
+    if (structurePages && opened.PageCount != 2)
+      throw new InvalidOperationException("Structured PDF smoke requires exactly two distinct pages.");
+    if (structurePages)
+    {
+      RecordPaddleSmokeStage("pdf select both pages");
+      await ClickManagedSmokeButtonAsync("全选页面");
+      opened = await WaitForPaddlePdfAsync(PaddleSmokePdfHasBothPages, TimeSpan.FromSeconds(30));
+    }
+    else if (opened.SelectedPages?.Contains(0) != true)
+    {
+      const string selector = "[aria-label=\"选择第 1 页\"]";
+      await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({JsonSerializer.Serialize(selector)}).click()");
+      opened = await WaitForPaddlePdfAsync(state => state.SelectedPages?.Contains(0) == true, TimeSpan.FromSeconds(30));
+    }
+    paddleSmokePartialEvidence = new { input_kind = "pdf", mode, fixture_path = fixture,
+      opened.PageCount, opened.SelectedPages, expected_pages = pageIndexes };
     int before = smokeSubmitAttempts!();
     bool textLayer = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER") == "1";
     if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
-    RecordPaddleSmokeStage($"pdf recognize first page {mode}");
+    RecordPaddleSmokeStage($"pdf recognize selected pages {mode}");
     await ClickManagedSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
       state => !state.IsBusy &&
-        state.Pages?.FirstOrDefault(page => page.Index == 0)?.StatusCode
-          is ("pdf.page.done" or "pdf.page.failed"),
+        pageIndexes.All(index => state.Pages?.FirstOrDefault(page => page.Index == index)?.StatusCode
+          is ("pdf.page.done" or "pdf.page.failed")),
       TimeSpan.FromMinutes(timeoutMinutes));
-    if (terminal.Pages?.FirstOrDefault(page => page.Index == 0)
-          ?.StatusCode != "pdf.page.done")
+    if (pageIndexes.Any(index => terminal.Pages?.FirstOrDefault(page => page.Index == index)
+          ?.StatusCode != "pdf.page.done"))
     {
       // broker 清理前保全真实失败 job，不把请求记录当作推理通过。
       string? failedJobId = smokeLastJobId!();
@@ -627,7 +653,35 @@ public sealed partial class MainWindow
       throw new InvalidOperationException($"PDF page OCR failed: {JsonSerializer.Serialize(terminal)}");
     }
     object job = await ObservePaddleInputJobAsync(session, pipeline,
-      optionName, optionValue, before, 1);
+      optionName, optionValue, before, pageIndexes.Length);
+    var pageEvidence = new List<object>();
+    if (structurePages)
+    {
+      var observed = await session.Client.ObserveAsync(smokeLastJobId!()!, 0, CancellationToken.None);
+      foreach (int index in pageIndexes)
+      {
+        var item = observed.Snapshot.Items.Single(item => item.ClientItemKey == $"page-{index}");
+        var outcome = observed.Outcomes.Single(outcome => outcome.ItemId == item.ItemId);
+        RecognizeResponse result = RecognitionOutcomeMapper.ToResponse(outcome, pipeline);
+        string selector = JsonSerializer.Serialize($"button[aria-label=\"检查第 {index + 1} 页\"]");
+        await WaitForSmokeDomAsync($"!!document.querySelector({selector})", TimeSpan.FromSeconds(30));
+        await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({selector}).click()");
+        PdfWorkbenchState inspectedPage = await WaitForPaddlePdfAsync(
+          state => state.SelectedPage == index && state.Pages?.Single(page => page.Index == index).StructuredResult is not null,
+          TimeSpan.FromSeconds(30));
+        await InspectPaddlePdfStructureAsync(mode);
+        WorkbenchResourceReference resource = inspectedPage.Pages!.Single(page => page.Index == index).StructuredResult!;
+        await using WorkbenchResourceResponse openedResource = await resourceBroker.OpenAsync(new Uri(resource.Url), CancellationToken.None);
+        using JsonDocument projected = await JsonDocument.ParseAsync(openedResource.Content);
+        JsonElement expected = JsonSerializer.SerializeToElement(result.ContentBlocks);
+        ValidatePaddlePdfProjection(expected, projected.RootElement, observed.Snapshot.JobId, item.ItemId);
+        pageEvidence.Add(new { page_index = index, item.ClientItemKey, item.ItemId, resource,
+          content_blocks = projected.RootElement.Clone(), structured_inspected = true });
+      }
+      if (JsonNode.DeepEquals(JsonSerializer.SerializeToNode(observed.Outcomes[0].Payload),
+            JsonSerializer.SerializeToNode(observed.Outcomes[1].Payload)))
+        throw new InvalidOperationException("Distinct PDF pages returned identical outcomes.");
+    }
     if (textLayer && (!terminal.IsModified || terminal.Pages?.FirstOrDefault(page => page.Index == 0)?.AddedThisSession != true))
       throw new InvalidOperationException("PDF text layer was not committed as an unsaved current-session layer.");
     bool inspected = !textLayer && await InspectPaddlePdfStructureAsync(mode);
@@ -636,7 +690,7 @@ public sealed partial class MainWindow
     {
       input_kind = "pdf", mode, job,
       pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
-      structured_inspected = inspected, copies,
+      structured_inspected = inspected, pages = pageEvidence, copies,
     };
     if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE") == "1")
     {
@@ -659,8 +713,35 @@ public sealed partial class MainWindow
       option = new { name = optionName, value = optionValue },
       submit_attempts = smokeSubmitAttempts!(), job,
       pdf = new { opened.PageCount, terminal.SelectedPages, terminal.Pages },
-      structured_inspected = inspected, text_layer = textLayer, copies, saved,
+      structured_inspected = inspected, pages = pageEvidence, text_layer = textLayer, copies, saved,
     };
+  }
+
+  internal static bool PaddleSmokePdfHasBothPages(PdfWorkbenchState state) =>
+    !state.IsBusy && state.PageCount == 2 && state.SelectedPages?.SequenceEqual([0, 1]) == true;
+
+  internal static void ValidatePaddlePdfProjection(
+    JsonElement expected, JsonElement actual, string jobId, string itemId)
+  {
+    if (expected.ValueKind != JsonValueKind.Array || expected.GetArrayLength() == 0 ||
+        actual.ValueKind != JsonValueKind.Array || expected.GetArrayLength() != actual.GetArrayLength())
+      throw new InvalidOperationException("PDF structured resource lost blocks.");
+    for (int index = 0; index < expected.GetArrayLength(); index++)
+    {
+      JsonNode source = JsonNode.Parse(expected[index].GetRawText())!;
+      JsonNode projected = JsonNode.Parse(actual[index].GetRawText())!;
+      if (source["image"] is JsonObject image)
+      {
+        if (image["job_id"]?.GetValue<string>() != jobId ||
+            image["item_id"]?.GetValue<string>() != itemId ||
+            string.IsNullOrWhiteSpace(image["asset_id"]?.GetValue<string>()))
+          throw new InvalidOperationException("PDF image asset belongs to another job or page.");
+        // 只排除宿主附加的 opaque 引用；来源归属及全部模型字段仍逐项核对。
+        if (projected["image"] is JsonObject published) published.Remove("resource");
+      }
+      if (!JsonNode.DeepEquals(source, projected))
+        throw new InvalidOperationException($"PDF page structured block {index} differs from its outcome.");
+    }
   }
 
   private async Task<object> RunPaddlePdfEditingAsync(PdfWorkbenchState layered, bool workspace = false)
@@ -1081,6 +1162,7 @@ public sealed partial class MainWindow
     {
       string diagnostic = JsonSerializer.Serialize(last is null ? null : new {
         last.Phase, last.IsBusy, last.StatusCode, last.Revision, last.AddedCount, last.SelectedPage, last.TaskEngine,
+        last.PageCount, last.SelectedPages, pages = last.Pages?.Select(page => new { page.Index, page.StatusCode }),
       });
       throw new TimeoutException($"PDF state wait timed out after {timeout}. Last state: {diagnostic}", error);
     }
@@ -1100,14 +1182,10 @@ public sealed partial class MainWindow
     bool optionRecorded = selection?.Options is { } options &&
       options.TryGetValue(optionName, out JsonElement value) &&
       NormalizePaddleSmokeJson(value) == optionValue;
-    bool chartRecorded = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE") !=
-      "paddle_structure" || selection?.Options is { } chartOptions &&
-      chartOptions.TryGetValue("use_chart_recognition", out JsonElement chart) &&
-      NormalizePaddleSmokeJson(chart) == "true";
     if (selection?.PipelineId.ToString() != pipeline ||
         snapshot.EnvironmentId != session.EnvironmentId ||
         snapshot.EnvironmentRevision != session.Revision ||
-        !optionRecorded || !chartRecorded ||
+        !optionRecorded ||
         snapshot.Items.Count != itemCount || snapshot.Summary.Succeeded != itemCount ||
         snapshot.Summary.Failed != 0)
       throw new InvalidOperationException(
@@ -1138,13 +1216,13 @@ public sealed partial class MainWindow
     if (await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(script) != "true")
       return false;
     await WaitForSmokeDomAsync(
-      "!!document.querySelector('.structured-result ol.structured-blocks')",
+      "!!document.querySelector('.structured-result > .structured-block, .structured-result > .structured-text')",
       TimeSpan.FromSeconds(30));
     if (mode is "paddle_table" or "paddle_structure" or "paddle_document_vl")
     {
       string predicate = mode == "paddle_table"
         ? "!!document.querySelector('.structured-result table td, .structured-result table th')"
-        : "document.querySelectorAll('.structured-result ol.structured-blocks li').length > 0";
+        : "document.querySelectorAll('.structured-result > .structured-block, .structured-result > .structured-text').length > 0";
       if (!await PaddleSmokeDomBoolAsync(predicate))
         throw new InvalidOperationException($"Batch {mode} has no structured preview.");
     }
@@ -1154,11 +1232,11 @@ public sealed partial class MainWindow
   private async Task<bool> InspectPaddlePdfStructureAsync(string mode)
   {
     await WaitForSmokeDomAsync(
-      "!!document.querySelector('.pdf-main .structured-result ol.structured-blocks')",
+      "!!document.querySelector('.pdf-main .structured-result > .structured-block, .pdf-main .structured-result > .structured-text')",
       TimeSpan.FromSeconds(30));
     string predicate = mode == "paddle_table"
       ? "!!document.querySelector('.pdf-main .structured-result table td, .pdf-main .structured-result table th')"
-      : "document.querySelectorAll('.pdf-main .structured-result ol.structured-blocks li').length > 0";
+      : "document.querySelectorAll('.pdf-main .structured-result > .structured-block, .pdf-main .structured-result > .structured-text').length > 0";
     if (!await PaddleSmokeDomBoolAsync(predicate))
       throw new InvalidOperationException($"PDF {mode} has no structured preview.");
     return true;
@@ -1228,17 +1306,31 @@ public sealed partial class MainWindow
       bool optionConsumed = options is not null &&
         options.TryGetValue(optionName, out System.Text.Json.JsonElement value) &&
         NormalizePaddleSmokeJson(value) == optionValue;
-      bool chartConsumed = mode != "paddle_structure" ||
-        options is not null &&
-        options.TryGetValue("use_chart_recognition", out JsonElement chart) &&
-        NormalizePaddleSmokeJson(chart) == "true";
-      if (!optionConsumed || !chartConsumed)
+      if (!optionConsumed)
         throw new InvalidOperationException(
-          $"Non-default options were not recorded on the job for {mode}: " +
-          $"{optionName}={optionValue}, chart={chartConsumed}.");
+          $"Non-default option was not recorded on the job for {mode}: {optionName}={optionValue}.");
+      if (mode == "paddle_structure" && options is not null &&
+          new[] { "use_formula_recognition", "use_seal_recognition", "use_chart_recognition" }.Any(options.ContainsKey))
+        throw new InvalidOperationException("Retired structure options were submitted.");
       if (observed.Snapshot.EnvironmentId != session.EnvironmentId ||
           observed.Snapshot.EnvironmentRevision != session.Revision)
         throw new InvalidOperationException($"Job environment binding mismatch for {jobId}.");
+      if (mode == "paddle_structure" &&
+          Path.GetFileName(PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE")) == "document_mixed.png")
+      {
+        JsonElement[] blocks = RecognitionOutcomeMapper.ToResponse(observed.Outcomes.Single(), expectedPipeline).ContentBlocks
+          ?? throw new InvalidOperationException("Mixed structure source has no blocks.");
+        string[] types = blocks.Select(block => block.GetProperty("type").GetString()!).ToArray();
+        if (new[] { "text", "formula", "table", "image", "footer" }.Except(types).Any())
+          throw new InvalidOperationException("Mixed structure source lost a retained region.");
+        foreach (JsonElement block in blocks)
+        {
+          double[] box = block.GetProperty("bbox").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+          if (box.Length != 4 || box.Any(value => !double.IsFinite(value) || value < 0 || value > 1000) ||
+              box[0] > box[2] || box[1] > box[3])
+            throw new InvalidOperationException("Mixed structure region lost normalized coordinates.");
+        }
+      }
       jobEvidence = new
       {
         task_id = observed.Snapshot.JobId,
@@ -1270,7 +1362,7 @@ public sealed partial class MainWindow
       {
         "paddle_table" => ".structured-result table td, .structured-result table th",
         "paddle_formula" => ".structured-formula code",
-        "paddle_structure" or "paddle_document_vl" => ".structured-blocks li",
+        "paddle_structure" or "paddle_document_vl" => ".structured-result > .structured-block, .structured-result > .structured-text",
         _ => ".result-document",
       };
       await WaitForSmokeDomAsync(
@@ -1300,6 +1392,8 @@ public sealed partial class MainWindow
       ui["structured_merged_cell_present"] = await PaddleSmokeDomBoolAsync(
         "Array.from(document.querySelectorAll('.structured-result table td, " +
         ".structured-result table th')).some(cell => cell.rowSpan > 1 || cell.colSpan > 1)");
+      ui["formula_region_present"] = await PaddleSmokeDomBoolAsync(
+        "!!document.querySelector('.structured-result section[aria-label=公式] .structured-formula')");
       ui["formula_latex_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-formula code') && " +
         "(document.querySelector('.structured-formula code')?.textContent ?? '').length > 0");
@@ -1313,7 +1407,7 @@ public sealed partial class MainWindow
       ui["image_block_present"] = await PaddleSmokeDomBoolAsync(
         "!!document.querySelector('.structured-result img')");
       string blocksCount = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        "document.querySelectorAll('.structured-result ol.structured-blocks li').length");
+        "document.querySelectorAll('.structured-result > .structured-block, .structured-result > .structured-text').length");
       ui["structured_blocks_count"] = int.Parse(
         blocksCount, System.Globalization.CultureInfo.InvariantCulture);
       await AssertPaddleStructureEvidenceAsync(mode, ui);
@@ -1437,11 +1531,12 @@ public sealed partial class MainWindow
             $"{mode} finished without structured layout blocks.");
         if (Path.GetFileName(PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE")) == "document_mixed.png" &&
             (ui.GetValueOrDefault("structured_table_present") is not true ||
-             ui.GetValueOrDefault("formula_latex_present") is not true ||
-             ui.GetValueOrDefault("formula_rendered") is not true ||
+             ui.GetValueOrDefault("formula_region_present") is not true ||
+             mode == "paddle_document_vl" && (ui.GetValueOrDefault("formula_latex_present") is not true ||
+             ui.GetValueOrDefault("formula_rendered") is not true) ||
              ui.GetValueOrDefault("image_block_present") is not true))
           throw new InvalidOperationException(
-            $"{mode} mixed fixture lost its table, rendered formula, or image preview.");
+            $"{mode} mixed fixture lost its required table, formula, or image preview.");
         break;
     }
   }

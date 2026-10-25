@@ -129,12 +129,19 @@ def build_result_projections(
     is_cancelled: Callable[[], bool] | None = None,
     include_raw: bool = True,
     include_markdown: bool = True,
+    discarded_types: frozenset[str] | None = None,
 ) -> tuple[str, str, str] | None:
     """Build selected raw/Markdown/HTML projections without mutating the result."""
 
     def cancelled(index: int, interval: int) -> bool:
         return is_cancelled is not None and index % interval == 0 and is_cancelled()
 
+    if discarded_types is None:
+        discarded_types = (
+            frozenset({"seal"})
+            if getattr(result, "pipeline_type", "") == "PP-StructureV3"
+            else DISCARDED_BLOCK_TYPES
+        )
     text_blocks = getattr(result, "text_blocks", None)
     markdown_parts: list[str] = []
     html_parts: list[str] = []
@@ -146,8 +153,7 @@ def build_result_projections(
                 if cancelled(index, 256):
                     return None
                 if (
-                    str(getattr(text_block, "label", "")).lower()
-                    not in DISCARDED_BLOCK_TYPES
+                    str(getattr(text_block, "label", "")).lower() not in discarded_types
                     and text_block.text
                 ):
                     raw_parts.append(text_block.text)
@@ -159,6 +165,7 @@ def build_result_projections(
             content_list,
             text_blocks if isinstance(text_blocks, list) else [],
             cancelled=cancelled,
+            discarded_types=discarded_types,
         )
         if projected_raw_parts is None:
             return None
@@ -171,7 +178,7 @@ def build_result_projections(
         if not isinstance(block, dict):
             continue
         block_type = str(block.get("type", "text")).lower()
-        if block_type in DISCARDED_BLOCK_TYPES:
+        if block_type in discarded_types:
             continue
         if block_type == "table":
             table = table_model_from_block(block)
@@ -209,7 +216,10 @@ def build_result_projections(
             body = str(
                 block.get("text", "")
                 if block_type == "table_unparsed"
-                else block.get("image_body") or block.get("chart_body") or ""
+                else block.get("image_body")
+                or block.get("chart_body")
+                or block.get("text")
+                or ""
             )
             image_ref = block.get("image")
             source = (
@@ -311,6 +321,7 @@ def _raw_parts_from_content(
     text_blocks: list[Any],
     *,
     cancelled: Callable[[int, int], bool],
+    discarded_types: frozenset[str] = DISCARDED_BLOCK_TYPES,
 ) -> list[str] | None:
     by_content_id: dict[str, int] = {}
     by_content_index: dict[int, int] = {}
@@ -346,7 +357,7 @@ def _raw_parts_from_content(
             text_index = content_index
         if text_index is not None:
             used_text_indices.add(text_index)
-        if block_type in DISCARDED_BLOCK_TYPES:
+        if block_type in discarded_types:
             continue
         if block_type == "table":
             text = table_model_to_plain_text(table_model_from_block(block))
@@ -355,7 +366,7 @@ def _raw_parts_from_content(
         elif block_type == "list":
             text = "\n".join(_text_items(block.get("list_items")))
         elif block_type in {"image", "figure", "chart", "seal"}:
-            text = "\n".join(
+            text = str(block.get("text") or "") or "\n".join(
                 _text_items(block.get("image_caption") or block.get("chart_caption"))
                 + _text_items(block.get("image_body") or block.get("chart_body"))
                 + _text_items(
@@ -380,7 +391,7 @@ def _raw_parts_from_content(
     for text_index, text_block in enumerate(text_blocks):
         if text_index in used_text_indices:
             continue
-        if str(getattr(text_block, "label", "")).lower() in DISCARDED_BLOCK_TYPES:
+        if str(getattr(text_block, "label", "")).lower() in discarded_types:
             continue
         text = str(getattr(text_block, "text", "") or "")
         if text:

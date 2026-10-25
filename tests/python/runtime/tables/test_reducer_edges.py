@@ -307,18 +307,19 @@ class TestBuildResultProjections:
         assert "table-caption" in html
         assert "table-footnote" in html
 
-    def test_discarded_block_type_skipped(self):
-        """DISCARDED_BLOCK_TYPES（如 image 的某些标签）不出现在投影中。"""
+    def test_image_body_text_is_preserved_in_all_projections(self):
+        """没有 caption 的图像块仍保留已有 text 说明，历史重投影不得丢字。"""
         result = SimpleNamespace(
             content_list=[
-                {"type": "image", "text": "should-skip-if-discarded"},
+                {"type": "image", "text": "image description"},
             ],
             text_blocks=[],
         )
 
-        # image 不在 DISCARDED 中，应正常投影 caption（这里无 caption）
         raw, markdown, html = build_result_projections(result)
-        assert raw == ""
+        assert raw == "image description"
+        assert "image description" in markdown
+        assert "image description" in html
 
     def test_include_raw_false_skips_raw(self):
         """include_raw=False 时 raw_text 为空。"""

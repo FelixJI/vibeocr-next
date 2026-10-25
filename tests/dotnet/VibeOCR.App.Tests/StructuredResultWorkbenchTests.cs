@@ -21,6 +21,31 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 public sealed class StructuredResultWorkbenchTests
 {
+  [Fact]
+  public void PdfSmokeRejectsStaleOrPartiallyToggledPageSelections()
+  {
+    var stale = new PdfWorkbenchState(false, "pdf.ready", 2, 0, SelectedPages: []);
+    var first = stale with { SelectedPages = [0] };
+    var accidentallyToggled = stale with { SelectedPages = [1] };
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(stale));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(first));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(accidentallyToggled));
+    var all = stale with { SelectedPages = [0, 1] };
+    Assert.True(MainWindow.PaddleSmokePdfHasBothPages(all));
+    Assert.False(MainWindow.PaddleSmokePdfHasBothPages(all with { IsBusy = true }));
+  }
+
+  [Fact]
+  public void PdfSmokeProjectionChecksPageOwnershipAndEverySourceField()
+  {
+    using JsonDocument source = JsonDocument.Parse("""[{"type":"image","bbox":[1,2,3,4],"image":{"job_id":"job","item_id":"page0","asset_id":"asset"}}]""");
+    using JsonDocument projected = JsonDocument.Parse("""[{"type":"image","bbox":[1,2,3,4],"image":{"job_id":"job","item_id":"page0","asset_id":"asset","resource":{"url":"opaque"}}}]""");
+    MainWindow.ValidatePaddlePdfProjection(source.RootElement, projected.RootElement, "job", "page0");
+    Assert.Throws<InvalidOperationException>(() => MainWindow.ValidatePaddlePdfProjection(source.RootElement, projected.RootElement, "job", "page1"));
+    using JsonDocument changed = JsonDocument.Parse("""[{"type":"image","bbox":[1,2,3,5],"image":{"job_id":"job","item_id":"page0","asset_id":"asset"}}]""");
+    Assert.Throws<InvalidOperationException>(() => MainWindow.ValidatePaddlePdfProjection(source.RootElement, changed.RootElement, "job", "page0"));
+  }
+
   private static readonly byte[] AssetPng = [1, 2, 3, 4];
   /// <summary>真实可解码 1×1 PNG：识别输入 fixture（ResultImage 像素契约）。</summary>
   private static readonly byte[] RecognitionPng = Convert.FromBase64String(

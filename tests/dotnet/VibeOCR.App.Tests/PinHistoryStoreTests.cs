@@ -63,6 +63,23 @@ public sealed class PinHistoryStoreTests : IDisposable
   }
 
   [Fact]
+  public void LegacyUntypedSummaryAndWholePageImageRemainReadable()
+  {
+    var store = Store();
+    store.SetEnabled(true);
+    byte[] wholePage = PngWithTag(7);
+    store.RecordSuccessfulCapture("mixed-legacy", wholePage);
+    store.EnrichRecognizedText("mixed-legacy", "正文及旧印章摘要");
+    var before = Assert.Single(store.Projection(null).Entries);
+    var reloaded = LoadedStore(root);
+    var after = Assert.Single(reloaded.Projection(null).Entries);
+    Assert.Equal(before, after);
+    Assert.Equal("正文及旧印章摘要", after.RecognizedText);
+    Assert.Equal(wholePage, reloaded.TryReadImage(after.EntryId)?.Png);
+    Assert.Equal(after, Assert.Single(reloaded.Projection(null).Entries));
+  }
+
+  [Fact]
   public void DisabledByDefaultAndEnablePersists()
   {
     var time = new FrozenTime();

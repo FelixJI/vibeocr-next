@@ -90,18 +90,21 @@ def _build_ocr_result(
 class PPStructureV3Options(BasePipelineOptions):
     """PP-StructureV3 管道选项
 
-    文档结构分析，支持表格、公式、印章、图表识别。六个模块/预处理开关
+    文档结构分析，支持正文、表格及普通图文区域识别。六个模块/预处理开关
     同时作为构造与 predict 参数：PaddleX 布局解析管线在构造期按这些
     开关初始化子模块（未初始化的模块在 predict 期开启会直接报错），
     因此它们参与构造签名，变更会重建管道。
     """
 
     pipeline: str = "PP-StructureV3"
+    model_preset: str = "small"
+    device: str = "auto"
+    local_models_only: bool = False
     use_doc_orientation_classify: bool = True
     use_doc_unwarping: bool = False
     use_textline_orientation: bool = False
     use_table_recognition: bool = True
-    use_formula_recognition: bool = True
+    use_formula_recognition: bool = False
     use_seal_recognition: bool = False
     use_chart_recognition: bool = False
 
@@ -109,16 +112,19 @@ class PPStructureV3Options(BasePipelineOptions):
 def _pp_structure_constructor_kwargs(options: Any) -> dict[str, Any]:
     """把公开选项映射为 PPStructureV3 构造参数（模块初始化门槛）。
 
-    仅返回会门控子模块初始化的参数；use_textline_orientation 是
-    GeneralOCR 子管线的 predict 参数，不参与构造签名（避免无谓重建）。
+    行方向与模块开关同时约束构造和执行，选项变化必须重建。
     """
+    from vibeocr.runtime.recognition.paddle_onnx import constructor_kwargs
+
     return {
+        "use_textline_orientation": options.use_textline_orientation,
         "use_doc_orientation_classify": options.use_doc_orientation_classify,
         "use_doc_unwarping": options.use_doc_unwarping,
         "use_table_recognition": options.use_table_recognition,
-        "use_formula_recognition": options.use_formula_recognition,
-        "use_seal_recognition": options.use_seal_recognition,
-        "use_chart_recognition": options.use_chart_recognition,
+        "use_formula_recognition": False,
+        "use_seal_recognition": False,
+        "use_chart_recognition": False,
+        **constructor_kwargs(options),
     }
 
 
@@ -127,6 +133,17 @@ def _create_pp_structure_pipeline(device: str, **kwargs: Any) -> Any:
 
     额外 kwargs 透传给 PPStructureV3（例如 enable_mkldnn 及模块开关）。
     """
+    kwargs.update(
+        use_formula_recognition=False,
+        use_seal_recognition=False,
+        use_chart_recognition=False,
+    )
+    if "_onnx_request" in kwargs:
+        from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
+
+        request = kwargs.pop("_onnx_request")
+        kwargs.pop("enable_mkldnn", None)
+        return create_pipeline(request, **kwargs)
     from paddleocr import PPStructureV3
 
     pipeline = PPStructureV3(device=device, **kwargs)
@@ -148,7 +165,7 @@ def _recognize_pp_structure(
 
     从 OCRService._recognize_structure 迁移而来。构造与 predict 均消费
     同一组模块开关：构造期决定子模块初始化，predict 期按请求覆盖。
-    块级图像（image/seal/chart）经 asset_sink 写入 job 受控目录，
+    块级图像（image/chart）经 asset_sink 写入 job 受控目录，
     content_list 携带 opaque 资产引用（不含本地路径）。
     """
     from vibeocr.runtime.recognition.models.ocr_result import TextBlock
@@ -165,9 +182,9 @@ def _recognize_pp_structure(
         use_doc_unwarping=options.use_doc_unwarping,
         use_textline_orientation=options.use_textline_orientation,
         use_table_recognition=options.use_table_recognition,
-        use_formula_recognition=options.use_formula_recognition,
-        use_seal_recognition=options.use_seal_recognition,
-        use_chart_recognition=options.use_chart_recognition,
+        use_formula_recognition=False,
+        use_seal_recognition=False,
+        use_chart_recognition=False,
     )
     output_list = _consume_generator_safely(output)
     _logger.info(
@@ -228,12 +245,14 @@ def _recognize_pp_structure(
 
         for block in parsing_res_list:
             label = getattr(block, "label", "text")
+            if str(label).lower() == "seal":
+                continue
             bbox = getattr(block, "bbox", None)
             content = getattr(block, "content", "")
             order_index = getattr(block, "order_index", -1)
             block_image = getattr(block, "image", None)
 
-            if not content and label not in ("image", "chart"):
+            if not content and label not in ("image", "chart", "formula"):
                 continue
 
             cl_idx = len(content_list)
@@ -329,7 +348,7 @@ def _recognize_pp_structure(
                     "bbox": bbox_tuple,
                     "block_id": block_id,
                 }
-                if label in ("image", "seal", "chart"):
+                if label in ("image", "chart"):
                     provider_image = (
                         block_image.get("img")
                         if isinstance(block_image, dict)
@@ -387,7 +406,7 @@ def _recognize_pp_structure(
 PP_STRUCTURE_V3_SPEC = PipelineSpec(
     name="PP-StructureV3",
     display_name="PP-StructureV3",
-    description="文档结构分析，支持表格、公式、印章、图表识别",
+    description="文档结构分析，支持正文、表格及普通图文区域识别",
     options_class=PPStructureV3Options,
     create_pipeline=_create_pp_structure_pipeline,
     recognize=_recognize_pp_structure,

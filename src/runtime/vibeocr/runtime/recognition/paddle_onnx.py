@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -28,6 +29,9 @@ PROVIDERS = {
     "directml": "DmlExecutionProvider",
 }
 PRESETS = ("tiny", "small", "medium")
+PIPELINES = ("OCR", "TABLE_RECOGNITION", "PP-StructureV3")
+_RETIRED = ("use_formula_recognition", "use_seal_recognition", "use_chart_recognition")
+_CONSTRUCTION_LOCK = threading.RLock()
 _SNAPSHOT: ContextVar[dict | None] = ContextVar("paddle_onnx_snapshot", default=None)
 _CANCELLED: ContextVar[Callable[[], bool]] = ContextVar(
     "paddle_onnx_cancelled", default=lambda: False
@@ -58,7 +62,13 @@ def model_catalog() -> dict:
     )["models"]
 
 
-def freeze_request(options: dict, source_ids: tuple[str, ...] = ()) -> dict:
+def freeze_request(
+    options: dict, source_ids: tuple[str, ...] = (), *, pipeline_id: str = "OCR"
+) -> dict:
+    if pipeline_id not in PIPELINES:
+        raise PaddleOnnxError("Unsupported Paddle ONNX pipeline")
+    if any(options.get(key) for key in _RETIRED):
+        raise PaddleOnnxError("Formula, seal and chart recognition are retired")
     preset = options.get("model_preset", "small")
     if preset not in PRESETS:
         raise PaddleOnnxError("Unsupported Paddle ONNX model preset")
@@ -81,14 +91,44 @@ def freeze_request(options: dict, source_ids: tuple[str, ...] = ()) -> dict:
         raise PaddleOnnxError(
             "Paddle ONNX requires official Hugging Face or ModelScope assets"
         )
+    selections = {
+        "use_doc_orientation_classify": options.get(
+            "use_doc_orientation_classify", True
+        ),
+        "use_doc_unwarping": options.get("use_doc_unwarping", False),
+        "use_textline_orientation": options.get("use_textline_orientation", False),
+        "use_table_recognition": options.get("use_table_recognition", True),
+        "use_table_orientation_classify": options.get(
+            "use_table_orientation_classify", True
+        ),
+    }
     names = [f"PP-OCRv6_{preset}_det", f"PP-OCRv6_{preset}_rec"]
-    for option, model, default in (
-        ("use_doc_orientation_classify", "PP-LCNet_x1_0_doc_ori", True),
-        ("use_doc_unwarping", "UVDoc", False),
-        ("use_textline_orientation", "PP-LCNet_x0_25_textline_ori", False),
-    ):
-        if options.get(option, default):
-            names.append(model)
+    if selections["use_doc_orientation_classify"]:
+        names.append("PP-LCNet_x1_0_doc_ori")
+    if selections["use_doc_unwarping"]:
+        names.append("UVDoc")
+    if selections["use_textline_orientation"]:
+        names.append(
+            "PP-LCNet_x1_0_textline_ori"
+            if pipeline_id == "PP-StructureV3"
+            else "PP-LCNet_x0_25_textline_ori"
+        )
+    if pipeline_id != "OCR":
+        names.append("PP-DocLayout_plus-L")
+        if pipeline_id == "PP-StructureV3":
+            names.append("PP-DocBlockLayout")
+        if pipeline_id == "TABLE_RECOGNITION" or selections["use_table_recognition"]:
+            names.extend(
+                (
+                    "PP-LCNet_x1_0_table_cls",
+                    "SLANeXt_wired",
+                    "SLANeXt_wireless",
+                    "RT-DETR-L_wired_table_cell_det",
+                    "RT-DETR-L_wireless_table_cell_det",
+                )
+            )
+            if selections["use_table_orientation_classify"]:
+                names.append("PP-LCNet_x1_0_doc_ori")
     catalog = model_catalog()
     device_id = 0
     adapter = None
@@ -106,6 +146,8 @@ def freeze_request(options: dict, source_ids: tuple[str, ...] = ()) -> dict:
             "VIBEOCR_MANAGED_ENVIRONMENT_REVISION", ""
         ),
         "recipe": recipe,
+        "pipeline_id": pipeline_id,
+        "selections": selections,
         "model_preset": preset,
         "device": device,
         "provider": PROVIDERS[device],
@@ -131,7 +173,14 @@ def request_snapshot(
 
 def current_snapshot(options: dict | None = None) -> dict:
     snapshot = _SNAPSHOT.get()
-    return snapshot if snapshot is not None else freeze_request(options or {})
+    if snapshot is not None:
+        if options and snapshot.get("pipeline_id", "OCR") != options.get(
+            "pipeline", "OCR"
+        ):
+            raise PaddleOnnxError("Paddle ONNX pipeline snapshot changed")
+        return snapshot
+    values = options or {}
+    return freeze_request(values, pipeline_id=values.get("pipeline", "OCR"))
 
 
 def constructor_kwargs(options: Any) -> dict:
@@ -140,6 +189,9 @@ def constructor_kwargs(options: Any) -> dict:
     values = {
         key: getattr(options, key, default)
         for key, default in (
+            ("pipeline", "OCR"),
+            ("use_table_recognition", True),
+            ("use_table_orientation_classify", True),
             ("model_preset", "small"),
             ("device", "auto"),
             ("use_doc_orientation_classify", True),
@@ -147,15 +199,16 @@ def constructor_kwargs(options: Any) -> dict:
             ("use_textline_orientation", False),
         )
     }
+    values["pipeline"] = getattr(values["pipeline"], "value", values["pipeline"])
     snapshot = current_snapshot(values)
     return {
         "_onnx_request": json.dumps(snapshot, sort_keys=True),
         **{
-            key: model in snapshot["models"]
-            for key, model in (
-                ("use_doc_orientation_classify", "PP-LCNet_x1_0_doc_ori"),
-                ("use_doc_unwarping", "UVDoc"),
-                ("use_textline_orientation", "PP-LCNet_x0_25_textline_ori"),
+            key: snapshot["selections"][key]
+            for key in (
+                "use_doc_orientation_classify",
+                "use_doc_unwarping",
+                "use_textline_orientation",
             )
         },
         "local_models_only": getattr(options, "local_models_only", False),
@@ -169,29 +222,217 @@ def _unwrap(pipeline):
 
 
 def owned_runners(pipeline) -> list:
-    pipeline = _unwrap(pipeline.paddlex_pipeline)
-    nodes = [
-        getattr(pipeline, name, None)
-        for name in ("text_det_model", "text_rec_model", "textline_orientation_model")
-    ]
-    preprocessor = getattr(pipeline, "doc_preprocessor_pipeline", None)
-    if preprocessor is not None:
-        preprocessor = _unwrap(preprocessor)
-        nodes.extend(
-            getattr(preprocessor, name, None)
-            for name in ("doc_ori_classify_model", "doc_unwarping_model")
+    runners = []
+    seen = set()
+
+    def visit(node):
+        node = _unwrap(node)
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        if getattr(node, "runner", None) is not None:
+            runners.append(node.runner)
+            return
+        for name, child in vars(node).items():
+            if hasattr(child, "__dict__") and (
+                name.endswith("_model") or name.endswith("_pipeline")
+            ):
+                visit(child)
+
+    visit(pipeline.paddlex_pipeline)
+    return runners
+
+
+class _MissingTableLayoutPostprocess:
+    """Only recover model table candidates when the normal layout has none."""
+
+    def __init__(self, original):
+        self.original = original
+
+    def __call__(self, batch_outputs, datas, **kwargs):
+        baseline = self.original(batch_outputs, datas, **kwargs)
+        missing = [not any(box["cls_id"] == 8 for box in boxes) for boxes in baseline]
+        if not any(missing):
+            return baseline
+        table_outputs = [
+            {**output, "boxes": output["boxes"][output["boxes"][:, 0] == 8]}
+            for output in batch_outputs
+        ]
+        tables = self.original(
+            table_outputs,
+            datas,
+            **{
+                **kwargs,
+                "threshold": 0.1,
+                "layout_nms": True,
+                # Containment filtering is restricted to the recovery table
+                # candidates. Existing layout and all non-table blocks stay intact.
+                "layout_merge_bboxes_mode": "large",
+            },
         )
-    return [node.runner for node in nodes if node is not None]
+        return [
+            original + table if recover else original
+            for original, table, recover in zip(baseline, tables, missing, strict=True)
+        ]
+
+
+def _install_lossless_doc_rotation(preprocessor):
+    """Keep the pinned PaddleX preprocessing flow, replacing only right-angle resampling."""
+    import inspect
+    from types import FunctionType, MethodType
+
+    import numpy as np
+    from paddlex.inference.pipelines.doc_preprocessor.pipeline import (
+        _DocPreprocessorPipeline,
+        rotate_image,
+    )
+    from paddlex.inference.utils.benchmark import benchmark
+
+    node = _unwrap(preprocessor)
+    method = node.predict
+    original = inspect.unwrap(_DocPreprocessorPipeline.predict)
+    if (
+        not inspect.ismethod(method)
+        or inspect.unwrap(method.__func__) is not original
+        or original.__globals__.get("rotate_image") is not rotate_image
+        or "rotate_image" not in original.__code__.co_names
+    ):
+        raise PaddleOnnxError("Unsupported PaddleX document rotation boundary")
+
+    def rotate(image, angle):
+        if angle in (0, 90, 180, 270):
+            return np.ascontiguousarray(np.rot90(image, int(angle) // 90))
+        return rotate_image(image, angle)
+
+    # The official method has no rotation injection point. A private globals
+    # mapping keeps its reader, batching, validation and single UVDoc invocation
+    # unchanged without mutating the module, class, or any other pipeline owner.
+    scoped = FunctionType(
+        original.__code__,
+        {**original.__globals__, "rotate_image": rotate},
+        original.__name__,
+        original.__defaults__,
+        original.__closure__,
+    )
+    scoped.__kwdefaults__ = original.__kwdefaults__
+    scoped.__qualname__ = original.__qualname__
+    scoped.__annotations__ = original.__annotations__
+    node.predict = MethodType(benchmark.timeit(scoped), node)
+
+
+def _materialize_table_nodes(pipeline, snapshot):
+    root = _unwrap(pipeline.paddlex_pipeline)
+    if snapshot["pipeline_id"] == "OCR":
+        return
+    preprocessor = getattr(root, "doc_preprocessor_pipeline", None)
+    if preprocessor is not None:
+        _install_lossless_doc_rotation(preprocessor)
+    if snapshot["pipeline_id"] == "TABLE_RECOGNITION":
+        # Unlike PPStructure, table_v2 does not forward layout kwargs from its
+        # config. Set the official predictor options on this instance only.
+        root.layout_det_model.layout_nms = True
+        root.layout_det_model.layout_merge_bboxes_mode = "union"
+    root.layout_det_model.post_op = _MissingTableLayoutPostprocess(
+        root.layout_det_model.post_op
+    )
+    if snapshot["pipeline_id"] == "PP-StructureV3":
+        root = getattr(root, "table_recognition_pipeline", None)
+        if root is None:
+            return
+        root = _unwrap(root)
+    if snapshot["selections"]["use_table_orientation_classify"]:
+        root.table_orientation_classify_model = root.create_model(
+            root.table_orientation_classify_config
+        )
+    if root.general_ocr_pipeline is None:
+        # This distinct OCR has box_thresh=.4; sharing the top .6 OCR changes table text.
+        root.general_ocr_pipeline = root.create_pipeline(root.general_ocr_config_bak)
+
+
+def _structure_config(snapshot, prepared):
+    from paddlex.inference import load_pipeline_config
+
+    config = load_pipeline_config(
+        "table_recognition_v2"
+        if snapshot["pipeline_id"] == "TABLE_RECOGNITION"
+        else "PP-StructureV3"
+    )
+    selection = snapshot["selections"]
+    expected = []
+
+    def configure(node, *, top=False):
+        for flag in _RETIRED:
+            node[flag] = False
+        modules = node.setdefault("SubModules", {})
+        pipelines = node.setdefault("SubPipelines", {})
+        modules.pop("ChartRecognition", None)
+        pipelines.pop("SealRecognition", None)
+        pipelines.pop("FormulaRecognition", None)
+        if top:
+            node["use_doc_preprocessor"] = (
+                selection["use_doc_orientation_classify"]
+                or selection["use_doc_unwarping"]
+            )
+            if not node["use_doc_preprocessor"]:
+                pipelines.pop("DocPreprocessor", None)
+        if node.get("pipeline_name") == "PP-StructureV3":
+            node["use_table_recognition"] = selection["use_table_recognition"]
+            if not selection["use_table_recognition"]:
+                pipelines.pop("TableRecognition", None)
+        if node.get("pipeline_name") == "doc_preprocessor":
+            for flag, role in (
+                ("use_doc_orientation_classify", "DocOrientationClassify"),
+                ("use_doc_unwarping", "DocUnwarping"),
+            ):
+                node[flag] = selection[flag]
+                if not selection[flag]:
+                    modules.pop(role, None)
+        if node.get("pipeline_name") == "OCR":
+            node["use_textline_orientation"] = selection["use_textline_orientation"]
+            if not selection["use_textline_orientation"]:
+                modules.pop("TextLineOrientation", None)
+            elif "TextLineOrientation" not in modules:
+                modules["TextLineOrientation"] = {
+                    "module_name": "textline_orientation",
+                    "model_name": "PP-LCNet_x0_25_textline_ori",
+                }
+        if not selection["use_table_orientation_classify"]:
+            modules.pop("TableOrientationClassify", None)
+        for role, model in modules.items():
+            if role in ("TextDetection", "TextRecognition"):
+                model["model_name"] = (
+                    f"PP-OCRv6_{snapshot['model_preset']}_{'det' if role == 'TextDetection' else 'rec'}"
+                )
+            elif role == "LayoutDetection":
+                model["model_name"] = "PP-DocLayout_plus-L"
+            elif role == "WirelessTableStructureRecognition":
+                model["model_name"] = "SLANeXt_wireless"
+            name = model["model_name"]
+            if name not in snapshot["models"]:
+                raise PaddleOnnxError(f"Unprepared model in Paddle ONNX graph: {name}")
+            model["model_dir"] = str(prepared / name)
+            expected.append(name)
+        for child in pipelines.values():
+            configure(child)
+
+    configure(config, top=True)
+    return config, expected
 
 
 class PaddleOnnxPipeline:
-    def __init__(self, pipeline, snapshot: dict):
+    def __init__(
+        self, pipeline, snapshot: dict, expected_models: list[str] | None = None
+    ):
         self.pipeline = pipeline
         self.snapshot = snapshot
         self._lock = threading.RLock()
         self.sessions = []
         runners = owned_runners(pipeline)
-        if len(runners) != len(snapshot["models"]):
+        if (
+            expected_models is not None
+            and Counter(Path(r.model_dir).name for r in runners)
+            != Counter(expected_models)
+        ) or (expected_models is None and len(runners) != len(snapshot["models"])):
             self.close()
             raise PaddleOnnxError("Paddle ONNX session/model count mismatch")
         for runner in runners:
@@ -233,6 +474,23 @@ class PaddleOnnxPipeline:
             if self.pipeline is None:
                 raise PaddleOnnxError("Paddle ONNX session already released")
             try:
+                for key, value in self.snapshot.get("selections", {}).items():
+                    if (
+                        key in kwargs
+                        and kwargs[key] is not None
+                        and kwargs[key] != value
+                    ):
+                        raise PaddleOnnxError(
+                            "Paddle ONNX prediction selection snapshot changed"
+                        )
+                if any(kwargs.get(key) for key in _RETIRED):
+                    raise PaddleOnnxError(
+                        "Formula, seal and chart recognition are retired"
+                    )
+                if self.snapshot.get("pipeline_id") == "PP-StructureV3":
+                    kwargs.update(dict.fromkeys(_RETIRED, False))
+                    kwargs.setdefault("use_e2e_wireless_table_rec_model", False)
+                    kwargs.setdefault("use_wireless_table_cells_trans_to_html", False)
                 yield from self.pipeline.predict(*args, **kwargs)
             except Exception as exc:
                 if (
@@ -265,16 +523,17 @@ def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
         )
     ):
         raise PaddleOnnxError("Paddle ONNX environment snapshot changed")
-    for option, model in (
-        ("use_doc_orientation_classify", "PP-LCNet_x1_0_doc_ori"),
-        ("use_doc_unwarping", "UVDoc"),
-        ("use_textline_orientation", "PP-LCNet_x0_25_textline_ori"),
+    selections = snapshot["selections"]
+    for option in (
+        "use_doc_orientation_classify",
+        "use_doc_unwarping",
+        "use_textline_orientation",
     ):
-        if flags.get(option, model in snapshot["models"]) != (
-            model in snapshot["models"]
-        ):
+        if flags.get(option, selections[option]) != selections[option]:
             raise PaddleOnnxError("Paddle ONNX auxiliary selection snapshot changed")
-        flags[option] = model in snapshot["models"]
+        flags[option] = selections[option]
+    if any(flags.get(key) for key in _RETIRED):
+        raise PaddleOnnxError("Formula, seal and chart recognition are retired")
     catalog = model_catalog()
     source = snapshot["source"]
     assets = []
@@ -327,33 +586,65 @@ def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
     engine_config = {"providers": [provider], "provider_options": [provider_options]}
     if snapshot["device"] == "directml":
         engine_config.update(enable_mem_pattern=False, execution_mode="sequential")
-    model_arguments = {}
-    for name in snapshot["models"]:
-        if name.endswith("_det"):
-            prefix = "text_detection"
-        elif name.endswith("_rec"):
-            prefix = "text_recognition"
-        else:
-            prefix = {
-                "PP-LCNet_x1_0_doc_ori": "doc_orientation_classify",
-                "UVDoc": "doc_unwarping",
-                "PP-LCNet_x0_25_textline_ori": "textline_orientation",
-            }[name]
-        model_arguments[prefix + "_model_name"] = name
-        model_arguments[prefix + "_model_dir"] = str(prepared.root / name)
     os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-    from paddleocr import PaddleOCR
+    import paddleocr
+    from paddlex.inference.models.runners.onnxruntime_runner import ONNXRuntimeRunner
 
-    try:
-        pipeline = PaddleOCR(
-            engine="onnxruntime",
-            device="cpu",
-            engine_config=engine_config,
-            **model_arguments,
-            **flags,
+    expected = None
+    if snapshot["pipeline_id"] == "OCR":
+        model_arguments = {}
+        prefixes = {
+            "PP-LCNet_x1_0_doc_ori": "doc_orientation_classify",
+            "UVDoc": "doc_unwarping",
+            "PP-LCNet_x0_25_textline_ori": "textline_orientation",
+        }
+        for name in snapshot["models"]:
+            prefix = (
+                "text_detection"
+                if name.endswith("_det")
+                else "text_recognition"
+                if name.endswith("_rec")
+                else prefixes[name]
+            )
+            model_arguments[prefix + "_model_name"] = name
+            model_arguments[prefix + "_model_dir"] = str(prepared.root / name)
+        factory = paddleocr.PaddleOCR
+        arguments = {**model_arguments, **flags}
+    else:
+        config, expected = _structure_config(snapshot, prepared.root)
+        factory = (
+            paddleocr.TableRecognitionPipelineV2
+            if snapshot["pipeline_id"] == "TABLE_RECOGNITION"
+            else paddleocr.PPStructureV3
         )
-        return PaddleOnnxPipeline(pipeline, snapshot)
-    except PaddleOnnxError:
-        raise
-    except Exception as exc:
-        raise PaddleOnnxError(str(exc)) from exc
+        arguments = {"paddlex_config": config}
+    # The locked upstream close() is empty, including partially built graphs.
+    # Capture each runner before initialization so failed constructors release it too.
+    captured = []
+    with _CONSTRUCTION_LOCK:
+        original = ONNXRuntimeRunner.__init__
+        owner_thread = threading.get_ident()
+
+        def initialize(runner, *args, **kwargs):
+            if threading.get_ident() == owner_thread:
+                captured.append(runner)
+            original(runner, *args, **kwargs)
+
+        ONNXRuntimeRunner.__init__ = initialize
+        try:
+            pipeline = factory(
+                engine="onnxruntime",
+                device="cpu",
+                engine_config=engine_config,
+                **arguments,
+            )
+            _materialize_table_nodes(pipeline, snapshot)
+            return PaddleOnnxPipeline(pipeline, snapshot, expected)
+        except Exception as exc:
+            for runner in captured:
+                runner.session = None
+            if isinstance(exc, PaddleOnnxError):
+                raise
+            raise PaddleOnnxError(str(exc)) from exc
+        finally:
+            ONNXRuntimeRunner.__init__ = original

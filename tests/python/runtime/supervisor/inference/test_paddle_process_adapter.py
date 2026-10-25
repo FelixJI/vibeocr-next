@@ -151,3 +151,51 @@ def test_onnx_cancellation_stops_worker_and_ignores_late_reply(monkeypatch):
         adapter._exchange({"operation": "recognize"})
     assert adapter._process is None
     assert adapter._responses.empty()
+
+
+@pytest.mark.parametrize("mode", ["TABLE_RECOGNITION", "PP-StructureV3"])
+@pytest.mark.parametrize("frozen_job", [False, True])
+def test_retained_worker_request_preserves_pipeline_id_and_frozen_selection(
+    monkeypatch, mode, frozen_job
+):
+    from contextlib import nullcontext
+
+    from vibeocr.runtime.recognition.paddle_onnx import freeze_request, request_snapshot
+    from vibeocr.runtime_contracts import PipelineSelection
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
+    values = {"model_preset": "tiny", "use_doc_unwarping": True}
+    selection = PipelineSelection(mode, options=values)
+    frozen = freeze_request(values, pipeline_id=mode)
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    request = MagicMock(return_value=[])
+    monkeypatch.setattr(adapter, "_request", request)
+    with request_snapshot(frozen) if frozen_job else nullcontext():
+        assert adapter.recognize_many([], options=selection) == []
+    sent = request.call_args.kwargs
+    assert sent["snapshot"]["pipeline_id"] == mode
+    assert sent["snapshot"]["selections"] == frozen["selections"]
+    assert sent["snapshot"]["models"] == frozen["models"]
+    assert sent["options"] == selection.to_payload()
+    assert "pipeline" not in values
+    if frozen_job:
+        assert sent["snapshot"] is frozen
+
+
+def test_worker_request_rejects_a_different_pipeline_than_frozen_job(monkeypatch):
+    from vibeocr.runtime.recognition.paddle_onnx import (
+        PaddleOnnxError,
+        freeze_request,
+        request_snapshot,
+    )
+    from vibeocr.runtime_contracts import PipelineSelection
+
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    request = MagicMock(return_value=[])
+    monkeypatch.setattr(adapter, "_request", request)
+    with request_snapshot(freeze_request({}, pipeline_id="TABLE_RECOGNITION")):
+        with pytest.raises(PaddleOnnxError, match="snapshot changed"):
+            adapter.recognize_many([], options=PipelineSelection("PP-StructureV3"))
+    request.assert_not_called()

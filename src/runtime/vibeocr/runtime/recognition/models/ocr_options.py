@@ -36,7 +36,7 @@ class OCROptions:
 
     # === PP-StructureV3 专用 ===
     use_table_recognition: bool = True  # 表格识别
-    use_formula_recognition: bool = True  # 公式识别
+    use_formula_recognition: bool = False  # 公式识别
     use_seal_recognition: bool = False  # 印章识别
     use_chart_recognition: bool = False  # 图表识别
 
@@ -68,7 +68,7 @@ class OCROptions:
     # === 公式识别专用（FORMULA_RECOGNITION）===
     formula_recognition_batch_size: int = 1  # 公式批量大小
     use_e2e_wired_table_rec_model: bool = False
-    use_e2e_wireless_table_rec_model: bool = True
+    use_e2e_wireless_table_rec_model: bool = False
     wireless_table_model_name: str = "SLANeXt_wireless"
     wired_table_model_name: str = "SLANeXt_wired"
     use_wired_table_cells_trans_to_html: bool = False
@@ -165,7 +165,7 @@ class OCROptions:
             use_doc_unwarping=data.get("use_doc_unwarping", False),
             use_textline_orientation=data.get("use_textline_orientation", False),
             use_table_recognition=data.get("use_table_recognition", True),
-            use_formula_recognition=data.get("use_formula_recognition", True),
+            use_formula_recognition=data.get("use_formula_recognition", False),
             use_seal_recognition=data.get("use_seal_recognition", False),
             use_chart_recognition=data.get("use_chart_recognition", False),
             vl_use_layout_detection=data.get("vl_use_layout_detection", True),
@@ -194,7 +194,7 @@ class OCROptions:
                 "use_e2e_wired_table_rec_model", False
             ),
             use_e2e_wireless_table_rec_model=data.get(
-                "use_e2e_wireless_table_rec_model", True
+                "use_e2e_wireless_table_rec_model", False
             ),
             wireless_table_model_name=data.get(
                 "wireless_table_model_name", "SLANeXt_wireless"

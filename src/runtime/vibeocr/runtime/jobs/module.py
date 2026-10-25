@@ -335,13 +335,13 @@ class SupervisorModule:
             )
 
             paddle_snapshot = None
-            is_paddle_text = (
-                pipeline is not None
-                and pipeline.pipeline_id == "OCR"
+            is_paddle_mode = pipeline is not None and (
+                pipeline.pipeline_id in {"TABLE_RECOGNITION", "PP-StructureV3"}
+                or pipeline.pipeline_id == "OCR"
                 and getattr(pipeline.engine, "value", pipeline.engine) == "paddleocr"
             )
             if (
-                is_paddle_text
+                is_paddle_mode
                 and not is_ort_environment()
                 and {"model_preset", "device"} & pipeline.options.keys()
             ):
@@ -351,14 +351,20 @@ class SupervisorModule:
             if (
                 is_ort_environment()
                 and pipeline is not None
-                and pipeline.pipeline_id == "OCR"
-                and getattr(pipeline.engine, "value", pipeline.engine) == "paddleocr"
+                and (
+                    pipeline.pipeline_id in {"TABLE_RECOGNITION", "PP-StructureV3"}
+                    or pipeline.pipeline_id == "OCR"
+                    and getattr(pipeline.engine, "value", pipeline.engine)
+                    == "paddleocr"
+                )
             ):
                 from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError
 
                 try:
                     paddle_snapshot = freeze_request(
-                        dict(pipeline.options), self._settings.download_source_ids
+                        dict(pipeline.options),
+                        self._settings.download_source_ids,
+                        pipeline_id=pipeline.pipeline_id,
                     )
                 except PaddleOnnxError as exc:
                     raise ContractError(str(exc)) from exc
@@ -502,7 +508,11 @@ class SupervisorModule:
         record = self.registry.get(job_id)
         out: list[ResultEntry] = []
         for item in record.items:
-            payload = record.results.get(item.item_id, {})
+            from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+                project_retired_seals,
+            )
+
+            payload = project_retired_seals(record.results.get(item.item_id, {}))
             err = record.item_errors.get(item.item_id)
             out.append(
                 ResultEntry(
@@ -536,7 +546,16 @@ class SupervisorModule:
 
         if item is None or item.state is not ItemState.SUCCEEDED:
             return None
-        payload = record.results.get(item_id)
+        from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+            project_retired_seals,
+        )
+
+        stored_payload = record.results.get(item_id)
+        payload = (
+            project_retired_seals(stored_payload)
+            if isinstance(stored_payload, dict)
+            else stored_payload
+        )
         if not isinstance(payload, dict):
             return None
 

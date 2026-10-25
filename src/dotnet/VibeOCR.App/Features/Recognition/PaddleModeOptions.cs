@@ -53,7 +53,10 @@ public sealed record PaddleModeOptions
         if (stored is null) return new();
         try
         {
-            return stored.Deserialize<PaddleModeOptions>(JsonOptions) ?? new();
+            PaddleModeOptions value = stored.Deserialize<PaddleModeOptions>(JsonOptions) ?? new();
+            return modeId == "paddle_structure"
+                ? value with { UseFormulaRecognition = null, UseSealRecognition = null, UseChartRecognition = null }
+                : value;
         }
         catch (JsonException)
         {
@@ -74,6 +77,8 @@ public sealed record PaddleModeOptions
     public IReadOnlyDictionary<string, JsonElement> ToWire(RecognitionModeOption mode)
     {
         ArgumentNullException.ThrowIfNull(mode);
+        if (mode.Id == "paddle_structure" && (UseFormulaRecognition is not null || UseSealRecognition is not null || UseChartRecognition is not null))
+            throw new ArgumentException("Formula, seal and chart recognition are retired for this mode.");
         if (ModelPreset is not null && ModelPreset is not ("tiny" or "small" or "medium"))
             throw new ArgumentException("Unsupported Paddle model preset.");
         if (Device is not null && Device is not ("auto" or "cpu" or "cuda" or "directml"))

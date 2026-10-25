@@ -128,7 +128,7 @@ it("remounts per result so a stale cell selection cannot leak across results", a
   );
 });
 
-it("keeps recognized text beside image/chart/seal previews including failed assets", () => {
+it("keeps image/chart content while hiding retired seal history", () => {
   // 生产管线对 image/chart/seal 同时产出 text 与 image（图表内容、图片
   // 说明、印章文字）：预览资产失效时识别文本也不得丢失。
   render(
@@ -165,11 +165,11 @@ it("keeps recognized text beside image/chart/seal previews including failed asse
   );
   expect(screen.getByText("图片说明文字")).toBeInTheDocument();
   expect(screen.getByText("图表内容摘要")).toBeInTheDocument();
-  expect(screen.getByText("印章文字")).toBeInTheDocument();
-  expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
+  expect(screen.queryByText("印章文字")).not.toBeInTheDocument();
+  expect(screen.queryByText("图片不可用：资产已过期")).not.toBeInTheDocument();
 });
 
-it.each(["image", "chart", "seal"])(
+it.each(["image", "chart"])(
   "keeps %s text when no image descriptor is provided",
   (type) => {
     render(
@@ -185,7 +185,7 @@ it.each(["image", "chart", "seal"])(
   },
 );
 
-it("previews image assets on chart and seal blocks", () => {
+it("previews chart assets without retired seal assets", () => {
   render(
     <StructuredResult
       source={JSON.stringify([
@@ -198,7 +198,8 @@ it("previews image assets on chart and seal blocks", () => {
             },
           },
         },
-        { type: "seal", image: { available: false, reason: "资产已过期" } },
+        { type: "SEAL", image: { available: false, reason: "资产已过期" } },
+        { type: "retired" },
       ])}
       onCopy={vi.fn(async () => true)}
     />,
@@ -207,7 +208,7 @@ it("previews image assets on chart and seal blocks", () => {
     "src",
     "https://resource.vibeocr/chart",
   );
-  expect(screen.getByText("图片不可用：资产已过期")).toBeInTheDocument();
+  expect(screen.queryByText("图片不可用：资产已过期")).not.toBeInTheDocument();
 });
 
 it("bounds sparse oversized tables to a note without clipboard copy", () => {
