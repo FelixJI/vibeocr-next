@@ -148,15 +148,15 @@ public sealed class BatchViewModelSupervisorTests
         var fake = new FakeBatchInferenceClient();
         var viewModel = new BatchViewModel(fake, files);
         viewModel.SetRecognitionMode(new RecognitionModeOption(
-            "paddle_formula",
-            "specialized",
-            "FORMULA_RECOGNITION",
-            null,
+            "paddle_text",
+            "text",
+            "OCR",
+            OcrEngine.PaddleOcr,
             "advanced_component",
             "ready",
             null,
-            "paddleocr-cpu",
-            ["formula_recognition_batch_size"],
+            "paddleocr-ort-cpu",
+            ["use_doc_unwarping"],
             "model_residency",
             true,
             true,

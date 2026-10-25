@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
+Paddle 三种保留 ORT 模式的隔离候选实机冒烟。
 
 .DESCRIPTION
 只复制全新候选到新的隔离根（不删除/复用任何已有 state，不读取真实
 桌面内容），用仓库 Python 生成合成 fixture，然后按阶段启动候选应用：
-  install   —— 通过既有宿主命令创建 ASCII 空环境 paddle-smoke-cpu，再从常规组件入口预览 paddleocr-cpu
+  install   —— 通过既有宿主命令创建 ASCII 空环境 paddle-smoke-cpu，再从常规组件入口预览 paddleocr-ort-cpu
                配方并确认安装（与 managed-environment 冒烟同一公共 UI）。
   recognize —— 每模式一次独立进程：切换环境、公共 UI 选模式、设置真实
                非默认选项并保存、纯截图（合成 fixture 选区器）+显式
@@ -22,7 +22,7 @@ Goal #110 隔离候选专用 Paddle 五模式实机冒烟。
 隔离工作根（不得与 ProductRoot 相互嵌套）。
 
 .PARAMETER Modes
-默认五种 paddle 模式；可用子集逐个交付。
+默认三种 retained Paddle ORT 模式；可用子集逐个交付。
 
 .PARAMETER InputKinds
 额外真实输入入口：file/batch 使用表格模式，pdf 按 Modes 中的表格/文档结构模式分别验证两页（包括 ORT）；无匹配模式时沿用文档结构默认。
@@ -45,7 +45,7 @@ WorkRoot 互斥。已有 health 证据不覆盖（passed 保留跳过，failed/b
 pwsh -File scripts/smoke_paddle_modes.ps1 -ProductRoot .release-build\publish -WorkRoot D:\goal103-smoke
 
 .EXAMPLE
-pwsh -File scripts/smoke_paddle_modes.ps1 -ResumeRoot D:\goal103-smoke\pm-abc123 -Modes paddle_formula
+pwsh -File scripts/smoke_paddle_modes.ps1 -ResumeRoot D:\goal103-smoke\pm-abc123 -Modes paddle_table
 #>
 [CmdletBinding()]
 param(
@@ -57,14 +57,14 @@ param(
     # 显式新尝试保留旧 health/导出；仅复用已安装成功的合成环境。
     [ValidatePattern("^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")]
     [string]$Attempt,
+    [ValidateSet("paddle_text", "paddle_table", "paddle_structure")]
     [string[]]$Modes = @(
-        'paddle_text', 'paddle_table', 'paddle_formula',
-        'paddle_structure', 'paddle_document_vl'
+        'paddle_text', 'paddle_table', 'paddle_structure'
     ),
     [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations", "pdf_editing", "pdf_workspace")]
     [string[]]$InputKinds = @(),
-    [ValidateSet("legacy", "cpu", "cuda", "directml")]
-    [string]$Provider = 'legacy',
+    [ValidateSet("cpu", "cuda", "directml")]
+    [string]$Provider = 'cpu',
     [ValidateSet("tiny", "small", "medium")]
     [string]$ModelPreset = 'small',
     [int]$ModeTimeoutMinutes = 40,
@@ -73,12 +73,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($Provider -ne 'legacy') {
-    if (-not $PSBoundParameters.ContainsKey('Modes')) { $Modes = @('paddle_text', 'paddle_table', 'paddle_structure') }
-    if (@($Modes | Where-Object { $_ -notin @('paddle_text', 'paddle_table', 'paddle_structure') }).Count) {
-        throw 'ORT smoke only supports retained text/table/structure modes'
-    }
-}
 if ($Attempt -and -not $ResumeRoot) { throw 'Attempt 只能与 ResumeRoot 一起使用' }
 $attemptSuffix = if ($Attempt) { "-$Attempt" } else { '' }
 if ($ModeTimeoutMinutes -le 0 -or $InstallTimeoutMinutes -le 0) {
@@ -157,8 +151,7 @@ if ($isResume) {
 
 # 模式 → fixture / 非默认选项 / 期望管线 / 结果 token / 公共 UI 导出按钮。
 # 选项均为真实构造/预测参数默认值之外的有效取值（默认值见
-# src/runtime/.../core/pipelines/*.py）；formula 用本地可信缓存已有的
-# PP-FormulaNet_plus-L 以减少下载。
+# src/runtime/.../core/pipelines/*.py）。
 $modeSpec = @{
     'paddle_text' = @{
         Fixture = 'text_zh_en.png'; Pipeline = 'OCR'
@@ -170,20 +163,10 @@ $modeSpec = @{
         Option = 'use_table_orientation_classify'; Value = 'false'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Excel|导出 Markdown'
     }
-    'paddle_formula' = @{
-        Fixture = 'formulas_multi.png'; Pipeline = 'FORMULA_RECOGNITION'
-        Option = 'formula_recognition_model_name'; Value = 'PP-FormulaNet_plus-L'; Kind = 'enum'
-        Tokens = ''; Export = '导出 Markdown'
-    }
     'paddle_structure' = @{
         Fixture = 'document_mixed.png'; Pipeline = 'PP-StructureV3'
         Option = 'use_textline_orientation'; Value = 'true'; Kind = 'bool'
         Tokens = 'GOAL103|1120'; Export = '导出 Markdown|导出 Excel'
-    }
-    'paddle_document_vl' = @{
-        Fixture = 'document_mixed.png'; Pipeline = 'PaddleOCR-VL'
-        Option = 'vl_use_chart_recognition'; Value = 'true'; Kind = 'bool'
-        Tokens = 'GOAL103|1120'; Export = '导出 Markdown'
     }
 }
 foreach ($mode in $Modes) {
@@ -236,7 +219,7 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
     $env:VIBEOCR_SELF_TEST_SMOKE = 'paddle-modes-e2e'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_PADDLE_SMOKE_HEALTH = $healthPath
-    $env:VIBEOCR_PADDLE_SMOKE_RECIPE = if ($Provider -eq 'legacy') { 'paddleocr-cpu' } else { 'paddleocr-ort-' + $Provider }
+    $env:VIBEOCR_PADDLE_SMOKE_RECIPE = 'paddleocr-ort-' + $Provider
     $env:VIBEOCR_PADDLE_SMOKE_PRESET = $ModelPreset
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     foreach ($key in $extra.Keys) {

@@ -18,7 +18,7 @@ import pytest
 from vibeocr.runtime.environments.settings_store import RuntimeSettingsStore
 from vibeocr.runtime.host.app import create_app
 from vibeocr.runtime.host.bootstrap import generate_session_token
-from vibeocr.runtime.jobs.module import SupervisorModule, SupervisorOptions
+from vibeocr.runtime.jobs.module import Executor, SupervisorModule, SupervisorOptions
 from vibeocr.runtime.jobs.registry import JobRecord
 from vibeocr.runtime.jobs.staging import StagedInput
 from vibeocr.runtime.recognition.recognition_modes import (
@@ -83,12 +83,14 @@ def _client(module: SupervisorModule, token: str) -> httpx.AsyncClient:
     )
 
 
-def _module_with_store(tmp_path: Path) -> SupervisorModule:
+def _module_with_store(
+    tmp_path: Path, executor: Executor | None = None
+) -> SupervisorModule:
     store = RuntimeSettingsStore(tmp_path / "state" / "supervisor-settings.json")
     return SupervisorModule(
         options=SupervisorOptions(instance_id="sup-default-mode"),
         stager_root=tmp_path / "staging",
-        executor=NullExecutor(),
+        executor=executor if executor is not None else NullExecutor(),
         settings_store=store,
     )
 
@@ -339,6 +341,99 @@ class TestSettingsRoutes:
 
 
 class TestPersistenceAndModuleSeam:
+    @pytest.mark.parametrize(
+        ("mode_id", "pipeline_id"),
+        [
+            ("paddle_formula", "FORMULA_RECOGNITION"),
+            ("paddle_document_vl", "PaddleOCR-VL"),
+        ],
+    )
+    @pytest.mark.parametrize("legacy", [False, True])
+    async def test_retired_default_and_pinned_settings_survive_read_and_restart(
+        self, tmp_path: Path, mode_id: str, pipeline_id: str, legacy: bool
+    ) -> None:
+        path = tmp_path / "state" / "supervisor-settings.json"
+        path.parent.mkdir(parents=True)
+        settings = _settings_body({"default_recognition_mode": mode_id, "keep": 1})
+        settings["residency"]["pipelines"] = [
+            {
+                "name": pipeline_id,
+                "recognition_mode": mode_id,
+                "pinned": True,
+                "ttl_seconds": 300,
+            }
+        ]
+        if legacy:
+            settings["residency"]["pipelines"][0].pop("recognition_mode")
+        original = json.dumps({"schema_version": 1, "settings": settings})
+        path.write_text(original, encoding="utf-8")
+        from vibeocr.runtime.recognition.paddle_executor import PaddleExecutor
+
+        def forbidden():
+            raise AssertionError("historical residency initialized an adapter or model")
+
+        for _restart in range(2):
+            executor = PaddleExecutor(adapter_factory=forbidden)
+            module = _module_with_store(tmp_path, executor)
+            async with _client(module, generate_session_token()) as http:
+                response = await http.get("/v2/settings")
+            assert response.status_code == 200
+            assert response.json()["extra"]["default_recognition_mode"] == mode_id
+            assert response.json()["residency"]["pipelines"][0]["pinned"] is True
+            assert path.read_text(encoding="utf-8") == original
+            with pytest.raises(RecognitionModeError) as error:
+                module.preload((), recognition_modes=(mode_id,))
+            assert error.value.code_name == "RECOGNITION_MODE_RETIRED"
+        edited = response.json()
+        edited["extra"]["default_recognition_mode"] = "rapid_text"
+        async with _client(module, generate_session_token()) as http:
+            recovered = await http.put("/v2/settings", json=edited)
+        assert recovered.status_code == 200
+        assert recovered.json()["extra"] == {
+            "default_recognition_mode": "rapid_text",
+            "keep": 1,
+        }
+
+        assert (
+            recovered.json()["residency"]["pipelines"]
+            == settings["residency"]["pipelines"]
+        )
+        assert executor._adapter is None
+        accepted = path.read_text(encoding="utf-8")
+        for change in ("ttl", "pinned", "duplicate", "unknown"):
+            modified = json.loads(json.dumps(edited))
+            item = modified["residency"]["pipelines"][0]
+            if change == "ttl":
+                item["ttl_seconds"] = 301
+            elif change == "pinned":
+                item["pinned"] = False
+            elif change == "duplicate":
+                modified["residency"]["pipelines"].append(dict(item))
+            else:
+                item["recognition_mode"] = "unknown"
+            async with _client(module, generate_session_token()) as http:
+                refused = await http.put("/v2/settings", json=modified)
+            assert refused.status_code == (400 if change == "unknown" else 426), (
+                refused.text
+            )
+            assert path.read_text(encoding="utf-8") == accepted
+            assert executor._adapter is None
+
+    @pytest.mark.parametrize("pipeline_id", ["FORMULA_RECOGNITION", "PaddleOCR-VL"])
+    async def test_new_legacy_retired_residency_cannot_be_saved(
+        self, tmp_path, pipeline_id
+    ):
+        module = _module_with_store(tmp_path)
+        settings = _settings_body({"default_recognition_mode": "rapid_text"})
+        settings["residency"]["pipelines"] = [
+            {"name": pipeline_id, "ttl_seconds": 30, "pinned": True}
+        ]
+        async with _client(module, generate_session_token()) as http:
+            refused = await http.put("/v2/settings", json=settings)
+        assert refused.status_code == 426
+        assert refused.json()["code"] == "RECOGNITION_MODE_RETIRED"
+        assert not (tmp_path / "state" / "supervisor-settings.json").exists()
+
     async def test_saved_default_survives_supervisor_restart(
         self, tmp_path: Path
     ) -> None:

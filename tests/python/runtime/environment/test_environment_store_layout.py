@@ -350,9 +350,11 @@ def test_cuda_combined_upgrade_uses_bound_cu126_lock(
         == "rapidocr+mineru-cuda"
     )
 
-    with pytest.raises(ManagedEnvironmentError, match="compatible locked recipe"):
+    # #270：旧原生 Paddle 配方退役：预览安装直接以退役错误拒绝（先于
+    # 组合兼容性判定），不再提供安装/下载入口。
+    with pytest.raises(ManagedEnvironmentError, match="retired"):
         full.preview_install(rapid["id"], "paddleocr-cpu")
-    with pytest.raises(ManagedEnvironmentError, match="compatible locked recipe"):
+    with pytest.raises(ManagedEnvironmentError, match="retired"):
         full.preview_install(rapid["id"], "paddleocr-cuda")
 
 
@@ -1559,7 +1561,7 @@ def test_reclaim_retired_preserves_unknown_empty_siblings(
 
 
 def test_rollback_journal_unlink_failure_preserves_error_and_intent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # 回滚完成但 journal 删除失败：原始探针错误不得被 unlink 的
     # PermissionError 覆盖（旧实现），回滚意图持久化，下次 list 收敛后
@@ -1597,6 +1599,12 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
         monkeypatch.setattr(Path, "unlink", original_unlink)
     assert manager._journal_path(env_id).is_file(), "journal 删除失败后仍在盘"
     assert (manager.root / env_id).is_dir(), "旧 venv 已复位"
+    assert (
+        "operation=remove_journal error_type=PermissionError errno=None winerror=None"
+        in caplog.text
+    )
+    assert "journal in use" not in caplog.text
+    assert str(tmp_path) not in caplog.text
 
     listed = manager.list()
     environment = listed["environments"][0]
@@ -1718,7 +1726,7 @@ def test_scan_treats_slot_container_regular_file_as_protected_unknown(
 
 
 def test_recovery_rollback_rename_failure_keeps_journal_and_protection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # 回滚改名（retired→live）被占用失败：恢复不得删除未完成回滚的
     # journal 证据（旧实现在回滚后无条件 unlink），退役槽位里的唯一旧
@@ -1774,6 +1782,11 @@ def test_recovery_rollback_rename_failure_keeps_journal_and_protection(
         )
         assert not env_item["can_clean"]
         assert (retired / "old.marker").exists(), "唯一旧副本不受影响"
+        assert (
+            "operation=restore_retired error_type=PermissionError errno=13 winerror=5"
+            in caplog.text
+        )
+        assert str(tmp_path) not in caplog.text
     finally:
         handle.close()
     manager.list()

@@ -1281,7 +1281,8 @@ public sealed record SettingsMineruConnectionState(
 public sealed record SettingsDefaultRecognitionModeState(
     bool Supported,
     string? ModeId,
-    bool Stored);
+    bool Stored,
+    string? ReasonCode = null);
 
 /// <summary>
 /// 全局 MinerU 识别偏好投影（extra.mineru_recognition）：Tiers/Languages

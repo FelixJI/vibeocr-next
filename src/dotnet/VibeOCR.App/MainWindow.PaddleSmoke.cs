@@ -31,7 +31,7 @@ namespace VibeOCR.App;
 public sealed partial class MainWindow
 {
   // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
-  private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-cpu";
+  private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-ort-cpu";
   private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
     ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
@@ -425,7 +425,6 @@ public sealed partial class MainWindow
     string recognitionButton = mode switch
     {
       "paddle_table" => "表格识别",
-      "paddle_formula" => "公式识别",
       _ => "识别文字",
     };
     RecognitionWorkbenchState ready = (await application.BootstrapAsync(CancellationToken.None))
@@ -558,8 +557,8 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Completed batch queue is absent from public UI.");
     bool inspected = await InspectPaddleStructuredItemAsync(
       $"查看 {Path.GetFileName(fixture)} 的结构化结果", mode);
-    if (!inspected && mode is ("paddle_table" or "paddle_formula" or
-        "paddle_structure" or "paddle_document_vl"))
+    if (!inspected && mode is ("paddle_table" or
+        "paddle_structure"))
       throw new InvalidOperationException($"Batch {mode} has no inspectable structured result.");
     Dictionary<string, object?> copies = inspected
       ? await ClickPaddleCopyButtonsAsync([]) : new();
@@ -1204,8 +1203,7 @@ public sealed partial class MainWindow
 
   private async Task<bool> InspectPaddleStructuredItemAsync(string label, string mode)
   {
-    if (mode is "paddle_table" or "paddle_formula" or
-        "paddle_structure" or "paddle_document_vl")
+    if (mode is "paddle_table" or "paddle_structure")
       await WaitForSmokeDomAsync(
         "!!document.querySelector('button[aria-label=" +
         JsonSerializer.Serialize(label) + "]')",
@@ -1218,7 +1216,7 @@ public sealed partial class MainWindow
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.structured-result > .structured-block, .structured-result > .structured-text')",
       TimeSpan.FromSeconds(30));
-    if (mode is "paddle_table" or "paddle_structure" or "paddle_document_vl")
+    if (mode is "paddle_table" or "paddle_structure")
     {
       string predicate = mode == "paddle_table"
         ? "!!document.querySelector('.structured-result table td, .structured-result table th')"
@@ -1361,8 +1359,7 @@ public sealed partial class MainWindow
       string selector = mode switch
       {
         "paddle_table" => ".structured-result table td, .structured-result table th",
-        "paddle_formula" => ".structured-formula code",
-        "paddle_structure" or "paddle_document_vl" => ".structured-result > .structured-block, .structured-result > .structured-text",
+        "paddle_structure" => ".structured-result > .structured-block, .structured-result > .structured-text",
         _ => ".result-document",
       };
       await WaitForSmokeDomAsync(
@@ -1413,8 +1410,9 @@ public sealed partial class MainWindow
       await AssertPaddleStructureEvidenceAsync(mode, ui);
       ui["copies"] = await ClickPaddleCopyButtonsAsync(tokens);
       paddleSmokePartialEvidence = new { job = jobEvidence, capture, ui };
-      if (mode == "paddle_formula")
+      if (mode is "mineru_document")
       {
+        // MinerU/历史公式结果的查看/选择验证保留；独立 paddle_formula 已退役。
         const string choice = ".structured-result section:has(.structured-formula) select";
         int count = int.Parse(await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
           $"document.querySelector({JsonSerializer.Serialize(choice)})?.options.length ?? 0"),
@@ -1510,33 +1508,15 @@ public sealed partial class MainWindow
               ".structured-result .structured-table-scroll table th').length > 0"))
           throw new InvalidOperationException("paddle_table table preview has no cells.");
         break;
-      case "paddle_formula":
-        if (ui.GetValueOrDefault("formula_latex_present") is not true)
-          throw new InvalidOperationException(
-            "paddle_formula finished without copyable LaTeX.");
-        if (ui.GetValueOrDefault("formula_rendered") is not true)
-        {
-          string? structuredText = await PaddleSmokeDomTextAsync(".structured-result");
-          bool renderErrorKept = structuredText?.Contains(
-            "公式无法渲染", StringComparison.Ordinal) ?? false;
-          if (!renderErrorKept)
-            throw new InvalidOperationException(
-              "paddle_formula LaTeX neither rendered nor retained with an explicit render error.");
-        }
-        break;
       case "paddle_structure":
-      case "paddle_document_vl":
         if (ui.GetValueOrDefault("structured_blocks_count") is not int count || count < 1)
           throw new InvalidOperationException(
             $"{mode} finished without structured layout blocks.");
         if (Path.GetFileName(PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE")) == "document_mixed.png" &&
             (ui.GetValueOrDefault("structured_table_present") is not true ||
-             ui.GetValueOrDefault("formula_region_present") is not true ||
-             mode == "paddle_document_vl" && (ui.GetValueOrDefault("formula_latex_present") is not true ||
-             ui.GetValueOrDefault("formula_rendered") is not true) ||
              ui.GetValueOrDefault("image_block_present") is not true))
           throw new InvalidOperationException(
-            $"{mode} mixed fixture lost its required table, formula, or image preview.");
+            $"{mode} mixed fixture lost its required table or image preview.");
         break;
     }
   }

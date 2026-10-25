@@ -64,6 +64,8 @@ export function statusLabel(value: unknown, fallback: string): string {
     "recognition.expired": "内容已修改，旧识别结果已失效；请重新识别当前图",
     "recognition.failed": "识别失败，请检查运行时状态后重试",
     "recognition.cancelled": "识别已取消，可重新选择输入",
+    "recognition.modeRetired":
+      "所选识别模式已退役，请在设置或任务面板重新选择可用模式。",
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
     "recognition.captureRefused.missingFixedRegion":

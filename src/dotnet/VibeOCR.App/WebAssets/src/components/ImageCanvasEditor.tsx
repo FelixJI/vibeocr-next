@@ -7587,7 +7587,7 @@ export function ImageCanvasEditor({
   );
   const imageModes: readonly ImageRecognitionMode[] = recognitionModes?.length
     ? recognitionModes
-    : ["文字识别", "表格识别", "公式识别"].map((displayName) => ({
+    : ["文字识别", "表格识别"].map((displayName) => ({
         modeId: "",
         displayName,
         availability: "catalog_unavailable",
@@ -7600,12 +7600,14 @@ export function ImageCanvasEditor({
           .map(
             (mode) =>
               `${mode.displayName}：${
-                mode.availability === "catalog_unavailable"
-                  ? "识别目录未就绪"
-                  : mode.availability === "default_missing" ||
-                      mode.availability === "default_invalid"
-                    ? "默认文字模式未配置或无效"
-                    : availabilityLabel(mode.availability)
+                mode.availability === "default_retired"
+                  ? "默认识别模式已退役，请重新选择"
+                  : mode.availability === "catalog_unavailable"
+                    ? "识别目录未就绪"
+                    : mode.availability === "default_missing" ||
+                        mode.availability === "default_invalid"
+                      ? "默认文字模式未配置或无效"
+                      : availabilityLabel(mode.availability)
               }${mode.reasonCode ? `（${mode.reasonCode}）` : ""}`,
           );
   const recognizeButton =

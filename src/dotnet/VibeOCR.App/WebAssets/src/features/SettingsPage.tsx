@@ -665,6 +665,7 @@ function mineruRecognition(value: unknown): MineruRecognitionState | undefined {
 }
 
 interface DefaultRecognitionModeState {
+  readonly reasonCode?: string | null;
   readonly supported: boolean;
   readonly modeId: string | null;
   readonly stored: boolean;
@@ -684,6 +685,10 @@ function defaultRecognitionMode(
         supported: candidate.supported,
         modeId: candidate.modeId ?? null,
         stored: candidate.stored,
+        reasonCode:
+          typeof candidate.reasonCode === "string"
+            ? candidate.reasonCode
+            : null,
       }
     : undefined;
 }
@@ -3162,6 +3167,7 @@ function DefaultRecognitionModeEditor({
   const loaded = mode !== undefined;
   const supported = mode?.supported === true;
   const currentId = mode?.modeId ?? null;
+  const retired = mode?.reasonCode === "recognition_mode_retired";
   // 本地选择直接控制显示：旧值合法时初始化为它，否则从空白开始；
   // 修复期间的新选择立即反映在 selector 上，不被旧值强制回空白。
   const inCatalog = modes.some((option) => option.id === currentId);
@@ -3198,10 +3204,16 @@ function DefaultRecognitionModeEditor({
   }
   if (modes.length === 0) {
     return (
-      <p className="form-note">
-        当前运行环境未提供识别模式目录，暂无法配置默认识别模式；请重新检查
-        状态或切换运行环境。
-      </p>
+      <>
+        {retired && (
+          <p className="form-note" role="alert">
+            当前默认识别模式已退役，请重新选择可用模式并保存。旧配置保留到显式保存。
+          </p>
+        )}
+        <p className="form-note">
+          当前运行环境未提供识别模式目录，暂无法配置默认识别模式；请重新检查状态或切换运行环境。
+        </p>
+      </>
     );
   }
   return (
@@ -3216,11 +3228,13 @@ function DefaultRecognitionModeEditor({
         >
           {!inCatalog ? (
             <option value="">
-              {currentId !== null
-                ? "请重新选择（当前值不在目录）"
-                : mode.stored
-                  ? "请重新选择（当前值无法解析）"
-                  : "请选择"}
+              {retired
+                ? "请重新选择（当前模式已退役）"
+                : currentId !== null
+                  ? "请重新选择（当前值不在目录）"
+                  : mode.stored
+                    ? "请重新选择（当前值无法解析）"
+                    : "请选择"}
             </option>
           ) : null}
           {modes.map((option) => (
@@ -3234,7 +3248,12 @@ function DefaultRecognitionModeEditor({
           ))}
         </Select>
       </div>
-      {currentId !== null && !inCatalog ? (
+      {retired ? (
+        <p className="form-note" role="alert">
+          当前默认识别模式已退役，请重新选择可用模式并保存。旧配置保留到显式保存。
+        </p>
+      ) : null}
+      {currentId !== null && !inCatalog && !retired ? (
         <p className="form-note" role="alert">
           已回显的默认 “{currentId}” 不在当前运行环境目录中（环境可能已切换或
           组件被移除），保存新默认前未显式选择的任务会拒绝提交；请重新选择
@@ -3268,7 +3287,7 @@ function DefaultRecognitionModeEditor({
         保存的是 Runtime 持久默认：单次、批量、PDF 与截图任务未显式选择时继承
         它；已在运行/排队的任务参数不受影响，任务中的显式选择始终优先。
         仅“就绪”模式可设为默认，需要下载/准备的请先在运行环境页准备。
-        截图工具栏的“文字识别”使用此处保存的文字或文档模式；若选择表格、公式模式，文字识别按钮会提示重新设置文字引擎。
+        截图工具栏的“文字识别”使用此处保存的文字或文档模式；若选择表格模式，文字识别按钮会提示重新设置文字引擎。
       </p>
     </>
   );

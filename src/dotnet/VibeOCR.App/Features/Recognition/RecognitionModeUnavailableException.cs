@@ -5,5 +5,8 @@ namespace VibeOCR.App.Features.Recognition;
 /// 提交必须以此失败并可恢复，并指向具体环境；不允许静默回退通用文字识别。
 /// 仅未选择模式（Runtime 默认）或旧版引擎 id 的兼容路径可以默认管线提交。
 /// </summary>
-public sealed class RecognitionModeUnavailableException(string message)
-    : InvalidOperationException(message);
+public sealed class RecognitionModeUnavailableException(string message, bool retired = false)
+    : InvalidOperationException(message)
+{
+    public bool IsRetired { get; } = retired;
+}

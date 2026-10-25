@@ -77,19 +77,6 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
                 "supports_release": True,
             },
         ),
-        "paddle_document_vl": (
-            "document",
-            "PaddleOCR-VL",
-            None,
-            "advanced_component",
-            {
-                "kind": "model_residency",
-                "supports_preload": True,
-                "supports_ttl": True,
-                "supports_pinning": True,
-                "supports_release": True,
-            },
-        ),
         "mineru_document": (
             "document",
             "MinerU",
@@ -106,19 +93,6 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
         "paddle_table": (
             "specialized",
             "TABLE_RECOGNITION",
-            None,
-            "advanced_component",
-            {
-                "kind": "model_residency",
-                "supports_preload": True,
-                "supports_ttl": True,
-                "supports_pinning": True,
-                "supports_release": True,
-            },
-        ),
-        "paddle_formula": (
-            "specialized",
-            "FORMULA_RECOGNITION",
             None,
             "advanced_component",
             {

@@ -30,6 +30,9 @@ public enum RuntimeSelectionErrorKind
 
     /// <summary>No component variant matches the feature for the accelerator.</summary>
     UnknownFeature,
+
+    /// <summary>The recognition mode is known but retired from the product.</summary>
+    RecognitionModeRetired,
 }
 
 /// <summary>Catalog-driven selection error; never falls back to a guessed default.</summary>
@@ -447,6 +450,11 @@ public sealed class RuntimeSelectionService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modeId);
         RecognitionModeOption? mode = RecognitionModes.SingleOrDefault(item => item.Id == modeId);
+        if (mode is null && RecognitionModeCatalog.IsRetiredModeId(modeId))
+        {
+            throw Error(RuntimeSelectionErrorKind.RecognitionModeRetired,
+                $"识别模式 '{modeId}' 已退役，请重新选择可用模式。");
+        }
         return mode ?? throw Error(RuntimeSelectionErrorKind.UnknownEngine,
             $"Recognition mode '{modeId}' is not in the runtime catalog.");
     }

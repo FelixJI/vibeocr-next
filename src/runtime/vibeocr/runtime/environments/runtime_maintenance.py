@@ -1211,6 +1211,7 @@ def _component_statuses(
     probe_results: dict[str, bool] | None = None,
     marker: dict[str, Any] | None = None,
     managed_scope: RuntimeInstallScope | None = None,
+    managed_closure: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     python_ready = runtime_root is not None and any(
         candidate.is_file()
@@ -1231,6 +1232,7 @@ def _component_statuses(
     )
     marker_matches = (
         managed_scope is not None
+        or managed_closure is not None
         or legacy_closure is not None
         or _marker_identity_matches(
             marker, manifest=manifest, accelerator=descriptor.accelerator
@@ -1239,6 +1241,8 @@ def _component_statuses(
     required_ids = (
         frozenset((*managed_scope.component_ids, "runtime_host"))
         if managed_scope is not None
+        else managed_closure
+        if managed_closure is not None
         else legacy_closure
         or declared_installed_closure(
             marker, manifest=manifest, accelerator=descriptor.accelerator
@@ -1289,7 +1293,9 @@ def _component_statuses(
             )
             continue
         actual_version: str | None = None
-        if (marker is None and managed_scope is None) or not python_ready:
+        if (
+            marker is None and managed_scope is None and managed_closure is None
+        ) or not python_ready:
             actual_state = "missing"
             drift_reason = "missing"
         elif not marker_matches:
@@ -1349,6 +1355,7 @@ def runtime_profile_status(
     probe_results: dict[str, bool] | None = None,
     profile_id: str | None = None,
     managed_scope: RuntimeInstallScope | None = None,
+    managed_closure: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Project one desired/actual component view for every transport.
 
@@ -1359,18 +1366,29 @@ def runtime_profile_status(
     closure when one is trusted, and the historical accelerator-plan
     projection otherwise, so a base-only installation reports
     ``win-x64-base`` instead of a plan view it does not satisfy.
+
+    ``managed_closure`` 是 #270 为退役原生 Paddle 环境保留的只读已安装闭包
+    投影：与真实安装 scope 一样作为可信闭包参与覆盖 profile/探针范围，
+    但不携带锁或安装身份（版本漂移按历史 manifest 元数据评估）。
     """
-    marker = None if managed_scope is not None else _installed_marker(runtime_root)
+    trusted_closure = managed_scope is not None or managed_closure is not None
+    marker = None if trusted_closure else _installed_marker(runtime_root)
     if profile_id is None:
-        legacy_closure = _legacy_closure_with_current_code(
-            marker,
-            manifest=manifest,
-            accelerator=accelerator,
-            runtime_root=runtime_root,
+        legacy_closure = (
+            _legacy_closure_with_current_code(
+                marker,
+                manifest=manifest,
+                accelerator=accelerator,
+                runtime_root=runtime_root,
+            )
+            if not trusted_closure
+            else None
         )
         closure = (
             frozenset((*managed_scope.component_ids, "runtime_host"))
             if managed_scope is not None
+            else managed_closure
+            if managed_closure is not None
             else legacy_closure
             or declared_installed_closure(
                 marker, manifest=manifest, accelerator=accelerator
@@ -1390,6 +1408,8 @@ def runtime_profile_status(
         required_ids = (
             frozenset((*managed_scope.component_ids, "runtime_host"))
             if managed_scope is not None
+            else managed_closure
+            if managed_closure is not None
             else None
         )
         probe_results = _cached_runtime_component_probe(
@@ -1411,6 +1431,7 @@ def runtime_profile_status(
             probe_results=probe_results,
             marker=marker,
             managed_scope=managed_scope,
+            managed_closure=managed_closure,
         ),
     }
 
@@ -1942,6 +1963,7 @@ def runtime_status_from_environment(
     # large Python/runtime archives on every HTTP request.
     manifest = load_runtime_manifest(manifest_value, verify_artifacts=False)
     managed_scope = None
+    managed_closure: frozenset[str] | None = None
     managed_id = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID")
     managed_recipe = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE")
     if managed_id and managed_id != "legacy":
@@ -1958,7 +1980,7 @@ def runtime_status_from_environment(
             layout_manifest=os.environ.get("VIBEOCR_LAYOUT_MANIFEST") or None,
             product_id=os.environ.get("VIBEOCR_PRODUCT_ID") or None,
         )
-        managed_scope, managed_accelerator = manager.status_scope(
+        managed_scope, managed_closure, managed_accelerator = manager.status_scope(
             managed_id,
             int(os.environ["VIBEOCR_MANAGED_ENVIRONMENT_REVISION"]),
             Path(runtime_root_value),
@@ -1971,6 +1993,7 @@ def runtime_status_from_environment(
         accelerator=accelerator,
         runtime_root=Path(runtime_root_value) if runtime_root_value else None,
         managed_scope=managed_scope,
+        managed_closure=managed_closure,
     )
     if service_state != "maintenance" and any(
         # not_required 组件缺席是合法状态（base-only / 精确 scope 安装），

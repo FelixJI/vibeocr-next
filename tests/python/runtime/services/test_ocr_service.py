@@ -39,7 +39,6 @@ except ImportError:
     ("method_name", "pipeline_name"),
     [
         ("_recognize_structure", "PP-StructureV3"),
-        ("_recognize_paddlocr_vl", "PaddleOCR-VL"),
     ],
 )
 def test_legacy_document_entrypoints_delegate_to_registry(
@@ -71,6 +70,13 @@ def test_legacy_document_entrypoints_delegate_to_registry(
 
     assert result is sentinel
     assert calls[-1] == ("recognize", "image", pipeline_name)
+
+
+def test_retired_paddlocr_vl_entrypoint_rejects_with_diagnostics():
+    """#270：PaddleOCR-VL 旧入口不再委托注册表，直接可诊断拒绝。"""
+    service = OCRService.__new__(OCRService)
+    with pytest.raises(ValueError, match="退役"):
+        service._recognize_paddlocr_vl("image", OCROptions(pipeline="PaddleOCR-VL"))
 
 
 class TestOCRServiceSingleton:

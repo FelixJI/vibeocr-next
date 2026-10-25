@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import contextlib
 import io
 import logging
 import os
 import threading
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from vibeocr.runtime.environments.model_cache import paddle_model_cache
 from vibeocr.runtime.recognition.core.pipelines import OCRPipeline
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.models.ocr_options import OCROptions
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
-from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
 
 # 重新导出以保持向后兼容性
 __all__ = [
@@ -45,7 +41,6 @@ from vibeocr.runtime.documents.utils.html_tables import (
 )
 from vibeocr.runtime.recognition.pipeline_status import (
     LOCAL_MARKABLE_PIPELINES,
-    is_pipeline_ever_succeeded,
     mark_pipeline_success,
 )
 
@@ -181,10 +176,6 @@ class OCRService(metaclass=SingletonMeta):
                 instance.__dict__.pop("_pipeline_signatures", None)
             cls._preloaded_pipelines = set()
             cls._is_preloading = False
-            # oneDNN 判定缓存必须随重置清空，否则测试间会泄漏上一个探测结果，
-            # 导致 _decide_enable_mkldnn 在 monkeypatch 后仍返回旧值。
-            cls._onednn_safe_cache = None
-            cls._onednn_runtime_disabled = False
 
     @classmethod
     def set_preload_progress_callback(
@@ -424,340 +415,18 @@ class OCRService(metaclass=SingletonMeta):
         thread.start()
         return thread
 
-    _cuda_dll_registered = False
-
-    @classmethod
-    def _setup_cuda_dll_path(cls) -> None:
-        """将 CUDA 运行时 DLL 目录加入 PATH，使 PaddlePaddle 能找到 cuBLAS/cuDNN 等
-
-        扫描两类来源：
-        1. ``nvidia/*`` 包（cu13/cudnn 等，DLL 多在 bin/ 或 bin/<arch>/、lib/<arch>/）
-        2. ``torch/lib`` —— PyTorch wheel 自带完整的 CUDA 12 + cuDNN 9 运行时，
-           是 paddlepaddle-gpu（CUDA 12 构建）所需 ``cublas64_12.dll`` 等的
-           可靠来源。在未安装系统级 CUDA Toolkit 的机器上，这是让 paddle GPU
-           可用的关键（否则 ``cublas64_12.dll`` 找不到，error 126 回退 CPU）。
-        """
-        if cls._cuda_dll_registered:
-            return
-        import sys
-
-        if sys.platform != "win32":
-            cls._cuda_dll_registered = True
-            return
-        site_packages = next(p for p in sys.path if "site-packages" in p)
-        existing = os.environ.get("PATH", "")
-        candidate_dirs: list[Path] = []
-
-        # 1) nvidia/* 包
-        nvidia_base = Path(site_packages) / "nvidia"
-        if nvidia_base.is_dir():
-            for entry in os.scandir(nvidia_base):
-                if not entry.is_dir():
-                    continue
-                # 扫描 bin/ 和 lib/ 目录（不同 nvidia 包的 DLL 位置不同）
-                for subfolder in ("bin", "lib"):
-                    sub_dir = Path(entry.path) / subfolder
-                    if sub_dir.is_dir():
-                        candidate_dirs.append(sub_dir)
-                        # 新版 nvidia 包 (cu13 等) 把 DLL 放在 <subfolder>/<arch>/ 子目录
-                        for sub in os.scandir(sub_dir):
-                            arch_dir = Path(sub_dir) / sub.name
-                            if sub.is_dir():
-                                candidate_dirs.append(arch_dir)
-
-        # 2) torch/lib（CUDA 12 + cuDNN 9 全套）
-        # 仅当 paddle 不自带 CUDA runtime 时才加 torch/lib 作为 fallback。
-        # paddle 3.x+ 自带完整 CUDA runtime（cu129 等），此时把 torch/lib（cu126）
-        # 加到 PATH 会导致版本冲突：paddle 加载的 cu129 符号与 torch/lib 的 cu126
-        # DLL 不匹配，torch 的 shm.dll 报 WinError 127（实测回归）。
-        paddle_has_cuda = False
-        try:
-            import paddle.version  # type: ignore[import-untyped]
-
-            paddle_has_cuda = bool(getattr(paddle.version, "cuda", lambda: None)())
-        except Exception:
-            pass
-
-        if not paddle_has_cuda:
-            torch_lib = Path(site_packages) / "torch" / "lib"
-            if torch_lib.is_dir():
-                candidate_dirs.append(torch_lib)
-
-        for d in candidate_dirs:
-            s = str(d)
-            if s not in existing:
-                existing = s + ";" + existing
-        os.environ["PATH"] = existing
-        cls._cuda_dll_registered = True
-
     @staticmethod
     def _get_device() -> str:
-        """根据环境变量和 GPU 可用性检测推理设备"""
-        if os.environ.get("VIBEOCR_USE_GPU", "").lower() != "true":
-            _logger.info("[推理设备] CPU（未启用 GPU，VIBEOCR_USE_GPU != true）")
-            return "cpu"
-        if is_ort_environment():
-            return "cpu"
-        try:
-            import paddle
-            import paddle.device as paddle_device
-
-            if paddle_device.cuda.device_count() > 0:
-                # 驱动可检测到 GPU，但 CUDA 运行时库（cuBLAS 等）可能未安装，
-                # 执行一次矩阵乘法验证 cuBLAS 可用性。
-                paddle.device.set_device("gpu")
-                a = paddle.randn([4, 4])
-                _ = paddle.matmul(a, a).numpy()
-                # paddle 导入完成后注册 DLL 目录，供 predict() 内部的 ctypes 使用
-                # （必须在 paddle 导入后调用，否则会触发 paddle/libs/nvidia 路径错误）
-                OCRService._register_dll_directories()
-                OCRService._log_gpu_summary()
-                return "gpu"
-        except Exception as e:
-            _logger.warning("[GPU] GPU 可用性验证失败: %s，回退到 CPU", e)
-            _logger.info("[推理设备] CPU（GPU 验证失败，已回退）")
-            return "cpu"
-        _logger.warning("[GPU] VIBEOCR_USE_GPU=true 但未检测到可用 GPU，回退到 CPU")
-        _logger.info("[推理设备] CPU（未检测到可用 GPU，已回退）")
+        """推理设备投影：#270 后保留管道只走 Paddle ONNX，真实 provider
+        由请求快照决定；这里不再探测原生 Paddle/CUDA DLL，恒为 CPU 形态。"""
+        _logger.info("[推理设备] Paddle ONNX（provider 由请求快照决定）")
         return "cpu"
-
-    # oneDNN 安全性判定结果缓存（进程级，避免每次创建管道重复探测指令集）
-    _onednn_safe_cache: bool | None = None
-    # 真实推理一旦命中已知 PIR/oneDNN 回归，本进程永久禁用，直到服务重置。
-    _onednn_runtime_disabled = False
-
-    @classmethod
-    def _decide_enable_mkldnn(cls, device: str) -> bool:
-        """决定是否向 PaddleOCR 构造函数传入 ``enable_mkldnn=True``。
-
-        **这是 oneDNN 是否启用的唯一真相**：返回值直接成为构造函数 kwarg，
-        而 PaddleOCR 推理路径只读这个 kwarg（最终落到
-        ``paddle.inference.Config.enable_mkldnn()``）。进程级 FLAGS
-        （FLAGS_use_mkldnn / FLAGS_enable_onednn_backend）对推理路径【不生效】
-        ——paddleocr/paddlex 零处读取它们，那些 FLAGS 仅影响 eager 路径。
-
-        - GPU 设备：不传（PaddleOCR 默认），返回 False。
-        - CPU 设备：调用 ``cpu_info.can_safely_enable_onednn`` 综合判定
-          （指令集产品门槛 + 已验证版本范围 + 用户强制覆盖）。结果缓存。
-
-        历史背景：paddle 3.3.x 的 PIR 新执行器与 oneDNN 不兼容
-        （ConvertPirAttribute2RuntimeAttribute 未实现，predict 抛
-        NotImplementedError），参考 PaddleOCR #17539、Paddle #77340。
-        故默认对受影响、未知和未验证版本拒绝；只有真实模型验证过的版本范围
-        才默认启用。若运行时仍命中该已知异常，会锁定本进程禁用并重建管道。
-        """
-        if device != "cpu":
-            return False
-        if cls._onednn_runtime_disabled:
-            return False
-        if cls._onednn_safe_cache is None:
-            try:
-                from vibeocr.runtime.processes.utils.cpu_info import (
-                    can_safely_enable_onednn,
-                )
-
-                safe, reason = can_safely_enable_onednn()
-                cls._onednn_safe_cache = safe
-                _logger.info("[oneDNN] %s: %s", "启用" if safe else "禁用", reason)
-            except Exception as e:
-                # 探测失败保守禁用（与历史行为一致）
-                cls._onednn_safe_cache = False
-                _logger.warning("[oneDNN] 安全性探测失败，保守禁用: %s", e)
-        return bool(cls._onednn_safe_cache)
-
-    @staticmethod
-    def _is_known_onednn_pir_failure(exc: BaseException) -> bool:
-        """判断异常链是否命中 Paddle 3.3 PIR/oneDNN 已知回归。"""
-        seen: set[int] = set()
-        current: BaseException | None = exc
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            message = str(current)
-            if (
-                "ConvertPirAttribute2RuntimeAttribute" in message
-                and "onednn_instruction" in message.lower()
-            ):
-                return True
-            current = current.__cause__ or current.__context__
-        return False
-
-    def _disable_onednn_and_release_pipeline(self, pipeline_name: str) -> None:
-        """锁定进程级禁用 oneDNN，并只释放发生兼容错误的管道。"""
-        cls = type(self)
-        with cls._lock:
-            cls._onednn_runtime_disabled = True
-            cls._onednn_safe_cache = False
-            released = self.cache_manager.release_one(pipeline_name)
-            with cls._preload_lock:
-                cls._preloaded_pipelines.discard(pipeline_name)
-
-        _logger.warning(
-            "[oneDNN] 管道 %s 命中已知 PIR/oneDNN 兼容错误；"
-            "已锁定本进程禁用并%s管道，当前请求仅重试一次",
-            pipeline_name,
-            "释放" if released else "清理",
-        )
-        self._notify_status(
-            "兼容性回退",
-            f"{pipeline_name} 的 oneDNN 路径不兼容，已切换到标准 CPU 推理",
-        )
-
-    @staticmethod
-    def _log_gpu_summary() -> None:
-        """在确定使用 GPU 推理后，输出一条设备摘要 INFO 日志。
-
-        包含 GPU 名称、显存（总/空闲）和 PDF 批量上限，便于排查“日志写 CPU
-        实际跑 GPU”这类不一致问题，也直观反映 4090 等大显存卡的批量能力。
-        """
-        gpu_name = "未知"
-        try:
-            import paddle.device as paddle_device
-
-            gpu_name = paddle_device.cuda.get_device_name(0)
-        except Exception:
-            pass
-
-        total_mb = free_mb = 0
-        try:
-            from vibeocr.runtime.processes.utils.gpu_memory_monitor import (
-                GPUMemoryMonitor,
-            )
-
-            info = GPUMemoryMonitor().get_status()
-            if info.available:
-                total_mb, free_mb = info.total, info.free
-        except Exception:
-            pass
-
-        from vibeocr.runtime.processes.utils.gpu_memory_monitor import GPU_BATCH_CAP
-
-        _logger.info(
-            "[推理设备] GPU=%s, 显存=%dMB (空闲 %dMB), PDF 批量上限=%d",
-            gpu_name,
-            total_mb,
-            free_mb,
-            GPU_BATCH_CAP,
-        )
-
-    @classmethod
-    def _register_dll_directories(cls) -> None:
-        """通过 os.add_dll_directory() 和 PATH 注册 CUDA DLL 目录
-
-        Python 3.8+ Windows 上 ctypes.CDLL 不再搜索 os.environ["PATH"]，
-        必须通过 os.add_dll_directory() 注册。同时更新 PATH 环境变量，
-        确保推理引擎（Paddle Inference）也能找到 CUDA DLL。
-
-        覆盖来源与 :meth:`_setup_cuda_dll_path` 一致：``nvidia/*`` 包，并且
-        仅在 Paddle 未自带 CUDA runtime 时回退到 ``torch/lib``。
-
-        此方法必须在 PaddlePaddle 导入完成后调用，否则会触发 PaddlePaddle
-        内部的路径错误。
-        """
-        if not hasattr(os, "add_dll_directory"):
-            return
-        import sys
-
-        site_packages = next((p for p in sys.path if "site-packages" in p), None)
-        if not site_packages:
-            return
-
-        def _register(d: Path) -> None:
-            with contextlib.suppress(OSError):
-                os.add_dll_directory(str(d))
-            os.environ["PATH"] = str(d) + ";" + os.environ.get("PATH", "")
-
-        # 1) nvidia/* 包（bin/, bin/<arch>/, lib/<arch>/）
-        nvidia_base = Path(site_packages) / "nvidia"
-        if nvidia_base.is_dir():
-            for entry in os.scandir(nvidia_base):
-                if not entry.is_dir():
-                    continue
-                for subfolder in ("bin", "lib"):
-                    sub_dir = Path(entry.path) / subfolder
-                    if sub_dir.is_dir():
-                        _register(sub_dir)
-                        for sub in os.scandir(sub_dir):
-                            arch_dir = Path(sub_dir) / sub.name
-                            if sub.is_dir():
-                                _register(arch_dir)
-
-        # 2) torch/lib fallback。Paddle 自带 CUDA 时禁止混入不同版本的
-        # Torch runtime，否则后续加载 torch/shm.dll 可能触发 WinError 127。
-        paddle_has_cuda = False
-        try:
-            import paddle.version  # type: ignore[import-untyped]
-
-            paddle_has_cuda = bool(getattr(paddle.version, "cuda", lambda: None)())
-        except Exception:
-            pass
-        if not paddle_has_cuda:
-            torch_lib = Path(site_packages) / "torch" / "lib"
-            if torch_lib.is_dir():
-                _register(torch_lib)
 
     @staticmethod
     def _get_project_root():
         from vibeocr.runtime.environments.env_manager import get_project_root
 
         return get_project_root()
-
-    def _create_pipeline(self, pipeline: OCRPipeline) -> Any:
-        """创建指定管道（使用 PaddleOCR 3.x API）"""
-        _logger.debug("[_create_pipeline] %s: 开始...", pipeline.value)
-        device = self._get_device()
-        display_name = pipeline.display_name
-
-        models_cached = is_pipeline_ever_succeeded(
-            pipeline.value, self._get_project_root()
-        )
-        if not models_cached:
-            self._notify_status(
-                "模型初始化",
-                f"正在初始化 {display_name} 管道（首次使用需要下载模型）...",
-            )
-
-        # CPU 设备的 mkldnn 启用与否由 _decide_enable_mkldnn 综合判定
-        # （指令集产品门槛 + 已验证版本范围），而非硬编码 False。
-        enable_mkldnn = self._decide_enable_mkldnn(device)
-        kwargs = {"enable_mkldnn": enable_mkldnn} if device == "cpu" else {}
-
-        if pipeline == OCRPipeline.OCR:
-            from paddleocr import PaddleOCR
-
-            with (
-                contextlib.nullcontext()
-                if is_ort_environment()
-                else paddle_model_cache()
-            ):
-                instance = PaddleOCR(device=device, **kwargs)
-        elif pipeline == OCRPipeline.PP_STRUCTURE_V3:
-            from paddleocr import PPStructureV3
-
-            with (
-                contextlib.nullcontext()
-                if is_ort_environment()
-                else paddle_model_cache()
-            ):
-                instance = PPStructureV3(device=device, **kwargs)
-        elif pipeline == OCRPipeline.PADDLEOCR_VL:
-            from paddleocr import PaddleOCRVL
-
-            with (
-                contextlib.nullcontext()
-                if is_ort_environment()
-                else paddle_model_cache()
-            ):
-                instance = PaddleOCRVL(device=device, **kwargs)  # type: ignore[call-arg]
-        else:
-            msg = f"不支持的管道类型: {pipeline}"
-            raise ValueError(msg)
-
-        _logger.debug("管道 %s 初始化于设备: %s", pipeline.value, device)
-
-        if not models_cached:
-            self._notify_status("模型初始化", f"{display_name} 管道初始化完成")
-
-        return instance
 
     def get_pipeline(self, pipeline: OCRPipeline) -> Any:
         """延迟加载指定管道 (线程安全)
@@ -804,8 +473,6 @@ class OCRService(metaclass=SingletonMeta):
         if not _reusable():
             with self._lock:
                 if not _reusable():
-                    if not is_ort_environment():
-                        self._setup_cuda_dll_path()
                     if pipeline_name in self._pipelines:
                         _logger.info(
                             "[get_or_create_pipeline] 构造参数变化，释放并重建管道 %s"
@@ -824,44 +491,40 @@ class OCRService(metaclass=SingletonMeta):
                     from vibeocr.runtime.recognition.core.pipelines import get_registry
 
                     registry = get_registry()
-                    if registry.has(pipeline_name):
-                        spec = registry.get(pipeline_name)
-                        device = self._get_device()
-                        # CPU 设备的 mkldnn 启用与否由 _decide_enable_mkldnn
-                        # 综合判定（指令集产品门槛 + 已验证版本范围）。
-                        enable_mkldnn = (
-                            False
-                            if is_ort_environment()
-                            else self._decide_enable_mkldnn(device)
-                        )
-                        kwargs = (
-                            {"enable_mkldnn": enable_mkldnn} if device == "cpu" else {}
-                        )
-                        if spec.constructor_kwargs is not None:
-                            # 与签名计算使用同一份 options（None → spec 默认），
-                            # 确保签名与实际构造参数一致。
-                            resolved = (
-                                options if options is not None else spec.options_class()
+                    if not registry.has(pipeline_name):
+                        # #270：注册表外的管道（含已退役的 PaddleOCR-VL /
+                        # FORMULA_RECOGNITION）没有可构造后端；不再回退旧式
+                        # 原生构造，直接可诊断拒绝。
+                        retired = {
+                            member.value
+                            for member in OCRPipeline
+                            if member
+                            in {
+                                OCRPipeline.PADDLEOCR_VL,
+                                OCRPipeline.FORMULA_RECOGNITION,
+                            }
+                        }
+                        if pipeline_name in retired:
+                            msg = (
+                                f"不支持的管道类型: {pipeline_name}；"
+                                "该能力已退役，请改用其他识别模式"
                             )
-                            kwargs.update(spec.constructor_kwargs(resolved))
-                        with (
-                            contextlib.nullcontext()
-                            if is_ort_environment()
-                            else paddle_model_cache()
-                        ):
-                            self._pipelines[pipeline_name] = spec.create_pipeline(
-                                device, **kwargs
-                            )
-                    else:
-                        # 回退到旧式创建（通过 OCRPipeline 枚举）
-                        try:
-                            pipeline_enum = OCRPipeline(pipeline_name)
-                        except ValueError:
+                        else:
                             msg = f"不支持的管道类型: {pipeline_name}"
-                            raise ValueError(msg) from None
-                        self._pipelines[pipeline_name] = self._create_pipeline(
-                            pipeline_enum
+                        raise ValueError(msg)
+                    spec = registry.get(pipeline_name)
+                    # 构造 kwargs 全部来自 spec.constructor_kwargs（Paddle ONNX
+                    # 请求快照）；provider 真值由快照持有，不再有 mkldnn/
+                    # 原生 DLL 探测。
+                    kwargs: dict[str, Any] = {}
+                    if spec.constructor_kwargs is not None:
+                        resolved = (
+                            options if options is not None else spec.options_class()
                         )
+                        kwargs.update(spec.constructor_kwargs(resolved))
+                    self._pipelines[pipeline_name] = spec.create_pipeline(
+                        self._get_device(), **kwargs
+                    )
                     self._pipeline_signatures[pipeline_name] = signature
                     _logger.debug(
                         "[get_or_create_pipeline] 管道 %s 创建完成", pipeline_name
@@ -1052,19 +715,9 @@ class OCRService(metaclass=SingletonMeta):
 
         # 根据管道类型分发
         try:
-            try:
-                results = _dispatch_once()
-            except Exception as first_error:
-                # 只有确实以 oneDNN 创建的 CPU 管道、且异常精确命中已知
-                # PIR 转换回归时才回退；其他异常保持原语义，不掩盖业务错误。
-                if not (
-                    type(self)._onednn_safe_cache is True
-                    and self._is_known_onednn_pir_failure(first_error)
-                ):
-                    raise
-                self._disable_onednn_and_release_pipeline(pipeline_name)
-                # 不再包一层同类 catch：第二次失败必须原样抛出，禁止循环重试。
-                results = _dispatch_once()
+            # #270：oneDNN/mkldnn 兼容回退已随原生 Paddle 后端退役；异常原样
+            # 上抛，不再重试重建。
+            results = _dispatch_once()
 
             # Normalize each result's bbox from pixel coords to [0-1000]
             for img, result in zip(images, results, strict=False):
@@ -1186,12 +839,8 @@ class OCRService(metaclass=SingletonMeta):
         image: Image.Image | np.ndarray | str,
         options: OCROptions,
     ) -> OCRResult:
-        """通过管道注册表委托 PaddleOCR-VL 文档解析。"""
-        from vibeocr.runtime.recognition.core.pipelines import get_registry
-
-        spec = get_registry().get("PaddleOCR-VL")
-        provider_options = spec.options_class.from_dict(options.to_dict())
-        return spec.recognize(self, image, provider_options)
+        """#270：PaddleOCR-VL 已退役；仅保留可诊断拒绝，不再有实现。"""
+        raise ValueError("PaddleOCR-VL 文档解析已退役：请改用其他文档识别模式")
 
     @staticmethod
     def _extract_bbox(

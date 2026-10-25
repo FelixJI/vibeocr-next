@@ -89,8 +89,11 @@ def test_broken_worker_pipe_discards_process():
     assert adapter._process is None
 
 
-def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-cpu")
+@pytest.mark.parametrize(
+    "recipe", ["paddleocr-ort-cpu", "paddleocr-ort-cuda", "paddleocr-ort-directml"]
+)
+def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch, recipe):
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
     monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
     monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
     assert paddle_python() == Path(sys.executable)
@@ -199,3 +202,9 @@ def test_worker_request_rejects_a_different_pipeline_than_frozen_job(monkeypatch
         with pytest.raises(PaddleOnnxError, match="snapshot changed"):
             adapter.recognize_many([], options=PipelineSelection("PP-StructureV3"))
     request.assert_not_called()
+
+
+@pytest.mark.parametrize("recipe", ["paddleocr-cpu", "paddleocr-cuda", "rapidocr-cpu"])
+def test_native_or_other_recipes_do_not_select_paddle_worker(monkeypatch, recipe):
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
+    assert paddle_python() is None

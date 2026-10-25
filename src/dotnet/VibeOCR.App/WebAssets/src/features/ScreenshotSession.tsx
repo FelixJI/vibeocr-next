@@ -38,7 +38,8 @@ export interface ImageRecognitionMode {
 export function imageRecognitionModes(
   value: unknown,
 ): readonly ImageRecognitionMode[] {
-  if (!Array.isArray(value) || value.length !== 3) return [];
+  // 宿主 BuildSelectionModeEntries 固定投影文字、表格两项，包含禁用占位。
+  if (!Array.isArray(value) || value.length !== 2) return [];
   return value.every((entry: unknown) => {
     if (entry === null || typeof entry !== "object") return false;
     const mode = entry as Partial<ImageRecognitionMode>;

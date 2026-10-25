@@ -234,19 +234,23 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     catch (RecognitionModeUnavailableException error)
     {
-      // 严格模式合同：显式选择的模式在当前环境不可用时，提交可恢复地失败
-      // 并指向环境；不静默回退通用文字识别。
       AppLog.Warn($"Recognition mode override refused: {error.Message}");
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
-        "recognition_mode_unavailable", WorkbenchProblemCategory.Unavailable, true,
-        "workbench.error.recognitionModeUnavailable"));
+        error.IsRetired ? "recognition_mode_retired" : "recognition_mode_unavailable",
+        WorkbenchProblemCategory.Unavailable, true,
+        error.IsRetired ? "workbench.error.recognitionModeRetired" : "workbench.error.recognitionModeUnavailable"));
     }
     catch (RuntimeSelectionException error)
     {
       AppLog.Warn($"Recognition mode selection refused: {error.Message}");
+      (string code, string messageKey) = error.Kind switch
+      {
+        RuntimeSelectionErrorKind.RecognitionModeRetired => ("recognition_mode_retired", "workbench.error.recognitionModeRetired"),
+        RuntimeSelectionErrorKind.UnknownEngine => ("recognition_mode_unknown", "workbench.error.recognitionModeUnknown"),
+        _ => ("recognition_mode_unavailable", "workbench.error.recognitionModeUnavailable"),
+      };
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
-        "recognition_mode_unavailable", WorkbenchProblemCategory.Unavailable, true,
-        "workbench.error.recognitionModeUnavailable"));
+        code, WorkbenchProblemCategory.Unavailable, true, messageKey));
     }
     catch (ArgumentException) when (command is SetRecognitionOptionsCommand or SetModeDeviceCommand)
     {

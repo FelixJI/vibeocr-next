@@ -42,21 +42,34 @@ it("submits explicit typed overrides and omits default fields", async () => {
   });
 });
 
-it("rejects an invalid formula batch before submitting", async () => {
-  const run = vi.fn();
+it("omits retired formula fields from the compatibility echo", async () => {
+  // #270：退役字段（VL/公式专用）不再出现在编辑器；旧记录中残留的字段
+  // 在回显投影中被忽略，不参与保存提交。
+  const run = vi.fn().mockResolvedValue(true);
   const user = userEvent.setup();
   render(
     <PaddleOptionsEditor
-      modeId="paddle_formula"
-      supportedOptions={["formula_recognition_batch_size"]}
-      values={{}}
+      modeId="paddle_structure"
+      supportedOptions={["use_doc_unwarping", "use_table_recognition"]}
+      values={{
+        use_doc_unwarping: true,
+        formula_recognition_batch_size: 8,
+        vl_use_layout_detection: true,
+      }}
       actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
     />,
   );
   await user.click(screen.getByText("识别参数"));
-  await user.type(screen.getByLabelText("公式模型批量大小"), "0");
-  expect(screen.getByRole("button", { name: "保存参数" })).toBeDisabled();
-  expect(run).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("公式模型批量大小")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("VL 版面检测")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("识别表格")).toHaveValue("default");
+  await user.click(screen.getByRole("button", { name: "保存参数" }));
+  // 同记录仍合法的字段保留（退役字段被剔除，不进入提交载荷）。
+  expect(run).toHaveBeenCalledWith({
+    type: "recognition.setOptions",
+    modeId: "paddle_structure",
+    options: { use_doc_unwarping: true },
+  });
 });
 
 it("follows host-provided defaults when no local edits are pending", async () => {

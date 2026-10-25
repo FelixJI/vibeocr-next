@@ -1,13 +1,10 @@
 """ocr_service.py staticmethod 纯逻辑测试。
 
 ocr_service.py 仅 33% 覆盖。聚焦可独立测试的 staticmethod：
-_to_ndarray / _is_known_onednn_pir_failure / _normalize_result_bbox /
-_decide_enable_mkldnn（class 级缓存逻辑）。
+_to_ndarray / _normalize_result_bbox。
 """
 
 from __future__ import annotations
-
-from unittest.mock import patch
 
 import numpy as np
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
@@ -46,59 +43,6 @@ class TestToNdarray:
         result = OCRService._to_ndarray(img)
         assert isinstance(result, np.ndarray)
         assert result.shape == (2, 4, 3)  # converted to RGB
-
-
-class TestIsKnownOnednnPirFailure:
-    """_is_known_onednn_pir_failure：判断异常链是否命中 PIR/oneDNN 回归。"""
-
-    def test_direct_match(self):
-        exc = RuntimeError(
-            "ConvertPirAttribute2RuntimeAttribute onednn_instruction not impl"
-        )
-        assert OCRService._is_known_onednn_pir_failure(exc) is True
-
-    def test_no_match_plain_error(self):
-        assert OCRService._is_known_onednn_pir_failure(ValueError("普通错误")) is False
-
-    def test_match_via_cause_chain(self):
-        """异常 __cause__ 链中包含匹配模式"""
-        root = RuntimeError(
-            "ConvertPirAttribute2RuntimeAttribute failed for onednn_instruction"
-        )
-        try:
-            try:
-                raise root
-            except RuntimeError as e:
-                raise RuntimeError("包装错误") from e
-        except RuntimeError as wrapper:
-            assert OCRService._is_known_onednn_pir_failure(wrapper) is True
-
-    def test_match_via_context_chain(self):
-        """异常 __context__ 链中包含匹配模式"""
-        root = RuntimeError(
-            "ConvertPirAttribute2RuntimeAttribute onednn_instruction bug"
-        )
-        try:
-            try:
-                raise root
-            except RuntimeError:
-                raise RuntimeError("隐式传播")  # noqa: B904 - 有意测试隐式 __context__ 传播
-        except RuntimeError as wrapper:
-            assert OCRService._is_known_onednn_pir_failure(wrapper) is True
-
-    def test_missing_onednn_keyword_no_match(self):
-        """只有 ConvertPirAttribute2RuntimeAttribute 但无 onednn → 不匹配"""
-        exc = RuntimeError("ConvertPirAttribute2RuntimeAttribute something else")
-        assert OCRService._is_known_onednn_pir_failure(exc) is False
-
-    def test_circular_reference_does_not_loop(self):
-        """异常链出现循环引用时不死循环（id 去重保护）"""
-        exc1 = RuntimeError("a")
-        exc2 = RuntimeError("b")
-        exc1.__cause__ = exc2
-        exc2.__cause__ = exc1  # 循环
-        # 应正常返回而非死循环
-        assert OCRService._is_known_onednn_pir_failure(exc1) is False
 
 
 class TestNormalizeResultBbox:
@@ -198,48 +142,3 @@ class TestNormalizeResultBbox:
         )
         OCRService._normalize_result_bbox(result, image=None)
         assert result.content_list[0]["bbox"] == [100.0, 100.0, 500.0, 500.0]
-
-
-class TestDecideEnableMkldnn:
-    """_decide_enable_mkldnn：决定是否启用 oneDNN（class 级缓存）。"""
-
-    def setup_method(self):
-        """每个测试前重置 class 级缓存，避免测试间污染。"""
-        OCRService._onednn_safe_cache = None
-        OCRService._onednn_runtime_disabled = False
-
-    def test_gpu_device_returns_false(self):
-        """GPU 设备不启用 oneDNN"""
-        assert OCRService._decide_enable_mkldnn("gpu") is False
-
-    def test_runtime_disabled_returns_false(self):
-        """运行时已锁定禁用时返回 False（即使 CPU）"""
-        OCRService._onednn_runtime_disabled = True
-        assert OCRService._decide_enable_mkldnn("cpu") is False
-
-    def test_cpu_safe_probe_true(self):
-        """CPU 设备 + 探测安全 → True，且缓存结果"""
-        with patch(
-            "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn"
-        ) as mock_probe:
-            mock_probe.return_value = (True, "supported CPU")
-            assert OCRService._decide_enable_mkldnn("cpu") is True
-            # 缓存生效：第二次不再探测
-            mock_probe.return_value = (False, "should not be reached")
-            assert OCRService._decide_enable_mkldnn("cpu") is True
-
-    def test_cpu_unsafe_probe_false(self):
-        """CPU 设备 + 探测不安全 → False"""
-        with patch(
-            "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn"
-        ) as mock_probe:
-            mock_probe.return_value = (False, "unsupported instruction set")
-            assert OCRService._decide_enable_mkldnn("cpu") is False
-
-    def test_probe_exception_defaults_false(self):
-        """探测抛异常时保守禁用"""
-        with patch(
-            "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn"
-        ) as mock_probe:
-            mock_probe.side_effect = RuntimeError("probe crashed")
-            assert OCRService._decide_enable_mkldnn("cpu") is False

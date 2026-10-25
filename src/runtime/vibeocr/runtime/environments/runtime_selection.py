@@ -31,6 +31,11 @@ DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY = "mineru_model_registry"
 VARIANT_ACCELERATORS = ("cpu", "nvidia_cuda")
 BASE_PROFILE = "win-x64-base"
 
+# #270：原生 Paddle 组件身份保留在 PROFILE_COMPONENTS/迁移表中供历史
+# 解析（旧记录/旧 marker 读取），但不再是可新安装组件：新目录、显式
+# 请求与缺省（None）闭包一律排除它们，不再落到任何安装 scope。
+RETIRED_NATIVE_PADDLE_COMPONENTS = frozenset({"paddleocr-cpu", "paddleocr-cuda"})
+
 # Backend release 声明的候选源。Protocol 允许同 kind 多候选；单次选择
 # TUNA 是发布/运行时默认 package index，官方 PyPI 保留为显式候选，
 # 不做静默 fallback。模型源选择只投影到 PaddleX/MinerU 官方环境值；
@@ -362,6 +367,20 @@ class RuntimeSelectionPolicy:
                 for component_id in requested_tuple
                 if component_id not in base_ids
             )
+        # #270：显式退役组件请求（含旧 ocr_engine 迁移出的原生 Paddle）
+        # 必须可诊断拒绝，不能静默降级成 base 安装成功；历史 marker/设置
+        # 的读取兼容由调用方（如 startup 选择）捕获本错误后回退缺省闭包。
+        retired_requested = RETIRED_NATIVE_PADDLE_COMPONENTS.intersection(
+            requested_tuple
+        )
+        if retired_requested:
+            raise RuntimeSelectionError(
+                ErrorCode.VALIDATION_ERROR,
+                "install component {} is retired; "
+                "prepare a Paddle ONNX environment instead".format(
+                    ", ".join(sorted(retired_requested))
+                ),
+            )
         selectable = tuple(
             component.component_id
             for component in profile.components
@@ -391,7 +410,12 @@ class RuntimeSelectionPolicy:
     ) -> tuple[str, ...]:
         base_ids = {component.component_id for component in base_profile.components}
         if requested is None:
-            return tuple(component.component_id for component in profile.components)
+            # 缺省（None）= 目标档位完整闭包，但 #270 后不再包含原生 Paddle。
+            return tuple(
+                component.component_id
+                for component in profile.components
+                if component.component_id not in RETIRED_NATIVE_PADDLE_COMPONENTS
+            )
         selected = set(base_ids)
         dependencies = {
             component.component_id: component.dependencies
@@ -511,13 +535,14 @@ def download_source_catalog_payload(
 
 
 def selectable_component_ids(accelerator: str) -> tuple[str, ...]:
-    """可选组件 = 目标档位 profile 相对 base 闭包的新增组件。"""
+    """可选组件 = 目标档位 profile 相对 base 闭包的新增组件（不含退役原生 Paddle）。"""
     plan = ACCELERATOR_TO_PLAN[accelerator]
     base_ids = {component_id for component_id, _ in PROFILE_COMPONENTS[BASE_PROFILE]}
     return tuple(
         component_id
         for component_id, _ in PROFILE_COMPONENTS[plan]
         if component_id not in base_ids
+        and component_id not in RETIRED_NATIVE_PADDLE_COMPONENTS
     )
 
 
@@ -644,6 +669,17 @@ def normalize_install_component_ids(
     )
     plan = ACCELERATOR_TO_PLAN[accelerator]
     requested = migrate_legacy_component_ids(plan, requested)
+    # #270：显式退役组件请求（含旧 ocr_engine 迁移出的原生 Paddle）
+    # 可诊断拒绝；历史读取兼容由调用方捕获后回退，不静默改写用户选择。
+    retired_requested = RETIRED_NATIVE_PADDLE_COMPONENTS.intersection(requested)
+    if retired_requested:
+        raise RuntimeSelectionError(
+            ErrorCode.VALIDATION_ERROR,
+            "install component {} is retired; "
+            "prepare a Paddle ONNX environment instead".format(
+                ", ".join(sorted(retired_requested))
+            ),
+        )
     if legacy_request:
         base_ids = {
             component_id for component_id, _ in PROFILE_COMPONENTS[BASE_PROFILE]
@@ -673,6 +709,7 @@ __all__ = [
     "DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY",
     "DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY",
     "DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY",
+    "RETIRED_NATIVE_PADDLE_COMPONENTS",
     "expand_legacy_model_sources",
     "DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX",
     "ResolvedRuntimeSelection",

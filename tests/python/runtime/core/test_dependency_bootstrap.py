@@ -11,30 +11,6 @@ import pytest
 from vibeocr.runtime.environments import dependency_bootstrap
 
 
-class TestResolveProfile:
-    """_resolve_profile 把 'auto' 解析为具体 profile。"""
-
-    def test_explicit_cpu_passthrough(self):
-        """显式 cpu 直接返回。"""
-        assert dependency_bootstrap._resolve_profile("cpu") == "cpu"
-
-    def test_explicit_gpu_passthrough(self):
-        """显式 gpu-cu126 直接返回。"""
-        assert dependency_bootstrap._resolve_profile("gpu-cu126") == "gpu-cu126"
-
-    def test_auto_with_gpu_detected(self, monkeypatch: pytest.MonkeyPatch):
-        """auto 且检测到 GPU 时解析为 gpu-cu126。"""
-        monkeypatch.setattr(dependency_bootstrap, "detect_gpu", lambda: (True, "cu126"))
-
-        assert dependency_bootstrap._resolve_profile("auto") == "gpu-cu126"
-
-    def test_auto_without_gpu_resolves_to_cpu(self, monkeypatch: pytest.MonkeyPatch):
-        """auto 且无 GPU 时解析为 cpu。"""
-        monkeypatch.setattr(dependency_bootstrap, "detect_gpu", lambda: (False, None))
-
-        assert dependency_bootstrap._resolve_profile("auto") == "cpu"
-
-
 class TestMainArgv:
     """main() 的 argparse 与退出码语义。"""
 
@@ -121,13 +97,18 @@ class TestMainArgv:
 
         assert seen_python["python"] == target
 
-    def test_auto_profile_resolves_before_install(
+    def test_auto_profile_does_not_probe_gpu_before_retired_diagnostic(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ):
-        """auto profile 经 _resolve_profile 解析后传入 install。"""
-        monkeypatch.setattr(dependency_bootstrap, "detect_gpu", lambda: (True, "cu126"))
+        """旧 auto 参数只透传诊断，不为退役请求探测 GPU。"""
+        from vibeocr.runtime.environments import env_manager
+
+        def forbidden():
+            raise AssertionError("retired CLI probed GPU")
+
+        monkeypatch.setattr(env_manager, "detect_gpu", forbidden)
         seen_profile: list[str] = []
 
         def fake_install(python_exe, *, profile, network_type, progress_callback):
@@ -141,7 +122,7 @@ class TestMainArgv:
         code = dependency_bootstrap.main(["--profile", "auto"])
 
         assert code == 0
-        assert seen_profile == ["gpu-cu126"]
+        assert seen_profile == ["auto"]
 
     def test_invalid_profile_choice_rejected(self, monkeypatch: pytest.MonkeyPatch):
         """argparse 拒绝非法 profile 选项（SystemExit）。"""
@@ -153,3 +134,28 @@ class TestMainArgv:
 
         with pytest.raises(SystemExit):
             dependency_bootstrap.main(["--profile", "bogus"])
+
+
+@pytest.mark.parametrize("operation", ["install", "switch"])
+def test_retired_native_entrypoints_reject_before_environment_side_effects(
+    tmp_path, monkeypatch, operation
+):
+    from vibeocr.runtime.environments import env_manager
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired request reached environment mutation")
+
+    monkeypatch.setattr(env_manager, "_run_pip", forbidden)
+    monkeypatch.setattr(env_manager, "_load_dep_specs", forbidden)
+    monkeypatch.setattr(env_manager.subprocess, "Popen", forbidden)
+    marker = tmp_path / "healthy.txt"
+    marker.write_text("old healthy environment", encoding="utf-8")
+    if operation == "install":
+        success, message = env_manager.install_backend_dependencies(
+            tmp_path / "python.exe"
+        )
+    else:
+        success, message = env_manager.switch_paddle_backend(tmp_path, "cpu")
+    assert not success
+    assert "已退役" in message and "ONNX" in message
+    assert marker.read_text(encoding="utf-8") == "old healthy environment"

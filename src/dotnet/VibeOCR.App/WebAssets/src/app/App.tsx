@@ -463,6 +463,12 @@ export function App({
 
 function commandProblemLabel(messageKey: string): string {
   const messages: Readonly<Record<string, string>> = {
+    "workbench.error.recognitionModeRetired":
+      "识别模式已退役，请在设置或任务面板重新选择可用模式。",
+    "workbench.error.recognitionModeUnknown":
+      "无法识别所选模式，请重新选择当前目录中的可用模式。",
+    "workbench.error.recognitionModeUnavailable":
+      "当前识别模式不可用，请检查运行环境或重新选择可用模式。",
     "workbench.error.stateSyncFailed":
       "界面状态同步中断。重新同步后可继续操作，未保存的本地编辑会保留。",
     "workbench.error.clipboardBusy": "剪贴板被占用，请稍后重试复制。",

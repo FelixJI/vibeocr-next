@@ -21,6 +21,81 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 public sealed class DefaultRecognitionModeWorkbenchTests
 {
+  [Theory]
+  [InlineData("paddle_formula")]
+  [InlineData("paddle_document_vl")]
+  public async Task RetiredDefaultRemainsReadableAndExplicitOverridesRejectWithoutReplacement(string modeId)
+  {
+    var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth(), Settings = Snapshot(modeId) };
+    var viewModel = new SettingsViewModel(fake);
+    await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+
+    RecognitionSelectionSnapshot snapshot = viewModel.RecognitionSelection!;
+    Assert.Equal(modeId, snapshot.DefaultRecognitionModeId);
+    Assert.Equal(modeId, DesktopWorkbenchCommandHandler.EffectiveModeIdOrDefault(snapshot, null, true));
+    Assert.Contains("已退役", SettingsViewModel.DisplayName(modeId));
+    var error = Assert.Throws<RecognitionModeUnavailableException>(() =>
+      WorkbenchSelectionOwner.EnsureUsableModeOverrideOrThrow(null, modeId));
+    Assert.Contains("已退役", error.Message);
+    Assert.Contains("重新选择", error.Message);
+    Assert.Equal(0, fake.UpdateCalls);
+    Assert.Equal(modeId, fake.Settings.Extra["default_recognition_mode"].GetString());
+    Assert.Equal("rapid_text", DesktopWorkbenchCommandHandler.EffectiveModeIdOrDefault(snapshot, "rapid_text", true));
+  }
+
+  [Theory]
+  [InlineData("paddle_formula")]
+  [InlineData("paddle_document_vl")]
+  public async Task RetiredModeProjectsWorkbenchProblemSettingsReasonAndScreenshotHint(string modeId)
+  {
+    var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth(), Settings = Snapshot(modeId) };
+    var settings = new SettingsViewModel(fake);
+    await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+    var recognition = new RecognitionViewModel(fake, new IdleInputService());
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-retired-ui-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = new DesktopWorkbenchCommandHandler(
+        () => recognition,
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        static () => throw new InvalidOperationException(),
+        () => settings,
+        () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+        static () => throw new InvalidOperationException(),
+        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+        broker, root, static () => 0, annotations);
+      WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+        new SetModeDeviceCommand(modeId, "cpu"), TestContext.Current.CancellationToken);
+      Assert.Equal("recognition_mode_retired", refused.Error?.Code);
+      Assert.Equal("workbench.error.recognitionModeRetired", refused.Error?.MessageKey);
+      Assert.Equal(0, fake.UpdateCalls);
+      WorkbenchCommandOutcome echoed = await handler.ExecuteAsync(
+        new SetDefaultRecognitionModeCommand(modeId), TestContext.Current.CancellationToken);
+      var state = Assert.IsType<SettingsWorkbenchState>(Assert.Single(echoed.States));
+      Assert.Equal(modeId, state.DefaultRecognitionMode?.ModeId);
+      Assert.Equal("recognition_mode_retired", state.DefaultRecognitionMode?.ReasonCode);
+      using JsonDocument wire = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
+        new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, state)));
+      Assert.Equal("recognition_mode_retired", wire.RootElement.GetProperty("payload").GetProperty("state")
+        .GetProperty("defaultRecognitionMode").GetProperty("reasonCode").GetString());
+      ScreenshotRecognitionModeEntry capture = DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)[0];
+      Assert.Equal("", capture.ModeId);
+      Assert.Equal("default_retired", capture.Availability);
+      Assert.Equal("recognition_mode_retired", capture.ReasonCode);
+      Assert.Contains("已退役", ScreenRegionPicker.UnavailableReason(capture.Availability));
+      Assert.Contains("重新选择", ScreenRegionPicker.UnavailableReason(capture.Availability));
+      WorkbenchCommandOutcome recovered = await handler.ExecuteAsync(
+        new SetDefaultRecognitionModeCommand("rapid_text"), TestContext.Current.CancellationToken);
+      Assert.Null(recovered.Error);
+      Assert.Null(Assert.IsType<SettingsWorkbenchState>(Assert.Single(recovered.States)).DefaultRecognitionMode?.ReasonCode);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   [Fact]
   public async Task LoadSnapshotProjectsCommittedDefaultFromBackendSettings()
   {
@@ -454,13 +529,9 @@ public sealed class DefaultRecognitionModeWorkbenchTests
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleStructure,
               Wire.RecognitionModeAvailability.Ready),
-            Mode(Wire.RecognitionModeId.PaddleDocumentVl,
-              Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.MineruDocument,
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleTable,
-              Wire.RecognitionModeAvailability.Ready),
-            Mode(Wire.RecognitionModeId.PaddleFormula,
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.RapidTable,
               Wire.RecognitionModeAvailability.Ready),
@@ -496,16 +567,8 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
-        Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,

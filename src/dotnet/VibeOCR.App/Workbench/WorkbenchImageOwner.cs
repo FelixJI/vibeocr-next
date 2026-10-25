@@ -468,9 +468,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   /// 严格模式合同的终态：显式选择的模式不可用时保留引擎目录、用户选择与
   /// 截图会话基准，状态指向环境修复；不发布虚假成功或丢失选择。
   /// </summary>
-  private RecognitionWorkbenchState ModeUnavailableRecognitionState() => new(
+  private RecognitionWorkbenchState ModeUnavailableRecognitionState(bool retired) => new(
     false,
-    "recognition.modeUnavailable",
+    retired ? "recognition.modeRetired" : "recognition.modeUnavailable",
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionInput,
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionResult,
     selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
@@ -1370,10 +1370,11 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   }
 
   /// <summary>
-  /// 普通截图动作栏的识别图标投影：固定三类语义——文字识别（设置已提交
-  /// 的默认引擎）、表格识别、公式识别；任意目录状态下都恰好返回三个条目
+  /// 普通截图动作栏的识别图标投影：固定两类语义——文字识别（设置已提交
+  /// 的默认引擎）、表格识别；任意目录状态下都恰好返回两个条目
   /// （不可用则禁用并指向设置），不会有时一整列、有时单个泛“未就绪”。
-  /// 纯截图不触发目录加载或安装。
+  /// 纯截图不触发目录加载或安装。#270：独立公式识别已退役，不再提供
+  /// 公式入口。
   /// </summary>
   private ScreenshotSelectionActions BuildSelectionActions()
   {
@@ -1389,29 +1390,33 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   }
 
   /// <summary>
-  /// 三类图标只消费 Runtime typed 目录自身的分类字段（family/pipeline），
-  /// 不在桌面侧复制引擎支持表：表格/公式取 specialized 族中
-  /// TABLE_RECOGNITION/FORMULA_RECOGNITION 管线（Protocol v2 稳定投影值）
-  /// 声明的模式。文字图标复用 <see cref="EffectiveModeIdOrDefault"/> 的
+  /// 图标只消费 Runtime typed 目录自身的分类字段（family/pipeline），
+  /// 不在桌面侧复制引擎支持表：表格取 specialized 族中
+  /// TABLE_RECOGNITION 管线（Protocol v2 稳定投影值）声明的模式。
+  /// 文字图标复用 <see cref="EffectiveModeIdOrDefault"/> 的
   /// 既有持久默认解析（Bound→回显 id，其余不猜默认）；解析出的默认属于
   /// 文字语义（text/document 族）才携带其 id 与目录 availability，默认
-  /// 缺失/无效/不在当前目录或属于表格/公式语义时显式禁用（空 ModeId +
+  /// 缺失/无效/不在当前目录或属于表格语义时显式禁用（空 ModeId +
   /// default_missing/default_invalid 稳定词汇）并指向设置，绝不静默改选
-  /// 其他文字引擎，也不把表格引擎冒充文字。控件名称固定为三分类（稳定
-  /// 可访问名称），引擎名等细节仅进 Hint（Tooltip）。目录未加载时三类
+  /// 其他文字引擎，也不把表格引擎冒充文字。控件名称固定为分类（稳定
+  /// 可访问名称），引擎名等细节仅进 Hint（Tooltip）。目录未加载时分类
   /// 统一 catalog_unavailable 禁用。
   /// </summary>
   internal static IReadOnlyList<ScreenshotRecognitionModeEntry> BuildSelectionModeEntries(
     RecognitionSelectionSnapshot? selection)
   {
     RuntimeSelectionService? catalog = selection?.Catalog;
+    string? defaultModeId = WorkbenchSelectionOwner.EffectiveModeIdOrDefault(
+      selection, taskEngine: null, requireUsable: false);
+    bool retiredDefault = RecognitionModeCatalog.IsRetiredModeId(defaultModeId);
     if (catalog?.SupportsRecognitionModes is not true || catalog.RecognitionModes.Count == 0)
     {
+      // #270：独立公式识别已退役，目录不可用时也不再提供公式入口。
       return
       [
-        new ScreenshotRecognitionModeEntry("", "文字识别", "catalog_unavailable", null, "textRecognition"),
+        new ScreenshotRecognitionModeEntry("", "文字识别", retiredDefault ? "default_retired" : "catalog_unavailable",
+          retiredDefault ? "recognition_mode_retired" : null, "textRecognition"),
         new ScreenshotRecognitionModeEntry("", "表格识别", "catalog_unavailable", null, "tableRecognition"),
-        new ScreenshotRecognitionModeEntry("", "公式识别", "catalog_unavailable", null, "formulaRecognition"),
       ];
     }
     IReadOnlyList<RecognitionModeOption> modes = catalog.RecognitionModes;
@@ -1420,8 +1425,6 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       modes.FirstOrDefault(mode => string.Equals(mode.Id, id, StringComparison.Ordinal));
 
     List<ScreenshotRecognitionModeEntry> entries = [];
-    string? defaultModeId = WorkbenchSelectionOwner.EffectiveModeIdOrDefault(
-      selection, taskEngine: null, requireUsable: false);
     if (FindMode(defaultModeId) is { } textMode && textMode.Family is "text" or "document")
     {
       entries.Add(new ScreenshotRecognitionModeEntry(
@@ -1437,25 +1440,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       // 三类语义显式区分：NotApplicable 且无解析默认=尚未配置；其余
       // （Invalid/Unread/不在目录/specialized 族默认）=当前默认不能用作
       // 文字识别。禁用条目不携带可提交的 modeId，提交路径 fail closed。
-      string availability = selection!.DefaultMode is RuntimeDefaultModeBinding.NotApplicable &&
+      string availability = retiredDefault ? "default_retired" : selection!.DefaultMode is RuntimeDefaultModeBinding.NotApplicable &&
         defaultModeId is null
           ? "default_missing"
           : "default_invalid";
       entries.Add(new ScreenshotRecognitionModeEntry(
-        "", "文字识别", availability, null, "textRecognition"));
+        "", "文字识别", availability, retiredDefault ? "recognition_mode_retired" : null, "textRecognition"));
     }
-
-    static ScreenshotRecognitionModeEntry SpecializedEntry(
-      IReadOnlyList<RecognitionModeOption> modes,
-      string pipelineId,
-      string label,
-      string iconKey) =>
-      modes.FirstOrDefault(mode => mode.Family == "specialized" &&
-        mode.PipelineId == pipelineId) is { } mode
-        ? new ScreenshotRecognitionModeEntry(
-          mode.Id, label, mode.Availability, mode.ReasonCode, iconKey)
-        // 验证后的目录必然声明全部稳定模式；缺失时按目录不可用禁用。
-        : new ScreenshotRecognitionModeEntry("", label, "unavailable", null, iconKey);
 
     // 表格语义有两个稳定模式；目录真值决定指向：ready RapidTable >
     // ready Paddle > preparation_required（RapidTable 先）；不读文字默认。
@@ -1478,7 +1469,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         : new ScreenshotRecognitionModeEntry("", "表格识别", "unavailable", null, "tableRecognition");
     }
     entries.Add(TableEntry(modes));
-    entries.Add(SpecializedEntry(modes, "FORMULA_RECOGNITION", "公式识别", "formulaRecognition"));
+    // #270：独立公式识别已退役；截图选区不再提供公式入口，历史公式
+    // 结果仍可查看/导出。无 FORMULA_RECOGNITION 目录条目可投影。
     return entries;
   }
 
@@ -1517,6 +1509,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
       if (input.SelectionRecognitionIntent is { } intent)
       {
+        if (intent is ScreenshotRecognitionIntent.Formula)
+        {
+          // #270：独立公式识别已退役；旧入口残留的公式意图明确拒绝。
+          throw new RecognitionModeUnavailableException(
+            "公式识别已退役，已拒绝执行；请改用文字或表格识别。", retired: true);
+        }
         ScreenshotRecognitionModeEntry resolved = BuildSelectionModeEntries(settingsOwner.CurrentModel?.RecognitionSelection)[(int)intent];
         modeId = resolved.ModeId;
       }
@@ -1578,7 +1576,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
         ReleaseCaptureGuard();
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
         terminalVisible = true;
       }
     }
@@ -1588,7 +1586,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
         ReleaseCaptureGuard();
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
         terminalVisible = true;
       }
     }
@@ -2093,7 +2091,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Image edit recognition mode refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2101,7 +2099,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Image edit recognition selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
       }
     }
     catch (Exception error)
@@ -2207,7 +2205,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Screenshot recognition mode refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2215,7 +2213,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Screenshot recognition selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
       }
     }
     catch (Exception error)
@@ -2886,7 +2884,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Recognition mode override refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2894,7 +2892,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Recognition mode selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState());
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
       }
     }
     catch (Exception error)

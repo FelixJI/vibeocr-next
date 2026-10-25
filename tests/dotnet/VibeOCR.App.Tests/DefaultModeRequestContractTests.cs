@@ -25,6 +25,28 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 public sealed class DefaultModeRequestContractTests
 {
+  [Theory]
+  [InlineData("paddle_formula")]
+  [InlineData("paddle_document_vl")]
+  public async Task RetiredDefaultPublishesExplicitAsyncTerminalWithoutSubmittingOrReplacingChoice(string modeId)
+  {
+    var fake = Client(modeId);
+    await using TestHarness harness = await Harness(fake);
+    using var terminal = new RecognitionStateAwaiter(harness.Handler,
+      state => !state.IsBusy && state.StatusCode == "recognition.modeRetired");
+    WorkbenchCommandOutcome started = await harness.Handler.ExecuteAsync(
+      new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
+    Assert.Null(started.Error);
+    RecognitionWorkbenchState rejected = await terminal.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Equal("recognition.modeRetired", rejected.StatusCode);
+    Assert.Null(rejected.TaskEngine);
+    Assert.NotEmpty(rejected.Engines!);
+    Assert.Empty(fake.Submissions);
+    Assert.Equal(0, fake.UpdateCalls);
+    Assert.Equal(modeId, harness.Settings.DefaultRecognitionMode?.ModeId);
+    Assert.Equal(modeId, fake.Settings.Extra["default_recognition_mode"].GetString());
+  }
+
   [Fact]
   public async Task InheritedDefaultDrivesSingleRequestEngineWithoutChangingSetting()
   {
@@ -808,14 +830,10 @@ public sealed class DefaultModeRequestContractTests
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleStructure,
               Wire.RecognitionModeAvailability.PreparationRequired),
-            Mode(Wire.RecognitionModeId.PaddleDocumentVl,
-              Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.MineruDocument,
               mineruReady ? Wire.RecognitionModeAvailability.Ready
                 : Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleTable,
-              Wire.RecognitionModeAvailability.PreparationRequired),
-            Mode(Wire.RecognitionModeId.PaddleFormula,
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.RapidTable,
               Wire.RecognitionModeAvailability.Ready),
@@ -867,20 +885,12 @@ public sealed class DefaultModeRequestContractTests
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
-        Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,

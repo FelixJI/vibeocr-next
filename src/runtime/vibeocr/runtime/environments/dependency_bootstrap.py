@@ -1,4 +1,4 @@
-"""VibeOCR 联网后端依赖安装命令。"""
+"""已退役原生后端安装命令的诊断兼容入口。"""
 
 from __future__ import annotations
 
@@ -7,21 +7,13 @@ import sys
 from pathlib import Path
 
 from vibeocr.runtime.environments.env_manager import (
-    detect_gpu,
     install_backend_dependencies,
 )
 
 
-def _resolve_profile(requested: str) -> str:
-    if requested != "auto":
-        return requested
-    has_gpu, _cuda_tag = detect_gpu()
-    return "gpu-cu126" if has_gpu else "cpu"
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="为 VibeOCR 安装 CPU 或 CUDA 12.6 后端重依赖",
+        description="原生 Paddle 后端安装已退役，请通过受管理环境准备 ONNX 或独立 MinerU 配方",
     )
     parser.add_argument(
         "--profile",
@@ -37,17 +29,16 @@ def main(argv: list[str] | None = None) -> int:
         "--python",
         type=Path,
         default=Path(sys.executable),
-        help="目标 Python；默认安装到当前环境",
+        help="兼容旧参数；此命令只返回退役诊断，不修改目标环境",
     )
     args = parser.parse_args(argv)
-    profile = _resolve_profile(args.profile)
 
     def report(stage: str, message: str) -> None:
         print(f"[{stage}] {message}", flush=True)
 
     success, message = install_backend_dependencies(
         args.python,
-        profile=profile,
+        profile=args.profile,
         network_type=args.network,
         progress_callback=report,
     )

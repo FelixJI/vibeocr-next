@@ -10,7 +10,11 @@
 | `paddleocr-ort-cuda` | `onnxruntime==1.30.0` | 与 Rapid 路径同一微软 CUDA13 EP v0.2.0 插件与七个固定 NVIDIA wheel |
 | `paddleocr-ort-directml` | `onnxruntime-directml==1.24.4` | Windows DirectML，无 CUDA/Paddle/Torch |
 
-三闭包保持 CPython 3.13 / win-x64，使用 `paddleocr==3.7.0`、`paddlex[ocr]==3.7.2`，不启用 `doc-parser` extra。`scripts/update_runtime_paddle_onnx_locks.py` 约束既有 Paddle CPU lock 中的共同包版本，生成三个 source-neutral lock；根 Python lock 和 Pillow 升级不属于此变更。manifest 将三锁绑定到同一个产品候选，安装仍经 staging、探针、固定路径交换及失败回滚。
+三类 ORT 配方的生产闭包均不含 PaddlePaddle、Torch/Transformers 或用户端转换工具；独立 MinerU 依赖不受影响。新候选不携带原生 Paddle 锁；历史 manifest 与健康环境按只读兼容保留。
+
+三闭包保持 CPython 3.13 / win-x64，使用 `paddleocr==3.7.0`、`paddlex[ocr]==3.7.2`，不启用 `doc-parser` extra。`scripts/update_runtime_paddle_onnx_locks.py` 约束各设备现有 ORT lock 中的版本，生成三个 source-neutral lock；根 Python lock 和 Pillow 升级不属于此变更。manifest 将三锁绑定到同一个产品候选，安装仍经 staging、探针、固定路径交换及失败回滚。
+
+依赖下载量以本次安装计划解析出的新增工件字节为准，模型体积以冻结资产清单和已缓存文件为准；CPU/CUDA/DirectML、档位和辅助模型会改变体积，不能沿用原生 Paddle/Torch 的旧估值。未知解析量继续显示未知，不承诺固定压缩比例。
 
 Windows 的 `chardet` 原生扩展已在较长 Portable 路径下出现 DLL 导入失败；若提示文件名或扩展名太长，请缩短 Portable 目录后重新预览安装。
 
@@ -48,7 +52,7 @@ C# `PaddleModeOptions` 是权威设置，TS 只展示 Runtime `supported_options
 
 主无辅助合成文本须完整返回 `VibeOCR 12345 TEST`。公开 smoke 保留 `paddle_smoke_fixtures.py` 的 `GOAL103|1120|2244`（既有 `Any`/`some`：命中任一配置 token）/ `1120` token 与 score、bbox/polygon、方向合同；8 页 `document_orientation.pdf` 按既有 `expected_rotate` 判断。启用 UVDoc 的简单合成行已观察到首字偏差，不能据此声称全文无误，辅助路径必须用既有文档 token 和有效几何另行验收。
 
-候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。默认 `-Provider legacy` 保留历史五模式 smoke。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
+候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。默认 `-Provider cpu`，仅允许三个保留模式，不再安装或运行原生 Paddle/公式/VL。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
 
 单次识别、批量和 PDF 的“本次模型档位”分别继承已保存默认，或临时选择 tiny/small/medium。临时选择不落盘，重启后恢复继承；PDF 沿每个文档已有 TaskEngine 范围隔离。截图与选字沿单次识别的有效设置。提交前冻结有效档位，批量整批沿同一快照；后续切换只影响新的提交。
 

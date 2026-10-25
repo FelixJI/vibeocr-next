@@ -192,7 +192,7 @@ public sealed class HttpV2GoldenContractTests
             .Select<HttpV2ErrorCode, string>(WireName)
             .ToArray();
         Assert.Equal(registered.Order(), declared.Order());
-        Assert.Equal(46, registered.Length);
+        Assert.Equal(47, registered.Length);
 
         foreach (JsonElement entry in entries)
         {
@@ -290,6 +290,7 @@ public sealed class HttpV2GoldenContractTests
         HttpV2ErrorCode.RuntimeComponentUnknown => false,
         HttpV2ErrorCode.RecognitionModeUnknown => false,
         HttpV2ErrorCode.RecognitionModeUnavailable => false,
+        HttpV2ErrorCode.RecognitionModeRetired => false,
         HttpV2ErrorCode.RecognitionModeLifecycleUnsupported => false,
         HttpV2ErrorCode.RecognitionModePipelineMismatch => false,
         HttpV2ErrorCode.MineruConfigUnavailable => false,

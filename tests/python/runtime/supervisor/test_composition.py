@@ -474,7 +474,12 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
     assert entries["rapid_text"]["required_component"] == "rapidocr-base"
     assert entries["windows_text"]["availability"] == "unavailable"
     assert entries["windows_text"]["required_component"] is None
-    assert entries["paddle_text"]["required_component"] == "paddleocr-cpu"
+    # #270：非 ONNX 环境中保留 Paddle 模式不再指向旧原生配方，而是提示
+    # 准备对应 Paddle ONNX 环境。
+    assert entries["paddle_text"]["required_component"] == "paddleocr-ort-cpu"
+    assert entries["paddle_text"]["reason_code"] == (
+        "mode_requires_paddle_onnx_environment"
+    )
 
     rapid.availability = EngineAvailability.READY
     resolver.invalidate_probe_cache()
@@ -515,10 +520,10 @@ def test_build_supervisor_base_path_exposes_engine_registry(
     assert module.engine_registry is not None
 
 
-def test_paddle_clear_cache_runs_empty_cache_when_cuda_compiled(
+def test_paddle_clear_cache_does_not_call_native_allocator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Force the CUDA branch of ``clear_cache`` so empty_cache() is invoked."""
+    """Retained ORT pipelines must not call the retired native Paddle allocator."""
     empty_calls: list[str] = []
 
     fake_paddle = types.ModuleType("paddle")
@@ -542,7 +547,7 @@ def test_paddle_clear_cache_runs_empty_cache_when_cuda_compiled(
 
     executor = composition._build_paddle_executor()
     executor._clear_cache()
-    assert empty_calls == ["called"]
+    assert empty_calls == []
 
 
 def test_paddle_clear_cache_swallows_paddle_error(

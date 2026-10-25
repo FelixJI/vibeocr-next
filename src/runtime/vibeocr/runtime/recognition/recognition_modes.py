@@ -13,13 +13,14 @@ from enum import StrEnum
 from typing import Any
 
 from vibeocr.runtime.recognition.pipeline_contracts import (
-    RecognitionMode as RecognitionModeId,
-)
-from vibeocr.runtime.recognition.pipeline_contracts import (
+    RETIRED_RECOGNITION_MODES,
     RecognitionModeFamily,
     RecognitionModeLifecycle,
     get_all_recognition_modes,
     get_recognition_mode_definition,
+)
+from vibeocr.runtime.recognition.pipeline_contracts import (
+    RecognitionMode as RecognitionModeId,
 )
 from vibeocr.runtime.recognition.pipeline_contracts import (
     RecognitionModeLifecycleKind as LifecycleKind,
@@ -117,6 +118,34 @@ DEFAULT_RECOGNITION_MODE_EXTRA_KEY = "default_recognition_mode"
 COMPAT_DEFAULT_RECOGNITION_MODE = RecognitionModeId.RAPID_TEXT
 """缺键时的兼容默认：与既有无 engine 提交的 Runtime 缺省一致。"""
 
+RECOGNITION_MODE_RETIRED_REASON = "recognition_mode_retired"
+"""#270：退役模式的统一 reason_code（目录/执行/默认/生命周期共用）。"""
+
+
+def _retired_mode_error(
+    mode_id: RecognitionModeId | str | None,
+) -> RecognitionModeError:
+    value = mode_id.value if isinstance(mode_id, RecognitionModeId) else mode_id
+    return RecognitionModeError(
+        "RECOGNITION_MODE_RETIRED",
+        recognition_mode=value,
+        reason_code=RECOGNITION_MODE_RETIRED_REASON,
+        detail={
+            "retired": True,
+            "next_action": "choose_available_recognition_mode",
+        },
+    )
+
+
+def _ensure_not_retired(
+    definition: "RecognitionModeDefinition",
+) -> "RecognitionModeDefinition":
+    """退役模式仅保留历史读取：目录外的一切执行性操作明确拒绝。"""
+
+    if definition.mode_id in RETIRED_RECOGNITION_MODES:
+        raise _retired_mode_error(definition.mode_id)
+    return definition
+
 
 def resolve_default_recognition_mode(
     extra: Mapping[str, Any] | None,
@@ -142,6 +171,7 @@ def resolve_default_recognition_mode(
         )
     definition = registry.definition(raw)
     if require_available:
+        _ensure_not_retired(definition)
         registry.ensure_mode_available(definition.mode_id)
     return definition.mode_id
 
@@ -196,6 +226,9 @@ class RecognitionModeRegistry:
             "modes": [
                 definition.to_payload(self._availability_probe(definition))
                 for definition in self._definitions
+                # #270：退役模式不出现在公开目录；definition() 仍可解析
+                # 历史 id 用于诊断与拒绝。
+                if definition.mode_id not in RETIRED_RECOGNITION_MODES
             ]
         }
 
@@ -218,6 +251,7 @@ class RecognitionModeRegistry:
         engine: str | None = None,
     ) -> RecognitionModeDefinition:
         definition = self.definition(recognition_mode)
+        _ensure_not_retired(definition)
         if pipeline_id != definition.pipeline_id or engine != definition.engine:
             raise RecognitionModeError(
                 "RECOGNITION_MODE_PIPELINE_MISMATCH",
@@ -247,6 +281,7 @@ class RecognitionModeRegistry:
                 "pipeline_id and engine do not identify one recognition mode"
             )
         definition = matches[0]
+        _ensure_not_retired(definition)
         self._ensure_available(definition)
         return definition
 
@@ -266,8 +301,10 @@ class RecognitionModeRegistry:
     def ensure_mode_available(
         self, recognition_mode: RecognitionModeId | str
     ) -> RecognitionModeDefinition:
-        """公开的可用性门禁：非 ready 抛 RECOGNITION_MODE_UNAVAILABLE。"""
+        """公开的可用性门禁：非 ready 抛 RECOGNITION_MODE_UNAVAILABLE；
+        退役模式优先抛 RECOGNITION_MODE_RETIRED。"""
         definition = self.definition(recognition_mode)
+        _ensure_not_retired(definition)
         self._ensure_available(definition)
         return definition
 
@@ -275,6 +312,7 @@ class RecognitionModeRegistry:
         self, recognition_mode: RecognitionModeId | str, operation: str
     ) -> RecognitionModeDefinition:
         definition = self.definition(recognition_mode)
+        _ensure_not_retired(definition)
         supported = {
             "preload": definition.lifecycle.supports_preload,
             "ttl": definition.lifecycle.supports_ttl,
@@ -310,6 +348,7 @@ class RecognitionModeRegistry:
         TTL or the snapshot default), and may additionally request pinning.
         """
         definition = self.definition(recognition_mode)
+        _ensure_not_retired(definition)
         if pipeline_id != definition.pipeline_id:
             raise RecognitionModeError(
                 "RECOGNITION_MODE_PIPELINE_MISMATCH",
@@ -366,6 +405,8 @@ class RecognitionModeRegistry:
             return canonical_pipelines
 
         definitions = tuple(self.definition(mode) for mode in recognition_modes)
+        for definition in definitions:
+            _ensure_not_retired(definition)
         mapped = tuple(
             dict.fromkeys(definition.pipeline_id for definition in definitions)
         )
@@ -437,6 +478,7 @@ __all__ = [
     "LifecycleKind",
     "ModeAvailability",
     "ProvisioningKind",
+    "RECOGNITION_MODE_RETIRED_REASON",
     "RecognitionModeAvailability",
     "RecognitionModeDefinition",
     "RecognitionModeError",

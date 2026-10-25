@@ -79,16 +79,17 @@ class TestIsSuccessEntryToday:
 class TestPipelineNamesConstants:
     """常量完整性。"""
 
-    def test_local_markable_subset_of_pipeline_names(self):
-        """LOCAL_MARKABLE_PIPELINES 必须全部在 PIPELINE_NAMES 内。"""
-        assert pipeline_status.LOCAL_MARKABLE_PIPELINES.issubset(
-            pipeline_status.PIPELINE_NAMES
+    def test_local_markable_pipelines_only_retained(self):
+        """#270：退役管道不再产生新的成功标记；仅保留模式在集合内。"""
+        assert pipeline_status.LOCAL_MARKABLE_PIPELINES == frozenset(
+            {"OCR", "PP-StructureV3", "TABLE_RECOGNITION", "RAPID_TABLE"}
         )
+        assert "PaddleOCR-VL" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
+        assert "FORMULA_RECOGNITION" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
 
     def test_mineru_not_in_local_markable(self):
         """MinerU 走远程独立标记，不在本地集合。"""
         assert "MinerU" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
-        assert "MinerU" in pipeline_status.PIPELINE_NAMES
 
 
 class TestIsPipelineEverSucceeded:

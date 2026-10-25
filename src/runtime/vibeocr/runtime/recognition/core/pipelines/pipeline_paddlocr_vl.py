@@ -1,15 +1,16 @@
 # src/vibeocr/core/pipelines/pipeline_paddlocr_vl.py
-"""PaddleOCR-VL 管道选项与规格
+"""PaddleOCR-VL 历史结果的只读投影（#270 退役）。
 
-定义 PaddleOCR-VL 管道的选项类和 PipelineSpec，
-支持图片/PDF 文档解析，提取文本、表格、公式、图表等。
+paddle_document_vl 模式已退役：不再提供新推理/构造/下载。本模块仅保留
+历史 provider payload → OCRResult 的投影读取逻辑（含表格/公式/图片区
+块），供历史结果与表格合同门继续消费。
 """
 
 from __future__ import annotations
 
 import html
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 from vibeocr.runtime.documents.tables.blocks import (
@@ -22,15 +23,8 @@ from vibeocr.runtime.documents.tables.projections import (
     table_model_to_plain_text,
 )
 from vibeocr.runtime.documents.tables.reducer import rebuild_result_projections
-from vibeocr.runtime.recognition.core.pipelines.base_options import BasePipelineOptions
-from vibeocr.runtime.recognition.core.pipelines.registry import PipelineSpec
 
 _logger = logging.getLogger(__name__)
-
-#: 本仓 paddle_document_vl 模式的语义固定为 VL-1.5（发行包同时提供
-#: PaddleOCR-VL-1.6 更新默认）。不跟随上游新默认静默换模型；升级须走
-#: 显式模式合同评审。
-PADDLEOCR_VL_PIPELINE_VERSION = "v1.5"
 
 
 def _normalize_vl_block_type(block_type: str) -> str:
@@ -218,95 +212,15 @@ def _build_ocr_result(
     )
 
 
-@dataclass
-class PaddleOCRVLOptions(BasePipelineOptions):
-    """PaddleOCR-VL 管道选项
-
-    使用 PaddleOCR-VL-1.5 解析文档，支持图片/PDF，提取文本、表格、公式、
-    图表等。``use_doc_orientation_classify``/``use_doc_unwarping``/
-    ``vl_use_layout_detection`` 门控构造期子模块初始化（参与构造签名）；
-    chart/seal/ocr_for_image_block 是 predict 参数（锁定版本中不门控
-    模型加载）。
-    """
-
-    pipeline: str = "PaddleOCR-VL"
-    use_doc_orientation_classify: bool = True
-    use_doc_unwarping: bool = False
-    vl_use_layout_detection: bool = True
-    vl_use_chart_recognition: bool = False
-    vl_use_seal_recognition: bool = False
-    use_ocr_for_image_block: bool = False
-
-
-def _paddlocr_vl_constructor_kwargs(options: Any) -> dict[str, Any]:
-    """把公开选项映射为 PaddleOCRVL 构造参数（仅模型门控项）。
-
-    语义固定 ``pipeline_version="v1.5"``，不随上游默认漂移。
-    """
-    return {
-        "use_doc_orientation_classify": options.use_doc_orientation_classify,
-        "use_doc_unwarping": options.use_doc_unwarping,
-        "use_layout_detection": options.vl_use_layout_detection,
-    }
-
-
-def _create_paddlocr_vl_pipeline(device: str, **kwargs: Any) -> Any:
-    """创建 PaddleOCR-VL 管道实例
-
-    额外 kwargs 透传给 PaddleOCRVL（例如 enable_mkldnn）。
-    """
-    from paddleocr import PaddleOCRVL
-
-    pipeline = PaddleOCRVL(
-        device=device,
-        pipeline_version=PADDLEOCR_VL_PIPELINE_VERSION,
-        **kwargs,
-    )
-    _logger.info(
-        "[Paddle consumed] construct PaddleOCR-VL use_layout_detection=%s",
-        kwargs.get("use_layout_detection"),
-    )
-    return pipeline
-
-
-def _recognize_paddlocr_vl(
-    service: Any,
-    image: Any,
-    options: PaddleOCRVLOptions,
-    asset_sink: Any | None = None,
+def project_historical_paddlocr_vl_payloads(
+    payloads: list[Any], asset_sink: Any | None = None
 ) -> Any:
-    """PaddleOCR-VL 文档解析
-
-    从 OCRService._recognize_paddlocr_vl 迁移而来。块级图像
-    （image/seal/chart，布局对象携带 PIL 图）经 asset_sink 写入 job
-    受控目录，content_list 携带 opaque 资产引用（不含本地路径）。
-    """
+    """读取既有 VL payload，不构造模型或执行推理。"""
     from vibeocr.runtime.recognition.models.ocr_result import TextBlock
     from vibeocr.runtime.recognition.result_assets import (
         REASON_SOURCE_UNAVAILABLE,
         REASON_STORE_UNAVAILABLE,
         unavailable_asset,
-    )
-
-    pipeline = service.get_or_create_pipeline("PaddleOCR-VL", options=options)
-
-    predict_kwargs: dict[str, Any] = {}
-    predict_kwargs["use_doc_orientation_classify"] = (
-        options.use_doc_orientation_classify
-    )
-    predict_kwargs["use_doc_unwarping"] = options.use_doc_unwarping
-    predict_kwargs["use_layout_detection"] = options.vl_use_layout_detection
-    predict_kwargs["use_chart_recognition"] = options.vl_use_chart_recognition
-    predict_kwargs["use_seal_recognition"] = options.vl_use_seal_recognition
-    predict_kwargs["use_ocr_for_image_block"] = options.use_ocr_for_image_block
-
-    output = pipeline.predict(input=image, **predict_kwargs)
-    output_list = list(output)
-    _logger.info(
-        "[Paddle consumed] predict PaddleOCR-VL use_layout_detection=%s "
-        "use_chart_recognition=%s",
-        predict_kwargs["use_layout_detection"],
-        predict_kwargs["use_chart_recognition"],
     )
 
     markdown_text = ""
@@ -319,7 +233,7 @@ def _recognize_paddlocr_vl(
     table_markdown_parts: list[str] = []
     projected_table_ids: set[str] = set()
 
-    for res in output_list:
+    for res in payloads:
         result_content_start = len(content_list)
         result_text_start = len(text_blocks)
         # PaddleX 结果是 dict 子类，content_list/images/parsing_res_list 是
@@ -678,14 +592,3 @@ def _recognize_paddlocr_vl(
     )
     rebuild_result_projections(result)
     return result
-
-
-PADDLEOCR_VL_SPEC = PipelineSpec(
-    name="PaddleOCR-VL",
-    display_name="文档P（PaddleOCR-VL）",
-    description="使用 PaddleOCR-VL-1.5 解析文档，支持图片/PDF，提取文本、表格、公式、图表等",
-    options_class=PaddleOCRVLOptions,
-    create_pipeline=_create_paddlocr_vl_pipeline,
-    recognize=_recognize_paddlocr_vl,
-    constructor_kwargs=_paddlocr_vl_constructor_kwargs,
-)

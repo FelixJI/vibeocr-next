@@ -36,8 +36,9 @@ class TestOCRPipeline:
         """验证描述获取"""
         desc = get_pipeline_description(OCRPipeline.OCR)
         assert "文字" in desc or "文本" in desc
+        # #270：退役管道描述明确标注不再提供新推理。
         desc_vl = get_pipeline_description(OCRPipeline.PADDLEOCR_VL)
-        assert "PaddleOCR-VL" in desc_vl
+        assert "已退役" in desc_vl
 
     def test_get_supported_options(self):
         """验证支持的选项"""

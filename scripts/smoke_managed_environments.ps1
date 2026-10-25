@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [int]$TimeoutMinutes = 120,
     [switch]$ProgressOnly,
-    [ValidateSet('rapidocr-cpu', 'paddleocr-cpu')][string]$ProgressRecipe = 'rapidocr-cpu',
+    [ValidateSet('rapidocr-cpu', 'paddleocr-ort-cpu')][string]$ProgressRecipe = 'rapidocr-cpu',
     [string]$InstallerCacheRoot
 )
 

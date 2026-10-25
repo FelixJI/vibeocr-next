@@ -39,26 +39,22 @@ class OCROptions(BasePipelineOptions):
 
 
 def _create_ocr_pipeline(device: str, **kwargs: Any) -> Any:
-    """创建通用 OCR 管道实例
+    """创建通用 OCR 管道实例（仅 Paddle ONNX 环境）。
 
-    额外 kwargs 透传给 PaddleOCR（例如 enable_mkldnn）。
-
-    GPU 模式下显式注入 ``text_recognition_batch_size``（对应 PaddleOCR 2.x
-    的 ``rec_batch_num``）。PaddleOCR 3.x 默认识别批量偏保守，导致 4090 等
-    大显存卡 GPU 占用仅 20-40%；这里在 GPU 模式给一个较大的批量以喂满 GPU。
-    调用方显式传入该参数时不覆盖。
+    #270：原生 PaddleOCR 构造已退役；缺 ``_onnx_request`` 时明确拒绝，
+    # 不再回退原生后端。``device`` 仅保留兼容签名，真实 provider 由
+    # 请求快照决定。
     """
-    from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError, create_pipeline
 
-    if "_onnx_request" in kwargs:
-        request = kwargs.pop("_onnx_request")
-        kwargs.pop("enable_mkldnn", None)
-        return create_pipeline(request, **kwargs)
-    from paddleocr import PaddleOCR
-
-    if device == "gpu" and "text_recognition_batch_size" not in kwargs:
-        kwargs["text_recognition_batch_size"] = 8
-    return PaddleOCR(device=device, **kwargs)
+    if "_onnx_request" not in kwargs:
+        raise PaddleOnnxError(
+            "Paddle pipelines require a Paddle ONNX environment "
+            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+        )
+    request = kwargs.pop("_onnx_request")
+    kwargs.pop("enable_mkldnn", None)
+    return create_pipeline(request, **kwargs)
 
 
 def _consume_generator_safely(output) -> list:

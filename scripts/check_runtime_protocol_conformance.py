@@ -158,7 +158,7 @@ def _engine_selection_app():
             _Engine(
                 OcrEngine.PADDLEOCR,
                 EngineAvailability.PREPARATION_REQUIRED,
-                required_component="paddleocr-cpu",
+                required_component="paddleocr-ort-cpu",
             ),
         ]
     )
@@ -352,7 +352,7 @@ async def _selection_http_checks() -> None:
             if kwargs["operation"] == "ensure" and scope:
                 snapshot["effective_component_ids"] = [
                     "rapidocr-base",
-                    "paddleocr-cpu",
+                    "paddleocr-ort-cpu",
                     "mineru-cpu",
                     "runtime_host",
                 ]
@@ -443,12 +443,6 @@ async def _selection_http_checks() -> None:
                 "advanced_component",
                 "model_residency",
             ),
-            "paddle_document_vl": (
-                "PaddleOCR-VL",
-                None,
-                "advanced_component",
-                "model_residency",
-            ),
             "mineru_document": (
                 "MinerU",
                 None,
@@ -457,12 +451,6 @@ async def _selection_http_checks() -> None:
             ),
             "paddle_table": (
                 "TABLE_RECOGNITION",
-                None,
-                "advanced_component",
-                "model_residency",
-            ),
-            "paddle_formula": (
-                "FORMULA_RECOGNITION",
                 None,
                 "advanced_component",
                 "model_residency",

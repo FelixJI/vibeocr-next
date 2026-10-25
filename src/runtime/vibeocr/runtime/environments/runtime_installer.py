@@ -99,6 +99,9 @@ from vibeocr.runtime.environments.runtime_selection import (
     RuntimeSelectionError,
     RuntimeSelectionPolicy,
 )
+from vibeocr.runtime.environments.runtime_selection import (
+    RETIRED_NATIVE_PADDLE_COMPONENTS as _RETIRED_NATIVE_PADDLE_COMPONENT_IDS,
+)
 from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
 
 
@@ -1257,6 +1260,17 @@ def _default_install_runner(
     ``sys.executable -m venv``. Protocol and Backend wheels are installed from
     the manifest directory; no editable/local workspace source is accepted.
     """
+    # #270：安装/修复写边界统一拒绝原生 Paddle：历史 manifest 可能仍声明
+    # paddle 组件或 paddle_environment 绑定，但不能据此重新安装原生闭包
+    # （新 manifest 不再生成；这里不依赖“不生成”作为唯一防线）。
+    native_paddle_ids = _RETIRED_NATIVE_PADDLE_COMPONENT_IDS & set(
+        install_scope.component_ids
+    )
+    if native_paddle_ids or install_scope.paddle_environment is not None:
+        raise RuntimeInstallError(
+            "native Paddle components are retired; prepare a Paddle ONNX "
+            "environment instead"
+        )
     progress: Callable[[int, int], None] | None = None
     if reporter is not None:
 
@@ -1437,30 +1451,6 @@ def _default_install_runner(
         heartbeat_code="runtime.verify_runtime",
         gate_python=python,
     )
-    paddle_environment = install_scope.paddle_environment
-    if paddle_environment is not None:
-        # Both interpreters stay inside the unactivated candidate. A failure
-        # leaves the old runtime active; existing activation commits them together.
-        paddle_scope = replace(
-            install_scope,
-            scope_id="paddle-environment",
-            component_ids=tuple(
-                x for x in install_scope.component_ids if x.startswith("paddleocr-")
-            ),
-            lock_path=paddle_environment.lock_path,
-            sha256=paddle_environment.sha256,
-            runtime_pack=(),
-            runtime_pack_sha256=(),
-            paddle_environment=None,
-        )
-        _default_install_runner(
-            partial_root / "engines" / "paddle",
-            manifest,
-            paddle_scope,
-            download_sources,
-            reporter,
-            cache_root=cache,
-        )
     return python
 
 

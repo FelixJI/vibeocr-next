@@ -630,15 +630,22 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
                 assert persisted["extra"]["default_recognition_mode"] == mode
             else:
                 assert persisted["extra"].get("default_recognition_mode") != mode
+        # #270：退役模式不在目录中；旧 id 的 API 请求明确拒绝且可改选。
         for mode in ("paddle_formula", "paddle_document_vl"):
-            assert entries[mode]["availability"] == "preparation_required"
-            assert entries[mode]["reason_code"] == "mode_requires_legacy_environment"
+            assert mode not in entries
+            manifest = json.loads(_manifest(pipeline="PaddleOCR-VL"))
+            if mode == "paddle_formula":
+                manifest = json.loads(_manifest(pipeline="FORMULA_RECOGNITION"))
+            rejected = await _submit(http, json.dumps(manifest))
+            assert rejected.status_code == 426, rejected.text
+            assert rejected.json()["code"] == "RECOGNITION_MODE_RETIRED"
 
 
 @pytest.mark.parametrize("recipe", ["paddleocr-cpu", "paddleocr-cuda"])
 async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_options(
     tmp_path, monkeypatch, recipe
 ):
+    """#270：旧原生 Paddle 环境不再是保留模式后端；提示准备 ONNX 环境。"""
     from vibeocr.runtime.host.composition import _build_recognition_mode_registry
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
@@ -659,6 +666,9 @@ async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_optio
         entries = {
             item["id"]: item for item in descriptor["recognition_mode_catalog"]["modes"]
         }
+        # 退役模式不出现在公开目录。
+        assert "paddle_document_vl" not in entries
+        assert "paddle_formula" not in entries
         for mode, pipeline, engine in (
             ("paddle_text", "OCR", "paddleocr"),
             ("paddle_table", "TABLE_RECOGNITION", None),
@@ -668,6 +678,12 @@ async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_optio
                 entries[mode]["supported_options"]
             )
             assert "use_doc_unwarping" in entries[mode]["supported_options"]
+            # 保留模式在旧原生环境中不再可作为默认或执行：提示准备 ONNX。
+            assert entries[mode]["availability"] == "preparation_required"
+            assert entries[mode]["reason_code"] == (
+                "mode_requires_paddle_onnx_environment"
+            )
+            assert entries[mode]["required_component"] == "paddleocr-ort-cpu"
             saved = await http.put(
                 "/v2/settings",
                 json={
@@ -676,12 +692,10 @@ async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_optio
                     "extra": {"default_recognition_mode": mode},
                 },
             )
-            assert saved.status_code == 200, saved.text
+            assert saved.status_code == 426, saved.text
+            assert saved.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
             manifest = json.loads(_manifest(engine=engine, pipeline=pipeline))
             manifest["pipeline"]["options"] = {"use_doc_unwarping": False}
-            accepted = await _submit(http, json.dumps(manifest))
-            assert accepted.status_code == 200, accepted.text
-            for field, value in (("device", "cpu"), ("model_preset", "small")):
-                manifest["pipeline"]["options"] = {field: value}
-                rejected = await _submit(http, json.dumps(manifest))
-                assert rejected.status_code == 400, rejected.text
+            rejected = await _submit(http, json.dumps(manifest))
+            assert rejected.status_code == 426, rejected.text
+            assert rejected.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"

@@ -123,6 +123,24 @@ _UNMANAGED_LIFECYCLE = RecognitionModeLifecycle(
     supports_pinning=False,
     supports_release=False,
 )
+# #270：paddle_document_vl / paddle_formula 已退役。历史枚举值保留以便
+# 识别旧请求/旧配置并给出可诊断拒绝；目录、执行与生命周期操作均不再
+# 暴露这两个模式。
+_RETIRED_LIFECYCLE = _UNMANAGED_LIFECYCLE
+RETIRED_RECOGNITION_MODES: frozenset[RecognitionMode] = frozenset(
+    {
+        RecognitionMode.PADDLE_DOCUMENT_VL,
+        RecognitionMode.PADDLE_FORMULA,
+    }
+)
+
+
+def is_recognition_mode_retired(mode: RecognitionMode) -> bool:
+    """该模式是否已在产品范围中退役（仅保留历史读取语义）。"""
+
+    return mode in RETIRED_RECOGNITION_MODES
+
+
 _MODEL_RESIDENCY_LIFECYCLE = RecognitionModeLifecycle(
     kind=RecognitionModeLifecycleKind.MODEL_RESIDENCY,
     supports_preload=True,
@@ -197,10 +215,12 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
     OCRPipeline.PADDLEOCR_VL: {
         "display_name": "视觉文档解析（PaddleOCR-VL）",
         "short_name": "文档P",
-        "preloadable": True,
+        # #270：随 paddle_document_vl 模式退役；选项保留仅供历史请求的
+        # 严格解析（新请求在模式门禁层拒绝），不再可预热。
+        "preloadable": False,
         "heavy": True,
         "cache_kind": "paddle",
-        "description": "使用 PaddleOCR-VL-1.5 解析文档，支持图片/PDF，提取文本、表格、公式、图表等",
+        "description": "已退役的视觉文档解析管道；不再提供新推理。",
         "supported_options": [
             "use_doc_orientation_classify",
             "use_doc_unwarping",
@@ -239,10 +259,12 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
     OCRPipeline.FORMULA_RECOGNITION: {
         "display_name": "数学公式识别（PaddleOCR）",
         "short_name": "公式",
-        "preloadable": True,
+        # #270：随 paddle_formula 模式退役；选项保留仅供历史请求的严格
+        # 解析（含唯一的 path_in_model_root 验证锚点），不再可预热。
+        "preloadable": False,
         "heavy": False,
         "cache_kind": "paddle",
-        "description": "独立数学公式识别（LaTeX 输出）",
+        "description": "已退役的独立公式识别管道；不再提供新推理。",
         "supported_options": [
             "use_doc_orientation_classify",
             "use_doc_unwarping",
@@ -460,13 +482,11 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         pipeline=OCRPipeline.PADDLEOCR_VL,
         engine=None,
         provisioning=RecognitionModeProvisioning.ADVANCED_COMPONENT,
-        lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
-        display_name="视觉文档解析（PaddleOCR-VL）",
+        lifecycle=_RETIRED_LIFECYCLE,
+        display_name="视觉文档解析（PaddleOCR-VL，已退役）",
         short_name="视觉文档",
-        description="使用 PaddleOCR-VL 解析图文混排文档，需要高级组件。",
-        supported_options=tuple(
-            _PIPELINE_METADATA[OCRPipeline.PADDLEOCR_VL]["supported_options"]
-        ),
+        description="该模式已退役：不再提供新推理，请改用其他文档识别模式。",
+        supported_options=(),
     ),
     RecognitionMode.MINERU_DOCUMENT: RecognitionModeDefinition(
         mode=RecognitionMode.MINERU_DOCUMENT,
@@ -502,13 +522,11 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         pipeline=OCRPipeline.FORMULA_RECOGNITION,
         engine=None,
         provisioning=RecognitionModeProvisioning.ADVANCED_COMPONENT,
-        lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
-        display_name="数学公式识别（PaddleOCR）",
+        lifecycle=_RETIRED_LIFECYCLE,
+        display_name="数学公式识别（PaddleOCR，已退役）",
         short_name="数学公式",
-        description="识别数学公式并输出 LaTeX，需要高级组件。",
-        supported_options=tuple(
-            _PIPELINE_METADATA[OCRPipeline.FORMULA_RECOGNITION]["supported_options"]
-        ),
+        description="该模式已退役：不再提供新推理；历史结果仍可查看与导出。",
+        supported_options=(),
     ),
     RecognitionMode.RAPID_TABLE: RecognitionModeDefinition(
         mode=RecognitionMode.RAPID_TABLE,
@@ -574,7 +592,7 @@ def get_heavy_pipelines() -> list[OCRPipeline]:
 
 
 def get_paddle_pipelines() -> list[OCRPipeline]:
-    """走 paddle 回收路径的管道（del + paddle.device.cuda.empty_cache）。"""
+    """走 Paddle ORT session 回收路径的管道。"""
     return [p for p in OCRPipeline if _metadata(p).get("cache_kind") == "paddle"]
 
 
@@ -594,6 +612,7 @@ __all__ = [
     "OCRPipeline",
     "PipelineOptionKind",
     "PipelineOptionSpec",
+    "RETIRED_RECOGNITION_MODES",
     "RecognitionMode",
     "RecognitionModeDefinition",
     "RecognitionModeFamily",
@@ -613,4 +632,5 @@ __all__ = [
     "get_preloadable_pipelines",
     "get_recognition_mode_definition",
     "is_option_supported",
+    "is_recognition_mode_retired",
 ]

@@ -1,16 +1,15 @@
-import { Button, Input, Select } from "@fluentui/react-components";
+import { Button, Select } from "@fluentui/react-components";
 import { useState } from "react";
 import type { AppActions } from "../app/types";
 
+// #270：独立公式识别与 PaddleOCR-VL 模式已退役；本编辑器只保留仍可
+// 选择模式的公开选项（历史记录中的退役字段由宿主 PaddleModeOptions
+// 兼容读取，不在 UI 中暴露）。
 const BOOLEAN_OPTIONS = {
   use_doc_orientation_classify: "文档方向分类",
   use_doc_unwarping: "文档去畸变",
   use_textline_orientation: "文本行方向分类",
   use_table_recognition: "识别表格",
-  vl_use_layout_detection: "VL 版面检测",
-  vl_use_chart_recognition: "VL 图表识别",
-  vl_use_seal_recognition: "VL 印章识别",
-  use_ocr_for_image_block: "识别图像区块文字",
   use_table_orientation_classify: "表格方向分类",
   use_ocr_results_with_table_cells: "结合单元格与 OCR 结果",
 } as const;
@@ -19,18 +18,7 @@ type BooleanOption = keyof typeof BOOLEAN_OPTIONS;
 type Options = Partial<Record<BooleanOption, boolean>> & {
   model_preset?: string;
   device?: string;
-  formula_recognition_batch_size?: number;
-  formula_recognition_model_name?: string;
 };
-const FORMULA_MODELS = [
-  "LaTeX_OCR_rec",
-  "PP-FormulaNet-L",
-  "PP-FormulaNet-S",
-  "PP-FormulaNet_plus-L",
-  "PP-FormulaNet_plus-M",
-  "PP-FormulaNet_plus-S",
-  "UniMERNet",
-];
 
 function readOptions(value: unknown): Options {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -42,12 +30,6 @@ function readOptions(value: unknown): Options {
   if (typeof source.model_preset === "string")
     result.model_preset = source.model_preset;
   if (typeof source.device === "string") result.device = source.device;
-  if (typeof source.formula_recognition_batch_size === "number")
-    result.formula_recognition_batch_size =
-      source.formula_recognition_batch_size;
-  if (typeof source.formula_recognition_model_name === "string")
-    result.formula_recognition_model_name =
-      source.formula_recognition_model_name;
   return result;
 }
 
@@ -66,10 +48,6 @@ export function PaddleOptionsEditor({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
-  const batchSize = options.formula_recognition_batch_size;
-  const valid =
-    batchSize === undefined ||
-    (Number.isInteger(batchSize) && batchSize >= 1 && batchSize <= 64);
   // 对比前后都用 readOptions 规范化，键序差异不影响回显匹配。
   const localKey = JSON.stringify(readOptions(options));
   const incomingKey = JSON.stringify(readOptions(values));
@@ -153,58 +131,8 @@ export function PaddleOptionsEditor({
             </Select>
           </div>
         ))}
-      {supportedOptions.includes("formula_recognition_batch_size") && (
-        <div className="setting-row">
-          <label htmlFor={`${modeId}-formula-batch`}>公式模型批量大小</label>
-          <Input
-            id={`${modeId}-formula-batch`}
-            type="number"
-            min={1}
-            max={64}
-            step={1}
-            value={batchSize === undefined ? "" : String(batchSize)}
-            placeholder="使用引擎默认值"
-            onChange={(_, data) => {
-              setDirty(true);
-              setOptions((current) => {
-                const next = { ...current };
-                if (data.value === "")
-                  delete next.formula_recognition_batch_size;
-                else next.formula_recognition_batch_size = Number(data.value);
-                return next;
-              });
-            }}
-          />
-        </div>
-      )}
-      {supportedOptions.includes("formula_recognition_model_name") && (
-        <div className="setting-row">
-          <label htmlFor={`${modeId}-formula-model`}>公式模型</label>
-          <Select
-            id={`${modeId}-formula-model`}
-            value={options.formula_recognition_model_name ?? ""}
-            onChange={(_, data) => {
-              setDirty(true);
-              setOptions((current) => {
-                const next = { ...current };
-                if (data.value === "")
-                  delete next.formula_recognition_model_name;
-                else next.formula_recognition_model_name = data.value;
-                return next;
-              });
-            }}
-          >
-            <option value="">使用引擎默认模型</option>
-            {FORMULA_MODELS.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </Select>
-        </div>
-      )}
       <Button
-        disabled={saving || !valid}
+        disabled={saving}
         onClick={async () => {
           setSaving(true);
           try {
@@ -225,9 +153,7 @@ export function PaddleOptionsEditor({
       >
         保存参数
       </Button>
-      <output aria-live="polite">
-        {valid ? message : "公式批量大小须为 1–64 的整数。"}
-      </output>
+      <output aria-live="polite">{message}</output>
     </details>
   );
 }

@@ -9,17 +9,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import inspect
 import json
 import logging
 import os
 import re
 import shutil
-import sys
-import threading
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
@@ -29,10 +24,7 @@ from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 
 _logger = logging.getLogger(__name__)
-_PADDLE_CONSTRUCTION_LOCK = threading.RLock()
 _SHARED_ENV = "VIBEOCR_SHARED_MODEL_CACHE"
-_WINDOWS = sys.platform == "win32"
-_PADDLE_LOCAL_ONLY: ContextVar[bool] = ContextVar("paddle_local_only", default=False)
 
 
 class ModelCacheError(RuntimeError):
@@ -170,21 +162,11 @@ def _validate_manifest(value: object, asset: ModelAsset) -> dict:
     return value
 
 
-def _hf_options(asset: ModelAsset) -> dict[str, str]:
-    if asset.namespace == "paddlex-3.7.2":
-        from paddlex.utils.flags import HUGGING_FACE_ENDPOINT
-
-        # Preserve PaddleX's native endpoint for both metadata and payload.
-        # Mirrors select transport, never model identity.
-        return {"endpoint": HUGGING_FACE_ENDPOINT}
-    return {}
-
-
 def _remote_manifest(asset: ModelAsset) -> dict:
     if asset.source == "huggingface":
         from huggingface_hub import HfApi
 
-        api = HfApi(**_hf_options(asset))
+        api = HfApi()
         revision = api.repo_info(asset.repo_id).sha
         entries = []
         for entry in api.list_repo_tree(
@@ -340,7 +322,6 @@ def _download(root: Path, asset: ModelAsset, manifest: dict, entry: dict) -> Pat
                 cache_dir=cache,
                 local_dir=local,
                 force_download=(local / entry["path"]).is_file(),
-                **_hf_options(asset),
             )
         )
     from modelscope_hub import HubApi
@@ -472,204 +453,6 @@ def prepare_models(
             candidate,
         )
         return PreparedModels(candidate, reused, None if downloaded else 0)
-
-
-def _windows_short_path(path: str) -> str:
-    """Return the 8.3 alias Windows already keeps for one existing path."""
-    import ctypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    get_short_path_name = kernel32.GetShortPathNameW
-    get_short_path_name.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
-    get_short_path_name.restype = ctypes.c_uint32
-    needed = get_short_path_name(path, None, 0)
-    if needed == 0:
-        raise OSError(ctypes.get_last_error(), "GetShortPathNameW failed", path)
-    buffer = ctypes.create_unicode_buffer(needed)
-    written = get_short_path_name(path, buffer, needed)
-    if written == 0 or written >= needed:
-        raise OSError(ctypes.get_last_error(), "GetShortPathNameW failed", path)
-    return buffer.value
-
-
-def _paddle_native_model_dir(root: Path) -> Path:
-    """Alias one non-ASCII Windows model dir to its existing 8.3 ASCII name.
-
-    Paddle 3.3.1's native layer cannot read non-ASCII model paths. The alias
-    names the same already-prepared directory (nothing is copied, moved or
-    re-downloaded) and is never persisted; ASCII paths and other platforms
-    keep existing behavior, and a missing alias fails closed.
-    """
-    text = str(root)
-    if not _WINDOWS or text.isascii():
-        return root
-    try:
-        alias = _windows_short_path(text)
-    except OSError as exc:
-        raise ModelCacheError(
-            f"Windows short path unavailable for Paddle model directory: {text}"
-        ) from exc
-    if not alias.isascii():
-        raise ModelCacheError(
-            "Paddle cannot read the model directory and Windows provided no "
-            "ASCII short alias for it; use a local volume with 8.3 short names "
-            f"enabled or an ASCII cache path instead: {text}"
-        )
-    return Path(alias)
-
-
-def _local_paddle_model(asset: ModelAsset, private: Path) -> Path:
-    try:
-        shared = Path(os.environ[_SHARED_ENV])
-        manifest = _validate_manifest(
-            json.loads(
-                (_asset_root(shared, asset) / "provider-files.json").read_text(
-                    encoding="utf-8"
-                )
-            ),
-            asset,
-        )
-        current = json.loads((private / "current.json").read_text(encoding="utf-8"))
-        expected = {
-            "assets": [_asset_request(asset)],
-            "completion_marker": None,
-        }
-        if not isinstance(current, dict) or current.get("request") != expected:
-            raise ModelCacheError("Private model binding does not match request")
-        generation = current.get("generation")
-        if not isinstance(generation, str) or not re.fullmatch(
-            r"[0-9a-f]{32}", generation
-        ):
-            raise ModelCacheError("Invalid private model generation")
-        candidate = private / "revisions" / generation
-        if not all(
-            _valid_file(candidate / entry["path"], entry)
-            for entry in _selected_files(manifest, asset)
-        ):
-            raise ModelCacheError("Prepared model is missing or damaged")
-        return candidate
-    except (OSError, ValueError, KeyError, TypeError, ModelCacheError) as exc:
-        raise LocalModelsNotPrepared(
-            "Local Paddle models are not prepared; explicitly prepare them with ordinary Paddle OCR"
-        ) from exc
-
-
-@contextmanager
-def paddle_model_cache(*, local_only: bool = False) -> Iterator[None]:
-    # A nested construction must not weaken the calling recognition request.
-    token = _PADDLE_LOCAL_ONLY.set(local_only or _PADDLE_LOCAL_ONLY.get())
-    try:
-        with _paddle_model_cache():
-            yield
-    finally:
-        _PADDLE_LOCAL_ONLY.reset(token)
-
-
-@contextmanager
-def _paddle_model_cache() -> Iterator[None]:
-    """Use PaddleX's actual submodel selection during one serialized construction."""
-    with _PADDLE_CONSTRUCTION_LOCK:
-        local_only = _PADDLE_LOCAL_ONLY.get()
-        source = os.environ.get("PADDLE_PDX_MODEL_SOURCE", "huggingface")
-        if not os.environ.get(_SHARED_ENV):
-            if local_only:
-                raise LocalModelsNotPrepared("Shared model cache is unavailable")
-            yield
-            return
-        try:
-            supported = (
-                source in {"huggingface", "modelscope"}
-                and version("paddlex") == "3.7.2"
-            )
-        except Exception as exc:
-            if local_only:
-                raise LocalModelsNotPrepared(
-                    "Local-only Paddle resolver version is unavailable"
-                ) from exc
-            raise
-        if not supported:
-            if local_only:
-                raise LocalModelsNotPrepared(
-                    "Local-only Paddle resolver version or source is unsupported"
-                )
-            _logger.info(
-                "Paddle shared model cache unsupported; using private native cache"
-            )
-            yield
-            return
-        from paddlex.inference.utils.official_models import official_models
-
-        original = getattr(official_models, "_get_model_local_path", None)
-        if not callable(original) or len(inspect.signature(original).parameters) != 1:
-            if local_only:
-                raise LocalModelsNotPrepared(
-                    "Local-only Paddle resolver shape is unsupported"
-                )
-            _logger.warning(
-                "Unsupported PaddleX resolver shape; using private native cache"
-            )
-            yield
-            return
-        if local_only and not os.environ.get("PADDLE_PDX_CACHE_HOME"):
-            raise LocalModelsNotPrepared("Private model cache is unavailable")
-        private = Path(os.environ["PADDLE_PDX_CACHE_HOME"])
-
-        def resolve(model_names: str | tuple[str, ...]) -> Path:
-            names = (model_names,) if isinstance(model_names, str) else model_names
-            if not names or not all(isinstance(name, str) for name in names):
-                raise ModelCacheError("Unsupported PaddleX model resolver arguments")
-            for index, requested in enumerate(names):
-                name = (
-                    requested.replace("-0.9B", "")
-                    if "PaddleOCR-VL" in requested
-                    else requested
-                )
-                old = private / "official_models" / name
-                asset = ModelAsset("paddlex-3.7.2", source, f"PaddlePaddle/{name}")
-                if local_only:
-                    try:
-                        root = _local_paddle_model(
-                            asset, private / "prepared-models" / name
-                        )
-                    except LocalModelsNotPrepared:
-                        if index + 1 < len(names):
-                            continue
-                        raise
-                    vl = root / "PaddleOCR-VL-0.9B"
-                    target = vl if name == "PaddleOCR-VL" and vl.is_dir() else root
-                    return _paddle_native_model_dir(target)
-                try:
-                    prepared = prepare_models(
-                        [asset], private / "prepared-models" / name, legacy_roots=(old,)
-                    )
-                    root = prepared.root
-                except ModelMetadataUnavailable as exc:
-                    if old.is_dir():
-                        _logger.warning(
-                            "Using unverified legacy private Paddle model: %s", old
-                        )
-                        root = old
-                    else:
-                        cause = exc.__cause__
-                        response = getattr(cause, "response", None)
-                        missing = getattr(response, "status_code", None) == 404
-                        if source == "modelscope":
-                            from modelscope_hub.errors import NotExistError
-
-                            missing = isinstance(cause, NotExistError)
-                        if missing and index + 1 < len(names):
-                            continue
-                        raise
-                vl = root / "PaddleOCR-VL-0.9B"
-                target = vl if name == "PaddleOCR-VL" and vl.is_dir() else root
-                return _paddle_native_model_dir(target)
-            raise ModelCacheError("Paddle did not select an available model")
-
-        official_models._get_model_local_path = resolve
-        try:
-            yield
-        finally:
-            official_models._get_model_local_path = original
 
 
 def prepare_mineru(tier: str) -> Path:

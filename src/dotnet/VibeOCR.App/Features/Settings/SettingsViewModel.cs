@@ -1037,10 +1037,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         "windows_text" => "Windows OCR（系统内置）",
         "paddle_text" => "通用 OCR（PaddleOCR）",
         "paddle_structure" => "文档结构识别（PP-StructureV3）",
-        "paddle_document_vl" => "视觉文档解析（PaddleOCR-VL）",
+        // #270：已退役模式仅用于历史配置/结果的诊断展示。
+        "paddle_document_vl" => "视觉文档解析（PaddleOCR-VL，已退役）",
         "mineru_document" => "深度文档解析（MinerU）",
         "paddle_table" => "表格结构识别（PaddleOCR）",
-        "paddle_formula" => "数学公式识别（PaddleOCR）",
+        "paddle_formula" => "数学公式识别（PaddleOCR，已退役）",
         "rapid_table" => "表格结构识别（RapidTable）",
         _ => mode,
     };
@@ -1069,6 +1070,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         RuntimeSelectionErrorKind.CapabilityMissing => "当前 Backend 不支持该选择能力",
         RuntimeSelectionErrorKind.InvalidCatalogEntry or RuntimeSelectionErrorKind.DuplicateCatalogEntry
             => "运行时目录数据无效，请刷新或更新 Backend",
+        RuntimeSelectionErrorKind.RecognitionModeRetired => "识别模式已退役，请重新选择可用模式",
         RuntimeSelectionErrorKind.UnknownEngine => "未知引擎，请重新选择",
         RuntimeSelectionErrorKind.EngineUnavailable => "该引擎当前不可用，请先安装所需依赖或选择其他引擎",
         RuntimeSelectionErrorKind.UnknownSource => "未知下载源，请重新选择",

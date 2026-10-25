@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from vibeocr.runtime.recognition.pipeline_contracts import (
     OCRPipeline,
     RecognitionMode,
@@ -48,13 +49,6 @@ EXPECTED_MODES = {
         "advanced_component",
         "model_residency",
     ),
-    "paddle_document_vl": (
-        "document",
-        "PaddleOCR-VL",
-        None,
-        "advanced_component",
-        "model_residency",
-    ),
     "mineru_document": (
         "document",
         "MinerU",
@@ -69,13 +63,6 @@ EXPECTED_MODES = {
         "advanced_component",
         "model_residency",
     ),
-    "paddle_formula": (
-        "specialized",
-        "FORMULA_RECOGNITION",
-        None,
-        "advanced_component",
-        "model_residency",
-    ),
     "rapid_table": (
         "specialized",
         "RAPID_TABLE",
@@ -85,15 +72,25 @@ EXPECTED_MODES = {
     ),
 }
 
+# #270：已退役模式。wire 枚举与历史 id 解析保留（识别旧请求并拒绝），
+# 公开目录、生命周期与执行能力不再暴露。
+RETIRED_MODES = {
+    "paddle_document_vl": ("document", "PaddleOCR-VL", None, "advanced_component"),
+    "paddle_formula": (
+        "specialized",
+        "FORMULA_RECOGNITION",
+        None,
+        "advanced_component",
+    ),
+}
+
 EXPECTED_LIFECYCLE = {
     "rapid_text": ("unmanaged", False, False, False, False),
     "windows_text": ("unmanaged", False, False, False, False),
     "paddle_text": ("model_residency", True, True, True, True),
     "paddle_structure": ("model_residency", True, True, True, True),
-    "paddle_document_vl": ("model_residency", True, True, True, True),
     "mineru_document": ("process_keep_alive", True, True, False, True),
     "paddle_table": ("model_residency", True, True, True, True),
-    "paddle_formula": ("model_residency", True, True, True, True),
     "rapid_table": ("unmanaged", False, False, False, False),
 }
 
@@ -110,7 +107,9 @@ def test_recognition_mode_catalog_is_the_semantic_source_of_truth() -> None:
     spec = _spec()
     schemas = spec["components"]["schemas"]
 
-    assert set(schemas["RecognitionModeId"]["enum"]) == set(EXPECTED_MODES)
+    assert set(schemas["RecognitionModeId"]["enum"]) == (
+        set(EXPECTED_MODES) | set(RETIRED_MODES)
+    )
     assert schemas["RecognitionModeFamily"]["enum"] == [
         "text",
         "document",
@@ -147,6 +146,8 @@ def test_recognition_mode_catalog_is_the_semantic_source_of_truth() -> None:
         for item in descriptor["recognition_mode_catalog"]["modes"]
     }
     assert modes == EXPECTED_MODES
+    # #270：已退役模式不得出现在公开目录（golden 与 Runtime 同一投影）。
+    assert set(modes).isdisjoint(RETIRED_MODES)
     lifecycle = {
         item["id"]: (
             item["lifecycle"]["kind"],
@@ -196,30 +197,55 @@ def test_paddle_local_models_policy_is_strict_and_request_only():
 def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambiguity() -> (
     None
 ):
-    assert tuple(mode.value for mode in get_all_recognition_modes()) == tuple(
-        EXPECTED_MODES
+    # #270：枚举仍包含退役 id（顺序固定，历史读取/拒绝用），目录另排除。
+    assert tuple(mode.value for mode in get_all_recognition_modes()) == (
+        "rapid_text",
+        "windows_text",
+        "paddle_text",
+        "paddle_structure",
+        "paddle_document_vl",
+        "mineru_document",
+        "paddle_table",
+        "paddle_formula",
+        "rapid_table",
     )
+    assert set(EXPECTED_MODES) | set(RETIRED_MODES) == {
+        mode.value for mode in RecognitionMode
+    }
 
     expected_names = {
         "rapid_text": "快速 OCR（RapidOCR）",
         "windows_text": "Windows OCR（系统内置）",
         "paddle_text": "通用 OCR（PaddleOCR）",
         "paddle_structure": "文档结构识别（PP-StructureV3）",
-        "paddle_document_vl": "视觉文档解析（PaddleOCR-VL）",
+        "paddle_document_vl": "视觉文档解析（PaddleOCR-VL，已退役）",
         "mineru_document": "深度文档解析（MinerU）",
         "paddle_table": "表格结构识别（PaddleOCR）",
-        "paddle_formula": "数学公式识别（PaddleOCR）",
+        "paddle_formula": "数学公式识别（PaddleOCR，已退役）",
         "rapid_table": "表格结构识别（RapidTable）",
     }
     for mode in RecognitionMode:
         definition = get_recognition_mode_definition(mode)
-        expected = EXPECTED_MODES[mode.value]
         assert definition.display_name == expected_names[mode.value]
-        assert definition.pipeline.value == expected[1]
-        assert definition.engine == expected[2]
-        assert definition.family == expected[0]
-        assert definition.provisioning == expected[3]
-        assert definition.lifecycle.kind == expected[4]
+        expected = EXPECTED_MODES.get(mode.value)
+        if expected is not None:
+            assert definition.pipeline.value == expected[1]
+            assert definition.engine == expected[2]
+            assert definition.family == expected[0]
+            assert definition.provisioning == expected[3]
+            assert definition.lifecycle.kind == expected[4]
+        else:
+            # 退役模式：仅保留历史身份字段，不再携带可执行生命周期。
+            retired = RETIRED_MODES[mode.value]
+            assert definition.pipeline.value == retired[1]
+            assert definition.engine == retired[2]
+            assert definition.family == retired[0]
+            assert definition.provisioning == retired[3]
+            assert not definition.lifecycle.supports_preload
+            assert not definition.lifecycle.supports_ttl
+            assert not definition.lifecycle.supports_pinning
+            assert not definition.lifecycle.supports_release
+            assert definition.supported_options == ()
 
     assert get_recognition_mode_definition(
         RecognitionMode.RAPID_TEXT
@@ -315,12 +341,83 @@ def test_lifecycle_contract_targets_modes_and_names_the_managed_resource() -> No
         for code in (
             ErrorCode.RECOGNITION_MODE_UNKNOWN,
             ErrorCode.RECOGNITION_MODE_UNAVAILABLE,
+            ErrorCode.RECOGNITION_MODE_RETIRED,
             ErrorCode.RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED,
             ErrorCode.RECOGNITION_MODE_PIPELINE_MISMATCH,
         )
     } == {
         "RECOGNITION_MODE_UNKNOWN",
         "RECOGNITION_MODE_UNAVAILABLE",
+        "RECOGNITION_MODE_RETIRED",
         "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED",
         "RECOGNITION_MODE_PIPELINE_MISMATCH",
     }
+
+
+def test_retired_modes_resolve_for_diagnostics_but_reject_execution() -> None:
+    """#270：退役模式历史 id 可解析、目录不暴露、执行性操作明确拒绝。"""
+    from vibeocr.runtime.recognition.pipeline_contracts import (
+        RETIRED_RECOGNITION_MODES,
+        is_recognition_mode_retired,
+    )
+    from vibeocr.runtime.recognition.recognition_modes import (
+        RecognitionModeError,
+        RecognitionModeRegistry,
+        resolve_default_recognition_mode,
+    )
+
+    assert {mode.value for mode in RETIRED_RECOGNITION_MODES} == set(RETIRED_MODES)
+    assert is_recognition_mode_retired(RecognitionMode.PADDLE_FORMULA)
+    assert is_recognition_mode_retired(RecognitionMode.PADDLE_DOCUMENT_VL)
+
+    registry = RecognitionModeRegistry()
+    catalog_ids = {entry["id"] for entry in registry.catalog_payload()["modes"]}
+    assert catalog_ids == set(EXPECTED_MODES)
+    assert catalog_ids.isdisjoint(RETIRED_MODES)
+
+    # 历史 id 仍可解析（诊断/迁移映射），但一切执行性入口 fail closed。
+    for mode_id in RETIRED_MODES:
+        definition = registry.definition(mode_id)
+        assert definition.mode_id.value == mode_id
+        for invoke in (
+            lambda: registry.ensure_mode_available(mode_id),
+            lambda: registry.validate_lifecycle(mode_id, "preload"),
+            lambda: registry.validate_pipeline_spec(
+                mode_id, pipeline_id=definition.pipeline_id, pinned=False
+            ),
+            lambda: registry.resolve_execution(
+                mode_id,
+                pipeline_id=definition.pipeline_id,
+                engine=definition.engine,
+            ),
+            lambda: registry.resolve_execution_fields(
+                pipeline_id=definition.pipeline_id, engine=definition.engine
+            ),
+            lambda: resolve_default_recognition_mode(
+                {"default_recognition_mode": mode_id},
+                registry,
+                require_available=True,
+            ),
+        ):
+            with pytest.raises(RecognitionModeError) as error:
+                invoke()
+            assert error.value.code_name == "RECOGNITION_MODE_RETIRED"
+            assert error.value.reason_code == "recognition_mode_retired"
+            assert error.value.detail.get("next_action") == (
+                "choose_available_recognition_mode"
+            )
+
+    # 读配置不崩溃：退役默认值在不校验可用性时可解析回显（GET settings），
+    # 缺省默认仍为 rapid_text。
+    assert (
+        resolve_default_recognition_mode(
+            {"default_recognition_mode": "paddle_formula"},
+            registry,
+            require_available=False,
+        )
+        is RecognitionMode.PADDLE_FORMULA
+    )
+    assert (
+        resolve_default_recognition_mode({}, registry, require_available=True)
+        is RecognitionMode.RAPID_TEXT
+    )

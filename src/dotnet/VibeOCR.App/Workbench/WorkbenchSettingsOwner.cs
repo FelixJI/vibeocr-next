@@ -810,7 +810,8 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       ? new SettingsDefaultRecognitionModeState(
         defaultMode.Supported,
         defaultMode.ModeId,
-        defaultMode.Stored)
+        defaultMode.Stored,
+        RecognitionModeCatalog.IsRetiredModeId(defaultMode.ModeId) ? "recognition_mode_retired" : null)
       : null,
     MineruRecognition: ProjectMineruRecognition(viewModel),
     RecognitionModes: viewModel.Selection?.SupportsRecognitionModes is true

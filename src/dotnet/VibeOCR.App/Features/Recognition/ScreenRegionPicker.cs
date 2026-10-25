@@ -1308,12 +1308,13 @@ public sealed class ScreenRegionPicker(
     // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字
     // 图标专用：指向设置 · 默认识别类型，不静默改选其他文字引擎；
     // catalog_unavailable 为目录未加载时三类图标的统一指引。
-    private static string UnavailableReason(string availability) => availability switch
+    internal static string UnavailableReason(string availability) => availability switch
     {
         "preparation_required" => "需要先准备依赖（可在设置中准备）",
         "unavailable" => "当前运行环境不可用",
         "default_missing" => "尚未配置默认识别类型；请在设置 · 默认识别类型中选择文字引擎",
-        "default_invalid" => "当前默认识别类型不能用作文字识别（无效或属于表格/公式）；请在设置 · 默认识别类型中重新选择",
+        "default_invalid" => "当前默认识别类型不能用作文字识别；请在设置 · 默认识别类型中重新选择",
+        "default_retired" => "当前默认识别模式已退役，请在设置 · 默认识别类型中重新选择可用模式",
         "catalog_unavailable" => "识别模式目录尚未加载；请先在设置中检查运行环境后重试",
         _ => "暂不可用",
     };

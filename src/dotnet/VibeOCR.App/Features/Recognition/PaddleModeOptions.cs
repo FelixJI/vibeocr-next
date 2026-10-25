@@ -16,17 +16,8 @@ public sealed record PaddleModeOptions
     public bool? UseDocUnwarping { get; init; }
     public bool? UseTextlineOrientation { get; init; }
     public bool? UseTableRecognition { get; init; }
-    public bool? UseFormulaRecognition { get; init; }
-    public bool? UseSealRecognition { get; init; }
-    public bool? UseChartRecognition { get; init; }
-    public bool? VlUseLayoutDetection { get; init; }
-    public bool? VlUseChartRecognition { get; init; }
-    public bool? VlUseSealRecognition { get; init; }
-    public bool? UseOcrForImageBlock { get; init; }
     public bool? UseTableOrientationClassify { get; init; }
     public bool? UseOcrResultsWithTableCells { get; init; }
-    public int? FormulaRecognitionBatchSize { get; init; }
-    public string? FormulaRecognitionModelName { get; init; }
 
     internal static JsonSerializerOptions JsonOptions { get; } = new()
     {
@@ -34,16 +25,20 @@ public sealed record PaddleModeOptions
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    // PaddleX 3.7.2 发行包内真实存在的公式识别模型名（与 Runtime catalog 一致）。
-    private static readonly HashSet<string> WireFormulaModelNames =
+    // #270：已退役的已知选项字段（VL 专用与独立公式识别专用）。旧记录中
+    // 出现这些字段时，兼容副本仅剔除它们并保留同记录其余合法设置；
+    // 其他未知/非法字段仍按严格解析失败处理（回退默认，不静默吞）。
+    private static readonly string[] RetiredKnownFields =
     [
-        "LaTeX_OCR_rec",
-        "PP-FormulaNet-L",
-        "PP-FormulaNet-S",
-        "PP-FormulaNet_plus-L",
-        "PP-FormulaNet_plus-M",
-        "PP-FormulaNet_plus-S",
-        "UniMERNet",
+        "vl_use_layout_detection",
+        "vl_use_chart_recognition",
+        "vl_use_seal_recognition",
+        "use_ocr_for_image_block",
+        "formula_recognition_batch_size",
+        "formula_recognition_model_name",
+        "use_formula_recognition",
+        "use_seal_recognition",
+        "use_chart_recognition",
     ];
 
     internal static PaddleModeOptions Load(PortableLayout layout, string modeId)
@@ -51,17 +46,17 @@ public sealed record PaddleModeOptions
         JsonObject root = AppSettingsStore.ReadForUpdate(layout);
         JsonNode? stored = root["recognition_options"]?[modeId];
         if (stored is null) return new();
+        JsonNode compat = stored.DeepClone();
+        if (compat is JsonObject options)
+            foreach (string field in RetiredKnownFields)
+                options.Remove(field);
         try
         {
-            PaddleModeOptions value = stored.Deserialize<PaddleModeOptions>(JsonOptions) ?? new();
-            return modeId == "paddle_structure"
-                ? value with { UseFormulaRecognition = null, UseSealRecognition = null, UseChartRecognition = null }
-                : value;
+            return compat.Deserialize<PaddleModeOptions>(JsonOptions) ?? new();
         }
         catch (JsonException)
         {
-            // 新环境 catalog 不再支持旧选项/旧版本字段时不能让整页崩溃：
-            // 回退默认值，用户重新保存后覆盖；本次提交仅携带当前环境支持项。
+            // 仅明确退役字段兼容；未知字段与非法类型仍按既有严格解析回退默认。
             return new();
         }
     }
@@ -77,17 +72,10 @@ public sealed record PaddleModeOptions
     public IReadOnlyDictionary<string, JsonElement> ToWire(RecognitionModeOption mode)
     {
         ArgumentNullException.ThrowIfNull(mode);
-        if (mode.Id == "paddle_structure" && (UseFormulaRecognition is not null || UseSealRecognition is not null || UseChartRecognition is not null))
-            throw new ArgumentException("Formula, seal and chart recognition are retired for this mode.");
         if (ModelPreset is not null && ModelPreset is not ("tiny" or "small" or "medium"))
             throw new ArgumentException("Unsupported Paddle model preset.");
         if (Device is not null && Device is not ("auto" or "cpu" or "cuda" or "directml"))
             throw new ArgumentException("Unsupported Paddle provider.");
-        if (FormulaRecognitionBatchSize is < 1 or > 64)
-            throw new ArgumentOutOfRangeException(nameof(FormulaRecognitionBatchSize));
-        if (FormulaRecognitionModelName is not null &&
-            !WireFormulaModelNames.Contains(FormulaRecognitionModelName))
-            throw new ArgumentException("Unsupported formula recognition model.");
         JsonElement serialized = JsonSerializer.SerializeToElement(this, JsonOptions);
         var result = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (JsonProperty property in serialized.EnumerateObject())
@@ -117,11 +105,6 @@ public sealed record PaddleModeOptions
             if (!mode.SupportedOptions.Contains(property.Name, StringComparer.Ordinal)) continue;
             if (property.Name == "model_preset" && property.Value.GetString() is not ("tiny" or "small" or "medium")) continue;
             if (property.Name == "device" && property.Value.GetString() is not ("auto" or "cpu" or "cuda" or "directml")) continue;
-            if (property.Name == "formula_recognition_batch_size" &&
-                (property.Value.GetInt32() is < 1 or > 64)) continue;
-            if (property.Name == "formula_recognition_model_name" &&
-                property.Value.GetString() is { } model &&
-                !WireFormulaModelNames.Contains(model)) continue;
             result.Add(property.Name, property.Value.Clone());
         }
         return result;

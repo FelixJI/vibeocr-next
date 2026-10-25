@@ -111,8 +111,8 @@
               "provisioning": "advanced_component",
               "availability": "preparation_required",
               "reason_code": "runtime_component_missing",
-              "required_component": "paddleocr-cpu",
-              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
+              "required_component": "paddleocr-ort-cpu",
+              "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
               "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
             },
             {
@@ -123,20 +123,8 @@
               "provisioning": "advanced_component",
               "availability": "preparation_required",
               "reason_code": "runtime_component_missing",
-              "required_component": "paddleocr-cpu",
-              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation", "use_table_recognition", "use_formula_recognition", "use_seal_recognition", "use_chart_recognition"],
-              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
-            },
-            {
-              "id": "paddle_document_vl",
-              "family": "document",
-              "pipeline_id": "PaddleOCR-VL",
-              "engine": null,
-              "provisioning": "advanced_component",
-              "availability": "preparation_required",
-              "reason_code": "runtime_component_missing",
-              "required_component": "paddleocr-cpu",
-              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "vl_use_layout_detection", "vl_use_chart_recognition", "vl_use_seal_recognition", "use_ocr_for_image_block"],
+              "required_component": "paddleocr-ort-cpu",
+              "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation", "use_table_recognition"],
               "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
             },
             {
@@ -159,20 +147,8 @@
               "provisioning": "advanced_component",
               "availability": "preparation_required",
               "reason_code": "runtime_component_missing",
-              "required_component": "paddleocr-cpu",
-              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "use_table_orientation_classify", "use_ocr_results_with_table_cells"],
-              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
-            },
-            {
-              "id": "paddle_formula",
-              "family": "specialized",
-              "pipeline_id": "FORMULA_RECOGNITION",
-              "engine": null,
-              "provisioning": "advanced_component",
-              "availability": "preparation_required",
-              "reason_code": "runtime_component_missing",
-              "required_component": "paddleocr-cpu",
-              "supported_options": ["use_doc_orientation_classify", "use_doc_unwarping", "formula_recognition_batch_size", "formula_recognition_model_name", "formula_recognition_model_dir"],
+              "required_component": "paddleocr-ort-cpu",
+              "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_table_orientation_classify", "use_ocr_results_with_table_cells"],
               "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
             },
             {

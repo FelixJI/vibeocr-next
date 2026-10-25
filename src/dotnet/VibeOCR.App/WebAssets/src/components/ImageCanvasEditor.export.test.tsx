@@ -413,15 +413,41 @@ describe("editor export pixels and previews", () => {
     unmount();
   });
 
+  it("explains the host-projected retired screenshot default without submitting", async () => {
+    stubCanvasStack();
+    const actions = createActions();
+    const mounted = render(
+      <ImageCanvasEditor
+        {...editorProps({ actions })}
+        recognitionModes={[
+          {
+            modeId: "",
+            displayName: "文字识别",
+            availability: "default_retired",
+            reasonCode: "recognition_mode_retired",
+          },
+        ]}
+      />,
+    );
+    const button = await screen.findByRole("button", { name: "识别文字" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      "title",
+      expect.stringContaining("已退役，请重新选择"),
+    );
+    expect(actions.run).not.toHaveBeenCalled();
+    mounted.unmount();
+  });
+
   it.each([
     ["识别文字", "rapid_text"],
     ["表格识别", "paddle_table"],
-    ["公式识别", "paddle_formula"],
   ])(
     "submits the completed image with the explicit %s mode",
     async (label, modeId) => {
       stubCanvasStack();
       const actions = createActions();
+      // #270：独立公式识别已退役，图片编辑不再提供公式入口。
       const modes = [
         {
           modeId: "rapid_text",
@@ -431,11 +457,6 @@ describe("editor export pixels and previews", () => {
         {
           modeId: "paddle_table",
           displayName: "表格识别",
-          availability: "ready",
-        },
-        {
-          modeId: "paddle_formula",
-          displayName: "公式识别",
           availability: "ready",
         },
       ];
@@ -480,11 +501,6 @@ describe("editor export pixels and previews", () => {
         displayName: "表格识别",
         availability: "ready",
       },
-      {
-        modeId: "paddle_formula",
-        displayName: "公式识别",
-        availability: "ready",
-      },
     ];
     const props = editorProps({ actions });
     const { rerender, unmount } = render(
@@ -524,8 +540,11 @@ describe("editor export pixels and previews", () => {
         {...{ recognitionModes: [] }}
       />,
     );
-    for (const label of ["识别文字", "表格识别", "公式识别"])
+    for (const label of ["识别文字", "表格识别"])
       expect(await screen.findByRole("button", { name: label })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "公式识别" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "识别文字" })).toBeDisabled();
     expect(state.toBlobCalls).toBe(0);

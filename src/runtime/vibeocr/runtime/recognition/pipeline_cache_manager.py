@@ -5,7 +5,7 @@
 - FIFO 淘汰（超并存上限时淘汰最久未用的 paddle 重管道；MinerU 不计入）
 - TTL 闲置回收（后台线程按最近到期时间唤醒）
 - 显式释放（release）
-- 按 cache_kind 分流回收：paddle 调 paddle.device.cuda.empty_cache()，mineru 不调
+- 按 cache_kind 分流回收：Paddle 释放所持 ORT session，MinerU 保持独立进程语义
 """
 
 from __future__ import annotations
@@ -538,29 +538,5 @@ class PipelineCacheManager:
         self._last_used.pop(pipeline_name, None)
         if not preserve_lease:
             self._active_counts.pop(pipeline_name, None)
-        if self._is_paddle(pipeline_name) and not isinstance(
-            instance, PaddleOnnxPipeline
-        ):
-            self._empty_cache()
-
-    @staticmethod
-    def _is_paddle(pipeline_name: str) -> bool:
-        from vibeocr.runtime.recognition.core.pipelines import (
-            get_paddle_residency_pipelines,
-        )
-
-        return pipeline_name in {
-            pipeline.value for pipeline in get_paddle_residency_pipelines()
-        }
-
-    @staticmethod
-    def _empty_cache() -> None:
-        """GPU 模式下回收显存碎片。"""
-        try:
-            if os.environ.get("VIBEOCR_USE_GPU", "").lower() == "true":
-                import paddle
-
-                paddle.device.cuda.empty_cache()
-                logger.info("[CacheManager] paddle.device.cuda.empty_cache() 已调用")
-        except Exception as e:
-            logger.debug("[CacheManager] empty_cache 跳过: %s", e)
+        # #270：原生 Paddle allocator（paddle.device.cuda.empty_cache）已随
+        # 原生后端退役；PaddleOnnxPipeline 会话在上方 close() 中自行释放。

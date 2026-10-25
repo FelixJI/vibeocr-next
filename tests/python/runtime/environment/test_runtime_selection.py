@@ -18,6 +18,7 @@ from vibeocr.runtime.environments.runtime_selection import (
     normalize_download_source_ids,
     normalize_install_component_ids,
     selectable_component_ids,
+    selectable_component_ids_across_catalog,
 )
 from vibeocr.runtime_contracts import ErrorCode
 
@@ -167,18 +168,16 @@ def test_component_variant_catalog_lists_only_selectable_full_components() -> No
         )
         assert variant["component_id"] not in per_accelerator
         per_accelerator.add(variant["component_id"])
-    # base 必备组件不进入可选目录。
+    # base 必备组件不进入可选目录；#270 后退役原生 Paddle 组件同样不进入
+    # 新目录（身份仅在 PROFILE_COMPONENTS/迁移表中保留）。
     listed = {variant["component_id"] for variant in variants}
     assert listed == {
-        "paddleocr-cpu",
         "mineru-cpu",
-        "paddleocr-cuda",
         "mineru-cuda",
         "gpu_runtime",
     }
-    assert selectable_component_ids("cpu") == ("paddleocr-cpu", "mineru-cpu")
+    assert selectable_component_ids("cpu") == ("mineru-cpu",)
     assert set(selectable_component_ids("nvidia_cuda")) == {
-        "paddleocr-cuda",
         "mineru-cuda",
         "gpu_runtime",
     }
@@ -370,9 +369,22 @@ def test_normalize_install_component_ids_distinguishes_omission_and_empty() -> N
         "mineru-cpu",
     )
     assert normalize_install_component_ids(["ocr_engine"], accelerator="base") == ()
-    assert normalize_install_component_ids(["ocr_engine"], accelerator="cpu") == (
-        "paddleocr-cpu",
-    )
+
+
+def test_normalize_install_component_ids_rejects_retired_native_paddle() -> None:
+    """#270：显式旧组件请求（含混合）可诊断拒绝，不静默降级为 base 成功。"""
+    for accelerator, retired in (
+        ("cpu", "paddleocr-cpu"),
+        ("nvidia_cuda", "paddleocr-cuda"),
+        ("cpu", "ocr_engine"),
+    ):
+        with pytest.raises(RuntimeSelectionError, match="retired") as excinfo:
+            normalize_install_component_ids([retired], accelerator=accelerator)
+        assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        normalize_install_component_ids(
+            ["paddleocr-cpu", "mineru-cpu"], accelerator="cpu"
+        )
 
 
 def test_normalize_install_component_ids_fails_closed() -> None:
@@ -394,17 +406,50 @@ def test_normalize_install_component_ids_fails_closed() -> None:
     "accelerator,suffix", [("cpu", "cpu"), ("nvidia_cuda", "cuda")]
 )
 def test_paddle_selection_never_adds_mineru_or_torch(accelerator, suffix):
-    selection = _selection_policy().plan_start(
-        accelerator=accelerator,
-        install_component_ids=(f"paddleocr-{suffix}",),
+    """#270：显式退役原生 Paddle 请求被明确拒绝，不安装也不降级成 base 成功。"""
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        _selection_policy().plan_start(
+            accelerator=accelerator,
+            install_component_ids=(f"paddleocr-{suffix}",),
+            download_source_ids=None,
+        )
+
+
+def test_retired_native_paddle_excluded_from_catalog_request_and_default_closure():
+    """#270 回归：新目录/缺省闭包排除原生 Paddle；显式旧请求无副作用拒绝。
+
+    旧实现（目录/默认闭包含 paddleocr-*、请求静默装 paddle）上失败。
+    """
+    policy = _selection_policy()
+    assert "paddleocr-cpu" not in selectable_component_ids_across_catalog()
+    assert "paddleocr-cuda" not in selectable_component_ids_across_catalog()
+    # 缺省（None）闭包 = base + MinerU（+ gpu_runtime），不含 paddleocr-*。
+    default = policy.plan_start(
+        accelerator="nvidia_cuda",
+        install_component_ids=None,
         download_source_ids=None,
     )
-    assert set(selection.effective_component_ids) == {
+    assert set(default.effective_component_ids) == {
         "rapidocr-base",
         "runtime_host",
-        f"paddleocr-{suffix}",
+        "mineru-cuda",
+        "gpu_runtime",
     }
-    assert selection.install_scope.scope_id == "paddle"
+    assert default.install_scope.scope_id == "mineru"
+    # 旧 ocr_engine 显式请求（迁移出原生 Paddle）同样拒绝。
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        policy.plan_start(
+            accelerator="cpu",
+            install_component_ids=("ocr_engine",),
+            download_source_ids=None,
+        )
+    # 混合请求（退役 + 合法组件）整体拒绝，不部分安装。
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        policy.plan_start(
+            accelerator="cpu",
+            install_component_ids=("paddleocr-cpu", "mineru-cpu"),
+            download_source_ids=None,
+        )
 
 
 def test_legacy_sources_do_not_lose_valid_preference_to_unknown_engine_id() -> None:

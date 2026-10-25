@@ -1193,8 +1193,54 @@ def test_named_recipe_addition_preserves_compatible_engine(tmp_path: Path) -> No
     explicit = manager.preview_install(item["id"], "rapidocr+mineru-cpu")
     assert explicit["requested_recipe"] == "rapidocr+mineru-cpu"
     assert explicit["recipe"] == "rapidocr+mineru-cpu"
-    with pytest.raises(ManagedEnvironmentError, match="compatible locked recipe"):
+    # #270：旧原生 Paddle 配方退役，预览安装以明确退役错误拒绝。
+    with pytest.raises(ManagedEnvironmentError, match="retired"):
         manager.preview_install(item["id"], "paddleocr-cpu")
+
+
+def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> None:
+    """#270 回归：旧已保存的 paddleocr-cpu 安装计划不能绕过 preview 拒绝。
+
+    旧实现允许已保存 plan 直接确认安装（复用历史 manifest 的隔离锁）；
+    本断言在旧实现上失败。
+    """
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("engines")
+    registry = manager.paths.state_root / "environments.json"
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    value["environments"][item["id"]].update(
+        {"status": "installed", "recipe": "rapidocr-cpu"}
+    )
+    registry.write_text(json.dumps(value), encoding="utf-8")
+    # 模拟旧版本保存的退役配方计划（preview 拒绝之前已落盘的文件）。
+    plan = {
+        "plan_id": "a" * 32,
+        "environment_id": item["id"],
+        "environment_revision": item["revision"],
+        "active_revision": value["active_revision"],
+        "requested_recipe": "paddleocr-cpu",
+        "recipe": "paddleocr-cpu",
+        "recipe_lock": "0" * 64,
+        "requested_source_ids": ["tuna-pypi"],
+        "source_ids": ["tuna-pypi"],
+        "effective_source_ids": ["tuna-pypi"],
+        "source_config_revision": 0,
+        "runtime_manifest": manager.manifest.sha256,
+    }
+    plan_path = manager.paths.state_root / "environment-plans" / f"{item['id']}.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    with pytest.raises(ManagedEnvironmentError, match="retired"):
+        manager.install(plan["plan_id"], item["id"], "paddleocr-cpu", ("tuna-pypi",))
+    latest = json.loads(registry.read_text(encoding="utf-8"))
+    # 拒绝发生在写入之前：环境记录不被改写。
+    assert latest["environments"][item["id"]]["recipe"] == "rapidocr-cpu"
 
 
 def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
@@ -1315,10 +1361,9 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     )
     catalog = full.recipe_catalog()
     assert full.list()["recipes"] == catalog
+    # #270：旧原生 Paddle 配方已从可安装目录退役（记录/诊断保留）。
     assert [entry["id"] for entry in catalog] == [
         "rapidocr-cpu",
-        "paddleocr-cpu",
-        "paddleocr-cuda",
         "mineru-cpu",
         "rapidocr+mineru-cpu",
         "rapidocr+mineru-cuda",
@@ -1334,16 +1379,11 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     assert entry["rapidocr-cpu"]["python_version"] == "3.13.16"
     assert entry["rapidocr-cpu"]["abi"] == "cp313"
     assert entry["rapidocr-cpu"]["platform"] == "win_amd64"
-    assert entry["paddleocr-cuda"]["display_name"] == "PaddleOCR · NVIDIA CUDA"
-    assert entry["paddleocr-cuda"]["configured_recognition_types"] == [
-        "text",
-        "table",
-        "formula",
-        "structure",
-        "document_vl",
-    ]
-    assert entry["paddleocr-cuda"]["accelerator"] == "nvidia_cuda"
-    assert entry["paddleocr-cuda"]["target_device"] == "cuda"
+    # 旧原生 Paddle 配方退役：不再宣称任何识别类型，预览安装明确拒绝。
+    target_record = _write_record(full, "b" * 32)
+    with pytest.raises(ManagedEnvironmentError, match="retired"):
+        full.preview_install(target_record["id"], "paddleocr-cuda")
+    assert full._recipe_modes("paddleocr-cuda") == []
     assert entry["mineru-cpu"]["configured_recognition_types"] == ["document"]
     assert entry["mineru-cpu"]["scope_id"] == "mineru-standalone"
     assert "paddlepaddle==3.3.1" in entry["rapidocr+mineru-cpu"]["dependencies"]
@@ -3097,9 +3137,11 @@ def test_component_repair_reports_requested_and_effective_scope(
     snapshot = repair.maintenance_snapshot()
     assert snapshot is not None
     assert snapshot["requested_component_ids"] == ["rapidocr-base"]
+    # #270：缺省闭包不再包含退役原生 Paddle 组件（base + MinerU）。
     assert set(snapshot["effective_component_ids"]) == {
-        component.component_id
-        for component in repair.manifest.profiles[repair.plan].components
+        "rapidocr-base",
+        "runtime_host",
+        "mineru-cpu",
     }
     assert repair.paths.runtime_root.is_dir()
 
@@ -3118,15 +3160,13 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
         {
             "component_id": "paddleocr-cpu",
             "display_name": "PaddleOCR CPU inference",
-            "version": "3.7.0",
         },
-        *[
-            {"component_id": component_id, "display_name": display_name}
-            for component_id, display_name in (
-                ("mineru-cpu", "MinerU CPU document parsing"),
-                ("runtime_host", "Runtime HTTP host"),
-            )
-        ],
+        {
+            "component_id": "mineru-cpu",
+            "display_name": "MinerU CPU document parsing",
+            "version": "4.0.0",
+        },
+        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
     ]
     manifest.write_text(json.dumps(manifest_payload) + "\n", encoding="utf-8")
     lock_payload = json.loads(component_lock.read_text(encoding="utf-8"))
@@ -3137,10 +3177,10 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     def install(partial: Path, runtime_manifest, profile: str) -> Path:
         calls.append(partial)
         python = _fake_install(partial, runtime_manifest, profile)
-        metadata = partial / "Lib" / "site-packages" / "paddleocr-3.7.0.dist-info"
+        metadata = partial / "Lib" / "site-packages" / "mineru-4.0.0.dist-info"
         metadata.mkdir(parents=True)
         (metadata / "METADATA").write_text(
-            "Metadata-Version: 2.1\nName: paddleocr\nVersion: 3.7.0\n",
+            "Metadata-Version: 2.1\nName: mineru\nVersion: 4.0.0\n",
             encoding="utf-8",
         )
         return python
@@ -3157,26 +3197,26 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
         initial.paths.runtime_root
         / "Lib"
         / "site-packages"
-        / "paddleocr-3.7.0.dist-info"
+        / "mineru-4.0.0.dist-info"
         / "METADATA"
     )
     metadata.write_text(
-        "Metadata-Version: 2.1\nName: paddleocr\nVersion: 3.6.0\n",
+        "Metadata-Version: 2.1\nName: mineru\nVersion: 3.9.0\n",
         encoding="utf-8",
     )
     drifted = next(
         item
         for item in initial.profile_payload()["components"]
-        if item["component_id"] == "paddleocr-cpu"
+        if item["component_id"] == "mineru-cpu"
     )
     assert drifted["actual_state"] == "drifted"
-    assert drifted["actual_version"] == "3.6.0"
+    assert drifted["actual_version"] == "3.9.0"
     assert drifted["drift_reason"] == "version_mismatch"
     metadata.unlink()
     missing = next(
         item
         for item in initial.profile_payload()["components"]
-        if item["component_id"] == "paddleocr-cpu"
+        if item["component_id"] == "mineru-cpu"
     )
     assert missing["actual_state"] == "missing"
 
@@ -3187,7 +3227,7 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
         accelerator="cpu",
         install_runner=install,
         operation_id="repair-component",
-        component_ids=("paddleocr-cpu",),
+        component_ids=("mineru-cpu",),
     )
     repair.repair()
 
@@ -3195,7 +3235,7 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     repaired = next(
         item
         for item in repair.profile_payload()["components"]
-        if item["component_id"] == "paddleocr-cpu"
+        if item["component_id"] == "mineru-cpu"
     )
     assert repaired["actual_state"] == "ready"
 
@@ -4033,7 +4073,11 @@ def test_full_profile_without_pack_falls_back_online(
         installer._default_install_runner(
             partial_root,
             manifest,
-            manifest.profiles["win-x64-cpu"].scopes[0],
+            next(
+                scope
+                for scope in manifest.profiles["win-x64-cpu"].scopes
+                if scope.scope_id == "mineru"
+            ),
             _pypi_source(),
         )
     finally:
@@ -4336,14 +4380,15 @@ def test_ensure_reinstalls_when_scope_changes(
     )
     base_only.ensure()
 
-    # 范围从 base-only 扩到缺省全量：marker 闭包不同 → 重装一次。
+    # 范围从 base-only 扩到 MinerU 闭包：marker 闭包不同 → 重装一次。
+    # #270：显式退役组件不能作为请求；用仍可选的 mineru-cpu 扩闭包。
     default_scope = RuntimeInstaller(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
         accelerator="cpu",
         install_runner=install,
-        install_component_ids=("paddleocr-cpu", "mineru-cpu"),
+        install_component_ids=("mineru-cpu",),
     )
     default_scope.ensure()
     assert len(calls) == 2
@@ -4371,35 +4416,59 @@ def test_startup_selection_is_base_only_without_an_installed_marker(
     assert inspection.state.integrity == "not-installed"
 
 
-def test_startup_selection_preserves_paddle_across_manifest_change(
+def test_startup_selection_surfaces_retired_paddle_as_unsupported(
     tmp_path: Path,
 ) -> None:
+    """#270：历史 marker 携带的退役 paddle 选择读取不崩溃、不自动安装；
+    新显式请求在构造期被可诊断拒绝且无副作用。"""
     manifest, component = _release(tmp_path / "release")
     product = tmp_path / "product"
 
     def probe(_root: Path, ids: tuple[str, ...], _profile: str) -> dict[str, bool]:
         return dict.fromkeys(ids, True)
 
+    # 用合法 gpu_runtime 组件建立真实安装，再把 marker 改写为历史形态
+    # （旧版本写入的退役显式选择），模拟升级后的历史记录。
     previous = RuntimeInstaller(
         product_root=product,
         component_lock=component,
         runtime_manifest=manifest,
         accelerator="nvidia_cuda",
-        install_component_ids=("paddleocr-cuda",),
+        install_component_ids=("gpu_runtime",),
         install_runner=_fake_install,
         component_probe=probe,
     )
     previous.ensure()
-    old_marker = json.loads(previous._marker().read_text(encoding="utf-8"))
+    marker_path = previous._marker()
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["requested_component_ids"] = ["paddleocr-cuda"]
+    marker["component_ids"] = ["rapidocr-base", "runtime_host", "paddleocr-cuda"]
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
 
-    updated_manifest = json.loads(manifest.read_text(encoding="utf-8"))
-    updated_manifest["product"]["source_sha"] = "1" * 40
-    manifest.write_text(json.dumps(updated_manifest), encoding="utf-8")
-    updated_lock = json.loads(component.read_text(encoding="utf-8"))
-    updated_lock["product"]["source_sha"] = "1" * 40
-    updated_lock["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
-    component.write_text(json.dumps(updated_lock), encoding="utf-8")
+    from vibeocr.runtime.environments.runtime_selection import RuntimeSelectionError
 
+    # 显式退役请求：构造期拒绝，无任何写入副作用。
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        RuntimeInstaller(
+            product_root=product,
+            component_lock=component,
+            runtime_manifest=manifest,
+            accelerator="nvidia_cuda",
+            install_component_ids=("paddleocr-cuda",),
+            install_runner=_fake_install,
+        )
+    with pytest.raises(RuntimeSelectionError, match="retired"):
+        RuntimeInstaller(
+            product_root=product,
+            component_lock=component,
+            runtime_manifest=manifest,
+            accelerator="nvidia_cuda",
+            install_component_ids=("paddleocr-cuda", "mineru-cuda"),
+            install_runner=_fake_install,
+        )
+
+    # 历史读取：startup 选择被标注为不支持（None），inspect 不崩溃、
+    # 不自动把退役闭包带回安装面。
     current = RuntimeInstaller(
         product_root=product,
         component_lock=component,
@@ -4409,30 +4478,19 @@ def test_startup_selection_preserves_paddle_across_manifest_change(
         component_probe=probe,
     )
     inspection = current.inspect_snapshot(emit=False)
-
-    assert inspection.state.integrity == "not-installed"
-    assert inspection.state.startup_install_component_ids == ("paddleocr-cuda",)
-    selected = RuntimeInstaller(
-        product_root=product,
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="nvidia_cuda",
-        install_component_ids=inspection.state.startup_install_component_ids,
-        install_runner=_fake_install,
-        component_probe=probe,
-    )
-    selected.ensure()
-    marker = json.loads(selected._marker().read_text(encoding="utf-8"))
-    assert marker["requested_component_ids"] == ["paddleocr-cuda"]
-    assert "paddleocr-cuda" in marker["component_ids"]
-    assert marker["manifest_sha256"] != old_marker["manifest_sha256"]
-    rollback = json.loads(
-        (product / "runtime.rollback" / ".installed.json").read_text(encoding="utf-8")
-    )
-    assert rollback["requested_component_ids"] == ["paddleocr-cuda"]
+    assert inspection.state.integrity == "verified"
+    # 旧 marker 携带的退役选择不再回灌：启动选择被标注不支持（None），
+    # 当前安装闭包也不含 paddleocr-cuda。
+    assert inspection.state.startup_install_component_ids is None
+    assert "paddleocr-cuda" not in current._selection.effective_component_ids
+    # 历史 marker 原文不被静默改写。
+    kept = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert kept["requested_component_ids"] == ["paddleocr-cuda"]
 
 
-@pytest.mark.parametrize("invalid_marker", ["malformed", "unsupported_component"])
+@pytest.mark.parametrize(
+    "invalid_marker", ["malformed", "unsupported_component", "retired_component"]
+)
 def test_startup_selection_rejects_unusable_prior_intent(
     tmp_path: Path, invalid_marker: str
 ) -> None:
@@ -4442,7 +4500,7 @@ def test_startup_selection_rejects_unusable_prior_intent(
         component_lock=component,
         runtime_manifest=manifest,
         accelerator="nvidia_cuda",
-        install_component_ids=("paddleocr-cuda",),
+        install_component_ids=("gpu_runtime",),
         install_runner=_fake_install,
         component_probe=lambda _root, ids, _profile: dict.fromkeys(ids, True),
     )
@@ -4451,8 +4509,11 @@ def test_startup_selection_rejects_unusable_prior_intent(
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     if invalid_marker == "malformed":
         marker["component_ids"] = "paddleocr-cuda"
-    else:
+    elif invalid_marker == "unsupported_component":
         marker["requested_component_ids"] = ["retired-cuda"]
+    else:
+        # #270：历史版本写入的退役组件显式选择。
+        marker["requested_component_ids"] = ["paddleocr-cuda"]
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
 
     current = RuntimeInstaller(
@@ -4977,9 +5038,11 @@ class TestOnlineArtifactDownload:
         )
 
 
-def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
-    tmp_path, monkeypatch
-):
+def test_install_runner_rejects_native_paddle_scopes(tmp_path, monkeypatch):
+    """#270 回归：安装写边界拒绝原生 Paddle 组件/绑定，不因历史 manifest 重新安装。
+
+    旧实现会递归安装 engines/paddle 隔离解释器；本断言在旧实现上失败。
+    """
     from dataclasses import replace
 
     from vibeocr.runtime.environments import runtime_installer as installer
@@ -4989,47 +5052,36 @@ def test_paddle_environment_installs_in_separate_interpreter_and_shared_cache(
     manifest = load_runtime_manifest(manifest_path)
     paddle_lock = tmp_path / "paddle.lock"
     paddle_lock.write_text("paddlepaddle==3.3.1")
-    scope = replace(
-        manifest.profiles["win-x64-cpu"].scopes[0],
+    default_scope = manifest.profiles["win-x64-cpu"].scopes[0]
+    bound_scope = replace(
+        default_scope,
         paddle_environment=PaddleEnvironment(paddle_lock, "a" * 64),
     )
     root = tmp_path / "candidate"
-    calls = []
-    caches = []
+    started = []
 
     def extract(_archive, destination, **kwargs):
+        started.append(destination)
         destination.mkdir(parents=True, exist_ok=True)
-        (destination / "python.exe").write_bytes(b"python")
-
-    def run(command, **kwargs):
-        calls.append(command)
-
-    def prepare(python, lock, endpoint, cache, reporter, env):
-        caches.append(cache)
-        return tmp_path
 
     monkeypatch.setattr(installer, "_extract_python_archive", extract)
-    monkeypatch.setattr(installer, "_run_install_command", run)
-    monkeypatch.setattr(installer, "_prepare_online_artifacts", prepare)
     monkeypatch.setattr(
         installer,
-        "_local_install_requirements",
-        lambda lock, *args: lock.with_suffix(".local.txt"),
+        "_run_install_command",
+        lambda command, **kwargs: started.append(command),
     )
-    installer._default_install_runner(root, manifest, scope, _pypi_source())
-    checks = [c for c in calls if "check" in c and "pip" in c]
-    assert [c[c.index("--python") + 1] for c in checks] == [
-        str(root / "python.exe"),
-        str(root / "engines/paddle/python.exe"),
-    ]
-    assert caches[0] == caches[1]
-    paddle_install = next(
-        c for c in calls if str(paddle_lock.with_suffix(".local.txt")) in c
-    )
-    assert paddle_install[paddle_install.index("--python") + 1] == str(
-        root / "engines/paddle/python.exe"
-    )
-    assert str(scope.lock_path) not in paddle_install
+    # 默认 scope 含 paddleocr-cpu 组件 → 写边界拒绝。
+    with pytest.raises(
+        RuntimeInstallError, match="native Paddle components are retired"
+    ):
+        installer._default_install_runner(root, manifest, default_scope, _pypi_source())
+    # 历史绑定（paddle_environment）→ 同样拒绝，不再递归安装隔离解释器。
+    with pytest.raises(
+        RuntimeInstallError, match="native Paddle components are retired"
+    ):
+        installer._default_install_runner(root, manifest, bound_scope, _pypi_source())
+    assert started == []
+    assert not (root / "engines" / "paddle").exists()
 
 
 def test_different_scope_locks_reuse_verified_download_without_second_request(
@@ -5137,7 +5189,8 @@ def test_gpu_probe_fails_when_import_works_but_device_is_unavailable(
     ) == {component: False}
 
 
-def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
+def test_gpu_scope_status_projects_its_own_host_lock(tmp_path: Path) -> None:
+    """gpu-runtime scope 用自己的 gpu 锁投影 host 版本；换闭包后 drift 可修复。"""
     manifest_path, component_lock = _release(tmp_path / "release")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["capabilities"].append("runtime.install-plan.v1")
@@ -5169,7 +5222,7 @@ def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
         component_lock=component_lock,
         runtime_manifest=manifest_path,
         accelerator="nvidia_cuda",
-        install_component_ids=("paddleocr-cuda",),
+        install_component_ids=("gpu_runtime",),
         install_runner=install,
     )
     installer.ensure()
@@ -5178,6 +5231,8 @@ def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
         for item in installer.profile_payload()["components"]
         if item["component_id"] == "runtime_host"
     )
+    # gpu-runtime scope 锁与 profile 锁不同：host 版本从 scope 锁投影（1.0.0），
+    # 而不是 manifest components 里的 0.141.0。
     assert host["desired_version"] == "1.0.0"
     assert host["actual_state"] == "ready"
     metadata = (
@@ -5190,7 +5245,7 @@ def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
         component_lock=component_lock,
         runtime_manifest=manifest_path,
         accelerator="nvidia_cuda",
-        install_component_ids=("paddleocr-cuda", "mineru-cuda"),
+        install_component_ids=("mineru-cuda",),
         required_capabilities=("runtime.install-plan.v1",),
         install_runner=install,
     )
@@ -5199,6 +5254,7 @@ def test_paddle_only_cuda_status_uses_base_host_lock(tmp_path: Path) -> None:
     host_change = next(
         item for item in preview["components"] if item["component_id"] == "runtime_host"
     )
+    # mineru scope 使用 profile 锁：host 目标版本回到 manifest 声明的 0.141.0。
     assert host_change["action"] == "replace"
     assert host_change["dependency_state"] == "pending"
     with pytest.raises(RuntimeInstallError, match="candidate Runtime did not verify"):
