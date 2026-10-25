@@ -282,16 +282,21 @@ class TestRecognizePpStructureBlockTypes:
 # ---- 构造参数：模块开关必须同时到达构造与 predict（锁定版本约束）----
 
 
-def test_pp_structure_constructor_kwargs_map_module_gates():
+def test_pp_structure_constructor_kwargs_map_module_gates(monkeypatch):
     """六个模块/预处理开关参与构造签名（模型初始化门槛）。"""
     from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
         _pp_structure_constructor_kwargs,
     )
 
+    monkeypatch.setattr(
+        "vibeocr.runtime.recognition.paddle_onnx.constructor_kwargs",
+        lambda options: {"_onnx_request": "frozen-request"},
+    )
     kwargs = _pp_structure_constructor_kwargs(
         PPStructureV3Options(use_seal_recognition=True, use_chart_recognition=True)
     )
     assert kwargs == {
+        "_onnx_request": "frozen-request",
         "use_textline_orientation": False,
         "use_doc_orientation_classify": True,
         "use_doc_unwarping": False,

@@ -129,30 +129,26 @@ def _pp_structure_constructor_kwargs(options: Any) -> dict[str, Any]:
 
 
 def _create_pp_structure_pipeline(device: str, **kwargs: Any) -> Any:
-    """创建 PP-StructureV3 管道实例
+    """创建 PP-StructureV3 管道实例（仅 Paddle ONNX 环境）。
 
-    额外 kwargs 透传给 PPStructureV3（例如 enable_mkldnn 及模块开关）。
+    #270：原生 PPStructureV3 构造已退役；缺 ``_onnx_request`` 时明确
+    # 拒绝，不再回退原生后端。
     """
     kwargs.update(
         use_formula_recognition=False,
         use_seal_recognition=False,
         use_chart_recognition=False,
     )
-    if "_onnx_request" in kwargs:
-        from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError, create_pipeline
 
-        request = kwargs.pop("_onnx_request")
-        kwargs.pop("enable_mkldnn", None)
-        return create_pipeline(request, **kwargs)
-    from paddleocr import PPStructureV3
-
-    pipeline = PPStructureV3(device=device, **kwargs)
-    _logger.info(
-        "[Paddle consumed] construct PP-StructureV3 use_seal_recognition=%s use_chart_recognition=%s",
-        kwargs.get("use_seal_recognition"),
-        kwargs.get("use_chart_recognition"),
-    )
-    return pipeline
+    if "_onnx_request" not in kwargs:
+        raise PaddleOnnxError(
+            "Paddle pipelines require a Paddle ONNX environment "
+            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+        )
+    request = kwargs.pop("_onnx_request")
+    kwargs.pop("enable_mkldnn", None)
+    return create_pipeline(request, **kwargs)
 
 
 def _recognize_pp_structure(

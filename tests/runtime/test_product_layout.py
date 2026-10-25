@@ -17,14 +17,25 @@ from scripts.product_layout import (
 from scripts.release_smoke import _verify_runtime_code
 from tests.python.runtime.environment.test_runtime_installer import _release
 
-PADDLE_CPU_LOCK = (
-    Path(__file__).parents[2]
-    / "config/runtime/win-x64-paddle-cpu/requirements-win-x64-paddle-cpu.lock"
-)
 CPU_HOST_LOCK = (
     Path(__file__).parents[2]
     / "config/runtime/win-x64-cpu/requirements-win-x64-cpu.lock"
 )
+
+
+def _legacy_paddle_cpu_lock_text() -> str:
+    """#270：仓库已删除旧原生 paddle 锁；历史 manifest 兼容路径用临时合成旧锁覆盖。"""
+    return (
+        "\n".join(
+            [
+                "opencv-contrib-python==4.12.0.88 " + chr(92),
+                "    --hash=sha256:" + "7" * 64,
+                "paddlepaddle==3.3.1 " + chr(92),
+                "    --hash=sha256:" + "8" * 64,
+            ]
+        )
+        + "\n"
+    )
 
 
 def _release_inputs(tmp_path: Path) -> dict[str, Path]:
@@ -398,6 +409,11 @@ def test_stage_requires_declared_paddle_environment_lock(
     backend = inputs["backend_release_dir"]
     manifest_path = backend / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # 历史兼容 fixture：仓库 paddle 专用锁已删除，这里合成一份满足旧
+    # win-x64-paddle-cpu 锁校验的临时旧锁，验证新 staging 仍按声明
+    # 携带历史 manifest 的旧字段（新 manifest 不再产生该绑定）。
+    # 历史隔离 host 锁不含 Paddle：用真实 cpu host 锁替换合成锁并同步
+    # sha，使 loader 的 paddle_isolated 校验与历史 manifest 形态一致。
     host_lock = backend / manifest["profiles"]["win-x64-cpu"]["lock"]
     host_lock.write_bytes(CPU_HOST_LOCK.read_bytes())
     host_sha = hashlib.sha256(host_lock.read_bytes()).hexdigest()
@@ -405,18 +421,20 @@ def test_stage_requires_declared_paddle_environment_lock(
     for scope in manifest["profiles"]["win-x64-cpu"]["install_scopes"]:
         if scope["lock"] == host_lock.name:
             scope["sha256"] = host_sha
+    legacy_lock = backend / "paddle-cpu.lock"
+    legacy_lock.write_text(_legacy_paddle_cpu_lock_text(), encoding="utf-8")
     manifest["profiles"]["win-x64-cpu"]["paddle_environment"] = {
-        "lock": "paddle-cpu.lock",
-        "sha256": hashlib.sha256(PADDLE_CPU_LOCK.read_bytes()).hexdigest(),
+        "lock": legacy_lock.name,
+        "sha256": hashlib.sha256(legacy_lock.read_bytes()).hexdigest(),
     }
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     product = tmp_path / "VibeOCR"
     if not present:
+        legacy_lock.unlink()
         with pytest.raises(ProductLayoutError, match="closure file is unavailable"):
             stage_product_layout(product_root=product, **inputs)
         return
-    (backend / "paddle-cpu.lock").write_bytes(PADDLE_CPU_LOCK.read_bytes())
     stage_product_layout(product_root=product, **inputs)
     assert (product / "runtime/backend/paddle-cpu.lock").read_text(
         encoding="utf-8"
-    ) == PADDLE_CPU_LOCK.read_text(encoding="utf-8")
+    ) == _legacy_paddle_cpu_lock_text()

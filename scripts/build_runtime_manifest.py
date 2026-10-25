@@ -141,16 +141,11 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _profile_components(
-    path: Path, profile: str, paddle_lock: Path | None = None
-) -> list[dict[str, str]]:
+def _profile_components(path: Path, profile: str) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for descriptor in default_profile_components(profile):
         version = locked_distribution_version(
-            paddle_lock
-            if paddle_lock and descriptor.component_id.startswith("paddleocr-")
-            else path,
-            _component_version_package(profile, descriptor.component_id),
+            path, _component_version_package(profile, descriptor.component_id)
         )
         result.append(
             {
@@ -167,10 +162,15 @@ def _independent_scopes(
     gpu_lock: Path,
     base_packs: list[Path],
     *,
-    isolated: bool,
     mineru_cpu_lock: Path | None = None,
 ) -> list[dict[str, object]]:
-    """Compose existing verified host/Paddle domains without new lock resolution."""
+    """Compose existing verified host/MinerU domains without new lock resolution.
+
+    #270 后原生 Paddle 闭包退役：不再生成 ``paddle`` / ``paddle-gpu-runtime``
+    scope，也不再把 MinerU scope 绑在隔离锁存在与否上；cpu/cu126 的
+    MinerU 复合闭包与独立 MinerU 锁始终是可选安装域（历史 manifest 里的
+    旧 scope 由 loader 按数据继续读取）。
+    """
     if profile == "win-x64-base":
         return []
     base_ids = [
@@ -199,17 +199,12 @@ def _independent_scopes(
     cuda = profile == "win-x64-cu126"
     if cuda:
         add("gpu-runtime", [*base_ids, "gpu_runtime"], gpu_lock)
-    if isolated:
-        suffix = "cuda" if cuda else "cpu"
-        paddle = f"paddleocr-{suffix}"
-        add("paddle", [*base_ids, paddle], locks["win-x64-base"])
-        add(
-            "mineru",
-            [*base_ids, f"mineru-{suffix}", *(["gpu_runtime"] if cuda else [])],
-            locks[profile],
-        )
-        if cuda:
-            add("paddle-gpu-runtime", [*base_ids, paddle, "gpu_runtime"], gpu_lock)
+    suffix = "cuda" if cuda else "cpu"
+    add(
+        "mineru",
+        [*base_ids, f"mineru-{suffix}", *(["gpu_runtime"] if cuda else [])],
+        locks[profile],
+    )
     if profile == "win-x64-cpu" and mineru_cpu_lock is not None:
         add("mineru-standalone", ["runtime_host", "mineru-cpu"], mineru_cpu_lock)
     return scopes
@@ -232,7 +227,6 @@ def build_runtime_manifest(
     output_dir: Path,
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES,
     runtime_packs: dict[str, list[Path]] | None = None,
-    paddle_locks: dict[str, Path] | None = None,
     mineru_cpu_lock: Path | None = None,
     rapid_cuda_lock: Path | None = None,
     paddle_onnx_locks: dict[str, Path] | None = None,
@@ -257,19 +251,10 @@ def build_runtime_manifest(
         "win-x64-cpu": cpu_lock.resolve(strict=True),
         "win-x64-cu126": cu126_lock.resolve(strict=True),
     }
-    paddle_locks = paddle_locks or {}
-    if paddle_locks and set(paddle_locks) != {"win-x64-cpu", "win-x64-cu126"}:
-        raise ValueError("Paddle locks must cover CPU and cu126")
+    # #270：原生 Paddle 隔离锁不再随产品构建发布；当前 host 锁不因
+    # paddle_isolated 语义要求原生 Paddle（见 validate_requirements_lock）。
     for profile in PROFILE_NAMES:
-        validate_requirements_lock(
-            profile_sources[profile],
-            profile=profile,
-            paddle_isolated=profile in paddle_locks,
-        )
-    for profile, lock in paddle_locks.items():
-        validate_requirements_lock(
-            lock, profile=profile.replace("win-x64-", "win-x64-paddle-")
-        )
+        validate_requirements_lock(profile_sources[profile], profile=profile)
     if mineru_cpu_lock is not None:
         mineru_cpu_lock = mineru_cpu_lock.resolve(strict=True)
         validate_requirements_lock(mineru_cpu_lock, profile="win-x64-mineru-cpu")
@@ -282,9 +267,7 @@ def build_runtime_manifest(
     for device, lock in paddle_onnx_locks.items():
         validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
     cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
-    validate_requirements_lock(
-        cu126_gpu_lock, profile="win-x64-cu126", paddle_isolated=bool(paddle_locks)
-    )
+    validate_requirements_lock(cu126_gpu_lock, profile="win-x64-cu126")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     copied_runtime = _copy_exact(runtime_wheel, output_dir)
@@ -305,9 +288,6 @@ def build_runtime_manifest(
         for profile in PROFILE_NAMES
     }
     copied_cu126_gpu_lock = _copy_exact(cu126_gpu_lock, output_dir)
-    copied_paddle = {
-        profile: _copy_exact(lock, output_dir) for profile, lock in paddle_locks.items()
-    }
     copied_mineru_cpu = (
         _copy_exact(mineru_cpu_lock, output_dir)
         if mineru_cpu_lock is not None
@@ -374,25 +354,12 @@ def build_runtime_manifest(
                     else {"runtime_pack": None}
                 ),
                 "sha256": sha256_file(copied_profiles[profile]),
-                "components": _profile_components(
-                    copied_profiles[profile], profile, copied_paddle.get(profile)
-                ),
-                **(
-                    {
-                        "paddle_environment": {
-                            "lock": copied_paddle[profile].name,
-                            "sha256": sha256_file(copied_paddle[profile]),
-                        }
-                    }
-                    if profile in copied_paddle
-                    else {}
-                ),
+                "components": _profile_components(copied_profiles[profile], profile),
                 "install_scopes": _independent_scopes(
                     profile,
                     copied_profiles,
                     copied_cu126_gpu_lock,
                     copied_packs.get("win-x64-base", []),
-                    isolated=profile in copied_paddle,
                     mineru_cpu_lock=copied_mineru_cpu,
                 ),
             }
@@ -425,8 +392,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cpu-lock", type=Path, required=True)
     parser.add_argument("--cu126-lock", type=Path, required=True)
     parser.add_argument("--cu126-gpu-lock", type=Path, required=True)
-    parser.add_argument("--paddle-cpu-lock", type=Path, required=True)
-    parser.add_argument("--paddle-cu126-lock", type=Path, required=True)
     parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
     parser.add_argument("--rapid-cuda-lock", type=Path, required=True)
     for device in ("cpu", "cuda", "directml"):
@@ -468,10 +433,6 @@ def main(argv: list[str] | None = None) -> int:
         cpu_lock=args.cpu_lock,
         cu126_lock=args.cu126_lock,
         cu126_gpu_lock=args.cu126_gpu_lock,
-        paddle_locks={
-            "win-x64-cpu": args.paddle_cpu_lock,
-            "win-x64-cu126": args.paddle_cu126_lock,
-        },
         mineru_cpu_lock=args.mineru_cpu_lock,
         rapid_cuda_lock=args.rapid_cuda_lock,
         paddle_onnx_locks={

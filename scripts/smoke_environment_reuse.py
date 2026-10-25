@@ -89,7 +89,7 @@ def main() -> int:
 
         manager._install_runner = install
         records = []
-        for recipe in ("paddleocr-cpu", "paddleocr-cuda"):
+        for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda"):
             print(f"Preparing real {recipe}", flush=True)
             created = manager.create(recipe)
             plan = manager.preview_install(created["id"], recipe, ("tuna-pypi",))
@@ -110,8 +110,14 @@ def main() -> int:
                     "-I",
                     "-B",
                     "-c",
-                    "import json,paddle; print(json.dumps({'cuda_compiled':paddle.is_compiled_with_cuda(),"
-                    "'cuda_devices':paddle.device.cuda.device_count(),'version':paddle.__version__}))",
+                    "import json,onnxruntime as ort; "
+                    "from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; "
+                    + (
+                        "assert cuda_provider_ready(); "
+                        if recipe.endswith("cuda")
+                        else ""
+                    )
+                    + "print(json.dumps({'providers':ort.get_available_providers(),'version':ort.__version__}))",
                 ],
                 env={**os.environ, **launch["environment"]},
                 capture_output=True,
@@ -120,9 +126,12 @@ def main() -> int:
                 timeout=60,
             )
             device = json.loads(result.stdout)
-            assert device["cuda_compiled"] is recipe.endswith("cuda"), device
-            if recipe.endswith("cuda"):
-                assert device["cuda_devices"] > 0, device
+            expected = (
+                "CUDAExecutionProvider"
+                if recipe.endswith("cuda")
+                else "CPUExecutionProvider"
+            )
+            assert expected in device["providers"], device
             evidence["installed"].append(
                 {
                     "id": record["id"],

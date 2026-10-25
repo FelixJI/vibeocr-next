@@ -10,9 +10,10 @@ def test_registry_has_all_pipelines():
     assert "OCR" in names
     assert "PP-StructureV3" in names
     assert "TABLE_RECOGNITION" in names
-    assert "FORMULA_RECOGNITION" in names
     assert "MinerU" in names
-    assert "PaddleOCR-VL" in names
+    # #270：FORMULA_RECOGNITION / PaddleOCR-VL 已退役，不再注册工厂。
+    assert "FORMULA_RECOGNITION" not in names
+    assert "PaddleOCR-VL" not in names
 
 
 def test_registry_get_each():
@@ -21,9 +22,7 @@ def test_registry_get_each():
         "OCR",
         "PP-StructureV3",
         "TABLE_RECOGNITION",
-        "FORMULA_RECOGNITION",
         "MinerU",
-        "PaddleOCR-VL",
     ]:
         spec = reg.get(name)
         assert spec.name == name
@@ -31,9 +30,9 @@ def test_registry_get_each():
 
 
 def test_registry_spec_count():
-    """注册表应恰好包含 6 个管道"""
+    """注册表应恰好包含 4 个管道（#270 退役公式/VL）。"""
     reg = get_registry()
-    assert len(reg.list_all()) == 6
+    assert len(reg.list_all()) == 4
 
 
 def test_registry_has_method():

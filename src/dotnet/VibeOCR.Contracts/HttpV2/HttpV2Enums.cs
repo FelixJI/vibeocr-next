@@ -298,6 +298,7 @@ public enum HttpV2ErrorCode
     [JsonStringEnumMemberName("RUNTIME_COMPONENT_UNKNOWN")] RuntimeComponentUnknown,
     [JsonStringEnumMemberName("RECOGNITION_MODE_UNKNOWN")] RecognitionModeUnknown,
     [JsonStringEnumMemberName("RECOGNITION_MODE_UNAVAILABLE")] RecognitionModeUnavailable,
+    [JsonStringEnumMemberName("RECOGNITION_MODE_RETIRED")] RecognitionModeRetired,
     [JsonStringEnumMemberName("RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED")] RecognitionModeLifecycleUnsupported,
     [JsonStringEnumMemberName("RECOGNITION_MODE_PIPELINE_MISMATCH")] RecognitionModePipelineMismatch,
     [JsonStringEnumMemberName("MINERU_CONFIG_UNAVAILABLE")] MineruConfigUnavailable,

@@ -4773,4 +4773,119 @@ describe("AppShell", () => {
     });
     unmount();
   });
+  it.each([
+    [
+      "workbench.error.recognitionModeRetired",
+      "识别模式已退役，请在设置或任务面板重新选择可用模式。",
+    ],
+    [
+      "workbench.error.recognitionModeUnknown",
+      "无法识别所选模式，请重新选择当前目录中的可用模式。",
+    ],
+    [
+      "workbench.error.recognitionModeUnavailable",
+      "当前识别模式不可用，请检查运行环境或重新选择可用模式。",
+    ],
+  ])(
+    "renders the host recognition problem %s",
+    async (commandProblem, message) => {
+      window.location.hash = "#/recognition";
+      const mounted = await renderLoaded(
+        <App
+          actions={{ run: vi.fn(), navigate: vi.fn(), setTheme: vi.fn() }}
+          viewState={{
+            connected: true,
+            revision: 1,
+            route: "recognition",
+            theme: "light",
+            capabilities: [],
+            features: {},
+            runtimeLabel: "原生宿主已连接",
+            commandProblem,
+          }}
+        />,
+      );
+      expect(screen.getByRole("alert")).toHaveTextContent(message);
+      mounted.unmount();
+    },
+  );
+
+  it.each([true, false])(
+    "renders the host retired default reason with catalog=%s",
+    async (hasCatalog) => {
+      window.location.hash = "#/settings";
+      const user = userEvent.setup();
+      const actions: AppActions = {
+        run: vi.fn().mockResolvedValue(true),
+        navigate: vi.fn(),
+        setTheme: vi.fn(),
+      };
+      const mounted = await renderLoaded(
+        <App
+          actions={actions}
+          viewState={{
+            connected: true,
+            revision: 1,
+            route: "settings",
+            theme: "light",
+            capabilities: ["settings.selection"],
+            runtimeLabel: "原生宿主已连接",
+            features: {
+              settings: {
+                theme: "light",
+                isBusy: false,
+                statusCode: "settings.ready",
+                backend: "cpu",
+                startupEnabled: false,
+                pendingBackend: "cpu",
+                sources: [],
+                features: [],
+                defaultRecognitionMode: {
+                  supported: true,
+                  modeId: "paddle_formula",
+                  stored: true,
+                  reasonCode: "recognition_mode_retired",
+                },
+                recognitionModes: hasCatalog
+                  ? [
+                      {
+                        id: "rapid_text",
+                        displayName: "快速 OCR（RapidOCR）",
+                        availability: "ready",
+                      },
+                    ]
+                  : [],
+              },
+            },
+          }}
+        />,
+      );
+      if (hasCatalog) {
+        expect(
+          screen.getByRole("option", { name: "请重新选择（当前模式已退役）" }),
+        ).toBeVisible();
+      }
+      expect(
+        screen.getByText(/当前默认识别模式已退役，请重新选择可用模式并保存/),
+      ).toBeVisible();
+      if (hasCatalog) {
+        await user.selectOptions(
+          screen.getByLabelText("默认识别类型"),
+          "rapid_text",
+        );
+        await user.click(
+          screen.getByRole("button", { name: "保存默认识别模式" }),
+        );
+        expect(actions.run).toHaveBeenCalledWith({
+          type: "settings.setDefaultRecognitionMode",
+          mode: "rapid_text",
+        });
+      } else {
+        expect(
+          screen.queryByRole("button", { name: "保存默认识别模式" }),
+        ).not.toBeInTheDocument();
+      }
+      mounted.unmount();
+    },
+  );
 });

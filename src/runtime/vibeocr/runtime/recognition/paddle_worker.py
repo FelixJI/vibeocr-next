@@ -1,4 +1,4 @@
-"""Private stdio worker keeping Paddle and its cv2 in a separate interpreter."""
+"""Private stdio worker isolating Paddle ORT pipelines and their cv2."""
 
 from __future__ import annotations
 
@@ -7,20 +7,12 @@ import json
 import logging
 import os
 import sys
-from contextlib import ExitStack
 from dataclasses import asdict
-from pathlib import Path
 
 
 def main() -> None:
     # Native libraries also print to fd 1. Reserve a duplicate for framed JSON
     # before redirecting stdout to stderr, so model logs cannot corrupt replies.
-    dll_handles = ExitStack()
-    if os.name == "nt":
-        libs = Path(sys.prefix) / "Lib" / "site-packages" / "paddle" / "libs"
-        if libs.is_dir():
-            dll_handles.enter_context(os.add_dll_directory(str(libs)))
-            os.environ["PATH"] = str(libs) + os.pathsep + os.environ.get("PATH", "")
     replies = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     logging.basicConfig(
@@ -91,21 +83,12 @@ def main() -> None:
                     raise ValueError("Unknown Paddle worker operation")
                 response = {"result": result}
             except Exception as exc:
-                # Recovery runs in the process that owns the CUDA allocator.
-                paddle = sys.modules.get("paddle")
-                if paddle is not None:
-                    try:
-                        if paddle.device.is_compiled_with_cuda():
-                            paddle.device.cuda.empty_cache()
-                    except Exception:
-                        pass  # Preserve the original inference failure.
                 response = {"error": str(exc), "error_type": type(exc).__name__}
             replies.write(json.dumps(response, ensure_ascii=True) + "\n")
             replies.flush()
     finally:
         adapter.close()
         replies.close()
-        dll_handles.close()
 
 
 if __name__ == "__main__":

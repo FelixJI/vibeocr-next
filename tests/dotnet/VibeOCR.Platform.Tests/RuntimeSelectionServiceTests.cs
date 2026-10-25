@@ -169,7 +169,13 @@ public sealed class RuntimeSelectionServiceTests
 
         Assert.True(service.SupportsRecognitionModes);
         Assert.Empty(service.EngineOptions);
-        Assert.Equal(9, service.RecognitionModes.Count);
+        // #270：目录仅含未退役模式（7 个）。
+        Assert.Equal(7, service.RecognitionModes.Count);
+        // 退役 id 诊断为明确错误（可改选），不隐式回退。
+        RuntimeSelectionException retired = Assert.Throws<RuntimeSelectionException>(
+            () => service.SelectRecognitionMode("paddle_formula"));
+        Assert.Equal(RuntimeSelectionErrorKind.RecognitionModeRetired, retired.Kind);
+        Assert.Contains("已退役", retired.Message);
 
         RecognitionModeOption rapid = service.SelectRecognitionMode("rapid_text");
         Assert.Equal("OCR", rapid.PipelineId);
@@ -586,20 +592,14 @@ public sealed class RuntimeSelectionServiceTests
                 Wire.ExecutionPipelineId.PPStructureV3, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
-            Mode(Wire.RecognitionModeId.PaddleDocumentVl, Wire.RecognitionModeFamily.Document,
-                Wire.ExecutionPipelineId.PaddleOCRVL, null,
-                Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+            // #270：paddle_document_vl / paddle_formula 已退役，不再进入
+            // 目录 fixture（真实目录同样不再声明它们）。
             Mode(Wire.RecognitionModeId.MineruDocument, Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.MinerU, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, false, true, false, true),
             Mode(Wire.RecognitionModeId.PaddleTable, Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.TABLERECOGNITION, null,
-                Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
-            Mode(Wire.RecognitionModeId.PaddleFormula, Wire.RecognitionModeFamily.Specialized,
-                Wire.ExecutionPipelineId.FORMULARECOGNITION, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
             Mode(Wire.RecognitionModeId.RapidTable, Wire.RecognitionModeFamily.Specialized,

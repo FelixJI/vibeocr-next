@@ -158,13 +158,10 @@ def _result_from_provider_fixture(fixture: dict):
         )
     if provider == "paddleocr-vl":
         from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-            PADDLEOCR_VL_SPEC,
-            PaddleOCRVLOptions,
+            project_historical_paddlocr_vl_payloads,
         )
 
-        return PADDLEOCR_VL_SPEC.recognize(
-            _FixtureService([payload]), None, PaddleOCRVLOptions()
-        )
+        return project_historical_paddlocr_vl_payloads([payload])
     raise AssertionError(f"unhandled provider fixture: {provider}")
 
 

@@ -464,7 +464,8 @@ public sealed class ImageImportWorkbenchTests
       Assert.Equal((descriptor.RequestId, descriptor.RequestId), (ImportOf(delayedState)?.RequestId, ImportOf(bootstrapState)?.RequestId));
       Assert.Equal(descriptor.RequestId, ImportOf(handler.InitialStates.Single(state => state.Scope == scope))?.RequestId);
       var modes = bootstrapState is ImageEditWorkbenchState image ? image.RecognitionModes : ((RecognitionWorkbenchState)bootstrapState!).RecognitionModes;
-      Assert.Equal(3, modes!.Count);
+      // #270：公式入口退役后固定两类。
+      Assert.Equal(2, modes!.Count);
       Assert.Equal("rapid_text", modes[0].ModeId);
       Guid session = Guid.Parse(descriptor.SessionId);
       WorkbenchCommand confirmation = (scope, acknowledge) switch
@@ -1070,7 +1071,8 @@ public sealed class ImageImportWorkbenchTests
         first = await captured.Task;
       }
       Assert.NotNull(first.RecognitionModes);
-      Assert.Equal(3, first.RecognitionModes.Count);
+      // #270：公式入口退役后固定两类。
+    Assert.Equal(2, first.RecognitionModes.Count);
       WorkbenchCommandOutcome second = await handler.ExecuteAsync(new PasteImageEditSystemContentCommand(), TestContext.Current.CancellationToken);
       Assert.Equal("image_import_in_progress", second.Error?.Code);
       Assert.Single(SessionFiles(root, new byte[8]));

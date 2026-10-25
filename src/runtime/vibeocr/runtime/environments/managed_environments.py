@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -122,6 +123,10 @@ _RECIPE_DISPLAY_NAMES = {
     "rapidocr+mineru-cpu": "RapidOCR + RapidTable + MinerU · CPU",
     "rapidocr+mineru-cuda": "RapidOCR + RapidTable + MinerU · NVIDIA CUDA",
 }
+# #270：旧原生 Paddle 配方已退役——不再进入可安装目录、不再宣称任何识别
+# 类型，也不再作为保留模式的后端；已安装记录按数据保护原则保留并继续
+# 健康探测（不自动卸载/删除），提示改用对应 Paddle ONNX 环境。
+_RETIRED_NATIVE_PADDLE_RECIPES = frozenset({"paddleocr-cpu", "paddleocr-cuda"})
 # 探针运行 Supervisor 实际执行的引擎导入：不实例化引擎、不下载模型。
 # rapidocr 必须导入真实符号，包级 __init__ 惰性解析无法证明原生闭包可用。
 # 历史配方维持原引擎基线；新 RapidTable 的缺失由模式 availability 单独报告。
@@ -1251,8 +1256,9 @@ class ManagedEnvironmentStore:
             "paddleocr-ort-directml",
         }:
             return ["text", "table", "structure"]
-        if recipe.startswith("paddleocr"):
-            return ["text", "table", "formula", "structure", "document_vl"]
+        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+            # #270：退役配方不再宣称任何识别类型；记录与健康状态仍保留。
+            return []
         if recipe.startswith("rapidocr+mineru"):
             return ["text", "rapid_table", "document"]
         if recipe in {"rapidocr-cpu", "rapidocr-cuda"}:
@@ -1693,6 +1699,7 @@ class ManagedEnvironmentStore:
         staging = self._staging_path(env_id)
         retired = self._retired_path(env_id)
         journal_path = self._journal_path(env_id)
+        operation = "guard_swap_slots"
         try:
             self._guard_swap_slots(env_id)
             if staging.exists() or staging.is_symlink():
@@ -1701,13 +1708,16 @@ class ManagedEnvironmentStore:
                 if not (live.exists() or live.is_symlink()):
                     if retired.exists() or retired.is_symlink():
                         # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
+                        operation = "restore_retired"
                         os.rename(retired, live)
+                    operation = "restore_ownership"
                     managed_cleanup.restore_owned_paths(
                         self, env_id, candidate_revision
                     )
                 elif not (retired.exists() or retired.is_symlink()):
                     # 回滚 retired→live 改名已完成、retired 已消失：补齐被
                     # 中断的归属恢复。
+                    operation = "restore_ownership"
                     managed_cleanup.restore_owned_paths(
                         self, env_id, candidate_revision
                     )
@@ -1715,31 +1725,57 @@ class ManagedEnvironmentStore:
                 # 失败）：retired 归属仍有效，不逆映射，ledger 不变。
                 try:
                     journal_path.unlink(missing_ok=True)
-                except OSError:
-                    pass  # 回滚未完成：journal 保留，下次恢复重试收敛
+                except OSError as error:
+                    logging.getLogger(__name__).warning(
+                        "Environment swap rollback pending: operation=remove_journal "
+                        "error_type=%s errno=%s winerror=%s",
+                        type(error).__name__,
+                        error.errno,
+                        getattr(error, "winerror", None),
+                    )
                 return
             if retired.exists() or retired.is_symlink():
                 if live.exists() or live.is_symlink():
                     # 换入已完成但注册表未提交：候选退回 staging 作残留，
                     # 旧 venv 回到固定路径。
+                    operation = "restore_staging"
                     os.rename(live, staging)
+                operation = "restore_retired"
                 os.rename(retired, live)
+                operation = "restore_ownership"
                 managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
             elif live.exists() or live.is_symlink():
                 # 无任何旧副本（空环境原目录缺失）：失败候选同样退回
                 # staging 并撤销其整树归属，固定路径复位为事务前缺失状态；
                 # 只有状态收敛才清除 journal。
+                operation = "prepare_staging"
                 staging.parent.mkdir(parents=True, exist_ok=True)
+                operation = "restore_staging"
                 os.rename(live, staging)
+                operation = "restore_ownership"
                 managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
             else:
                 return
-        except OSError:
+        except OSError as error:
+            logging.getLogger(__name__).warning(
+                "Environment swap rollback pending: operation=%s "
+                "error_type=%s errno=%s winerror=%s",
+                operation,
+                type(error).__name__,
+                error.errno,
+                getattr(error, "winerror", None),
+            )
             return
         try:
             journal_path.unlink(missing_ok=True)
-        except OSError:
-            pass  # 回滚未完成：journal 保留，下次恢复重试收敛
+        except OSError as error:
+            logging.getLogger(__name__).warning(
+                "Environment swap rollback pending: operation=remove_journal "
+                "error_type=%s errno=%s winerror=%s",
+                type(error).__name__,
+                error.errno,
+                getattr(error, "winerror", None),
+            )
 
     def _swap_fixed_candidate(
         self, env_id: str, expected: dict, candidate: dict, latest: dict
@@ -1969,26 +2005,27 @@ class ManagedEnvironmentStore:
             if scope is None:
                 raise ManagedEnvironmentError("MinerU recipe is absent from manifest")
             return scope, accelerator
-        if recipe in {"paddleocr-cpu", "paddleocr-cuda"}:
-            profile_id = "win-x64-cpu" if recipe.endswith("cpu") else "win-x64-cu126"
-            bound = self.manifest.profiles[profile_id].scopes[0].paddle_environment
-            if bound is None:
-                raise ManagedEnvironmentError("Paddle recipe is absent from manifest")
-            return RuntimeInstallScope(
-                scope_id=recipe,
-                component_ids=(recipe,),
-                lock_path=bound.lock_path,
-                sha256=bound.sha256,
-                runtime_pack=(),
-                runtime_pack_sha256=(),
-                paddle_environment=None,
-            ), "cpu" if recipe.endswith("cpu") else "nvidia_cuda"
+        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+            # #270：旧原生 Paddle 配方退役。新 manifest 不再绑定
+            # paddle_environment，也不能伪造安装 scope：预览/确认安装在此
+            # 明确拒绝；历史记录读取走 status_scope 的只读闭包投影。
+            raise ManagedEnvironmentError(
+                "native Paddle recipe is retired; prepare a Paddle ONNX environment",
+                reason_code="paddle_native_recipe_retired",
+                next_action="prepare_paddle_onnx",
+            )
         raise ManagedEnvironmentError("unknown engine recipe")
 
     def status_scope(
         self, env_id: str, revision: int, runtime_root: Path, recipe: str
-    ) -> tuple[RuntimeInstallScope, str]:
-        """Resolve the running revision's installed scope from the registry."""
+    ) -> tuple[RuntimeInstallScope | None, frozenset[str] | None, str]:
+        """Resolve the running revision's installed scope from the registry.
+
+        返回 (install_scope, trusted_closure, accelerator)：正常配方返回
+        真实安装 scope；旧原生 Paddle 配方不再有可安装 scope，改用只读的
+        已安装组件 ID 投影（recipe 组件 + runtime_host）供状态页展示，
+        不调用 _recipe、不伪造锁。
+        """
         data = self._read()
         record = data["environments"].get(env_id)
         if (
@@ -2000,11 +2037,23 @@ class ManagedEnvironmentStore:
             or self._safe_path(record).resolve() != runtime_root.resolve()
         ):
             raise ManagedEnvironmentError("running environment revision is stale")
-        return self._recipe(recipe)
+        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+            accelerator = "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
+            return None, frozenset({recipe, "runtime_host"}), accelerator
+        scope, accelerator = self._recipe(recipe)
+        return scope, None, accelerator
 
     def preview_install(
         self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
     ) -> dict:
+        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+            # #270：旧原生 Paddle 配方退役，不再提供安装/下载入口；
+            # 已安装环境与健康记录保留，提示改用 Paddle ONNX 环境。
+            raise ManagedEnvironmentError(
+                "native Paddle recipe is retired; prepare a Paddle ONNX environment",
+                reason_code="paddle_native_recipe_retired",
+                next_action="prepare_paddle_onnx",
+            )
         if recipe in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
             # NVIDIA CUDA minor-version compatibility: CUDA 13 requires R580.
             # docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
@@ -2131,6 +2180,8 @@ class ManagedEnvironmentStore:
         """
         entries: list[dict] = []
         for recipe in _RECIPE_IDS:
+            if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+                continue
             try:
                 scope, accelerator = self._recipe(recipe)
             except ManagedEnvironmentError:

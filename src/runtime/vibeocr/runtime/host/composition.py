@@ -170,18 +170,9 @@ def _build_paddle_executor(
     from vibeocr.runtime.recognition.ocr_engines import OcrEngineResolver
     from vibeocr.runtime.recognition.paddle_executor import PaddleExecutor
 
-    def clear_cache() -> None:
-        from vibeocr.runtime.recognition.paddle_process_adapter import paddle_python
-
-        if paddle_python() is not None:
-            return  # The isolated worker clears its own allocator on failure.
-        try:
-            import paddle
-
-            if paddle.device.is_compiled_with_cuda():
-                paddle.device.cuda.empty_cache()
-        except Exception:
-            pass
+    # #270：原生 Paddle allocator（paddle.device.cuda.empty_cache）已随原生
+    # 后端退役；PaddleExecutor 的 clear_cache 默认无操作，隔离 worker 自行
+    # 释放 ORT 会话。
 
     adapter_factory: Any = _paddle_adapter_factory
     if engine_registry is not None:
@@ -202,12 +193,15 @@ def _build_paddle_executor(
     return PaddleExecutor(
         adapter_factory=adapter_factory,
         scheduler=scheduler,
-        clear_cache=clear_cache,
     )
 
 
 def _paddle_available() -> bool:
-    """Return True if a real Paddle backend is importable in this environment."""
+    """Return True if a Paddle ONNX backend is usable in this environment.
+
+    #270：不再以 ``import paddle`` 原生探测；只有 Paddle ONNX 管理环境里
+    的 ORT/进程探针算可用（隔离 worker / onnxruntime 导入）。
+    """
     from vibeocr.runtime.recognition.ocr_engines import EngineAvailability
     from vibeocr.runtime.recognition.paddle_process_adapter import (
         PaddleProcessAdapter,
@@ -219,8 +213,12 @@ def _paddle_available() -> bool:
             PaddleProcessAdapter.probe_descriptor().availability
             is EngineAvailability.READY
         )
+    from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
+    if not is_ort_environment():
+        return False
     try:
-        __import__("paddle")
+        __import__("onnxruntime")
     except Exception:
         return False
     return True
@@ -347,8 +345,30 @@ def _build_recognition_mode_registry(
         )
 
     from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+    from vibeocr.runtime.recognition.pipeline_contracts import (
+        RETIRED_RECOGNITION_MODES,
+    )
 
     def availability(definition) -> ModeAvailability:  # type: ignore[no-untyped-def]
+        if definition.mode_id in RETIRED_RECOGNITION_MODES:
+            # #270：paddle_document_vl / paddle_formula 已退役（目录不再
+            # 暴露；此处仅防御性投影，历史请求走 RECOGNITION_MODE_RETIRED）。
+            return ModeAvailability(
+                RecognitionModeAvailability.UNAVAILABLE,
+                reason_code="recognition_mode_retired",
+            )
+        if not is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
+            # #270：保留的 Paddle 模式不再有原生 PaddlePaddle 后端；
+            # 旧原生环境不再作为可执行后端，提示准备对应 ONNX 环境。
+            return ModeAvailability(
+                RecognitionModeAvailability.PREPARATION_REQUIRED,
+                reason_code="mode_requires_paddle_onnx_environment",
+                required_component=(
+                    "paddleocr-ort-cuda"
+                    if accelerator == "nvidia_cuda"
+                    else "paddleocr-ort-cpu"
+                ),
+            )
         if definition.mode_id is RecognitionModeId.RAPID_TABLE:
             return rapid_table_availability()
         if definition.engine is not None:

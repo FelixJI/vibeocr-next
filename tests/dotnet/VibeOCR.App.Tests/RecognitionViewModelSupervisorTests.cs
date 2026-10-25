@@ -144,17 +144,18 @@ public sealed class RecognitionViewModelSupervisorTests
     var inference = new FakeInferenceClient("formula");
     var inputs = new StubInputService();
     var viewModel = new RecognitionViewModel(inference, inputs);
-    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-        null, "advanced_component", "ready", null, "paddleocr-cpu",
-        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 2 });
+    // #270：paddle_formula 已退役；冻结语义用保留的 paddle_structure 验证。
+    var mode = new RecognitionModeOption("paddle_structure", "document", "PP-StructureV3",
+        null, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+        ["use_table_recognition"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { UseTableRecognition = false });
     await viewModel.RecognizeViaSupervisorAsync(async ct =>
     {
       viewModel.SetRecognitionMode(null);
       return await inputs.PickFileAsync(ct);
     }, CancellationToken.None);
-    Assert.Equal("FORMULA_RECOGNITION", inference.LastRequest!.Pipeline.PipelineId);
-    Assert.Equal(2, inference.LastRequest.Pipeline.Options["formula_recognition_batch_size"].GetInt32());
+    Assert.Equal("PP-StructureV3", inference.LastRequest!.Pipeline.PipelineId);
+    Assert.False(inference.LastRequest.Pipeline.Options["use_table_recognition"].GetBoolean());
   }
 
   [Fact]
@@ -177,6 +178,62 @@ public sealed class RecognitionViewModelSupervisorTests
       Assert.Null(restarted.TaskModelPreset);
       Assert.Equal("medium", restarted.GetWireOptions(mode)!["model_preset"].GetString());
       Assert.Equal("directml", restarted.GetWireOptions(mode)!["device"].GetString());
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData("paddle_text")]
+  [InlineData("paddle_table")]
+  [InlineData("paddle_structure")]
+  public void LegacyOptionsLoadPreservesRetainedFieldsWithoutWritingUntilSave(string modeId)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-retired-options-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+      layout.EnsurePortableState();
+      string original = """
+        {"other_setting":"keep","recognition_options":{"__mode__":{
+          "use_doc_unwarping":true,"model_preset":"medium","device":"cpu",
+          "formula_recognition_batch_size":5,"formula_recognition_model_name":"PP-FormulaNet_plus-L",
+          "vl_use_layout_detection":true,"vl_use_chart_recognition":false,"vl_use_seal_recognition":false,
+          "use_ocr_for_image_block":true,"use_formula_recognition":true,
+          "use_seal_recognition":true,"use_chart_recognition":true}}}
+        """.Replace("__mode__", modeId, StringComparison.Ordinal);
+      File.WriteAllText(layout.ConfigFile, original);
+      PaddleModeOptions loaded = PaddleModeOptions.Load(layout, modeId);
+      Assert.Equal(original, File.ReadAllText(layout.ConfigFile));
+      var mode = new RecognitionModeOption(modeId, "document", "PP-StructureV3", null,
+        "advanced_component", "ready", null, "paddleocr-ort-cpu",
+        ["use_doc_unwarping", "model_preset", "device"], "model_residency", true, true, true, true);
+      Assert.True(loaded.ToWire(mode)["use_doc_unwarping"].GetBoolean());
+      Assert.Equal("medium", loaded.ToWire(mode)["model_preset"].GetString());
+      loaded.Save(layout, modeId);
+      using JsonDocument saved = JsonDocument.Parse(File.ReadAllText(layout.ConfigFile));
+      Assert.Equal("keep", saved.RootElement.GetProperty("other_setting").GetString());
+      Assert.Equal(3, saved.RootElement.GetProperty("recognition_options").GetProperty(modeId).EnumerateObject().Count());
+      Assert.Equal(loaded, PaddleModeOptions.Load(layout, modeId));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData("\"unexpected\":true")]
+  [InlineData("\"use_doc_unwarping\":1")]
+  public void LegacyOptionsCompatibilityDoesNotAcceptUnknownFieldsOrInvalidTypes(string invalid)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-invalid-options-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+      layout.EnsurePortableState();
+      string original = "{\"recognition_options\":{\"paddle_text\":{\"model_preset\":\"medium\",\"formula_recognition_batch_size\":5," + invalid + "}}}";
+      File.WriteAllText(layout.ConfigFile, original);
+      Assert.Equal(new PaddleModeOptions(), PaddleModeOptions.Load(layout, "paddle_text"));
+      Assert.Equal(original, File.ReadAllText(layout.ConfigFile));
     }
     finally { Directory.Delete(root, recursive: true); }
   }
@@ -243,12 +300,12 @@ public sealed class RecognitionViewModelSupervisorTests
     var inference = new FakeInferenceClient("must not submit");
     var inputs = new StubInputService();
     var viewModel = new RecognitionViewModel(inference, inputs);
-    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-        null, "advanced_component", "ready", null, "paddleocr-cpu",
-        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    var mode = new RecognitionModeOption("paddle_table", "specialized", "TABLE_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+        ["use_doc_unwarping"], "model_residency", true, true, true, true);
     viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions
     {
-      FormulaRecognitionBatchSize = 2,
+      UseDocUnwarping = true,
       UseTableRecognition = true, // 不属于该模式合同
     });
 
@@ -262,23 +319,23 @@ public sealed class RecognitionViewModelSupervisorTests
   }
 
   [Fact]
-  public async Task OutOfRangeModeOptionRejectsSubmissionWithPreciseParameter()
+  public async Task InvalidProviderRejectsSubmissionWithPreciseParameter()
   {
     // 回归契约（#110 AC2）：越界的范围值同样明确拒绝并点名参数。
     var inference = new FakeInferenceClient("must not submit");
     var inputs = new StubInputService();
     var viewModel = new RecognitionViewModel(inference, inputs);
-    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-        null, "advanced_component", "ready", null, "paddleocr-cpu",
-        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
-    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { FormulaRecognitionBatchSize = 0 });
+    var mode = new RecognitionModeOption("paddle_table", "specialized", "TABLE_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+        ["use_doc_unwarping"], "model_residency", true, true, true, true);
+    viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { Device = "invalid" });
 
     await viewModel.RecognizeViaSupervisorAsync(ct => inputs.PickFileAsync(ct), CancellationToken.None);
 
     Assert.Equal(0, inference.SubmitCalls);
     Assert.Equal(JobState.Failed, viewModel.TerminalState);
     Assert.StartsWith("识别选项无效，已拒绝提交", viewModel.Status);
-    Assert.Contains("FormulaRecognitionBatchSize", viewModel.Status);
+    Assert.Contains("Unsupported Paddle provider", viewModel.Status);
   }
 
   [Theory]
@@ -294,11 +351,11 @@ public sealed class RecognitionViewModelSupervisorTests
   [Fact]
   public void PaddleOptionsRejectOptionsOutsideSelectedCatalogMode()
   {
-    var mode = new RecognitionModeOption("paddle_formula", "specialized", "FORMULA_RECOGNITION",
-        null, "advanced_component", "ready", null, "paddleocr-cpu",
-        ["formula_recognition_batch_size"], "model_residency", true, true, true, true);
+    var mode = new RecognitionModeOption("paddle_table", "specialized", "TABLE_RECOGNITION",
+        null, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+        ["use_doc_unwarping"], "model_residency", true, true, true, true);
     Assert.Throws<ArgumentException>(() => new PaddleModeOptions { UseTableRecognition = true }.ToWire(mode));
-    Assert.Throws<ArgumentOutOfRangeException>(() => new PaddleModeOptions { FormulaRecognitionBatchSize = 0 }.ToWire(mode));
+    Assert.Throws<ArgumentException>(() => new PaddleModeOptions { Device = "invalid" }.ToWire(mode));
   }
   [Fact]
   public async Task SupervisorPathLocalizesTypedError()

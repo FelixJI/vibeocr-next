@@ -24,6 +24,10 @@ def main() -> int:
         profile = f"win-x64-paddle-ort-{device}"
         directory = Path("config/runtime") / profile
         output = directory / f"requirements-{profile}.lock"
+        # #270：旧原生 paddle-cpu 锁已随产品退役删除。约束改用各设备现有的
+        # ORT 锁自身：已锁版本全部保留（不因重生成顺带升级），仅在新增
+        # 依赖时重新解析；生成仍由 uv pip compile 完成，不手改锁。
+        constraints = ["--constraints", str(output)] if output.is_file() else []
         subprocess.run(
             [
                 uv,
@@ -37,8 +41,7 @@ def main() -> int:
                 "--python-platform",
                 "windows",
                 "--generate-hashes",
-                "--constraints",
-                "config/runtime/win-x64-paddle-cpu/requirements-win-x64-paddle-cpu.lock",
+                *constraints,
                 "--custom-compile-command",
                 "uv run python scripts/update_runtime_paddle_onnx_locks.py",
                 "--output-file",

@@ -152,35 +152,24 @@ def _diagnose_paddlex_ocr_extra() -> list[str]:
 
 
 def _create_table_pipeline(device: str, **kwargs: Any) -> Any:
-    """创建表格识别管道实例
+    """创建表格识别管道实例（仅 Paddle ONNX 环境）。
 
-    额外 kwargs 透传给 TableRecognitionPipelineV2（例如 enable_mkldnn）。
+    #270：原生 TableRecognitionPipelineV2 构造已退役；缺 ``_onnx_request``
+    # 时明确拒绝，不再回退原生后端。
     """
     # 创建前主动探测 paddlex[ocr] leaf 包。PaddleX 会把真因 DependencyError 包成
     # 无信息的 RuntimeError，此处提前拦截并报告具体缺失包，引导用户修复。
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError, create_pipeline
+
+    if "_onnx_request" not in kwargs:
+        raise PaddleOnnxError(
+            "Paddle pipelines require a Paddle ONNX environment "
+            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+        )
     _check_table_deps()
-    if "_onnx_request" in kwargs:
-        from vibeocr.runtime.recognition.paddle_onnx import create_pipeline
-
-        request = kwargs.pop("_onnx_request")
-        kwargs.pop("enable_mkldnn", None)
-        return create_pipeline(request, **kwargs)
-    from paddleocr import TableRecognitionPipelineV2
-
-    try:
-        return TableRecognitionPipelineV2(device=device, **kwargs)
-    except Exception:
-        # _check_table_deps 已用 is_extra_available 前置拦截，正常情况下此处
-        # 不会因 ocr extra 缺失触发。但 defense-in-depth：若 PaddleX 内部状态
-        # 在两次调用间变化（lru_cache 时序 / 并发），把具体缺失包名落进日志，
-        # 避免又退回无信息的 RuntimeError。
-        paddlex_missing = _diagnose_paddlex_ocr_extra()
-        if paddlex_missing:
-            _logger.error(
-                "[表格管道] PaddleX 判定 ocr extra 不可用，缺失发行版: %s",
-                ", ".join(paddlex_missing),
-            )
-        raise
+    request = kwargs.pop("_onnx_request")
+    kwargs.pop("enable_mkldnn", None)
+    return create_pipeline(request, **kwargs)
 
 
 def _recognize_table(

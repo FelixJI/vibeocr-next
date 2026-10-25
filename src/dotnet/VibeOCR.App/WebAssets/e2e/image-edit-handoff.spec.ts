@@ -66,7 +66,7 @@ function pixelAt(image: DecodedImage, x: number, y: number): number[] {
 for (const [label, modeId] of [
   ["识别文字", "rapid_text"],
   ["表格识别", "paddle_table"],
-  ["公式识别", "paddle_formula"],
+  // #270：独立公式识别已退役，图片编辑交接不再提供公式入口。
 ]) {
   test(`explicit ${label} handoff keeps edited ordinary pixels, mask and route`, async ({
     page,

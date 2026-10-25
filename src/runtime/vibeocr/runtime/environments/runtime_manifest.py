@@ -478,9 +478,11 @@ def validate_requirements_lock(
         if "paddlepaddle-gpu" in lowered or "cu126" in lowered:
             raise ManifestError("CPU lock contains a GPU/cu126 artifact")
     elif profile == "win-x64-cu126":
+        # #270：cu126 host 锁只承载 torch/gpu_runtime 闭包，不再要求原生
+        # PaddlePaddle。历史 loader 仍会读到旧集成锁（含 paddlepaddle-gpu）
+        # 或旧隔离锁：旧包存在本身不拒绝整个历史 manifest，只继续拒绝
+        # 从未属于 cu126 的 CPU paddlepaddle。
         required_packages = ("torch", "torchvision", "cu126")
-        if not paddle_isolated:
-            required_packages += ("paddlepaddle-gpu",)
         for required in required_packages:
             if required not in lowered:
                 raise ManifestError(f"cu126 lock is missing {required}")

@@ -1,5 +1,5 @@
 # tests/core/test_pipeline_paddlocr_vl.py
-"""PaddleOCR-VL 管道解析回归测试。
+"""PaddleOCR-VL 历史 payload 只读投影回归测试。
 
 回归背景：PaddleX 结果对象是 dict 子类，parsing_res_list/content_list/images
 是 dict key 而非实例属性。早期代码用 hasattr(res, ...) + res.xxx 属性访问，
@@ -7,44 +7,12 @@
 """
 
 from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-    PADDLEOCR_VL_SPEC,
-    PaddleOCRVLOptions,
-    _recognize_paddlocr_vl,
+    project_historical_paddlocr_vl_payloads,
 )
 
 
 class _DictResult(dict):
     """模拟 PaddleX 结果：dict 子类，键需下标访问。"""
-
-
-class _FakePipeline:
-    def __init__(self, result_list):
-        self._result_list = result_list
-        self.predict_calls: list[dict] = []
-
-    def predict(self, input, **kwargs):  # noqa: A002 — 模拟 PaddleOCR API（input 关键字参数）
-        self.predict_calls.append(dict(kwargs))
-        return list(self._result_list)
-
-
-class _FakeService:
-    def __init__(self, result_list):
-        self._pipeline = _FakePipeline(result_list)
-        self.requests: list[tuple[str, object]] = []
-
-    def get_or_create_pipeline(self, name, options=None):
-        self.requests.append((name, options))
-        return self._pipeline
-
-
-def test_vl_options_defaults():
-    opts = PaddleOCRVLOptions()
-    assert opts.pipeline == "PaddleOCR-VL"
-
-
-def test_vl_spec():
-    assert PADDLEOCR_VL_SPEC.name == "PaddleOCR-VL"
-    assert PADDLEOCR_VL_SPEC.display_name == "文档P（PaddleOCR-VL）"
 
 
 def test_recognize_vl_extracts_blocks_from_dict_result():
@@ -71,8 +39,7 @@ def test_recognize_vl_extracts_blocks_from_dict_result():
             ]
         }
     )
-    service = _FakeService([res])
-    result = _recognize_paddlocr_vl(service, image=None, options=PaddleOCRVLOptions())
+    result = project_historical_paddlocr_vl_payloads([res])
 
     assert result.pipeline_type == "PaddleOCR-VL"
     assert len(result.text_blocks) == 1
@@ -90,8 +57,7 @@ def test_recognize_vl_extracts_content_list_and_images():
             "images": {"img1": b"\x89PNG"},
         }
     )
-    service = _FakeService([res])
-    result = _recognize_paddlocr_vl(service, image=None, options=PaddleOCRVLOptions())
+    result = project_historical_paddlocr_vl_payloads([res])
 
     content = next(c for c in result.content_list if c.get("text") == "from cl")
     text_block = next(b for b in result.text_blocks if b.text == "from cl")
@@ -127,8 +93,7 @@ def test_recognize_vl_extracts_object_blocks():
             ]
         }
     )
-    service = _FakeService([res])
-    result = _recognize_paddlocr_vl(service, image=None, options=PaddleOCRVLOptions())
+    result = project_historical_paddlocr_vl_payloads([res])
 
     assert len(result.text_blocks) == 1
     assert result.text_blocks[0].text == "title text"
@@ -156,9 +121,7 @@ def test_recognize_vl_normalizes_display_formula_from_content_list():
             "parsing_res_list": [],
         }
     )
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     formula = result.content_list[0]
     assert formula["type"] == "formula"
@@ -181,9 +144,7 @@ def test_recognize_vl_normalizes_display_formula_from_parsing_res_list():
             ]
         }
     )
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     assert result.content_list[0]["type"] == "formula"
     assert result.content_list[0]["text"] == "\\frac{a+b}{c-d}"
@@ -211,9 +172,7 @@ def test_vl_deduplicates_table_across_content_and_parsing_lists():
         }
     )
 
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     tables = [block for block in result.content_list if block["type"] == "table"]
     assert len(tables) == 1
@@ -243,9 +202,7 @@ def test_vl_deduplicates_table_when_content_list_bbox_is_missing():
         }
     )
 
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     tables = [block for block in result.content_list if block["type"] == "table"]
     assert len(tables) == 1
@@ -270,9 +227,7 @@ def test_vl_does_not_deduplicate_same_table_across_results():
         for _ in range(2)
     ]
 
-    result = _recognize_paddlocr_vl(
-        _FakeService(results), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads(results)
 
     tables = [block for block in result.content_list if block["type"] == "table"]
     assert len(tables) == 2
@@ -306,9 +261,7 @@ def test_vl_prefers_provider_block_id_for_ambiguous_tables():
         }
     )
 
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     tables = [block for block in result.content_list if block["type"] == "table"]
     assert len(tables) == 2
@@ -327,9 +280,7 @@ def test_vl_projects_content_list_only_table():
         }
     )
 
-    result = _recognize_paddlocr_vl(
-        _FakeService([res]), image=None, options=PaddleOCRVLOptions()
-    )
+    result = project_historical_paddlocr_vl_payloads([res])
 
     assert result.text_blocks[0].text == "A\tB\nC"
     assert result.raw_text == "A\tB\nC"
@@ -436,62 +387,6 @@ class TestVlPureHelpers:
         assert all(isinstance(x, str) for x in result)
 
 
-# ---- 构造参数：版本固定 VL-1.5 与门控项 ----
-
-
-def test_vl_constructor_kwargs_only_gating_flags():
-    from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-        _paddlocr_vl_constructor_kwargs,
-    )
-
-    kwargs = _paddlocr_vl_constructor_kwargs(PaddleOCRVLOptions())
-    assert kwargs == {
-        "use_doc_orientation_classify": True,
-        "use_doc_unwarping": False,
-        "use_layout_detection": True,
-    }
-
-
-def test_create_vl_pipeline_pins_v15(monkeypatch):
-    """回归：锁定版本默认 pipeline_version=v1.6，必须显式固定 v1.5（旧实现会失败）。"""
-    import sys
-    import types
-
-    captured: dict = {}
-
-    class _Captured:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        def predict(self, *args, **kwargs):
-            return []
-
-    stub = types.ModuleType("paddleocr")
-    stub.PaddleOCRVL = _Captured
-    monkeypatch.setitem(sys.modules, "paddleocr", stub)
-
-    from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-        _create_paddlocr_vl_pipeline,
-    )
-
-    _create_paddlocr_vl_pipeline("cpu", enable_mkldnn=False)
-    assert captured["pipeline_version"] == "v1.5"
-    assert captured["device"] == "cpu"
-
-
-def test_vl_options_forwarded_to_cache_layer():
-
-    opts = PaddleOCRVLOptions(vl_use_seal_recognition=True)
-    service = _FakeService([])
-    _recognize_paddlocr_vl(service, image=None, options=opts)
-    name, passed = service.requests[0]
-    assert name == "PaddleOCR-VL"
-    assert passed is opts
-    # chart/seal/ocr_for_image_block 是 predict 参数
-    predict_kwargs = service._pipeline.predict_calls[0]
-    assert predict_kwargs["use_seal_recognition"] is True
-
-
 def test_vl_keeps_image_block_without_ocr_text(tmp_path):
     from types import SimpleNamespace
 
@@ -505,10 +400,8 @@ def test_vl_keeps_image_block_without_ocr_text(tmp_path):
         global_block_id=0,
         image={"img": Image.new("RGB", (12, 8), "red"), "path": "provider.png"},
     )
-    result = _recognize_paddlocr_vl(
-        _FakeService([_DictResult(parsing_res_list=[block])]),
-        image=None,
-        options=PaddleOCRVLOptions(),
+    result = project_historical_paddlocr_vl_payloads(
+        [_DictResult(parsing_res_list=[block])],
         asset_sink=ResultAssetSink(tmp_path, "it-0"),
     )
     assert len(result.content_list) == 1

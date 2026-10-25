@@ -7,8 +7,6 @@ fixtures，不依赖真实 PaddleOCR 模型加载：
 - _process_ocr_output_safe: dict / object / 多格式输出解析
 - _build_ocr_result: OCRResult 构建 + 平均置信度/低置信项
 - _normalize_result_bbox: 像素坐标归一化到 [0,1000]
-- _decide_enable_mkldnn: CPU/GPU + 探测缓存
-- _is_known_onednn_pir_failure: 异常链匹配
 - OCRPreset.display_name
 """
 
@@ -382,82 +380,6 @@ class TestNormalizeResultBbox:
 # ---------------------------------------------------------------------------
 
 
-class TestIsKnownOnednnPirFailure:
-    def test_matching_message_returns_true(self):
-        err = RuntimeError(
-            "ConvertPirAttribute2RuntimeAttribute failed for onednn_instruction"
-        )
-        assert OCRService._is_known_onednn_pir_failure(err) is True
-
-    def test_non_matching_returns_false(self):
-        assert OCRService._is_known_onednn_pir_failure(ValueError("other")) is False
-
-    def test_chained_exception_matched(self):
-        """异常链中某层命中 → True。"""
-        root = RuntimeError("ConvertPirAttribute2RuntimeAttribute onednn_instruction")
-        mid = ValueError("wrapped")
-        mid.__cause__ = root
-        assert OCRService._is_known_onednn_pir_failure(mid) is True
-
-    def test_missing_onednn_keyword_returns_false(self):
-        err = RuntimeError("ConvertPirAttribute2RuntimeAttribute without keyword")
-        assert OCRService._is_known_onednn_pir_failure(err) is False
-
-    def test_circular_chain_terminates(self):
-        """循环异常链不无限递归。"""
-        a = RuntimeError("x")
-        b = RuntimeError("y")
-        a.__cause__ = b
-        b.__cause__ = a
-        assert OCRService._is_known_onednn_pir_failure(a) is False
-
-
 # ---------------------------------------------------------------------------
 # _decide_enable_mkldnn
 # ---------------------------------------------------------------------------
-
-
-class TestDecideEnableMkldnn:
-    def test_gpu_device_returns_false(self):
-        # 重置缓存
-        OCRService._onednn_safe_cache = None
-        OCRService._onednn_runtime_disabled = False
-        assert OCRService._decide_enable_mkldnn("gpu") is False
-
-    def test_runtime_disabled_returns_false(self):
-        OCRService._onednn_safe_cache = True
-        OCRService._onednn_runtime_disabled = True
-        assert OCRService._decide_enable_mkldnn("cpu") is False
-        OCRService._onednn_runtime_disabled = False
-
-    def test_cpu_probes_and_caches(self, monkeypatch):
-        OCRService._onednn_safe_cache = None
-        OCRService._onednn_runtime_disabled = False
-
-        called = {"n": 0}
-
-        def fake_probe():
-            called["n"] += 1
-            return (True, "safe")
-
-        monkeypatch.setattr(
-            "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-            fake_probe,
-        )
-        assert OCRService._decide_enable_mkldnn("cpu") is True
-        # 缓存生效：第二次不重新探测
-        OCRService._decide_enable_mkldnn("cpu")
-        assert called["n"] == 1
-
-    def test_probe_exception_disables(self, monkeypatch):
-        OCRService._onednn_safe_cache = None
-        OCRService._onednn_runtime_disabled = False
-
-        def _raise():
-            raise RuntimeError("probe failed")
-
-        monkeypatch.setattr(
-            "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn", _raise
-        )
-        assert OCRService._decide_enable_mkldnn("cpu") is False
-        assert OCRService._onednn_safe_cache is False

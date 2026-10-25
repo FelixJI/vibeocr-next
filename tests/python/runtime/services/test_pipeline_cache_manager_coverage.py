@@ -259,8 +259,18 @@ class TestPrepareLoad:
         result = mgr.prepare_load("OCR")
         assert result == []
 
-    def test_prepare_load_evicts_to_make_room(self):
+    def test_prepare_load_evicts_to_make_room(self, monkeypatch: pytest.MonkeyPatch):
         """prepare_load 超上限时淘汰（lines 310-317）。"""
+        # #270：PaddleOCR-VL 已退役；用 monkeypatch 还原两个重型驻留成员
+        # 覆盖容量淘汰逻辑本身。
+        import vibeocr.runtime.recognition.core.pipelines as pipeline_package
+        from vibeocr.runtime.recognition.pipeline_contracts import OCRPipeline
+
+        members = [OCRPipeline.PP_STRUCTURE_V3, OCRPipeline.PADDLEOCR_VL]
+        monkeypatch.setattr(pipeline_package, "get_heavy_pipelines", lambda: members)
+        monkeypatch.setattr(
+            pipeline_package, "get_paddle_residency_pipelines", lambda: members
+        )
         mgr = _make_legacy_manager(max_heavy=1)
         mgr._service._pipelines = {"PP-StructureV3": object()}
         mgr._last_used = {"PP-StructureV3": 100.0}
@@ -413,42 +423,9 @@ class TestTickLoopException:
 # ---- _empty_cache -----------------------------------------------------
 
 
-class TestEmptyCache:
-    def test_empty_cache_cpu_mode_skips(self, monkeypatch):
-        """CPU 模式 → 不调 paddle（line 532 False）。"""
-        monkeypatch.setenv("VIBEOCR_USE_GPU", "false")
-        PipelineCacheManager._empty_cache()  # 不应抛异常
-
-    def test_empty_cache_gpu_mode_calls_paddle(self, monkeypatch):
-        """GPU 模式 → 调 paddle.device.cuda.empty_cache（lines 532-536）。"""
-        monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-        import sys
-        from types import ModuleType
-
-        fake_paddle = ModuleType("paddle")
-        fake_paddle.device = MagicMock()
-        fake_paddle.device.cuda = MagicMock()
-        # 注入 fake paddle
-        monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-        PipelineCacheManager._empty_cache()
-        fake_paddle.device.cuda.empty_cache.assert_called_once()
-
-    def test_empty_cache_gpu_mode_exception_swallowed(self, monkeypatch):
-        """GPU 模式 + paddle 抛异常 → 吞掉（lines 537-538）。"""
-        monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-        import sys
-        from types import ModuleType
-
-        fake_paddle = ModuleType("paddle")
-        fake_paddle.device = MagicMock()
-        fake_paddle.device.cuda = MagicMock()
-        fake_paddle.device.cuda.empty_cache.side_effect = RuntimeError("cuda boom")
-        monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-        # 不应抛异常
-        PipelineCacheManager._empty_cache()
-
-    def test_release_one_paddle_calls_empty_cache(self, monkeypatch):
-        """_release_one 对 paddle 管道调用 _empty_cache（lines 517-518）。"""
+class TestReleaseOwner:
+    def test_release_one_paddle_removes_owned_pipeline(self, monkeypatch):
+        """_release_one 释放目标管道并移除其使用记录。"""
         monkeypatch.setenv(
             "VIBEOCR_USE_GPU", "false"
         )  # CPU 模式，_empty_cache 跳过 paddle

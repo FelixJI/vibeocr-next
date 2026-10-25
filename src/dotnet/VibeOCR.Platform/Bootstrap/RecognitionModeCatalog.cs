@@ -36,6 +36,20 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
 {
     public const string Capability = "ocr.recognition-modes.v1";
 
+    /// <summary>
+    /// #270：已退役模式 id（wire 枚举值保留供历史读取）。目录不再声明
+    /// 它们；调用方用它把旧默认/固定/快捷键选择诊断为“已退役，请重新选择”。
+    /// </summary>
+    public static readonly IReadOnlySet<string> RetiredModeIds = new HashSet<string>(
+        StringComparer.Ordinal)
+    {
+        "paddle_document_vl",
+        "paddle_formula",
+    };
+
+    public static bool IsRetiredModeId(string? modeId) =>
+        modeId is not null && RetiredModeIds.Contains(modeId);
+
     private sealed record ExpectedMode(
         Wire.RecognitionModeFamily Family,
         Wire.ExecutionPipelineId Pipeline,
@@ -65,9 +79,8 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             [Wire.RecognitionModeId.PaddleStructure] = Paddle(
                 Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.PPStructureV3),
-            [Wire.RecognitionModeId.PaddleDocumentVl] = Paddle(
-                Wire.RecognitionModeFamily.Document,
-                Wire.ExecutionPipelineId.PaddleOCRVL),
+            // #270：paddle_document_vl / paddle_formula 已退役：不再进入目录
+            // 合同；wire 枚举值保留仅供识别旧持久化/请求并提示重新选择。
             [Wire.RecognitionModeId.MineruDocument] = Mode(
                 Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.MinerU,
@@ -77,9 +90,6 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             [Wire.RecognitionModeId.PaddleTable] = Paddle(
                 Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.TABLERECOGNITION),
-            [Wire.RecognitionModeId.PaddleFormula] = Paddle(
-                Wire.RecognitionModeFamily.Specialized,
-                Wire.ExecutionPipelineId.FORMULARECOGNITION),
             // RapidTable 表格识别：独立 RAPID_TABLE 管线（engine-only-OCR
             // 不变量保留），依赖随 base 离线闭包分发，unmanaged 惰性加载。
             [Wire.RecognitionModeId.RapidTable] = Mode(

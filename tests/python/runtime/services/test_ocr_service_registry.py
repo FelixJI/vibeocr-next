@@ -3,22 +3,17 @@
 Verifies that:
 - get_or_create_pipeline() caches pipeline instances
 - get_or_create_pipeline() uses registry's spec.create_pipeline when available
-- get_or_create_pipeline() falls back to old _create_pipeline for unregistered names
+- get_or_create_pipeline() rejects unregistered names
 - recognize() dispatches to registered pipeline specs via registry
 - recognize() falls back to spec.recognize (逐张) for pipelines without recognize_batch
 - 表格/公式等无 recognize_batch 的管道走对应 spec.recognize，而非被当 OCR
 - Old OCROptions (enum pipeline) still works end-to-end
 """
 
-import json
-import sys
-import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from vibeocr.runtime.recognition.core.pipelines import OCRPipeline
-from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
 from vibeocr.runtime.recognition.models.ocr_options import OCROptions
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult
 from vibeocr.runtime.recognition.ocr_service import OCRService
@@ -27,6 +22,14 @@ from vibeocr.runtime.recognition.pipeline_cache_manager import PipelineCacheMana
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_constructor_snapshot(monkeypatch):
+    # 此处验证 registry/cache；真实 ORT 快照准入由 paddle_onnx 合同测试覆盖。
+    monkeypatch.setattr(
+        "vibeocr.runtime.recognition.paddle_onnx.constructor_kwargs", lambda options: {}
+    )
 
 
 def _make_ocr_result(**overrides) -> OCRResult:
@@ -59,73 +62,6 @@ def _known_onednn_pir_error() -> NotImplementedError:
         "[pir::ArrayAttribute<pir::DoubleAttribute>] "
         "(at ..\\instruction\\onednn\\onednn_instruction.cc:118)"
     )
-
-
-@pytest.mark.parametrize(
-    ("pipeline", "consumer", "constructor_name", "binding_key"),
-    [
-        (
-            OCRPipeline.OCR,
-            "paddleocr",
-            "PaddleOCR",
-            "text_recognition_model_dir",
-        ),
-        (
-            OCRPipeline.PP_STRUCTURE_V3,
-            "pp_structure",
-            "PPStructureV3",
-            "layout_detection_model_dir",
-        ),
-        (
-            OCRPipeline.PADDLEOCR_VL,
-            "paddleocr_vl",
-            "PaddleOCRVL",
-            "vl_rec_model_dir",
-        ),
-    ],
-)
-def test_legacy_pipeline_factory_delegates_model_discovery_to_paddle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pipeline: OCRPipeline,
-    consumer: str,
-    constructor_name: str,
-    binding_key: str,
-) -> None:
-    SingletonMeta.reset_instance(OCRService)
-    model_dir = tmp_path / consumer
-    model_dir.mkdir()
-    binding = tmp_path / "resolved-models.json"
-    binding.write_text(
-        json.dumps({"consumers": {consumer: {binding_key: str(model_dir)}}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("VIBEOCR_RESOLVED_MODELS", str(binding))
-    captured: dict[str, object] = {}
-
-    def constructor(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "paddleocr",
-        types.SimpleNamespace(**{constructor_name: constructor}),
-    )
-    try:
-        service = OCRService()
-        monkeypatch.setattr(service, "_get_device", lambda: "cpu")
-        monkeypatch.setattr(service, "_decide_enable_mkldnn", lambda _device: False)
-        monkeypatch.setattr(
-            "vibeocr.runtime.recognition.ocr_service.is_pipeline_ever_succeeded",
-            lambda *_args: True,
-        )
-
-        service._create_pipeline(pipeline)
-
-        assert captured == {"device": "cpu", "enable_mkldnn": False}
-    finally:
-        SingletonMeta.reset_instance(OCRService)
 
 
 # ---------------------------------------------------------------------------
@@ -185,19 +121,12 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="cpu",
             ),
             patch(
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
-            ),
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(False, "mocked"),
             ),
         ):
             first = service.get_or_create_pipeline("PP-StructureV3", options_a)
@@ -226,19 +155,12 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="cpu",
             ),
             patch(
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
-            ),
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(False, "mocked"),
             ),
         ):
             first = service.get_or_create_pipeline("PP-StructureV3", options_a)
@@ -264,9 +186,6 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="cpu",
             ),
@@ -274,22 +193,13 @@ class TestGetOrCreatePipeline:
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
             ),
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(False, "mocked"),
-            ),
         ):
             result = service.get_or_create_pipeline("PP-StructureV3", options_a)
 
         assert result is fresh
 
     def test_creates_pipeline_via_registry(self):
-        """Uses spec.create_pipeline from registry when pipeline is registered.
-
-        On CPU, enable_mkldnn must be forwarded to the factory. The probe is
-        mocked so the assertion is stable regardless of the host's CPU/paddle
-        version (avoids order-dependent leakage of the process-level cache).
-        """
+        """Uses spec.create_pipeline from registry when pipeline is registered."""
         service = OCRService()
         service._pipelines = {}
 
@@ -303,71 +213,20 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="cpu",
             ),
             patch(
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
-            ),
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._create_pipeline"
-            ) as mock_old_create,
-            # 固定探测结果为 False，断言不依赖宿主环境
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(False, "mocked: paddle 3.3 黑名单"),
             ),
         ):
             result = service.get_or_create_pipeline("OCR")
 
-        # Should use registry, not old _create_pipeline.
-        # On CPU the factory must receive enable_mkldnn=False (mocked probe).
-        mock_spec.create_pipeline.assert_called_once_with("cpu", enable_mkldnn=False)
-        mock_old_create.assert_not_called()
+        # Constructs through the registered factory.
+        mock_spec.create_pipeline.assert_called_once_with("cpu")
         assert result is mock_pipeline
         assert "OCR" in service._pipelines
-
-    def test_cpu_forwards_enable_mkldnn_true_when_probe_says_safe(self):
-        """When the probe says oneDNN is safe, enable_mkldnn=True is forwarded.
-
-        Covers the True branch so the assertion doesn't silently rot until a
-        future paddle upgrade makes the probe return True on the host.
-        """
-        service = OCRService()
-        service._pipelines = {}
-
-        mock_pipeline = MagicMock(name="ocr_pipeline_mkldnn")
-        mock_spec = MagicMock()
-        mock_spec.create_pipeline.return_value = mock_pipeline
-
-        mock_registry = MagicMock()
-        mock_registry.has.return_value = True
-        mock_registry.get.return_value = mock_spec
-
-        with (
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
-                return_value="cpu",
-            ),
-            patch(
-                "vibeocr.runtime.recognition.core.pipelines.get_registry",
-                return_value=mock_registry,
-            ),
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(True, "mocked: AVX2 + 新 paddle"),
-            ),
-        ):
-            service.get_or_create_pipeline("OCR")
-
-        mock_spec.create_pipeline.assert_called_once_with("cpu", enable_mkldnn=True)
 
     def test_gpu_device_omits_enable_mkldnn(self):
         """On GPU the factory is called with device only — no enable_mkldnn kwarg."""
@@ -384,9 +243,6 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="gpu",
             ),
@@ -399,32 +255,6 @@ class TestGetOrCreatePipeline:
 
         mock_spec.create_pipeline.assert_called_once_with("gpu")
 
-    def test_falls_back_to_old_create_pipeline(self):
-        """Falls back to _create_pipeline for unregistered pipeline names."""
-        service = OCRService()
-        service._pipelines = {}
-
-        mock_pipeline = MagicMock(name="fallback_pipeline")
-        mock_registry = MagicMock()
-        mock_registry.has.return_value = False
-
-        with (
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
-                "vibeocr.runtime.recognition.core.pipelines.get_registry",
-                return_value=mock_registry,
-            ),
-            patch.object(
-                service, "_create_pipeline", return_value=mock_pipeline
-            ) as mock_create,
-        ):
-            result = service.get_or_create_pipeline("OCR")
-
-        mock_create.assert_called_once_with(OCRPipeline.OCR)
-        assert result is mock_pipeline
-
     def test_raises_for_unknown_pipeline_name(self):
         """Raises ValueError for a pipeline name not in registry or OCRPipeline enum."""
         service = OCRService()
@@ -434,9 +264,6 @@ class TestGetOrCreatePipeline:
         mock_registry.has.return_value = False
 
         with (
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
             patch(
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
@@ -460,19 +287,12 @@ class TestGetOrCreatePipeline:
 
         with (
             patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
                 "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
                 return_value="cpu",
             ),
             patch(
                 "vibeocr.runtime.recognition.core.pipelines.get_registry",
                 return_value=mock_registry,
-            ),
-            patch(
-                "vibeocr.runtime.processes.utils.cpu_info.can_safely_enable_onednn",
-                return_value=(False, "mocked for registry locking test"),
             ),
         ):
             # Call twice — second should return cached instance
@@ -907,69 +727,11 @@ class TestRecognizeBatch:
         mock_spec.recognize_batch.assert_called_once()
         assert len(mock_spec.recognize_batch.call_args[0][1]) == 1
 
-    def test_known_onednn_failure_rebuilds_disabled_and_retries_once(self):
-        """已知 PIR/oneDNN 异常会释放管道，以 mkldnn=False 重建并成功重试。"""
-        import numpy as np
-
-        service = OCRService()
-        service._pipelines = {}
-        service._cache_manager = PipelineCacheManager(service, {}, max_heavy=1)
-        type(service)._onednn_safe_cache = True
-
-        first_pipeline = MagicMock(name="onednn_pipeline")
-        fallback_pipeline = MagicMock(name="plain_cpu_pipeline")
-        mock_spec = MagicMock()
-        mock_spec.create_pipeline.side_effect = [first_pipeline, fallback_pipeline]
-
-        dispatch_count = 0
-
-        def recognize_batch(svc, _images, _options, *, asset_sinks=None):
-            nonlocal dispatch_count
-            dispatch_count += 1
-            svc.get_or_create_pipeline("OCR")
-            if dispatch_count == 1:
-                raise _known_onednn_pir_error()
-            return [_make_ocr_result(raw_text="fallback-ok")]
-
-        mock_spec.recognize_batch.side_effect = recognize_batch
-        mock_registry = MagicMock()
-        mock_registry.has.return_value = True
-        mock_registry.get.return_value = mock_spec
-
-        with (
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
-                return_value="cpu",
-            ),
-            patch(
-                "vibeocr.runtime.recognition.core.pipelines.get_registry",
-                return_value=mock_registry,
-            ),
-        ):
-            got = service.recognize_batch(
-                [np.zeros((50, 100, 3), dtype=np.uint8)],
-                OCROptions(pipeline=OCRPipeline.OCR),
-            )
-
-        assert got[0].raw_text == "fallback-ok"
-        assert dispatch_count == 2
-        assert mock_spec.create_pipeline.call_args_list == [
-            (("cpu",), {"enable_mkldnn": True}),
-            (("cpu",), {"enable_mkldnn": False}),
-        ]
-        assert service._pipelines["OCR"] is fallback_pipeline
-        assert type(service)._onednn_runtime_disabled is True
-        assert type(service)._onednn_safe_cache is False
-
     def test_non_onednn_failure_is_not_retried(self):
         """普通业务异常不触发兼容回退，也不改变 oneDNN 决策。"""
         import numpy as np
 
         service = OCRService()
-        type(service)._onednn_safe_cache = True
         mock_spec = MagicMock()
         mock_spec.recognize_batch.side_effect = ValueError("bad input")
         mock_registry = MagicMock()
@@ -989,8 +751,6 @@ class TestRecognizeBatch:
             )
 
         assert mock_spec.recognize_batch.call_count == 1
-        assert type(service)._onednn_runtime_disabled is False
-        assert type(service)._onednn_safe_cache is True
 
     def test_generator_failure_from_real_ocr_spec_is_propagated(self):
         """模型 generator 中途失败不能伪装成空识别成功。"""
@@ -1045,54 +805,11 @@ class TestRecognizeBatch:
                 OCROptions(pipeline=OCRPipeline.PP_STRUCTURE_V3),
             )
 
-    def test_known_onednn_failure_on_retry_is_propagated_without_loop(self):
-        """禁用重建后若仍失败，第二次异常原样抛出且不继续循环。"""
-        import numpy as np
-
-        service = OCRService()
-        service._pipelines = {}
-        service._cache_manager = PipelineCacheManager(service, {}, max_heavy=1)
-        type(service)._onednn_safe_cache = True
-        mock_spec = MagicMock()
-        mock_spec.create_pipeline.side_effect = [MagicMock(), MagicMock()]
-
-        def recognize_batch(svc, _images, _options, *, asset_sinks=None):
-            svc.get_or_create_pipeline("OCR")
-            raise _known_onednn_pir_error()
-
-        mock_spec.recognize_batch.side_effect = recognize_batch
-        mock_registry = MagicMock()
-        mock_registry.has.return_value = True
-        mock_registry.get.return_value = mock_spec
-
-        with (
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._setup_cuda_dll_path"
-            ),
-            patch(
-                "vibeocr.runtime.recognition.ocr_service.OCRService._get_device",
-                return_value="cpu",
-            ),
-            patch(
-                "vibeocr.runtime.recognition.core.pipelines.get_registry",
-                return_value=mock_registry,
-            ),
-            pytest.raises(NotImplementedError, match="ConvertPirAttribute"),
-        ):
-            service.recognize_batch(
-                [np.zeros((50, 100, 3), dtype=np.uint8)],
-                OCROptions(pipeline=OCRPipeline.OCR),
-            )
-
-        assert mock_spec.recognize_batch.call_count == 2
-        assert mock_spec.create_pipeline.call_count == 2
-
     def test_gpu_path_does_not_apply_cpu_onednn_fallback(self):
         """未启用 CPU oneDNN 的路径即使出现同文案异常也不执行重建。"""
         import numpy as np
 
         service = OCRService()
-        type(service)._onednn_safe_cache = None
         mock_spec = MagicMock()
         mock_spec.recognize_batch.side_effect = _known_onednn_pir_error()
         mock_registry = MagicMock()
@@ -1112,4 +829,3 @@ class TestRecognizeBatch:
             )
 
         assert mock_spec.recognize_batch.call_count == 1
-        assert type(service)._onednn_runtime_disabled is False

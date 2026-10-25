@@ -85,6 +85,47 @@ const editorCapabilities = [
   "recognition.clipboard",
 ];
 
+describe("retained screenshot recognition actions", () => {
+  it.each(["imageEdit", "recognition"] as const)(
+    "%s enables both actions from the host's two-entry projection",
+    (featureName) => {
+      window.location.hash = `#/${featureName}`;
+      const Page =
+        featureName === "imageEdit" ? ImageEditPage : RecognitionPage;
+      render(
+        <Page
+          actions={actions()}
+          viewState={viewState(
+            {
+              [featureName]: {
+                ...(featureName === "imageEdit"
+                  ? imageEditWithInput
+                  : recognitionWithResult),
+                recognitionModes: [
+                  {
+                    modeId: "rapid_text",
+                    displayName: "文字识别",
+                    availability: "ready",
+                  },
+                  {
+                    modeId: "paddle_table",
+                    displayName: "表格识别",
+                    availability: "ready",
+                  },
+                ],
+              },
+            },
+            editorCapabilities,
+          )}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "识别文字" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "表格识别" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "公式识别" })).toBeNull();
+    },
+  );
+});
+
 describe("ImageEditPage result isolation", () => {
   it("renders the edit canvas from the imageEdit feature without projecting a shared recognition result", () => {
     // 独立状态接线：编辑页输入来自 imageEdit feature；共享 recognition
@@ -278,8 +319,10 @@ describe("RecognitionPage lean editor", () => {
     expect(screen.queryByRole("button", { name: "检查文件大小" })).toBeNull();
     // 必要的识别面功能保留：显示缩放（不改像素）与显式识别入口。
     expect(screen.getByLabelText("显示缩放")).toBeInTheDocument();
-    for (const name of ["识别文字", "表格识别", "公式识别"])
+    // #270：独立公式识别已退役，不再提供公式入口。
+    for (const name of ["识别文字", "表格识别"])
       expect(screen.getByRole("button", { name })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "公式识别" })).toBeNull();
     expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
     unmount();
   });

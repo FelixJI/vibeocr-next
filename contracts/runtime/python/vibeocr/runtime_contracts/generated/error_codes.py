@@ -46,6 +46,7 @@ class RuntimeErrorCode(StrEnum):
     RUNTIME_COMPONENT_UNKNOWN = "RUNTIME_COMPONENT_UNKNOWN"
     RECOGNITION_MODE_UNKNOWN = "RECOGNITION_MODE_UNKNOWN"
     RECOGNITION_MODE_UNAVAILABLE = "RECOGNITION_MODE_UNAVAILABLE"
+    RECOGNITION_MODE_RETIRED = "RECOGNITION_MODE_RETIRED"
     RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED = "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED"
     RECOGNITION_MODE_PIPELINE_MISMATCH = "RECOGNITION_MODE_PIPELINE_MISMATCH"
     MINERU_CONFIG_UNAVAILABLE = "MINERU_CONFIG_UNAVAILABLE"
@@ -104,6 +105,7 @@ ERROR_DEFINITIONS: tuple[RuntimeErrorDefinition, ...] = (
     RuntimeErrorDefinition(RuntimeErrorCode.RUNTIME_COMPONENT_UNKNOWN, 'validation', 400, False, 'A selected install component id is not in the runtime.component-selection.v1 catalog; the request fails closed without silently installing a different scope.'),
     RuntimeErrorDefinition(RuntimeErrorCode.RECOGNITION_MODE_UNKNOWN, 'validation', 400, False, 'The requested recognition mode id is not in the ocr.recognition-modes.v1 catalog.'),
     RuntimeErrorDefinition(RuntimeErrorCode.RECOGNITION_MODE_UNAVAILABLE, 'capability', 426, False, 'The selected recognition mode cannot run in the current runtime state.'),
+    RuntimeErrorDefinition(RuntimeErrorCode.RECOGNITION_MODE_RETIRED, 'capability', 426, False, 'The selected recognition mode has been retired; choose one of the available recognition modes.'),
     RuntimeErrorDefinition(RuntimeErrorCode.RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED, 'validation', 400, False, 'The selected recognition mode does not support the requested preload, TTL, pinning or release operation.'),
     RuntimeErrorDefinition(RuntimeErrorCode.RECOGNITION_MODE_PIPELINE_MISMATCH, 'validation', 400, False, 'The legacy execution pipeline does not match the selected recognition mode.'),
     RuntimeErrorDefinition(RuntimeErrorCode.MINERU_CONFIG_UNAVAILABLE, 'capability', 426, False, 'The runtime does not provide the ocr.mineru-config.v1 typed MinerU configuration capability; the request fails closed without falling back to legacy options or the flash tier.'),

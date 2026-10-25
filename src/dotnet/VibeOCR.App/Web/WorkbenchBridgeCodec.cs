@@ -1327,8 +1327,13 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "setOptions"):
         EnsureObjectWithFields(arguments, RecognitionOptionsFields, "command arguments");
         string? modeId = arguments.GetProperty("modeId").GetString();
-        if (modeId is not ("paddle_text" or "paddle_table" or "paddle_formula" or "paddle_structure" or "paddle_document_vl"))
-          throw new WorkbenchBridgeProtocolException("Unsupported Paddle recognition mode.");
+        // #270：paddle_formula / paddle_document_vl 已退役，不再接受其
+        // 选项写入；旧持久化记录由 PaddleModeOptions.Load 兼容读取。
+        if (modeId is not ("paddle_text" or "paddle_table" or "paddle_structure"))
+          throw new WorkbenchBridgeProtocolException(
+            RecognitionModeCatalog.IsRetiredModeId(modeId)
+              ? "该识别模式已退役，不再支持保存其识别选项；请选择其他模式。"
+              : "Unsupported Paddle recognition mode.");
         PaddleModeOptions options = arguments.GetProperty("options")
           .Deserialize<PaddleModeOptions>(PaddleModeOptions.JsonOptions)
           ?? throw new WorkbenchBridgeProtocolException("Recognition options must be an object.");
@@ -2038,6 +2043,7 @@ public static class WorkbenchBridgeCodec
         settings.DefaultRecognitionMode.Supported,
         settings.DefaultRecognitionMode.ModeId,
         settings.DefaultRecognitionMode.Stored,
+        settings.DefaultRecognitionMode.ReasonCode,
       },
       mineruRecognition = settings.MineruRecognition is null ? null : new
       {

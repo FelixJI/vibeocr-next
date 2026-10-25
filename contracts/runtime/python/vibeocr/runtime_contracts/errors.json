@@ -290,6 +290,13 @@
       "message": "The selected recognition mode cannot run in the current runtime state."
     },
     {
+      "code": "RECOGNITION_MODE_RETIRED",
+      "category": "capability",
+      "http_status": 426,
+      "retryable": false,
+      "message": "The selected recognition mode has been retired; choose one of the available recognition modes."
+    },
+    {
       "code": "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED",
       "category": "validation",
       "http_status": 400,

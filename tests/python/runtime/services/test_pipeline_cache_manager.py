@@ -259,7 +259,12 @@ def test_configured_pin_blocks_ttl_and_explicit_release() -> None:
     assert mgr.release(heavy_only=False, force=True) == ["PP-StructureV3"]
 
 
-def test_prepare_load_refuses_to_evict_pinned_capacity() -> None:
+def test_prepare_load_refuses_to_evict_pinned_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #270：PaddleOCR-VL 已退役，不再属于真实重型驻留集合；此处用
+    # monkeypatch 还原两个重型成员，继续覆盖容量冲突拒绝逻辑本身。
+    _patch_heavy_residency(monkeypatch)
     mgr = _make_legacy_manager(max_heavy=1)
     mgr._service._pipelines = {"PP-StructureV3": object()}
     mgr._pinned = {"PP-StructureV3"}
@@ -428,21 +433,37 @@ def test_release_mineru_does_not_call_empty_cache(monkeypatch) -> None:
     assert called == []  # MinerU 不触发 empty_cache
 
 
-def test_release_paddle_calls_empty_cache(monkeypatch) -> None:
-    """回收 paddle 管道时调 paddle.device.cuda.empty_cache()。"""
-    called: list[str] = []
-    monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-
+def test_release_paddle_closes_ort_pipeline_without_native_allocator(
+    monkeypatch,
+) -> None:
     import sys
+    from types import SimpleNamespace
 
+    from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxPipeline
+
+    session = MagicMock()
+    session.get_providers.return_value = ["CPUExecutionProvider"]
+    runner = SimpleNamespace(session=session, model_dir="synthetic-model")
+    native = SimpleNamespace(
+        paddlex_pipeline=SimpleNamespace(runner=runner), close=MagicMock()
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+    )
+    pipeline = PaddleOnnxPipeline(
+        native, {"models": {"synthetic-model": {}}, "provider": "CPUExecutionProvider"}
+    )
     fake_paddle = MagicMock()
-    fake_paddle.device.cuda.empty_cache = lambda: called.append("empty_cache")
     monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-
-    mgr, svc = _make_manager({"OCR": object()}, {"OCR": 0})
+    mgr, svc = _make_manager({"OCR": pipeline}, {"OCR": 0})
     mgr.release(heavy_only=False)
     assert "OCR" not in svc._pipelines
-    assert called == ["empty_cache"]
+    assert pipeline.pipeline is None
+    assert runner.session is None
+    native.close.assert_called_once()
+    fake_paddle.device.cuda.empty_cache.assert_not_called()
 
 
 def test_compute_max_heavy_by_vram_8gb_threshold() -> None:
@@ -550,8 +571,23 @@ def test_configure_residency_sets_ttl_for_pipeline() -> None:
     assert mgr._ttls["OCR"] == 120
 
 
-def test_prepare_load_evicts_idle_heavy_paddle() -> None:
+def _patch_heavy_residency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#270 后 PaddleOCR-VL 已退役；为容量逻辑测试还原两个重型驻留成员。"""
+    import vibeocr.runtime.recognition.core.pipelines as pipeline_package
+    from vibeocr.runtime.recognition.pipeline_contracts import OCRPipeline
+
+    members = [OCRPipeline.PP_STRUCTURE_V3, OCRPipeline.PADDLEOCR_VL]
+    monkeypatch.setattr(pipeline_package, "get_heavy_pipelines", lambda: members)
+    monkeypatch.setattr(
+        pipeline_package, "get_paddle_residency_pipelines", lambda: members
+    )
+
+
+def test_prepare_load_evicts_idle_heavy_paddle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """prepare_load 成功驱逐空闲重管道（line 292-317 成功路径）。"""
+    _patch_heavy_residency(monkeypatch)
     mgr = _make_legacy_manager(max_heavy=1)
     mgr._service._pipelines = {"PP-StructureV3": object()}
     mgr._last_used = {"PP-StructureV3": 10.0}

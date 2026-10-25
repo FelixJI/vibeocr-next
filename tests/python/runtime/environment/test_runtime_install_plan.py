@@ -50,13 +50,13 @@ def _control(tmp_path):
 def test_preview_is_contract_valid_and_does_not_create_operation_or_runtime(tmp_path):
     control, _, calls, _, _ = _control(tmp_path)
     response = control.preview_install_plan(
-        install_component_ids=("paddleocr-cpu",), required_capabilities=(CAPABILITY,)
+        install_component_ids=("mineru-cpu",), required_capabilities=(CAPABILITY,)
     )
     parsed = parse_runtime_install_plan_response(response)
     assert set(parsed.plan.effective_component_ids) == {
         "rapidocr-base",
         "runtime_host",
-        "paddleocr-cpu",
+        "mineru-cpu",
     }
     assert calls == []
     assert not (tmp_path / "product/runtime").exists()
@@ -71,7 +71,7 @@ def test_preview_is_contract_valid_and_does_not_create_operation_or_runtime(tmp_
 def test_confirmation_and_expired_replay_keep_same_receipt(tmp_path):
     control, _, calls, _, _ = _control(tmp_path)
     plan = control.preview_install_plan(
-        install_component_ids=("paddleocr-cpu",), required_capabilities=(CAPABILITY,)
+        install_component_ids=("mineru-cpu",), required_capabilities=(CAPABILITY,)
     )["plan"]
     receipt = control.execute(
         operation="ensure",
@@ -123,15 +123,17 @@ def test_marker_change_between_preview_and_confirmation_is_stale(tmp_path):
 def test_restart_and_device_switch_preserve_selected_engine(tmp_path):
     control, factory, calls, _, _ = _control(tmp_path)
     control.execute(
-        operation="ensure", operation_id="cpu", install_component_ids=("paddleocr-cpu",)
+        operation="ensure", operation_id="cpu", install_component_ids=("mineru-cpu",)
     )
     factory().ensure()
     assert len(calls) == 1
     cuda = factory(accelerator="nvidia_cuda")
+    # #270：缺省 CUDA 闭包 = base + MinerU + gpu_runtime，不再含 paddleocr-cuda。
     assert set(cuda._desired_scope_ids()) == {
         "rapidocr-base",
         "runtime_host",
-        "paddleocr-cuda",
+        "mineru-cuda",
+        "gpu_runtime",
     }
     cuda.ensure()
     assert (tmp_path / "product" / "runtime.rollback").is_dir()
@@ -310,7 +312,7 @@ def test_cuda_preview_checks_driver_compatibility_floor(
 
     control, factory, _, _, _ = _control(tmp_path)
     installer = factory(
-        accelerator="nvidia_cuda", install_component_ids=("paddleocr-cuda",)
+        accelerator="nvidia_cuda", install_component_ids=("mineru-cuda",)
     )
     installer._runner_reports_phases = True
     monkeypatch.setattr(
@@ -330,7 +332,7 @@ def test_cuda_blockers_stay_fail_closed_when_probe_times_out(tmp_path, monkeypat
 
     control, factory, _, _, _ = _control(tmp_path)
     installer = factory(
-        accelerator="nvidia_cuda", install_component_ids=("paddleocr-cuda",)
+        accelerator="nvidia_cuda", install_component_ids=("mineru-cuda",)
     )
     installer._runner_reports_phases = True
     monkeypatch.setattr(
@@ -781,7 +783,7 @@ def test_preview_holds_writer_lock_while_resolving_inherited_selection(tmp_path)
     )
 
     control, factory, calls, _, _ = _control(tmp_path)
-    factory(install_component_ids=("paddleocr-cpu",)).ensure()
+    factory(install_component_ids=("mineru-cpu",)).ensure()
     entered, release = threading.Event(), threading.Event()
 
     def delayed_factory(**kwargs):
@@ -806,8 +808,8 @@ def test_preview_holds_writer_lock_while_resolving_inherited_selection(tmp_path)
         finally:
             release.set()
         plan = pending.result()["plan"]
-    assert "paddleocr-cpu" in plan["effective_component_ids"]
-    factory(install_component_ids=("mineru-cpu",)).ensure()
+    assert "mineru-cpu" in plan["effective_component_ids"]
+    factory(install_component_ids=()).ensure()
     with pytest.raises(RuntimeInstallPlanStale):
         control.execute(
             operation="ensure",
@@ -1260,7 +1262,7 @@ def test_committed_event_failure_records_failed_and_allows_retry(
     installer = factory(
         operation_id="projection-failed",
         accelerator="cpu",
-        install_component_ids=("paddleocr-cpu",) if operation == "ensure" else (),
+        install_component_ids=("mineru-cpu",) if operation == "ensure" else (),
     )
     if operation == "repair":
         monkeypatch.setattr(

@@ -207,7 +207,7 @@ OCR_DIST_NAME_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # leaf→承载顶层包映射（pip 包名）。
-# 这些 leaf 全部由 paddleocr[doc-parser] → paddlex[ocr] 的传递依赖拉入，
+# 这些 leaf 由保留 ORT 环境的 paddlex[ocr] 传递依赖拉入，
 # 故承载顶层包统一是 paddleocr。leaf 缺失时，补装应重装承载顶层包以重新解析
 # 整条传递树（而非逐个 leaf 单装，后者无法覆盖 leaf 自身的传递依赖）。
 LEAF_TO_TOPLEVEL: dict[str, str] = dict.fromkeys(
@@ -329,7 +329,8 @@ def validate_dep_check_consistency(project_root: Path) -> list[str]:
         if canonical:
             declared_ocr.add(canonical)
 
-    check_modules_names = set(OCR_CHECK_MODULES.values())
+    # 原生 Paddle 只供历史环境健康检测，不再属于当前可安装依赖。
+    check_modules_names = set(OCR_CHECK_MODULES.values()) - {"paddlepaddle"}
 
     # 漂移 1：OCR_CHECK_MODULES 有但依赖 profile 没声明
     not_declared = check_modules_names - declared_ocr

@@ -99,6 +99,31 @@ function setup(withResultImage: boolean) {
 }
 
 describe("recognition page result actions", () => {
+  it("shows the asynchronous retired-mode terminal with a reselect instruction", () => {
+    const { viewState, actions, run } = setup(false);
+    render(
+      <RecognitionPage
+        actions={actions}
+        viewState={{
+          ...viewState,
+          features: {
+            recognition: {
+              isBusy: false,
+              statusCode: "recognition.modeRetired",
+              taskEngine: "paddle_formula",
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "所选识别模式已退役，请在设置或任务面板重新选择可用模式。",
+      ),
+    ).toBeVisible();
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it.each(["选图编辑", "粘贴编辑"])(
     "%s succeeds into expanded editor; cancellation preserves preview",
     async (label) => {

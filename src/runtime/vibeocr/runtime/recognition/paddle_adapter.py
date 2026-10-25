@@ -47,11 +47,12 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from vibeocr.runtime.recognition.result_assets import ResultAssetSink
 
-# PaddleOCR 属于用户显式准备的重型闭包；variant id 按 accelerator 一义。
+# PaddleOCR ONNX 属于用户显式准备的重型闭包；#270 后组件 id 只指向
+# Paddle ONNX 环境（原生 paddleocr-cpu/cuda 已退役）。
 PADDLE_REQUIRED_COMPONENT = (
-    "paddleocr-cuda"
+    "paddleocr-ort-cuda"
     if os.environ.get("VIBEOCR_RUNTIME_ACCELERATOR") == "nvidia_cuda"
-    else "paddleocr-cpu"
+    else "paddleocr-ort-cpu"
 )
 
 
@@ -73,7 +74,7 @@ class PaddlePipelineAdapter:
     """Wraps an OCRService-like object behind ``recognize_many``.
 
     同时以 ``engine_id=paddleocr`` 实现 GeneralTextOcrEngine 契约；
-    其他 Paddle 管道（表格/公式/版面）继续经本 adapter 的
+    其他保留 Paddle 管道（表格/版面）继续经本 adapter 的
     ``pipeline_name`` 路由，不经过 engine resolver。
     """
 
@@ -95,11 +96,23 @@ class PaddlePipelineAdapter:
 
     @staticmethod
     def _probe_descriptor() -> EngineDescriptor:
-        """探测 paddle 可导入性；不触发模型加载。"""
-        try:
-            from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+        """#270：只探测 Paddle ONNX 后端可用性，不再导入原生 Paddle。
 
-            __import__("onnxruntime" if is_ort_environment() else "paddle")
+        非 ORT 环境直接报告待准备（指向对应 Paddle ONNX 组件），不触发
+        原生探测；模型加载不发生。
+        """
+        from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
+
+        if not is_ort_environment():
+            return EngineDescriptor(
+                engine_id=OcrEngine.PADDLEOCR,
+                availability=EngineAvailability.PREPARATION_REQUIRED,
+                included_in_base=False,
+                reason_code=REASON_ENGINE_NOT_INSTALLED,
+                required_component=PADDLE_REQUIRED_COMPONENT,
+            )
+        try:
+            __import__("onnxruntime")
         except ImportError:
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
@@ -201,14 +214,7 @@ class PaddlePipelineAdapter:
                 if manager is not None and hasattr(manager, "lease")
                 else contextlib.nullcontext()
             )
-            from vibeocr.runtime.environments.model_cache import paddle_model_cache
-
-            model_policy = (
-                paddle_model_cache(local_only=True)
-                if getattr(service_options, "local_models_only", False)
-                else contextlib.nullcontext()
-            )
-            with lease, model_policy:
+            with lease:
                 results = self.service.recognize_batch(
                     images, service_options, asset_sinks=asset_sinks
                 )

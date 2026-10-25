@@ -428,11 +428,9 @@ public sealed class ScreenshotSessionWorkbenchTests
   [InlineData("recognition", "rapid_text", "OCR", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", true)]
   [InlineData("recognition", "rapid_table", "RAPID_TABLE", true)]
-  [InlineData("recognition", "paddle_formula", "FORMULA_RECOGNITION", true)]
   [InlineData("imageEdit", "rapid_text", "OCR", true)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", true)]
   [InlineData("imageEdit", "rapid_table", "RAPID_TABLE", true)]
-  [InlineData("imageEdit", "paddle_formula", "FORMULA_RECOGNITION", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", false)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", false)]
   public async Task CompletedImageExplicitModeKeepsFrozenPixelsAndModeDuringReadiness(
@@ -493,9 +491,9 @@ public sealed class ScreenshotSessionWorkbenchTests
       using JsonDocument wire = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
         new WorkbenchStateEnvelope(1, "recognition", WorkbenchStateChange.Replace, result)));
       JsonElement modes = wire.RootElement.GetProperty("payload").GetProperty("state").GetProperty("recognitionModes");
-      Assert.Equal(3, modes.GetArrayLength());
+      // #270：公式入口退役后固定两类（文字/表格）。
+      Assert.Equal(2, modes.GetArrayLength());
       Assert.Equal("rapid_table", modes[1].GetProperty("modeId").GetString());
-      Assert.Equal("paddle_formula", modes[2].GetProperty("modeId").GetString());
       Assert.Equal(AnnotationPng.LongLength, result.Input!.ByteLength);
     }
     finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
@@ -516,10 +514,11 @@ public sealed class ScreenshotSessionWorkbenchTests
       await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
         inferenceAttached: () => true);
 
-      // 目录未声明 device 的模式 fail closed 拒绝，不落到目录外字段。
+      // 目录未声明 device 的模式 fail closed 拒绝；#270 后 paddle_formula
+      // 本身已退役，落在 mode_unavailable 拒绝路径上（可改选恢复）。
       WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
         new SetModeDeviceCommand("paddle_formula", "cuda"), TestContext.Current.CancellationToken);
-      Assert.Equal("recognition_options_invalid", refused.Error?.Code);
+      Assert.Equal("recognition_mode_retired", refused.Error?.Code);
       Assert.Empty(inference.Requests);
 
       Assert.Null((await handler.ExecuteAsync(
@@ -568,7 +567,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       WorkbenchCommandOutcome refused = await handler.ExecuteAsync(ParseImageRecognitionCommand("recognition",
         Guid.Parse(before.ScreenshotSession!.SessionId), 0, lease.ResourceUri.AbsoluteUri, modeId),
         TestContext.Current.CancellationToken);
-      Assert.Equal("recognition_mode_unavailable", refused.Error?.Code);
+      Assert.Equal(modeId == "missing_mode" ? "recognition_mode_unknown" : "recognition_mode_unavailable", refused.Error?.Code);
       Assert.Empty(inference.Requests);
       Assert.Same(original, recognition.CurrentInput);
       // 模式拒绝必须发生在消费上传或改变会话基准之前，用户可修复后重试。
@@ -2888,16 +2887,10 @@ public sealed class ScreenshotSessionWorkbenchTests
                 TextMode(Wire.RecognitionModeId.PaddleStructure,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
-                TextMode(Wire.RecognitionModeId.PaddleDocumentVl,
-                  Wire.RecognitionModeAvailability.Ready,
-                  null),
                 TextMode(Wire.RecognitionModeId.MineruDocument,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
                 TextMode(Wire.RecognitionModeId.PaddleTable,
-                  Wire.RecognitionModeAvailability.Ready,
-                  null),
-                TextMode(Wire.RecognitionModeId.PaddleFormula,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
                 TextMode(Wire.RecognitionModeId.RapidTable,
@@ -2974,20 +2967,12 @@ public sealed class ScreenshotSessionWorkbenchTests
           Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
           Wire.RecognitionModeProvisioning.AdvancedComponent,
           Wire.RecognitionModeLifecycleKind.ModelResidency),
-        Wire.RecognitionModeId.PaddleDocumentVl => (Wire.RecognitionModeFamily.Document,
-          Wire.ExecutionPipelineId.PaddleOCRVL, (Wire.OcrEngineId?)null,
-          Wire.RecognitionModeProvisioning.AdvancedComponent,
-          Wire.RecognitionModeLifecycleKind.ModelResidency),
         Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
           Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
           Wire.RecognitionModeProvisioning.AdvancedComponent,
           Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
         Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
           Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
-          Wire.RecognitionModeProvisioning.AdvancedComponent,
-          Wire.RecognitionModeLifecycleKind.ModelResidency),
-        Wire.RecognitionModeId.PaddleFormula => (Wire.RecognitionModeFamily.Specialized,
-          Wire.ExecutionPipelineId.FORMULARECOGNITION, (Wire.OcrEngineId?)null,
           Wire.RecognitionModeProvisioning.AdvancedComponent,
           Wire.RecognitionModeLifecycleKind.ModelResidency),
         Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
@@ -3568,13 +3553,13 @@ public sealed class ScreenshotSessionWorkbenchTests
         await captured.Task;
       }
 
-      // 识别区固定三类语义图标：文字（设置默认引擎，名称固定“文字识别”、
-      // 引擎名仅进 Hint/Tooltip）、表格、公式；只消费宿主已加载的真实
+      // 识别区固定两类语义图标：文字（设置默认引擎，名称固定“文字识别”、
+      // 引擎名仅进 Hint/Tooltip）、表格；只消费宿主已加载的真实
       // typed 目录投影（availability/reason 原样透传），不额外复制引擎表。
       Assert.NotNull(inputs.ReceivedActions);
       Assert.Equal(WorkbenchTheme.Light, inputs.ReceivedActions.Theme);
       ScreenshotRecognitionModeEntry[] entries = [.. inputs.ReceivedActions!.Modes];
-      Assert.Equal(3, entries.Length);
+      Assert.Equal(2, entries.Length);
       Assert.All(entries, entry => Assert.False(string.IsNullOrWhiteSpace(entry.DisplayName)));
       Assert.Contains(entries, entry =>
         entry.ModeId == "windows_text" && entry.Availability == "ready" &&
@@ -3583,9 +3568,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Contains(entries, entry =>
         entry.ModeId == "rapid_table" && entry.DisplayName == "表格识别" &&
         entry.Availability == "ready" && entry.IconKey == "tableRecognition" && entry.Hint is null);
-      Assert.Contains(entries, entry =>
-        entry.ModeId == "paddle_formula" && entry.DisplayName == "公式识别" &&
-        entry.Availability == "ready" && entry.IconKey == "formulaRecognition" && entry.Hint is null);
+      // #270：独立公式识别已退役，不再出现公式入口。
+      Assert.DoesNotContain(entries, entry => entry.IconKey == "formulaRecognition");
       // 纯截图零目录加载/零推理提交（submit 会直接抛错）。
       Assert.Equal(1, inputs.CaptureCalls);
     }
@@ -3618,14 +3602,14 @@ public sealed class ScreenshotSessionWorkbenchTests
           TestContext.Current.CancellationToken);
         await captured.Task;
       }
-      // 无 Runtime 时本地截图仍可用；三类图标固定呈现并统一禁用指引
+      // 无 Runtime 时本地截图仍可用；两类图标固定呈现并统一禁用指引
       // （catalog_unavailable→设置），不破块、不臆造引擎表。
       Assert.NotNull(inputs.ReceivedActions);
       ScreenshotRecognitionModeEntry[] entries = [.. inputs.ReceivedActions!.Modes];
-      Assert.Equal(3, entries.Length);
+      // #270：公式入口退役后固定两类。
+      Assert.Equal(2, entries.Length);
       Assert.Equal("文字识别", entries[0].DisplayName);
       Assert.Equal("表格识别", entries[1].DisplayName);
-      Assert.Equal("公式识别", entries[2].DisplayName);
       Assert.All(entries, entry =>
       {
         Assert.Equal("", entry.ModeId);
@@ -3643,7 +3627,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   public async Task SelectionMenuProjectionBindsCommittedDefaultOnlyForTextSemantics()
   {
     // 已提交默认属于文字/文档语义：文字图标携带该 id（复用既有持久默认
-    // 解析），控件名称固定“文字识别”、引擎名仅进 Hint；表格/公式按
+    // 解析），控件名称固定“文字识别”、引擎名仅进 Hint；表格按
     // specialized 族 pipeline 分类；availability 原样透传。
     foreach (string defaultId in new[] { "rapid_text", "mineru_document" })
     {
@@ -3651,7 +3635,6 @@ public sealed class ScreenshotSessionWorkbenchTests
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
       ScreenshotRecognitionModeEntry[] entries =
         [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
-      Assert.Equal(3, entries.Length);
       ScreenshotRecognitionModeEntry text = entries[0];
       Assert.Equal(defaultId, text.ModeId);
       Assert.Equal("ready", text.Availability);
@@ -3659,8 +3642,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Contains(SettingsViewModel.DisplayName(defaultId), text.Hint!, StringComparison.Ordinal);
       Assert.Equal(("rapid_table", "表格识别", "tableRecognition"),
         (entries[1].ModeId, entries[1].DisplayName, entries[1].IconKey));
-      Assert.Equal(("paddle_formula", "公式识别", "formulaRecognition"),
-        (entries[2].ModeId, entries[2].DisplayName, entries[2].IconKey));
+      // #270：公式入口退役后仅有两类。
+      Assert.Equal(2, entries.Length);
     }
   }
 
@@ -3668,13 +3651,13 @@ public sealed class ScreenshotSessionWorkbenchTests
   public async Task SelectionMenuProjectionKeepsUnavailableDefaultExplicitlyDisabled()
   {
     // 默认引擎需要准备：文字图标透传 preparation_required（禁用+原因），
-    // 不静默改选其他就绪文字引擎；表格/公式不受影响。
+    // 不静默改选其他就绪文字引擎；表格不受影响。
     var settings = new SettingsViewModel(
       new SelectionCatalogClient(rapidReady: false, defaultMode: "rapid_text"));
     await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
     ScreenshotRecognitionModeEntry[] entries =
       [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
-    Assert.Equal(3, entries.Length);
+    Assert.Equal(2, entries.Length);
     ScreenshotRecognitionModeEntry text = entries[0];
     Assert.Equal("rapid_text", text.ModeId);
     Assert.Equal("preparation_required", text.Availability);
@@ -3691,16 +3674,14 @@ public sealed class ScreenshotSessionWorkbenchTests
     await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
     ScreenshotRecognitionModeEntry[] entries =
       [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
-    Assert.Equal(3, entries.Length);
+    Assert.Equal(2, entries.Length);
     ScreenshotRecognitionModeEntry text = entries[0];
     Assert.Equal("", text.ModeId);
     Assert.Equal("default_invalid", text.Availability);
     Assert.Equal("文字识别", text.DisplayName);
-    // 表格/公式图标照常按目录分类可用（ready RapidTable 优先于 Paddle）。
+    // 表格图标照常按目录分类可用（ready RapidTable 优先于 Paddle）。
     Assert.Equal("rapid_table", entries[1].ModeId);
     Assert.Equal("ready", entries[1].Availability);
-    Assert.Equal("paddle_formula", entries[2].ModeId);
-    Assert.Equal("ready", entries[2].Availability);
   }
 
   [Fact]
@@ -3791,16 +3772,15 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
-  public void SelectionMenuProjectionWithoutTypedModeCatalogKeepsThreeDisabledIcons()
+  public void SelectionMenuProjectionWithoutTypedModeCatalogKeepsDisabledIcons()
   {
-    // 无 Runtime/目录未加载：三类图标固定呈现并统一禁用指引，
-    // 不臆造可用引擎、也不退回单个泛“未就绪”条目。
+    // 无 Runtime/目录未加载：两类图标固定呈现并统一禁用指引，
+    // 不臆造可用引擎、也不退回单个泛“未就绪”条目。#270 后无公式入口。
     ScreenshotRecognitionModeEntry[] unloaded =
       [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(null)];
-    Assert.Equal(3, unloaded.Length);
+    Assert.Equal(2, unloaded.Length);
     Assert.Equal("文字识别", unloaded[0].DisplayName);
     Assert.Equal("表格识别", unloaded[1].DisplayName);
-    Assert.Equal("公式识别", unloaded[2].DisplayName);
     Assert.All(unloaded, entry =>
     {
       Assert.Equal("", entry.ModeId);
@@ -3812,7 +3792,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     ScreenshotRecognitionModeEntry[] noCatalog =
       [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(
         settings.RecognitionSelection)];
-    Assert.Equal(3, noCatalog.Length);
+    Assert.Equal(2, noCatalog.Length);
     Assert.All(noCatalog, entry => Assert.Equal("catalog_unavailable", entry.Availability));
   }
 
@@ -3877,13 +3857,13 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.False(string.IsNullOrWhiteSpace(entry.Label));
       Assert.False(string.IsNullOrWhiteSpace(entry.Tip));
     });
-    // 上排固定动作（识别三类/长截图/复制/保存/钉图/设置/重选/退出/放大镜）
+    // 上排固定动作（识别两类/长截图/复制/保存/钉图/设置/重选/退出/放大镜）
     // 与直接入口（确认/撤销/重做）在 picker 内以中文文字内联创建，无图标键。
   }
 
   [Theory]
   [InlineData(ScreenshotRecognitionIntent.Table, "RAPID_TABLE")]
-  [InlineData(ScreenshotRecognitionIntent.Formula, "FORMULA_RECOGNITION")]
+  // #270：Formula 意图已随独立公式识别退役，不再解析到任何管线。
   public async Task ColdScreenshotCategoryResolvesOnlyAfterExplicitPreparation(
     ScreenshotRecognitionIntent intent, string pipeline)
   {
@@ -3947,10 +3927,8 @@ public sealed class ScreenshotSessionWorkbenchTests
   [InlineData("windows_text", "OCR", "windows")]
   [InlineData("paddle_text", "OCR", "paddleocr")]
   [InlineData("paddle_structure", "PP-StructureV3", null)]
-  [InlineData("paddle_document_vl", "PaddleOCR-VL", null)]
   [InlineData("mineru_document", "MinerU", null)]
   [InlineData("paddle_table", "TABLE_RECOGNITION", null)]
-  [InlineData("paddle_formula", "FORMULA_RECOGNITION", null)]
   public async Task OrdinaryRecognizeIntentSubmitsOnceWithTypedModeWithoutEditorSession(
     string modeId,
     string pipelineId,

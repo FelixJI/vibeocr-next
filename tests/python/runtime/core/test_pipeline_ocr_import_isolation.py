@@ -1,108 +1,43 @@
 from __future__ import annotations
 
-import json
-import sys
-import types
-from pathlib import Path
+import builtins
 
 import pytest
 from vibeocr.runtime.recognition.core.pipelines.pipeline_ocr import _create_ocr_pipeline
-from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-    _create_paddlocr_vl_pipeline,
-)
 from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
     _create_pp_structure_pipeline,
 )
-
-
-def test_create_ocr_pipeline_delegates_model_discovery_to_paddle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    binding = tmp_path / "resolved-models.json"
-    binding.write_text(
-        json.dumps(
-            {"consumers": {"paddleocr": {"text_recognition_model_dir": str(model_dir)}}}
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("VIBEOCR_RESOLVED_MODELS", str(binding))
-    monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
-    monkeypatch.delitem(sys.modules, "modelscope", raising=False)
-    captured: dict[str, object] = {}
-
-    def paddle_ocr(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "paddleocr",
-        types.SimpleNamespace(PaddleOCR=paddle_ocr),
-    )
-
-    _create_ocr_pipeline("cpu")
-
-    assert captured == {"device": "cpu"}
-    assert "modelscope" not in sys.modules
+from vibeocr.runtime.recognition.core.pipelines.pipeline_table import (
+    _create_table_pipeline,
+)
+from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError, constructor_kwargs
 
 
 @pytest.mark.parametrize(
-    ("factory", "consumer", "constructor_name", "binding_key", "fixed_kwargs"),
-    [
-        (
-            _create_pp_structure_pipeline,
-            "pp_structure",
-            "PPStructureV3",
-            "layout_detection_model_dir",
-            {
-                "use_formula_recognition": False,
-                "use_seal_recognition": False,
-                "use_chart_recognition": False,
-            },
-        ),
-        (
-            _create_paddlocr_vl_pipeline,
-            "paddleocr_vl",
-            "PaddleOCRVL",
-            "vl_rec_model_dir",
-            # 语义固定 VL-1.5：不跟随上游新默认（锁定版本默认 v1.6）
-            {"pipeline_version": "v1.5"},
-        ),
-    ],
+    "factory",
+    [_create_ocr_pipeline, _create_pp_structure_pipeline, _create_table_pipeline],
 )
-def test_document_pipeline_factories_delegate_model_discovery_to_paddle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory: object,
-    consumer: str,
-    constructor_name: str,
-    binding_key: str,
-    fixed_kwargs: dict,
-) -> None:
-    model_dir = tmp_path / consumer
-    model_dir.mkdir()
-    binding = tmp_path / "resolved-models.json"
-    binding.write_text(
-        json.dumps({"consumers": {consumer: {binding_key: str(model_dir)}}}),
-        encoding="utf-8",
+def test_native_factory_request_rejected_before_import(factory, monkeypatch):
+    real_import = builtins.__import__
+    imported = []
+
+    def record(name, *args, **kwargs):
+        if name in {"paddle", "paddleocr"}:
+            imported.append(name)
+            raise AssertionError("native framework import")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", record)
+    with pytest.raises(PaddleOnnxError, match="ONNX"):
+        factory("cpu")
+    assert imported == []
+
+
+def test_native_constructor_options_rejected_without_snapshot(monkeypatch):
+    monkeypatch.delenv("VIBEOCR_PADDLE_ORT_DEVICE", raising=False)
+    monkeypatch.delenv("VIBEOCR_PADDLE_ONNX", raising=False)
+    monkeypatch.setattr(
+        "vibeocr.runtime.recognition.paddle_onnx.is_ort_environment", lambda: False
     )
-    monkeypatch.setenv("VIBEOCR_RESOLVED_MODELS", str(binding))
-    captured: dict[str, object] = {}
-
-    def constructor(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setitem(
-        sys.modules,
-        "paddleocr",
-        types.SimpleNamespace(**{constructor_name: constructor}),
-    )
-
-    assert callable(factory)
-    factory("cpu")
-
-    assert captured == {"device": "cpu", **fixed_kwargs}
+    with pytest.raises(PaddleOnnxError, match="Paddle ONNX environment"):
+        constructor_kwargs(object())

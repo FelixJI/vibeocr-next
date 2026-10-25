@@ -204,6 +204,11 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
     {
       return;
     }
+    if (RecognitionModeCatalog.IsRetiredModeId(taskEngine))
+    {
+      throw new RecognitionModeUnavailableException(
+        $"识别模式 {SettingsViewModel.DisplayName(taskEngine)} 已退役，已拒绝按通用文字识别执行；请在设置或任务面板重新选择可用模式。", retired: true);
+    }
     throw new RecognitionModeUnavailableException(selection is null
       ? $"任务识别模式 {taskEngine} 需要的识别模式目录尚未加载（运行环境可能未就绪），已拒绝按通用文字识别执行；请在设置中检查运行环境后重试。"
       : $"当前运行环境不支持识别模式 {taskEngine}，已拒绝按通用文字识别执行；请切换或准备对应运行环境。");

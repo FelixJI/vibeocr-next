@@ -327,15 +327,15 @@ public sealed class PdfViewModelSupervisorTests
     var fake = new FakePdfInference();
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
     viewModel.SetRecognitionMode(new RecognitionModeOption(
-        "paddle_formula",
-        "specialized",
-        "FORMULA_RECOGNITION",
-        null,
+        "paddle_text",
+        "text",
+        "OCR",
+        OcrEngine.PaddleOcr,
         "advanced_component",
         "ready",
         null,
-        "paddleocr-cpu",
-        ["formula_recognition_batch_size"],
+        "paddleocr-ort-cpu",
+        ["use_doc_unwarping"],
         "model_residency",
         true,
         true,

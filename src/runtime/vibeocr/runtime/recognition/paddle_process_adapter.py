@@ -1,4 +1,4 @@
-"""Paddle adapter proxy; only the dedicated worker imports Paddle or its cv2."""
+"""Paddle adapter proxy; the dedicated worker owns ORT pipelines and their cv2."""
 
 from __future__ import annotations
 
@@ -44,23 +44,16 @@ logger = logging.getLogger(__name__)
 
 
 def paddle_python() -> Path | None:
-    if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "").startswith(
-        "paddleocr-"
-    ):
+    """#270：Paddle worker 解释器只在 Paddle ONNX 管理环境内指向当前进程。
+
+    不再发现旧 legacy 安装的 ``engines/paddle`` 隔离解释器，也不再在非
+    ORT 环境里落回原生 Paddle；返回 None 表示本进程没有可用 Paddle 后端。
+    """
+    from vibeocr.runtime.recognition.paddle_onnx import RECIPES
+
+    if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "") in RECIPES:
         return Path(sys.executable)
-    root = Path(sys.prefix) / "engines" / "paddle"
-    return next(
-        (
-            p
-            for p in (
-                root / "python.exe",
-                root / "Scripts/python.exe",
-                root / "bin/python",
-            )
-            if p.is_file()
-        ),
-        None,
-    )
+    return None
 
 
 class PaddleProcessAdapter:
@@ -82,14 +75,14 @@ class PaddleProcessAdapter:
         available = False
         if python is not None:
             try:
+                # #270：探针只验证 Paddle ONNX 编排依赖（paddleocr/paddlex +
+                # onnxruntime），不再探测原生 Paddle 导入。
                 result = subprocess.run(
                     [
                         str(python),
                         "-I",
                         "-c",
-                        "from paddleocr import PaddleOCR; import onnxruntime"
-                        if is_ort_environment()
-                        else "import paddle, paddleocr",
+                        "from paddleocr import PaddleOCR; import onnxruntime",
                     ],
                     capture_output=True,
                     timeout=60,
@@ -257,7 +250,7 @@ class PaddleProcessAdapter:
         options: PipelineSelection | None = None,
         compute_batch: object | None = None,
     ) -> list[dict]:
-        del compute_batch  # The native Paddle adapter schedules its own batches.
+        del compute_batch  # The Paddle adapter schedules its own batches.
         wire_items = [
             {**asdict(item), "data": base64.b64encode(item.data).decode("ascii")}
             for item in items

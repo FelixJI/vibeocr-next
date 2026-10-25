@@ -764,31 +764,54 @@ class SupervisorModule:
             return self._settings
 
     def update_settings(self, snapshot: SettingsSnapshot) -> SettingsSnapshot:
-        if snapshot.download_source_ids:
-            normalize_download_source_ids(snapshot.download_source_ids)
-        for pipeline in snapshot.pipelines:
-            if pipeline.recognition_mode is not None:
-                self.recognition_mode_registry.validate_pipeline_spec(
-                    pipeline.recognition_mode,
-                    pipeline_id=pipeline.name,
-                    pinned=pipeline.pinned,
-                )
-        # default_recognition_mode 的唯一权威校验 seam：恒验类型/known id；
-        # 仅当值变更时验可用性，让已失效的旧默认不阻断其他设置的读改写。
+        from vibeocr.runtime.recognition.pipeline_contracts import (
+            RETIRED_RECOGNITION_MODES,
+            get_recognition_mode_definition,
+            is_recognition_mode_retired,
+        )
         from vibeocr.runtime.recognition.recognition_modes import (
             DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
             resolve_default_recognition_mode,
         )
 
-        old_raw = self._settings.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
-        new_raw = snapshot.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
-        resolve_default_recognition_mode(
-            snapshot.extra,
-            self.recognition_mode_registry,
-            require_available=new_raw != old_raw,
-        )
+        if snapshot.download_source_ids:
+            normalize_download_source_ids(snapshot.download_source_ids)
         with self._lock:
             previous = self._settings
+            unchanged = list(previous.pipelines)
+            retired_by_pipeline = {
+                get_recognition_mode_definition(mode).pipeline.value: mode.value
+                for mode in RETIRED_RECOGNITION_MODES
+            }
+            for pipeline in snapshot.pipelines:
+                mode_id = (
+                    pipeline.recognition_mode
+                    if pipeline.recognition_mode is not None
+                    else retired_by_pipeline.get(pipeline.name)
+                )
+                if mode_id is not None:
+                    definition = self.recognition_mode_registry.definition(mode_id)
+                    # 历史退役项可原样保留；逐项消耗匹配，不能借兼容新增重复项。
+                    if (
+                        is_recognition_mode_retired(definition.mode_id)
+                        and pipeline.name == definition.pipeline_id
+                        and pipeline in unchanged
+                    ):
+                        unchanged.remove(pipeline)
+                        continue
+                    self.recognition_mode_registry.validate_pipeline_spec(
+                        mode_id,
+                        pipeline_id=pipeline.name,
+                        pinned=pipeline.pinned,
+                    )
+            # 未变默认不阻断其他设置；新默认仍须通过类型、known id 与可用性校验。
+            old_raw = previous.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+            new_raw = snapshot.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+            resolve_default_recognition_mode(
+                snapshot.extra,
+                self.recognition_mode_registry,
+                require_available=new_raw != old_raw,
+            )
             configure = getattr(self._executor, "configure_settings", None)
             status: ResidencyStatus | None = None
             if callable(configure):

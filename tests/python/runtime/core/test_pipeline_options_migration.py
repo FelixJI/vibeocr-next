@@ -3,9 +3,6 @@
 
 from vibeocr.runtime.recognition.core.pipelines.pipeline_mineru import MinerUOptions
 from vibeocr.runtime.recognition.core.pipelines.pipeline_ocr import OCROptions
-from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-    PaddleOCRVLOptions,
-)
 from vibeocr.runtime.recognition.core.pipelines.pipeline_pp_structure import (
     PPStructureV3Options,
 )
@@ -38,8 +35,5 @@ def test_mineru_options():
     assert d["parse_method"] == "ocr"
 
 
-def test_paddlocr_vl_options():
-    opts = PaddleOCRVLOptions(vl_use_layout_detection=False)
-    d = opts.to_dict()
-    assert d["pipeline"] == "PaddleOCR-VL"
-    assert d["vl_use_layout_detection"] is False
+# #270：PaddleOCRVLOptions 随 paddle_document_vl 模式退役删除；历史
+# recognition_options 记录的 vl_* 字段由宿主兼容读取层处理。

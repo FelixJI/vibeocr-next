@@ -65,12 +65,11 @@ def test_generic_paddle_pipelines_exclude_routed_ocr() -> None:
 
 def test_backend_paddle_residency_pipelines_include_paddle_text_ocr() -> None:
     """Paddle 物理 adapter 从 Recognition Mode 恢复 OCR 模型所有权。"""
+    # #270：退役模式不再拥有驻留资源。
     assert {pipeline.value for pipeline in get_paddle_residency_pipelines()} == {
         "OCR",
         "TABLE_RECOGNITION",
-        "FORMULA_RECOGNITION",
         "PP-StructureV3",
-        "PaddleOCR-VL",
     }
 
 
@@ -113,7 +112,14 @@ def test_preloadable_pipelines_include_document_preparation() -> None:
     preloadable = set(get_preloadable_pipelines())
     assert OCRPipeline.DOCUMENT_PARSING in preloadable
     assert OCRPipeline.OCR not in preloadable
-    assert preloadable == set(get_paddle_pipelines()) | {OCRPipeline.DOCUMENT_PARSING}
+    # #270：退役管道不可预热（preloadable=False）。仅保留结构管道与 MinerU。
+    assert OCRPipeline.PADDLEOCR_VL not in preloadable
+    assert OCRPipeline.FORMULA_RECOGNITION not in preloadable
+    assert preloadable == {
+        OCRPipeline.PP_STRUCTURE_V3,
+        OCRPipeline.TABLE_RECOGNITION,
+        OCRPipeline.DOCUMENT_PARSING,
+    }
 
 
 def test_is_option_supported_reports_membership() -> None:

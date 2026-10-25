@@ -56,7 +56,8 @@ def test_source_checkout_uses_engine_profile_not_root_dev_dependencies(
     monkeypatch.setattr(env_manager, "_dep_specs_cache", None)
     specs = env_manager._load_dep_specs()
 
-    assert specs["paddleocr"] == "paddleocr[doc-parser]>=3.7.0"
+    assert specs["paddleocr"] == "paddleocr==3.7.0"
+    assert "paddlepaddle" not in specs and "paddlepaddle-gpu" not in specs
     assert specs["mineru"] == "mineru==4.0.10"
     assert (
         env_config.validate_dep_check_consistency(

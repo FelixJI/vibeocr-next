@@ -95,8 +95,7 @@ export function TaskEngineSelector({
           [
             ["文字", ["paddle_text"]],
             ["表格", ["rapid_table", "paddle_table"]],
-            ["公式", ["paddle_formula"]],
-            ["文档结构", ["paddle_structure", "paddle_document_vl"]],
+            ["文档结构", ["paddle_structure"]],
             ["其他引擎", []],
           ] as const
         ).map(([label, ids]) => {
@@ -106,9 +105,7 @@ export function TaskEngineSelector({
                   "paddle_text",
                   "rapid_table",
                   "paddle_table",
-                  "paddle_formula",
                   "paddle_structure",
-                  "paddle_document_vl",
                 ].includes(engine.engine)
               : (ids as readonly string[]).includes(engine.engine),
           );

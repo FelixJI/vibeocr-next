@@ -1274,14 +1274,14 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   }
 
   [Fact]
-  public void SixRecipeCleanupFlowFitsStateAndBootstrapAfterExplicitLifecycleTransition()
+  public void RetainedRecipeCleanupFlowFitsStateAndBootstrapAfterExplicitLifecycleTransition()
   {
     DirectoryInfo? root = new(AppContext.BaseDirectory);
     while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
     Assert.NotNull(root);
     var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false,
       StatusMessage: new string('字', 4000));
-    string[] recipeLocks = ["win-x64-base", "win-x64-paddle-cpu", "win-x64-paddle-cu126", "win-x64-mineru-cpu", "win-x64-cpu", "win-x64-cu126"];
+    string[] recipeLocks = ["win-x64-base", "win-x64-rapid-cu13", "win-x64-paddle-ort-cpu", "win-x64-paddle-ort-cuda", "win-x64-paddle-ort-directml", "win-x64-mineru-cpu", "win-x64-cpu", "win-x64-cu126"];
     var recipes = recipeLocks.Select(id => new SettingsEnvironmentRecipeState(id, id,
       Dependencies: File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock"))
         .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
@@ -1312,7 +1312,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       using JsonDocument document = JsonDocument.Parse(json);
       JsonElement payload = document.RootElement.GetProperty("payload");
       JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
-      Assert.Equal(6, projected.GetProperty("environmentRecipes").GetArrayLength());
+      Assert.Equal(recipeLocks.Length, projected.GetProperty("environmentRecipes").GetArrayLength());
       Assert.Equal(3, projected.GetProperty("environmentCleanupPlan").GetProperty("items").GetArrayLength());
       Assert.Equal("failed", projected.GetProperty("environmentCleanupResult").GetProperty("items")[0].GetProperty("state").GetString());
     }
