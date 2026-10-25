@@ -244,7 +244,27 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
     if (-not (Test-Path -LiteralPath $healthPath -PathType Leaf)) {
         throw "$phaseName exited without health evidence (exit $($process.ExitCode))"
     }
-    return Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+    $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+    # App 写完 passed health 后仍可能在退出时崩溃，不能仅凭 health 放行。
+    if ($process.ExitCode -ne 0) {
+        throw "$phaseName process exited with code $($process.ExitCode) despite health state '$($health.state)'（现场与 health 已保留: $smokeRoot）"
+    }
+    # 持久化 wrapper 观察到的完成证据（不改 App 原始 health）：仅 Wait 完成且
+    # 退出码 0 才写 receipt；崩溃/超时/强杀均无 receipt，Resume 复用 fail closed。
+    $receiptDir = Join-Path $smokeRoot 'receipts'
+    New-Item -ItemType Directory -Path $receiptDir -Force | Out-Null
+    $receipt = [pscustomobject]@{ phase = $phaseName; exit_code = $process.ExitCode }
+    Set-Content -LiteralPath (Join-Path $receiptDir "$phaseName.json") `
+        -Value (ConvertTo-Json $receipt) -Encoding utf8
+    return $health
+}
+
+# 安装阶段缺退出证据须换新隔离根；-Attempt 仅能重验已具安装证据的模式/输入阶段。
+function Test-PaddlePhaseReceipt([string]$phaseName) {
+    $receiptPath = Join-Path (Join-Path $smokeRoot 'receipts') "$phaseName.json"
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { return $false }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    return ($receipt.phase -eq $phaseName -and $receipt.exit_code -eq 0)
 }
 
 $results = @()
@@ -261,8 +281,8 @@ try {
         # 已有 install 证据不覆盖：passed 直接复用；非 passed 拒绝恢复
         # （重跑需要覆盖 health，与固定输出不可覆盖规则冲突）。
         $kept = Get-Content -LiteralPath $installHealthPath -Raw | ConvertFrom-Json
-        if ($kept.state -ne 'passed') {
-            throw "paddle-install 既有证据非 passed（$($kept.state)）且不可覆盖，拒绝恢复"
+        if ($kept.state -ne 'passed' -or -not (Test-PaddlePhaseReceipt 'paddle-install')) {
+            throw "paddle-install 既有证据非 passed（$($kept.state)）或缺 exit0 receipt，不可覆盖拒绝复用（现场保留；安装阶段须新隔离根重验，-Attempt 不适用）"
         }
         $installReused = $true
         Write-Host "Install evidence reused (kept): $installHealthPath"
@@ -289,6 +309,10 @@ try {
             $healthPath = Join-Path $smokeRoot "$phaseName.json"
             if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
                 # 已有证据不覆盖：passed 保留跳过；failed/blocked 保留并计入退出码。
+                # 复用必须持有 wrapper exit0 receipt，崩溃残留/历史根 fail closed。
+                if (-not (Test-PaddlePhaseReceipt $phaseName)) {
+                    throw "$phaseName 既有 health 缺 exit0 receipt，fail closed 拒绝复用（现场保留；显式 -Attempt 或新隔离根重验）"
+                }
                 $kept = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
                 $results += [pscustomobject]@{
                     phase = $phaseName; mode = $mode; fixture = $run.Fixture
@@ -338,6 +362,9 @@ try {
             $phaseName = "paddle-input-$inputKind$inputSuffix$attemptSuffix"
             $healthPath = Join-Path $smokeRoot "$phaseName.json"
             if (Test-Path -LiteralPath $healthPath -PathType Leaf) {
+                if (-not (Test-PaddlePhaseReceipt $phaseName)) {
+                    throw "$phaseName 既有 health 缺 exit0 receipt，fail closed 拒绝复用（现场保留；显式 -Attempt 或新隔离根重验）"
+                }
                 $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
                 Write-Host "KEPT $phaseName state=$($health.state)"
             } else {
@@ -410,7 +437,7 @@ try {
 }
 
 Write-Host ''
-Write-Host '==== Paddle 五模式冒烟汇总 ===='
+Write-Host '==== Paddle 三模式冒烟汇总 ===='
 $results | Format-Table phase, mode, state, stage -AutoSize | Out-String | Write-Host
 Write-Host "隔离证据保留在: $smokeRoot （候选副本、fixtures、health JSON、UI 导出文件）"
 Write-Host "已请求配方: $Provider；模型档位: $ModelPreset。实际 session/EP 节点沿对应原生 profile 证据核对。"
