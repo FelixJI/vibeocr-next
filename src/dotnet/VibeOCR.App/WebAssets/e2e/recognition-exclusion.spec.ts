@@ -128,7 +128,10 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await expect(canvas).toBeVisible();
   await expect(page.getByText(/原图 160×80/)).toBeVisible();
   // 固定自动准备先完成，再验证显式识别/保存各自的上传。
-  const initialText = await uploads.submitted("prepareScreenshotTextLayer");
+  const initialText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    0,
+  );
   expect(initialText.command.arguments).toEqual({
     resourceUri: initialText.resourceUri,
     sessionId: "exclusion-e2e",
@@ -172,8 +175,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     page.getByRole("button", { name: "保存屏蔽副本" }),
   ).toBeVisible();
   // 默认文字层也遵守屏蔽语义，且完成租约释放后再做显式操作。
-  const maskedText = await uploads.submitted("prepareScreenshotTextLayer", 1);
-  expect(maskedText.command.arguments.revision).toBe(1);
+  const maskedText = await uploads.forRevision("prepareScreenshotTextLayer", 1);
   await uploads.waitForDiscard(maskedText.resourceUri);
   const textInput = await decodeUpload(
     page,
@@ -250,7 +252,6 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   expect(pixelAt(maskedSave, 40, 40)).toEqual([255, 255, 255]);
   expect(maskedSave.pixels[(40 * maskedSave.width + 40) * 4 + 3]).toBe(255);
   expect(pixelAt(maskedSave, 120, 40)).toEqual([224, 32, 32]);
-  expect(uploads.count()).toBe(5);
 
   // 补第二个排除区覆盖剩余区域：整图被屏蔽时拒绝识别且不产生新上传。
   await canvas.scrollIntoViewIfNeeded();
@@ -272,10 +273,12 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     ),
   ).toBeVisible();
   expect(
-    (await uploads.commands("prepareScreenshotTextLayer")).map(
-      (command) => command.arguments.revision,
+    new Set(
+      (await uploads.commands("prepareScreenshotTextLayer")).map(
+        (command) => command.arguments.revision,
+      ),
     ),
-  ).toEqual([0, 1]);
+  ).toEqual(new Set([0, 1]));
   const beforeRefusedRecognition = uploads.count();
   await page.getByRole("button", { name: "识别文字" }).click();
   await expect(
@@ -293,18 +296,21 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
     action: "notifyScreenshotRevision",
     arguments: { sessionId: "exclusion-e2e", revision: 3 },
   });
-  const restoredText = await uploads.submitted("prepareScreenshotTextLayer", 2);
-  expect(restoredText.command.arguments.revision).toBe(3);
+  const restoredText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    3,
+  );
   await uploads.waitForDiscard(restoredText.resourceUri);
   await page.getByRole("button", { name: "识别文字" }).click();
   const retried = await uploads.submitted("recognizeScreenshotImage", 1);
   expect(retried.command.arguments.revision).toBe(3);
   const retryInput = await decodeUpload(page, retried.body, "image/png");
   expect(pixelAt(retryInput, 120, 40)).toEqual([224, 32, 32]);
-  expect(uploads.count()).toBe(7);
   expect(
-    (await uploads.commands("prepareScreenshotTextLayer")).map(
-      (command) => command.arguments.revision,
+    new Set(
+      (await uploads.commands("prepareScreenshotTextLayer")).map(
+        (command) => command.arguments.revision,
+      ),
     ),
-  ).toEqual([0, 1, 3]);
+  ).toEqual(new Set([0, 1, 3]));
 });

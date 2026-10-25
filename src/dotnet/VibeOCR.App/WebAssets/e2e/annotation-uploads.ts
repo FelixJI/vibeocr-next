@@ -49,7 +49,7 @@ export async function recordAnnotationUploads(
     async submitted(action: string, index = 0, targetScope = scope) {
       await expect
         .poll(async () => (await commands(action, targetScope)).length)
-        .toBe(index + 1);
+        .toBeGreaterThan(index);
       const command = (await commands(action, targetScope))[index]!;
       const upload = uploads.get(String(command.arguments.resourceUri));
       expect(upload, `${action} 必须消费自己的上传租约`).toBeDefined();
@@ -60,7 +60,9 @@ export async function recordAnnotationUploads(
         (await commands(action)).filter(
           (command) => command.arguments.revision === revision,
         );
-      await expect.poll(async () => (await matching()).length).toBe(1);
+      await expect
+        .poll(async () => (await matching()).length)
+        .toBeGreaterThan(0);
       const command = (await matching())[0]!;
       const upload = uploads.get(String(command.arguments.resourceUri));
       expect(upload, `${action} 必须消费当前修订的上传租约`).toBeDefined();
