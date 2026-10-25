@@ -107,13 +107,12 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
     assert run_quality() == 0
 
     web_prefix = "src/dotnet/VibeOCR.App/WebAssets"
-    assert commands[-6:] == [
+    assert commands[-5:] == [
         ["C:/node/npm.cmd", "run", "format:check", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "lint", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "typecheck", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "test", "--prefix", web_prefix],
         ["C:/node/npm.cmd", "run", "test:visual", "--prefix", web_prefix],
-        ["C:/node/npm.cmd", "run", "build", "--prefix", web_prefix],
     ]
     assert all("test:legacy" not in command for command in commands)
     assert not any(
@@ -126,7 +125,7 @@ def test_quality_runs_web_gates_once_and_verifies_production_dist(
     ]
     output = capsys.readouterr().out
     assert "brand-assets" not in output
-    assert "::notice title=Quality stage::web-build completed" in output
+    assert "::notice title=Quality stage::web-visual completed" in output
 
 
 def _run_release_build_fixture(

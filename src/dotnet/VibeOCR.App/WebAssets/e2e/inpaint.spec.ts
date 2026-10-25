@@ -618,10 +618,11 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
     "image/png",
   );
   expectPixelNear(recognitionInput, 48, 20, [10, 160, 90]);
-  expect(uploads.count()).toBe(3);
   expect(
-    (await uploads.commands("prepareScreenshotTextLayer")).map(
-      (command) => command.arguments.revision,
+    new Set(
+      (await uploads.commands("prepareScreenshotTextLayer")).map(
+        (command) => command.arguments.revision,
+      ),
     ),
-  ).toEqual([0, 1]);
+  ).toEqual(new Set([0, 1]));
 });

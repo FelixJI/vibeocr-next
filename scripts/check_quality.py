@@ -65,11 +65,11 @@ def main() -> int:
         ("web-typecheck", [npm, "run", "typecheck", "--prefix", WEB_ASSETS]),
         ("web-test", [npm, "run", "test", "--prefix", WEB_ASSETS]),
         ("web-visual", [npm, "run", "test:visual", "--prefix", WEB_ASSETS]),
-        ("web-build", [npm, "run", "build", "--prefix", WEB_ASSETS]),
     ):
         print(f"::notice title=Quality stage::{label} started", flush=True)
         subprocess.run(command, cwd=ROOT, check=True)
         print(f"::notice title=Quality stage::{label} completed", flush=True)
+    # test:visual 已构建并测试这份生产资产，直接校验它而不重新构建。
     verify_web_assets(ROOT / WEB_ASSETS / "dist")
     return 0
 

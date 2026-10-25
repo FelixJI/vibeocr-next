@@ -138,7 +138,10 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   const canvas = page.getByLabel("图片检查画布");
   await expect(canvas).toBeVisible();
   // 固定自动准备先完成，显式保存不能依赖恰好早于400ms防抖。
-  const initialText = await uploads.submitted("prepareScreenshotTextLayer");
+  const initialText = await uploads.forRevision(
+    "prepareScreenshotTextLayer",
+    0,
+  );
   expect(initialText.command.arguments).toEqual({
     resourceUri: initialText.resourceUri,
     sessionId: "capture-scene",
@@ -250,9 +253,11 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     return Array.from(context.getImageData(200, 200, 1, 1).data);
   }, Array.from(screenshot));
   expect(visiblePixels).toEqual([213, 229, 244, 255]);
-  const editedText = await uploads.submitted("prepareScreenshotTextLayer", 1);
-  expect(editedText.command.arguments.revision).toBe(1);
+  // 自动准备可能重复同一修订；按内容修订定位，不能按请求次序推断。
+  const editedText = await uploads.forRevision("prepareScreenshotTextLayer", 1);
   await uploads.waitForDiscard(editedText.resourceUri);
+  const editedImage = await decodeUpload(page, editedText.body);
+  expect(pixelAt(editedImage, 600, 150)).toEqual([243, 139, 53]);
   await page.getByRole("button", { name: "保存标注图" }).click();
   const saved = await uploads.submitted("saveScreenshotImage");
   await expectCommand(page, {
@@ -279,12 +284,10 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
       excludeBoxes: [],
     },
   });
-  expect(uploads.count()).toBe(4);
   expect(
-    (await uploads.commands("prepareScreenshotTextLayer")).map(
-      (command) => command.arguments.revision,
-    ),
-  ).toEqual([0, 1]);
+    new Set([editedText.resourceUri, saved.resourceUri, recognized.resourceUri])
+      .size,
+  ).toBe(3);
   await canvas.press("Escape");
   await canvas.press("Escape");
   await expectCommand(page, {
