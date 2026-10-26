@@ -320,6 +320,15 @@ def test_cuda_combined_upgrade_uses_bound_cu126_lock(
         runtime_manifest=standalone_manifest,
         base_python=sys._base_executable,
     )
+    # 配方兼容性测试显式提供满足各 CUDA 配方要求的驱动，避免依赖本机 GPU。
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
+        lambda **_kwargs: {
+            "status": "ok",
+            "reason_code": None,
+            "driver_version": "580.88",
+        },
+    )
 
     def write_installed(env_id: str, recipe: str) -> dict:
         with RuntimeStoreLock(full._lock):
@@ -353,14 +362,6 @@ def test_cuda_combined_upgrade_uses_bound_cu126_lock(
     mineru = write_installed("b" * 32, "mineru-cpu")
     with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
         full.preview_install(mineru["id"], "paddleocr-ort-cuda")
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_kwargs: {
-            "status": "ok",
-            "reason_code": None,
-            "driver_version": "575.64",
-        },
-    )
     created = full.create("cuda-mineru")
     plan = full.preview_install(created["id"], "mineru-cuda")
     assert plan["requested_recipe"] == "mineru-cuda"

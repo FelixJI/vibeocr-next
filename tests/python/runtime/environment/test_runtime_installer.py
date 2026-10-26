@@ -1456,7 +1456,9 @@ def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> N
     assert latest["environments"][item["id"]]["recipe"] == "paddleocr-ort-cpu"
 
 
-def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
+def test_named_preview_includes_direct_url_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -1465,6 +1467,15 @@ def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
         base_python=sys._base_executable,
     )
     item = manager.create("cuda")
+    # 依赖投影测试显式提供满足 CUDA 配方要求的驱动，避免依赖本机 GPU。
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
+        lambda **_kwargs: {
+            "status": "ok",
+            "reason_code": None,
+            "driver_version": "580.88",
+        },
+    )
     dependencies = manager.preview_install(item["id"], "paddleocr-ort-cuda")[
         "dependencies"
     ]
@@ -1533,7 +1544,9 @@ def _pinned_versions(manager: ManagedEnvironmentStore, recipe: str) -> dict[str,
     }
 
 
-def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
+def test_recipe_catalog_projects_manifest_bound_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -1592,6 +1605,15 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     assert "nvidia-cudnn-cu13==9.27.0.42" in entry["paddleocr-ort-cuda"]["dependencies"]
 
     # 目录与 preview 同源：锁、pin 与来源分类完全一致，前台不得另算。
+    # 目录同源预览显式提供满足 CUDA 配方要求的驱动，避免依赖本机 GPU。
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
+        lambda **_kwargs: {
+            "status": "ok",
+            "reason_code": None,
+            "driver_version": "580.88",
+        },
+    )
     target = _write_record(full, "a" * 32)
     for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda", "mineru-cpu"):
         plan = full.preview_install(target["id"], recipe)
