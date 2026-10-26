@@ -766,14 +766,6 @@ public sealed record SetTaskModelPresetCommand(string? Preset) : WorkbenchComman
 public sealed record SetRecognitionOptionsCommand(string ModeId, PaddleModeOptions Options) : WorkbenchCommand;
 
 /// <summary>
-/// Set the task-level Rapid device option (auto|cpu|cuda) for one recognition
-/// mode whose catalog supported_options declares "device"; the host rechecks
-/// the authoritative catalog before persisting (fail closed, no UI-side
-/// capability derivation).
-/// </summary>
-public sealed record SetModeDeviceCommand(string ModeId, string Device) : WorkbenchCommand;
-
-/// <summary>
 /// Persist the default recognition mode in Backend settings
 /// extra.default_recognition_mode（ocr.default-recognition-mode.v1）。
 /// The runtime capability gate, catalog id and ready availability are all

@@ -53,7 +53,7 @@ class AdapterCapability:
     adapters must never claim it without upstream multi-image inference.
     ``parallel_compute`` is the weaker promise that one ``recognize_many``
     call may fan a microbatch out to bounded engine-internal workers (still
-    per-item native calls, e.g. independent RapidOCR instances): the executor
+    per-item native calls, e.g. independent engine instances): the executor
     treats the whole call as one recovery unit exactly like a real batch.
     """
 

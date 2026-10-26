@@ -428,17 +428,20 @@ def create_app(
                     else (
                         engine_resolver.registry.default_engine
                         if engine_resolver is not None
-                        else OcrEngine.RAPIDOCR
+                        else OcrEngine.PADDLEOCR
                     )
                 )
                 module.recognition_mode_registry.resolve_execution_fields(
                     pipeline_id=pipeline.pipeline_id,
                     engine=effective_engine.value,
                 )
-                if engine is not None:
-                    manifest = replace(
-                        manifest, pipeline=replace(pipeline, engine=engine)
-                    )
+                # 缺省 engine 在提交 seam 解析为 effective 默认（paddleocr）
+                # 并写回 manifest：提交期冻结与门禁（Paddle 快照、settings
+                # download sources、设备/选项校验）与显式 engine 完全一致，
+                # 执行期不再重新解析选项。
+                manifest = replace(
+                    manifest, pipeline=replace(pipeline, engine=effective_engine)
+                )
             elif engine is not None:
                 # engine 来自 pipeline dict，理论上 pipeline 一定存在；
                 # 防御性兜底仍然显式拒绝而不是静默丢弃。
@@ -939,8 +942,9 @@ def create_app(
     @app.get("/v2/settings", response_model=wire.SettingsSnapshot)
     async def get_settings() -> dict[str, Any]:
         payload = module.settings().to_payload()
-        # 回显解析后的已提交默认（缺键注入兼容 rapid_text）；无法解析的
-        # 持久值原样回显，由客户端按目录标记并修复。校验只在保存 seam。
+        # 回显解析后的已提交默认（缺键注入兼容 paddle_text，历史 rapid
+        # 值在解析 seam 迁移到对应 Paddle 模式）；无法解析的持久值原样
+        # 回显，由客户端按目录标记并修复。校验只在保存 seam。
         extra = payload.get("extra")
         if isinstance(extra, dict):
             try:

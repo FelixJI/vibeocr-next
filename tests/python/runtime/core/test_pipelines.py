@@ -11,7 +11,7 @@ from vibeocr.runtime.recognition.core.pipelines import (
 
 class TestOCRPipeline:
     def test_pipeline_count(self):
-        """验证管道数量为 7（含 RAPID_TABLE 轻量表格管道）"""
+        """验证管道数量为 7（含已退役 RAPID_TABLE，仅供历史记录反序列化）"""
         assert len(OCRPipeline) == 7
 
     def test_pipeline_values(self):

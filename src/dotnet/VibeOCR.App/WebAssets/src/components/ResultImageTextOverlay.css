@@ -26,6 +26,13 @@
   border-color: #d13438;
 }
 
+/* 双向悬停高亮：右侧结果行/图上行框任一悬停时，两侧对应行同时加亮。 */
+.overlay-line.hovered {
+  border-color: #0078d4;
+  background: rgba(0, 120, 212, 0.18);
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.35);
+}
+
 /* 编辑面板锚定行框并钳位到舞台内，不越过右/下边缘。 */
 .overlay-line-editor {
   position: absolute;

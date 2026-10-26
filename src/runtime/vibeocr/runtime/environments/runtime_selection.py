@@ -360,8 +360,8 @@ class RuntimeSelectionPolicy:
         requested_tuple = migrate_legacy_component_ids(profile.name, requested_tuple)
         base_ids = {component.component_id for component in base_profile.components}
         if legacy_request:
-            # 旧 full ``ocr_engine`` 同时迁移出 rapidocr-base 与 Paddle；前者是
-            # 必备 base closure，不应重新暴露成可选组件请求。
+            # 旧 full ``ocr_engine`` 曾同时迁移出基础闭包与原生 Paddle；两者均已
+            # 退役折叠，不应重新暴露成可选组件请求。
             requested_tuple = tuple(
                 component_id
                 for component_id in requested_tuple

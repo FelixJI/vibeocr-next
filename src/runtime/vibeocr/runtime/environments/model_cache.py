@@ -14,9 +14,11 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Sequence
+import zipfile
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -25,6 +27,117 @@ from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 
 _logger = logging.getLogger(__name__)
 _SHARED_ENV = "VIBEOCR_SHARED_MODEL_CACHE"
+
+# 随产品 model pack 携带的默认 Paddle ONNX 模型：small 检测/识别（默认
+# preset）与默认文档方向分类。tiny/medium/表格/结构大模型不随包，
+# 按需走冻结清单下载。
+BUNDLED_PADDLE_ONNX_MODELS = (
+    "PP-OCRv6_small_det",
+    "PP-OCRv6_small_rec",
+    "PP-LCNet_x1_0_doc_ori",
+)
+_PADDLE_ONNX_NAMESPACE = "paddlex-onnx-3.7.2"
+
+
+def _paddle_onnx_catalog() -> dict:
+    return json.loads(
+        files("vibeocr.runtime.environments")
+        .joinpath("paddle_onnx_models.json")
+        .read_text(encoding="utf-8")
+    )["models"]
+
+
+def seed_bundled_paddle_onnx_models(
+    manifest: object,
+    shared_root: Path,
+    check_cancelled: Callable[[], None],
+    *,
+    models: Sequence[str] = BUNDLED_PADDLE_ONNX_MODELS,
+) -> None:
+    """把随包 model pack 的默认模型布置进共享资产缓存的可消费位置。
+
+    布置目标即 ``prepare_models`` 的共享根（``<shared>/paddlex-onnx-3.7.2/
+    <source>/<repo>/payload/…``），source/revision 身份与冻结清单一致：
+    已存在且校验通过的文件不重写；包内字节与冻结清单不匹配时 fail
+    closed，不静默降级。CPU/CUDA/DirectML 环境共用同一共享缓存。
+    """
+    from vibeocr.runtime.environments.runtime_manifest import ManifestError
+
+    model_pack = getattr(manifest, "paddle_model_pack", None)
+    if model_pack is None:
+        return
+    archive = Path(model_pack.archive_path)
+    if not archive.is_file():
+        raise ModelCacheError("bundled Paddle model pack is missing")
+    catalog = _paddle_onnx_catalog()
+    unknown = sorted(set(models).difference(catalog))
+    if unknown:
+        raise ModelCacheError(
+            f"bundled Paddle model is not in the frozen catalog: {unknown}"
+        )
+    expected_members: dict[str, dict] = {}
+    for name in models:
+        for file_entry in catalog[name]["sources"]["modelscope"]["files"]:
+            expected_members[f"{name}/{file_entry['path']}"] = file_entry
+    shared_root = shared_root.resolve()
+    with RuntimeStoreLock(shared_root / "prepare.lock", timeout=1800):
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                names = set(bundle.namelist())
+                unexpected = sorted(names.difference(expected_members))
+                if unexpected or len(names) != len(expected_members):
+                    raise ModelCacheError(
+                        "bundled Paddle model pack contains unexpected members"
+                    )
+                for member, entry in expected_members.items():
+                    check_cancelled()
+                    payload_bytes = bundle.read(member)
+                    if (
+                        len(payload_bytes) != entry["size"]
+                        or hashlib.sha256(payload_bytes).hexdigest()
+                        != entry["checksum"]
+                    ):
+                        raise ModelCacheError(
+                            f"bundled Paddle model does not match the frozen listing: {member}"
+                        )
+                    name = member.split("/", 1)[0]
+                    for source in ("modelscope", "huggingface"):
+                        source_entry = next(
+                            (
+                                item
+                                for item in catalog[name]["sources"][source]["files"]
+                                if item["path"] == entry["path"]
+                            ),
+                            None,
+                        )
+                        if source_entry is None:
+                            continue
+                        asset = ModelAsset(
+                            _PADDLE_ONNX_NAMESPACE,
+                            source,
+                            catalog[name]["repo_id"],
+                            name,
+                        )
+                        payload = (
+                            _asset_root(shared_root, asset)
+                            / "payload"
+                            / source_entry["path"]
+                        )
+                        if _valid_file(payload, source_entry):
+                            continue
+                        payload.parent.mkdir(parents=True, exist_ok=True)
+                        temporary = payload.with_name(
+                            f".{payload.name}.{uuid4().hex}.tmp"
+                        )
+                        try:
+                            temporary.write_bytes(payload_bytes)
+                            os.replace(temporary, payload)
+                        finally:
+                            temporary.unlink(missing_ok=True)
+        except zipfile.BadZipFile as exc:
+            raise ModelCacheError("bundled Paddle model pack is invalid") from exc
+        except ManifestError as exc:
+            raise ModelCacheError(str(exc)) from exc
 
 
 class ModelCacheError(RuntimeError):

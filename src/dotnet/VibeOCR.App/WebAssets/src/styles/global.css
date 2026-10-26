@@ -142,8 +142,9 @@ input {
   display: grid;
   min-height: 100%;
   align-content: start;
-  gap: 10px;
-  padding: 12px 16px 16px;
+  /* 纵向紧凑：头部/卡片留白收紧，把高度留给预览与结果区。 */
+  gap: 8px;
+  padding: 8px 16px 12px;
   width: 100%;
   max-width: 1920px;
   margin-inline: auto;
@@ -163,7 +164,7 @@ input {
   line-height: 28px;
 }
 .eyebrow {
-  margin: 0 0 3px;
+  margin: 0 0 2px;
   color: var(--colorBrandForeground1);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 10px;
@@ -172,7 +173,7 @@ input {
 }
 .workspace-description {
   max-width: 660px;
-  margin: 4px 0 0;
+  margin: 2px 0 0;
   color: var(--colorNeutralForeground2);
   font-size: 13px;
   line-height: 19px;
@@ -228,8 +229,8 @@ input {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 50px;
-  padding: 9px 12px;
+  min-height: 42px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--colorNeutralStroke1);
 }
 .panel-heading span {
@@ -250,8 +251,8 @@ input {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px 12px;
 }
 .editor-toolbar {
   flex-wrap: wrap;
@@ -557,11 +558,15 @@ input {
   background: var(--colorNeutralBackground2);
   font-size: 12px;
 }
+/* 设置页卡片统一整行宽：默认模式/MinerU 识别参数与其它卡片同宽，
+   不再在两列网格里出现半宽卡片。 */
 .settings-app-panel,
+.settings-default-mode-panel,
 .settings-shortcuts-panel,
 .settings-toolbar-panel,
 .settings-runtime-panel,
 .settings-mineru-panel,
+.settings-mineru-recognition-panel,
 .settings-download-panel {
   grid-column: 1 / -1;
 }
@@ -875,7 +880,7 @@ html[data-capture-scene="true"] .workspace > .work-panel {
   top: var(--capture-tools-top);
   max-height: var(--capture-tools-height);
   overflow: auto;
-  padding: 8px;
+  padding: 6px;
   border: 1px solid var(--colorNeutralStroke1);
   border-radius: 8px;
   background: var(--colorNeutralBackground1);
@@ -1002,10 +1007,12 @@ select {
     grid-template-columns: minmax(0, 1fr);
   }
   .settings-app-panel,
+  .settings-default-mode-panel,
   .settings-shortcuts-panel,
   .settings-toolbar-panel,
   .settings-runtime-panel,
   .settings-mineru-panel,
+  .settings-mineru-recognition-panel,
   .settings-download-panel,
   .diagnostics-health-panel {
     grid-column: auto;
@@ -1015,7 +1022,7 @@ select {
     min-height: 240px;
   }
   .workspace {
-    padding: 16px;
+    padding: 12px 16px;
   }
 }
 @media (max-width: 900px) {
@@ -1147,8 +1154,9 @@ select {
   /* 顶部对齐：两排内容高于高度窗口时滚动从首排可达（居中会把顶部溢出卷成不可达）。 */
   align-items: flex-start;
   gap: 4px;
-  width: min(760px, calc(100vw - var(--capture-tools-left)));
-  max-width: calc(100vw - var(--capture-tools-left));
+  /* 与原生框选工具栏一致：内容自然宽，不超过视口右缘；主排单行靠容器滚动。 */
+  width: max-content;
+  max-width: calc(100vw - var(--capture-tools-left) - 8px);
   box-sizing: border-box;
 }
 .capture-scene-editor > .editor-toolbar-stack {
@@ -1183,27 +1191,44 @@ select {
   flex-shrink: 0;
   white-space: nowrap;
 }
+/* 现场工具栏与原生 ScreenRegionPicker 单横排对齐：主排 = 可滚动的
+   工具+次要动作区（flex:1/min-width:0/overflow-x:auto）+ 固定的核心
+   动作区（输出开关/格式/识别/完成/更多），核心不随滚动离开可视区，
+   也不遮挡工具（独立分区，不用遮挡换可达）。 */
 .capture-scene-editor .editor-toolbar-main {
-  flex-direction: column;
-  align-items: stretch;
+  flex-direction: row;
+  flex-wrap: nowrap;
   overflow: visible;
 }
-.capture-scene-editor .editor-tools-group,
-.capture-scene-editor .editor-actions-group {
+.capture-scene-editor .editor-toolbar-main > .editor-scene-scroll {
+  flex: 1 1 auto;
+  flex-shrink: 1;
+  min-width: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 3px;
-  white-space: normal;
+  gap: 4px;
+  overflow-x: auto;
 }
-.capture-scene-editor .editor-actions-group {
-  border-top: 1px solid var(--colorNeutralStroke2);
-  padding-top: 6px;
-  margin-top: 5px;
+.capture-scene-editor .editor-scene-core {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--colorNeutralStroke2);
 }
+/* 与原生 token 对齐：按钮高 32、字号 14、内边 8、圆角 6、细边框。
+   不覆盖背景：subtle 本就透明，primary 保留 Fluent 品牌底色可读性
+   （曾用 background:transparent 造成 primary 白字白底不可见）。 */
 .capture-scene-editor .editor-toolbar button {
-  min-height: 28px;
-  padding-inline: 5px;
+  min-height: 32px;
+  padding-inline: 8px;
+  font-size: 14px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
   white-space: nowrap;
 }
 .editor-recognition-status {
@@ -1275,33 +1300,8 @@ select {
   left: 12px;
   background: var(--colorNeutralBackground1);
 }
-.capture-scene-editor .editor-output-settings > summary {
-  display: flex;
-  padding: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.capture-scene-editor .editor-output-settings > .editor-toolbar {
-  position: fixed;
-  right: 8px;
-  /* 位置/高度由 TS 注入：下方放不下时翻到覆盖层上方，max-height+滚动兑底。 */
-  top: var(
-    --capture-settings-top,
-    calc(var(--capture-tools-top) + var(--capture-tools-height) + 4px)
-  );
-  max-height: var(--capture-settings-max-height, 60vh);
-  overflow: auto;
-  max-width: calc(100vw - 16px);
-  flex-wrap: wrap;
-  padding: 8px;
-  background: var(--colorNeutralBackground1);
-  border: 1px solid var(--colorNeutralStroke1);
-  border-radius: 8px;
-}
-
-.capture-scene-editor .editor-toolbar button {
-  padding-inline: 6px;
-}
+/* 截图现场不再渲染输出设置 details（格式/质量已内联主排）；
+   以下仅保留通用按钮状态色。 */
 
 /* 工具栏按钮：框选后的浮动工具需要明确的可点击与状态色，
    不依赖 Fluent 默认主题在冻结桌面背景上的对比度。 */

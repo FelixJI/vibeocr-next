@@ -104,7 +104,7 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     var environment = new ManagedEnvironment("environment", "Paddle", 2, "venv", "installed", "python",
       "ready", "installed", "unverified", "not_checked", "not_started", null,
-      Recipe: "paddleocr-cpu");
+      Recipe: "paddleocr-ort-cpu");
     var health = new Wire.Health
     {
       SchemaVersion = 2, InstanceId = "sup", ProtocolVersion = 2, Ready = true,
@@ -168,6 +168,39 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Theory]
+  [InlineData("rapidocr-cpu")]
+  [InlineData("rapidocr-cuda")]
+  [InlineData("rapidocr+mineru-cpu")]
+  [InlineData("rapidocr+mineru-cuda")]
+  [InlineData("paddleocr-cpu")]
+  [InlineData("paddleocr-cuda")]
+  public void RetiredEnvironmentCannotBorrowReadyCatalogOrEngine(string recipe)
+  {
+    var environment = new ManagedEnvironment("environment", "Retired", 2, "venv", "installed", "python",
+      "ready", "installed", "unverified", "not_checked", "not_started", null, Recipe: recipe);
+    foreach (Wire.Health health in new[] { DefaultRecognitionModeWorkbenchTests.DefaultModeHealth(), PaddleReadyHealth() })
+    {
+      ManagedEnvironment projected = ManagedEnvironmentSettings.ProjectRunning(
+        environment, health, new ResidencyStatus(), ReadyStatus());
+      Assert.Equal("unavailable", projected.EngineState);
+      Assert.Equal("unavailable", projected.ModelState);
+      Assert.Null(projected.ActualDevice);
+    }
+  }
+
+  [Theory]
+  [InlineData("mineru-cpu")]
+  [InlineData("mineru-cuda")]
+  public void MineruEnvironmentUsesItsOwnModeReadiness(string recipe)
+  {
+    var environment = new ManagedEnvironment("environment", "MinerU", 2, "venv", "installed", "python",
+      "ready", "installed", "unverified", "not_checked", "not_started", null, Recipe: recipe);
+    ManagedEnvironment projected = ManagedEnvironmentSettings.ProjectRunning(environment,
+      DefaultRecognitionModeWorkbenchTests.DefaultModeHealth(), new ResidencyStatus(), ReadyStatus());
+    Assert.Equal("preparation_required", projected.EngineState);
+  }
+
+  [Theory]
   [InlineData(null)]
   [InlineData("pypi")]
   public async Task StaleConfirmationCannotInstallTheCurrentPreview(string? sourceId)
@@ -175,7 +208,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var manager = new WaitingManager();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, new ProductMaintenanceCoordinator());
-    await settings.PreviewAsync("environment", "rapidocr-cpu", sourceId,
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", sourceId,
       TestContext.Current.CancellationToken);
 
     await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -192,7 +225,7 @@ public sealed class ManagedEnvironmentSettingsTests
     int installAttempts = 0;
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance, installAttempted: () => installAttempts++);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -223,9 +256,9 @@ public sealed class ManagedEnvironmentSettingsTests
       () => null, new ProductMaintenanceCoordinator());
     await settings.RefreshAsync(TestContext.Current.CancellationToken);
 
-    await settings.FindCompatibleAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    await settings.FindCompatibleAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
 
-    Assert.Equal("rapidocr-cpu", settings.Compatibility?.Recipe);
+    Assert.Equal("paddleocr-ort-cpu", settings.Compatibility?.Recipe);
     Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
     Assert.Contains("可直接复用", settings.Status);
     // 未知配方在宿主按 Runtime 目录 fail closed 拒绝，不透传给管理器。
@@ -247,7 +280,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeFind = () => pending.Task;
 
-    Task query = settings.FindCompatibleAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Task query = settings.FindCompatibleAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
 
     Assert.True(settings.IsBusy);
     Assert.Same(snapshot, settings.Snapshot);
@@ -264,7 +297,7 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     var manager = new MutableManager();
     var settings = NewSettings(manager);
-    await settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    await settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
     Assert.Null(settings.Plan);
     Assert.Equal(0, manager.CreateCalls);
@@ -279,11 +312,11 @@ public sealed class ManagedEnvironmentSettingsTests
     var settings = NewSettings(manager);
     manager.BeforePreview = () => throw new HttpRequestException("preview unavailable");
     await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "rapidocr-cpu", TestContext.Current.CancellationToken));
+      "paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     Assert.Equal(1, manager.CreateCalls);
     manager.BeforePreview = null;
-    await Task.WhenAll(settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken),
-      settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken));
+    await Task.WhenAll(settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken),
+      settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     Assert.Equal(1, manager.CreateCalls);
     Assert.Equal("fresh", settings.Plan?.EnvironmentId);
     Assert.Equal(0, manager.InstallCalls);
@@ -295,13 +328,13 @@ public sealed class ManagedEnvironmentSettingsTests
     var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
     var settings = NewSettings(manager);
     await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "rapidocr-cpu", TestContext.Current.CancellationToken));
+      "paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "rapidocr-cpu", TestContext.Current.CancellationToken));
+      "paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     Assert.Equal(1, manager.CreateCalls);
     Assert.Equal(0, manager.PreviewCalls);
     manager.FailListAfterCreate = false;
-    await settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    await settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     Assert.Equal(1, manager.CreateCalls);
     Assert.Equal("fresh", settings.Plan?.EnvironmentId);
   }
@@ -312,13 +345,13 @@ public sealed class ManagedEnvironmentSettingsTests
     var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
     var settings = NewSettings(manager);
     await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "rapidocr-cpu", TestContext.Current.CancellationToken));
+      "paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     manager.FailListAfterCreate = false;
     await manager.DeleteEnvironmentAsync("fresh", TestContext.Current.CancellationToken);
     var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeList = () => { entered.TrySetResult(); return release.Task; };
-    Task retry = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Task retry = settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     settings.InvalidatePlan();
     release.SetResult();
@@ -337,11 +370,11 @@ public sealed class ManagedEnvironmentSettingsTests
     var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeFind = () => { entered.TrySetResult(); return release.Task; };
-    Task inFlight = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Task inFlight = settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Task queued = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Task queued = settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     settings.InvalidatePlan();
-    Task current = settings.PreviewAsync("environment", "rapidocr-cpu", null,
+    Task current = settings.PreviewAsync("environment", "paddleocr-ort-cpu", null,
       TestContext.Current.CancellationToken);
     release.SetResult();
     await Task.WhenAll(inFlight, queued, current);
@@ -358,7 +391,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforePreview = () => { entered.TrySetResult(); return release.Task; };
-    Task preview = settings.PreviewAsync("environment", "rapidocr-cpu", null,
+    Task preview = settings.PreviewAsync("environment", "paddleocr-ort-cpu", null,
       TestContext.Current.CancellationToken);
     await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     settings.InvalidatePlan();
@@ -372,7 +405,7 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     var manager = new MutableManager { HasCompatibleEnvironment = false };
     var settings = NewSettings(manager);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", null,
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", null,
       TestContext.Current.CancellationToken);
     ManagedEnvironmentPlan frozen = settings.Plan!;
     var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -381,7 +414,7 @@ public sealed class ManagedEnvironmentSettingsTests
     Task refresh = settings.RefreshAsync(TestContext.Current.CancellationToken);
     await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     Task install = settings.InstallAsync(frozen.PlanId, null, TestContext.Current.CancellationToken);
-    Task queued = settings.PrepareAsync("rapidocr-cpu", TestContext.Current.CancellationToken);
+    Task queued = settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
     manager.BeforeInstall = () => { Assert.Same(frozen, settings.Plan); return Task.CompletedTask; };
     release.SetResult();
     await Task.WhenAll(refresh, install, queued);
@@ -395,7 +428,7 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     var manager = new MutableManager();
     var settings = NewSettings(manager);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi", TestContext.Current.CancellationToken);
     var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeInstall = async () => { started.SetResult(); await release.Task; };
@@ -437,7 +470,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var context = new PausedProgressContext();
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeInstall = () => release.Task;
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi", TestContext.Current.CancellationToken);
     Task Start()
     {
       SynchronizationContext? previous = SynchronizationContext.Current;
@@ -464,7 +497,7 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal("succeeded", settings.InstallProgress?.State);
     oldObserver(update with { Seq = 20000 }); Assert.Equal("succeeded", settings.InstallProgress?.State);
 
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi", TestContext.Current.CancellationToken);
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi", TestContext.Current.CancellationToken);
     release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     manager.BeforeInstall = () => release.Task;
     Task second = Start();
@@ -582,7 +615,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", CancellationToken.None);
@@ -612,7 +645,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     using var user = new CancellationTokenSource();
@@ -640,7 +673,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -668,13 +701,13 @@ public sealed class ManagedEnvironmentSettingsTests
     {
       CancelFailureReasonCode = null,
       Failure = failurePlanId is null ? null : new ManagedEnvironmentInstallFailure(
-        "failed", 1, "rapidocr-cpu", "install_interrupted", "preview_again", "Previous attempt",
+        "failed", 1, "paddleocr-ort-cpu", "install_interrupted", "preview_again", "Previous attempt",
         PlanId: failurePlanId),
     };
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -697,7 +730,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -721,7 +754,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var maintenance = new ProductMaintenanceCoordinator();
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance);
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -748,7 +781,7 @@ public sealed class ManagedEnvironmentSettingsTests
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, maintenance)
     { InstallCancelConfirmTimeout = TimeSpan.FromMilliseconds(200) };
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
@@ -770,7 +803,7 @@ public sealed class ManagedEnvironmentSettingsTests
   [Fact]
   public async Task FailedInstallRefreshesDurableReasonWithoutShowingRawManagerError()
   {
-    var failure = new ManagedEnvironmentInstallFailure("failed", 1, "rapidocr-cpu",
+    var failure = new ManagedEnvironmentInstallFailure("failed", 1, "paddleocr-ort-cpu",
       "network_error", "check_source_and_retry", "下载源连接失败。");
     var manager = new WaitingManager
     {
@@ -779,7 +812,7 @@ public sealed class ManagedEnvironmentSettingsTests
     };
     var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
       () => null, new ProductMaintenanceCoordinator());
-    await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
       TestContext.Current.CancellationToken);
 
     await Assert.ThrowsAsync<InvalidOperationException>(() =>
@@ -843,7 +876,9 @@ public sealed class ManagedEnvironmentSettingsTests
       await settings.RefreshAsync(TestContext.Current.CancellationToken);
       ManagedEnvironment active = ActiveEnvironment(settings);
       Assert.Equal("ready", active.EngineState);
-      Assert.Equal("not_applicable", active.ModelState);
+      // Paddle ONNX 环境的模型在 residency 出现前如实标注 pending，
+      // 不因随包 small 默认模型流报 ready。
+      Assert.Equal("pending", active.ModelState);
       Assert.Equal("ready", active.ServiceState);
 
       // 旧代码在 Create/Install/Delete/Repair 后直接重置为管理器列表，
@@ -853,7 +888,7 @@ public sealed class ManagedEnvironmentSettingsTests
       Assert.Contains(settings.Snapshot!.Environments,
         item => item.Id == "fresh" && item.ServiceState == "not_started");
 
-      await settings.PreviewAsync("fresh", "rapidocr-cpu", "pypi",
+      await settings.PreviewAsync("fresh", "paddleocr-ort-cpu", "pypi",
         TestContext.Current.CancellationToken);
       await settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
       Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
@@ -1003,7 +1038,7 @@ public sealed class ManagedEnvironmentSettingsTests
       var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
         () => ("environment", 1), new ProductMaintenanceCoordinator(), () => session);
 
-      await settings.PreviewAsync("environment", "rapidocr-cpu", "pypi",
+      await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
         TestContext.Current.CancellationToken);
       Assert.NotNull(settings.Plan);
 
@@ -1053,7 +1088,7 @@ public sealed class ManagedEnvironmentSettingsTests
     },
   };
 
-  private static Wire.Health RapidReadyHealth() => new()
+  private static Wire.Health PaddleReadyHealth() => new()
   {
     SchemaVersion = 2,
     InstanceId = "sup-test",
@@ -1073,7 +1108,7 @@ public sealed class ManagedEnvironmentSettingsTests
       {
         Engines = [new Wire.OcrEngineDescriptor
         {
-          Id = Wire.OcrEngineId.Rapidocr,
+          Id = Wire.OcrEngineId.Paddleocr,
           Availability = Wire.OcrEngineAvailability.Ready,
           IncludedInBase = false,
           ReasonCode = null,
@@ -1138,7 +1173,7 @@ public sealed class ManagedEnvironmentSettingsTests
     {
       string json = request.RequestUri?.AbsolutePath switch
       {
-        "/v2/health" => JsonSerializer.Serialize(RapidReadyHealth()),
+        "/v2/health" => JsonSerializer.Serialize(PaddleReadyHealth()),
         "/v2/runtime/residency" => HttpV2Json.Serialize(new ResidencyStatus()),
         "/v2/runtime/status" => HttpV2Json.Serialize(ReadyStatus()),
         _ => throw new HttpRequestException($"Unexpected probe path: {request.RequestUri}"),
@@ -1187,7 +1222,7 @@ public sealed class ManagedEnvironmentSettingsTests
     // 与生产 list payload 一致：配方目录随列表同步，宿主据此核验未知配方。
     private static readonly IReadOnlyList<ManagedEnvironmentRecipe> Catalog =
     [
-      new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU",
+      new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
         ["text"], "cpu", "cpu"),
     ];
 
@@ -1195,7 +1230,7 @@ public sealed class ManagedEnvironmentSettingsTests
     [
       new ManagedEnvironment("environment", "活动环境", 1, "venv", "installed", "python",
         "ready", "installed", "unverified", "not_checked", "not_started", null,
-        Recipe: "rapidocr-cpu",
+        Recipe: "paddleocr-ort-cpu",
         ResolvedSources:
         [
           new ManagedEnvironmentResolvedSource("package_index", "tuna-pypi", "TUNA PyPI 镜像", "product_default"),
@@ -1350,7 +1385,7 @@ public sealed class ManagedEnvironmentSettingsTests
         throw new HttpRequestException("environments list unavailable");
       return new ManagedEnvironmentList(ActiveId, 0,
         [current with { LastInstallFailure = Failure }],
-        Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
+        Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU")]);
     }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
@@ -1427,14 +1462,14 @@ public sealed class ManagedEnvironmentSettingsTests
     {
       if (Volatile.Read(ref installReturned) == 0)
         return new ManagedEnvironmentList(null, 0, [current],
-          Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
+          Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU")]);
       RefreshEntered.TrySetResult();
       if (CancelRefreshByToken)
         await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
       await RefreshGate.Task.WaitAsync(cancellationToken);
       RefreshTokenCancelled = cancellationToken.IsCancellationRequested;
       return new ManagedEnvironmentList(null, 0, [current],
-        Recipes: [new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU")]);
+        Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU")]);
     }
 
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(

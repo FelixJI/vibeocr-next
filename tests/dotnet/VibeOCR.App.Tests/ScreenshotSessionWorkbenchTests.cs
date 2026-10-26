@@ -258,7 +258,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     {
       Dictionary<string, JsonElement> payload = base.OutcomePayload();
       string pipeline = Requests[^1].Pipeline.PipelineId;
-      if (pipeline is "TABLE_RECOGNITION" or "RAPID_TABLE")
+      if (pipeline is "TABLE_RECOGNITION" or "paddle_table")
         payload["content_list"] = JsonSerializer.SerializeToElement(new[]
         {
           new { type = "table", html = "<table><tr><td>selection text</td></tr></table>" },
@@ -274,8 +274,8 @@ public sealed class ScreenshotSessionWorkbenchTests
     }
   }
 
-  /// <summary>rapid_table 目录声明 device 选项的识别提交客户端。</summary>
-  private sealed class RapidTableDeviceClient : CompletedImageSelectionClient
+  /// <summary>paddle_table 目录声明 device 选项的识别提交客户端。</summary>
+  private sealed class PaddleTableDeviceClient : CompletedImageSelectionClient
   {
     public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
     {
@@ -291,7 +291,7 @@ public sealed class ScreenshotSessionWorkbenchTests
             RecognitionModeCatalog = catalog with
             {
               Modes = [.. catalog.Modes.Select(mode =>
-                mode.Id == Wire.RecognitionModeId.RapidTable
+                mode.Id == Wire.RecognitionModeId.PaddleTable
                   ? mode with { SupportedOptions = ["device"] }
                   : mode)],
             },
@@ -425,12 +425,10 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
-  [InlineData("recognition", "rapid_text", "OCR", true)]
+  [InlineData("recognition", "paddle_text", "OCR", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", true)]
-  [InlineData("recognition", "rapid_table", "RAPID_TABLE", true)]
-  [InlineData("imageEdit", "rapid_text", "OCR", true)]
+  [InlineData("imageEdit", "paddle_text", "OCR", true)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", true)]
-  [InlineData("imageEdit", "rapid_table", "RAPID_TABLE", true)]
   [InlineData("recognition", "paddle_table", "TABLE_RECOGNITION", false)]
   [InlineData("imageEdit", "paddle_table", "TABLE_RECOGNITION", false)]
   public async Task CompletedImageExplicitModeKeepsFrozenPixelsAndModeDuringReadiness(
@@ -493,19 +491,19 @@ public sealed class ScreenshotSessionWorkbenchTests
       JsonElement modes = wire.RootElement.GetProperty("payload").GetProperty("state").GetProperty("recognitionModes");
       // #270：公式入口退役后固定两类（文字/表格）。
       Assert.Equal(2, modes.GetArrayLength());
-      Assert.Equal("rapid_table", modes[1].GetProperty("modeId").GetString());
+      Assert.Equal("paddle_table", modes[1].GetProperty("modeId").GetString());
       Assert.Equal(AnnotationPng.LongLength, result.Input!.ByteLength);
     }
     finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
   }
 
   [Fact]
-  public async Task RapidTableDeviceOptionFailsClosedPersistsAndSubmitsOnTheWire()
+  public async Task PaddleTableDeviceOptionFailsClosedPersistsAndSubmitsOnTheWire()
   {
     string root = TemporaryRoot();
     try
     {
-      var inference = new RapidTableDeviceClient();
+      var inference = new PaddleTableDeviceClient();
       var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
       var settings = new SettingsViewModel(inference);
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
@@ -517,12 +515,14 @@ public sealed class ScreenshotSessionWorkbenchTests
       // 目录未声明 device 的模式 fail closed 拒绝；#270 后 paddle_formula
       // 本身已退役，落在 mode_unavailable 拒绝路径上（可改选恢复）。
       WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
-        new SetModeDeviceCommand("paddle_formula", "cuda"), TestContext.Current.CancellationToken);
+        new SetRecognitionOptionsCommand("paddle_formula", new PaddleModeOptions { Device = "cuda" }),
+        TestContext.Current.CancellationToken);
       Assert.Equal("recognition_mode_retired", refused.Error?.Code);
       Assert.Empty(inference.Requests);
 
       Assert.Null((await handler.ExecuteAsync(
-        new SetModeDeviceCommand("rapid_table", "cuda"), TestContext.Current.CancellationToken)).Error);
+        new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
+        TestContext.Current.CancellationToken)).Error);
 
       using var captured = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.ScreenshotSession is not null);
@@ -531,11 +531,11 @@ public sealed class ScreenshotSessionWorkbenchTests
       WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
       using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy && state.Result is not null);
       Assert.Null((await handler.ExecuteAsync(ParseImageRecognitionCommand("recognition",
-        Guid.Parse(session.ScreenshotSession!.SessionId), session.ScreenshotSession.Revision, lease.ResourceUri.AbsoluteUri, "rapid_table"),
+        Guid.Parse(session.ScreenshotSession!.SessionId), session.ScreenshotSession.Revision, lease.ResourceUri.AbsoluteUri, "paddle_table"),
         TestContext.Current.CancellationToken)).Error);
       RecognitionWorkbenchState result = await completed.Task;
       SubmitRequest request = Assert.Single(inference.Requests);
-      Assert.Equal("RAPID_TABLE", request.Pipeline.PipelineId);
+      Assert.Equal("TABLE_RECOGNITION", request.Pipeline.PipelineId);
       Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
       Assert.Null(request.Pipeline.Engine);
       Assert.NotNull(result.StructuredResult);
@@ -544,14 +544,14 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
-  [InlineData("rapid_text")]
+  [InlineData("paddle_text")]
   [InlineData("missing_mode")]
   public async Task CompletedImageUnavailableModePreservesInputAndUploadLease(string modeId)
   {
     string root = TemporaryRoot();
     try
     {
-      var inference = new SelectionSubmitClient(rapidReady: false);
+      var inference = new SelectionSubmitClient(textReady: false);
       var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
       var settings = new SettingsViewModel(inference);
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
@@ -786,7 +786,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         {
           await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[0].Path,
             TestContext.Current.CancellationToken);
-          Assert.Equal("rapid_text", (await readyAwaiter.Task).TextLayer?.ModeId);
+          Assert.Equal("windows_text", (await readyAwaiter.Task).TextLayer?.ModeId);
         }
         await handler.PreparePinnedTextLayerAsync(sessionId, 0, pins[1].Path,
           TestContext.Current.CancellationToken);
@@ -2230,7 +2230,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           RecognitionWorkbenchState ready = await readyAwaiter.Task;
 
           RecognitionTextLayerState layer = ready.TextLayer!;
-          Assert.Equal("rapid_text", layer.ModeId);
+          Assert.Equal("windows_text", layer.ModeId);
           Assert.Equal("sup-text", layer.ServiceInstance);
           Assert.NotNull(layer.Image);
           Assert.Equal(AnnotationPng.Length, layer.Image!.ByteLength);
@@ -2243,14 +2243,14 @@ public sealed class ScreenshotSessionWorkbenchTests
         }
       }
 
-      // 固定轻量配置：OCR 管线、rapidocr 引擎、空选项/空 mineru；
+      // 固定轻量配置：OCR 管线、windows 引擎、空选项/空 mineru；
       // 输入只能是编辑器导出的最终 PNG。
       SubmitRequest submit = Assert.Single(inference.Requests);
       Assert.Equal(JobKind.Recognition, submit.Kind);
       Assert.Equal(JobPriority.Interactive, submit.Priority);
       Assert.Equal("OCR", submit.Pipeline.PipelineId);
       Assert.Empty(submit.Pipeline.Options);
-      Assert.Equal(OcrEngine.RapidOcr, submit.Pipeline.Engine);
+      Assert.Equal(OcrEngine.Windows, submit.Pipeline.Engine);
       Assert.Equal(AnnotationPng, Assert.Single(inference.UploadedContent));
       // 独立提交通道：用户任务级 TaskEngine 不被污染。
       Assert.Null(recognition.TaskEngine);
@@ -2393,7 +2393,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     string root = TemporaryRoot();
     try
     {
-      var inference = new TextLayerRecognitionClient(rapidReady: !attached, windowsReady: !attached);
+      var inference = new TextLayerRecognitionClient(textReady: !attached, windowsReady: !attached);
       var inputs = new FixedCaptureInput();
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
@@ -2838,7 +2838,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   private class TextModeHealthClient(
-      bool rapidReady = true, bool windowsReady = true, bool mineruConfig = false)
+      bool textReady = true, bool windowsReady = true, bool mineruConfig = false)
     : InferenceClientStub
   {
     public override Task<JobRef> SubmitAsync(
@@ -2871,19 +2871,16 @@ public sealed class ScreenshotSessionWorkbenchTests
             {
               Modes =
               [
-                TextMode(Wire.RecognitionModeId.RapidText,
-                  rapidReady
-                    ? Wire.RecognitionModeAvailability.Ready
-                    : Wire.RecognitionModeAvailability.PreparationRequired,
-                  "rapidocr-base"),
                 TextMode(Wire.RecognitionModeId.WindowsText,
                   windowsReady
                     ? Wire.RecognitionModeAvailability.Ready
                     : Wire.RecognitionModeAvailability.Unavailable,
                   null),
                 TextMode(Wire.RecognitionModeId.PaddleText,
-                  Wire.RecognitionModeAvailability.Ready,
-                  null),
+                  textReady
+                    ? Wire.RecognitionModeAvailability.Ready
+                    : Wire.RecognitionModeAvailability.PreparationRequired,
+                  "paddleocr-ort-cpu"),
                 TextMode(Wire.RecognitionModeId.PaddleStructure,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
@@ -2891,9 +2888,6 @@ public sealed class ScreenshotSessionWorkbenchTests
                   Wire.RecognitionModeAvailability.Ready,
                   null),
                 TextMode(Wire.RecognitionModeId.PaddleTable,
-                  Wire.RecognitionModeAvailability.Ready,
-                  null),
-                TextMode(Wire.RecognitionModeId.RapidTable,
                   Wire.RecognitionModeAvailability.Ready,
                   null),
               ],
@@ -2951,17 +2945,13 @@ public sealed class ScreenshotSessionWorkbenchTests
     {
       var (family, pipeline, engine, provisioning, lifecycle) = id switch
       {
-        Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-          Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-          Wire.RecognitionModeProvisioning.BaseRuntime,
-          Wire.RecognitionModeLifecycleKind.Unmanaged),
         Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
           Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
           Wire.RecognitionModeProvisioning.OperatingSystem,
           Wire.RecognitionModeLifecycleKind.Unmanaged),
         Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
           Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-          Wire.RecognitionModeProvisioning.AdvancedComponent,
+          Wire.RecognitionModeProvisioning.BaseRuntime,
           Wire.RecognitionModeLifecycleKind.ModelResidency),
         Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
           Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
@@ -2975,10 +2965,6 @@ public sealed class ScreenshotSessionWorkbenchTests
           Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
           Wire.RecognitionModeProvisioning.AdvancedComponent,
           Wire.RecognitionModeLifecycleKind.ModelResidency),
-        Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-          Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-          Wire.RecognitionModeProvisioning.BaseRuntime,
-          Wire.RecognitionModeLifecycleKind.Unmanaged),
         _ => throw new ArgumentOutOfRangeException(nameof(id)),
       };
       return new Wire.RecognitionModeDescriptor
@@ -3012,8 +2998,8 @@ public sealed class ScreenshotSessionWorkbenchTests
   /// Backend 未声明能力（NotApplicable）。
   /// </summary>
   private sealed class SelectionCatalogClient(
-      bool rapidReady = true, string? defaultMode = null, bool defaultCapability = true)
-    : TextModeHealthClient(rapidReady)
+      bool textReady = true, string? defaultMode = null, bool defaultCapability = true)
+    : TextModeHealthClient(textReady)
   {
     public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
     {
@@ -3044,8 +3030,8 @@ public sealed class ScreenshotSessionWorkbenchTests
 
   /// <summary>Records submissions; outcomes carry real text_blocks geometry.</summary>
   private class TextLayerRecognitionClient(
-    bool rapidReady = true, bool windowsReady = true, bool noText = false)
-    : TextModeHealthClient(rapidReady, windowsReady)
+    bool textReady = true, bool windowsReady = true, bool noText = false)
+    : TextModeHealthClient(textReady, windowsReady)
   {
     public bool OrtTextReady { get; init; }
 
@@ -3459,8 +3445,8 @@ public sealed class ScreenshotSessionWorkbenchTests
       });
   }
 
-  private class SelectionSubmitClient(bool rapidReady = true, bool mineruConfig = false)
-    : TextModeHealthClient(rapidReady, mineruConfig: mineruConfig)
+  private class SelectionSubmitClient(bool textReady = true, bool mineruConfig = false)
+    : TextModeHealthClient(textReady, mineruConfig: mineruConfig)
   {
     protected virtual Dictionary<string, JsonElement> OutcomePayload() => new()
     {
@@ -3533,7 +3519,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       // 目录真实加载且默认能力已声明、已提交 windows_text：文字图标绑定
       // 设置选择的持久默认引擎，表格/公式按 typed 目录分类投影。
       var inference = new SelectionCatalogClient(
-        rapidReady: false, defaultMode: "windows_text");
+        textReady: false, defaultMode: "windows_text");
       var inputs = new SelectionActionCaptureInput(ScreenshotSelectionAction.Edit);
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
@@ -3566,7 +3552,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         entry.DisplayName == "文字识别" && entry.IconKey == "textRecognition" &&
         entry.Hint!.Contains("Windows OCR（系统内置）", StringComparison.Ordinal));
       Assert.Contains(entries, entry =>
-        entry.ModeId == "rapid_table" && entry.DisplayName == "表格识别" &&
+        entry.ModeId == "paddle_table" && entry.DisplayName == "表格识别" &&
         entry.Availability == "ready" && entry.IconKey == "tableRecognition" && entry.Hint is null);
       // #270：独立公式识别已退役，不再出现公式入口。
       Assert.DoesNotContain(entries, entry => entry.IconKey == "formulaRecognition");
@@ -3629,7 +3615,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     // 已提交默认属于文字/文档语义：文字图标携带该 id（复用既有持久默认
     // 解析），控件名称固定“文字识别”、引擎名仅进 Hint；表格按
     // specialized 族 pipeline 分类；availability 原样透传。
-    foreach (string defaultId in new[] { "rapid_text", "mineru_document" })
+    foreach (string defaultId in new[] { "paddle_text", "mineru_document" })
     {
       var settings = new SettingsViewModel(new SelectionCatalogClient(defaultMode: defaultId));
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
@@ -3640,7 +3626,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Equal("ready", text.Availability);
       Assert.Equal("文字识别", text.DisplayName);
       Assert.Contains(SettingsViewModel.DisplayName(defaultId), text.Hint!, StringComparison.Ordinal);
-      Assert.Equal(("rapid_table", "表格识别", "tableRecognition"),
+      Assert.Equal(("paddle_table", "表格识别", "tableRecognition"),
         (entries[1].ModeId, entries[1].DisplayName, entries[1].IconKey));
       // #270：公式入口退役后仅有两类。
       Assert.Equal(2, entries.Length);
@@ -3653,13 +3639,13 @@ public sealed class ScreenshotSessionWorkbenchTests
     // 默认引擎需要准备：文字图标透传 preparation_required（禁用+原因），
     // 不静默改选其他就绪文字引擎；表格不受影响。
     var settings = new SettingsViewModel(
-      new SelectionCatalogClient(rapidReady: false, defaultMode: "rapid_text"));
+      new SelectionCatalogClient(textReady: false, defaultMode: "paddle_text"));
     await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
     ScreenshotRecognitionModeEntry[] entries =
       [.. DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(settings.RecognitionSelection)];
     Assert.Equal(2, entries.Length);
     ScreenshotRecognitionModeEntry text = entries[0];
-    Assert.Equal("rapid_text", text.ModeId);
+    Assert.Equal("paddle_text", text.ModeId);
     Assert.Equal("preparation_required", text.Availability);
     Assert.Equal("runtime_component_missing", text.ReasonCode);
     Assert.All(entries[1..], entry => Assert.Equal("ready", entry.Availability));
@@ -3679,20 +3665,18 @@ public sealed class ScreenshotSessionWorkbenchTests
     Assert.Equal("", text.ModeId);
     Assert.Equal("default_invalid", text.Availability);
     Assert.Equal("文字识别", text.DisplayName);
-    // 表格图标照常按目录分类可用（ready RapidTable 优先于 Paddle）。
-    Assert.Equal("rapid_table", entries[1].ModeId);
+    // 表格图标照常按目录分类可用（表格语义由 paddle_table 承载）。
+    Assert.Equal("paddle_table", entries[1].ModeId);
     Assert.Equal("ready", entries[1].Availability);
   }
 
   [Fact]
-  public async Task SelectionMenuTableEntryPrefersRapidTableByCatalogAvailability()
+  public async Task SelectionMenuTableEntryFollowsCatalogAvailability()
   {
-    // 表格图标路由只消费目录真值：ready RapidTable > ready PaddleTable >
-    // preparation_required RapidTable > preparation_required PaddleTable；
-    // 两者均不可用时透传首个表格模式的目录状态，绝不读取文字默认。
+    // 表格图标路由只消费目录真值（RapidTable 已退役，表格语义统一由
+    // paddle_table 承载）：目录状态原样透传，绝不读取文字默认。
     ScreenshotRecognitionModeEntry TableEntry(
-      Wire.RecognitionModeAvailability rapid,
-      Wire.RecognitionModeAvailability paddle)
+      Wire.RecognitionModeAvailability availability)
     {
       Wire.Health health = new SelectionCatalogClient().GetHealthAsync(
         TestContext.Current.CancellationToken).GetAwaiter().GetResult();
@@ -3703,8 +3687,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       {
         Modes = [.. catalog.Modes.Select(mode => mode.Id switch
         {
-          Wire.RecognitionModeId.RapidTable => mode with { Availability = rapid },
-          Wire.RecognitionModeId.PaddleTable => mode with { Availability = paddle },
+          Wire.RecognitionModeId.PaddleTable => mode with { Availability = availability },
           _ => mode,
         })],
       };
@@ -3716,27 +3699,18 @@ public sealed class ScreenshotSessionWorkbenchTests
             : descriptor with { RecognitionModeCatalog = mutated })],
       });
       return DesktopWorkbenchCommandHandler.BuildSelectionModeEntries(
-        new RecognitionSelectionSnapshot(selection, RuntimeDefaultModeBinding.Bound, "rapid_text"))[1];
+        new RecognitionSelectionSnapshot(selection, RuntimeDefaultModeBinding.Bound, "paddle_text"))[1];
     }
 
-    Assert.Equal(("rapid_table", "ready"),
-      (TableEntry(Wire.RecognitionModeAvailability.Ready, Wire.RecognitionModeAvailability.Ready).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.Ready, Wire.RecognitionModeAvailability.Ready).Availability));
     Assert.Equal(("paddle_table", "ready"),
-      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Ready).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Ready).Availability));
-    Assert.Equal(("rapid_table", "preparation_required"),
-      (TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.Unavailable).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.Unavailable).Availability));
+      (TableEntry(Wire.RecognitionModeAvailability.Ready).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Ready).Availability));
     Assert.Equal(("paddle_table", "preparation_required"),
-      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.PreparationRequired).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.PreparationRequired).Availability));
-    Assert.Equal(("rapid_table", "preparation_required"),
-      (TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.PreparationRequired).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.PreparationRequired, Wire.RecognitionModeAvailability.PreparationRequired).Availability));
-    Assert.Equal(("rapid_table", "unavailable"),
-      (TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Unavailable).ModeId,
-       TableEntry(Wire.RecognitionModeAvailability.Unavailable, Wire.RecognitionModeAvailability.Unavailable).Availability));
+      (TableEntry(Wire.RecognitionModeAvailability.PreparationRequired).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.PreparationRequired).Availability));
+    Assert.Equal(("paddle_table", "unavailable"),
+      (TableEntry(Wire.RecognitionModeAvailability.Unavailable).ModeId,
+       TableEntry(Wire.RecognitionModeAvailability.Unavailable).Availability));
   }
 
   [Fact]
@@ -3862,7 +3836,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
-  [InlineData(ScreenshotRecognitionIntent.Table, "RAPID_TABLE")]
+  [InlineData(ScreenshotRecognitionIntent.Table, "TABLE_RECOGNITION")]
   // #270：Formula 意图已随独立公式识别退役，不再解析到任何管线。
   public async Task ColdScreenshotCategoryResolvesOnlyAfterExplicitPreparation(
     ScreenshotRecognitionIntent intent, string pipeline)
@@ -3923,7 +3897,6 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
-  [InlineData("rapid_text", "OCR", "rapidocr")]
   [InlineData("windows_text", "OCR", "windows")]
   [InlineData("paddle_text", "OCR", "paddleocr")]
   [InlineData("paddle_structure", "PP-StructureV3", null)]
@@ -4016,10 +3989,10 @@ public sealed class ScreenshotSessionWorkbenchTests
     string root = TemporaryRoot();
     try
     {
-      // 模拟菜单渲染后环境变化：rapid_text 变为 preparation_required。
-      var inference = new SelectionSubmitClient(rapidReady: false);
+      // 模拟菜单渲染后环境变化：paddle_text 变为 preparation_required。
+      var inference = new SelectionSubmitClient(textReady: false);
       var inputs = new SelectionActionCaptureInput(
-        ScreenshotSelectionAction.Recognize, "rapid_text");
+        ScreenshotSelectionAction.Recognize, "paddle_text");
       var recognition = new RecognitionViewModel(inference, inputs);
       var settings = new SettingsViewModel(inference);
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);

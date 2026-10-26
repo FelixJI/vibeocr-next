@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,7 +64,12 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
         "<configuration />", encoding="utf-8"
     )
     backend = tmp_path / "backend-release"
-    manifest_path, component_lock = _release(backend, with_base_pack=True)
+    manifest_path, component_lock = _release(
+        backend,
+        with_base_pack=True,
+        with_paddle_packs=True,
+        with_paddle_model_pack=True,
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     identities = tmp_path / "component-identities.json"
     identities.write_text(
@@ -111,6 +117,14 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
         product_root / "runtime/backend/runtime-code/vibeocr/runtime/host/main.py"
     ).is_file()
     assert (product_root / "runtime/installer/vibeocr-runtime-installer.exe").is_file()
+    # 产品只携带一份可执行安装器：backend 目录不再携带 zip/exe 双副本。
+    assert (
+        product_root / "runtime/installer/vibeocr-runtime-installer.exe"
+    ).read_bytes() == b"installer"
+    assert not list(
+        (product_root / "runtime/backend").glob("vibeocr-runtime-installer*")
+    )
+    assert len(list(product_root.rglob("vibeocr-runtime-installer*"))) == 1
     _verify_runtime_code(product_root, "0.7.0")
     assert not list(product_root.rglob("*.pdb"))
     assert not list(product_root.rglob("*.exe.config"))
@@ -169,13 +183,11 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack_sha256"] = [
         hashlib.sha256(b"cuda-full").hexdigest()
     ]
-    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0]["runtime_pack"] = [
+    runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack"] = [
         "vibeocr-runtime-pack-paddlex-future.zip",
         "vibeocr-runtime-pack-mineru-future.zip",
     ]
-    runtime_manifest["profiles"]["win-x64-cpu"]["install_scopes"][0][
-        "runtime_pack_sha256"
-    ] = [
+    runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack_sha256"] = [
         hashlib.sha256(b"paddlex").hexdigest(),
         hashlib.sha256(b"mineru").hexdigest(),
     ]
@@ -192,11 +204,16 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
         "runtime-manifest.json",
         runtime_manifest["runtime_wheel"],
         runtime_manifest["python"]["archive"],
-        runtime_manifest["installer"]["archive"],
         runtime_manifest["profiles"]["win-x64-base"]["lock"],
         runtime_manifest["profiles"]["win-x64-cpu"]["lock"],
         runtime_manifest["profiles"]["win-x64-cu126"]["lock"],
         runtime_manifest["profiles"]["win-x64-cu126"]["install_scopes"][0]["lock"],
+        runtime_manifest["paddle_onnx_environments"]["cpu"]["lock"],
+        runtime_manifest["paddle_onnx_environments"]["cuda"]["lock"],
+        runtime_manifest["paddle_onnx_environments"]["directml"]["lock"],
+        *runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack"],
+        *runtime_manifest["paddle_onnx_environments"]["directml"]["runtime_pack"],
+        runtime_manifest["paddle_model_pack"]["archive"],
         "offline-foundation.part-01.bundle",
         "runtime-code",
     }
@@ -250,17 +267,15 @@ def test_stage_product_layout_validates_every_declared_runtime_pack(
     inputs = _release_inputs(tmp_path)
     manifest_path = inputs["backend_release_dir"] / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    profile = manifest["profiles"]["win-x64-cpu"]
     if owner == "profile":
-        profile["runtime_pack"] = runtime_pack
+        manifest["profiles"]["win-x64-cpu"]["runtime_pack"] = runtime_pack
+        pattern = r"layout.invalid-descriptor: profiles\.win-x64-cpu"
     else:
-        profile["install_scopes"][0]["runtime_pack"] = runtime_pack
+        manifest["paddle_onnx_environments"]["directml"]["runtime_pack"] = runtime_pack
+        pattern = r"layout.invalid-descriptor: paddle_onnx_environments\.directml"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(
-        ProductLayoutError,
-        match=r"layout.invalid-descriptor: profiles\.win-x64-cpu",
-    ):
+    with pytest.raises(ProductLayoutError, match=pattern):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
 
 
@@ -375,30 +390,52 @@ def test_load_product_layout_rejects_safe_but_noncanonical_paths(
 
 
 @pytest.mark.parametrize("present", [True, False])
-def test_stage_requires_declared_rapid_cuda_environment_lock(
-    tmp_path: Path, present: bool
+@pytest.mark.parametrize("device", ["cpu", "directml"])
+def test_stage_requires_declared_paddle_onnx_pack_and_lock(
+    tmp_path: Path, present: bool, device: str
 ) -> None:
     inputs = _release_inputs(tmp_path)
     backend = inputs["backend_release_dir"]
     manifest_path = backend / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    lock = (
-        Path(__file__).parents[2]
-        / "config/runtime/win-x64-rapid-cu13/requirements-win-x64-rapid-cu13.lock"
-    )
-    manifest["rapid_cuda_environment"] = {
-        "lock": lock.name,
-        "sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-    }
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    product = tmp_path / "VibeOCR"
+    binding = manifest["paddle_onnx_environments"][device]
+    lock = backend / binding["lock"]
+    pack = backend / binding["runtime_pack"][0]
     if not present:
+        lock.unlink()
         with pytest.raises(ProductLayoutError, match="closure file is unavailable"):
-            stage_product_layout(product_root=product, **inputs)
+            stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
         return
-    (backend / lock.name).write_bytes(lock.read_bytes())
-    stage_product_layout(product_root=product, **inputs)
-    assert (product / "runtime/backend" / lock.name).read_bytes() == lock.read_bytes()
+    stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+    assert (tmp_path / "VibeOCR/runtime/backend" / pack.name).is_file()
+
+
+@pytest.mark.parametrize("device", ["cpu", "directml"])
+def test_stage_requires_offline_paddle_onnx_pack_binding(
+    tmp_path: Path, device: str
+) -> None:
+    """CPU/DirectML 的离线 wheel 闭包必须随产品：缺失 pack 绑定 fail closed。"""
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["paddle_onnx_environments"][device].pop("runtime_pack")
+    manifest["paddle_onnx_environments"][device].pop("runtime_pack_sha256")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ProductLayoutError, match="runtime_pack must contain"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+def test_stage_requires_bundled_paddle_model_pack(tmp_path: Path) -> None:
+    """默认 Paddle small 检测/识别 + 文档方向模型必须随产品携带。"""
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("paddle_model_pack")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ProductLayoutError, match="paddle_model_pack"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
 
 
 @pytest.mark.parametrize("present", [True, False])
@@ -416,11 +453,9 @@ def test_stage_requires_declared_paddle_environment_lock(
     # sha，使 loader 的 paddle_isolated 校验与历史 manifest 形态一致。
     host_lock = backend / manifest["profiles"]["win-x64-cpu"]["lock"]
     host_lock.write_bytes(CPU_HOST_LOCK.read_bytes())
-    host_sha = hashlib.sha256(host_lock.read_bytes()).hexdigest()
-    manifest["profiles"]["win-x64-cpu"]["sha256"] = host_sha
-    for scope in manifest["profiles"]["win-x64-cpu"]["install_scopes"]:
-        if scope["lock"] == host_lock.name:
-            scope["sha256"] = host_sha
+    manifest["profiles"]["win-x64-cpu"]["sha256"] = hashlib.sha256(
+        host_lock.read_bytes()
+    ).hexdigest()
     legacy_lock = backend / "paddle-cpu.lock"
     legacy_lock.write_text(_legacy_paddle_cpu_lock_text(), encoding="utf-8")
     manifest["profiles"]["win-x64-cpu"]["paddle_environment"] = {
@@ -438,3 +473,34 @@ def test_stage_requires_declared_paddle_environment_lock(
     assert (product / "runtime/backend/paddle-cpu.lock").read_text(
         encoding="utf-8"
     ) == _legacy_paddle_cpu_lock_text()
+
+
+def test_stage_product_layout_still_carries_legacy_zip_bound_installer(
+    tmp_path: Path,
+) -> None:
+    """历史 zip 绑定 manifest 的产品 staging 兼容：backend 携带 zip、提取 exe。"""
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    (backend / manifest["installer"]["executable"]).unlink()
+    legacy_zip = backend / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
+    with zipfile.ZipFile(legacy_zip, mode="w") as archive:
+        archive.writestr(
+            "runtime-installer/vibeocr-runtime-installer.exe", b"installer"
+        )
+    manifest["installer"] = {
+        "archive": legacy_zip.name,
+        "sha256": hashlib.sha256(legacy_zip.read_bytes()).hexdigest(),
+        "executable_path": "runtime-installer/vibeocr-runtime-installer.exe",
+        "executable_sha256": hashlib.sha256(b"installer").hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    product_root = tmp_path / "VibeOCR"
+    stage_product_layout(product_root=product_root, **inputs)
+
+    installer = product_root / "runtime/installer/vibeocr-runtime-installer.exe"
+    assert installer.read_bytes() == b"installer"
+    # 历史产品形态保留：backend 目录携带绑定的 zip（新 manifest 不再产生）。
+    assert (product_root / "runtime/backend" / legacy_zip.name).is_file()

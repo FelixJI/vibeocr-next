@@ -179,9 +179,9 @@
     "engines": [
       {
         "id": "rapidocr",
-        "availability": "ready",
-        "included_in_base": true,
-        "reason_code": null,
+        "availability": "unavailable",
+        "included_in_base": false,
+        "reason_code": "engine_retired",
         "required_component": null
       },
       {
@@ -194,7 +194,7 @@
       {
         "id": "paddleocr",
         "availability": "unavailable",
-        "included_in_base": false,
+        "included_in_base": true,
         "reason_code": "unsupported_platform",
         "required_component": null
       }

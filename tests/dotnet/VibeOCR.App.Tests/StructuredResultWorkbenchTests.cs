@@ -271,7 +271,7 @@ public sealed class StructuredResultWorkbenchTests
     {
       var client = new PlainLinesInferenceClient();
       var inputs = new FixedRecognitionInputs();
-      var recognition = new RecognitionViewModel(client, inputs) { TaskEngine = "rapidocr" };
+      var recognition = new RecognitionViewModel(client, inputs) { TaskEngine = "windows" };
       var clipboard = new RecordingLinesClipboard();
       var settings = new SettingsViewModel(client);
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
@@ -656,7 +656,7 @@ public sealed class StructuredResultWorkbenchTests
     {
       Directory.CreateDirectory(root);
       Client = client;
-      ViewModel = new RecognitionViewModel(client, new FixedRecognitionInputs()) { TaskEngine = "rapidocr" };
+      ViewModel = new RecognitionViewModel(client, new FixedRecognitionInputs()) { TaskEngine = "windows" };
       broker = new WorkbenchResourceBroker(root);
       annotations = new WorkbenchAnnotationStore(root);
       Handler = new DesktopWorkbenchCommandHandler(

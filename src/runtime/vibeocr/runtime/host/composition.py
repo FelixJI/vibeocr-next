@@ -107,11 +107,11 @@ def _paddle_adapter_factory() -> Any:
 def _build_ocr_engine_registry(
     paddle_adapter_factory: Callable[[], Any],
 ) -> OcrEngineRegistry:
-    """构建引擎 registry：rapidocr / windows / paddleocr 全部注册。
+    """构建引擎 registry：windows / paddleocr 全部注册。
 
     目录探测来自实际探针（importability/语言包），未安装的稳定 id 以
     unavailable descriptor 占位。Paddle 以 LazyEngineHandle 注册，保持
-    重依赖导入惰性。
+    重依赖导入惰性；Paddle CPU/DirectML 随基础运行时离线提供。
     """
     from vibeocr.runtime.recognition.native_runtime import (
         prepare_windows_ocr_native_runtime,
@@ -120,7 +120,6 @@ def _build_ocr_engine_registry(
         LazyEngineHandle,
         OcrEngineRegistry,
     )
-    from vibeocr.runtime.recognition.rapidocr_engine import RapidOcrEngine
     from vibeocr.runtime.recognition.windows_ocr_engine import WindowsMediaOcrEngine
     from vibeocr.runtime_contracts.dtos import OcrEngine
 
@@ -139,7 +138,6 @@ def _build_ocr_engine_registry(
 
     return OcrEngineRegistry(
         [
-            RapidOcrEngine(),
             WindowsMediaOcrEngine(),
             LazyEngineHandle(
                 engine_id=OcrEngine.PADDLEOCR,
@@ -163,7 +161,7 @@ def _build_paddle_executor(
     first ``recognize_many`` call (not import) pays the model-load cost.
     When ``engine_registry`` is provided the paddle adapter is wrapped in an
     :class:`OcrEngineRoutingAdapter`: plain-text ``OCR`` jobs route through
-    the engine resolver (default rapidocr, fail closed), while every other
+    the engine resolver (default paddleocr, fail closed), while every other
     Paddle pipeline keeps the direct adapter path.
     """
     from vibeocr.runtime.recognition.ocr_engine_router import OcrEngineRoutingAdapter
@@ -178,15 +176,10 @@ def _build_paddle_executor(
     if engine_registry is not None:
         resolver = engine_resolver or OcrEngineResolver(registry=engine_registry)
 
-        from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
-
-        rapid_table_engine = RapidTableEngine()
-
         def routing_factory() -> Any:
             return OcrEngineRoutingAdapter(
                 fallback_factory=(_paddle_adapter_factory if paddle_fallback else None),
                 resolver=resolver,
-                rapid_table_factory=lambda: rapid_table_engine,
             )
 
         adapter_factory = routing_factory
@@ -296,7 +289,6 @@ def _build_recognition_mode_registry(
     engine_resolver: OcrEngineResolver,
     use_paddle: bool,
     use_mineru: bool,
-    rapid_table_probe: Callable[[], Any] | None = None,
 ) -> RecognitionModeRegistry:
     """把实时 engine/component 探针投影成单一 Recognition Mode 目录。"""
     from vibeocr.runtime.recognition.recognition_modes import (
@@ -325,25 +317,6 @@ def _build_recognition_mode_registry(
             return True
         return _mineru_available()
 
-    def rapid_table_availability() -> ModeAvailability:
-        """RAPID_TABLE：包随 base 闭包；模型就绪即可用（缺模型=待准备）。"""
-        if rapid_table_probe is None:
-            return ModeAvailability(
-                RecognitionModeAvailability.UNAVAILABLE,
-                reason_code="engine_not_installed",
-            )
-        reason = rapid_table_probe()
-        if reason is None:
-            return ModeAvailability(RecognitionModeAvailability.READY)
-        if reason == "model_not_prepared":
-            return ModeAvailability(
-                RecognitionModeAvailability.PREPARATION_REQUIRED,
-                reason_code=reason,
-            )
-        return ModeAvailability(
-            RecognitionModeAvailability.UNAVAILABLE, reason_code=reason
-        )
-
     from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
     from vibeocr.runtime.recognition.pipeline_contracts import (
         RETIRED_RECOGNITION_MODES,
@@ -369,27 +342,17 @@ def _build_recognition_mode_registry(
                     else "paddleocr-ort-cpu"
                 ),
             )
-        if definition.mode_id is RecognitionModeId.RAPID_TABLE:
-            return rapid_table_availability()
         if definition.engine is not None:
             descriptors = {
                 descriptor.engine_id.value: descriptor
                 for descriptor in engine_resolver.probe_descriptors()
             }
             descriptor = descriptors[definition.engine]
-            if definition.mode_id is RecognitionModeId.RAPID_TEXT:
-                if descriptor.availability.value == "ready":
-                    return ModeAvailability(RecognitionModeAvailability.READY)
-                return ModeAvailability(
-                    RecognitionModeAvailability.PREPARATION_REQUIRED,
-                    reason_code=descriptor.reason_code,
-                    required_component="rapidocr-base",
-                )
             required_component = (
                 (
                     os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"]
                     if is_ort_environment()
-                    else f"paddleocr-{suffix}"
+                    else f"paddleocr-ort-{suffix}"
                 )
                 if definition.mode_id is RecognitionModeId.PADDLE_TEXT
                 else None
@@ -489,8 +452,8 @@ def _build_composite_executor(
 
     scheduler = DeviceScheduler(devices=["gpu:0"])
     children: list[tuple[Executor, frozenset]] = []
-    # Base Runtime always owns RECOGNITION through RapidOCR/Windows. Paddle is
-    # only the optional fallback for non-OCR recognition pipelines.
+    # Paddle owns RECOGNITION by default (offline text OCR in the base
+    # runtime); Windows OCR stays an optional engine selection.
     children.append(
         (
             _build_paddle_executor(
@@ -575,14 +538,10 @@ def build_supervisor(
         from vibeocr.runtime.recognition.ocr_engines import OcrEngineResolver
 
         engine_resolver = OcrEngineResolver(registry=engine_registry)
-        from vibeocr.runtime.recognition.rapidtable_engine import RapidTableEngine
-
-        mode_rapid_table_engine = RapidTableEngine()
         recognition_mode_registry = _build_recognition_mode_registry(
             engine_resolver=engine_resolver,
             use_paddle=want_paddle,
             use_mineru=want_mineru,
-            rapid_table_probe=mode_rapid_table_engine.probe_reason,
         )
         exec_impl = _build_composite_executor(
             use_paddle=want_paddle,

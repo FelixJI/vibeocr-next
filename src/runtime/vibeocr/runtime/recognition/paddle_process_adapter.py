@@ -58,7 +58,8 @@ def paddle_python() -> Path | None:
 
 class PaddleProcessAdapter:
     engine_id = OcrEngine.PADDLEOCR
-    included_in_base = False
+    # Paddle CPU/DirectML 随基础运行时离线发布；CUDA 环境与大型模型按需准备。
+    included_in_base = True
 
     def __init__(self, python: Path) -> None:
         self.python = python
@@ -96,7 +97,7 @@ class PaddleProcessAdapter:
             availability=EngineAvailability.READY
             if available
             else EngineAvailability.PREPARATION_REQUIRED,
-            included_in_base=False,
+            included_in_base=True,
             reason_code=None if available else REASON_ENGINE_NOT_INSTALLED,
             required_component=None if available else PADDLE_REQUIRED_COMPONENT,
         )

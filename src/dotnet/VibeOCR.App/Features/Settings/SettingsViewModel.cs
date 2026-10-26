@@ -1025,7 +1025,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     internal static string DisplayName(OcrEngine engine) => engine switch
     {
-        OcrEngine.RapidOcr => "RapidOCR",
+        // RapidOcr 已退役：仅历史记录诊断展示；目录不再提供该引擎。
+        OcrEngine.RapidOcr => "RapidOCR（已退役）",
         OcrEngine.Windows => "Windows OCR",
         OcrEngine.PaddleOcr => "PaddleOCR",
         _ => engine.ToString(),
@@ -1033,7 +1034,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     internal static string DisplayName(string mode) => mode switch
     {
-        "rapid_text" => "快速 OCR（RapidOCR）",
+        // Rapid 模式已退役：仅历史配置/结果诊断展示，不再提供可执行分支。
+        "rapid_text" => "快速 OCR（RapidOCR，已退役）",
         "windows_text" => "Windows OCR（系统内置）",
         "paddle_text" => "通用 OCR（PaddleOCR）",
         "paddle_structure" => "文档结构识别（PP-StructureV3）",
@@ -1042,7 +1044,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         "mineru_document" => "深度文档解析（MinerU）",
         "paddle_table" => "表格结构识别（PaddleOCR）",
         "paddle_formula" => "数学公式识别（PaddleOCR，已退役）",
-        "rapid_table" => "表格结构识别（RapidTable）",
+        "rapid_table" => "表格结构识别（RapidTable，已退役）",
         _ => mode,
     };
 

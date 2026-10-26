@@ -2346,8 +2346,8 @@ describe("AppShell", () => {
           taskEngine: null,
           engines: [
             {
-              engine: "rapidocr",
-              displayName: "RapidOCR",
+              engine: "paddleocr",
+              displayName: "PaddleOCR",
               selected: false,
               isTaskOverride: false,
               availability: "ready",
@@ -2462,7 +2462,7 @@ describe("AppShell", () => {
     ).toBeVisible();
     unmount();
   });
-  it("groups rapid_table with table modes and persists its device option", async () => {
+  it("groups paddle_table with table modes and persists its device option", async () => {
     window.location.hash = "#/recognition";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -2472,28 +2472,28 @@ describe("AppShell", () => {
     };
     const engines = [
       {
-        engine: "rapid_table",
-        displayName: "表格结构识别（RapidTable）",
-        selected: true,
-        isTaskOverride: true,
+        engine: "paddle_text",
+        displayName: "通用 OCR（PaddleOCR）",
+        selected: false,
+        isTaskOverride: false,
         availability: "ready",
         requiresDownload: false,
-        lifecycleKind: "unmanaged",
-        supportsPreload: false,
-        supportsTtl: false,
-        supportsPinning: false,
-        supportsRelease: false,
-        supportedOptions: ["device"],
-        options: { device: "cpu" },
+        supportedOptions: [],
       },
       {
         engine: "paddle_table",
         displayName: "表格结构识别（PaddleOCR）",
-        selected: false,
-        isTaskOverride: false,
-        availability: "preparation_required",
+        selected: true,
+        isTaskOverride: true,
+        availability: "ready",
         requiresDownload: false,
-        supportedOptions: [],
+        lifecycleKind: "model_residency",
+        supportsPreload: true,
+        supportsTtl: true,
+        supportsPinning: true,
+        supportsRelease: true,
+        supportedOptions: ["device"],
+        options: { device: "cpu" },
       },
     ];
     const viewState: AppViewState = {
@@ -2506,7 +2506,7 @@ describe("AppShell", () => {
         recognition: {
           isBusy: false,
           statusCode: "recognition.ready",
-          taskEngine: "rapid_table",
+          taskEngine: "paddle_table",
           engines,
         },
       },
@@ -2524,23 +2524,22 @@ describe("AppShell", () => {
     const grouped = [...tableGroup!.children].map(
       (option) => (option as HTMLOptionElement).value,
     );
-    expect(grouped).toEqual(["rapid_table", "paddle_table"]);
-    expect(
-      screen.getByText("该模式不提供模型预热、TTL、固定驻留或释放控制。"),
-    ).toBeVisible();
-    const deviceSelect = screen.getByLabelText("运行设备");
-    expect(deviceSelect).toHaveValue("cpu");
-    await user.selectOptions(deviceSelect, "cuda");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "recognition.setDeviceOption",
-      modeId: "rapid_table",
-      device: "cuda",
-    });
+    expect(grouped).toEqual(["paddle_table"]);
     expect(
       screen.getByText(
-        "GPU 需要 NVIDIA 显卡及 GPU 运行环境；不可用时会提示错误。",
+        "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
       ),
     ).toBeVisible();
+    // 识别参数编辑器承载 device 选项；保存走 recognition.setOptions。
+    const deviceSelect = await screen.findByLabelText("运行设备");
+    expect(deviceSelect).toHaveValue("cpu");
+    await user.selectOptions(deviceSelect, "cuda");
+    await user.click(screen.getByRole("button", { name: "保存参数" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "recognition.setOptions",
+      modeId: "paddle_table",
+      options: { device: "cuda" },
+    });
     unmount();
   });
   it("shows runtime package counts and bounded text logs across remount without installing", async () => {
@@ -2722,6 +2721,10 @@ describe("AppShell", () => {
     const { unmount, rerender } = await renderLoaded(
       <App viewState={viewState} actions={actions} />,
     );
+    // 高级区（环境清单/来源/清理）默认折叠：先展开再操作原全部路径。
+    await user.click(
+      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
+    );
     expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "检查可清理项" }));
     expect(actions.run).toHaveBeenCalledWith({
@@ -2809,7 +2812,7 @@ describe("AppShell", () => {
               lastInstallFailure: {
                 phase: "failed",
                 environmentRevision: 1,
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 reasonCode: "network_error",
                 nextAction: "check_source_and_retry",
                 detail: "下载源连接失败。",
@@ -2821,8 +2824,8 @@ describe("AppShell", () => {
           activeEnvironmentId: null,
           environmentRecipes: [
             {
-              id: "rapidocr-cpu",
-              displayName: "RapidOCR · CPU",
+              id: "paddleocr-ort-cpu",
+              displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
               targetDevice: "cpu",
@@ -2849,11 +2852,11 @@ describe("AppShell", () => {
             planId: "plan-1",
             environmentId: "env-1",
             environmentRevision: 1,
-            recipe: "rapidocr-cpu",
-            requestedRecipe: "rapidocr-cpu",
+            recipe: "paddleocr-ort-cpu",
+            requestedRecipe: "paddleocr-ort-cpu",
             sourceIds: ["tuna-pypi"],
             requestedSourceIds: null,
-            dependencies: ["rapidocr==3.6.0"],
+            dependencies: ["paddleocr==3.2.0"],
           },
           environmentStatus: "已预览锁定配方。",
         },
@@ -2862,12 +2865,15 @@ describe("AppShell", () => {
     const { unmount } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
-    // 高级区默认折叠：先展开再操作原编辑器全部路径。
+    // 高级区默认折叠：环境行/移除/取消安装在折叠区内，先展开再操作。
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
+    );
     // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
     // 也不伪造就绪。
     expect(
-      screen.getByText("默认运行环境：RapidOCR · CPU（尚未启动）"),
+      screen.getByText("默认运行环境：PaddleOCR ONNX · CPU（尚未启动）"),
     ).toBeVisible();
     expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
@@ -2884,7 +2890,7 @@ describe("AppShell", () => {
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标文档（失败后重新准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标文档（失败后重新准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     expect(
@@ -2894,7 +2900,7 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.previewEnvironmentInstall",
       environmentId: "env-1",
-      recipe: "rapidocr-cpu",
+      recipe: "paddleocr-ort-cpu",
     });
     await user.click(screen.getByRole("button", { name: "移除环境" }));
     expect(actions.run).not.toHaveBeenCalledWith({
@@ -2933,23 +2939,23 @@ describe("AppShell", () => {
     };
     const recipes = [
       {
-        id: "rapidocr-cpu",
-        displayName: "RapidOCR · CPU",
+        id: "paddleocr-ort-cpu",
+        displayName: "PaddleOCR ONNX · CPU",
         configuredRecognitionTypes: ["text"],
         accelerator: "cpu",
         targetDevice: "cpu",
       },
       {
-        id: "rapidocr+mineru-cpu",
-        displayName: "RapidOCR + MinerU · CPU",
+        id: "mineru-cpu",
+        displayName: "MinerU · CPU",
         configuredRecognitionTypes: ["text", "document"],
         accelerator: "cpu",
         targetDevice: "cpu",
       },
       {
-        id: "rapidocr+mineru-cuda",
-        displayName: "RapidOCR + MinerU · NVIDIA CUDA",
-        configuredRecognitionTypes: ["text", "document"],
+        id: "paddleocr-ort-cuda",
+        displayName: "PaddleOCR ONNX · NVIDIA CUDA",
+        configuredRecognitionTypes: ["text"],
         accelerator: "nvidia_cuda",
         targetDevice: "cuda",
       },
@@ -2996,13 +3002,16 @@ describe("AppShell", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "rapidocr-cpu",
+        recipe: "paddleocr-ort-cpu",
       }),
     );
-    expect(screen.getByText(/GPU 状态（Runtime 探测）：不支持/)).toBeVisible();
+    expect(
+      screen.getAllByText(/NVIDIA 驱动（Runtime 探测[^：]*）：不满足要求/)
+        .length,
+    ).toBeGreaterThan(0);
     // 目录分组来自 Runtime 投影，无前端臆造组合。
     expect(
-      screen.getByText(/目标配置：RapidOCR · CPU（文字识别，设备 cpu/),
+      screen.getByText(/目标配置：PaddleOCR ONNX · CPU（文字识别，设备 cpu/),
     ).toBeVisible();
     await rerender(
       <App
@@ -3014,7 +3023,7 @@ describe("AppShell", () => {
             settings: {
               ...settingsBase,
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: "env-1",
                 selectedEnvironmentRevision: 3,
                 selectionReason: "deterministic_id_order",
@@ -3025,7 +3034,7 @@ describe("AppShell", () => {
       />,
     );
     expect(
-      screen.getByText(/可直接复用环境「文档环境」（修订 3，按稳定顺序选中）/),
+      screen.getByText(/可直接复用环境「文档环境」；切换前不安装任何内容/),
     ).toBeVisible();
     // AC8：切换语义如实说明（重新启动并验证；运行中任务时被拒绝）。
     expect(
@@ -3058,7 +3067,7 @@ describe("AppShell", () => {
                 },
               ],
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: "env-1",
                 selectedEnvironmentRevision: 3,
                 selectionReason: "active_environment",
@@ -3074,30 +3083,32 @@ describe("AppShell", () => {
     expect(
       screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
     ).not.toBeInTheDocument();
-    // 切换用途：旧选择失效 + 新配方的只读查询。
+    // 切换引擎分区：MinerU 卡显式接管主导权后触发新配方的只读查询；
+    // 计划失效只在选择（后端/设备）变化时触发（见下方 CUDA 选择）。
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "mineru-cpu",
+      }),
+    );
+    // 真正不支持的 GPU 后端明确禁用并给出原因，不发起查询；后端切换即
+    // 选择变化，同步失效旧计划。
     await user.selectOptions(
-      screen.getByLabelText("识别组件"),
-      "rapidocr+mineru",
+      screen.getByLabelText("Paddle 推理后端"),
+      "nvidia_cuda",
     );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "rapidocr+mineru-cpu",
-      }),
-    );
-    // 真正不支持的 GPU 配方明确禁用并给出原因，不发起查询。
-    await user.selectOptions(screen.getByLabelText("加速方式"), "nvidia_cuda");
     expect(
       screen.getByText(
-        /不支持：NVIDIA 驱动 527\.00 低于 CUDA 12\.x 下限（需 ≥ 528\.33）；该配置当前不可选。/,
+        /不支持：当前 NVIDIA 驱动不满足安装要求；该配置当前不可选。/,
       ),
     ).toBeVisible();
     expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.findCompatibleEnvironment",
-      recipe: "rapidocr+mineru-cuda",
+      recipe: "paddleocr-ort-cuda",
     });
     unmount();
   });
@@ -3114,8 +3125,8 @@ describe("AppShell", () => {
       activeEnvironmentId: null,
       environmentRecipes: [
         {
-          id: "rapidocr-cpu",
-          displayName: "RapidOCR · CPU",
+          id: "paddleocr-ort-cpu",
+          displayName: "PaddleOCR ONNX · CPU",
           configuredRecognitionTypes: ["text"],
           accelerator: "cpu",
           targetDevice: "cpu",
@@ -3153,7 +3164,7 @@ describe("AppShell", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "rapidocr-cpu",
+        recipe: "paddleocr-ort-cpu",
       }),
     );
     // 查询无命中：只读结果如实呈现“没有可直接复用”，准备按钮可用。
@@ -3167,7 +3178,7 @@ describe("AppShell", () => {
             settings: {
               ...settingsBase,
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: null,
                 selectedEnvironmentRevision: null,
                 selectionReason: null,
@@ -3179,11 +3190,11 @@ describe("AppShell", () => {
     );
     expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
     expect(screen.getByText(/自动准备目标环境并预览依赖/)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "准备此配置" }));
+    await user.click(screen.getByRole("button", { name: "准备此后端" }));
     // 自动命名沿目录展示名；创建成功后对同一环境真实预览（跟随配置）。
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.prepareEnvironment",
-      recipe: "rapidocr-cpu",
+      recipe: "paddleocr-ort-cpu",
     });
     await rerender(
       <App
@@ -3197,7 +3208,7 @@ describe("AppShell", () => {
               environments: [
                 {
                   id: "env-new",
-                  name: "RapidOCR · CPU",
+                  name: "PaddleOCR ONNX · CPU",
                   revision: 1,
                   kind: "venv",
                   status: "empty",
@@ -3210,7 +3221,7 @@ describe("AppShell", () => {
                 },
               ],
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: null,
                 selectedEnvironmentRevision: null,
                 selectionReason: null,
@@ -3222,7 +3233,7 @@ describe("AppShell", () => {
     );
     expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.createEnvironment",
-      name: "RapidOCR · CPU",
+      name: "PaddleOCR ONNX · CPU",
     });
     // 计划回显在推荐区：新增依赖如实列出，由用户确认安装。
     await rerender(
@@ -3237,7 +3248,7 @@ describe("AppShell", () => {
               environments: [
                 {
                   id: "env-new",
-                  name: "RapidOCR · CPU",
+                  name: "PaddleOCR ONNX · CPU",
                   revision: 1,
                   kind: "venv",
                   status: "empty",
@@ -3250,7 +3261,7 @@ describe("AppShell", () => {
                 },
               ],
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: null,
                 selectedEnvironmentRevision: null,
                 selectionReason: null,
@@ -3259,11 +3270,11 @@ describe("AppShell", () => {
                 planId: "p-9",
                 environmentId: "env-new",
                 environmentRevision: 1,
-                recipe: "rapidocr-cpu",
-                requestedRecipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
+                requestedRecipe: "paddleocr-ort-cpu",
                 sourceIds: ["tuna-pypi"],
                 requestedSourceIds: null,
-                dependencies: ["rapidocr==3.9.2"],
+                dependencies: ["paddleocr==3.2.0"],
               },
             },
           },
@@ -3272,16 +3283,16 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标RapidOCR · CPU（空环境准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标PaddleOCR ONNX · CPU（空环境准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
     expect(
       screen.getByText(/依赖安装只写入此目标环境，不会停止当前识别服务/),
     ).toBeVisible();
-    // 同一待准备未确认前不再提供重复 create：指向既有高级确认。
+    // 同一待准备未确认前不再提供重复准备：计划卡接管确认入口。
     expect(
-      screen.queryByRole("button", { name: "准备此配置" }),
+      screen.queryByRole("button", { name: "准备此后端" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/高级：环境与依赖/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
@@ -3289,8 +3300,8 @@ describe("AppShell", () => {
       type: "settings.confirmEnvironmentInstall",
       planId: "p-9",
     });
-    // 选择失效后仍可新建：切到另一用途后重新可以准备（不重复旧待准备）。
-    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
+    // 选择失效后仍可新建：接管 MinerU 分区后重新可以准备（不重复旧待准备）。
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
     await rerender(
       <App
         actions={actions}
@@ -3303,7 +3314,7 @@ describe("AppShell", () => {
               environments: [
                 {
                   id: "env-new",
-                  name: "RapidOCR · CPU",
+                  name: "PaddleOCR ONNX · CPU",
                   revision: 1,
                   kind: "venv",
                   status: "empty",
@@ -3333,7 +3344,7 @@ describe("AppShell", () => {
       }),
     );
     expect(
-      screen.getByRole("button", { name: "准备此配置" }),
+      screen.getByRole("button", { name: "安装 MinerU 本地引擎" }),
     ).toBeInTheDocument();
     unmount();
   });
@@ -3365,8 +3376,8 @@ describe("AppShell", () => {
       activeEnvironmentId: null,
       environmentRecipes: [
         {
-          id: "rapidocr-cpu",
-          displayName: "RapidOCR · CPU",
+          id: "paddleocr-ort-cpu",
+          displayName: "PaddleOCR ONNX · CPU",
           configuredRecognitionTypes: ["text"],
           accelerator: "cpu",
           targetDevice: "cpu",
@@ -3402,7 +3413,7 @@ describe("AppShell", () => {
       <App actions={actions} viewState={viewState} />,
     );
     await waitFor(() =>
-      expect(countQueries("rapidocr-cpu")).toBeGreaterThanOrEqual(1),
+      expect(countQueries("paddleocr-ort-cpu")).toBeGreaterThanOrEqual(1),
     );
     await rerender(
       <App
@@ -3413,7 +3424,7 @@ describe("AppShell", () => {
             settings: {
               ...settingsBase,
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: null,
               },
             },
@@ -3421,18 +3432,19 @@ describe("AppShell", () => {
         }}
       />,
     );
-    // 原生 Select 会派发同值 change；不应废弃已查询的默认配置。
-    fireEvent.change(screen.getByLabelText("识别组件"), {
-      target: { value: "rapidocr" },
+    // 原生 Select 会派发同值 change；不应废弃已查询的默认配置
+    //（Paddle 后端与 MinerU 设备两个下拉都保持当前值）。
+    fireEvent.change(screen.getByLabelText("Paddle 推理后端"), {
+      target: { value: "cpu" },
     });
-    fireEvent.change(screen.getByLabelText("加速方式"), {
+    fireEvent.change(screen.getByLabelText("MinerU 安装设备"), {
       target: { value: "cpu" },
     });
     expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
-    expect(countQueries("rapidocr-cpu")).toBe(1);
-    expect(screen.getByRole("button", { name: "准备此配置" })).toBeVisible();
+    expect(countQueries("paddleocr-ort-cpu")).toBe(1);
+    expect(screen.getByRole("button", { name: "准备此后端" })).toBeVisible();
     // 查询失败（宿主未回传结果）+ busy/状态推送多次重渲染：同一配方不得
     // 自动重发（每次查询都会冻结一个 Installer 子进程）。
     await rerender(
@@ -3465,14 +3477,14 @@ describe("AppShell", () => {
     await rerender(
       <App actions={actions} viewState={{ ...viewState, revision: 33 }} />,
     );
-    expect(countQueries("rapidocr-cpu")).toBe(1);
+    expect(countQueries("paddleocr-ort-cpu")).toBe(1);
     // 失败后如实提示并允许显式重试。
     expect(screen.getByText(/兼容性查询未完成/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "重新查询兼容环境" }));
-    expect(countQueries("rapidocr-cpu")).toBe(2);
-    // 迟到的旧选择结果不覆盖新选择：切到文档解析后，旧 rapidocr-cpu 结果
-    // 只按配方 id 绑定，不冒充当前选择的查询结果。
-    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
+    expect(countQueries("paddleocr-ort-cpu")).toBe(2);
+    // 迟到的旧选择结果不冒充新分区的查询结果：接管 MinerU 分区后，旧
+    // paddleocr-ort-cpu 结果仍按配方绑定在 Paddle 分区，不进入 MinerU 卡。
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
     await rerender(
       <App
         actions={actions}
@@ -3483,7 +3495,7 @@ describe("AppShell", () => {
             settings: {
               ...settingsBase,
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: "env-1",
                 selectedEnvironmentRevision: 3,
                 selectionReason: "deterministic_id_order",
@@ -3493,17 +3505,21 @@ describe("AppShell", () => {
         }}
       />,
     );
+    const mineruSection = () =>
+      screen.getByRole("region", { name: "MinerU 本地引擎" });
     expect(
-      screen.queryByText(/可直接复用环境「文档环境」/),
+      within(mineruSection()).queryByText(/可直接复用环境「文档环境」/),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
+      within(mineruSection()).queryByRole("button", {
+        name: "切换到此环境并启动验证",
+      }),
     ).not.toBeInTheDocument();
+    expect(screen.getByText(/可直接复用环境「文档环境」/)).toBeInTheDocument();
     await waitFor(() =>
       expect(countQueries("mineru-cpu")).toBeGreaterThanOrEqual(1),
     );
-    // 切回文字识别：旧结果（未选中任何环境）如实呈现“没有可直接复用”。
-    await user.selectOptions(screen.getByLabelText("识别组件"), "rapidocr");
+    // 切回 Paddle 分区：结果槽被宿主清空后重新只读查询，旧结果状态如实呈现。
     await rerender(
       <App
         actions={actions}
@@ -3514,7 +3530,28 @@ describe("AppShell", () => {
             settings: {
               ...settingsBase,
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "mineru-cpu",
+                selectedEnvironmentId: null,
+                selectedEnvironmentRevision: null,
+                selectionReason: null,
+              },
+            },
+          },
+        }}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
+    await rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 36,
+          features: {
+            settings: {
+              ...settingsBase,
+              environmentCompatibility: {
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: null,
                 selectedEnvironmentRevision: null,
                 selectionReason: null,
@@ -3525,7 +3562,7 @@ describe("AppShell", () => {
       />,
     );
     expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
-    const installedBase = countQueries("rapidocr-cpu");
+    const installedBase = countQueries("paddleocr-ort-cpu");
     // 安装进行中：宿主已清空兼容结果且环境修订推进，但 busy 时不补发。
     await rerender(
       <App
@@ -3543,8 +3580,12 @@ describe("AppShell", () => {
         }}
       />,
     );
-    expect(countQueries("rapidocr-cpu")).toBe(installedBase);
-    expect(screen.getByText(/正在查询可复用环境/)).toBeVisible();
+    expect(countQueries("paddleocr-ort-cpu")).toBe(installedBase);
+    expect(
+      within(
+        screen.getByRole("region", { name: "PaddleOCR 推理后端" }),
+      ).getByText(/正在查询可复用环境/),
+    ).toBeVisible();
     // 安装成功结束：兼容结果仍被宿主清空且环境状态已变——自动补发一次新
     // 查询（成功安装后需要新的兼容查询），不永久卡在“查询未完成”；
     // 重复状态推送也不再多发。
@@ -3564,7 +3605,7 @@ describe("AppShell", () => {
       />,
     );
     await waitFor(() =>
-      expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1),
+      expect(countQueries("paddleocr-ort-cpu")).toBe(installedBase + 1),
     );
     await rerender(
       <App
@@ -3596,7 +3637,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    expect(countQueries("rapidocr-cpu")).toBe(installedBase + 1);
+    expect(countQueries("paddleocr-ort-cpu")).toBe(installedBase + 1);
     // 新结果绑定后如实指向修订 4 的可复用环境，不再卡在“查询未完成”。
     await rerender(
       <App
@@ -3609,7 +3650,7 @@ describe("AppShell", () => {
               ...settingsBase,
               environments: [{ ...settingsBase.environments[0], revision: 4 }],
               environmentCompatibility: {
-                recipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
                 selectedEnvironmentId: "env-1",
                 selectedEnvironmentRevision: 4,
                 selectionReason: "deterministic_id_order",
@@ -3619,9 +3660,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    expect(
-      screen.getByText(/可直接复用环境「文档环境」（修订 4，按稳定顺序选中）/),
-    ).toBeVisible();
+    expect(screen.getByText(/可直接复用环境「文档环境」/)).toBeVisible();
     expect(screen.queryByText(/兼容性查询未完成/)).not.toBeInTheDocument();
     unmount();
   });
@@ -3638,8 +3677,8 @@ describe("AppShell", () => {
           environments: [],
           environmentRecipes: [
             {
-              id: "rapidocr-cpu",
-              displayName: "RapidOCR · CPU",
+              id: "paddleocr-ort-cpu",
+              displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
               targetDevice: "cpu",
@@ -3654,10 +3693,10 @@ describe("AppShell", () => {
       planId: "plan-Y",
       environmentId: "Y",
       environmentRevision: 1,
-      recipe: "rapidocr-cpu",
-      requestedRecipe: "rapidocr-cpu",
+      recipe: "paddleocr-ort-cpu",
+      requestedRecipe: "paddleocr-ort-cpu",
       sourceIds: ["tuna-pypi"],
-      dependencies: ["rapidocr==3.9.2"],
+      dependencies: ["paddleocr==3.2.0"],
     };
     const environment = {
       id: "X",
@@ -3690,7 +3729,7 @@ describe("AppShell", () => {
       const withResult = {
         ...settings,
         environmentCompatibility: {
-          recipe: "rapidocr-cpu",
+          recipe: "paddleocr-ort-cpu",
           selectedEnvironmentId: null,
         },
       };
@@ -3831,7 +3870,7 @@ describe("AppShell", () => {
         ...settings,
         environments: [environment],
         environmentCompatibility: {
-          recipe: "rapidocr-cpu",
+          recipe: "paddleocr-ort-cpu",
           selectedEnvironmentId: null,
         },
       };
@@ -3845,7 +3884,7 @@ describe("AppShell", () => {
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.previewEnvironmentInstall",
         environmentId: "X",
-        recipe: "rapidocr-cpu",
+        recipe: "paddleocr-ort-cpu",
       });
       await rerender(
         <App
@@ -3858,10 +3897,10 @@ describe("AppShell", () => {
           }}
         />,
       );
-      await user.click(screen.getByRole("button", { name: "准备此配置" }));
+      await user.click(screen.getByRole("button", { name: "准备此后端" }));
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.prepareEnvironment",
-        recipe: "rapidocr-cpu",
+        recipe: "paddleocr-ort-cpu",
       });
       await rerender(
         <App
@@ -3915,7 +3954,7 @@ describe("AppShell", () => {
                 environments: [{ ...environment, id: "Y" }],
                 environmentPlan: {
                   ...plan,
-                  dependencies: ["rapidocr==3.9.2", torch, torchvision],
+                  dependencies: ["paddleocr==3.2.0", torch, torchvision],
                 },
               },
             },
@@ -3923,14 +3962,14 @@ describe("AppShell", () => {
         />,
       );
       expect(
-        screen.getByText(/主要组件：rapidocr==3.9.2、torch、torchvision；/),
+        screen.getByText(/主要组件：paddleocr==3.2.0、torch、torchvision；/),
       ).toBeVisible();
       expect(
-        screen.getByText(`${"rapidocr==3.9.2"}、${torch}、${torchvision}`),
+        screen.getByText(`${"paddleocr==3.2.0"}、${torch}、${torchvision}`),
       ).not.toBeVisible();
       await user.click(screen.getByText("完整依赖与来源明细（只读）"));
       expect(
-        screen.getByText(`${"rapidocr==3.9.2"}、${torch}、${torchvision}`),
+        screen.getByText(`${"paddleocr==3.2.0"}、${torch}、${torchvision}`),
       ).toBeVisible();
       unmount();
     });
@@ -3956,7 +3995,7 @@ describe("AppShell", () => {
           environments: [
             {
               id: "env-1",
-              name: "RapidOCR",
+              name: "PaddleOCR ONNX · CPU",
               revision: 2,
               kind: "venv",
               status: "installed",
@@ -3970,8 +4009,8 @@ describe("AppShell", () => {
           ],
           environmentRecipes: [
             {
-              id: "rapidocr-cpu",
-              displayName: "RapidOCR · CPU",
+              id: "paddleocr-ort-cpu",
+              displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
               targetDevice: "cpu",
@@ -3991,10 +4030,10 @@ describe("AppShell", () => {
             environmentId: "env-1",
             environmentRevision: 2,
             requestedRecipe: "mineru-cpu",
-            recipe: "rapidocr+mineru-cpu",
+            recipe: "mineru-cpu",
             sourceIds: ["tuna-pypi"],
             requestedSourceIds: null,
-            dependencies: ["rapidocr==3.9.2", "mineru==4.0.10"],
+            dependencies: ["paddleocr==3.2.0", "mineru==4.0.10"],
           },
         },
       },
@@ -4003,17 +4042,30 @@ describe("AppShell", () => {
       <App actions={actions} viewState={viewState} />,
     );
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
-    // 重进页面从宿主 requestedRecipe 恢复选择，Runtime 实际合并配方仍可确认。
-    expect(screen.getByLabelText("识别组件")).toHaveValue("mineru");
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
-    await user.selectOptions(screen.getByLabelText("识别组件"), "rapidocr");
+    // 重进页面从宿主 requestedRecipe 恢复主导分区（MinerU），Runtime 实际
+    // 合并配方仍可在该分区确认。
+    expect(screen.getByLabelText("MinerU 安装设备")).toHaveValue("cpu");
+    const mineruPlanCard = () =>
+      screen.getByRole("region", { name: "MinerU 本地引擎" });
     expect(
-      screen.queryByRole("button", { name: "确认安装依赖" }),
+      within(mineruPlanCard()).getByRole("button", { name: "确认安装依赖" }),
+    ).toBeVisible();
+    // 接管 Paddle 分区：计划卡仍按配方绑定在 MinerU 分区，不在 Paddle 卡
+    // 冒充；分区切换本身不作废待确认计划（失效只由选择变化触发）。
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
+    expect(
+      within(
+        screen.getByRole("region", { name: "PaddleOCR 推理后端" }),
+      ).queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText("识别组件"), "mineru");
-    expect(actions.run).toHaveBeenCalledWith({
+    expect(
+      within(mineruPlanCard()).getByRole("button", { name: "确认安装依赖" }),
+    ).toBeInTheDocument();
+    expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
+    // 回到 MinerU 分区后新计划仍可确认。
+    await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
     const settingsState = viewState.features.settings as Record<
       string,
       unknown
@@ -4037,7 +4089,7 @@ describe("AppShell", () => {
         }}
       />,
     );
-    expect(screen.getByText(/计划：rapidocr\+mineru-cpu/)).toBeVisible();
+    expect(screen.getByText(/计划：mineru-cpu/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.confirmEnvironmentInstall",
@@ -4128,8 +4180,8 @@ describe("AppShell", () => {
           activeEnvironmentId: "env-a",
           environmentRecipes: [
             {
-              id: "rapidocr-cpu",
-              displayName: "RapidOCR · CPU",
+              id: "paddleocr-ort-cpu",
+              displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
               targetDevice: "cpu",
@@ -4212,6 +4264,10 @@ describe("AppShell", () => {
     };
     const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
+    );
+    // 来源设置收进高级区：先展开再验证目录/默认值与保存路径。
+    await user.click(
+      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
     );
     // 来源收敛为一个简单设置：目录展示名直出，默认值跟随 Runtime 解析；
     // 不再提供“来源配置/全局默认来源”两处重复入口与 override 三层。
@@ -4329,8 +4385,8 @@ describe("AppShell", () => {
           activeEnvironmentId: null,
           environmentRecipes: [
             {
-              id: "rapidocr-cpu",
-              displayName: "RapidOCR · CPU",
+              id: "paddleocr-ort-cpu",
+              displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
               targetDevice: "cpu",
@@ -4367,7 +4423,7 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.previewEnvironmentInstall",
       environmentId: "env-1",
-      recipe: "rapidocr-cpu",
+      recipe: "paddleocr-ort-cpu",
     });
 
     // 计划只展示实际使用的下载来源与资产分类。
@@ -4385,11 +4441,11 @@ describe("AppShell", () => {
                 planId: "plan-follow",
                 environmentId: "env-1",
                 environmentRevision: 1,
-                recipe: "rapidocr-cpu",
-                requestedRecipe: "rapidocr-cpu",
+                recipe: "paddleocr-ort-cpu",
+                requestedRecipe: "paddleocr-ort-cpu",
                 sourceIds: ["tuna-pypi"],
                 requestedSourceIds: null,
-                dependencies: ["rapidocr==3.9.2"],
+                dependencies: ["paddleocr==3.2.0"],
                 sources: [
                   {
                     id: "tuna-pypi",
@@ -4414,7 +4470,7 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：rapidocr-cpu · 目标空白（空环境准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标空白（空环境准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
     await user.click(screen.getByText("完整依赖与来源明细（只读）"));
@@ -4615,13 +4671,13 @@ describe("AppShell", () => {
           features: [],
           defaultRecognitionMode: {
             supported: true,
-            modeId: "rapid_text",
+            modeId: "paddle_text",
             stored: true,
           },
           recognitionModes: [
             {
-              id: "rapid_text",
-              displayName: "快速 OCR（RapidOCR）",
+              id: "paddle_text",
+              displayName: "通用 OCR（PaddleOCR）",
               availability: "ready",
             },
             {
@@ -4630,8 +4686,8 @@ describe("AppShell", () => {
               availability: "ready",
             },
             {
-              id: "paddle_text",
-              displayName: "通用 OCR（PaddleOCR）",
+              id: "paddle_structure",
+              displayName: "文档结构识别（PP-StructureV3）",
               availability: "preparation_required",
             },
           ],
@@ -4645,11 +4701,11 @@ describe("AppShell", () => {
     );
 
     const selector = screen.getByLabelText("默认识别类型");
-    expect(selector).toHaveValue("rapid_text");
+    expect(selector).toHaveValue("paddle_text");
     // 未就绪模式不可选为默认，且可用性如实标注。
     expect(
       screen.getByRole("option", {
-        name: /通用 OCR（PaddleOCR）（需准备依赖）/,
+        name: /文档结构识别（PP-StructureV3）（需准备依赖）/,
       }),
     ).toBeDisabled();
     await user.selectOptions(selector, "windows_text");
@@ -4702,7 +4758,7 @@ describe("AppShell", () => {
     expect(
       screen.getByText(/当前识别服务未声明 ocr\.default-recognition-mode\.v1/),
     ).toBeVisible();
-    expect(screen.getByText(/按快速 OCR（RapidOCR）执行/)).toBeVisible();
+    expect(screen.getByText(/按通用 OCR（PaddleOCR）执行/)).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "保存默认识别模式" }),
     ).not.toBeInTheDocument();
@@ -4741,8 +4797,8 @@ describe("AppShell", () => {
           },
           recognitionModes: [
             {
-              id: "rapid_text",
-              displayName: "快速 OCR（RapidOCR）",
+              id: "paddle_text",
+              displayName: "通用 OCR（PaddleOCR）",
               availability: "ready",
             },
           ],
@@ -4763,13 +4819,13 @@ describe("AppShell", () => {
     ).toBeVisible();
     const selector = screen.getByLabelText("默认识别类型");
     expect(selector).toHaveValue("");
-    await user.selectOptions(selector, "rapid_text");
+    await user.selectOptions(selector, "paddle_text");
     // 修复项选择后 selector 真实回显新值，不被无效旧值强制回空白。
-    expect(selector).toHaveValue("rapid_text");
+    expect(selector).toHaveValue("paddle_text");
     await user.click(screen.getByRole("button", { name: "保存默认识别模式" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setDefaultRecognitionMode",
-      mode: "rapid_text",
+      mode: "paddle_text",
     });
     unmount();
   });
@@ -4849,8 +4905,8 @@ describe("AppShell", () => {
                 recognitionModes: hasCatalog
                   ? [
                       {
-                        id: "rapid_text",
-                        displayName: "快速 OCR（RapidOCR）",
+                        id: "paddle_text",
+                        displayName: "通用 OCR（PaddleOCR）",
                         availability: "ready",
                       },
                     ]
@@ -4871,14 +4927,14 @@ describe("AppShell", () => {
       if (hasCatalog) {
         await user.selectOptions(
           screen.getByLabelText("默认识别类型"),
-          "rapid_text",
+          "paddle_text",
         );
         await user.click(
           screen.getByRole("button", { name: "保存默认识别模式" }),
         );
         expect(actions.run).toHaveBeenCalledWith({
           type: "settings.setDefaultRecognitionMode",
-          mode: "rapid_text",
+          mode: "paddle_text",
         });
       } else {
         expect(

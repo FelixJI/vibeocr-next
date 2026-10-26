@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parents[4]
 V2 = ROOT / "contracts/runtime/python/vibeocr/runtime_contracts"
 
 EXPECTED_MODES = {
-    "rapid_text": ("text", "OCR", "rapidocr", "base_runtime", "unmanaged"),
     "windows_text": (
         "text",
         "OCR",
@@ -39,7 +38,7 @@ EXPECTED_MODES = {
         "text",
         "OCR",
         "paddleocr",
-        "advanced_component",
+        "base_runtime",
         "model_residency",
     ),
     "paddle_structure": (
@@ -63,16 +62,9 @@ EXPECTED_MODES = {
         "advanced_component",
         "model_residency",
     ),
-    "rapid_table": (
-        "specialized",
-        "RAPID_TABLE",
-        None,
-        "base_runtime",
-        "unmanaged",
-    ),
 }
 
-# #270：已退役模式。wire 枚举与历史 id 解析保留（识别旧请求并拒绝），
+# 已退役模式：wire 枚举与历史 id 解析保留（识别旧请求/旧记录并拒绝），
 # 公开目录、生命周期与执行能力不再暴露。
 RETIRED_MODES = {
     "paddle_document_vl": ("document", "PaddleOCR-VL", None, "advanced_component"),
@@ -82,16 +74,21 @@ RETIRED_MODES = {
         None,
         "advanced_component",
     ),
+    "rapid_text": ("text", "OCR", "rapidocr", "base_runtime"),
+    "rapid_table": ("specialized", "RAPID_TABLE", None, "base_runtime"),
 }
 
+# RapidOCR/RapidTable 全面退役：rapid_text/rapid_table 保留为退休枚举值
+# 仅供历史记录反序列化；提交/目录/生命周期 fail closed，旧持久化默认
+# 只在设置 seam 按别名迁移到 paddle_text/paddle_table。
+RETIRED_RAPID_MODES = ("rapid_text", "rapid_table")
+
 EXPECTED_LIFECYCLE = {
-    "rapid_text": ("unmanaged", False, False, False, False),
     "windows_text": ("unmanaged", False, False, False, False),
     "paddle_text": ("model_residency", True, True, True, True),
     "paddle_structure": ("model_residency", True, True, True, True),
     "mineru_document": ("process_keep_alive", True, True, False, True),
     "paddle_table": ("model_residency", True, True, True, True),
-    "rapid_table": ("unmanaged", False, False, False, False),
 }
 
 
@@ -197,7 +194,7 @@ def test_paddle_local_models_policy_is_strict_and_request_only():
 def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambiguity() -> (
     None
 ):
-    # #270：枚举仍包含退役 id（顺序固定，历史读取/拒绝用），目录另排除。
+    # 已退役 id 保留在枚举中（顺序固定，历史读取/拒绝用），目录另排除。
     assert tuple(mode.value for mode in get_all_recognition_modes()) == (
         "rapid_text",
         "windows_text",
@@ -214,7 +211,7 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
     }
 
     expected_names = {
-        "rapid_text": "快速 OCR（RapidOCR）",
+        "rapid_text": "快速 OCR（RapidOCR，已退役）",
         "windows_text": "Windows OCR（系统内置）",
         "paddle_text": "通用 OCR（PaddleOCR）",
         "paddle_structure": "文档结构识别（PP-StructureV3）",
@@ -222,7 +219,7 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
         "mineru_document": "深度文档解析（MinerU）",
         "paddle_table": "表格结构识别（PaddleOCR）",
         "paddle_formula": "数学公式识别（PaddleOCR，已退役）",
-        "rapid_table": "表格结构识别（RapidTable）",
+        "rapid_table": "表格结构识别（RapidTable，已退役）",
     }
     for mode in RecognitionMode:
         definition = get_recognition_mode_definition(mode)
@@ -247,9 +244,11 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
             assert not definition.lifecycle.supports_release
             assert definition.supported_options == ()
 
-    assert get_recognition_mode_definition(
-        RecognitionMode.RAPID_TEXT
-    ).supported_options == ("device",)
+    # 退休 rapid 模式仅保留历史身份，不再携带可执行选项/生命周期。
+    assert (
+        get_recognition_mode_definition(RecognitionMode.RAPID_TEXT).supported_options
+        == ()
+    )
     assert (
         get_recognition_mode_definition(RecognitionMode.WINDOWS_TEXT).supported_options
         == ()
@@ -393,10 +392,18 @@ def test_retired_modes_resolve_for_diagnostics_but_reject_execution() -> None:
             lambda: registry.resolve_execution_fields(
                 pipeline_id=definition.pipeline_id, engine=definition.engine
             ),
-            lambda: resolve_default_recognition_mode(
-                {"default_recognition_mode": mode_id},
-                registry,
-                require_available=True,
+            # 旧 rapid 默认值例外：设置 seam 按别名安全迁移到 Paddle，
+            # 不走 RECOGNITION_MODE_RETIRED（见 rapid 迁移专项测试）。
+            *(
+                (
+                    lambda mode_id=mode_id: resolve_default_recognition_mode(
+                        {"default_recognition_mode": mode_id},
+                        registry,
+                        require_available=True,
+                    ),
+                )
+                if mode_id not in RETIRED_RAPID_MODES
+                else ()
             ),
         ):
             with pytest.raises(RecognitionModeError) as error:
@@ -407,8 +414,9 @@ def test_retired_modes_resolve_for_diagnostics_but_reject_execution() -> None:
                 "choose_available_recognition_mode"
             )
 
-    # 读配置不崩溃：退役默认值在不校验可用性时可解析回显（GET settings），
-    # 缺省默认仍为 rapid_text。
+    # 读配置不崩溃：非 rapid 退役默认值在不校验可用性时可解析回显（GET
+    # settings）；旧 rapid 默认值在设置 seam 按别名迁移到 Paddle，缺省
+    # 默认已是 paddle_text。
     assert (
         resolve_default_recognition_mode(
             {"default_recognition_mode": "paddle_formula"},
@@ -419,5 +427,13 @@ def test_retired_modes_resolve_for_diagnostics_but_reject_execution() -> None:
     )
     assert (
         resolve_default_recognition_mode({}, registry, require_available=True)
-        is RecognitionMode.RAPID_TEXT
+        is RecognitionMode.PADDLE_TEXT
+    )
+    assert (
+        resolve_default_recognition_mode(
+            {"default_recognition_mode": "rapid_text"},
+            registry,
+            require_available=False,
+        )
+        is RecognitionMode.PADDLE_TEXT
     )

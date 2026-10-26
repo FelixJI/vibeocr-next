@@ -605,7 +605,7 @@ test("screenshot session mode exports applied inpaint pixels for explicit recogn
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
-      modeId: "rapid_text",
+      modeId: "paddle_text",
       resourceUri: recognized.resourceUri,
       sessionId: "inpaint-session-e2e",
       revision: 1,

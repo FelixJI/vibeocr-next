@@ -3104,7 +3104,7 @@
       },
       "ExecutionPipelineId": {
         "type": "string",
-        "description": "Stable legacy execution-pipeline identifiers. Products present RecognitionModeId values instead of exposing this enum directly. RAPID_TABLE is the lightweight RapidTable table-recognition pipeline carried by the base runtime.",
+        "description": "Stable legacy execution-pipeline identifiers. Products present RecognitionModeId values instead of exposing this enum directly. RAPID_TABLE is the retired RapidTable pipeline: the value stays deserializable for historical records, new inference requests are rejected fail closed, and table structure recognition is served by TABLE_RECOGNITION (paddle_table).",
         "enum": [
           "OCR",
           "PP-StructureV3",
@@ -3133,7 +3133,7 @@
       },
       "RecognitionModeId": {
         "type": "string",
-        "description": "Stable user-semantic recognition modes. Each mode maps to one legacy execution pipeline and, for plain text OCR, one explicit OCR engine.",
+        "description": "Stable user-semantic recognition modes. Each mode maps to one legacy execution pipeline and, for plain text OCR, one explicit OCR engine. rapid_text and rapid_table are retired with the RapidOCR engine family: the values stay deserializable for historical records and are rejected fail closed on execution; persisted defaults carrying them are migrated to paddle_text/paddle_table at the settings seam.",
         "enum": [
           "rapid_text",
           "windows_text",
@@ -3356,7 +3356,7 @@
       },
       "OcrEngineId": {
         "type": "string",
-        "description": "Stable engine ids for the plain-text OCR pipeline. Unknown values MUST fail closed with OCR_ENGINE_UNKNOWN and MUST NOT silently fall back to another engine.",
+        "description": "Stable engine ids for the plain-text OCR pipeline. Unknown values MUST fail closed with OCR_ENGINE_UNKNOWN and MUST NOT silently fall back to another engine. The backend default for an omitted selection is paddleocr. rapidocr is retired: the value stays deserializable for historical records, the engine catalog reports it unavailable with reason engine_retired, and submissions are rejected fail closed with OCR_ENGINE_UNAVAILABLE.",
         "enum": [
           "rapidocr",
           "windows",
@@ -4031,7 +4031,7 @@
       },
       "PipelineSelection": {
         "type": "object",
-        "description": "Frozen user-semantic pipeline selection for one logical job. The optional engine field selects the plain-text OCR engine and is only valid when pipeline_id is 'OCR': the server MUST reject it for any other pipeline with OCR_ENGINE_NOT_VALID_FOR_PIPELINE instead of silently ignoring it, and MUST fail closed on unknown values with OCR_ENGINE_UNKNOWN. Clients SHOULD always send the user's current selection; when the field is omitted the server applies its own default engine (rapidocr). The optional mineru block carries the typed MinerU 4 configuration protected by ocr.mineru-config.v1: it is only valid for pipeline_id=MinerU with kind=mineru_parse, and the server MUST reject requests that combine it with non-empty legacy options or the engine field using VALIDATION_ERROR instead of silently dropping either side (server-side conformance case). Clients MUST omit the block entirely when the runtime does not advertise the capability; omitting it keeps the legacy payload shape unchanged.",
+        "description": "Frozen user-semantic pipeline selection for one logical job. The optional engine field selects the plain-text OCR engine and is only valid when pipeline_id is 'OCR': the server MUST reject it for any other pipeline with OCR_ENGINE_NOT_VALID_FOR_PIPELINE instead of silently ignoring it, and MUST fail closed on unknown values with OCR_ENGINE_UNKNOWN. Clients SHOULD always send the user's current selection; when the field is omitted the server applies its own default engine (paddleocr). The optional mineru block carries the typed MinerU 4 configuration protected by ocr.mineru-config.v1: it is only valid for pipeline_id=MinerU with kind=mineru_parse, and the server MUST reject requests that combine it with non-empty legacy options or the engine field using VALIDATION_ERROR instead of silently dropping either side (server-side conformance case). Clients MUST omit the block entirely when the runtime does not advertise the capability; omitting it keeps the legacy payload shape unchanged.",
         "required": [
           "pipeline_id",
           "options_version",
@@ -5749,7 +5749,7 @@
           },
           "extra": {
             "type": "object",
-            "description": "When ocr.mineru-remote-api.v1 is advertised, mineru_connection selects the instance-wide MinerU connection: an object with mode local or remote, api_url (HTTP(S) service root, optional reverse-proxy path; no userinfo, query or fragment), and optional api_key (Bearer credential without CR/LF). Omission selects local mode. Remote mode requires a nonempty api_url and uses the complete MinerU 4 V1 parsing API without local MinerU dependencies or models. Clients MUST NOT send mineru_connection to runtimes lacking this capability. Invalid settings MUST be rejected without replacing the prior configuration. Active jobs MUST retain their original connection; servers may reject connection changes while jobs are active. Remote failures MUST NOT fall back to local execution. Credentials MUST NOT appear in logs or diagnostics or be forwarded to another origin. Remote service processes and model residency are owned by the remote deployment, not by local preload/release or TTL settings. When ocr.default-recognition-mode.v1 is advertised, default_recognition_mode persists the instance-wide default recognition mode id (ocr.recognition-modes.v1 catalog id). A missing key keeps the legacy default rapid_text; GET /v2/settings echoes the resolved committed default so clients never copy the fallback rule. Every write validates the value type and catalog id, and availability only when the default changes; a stored value that can no longer be parsed or resolved is echoed verbatim so clients can surface and repair it. Invalid snapshots are rejected without replacing prior settings. Clients MUST NOT send default_recognition_mode to runtimes lacking this capability. Explicit per-job mode overrides keep precedence, submitted jobs keep their submit-time parameters, and saving the default never installs components or changes any environment. Other extra keys retain their existing semantics.",
+            "description": "When ocr.mineru-remote-api.v1 is advertised, mineru_connection selects the instance-wide MinerU connection: an object with mode local or remote, api_url (HTTP(S) service root, optional reverse-proxy path; no userinfo, query or fragment), and optional api_key (Bearer credential without CR/LF). Omission selects local mode. Remote mode requires a nonempty api_url and uses the complete MinerU 4 V1 parsing API without local MinerU dependencies or models. Clients MUST NOT send mineru_connection to runtimes lacking this capability. Invalid settings MUST be rejected without replacing the prior configuration. Active jobs MUST retain their original connection; servers may reject connection changes while jobs are active. Remote failures MUST NOT fall back to local execution. Credentials MUST NOT appear in logs or diagnostics or be forwarded to another origin. Remote service processes and model residency are owned by the remote deployment, not by local preload/release or TTL settings. When ocr.default-recognition-mode.v1 is advertised, default_recognition_mode persists the instance-wide default recognition mode id (ocr.recognition-modes.v1 catalog id). A missing key keeps the legacy default paddle_text; persisted rapid_text/rapid_table values are migrated to paddle_text/paddle_table at the settings seam; GET /v2/settings echoes the resolved committed default so clients never copy the fallback rule. Every write validates the value type and catalog id, and availability only when the default changes; a stored value that can no longer be parsed or resolved is echoed verbatim so clients can surface and repair it. Invalid snapshots are rejected without replacing prior settings. Clients MUST NOT send default_recognition_mode to runtimes lacking this capability. Explicit per-job mode overrides keep precedence, submitted jobs keep their submit-time parameters, and saving the default never installs components or changes any environment. Other extra keys retain their existing semantics.",
             "additionalProperties": true
           },
           "download_source_ids": {

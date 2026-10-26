@@ -85,7 +85,8 @@ class PaddlePipelineAdapter:
     _settings: SettingsSnapshot = field(default_factory=SettingsSnapshot)
 
     engine_id = OcrEngine.PADDLEOCR
-    included_in_base = False
+    # Paddle CPU/DirectML 随基础运行时离线发布；CUDA 环境与大型模型按需准备。
+    included_in_base = True
 
     # ------------------------------------------------------------------
     # Engine contract
@@ -107,7 +108,7 @@ class PaddlePipelineAdapter:
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.PREPARATION_REQUIRED,
-                included_in_base=False,
+                included_in_base=True,
                 reason_code=REASON_ENGINE_NOT_INSTALLED,
                 required_component=PADDLE_REQUIRED_COMPONENT,
             )
@@ -117,7 +118,7 @@ class PaddlePipelineAdapter:
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.PREPARATION_REQUIRED,
-                included_in_base=False,
+                included_in_base=True,
                 reason_code=REASON_ENGINE_NOT_INSTALLED,
                 required_component=PADDLE_REQUIRED_COMPONENT,
             )
@@ -126,13 +127,13 @@ class PaddlePipelineAdapter:
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.UNAVAILABLE,
-                included_in_base=False,
+                included_in_base=True,
                 reason_code=REASON_ENGINE_INIT_FAILED,
             )
         return EngineDescriptor(
             engine_id=OcrEngine.PADDLEOCR,
             availability=EngineAvailability.READY,
-            included_in_base=False,
+            included_in_base=True,
         )
 
     # ------------------------------------------------------------------

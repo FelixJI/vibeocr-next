@@ -116,6 +116,48 @@ describe("result image text overlay", () => {
     expect(line).toHaveStyle({ width: "250px", height: "25px" });
   });
 
+  it("悬停行框上报行下标，受侧高亮下标时对应行加亮", () => {
+    const lines: IndexedResultLine[] = [
+      {
+        index: 0,
+        line: { text: "第一行", score: 0.9, bbox: [0, 0, 500, 100] },
+      },
+      {
+        index: 3,
+        line: { text: "第四行", score: 0.9, bbox: [0, 200, 500, 300] },
+      },
+    ];
+    const onHoverLine = vi.fn();
+    const view = render(
+      <ResultImageTextOverlay
+        imageUrl="https://resource.vibeocr/result-image.png"
+        lines={lines}
+        onHoverLine={onHoverLine}
+      />,
+    );
+    loadWithSize(
+      screen.getByRole("img", { name: "识别结果参考图" }) as HTMLImageElement,
+      1000,
+      600,
+    );
+    // 图上悬停 → 上报宿主行下标（右侧结果行同步加亮）。
+    fireEvent.mouseEnter(screen.getByLabelText("第四行"));
+    expect(onHoverLine).toHaveBeenCalledWith(3);
+    fireEvent.mouseLeave(screen.getByLabelText("第四行"));
+    expect(onHoverLine).toHaveBeenCalledWith(undefined);
+    // 右侧悬停回传的 highlightIndex 同步加亮图上对应行框。
+    view.rerender(
+      <ResultImageTextOverlay
+        imageUrl="https://resource.vibeocr/result-image.png"
+        lines={lines}
+        onHoverLine={onHoverLine}
+        highlightIndex={3}
+      />,
+    );
+    expect(screen.getByLabelText("第四行")).toHaveClass("hovered");
+    expect(screen.getByLabelText("第一行")).not.toHaveClass("hovered");
+  });
+
   it("starts editing via Enter on a focused line and keeps drafts on failure", async () => {
     const lines: IndexedResultLine[] = [
       {

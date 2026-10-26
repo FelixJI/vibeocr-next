@@ -662,7 +662,7 @@ async def test_put_settings_uses_recognition_mode_lifecycle_registry(
             "/v2/settings", json=payload("MinerU", "mineru_document")
         )
         mismatch = await http.put("/v2/settings", json=payload("MinerU", "paddle_text"))
-        unmanaged = await http.put("/v2/settings", json=payload("OCR", "rapid_text"))
+        unmanaged = await http.put("/v2/settings", json=payload("OCR", "windows_text"))
 
     assert mineru.status_code == 200, mineru.text
     pipeline = mineru.json()["residency"]["pipelines"][0]
@@ -1524,7 +1524,8 @@ async def test_remote_mineru_preload_reports_actionable_configuration_error(
         ("paddleocr", "tiny", "cpu", 200),
         ("paddleocr", "small", "directml", 200),
         ("paddleocr", "medium", "cuda", 200),
-        (None, "small", "cpu", 400),
+        (None, "small", "cpu", 200),
+        ("windows", "small", "cpu", 400),
         ("rapidocr", "small", "cpu", 400),
         ("rapidocr", None, "directml", 400),
         ("unknown", "small", "cpu", 400),

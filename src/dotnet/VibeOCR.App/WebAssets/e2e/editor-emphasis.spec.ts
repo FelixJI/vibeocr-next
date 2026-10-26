@@ -1340,11 +1340,12 @@ test("G3 watermark opacity typed then drawn directly controls the first text pix
   for (let y = 400; y < 500; y += 1)
     for (let x = 100; x < 180; x += 1) probes.push([x, y]);
   const glyph = await pixels(page, png, probes);
+  // 默认红色 #e02020 以 37% 不透明度叠白底，G/B 约为 172。
   expect(
-    Math.abs(Math.min(...glyph.map((pixel) => pixel[1]!)) - 212),
+    Math.abs(Math.min(...glyph.map((pixel) => pixel[1]!)) - 172),
   ).toBeLessThanOrEqual(2);
   expect(
-    Math.abs(Math.min(...glyph.map((pixel) => pixel[2]!)) - 180),
+    Math.abs(Math.min(...glyph.map((pixel) => pixel[2]!)) - 172),
   ).toBeLessThanOrEqual(2);
   await action(page, "保存工程");
   await expect.poll(() => projects.length).toBe(1);

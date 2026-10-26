@@ -65,7 +65,6 @@ public sealed class PdfViewModel(
   private RecognitionModeOption? _recognitionMode;
   private string? _taskModeId;
   private PaddleModeOptions? _options;
-  private RapidDeviceOptions? _deviceOptions;
   private PdfIssueKind? _issue;
 
   public event PropertyChangedEventHandler? PropertyChanged;
@@ -96,11 +95,9 @@ public sealed class PdfViewModel(
   public void SetRecognitionMode(
       RecognitionModeOption? mode,
       PaddleModeOptions? options = null,
-      string? taskModeId = null,
-      RapidDeviceOptions? deviceOptions = null)
+      string? taskModeId = null)
   {
     _options = mode is null ? null : options;
-    _deviceOptions = mode is null ? null : deviceOptions;
     _recognitionMode = mode;
     _taskModeId = taskModeId;
   }
@@ -547,8 +544,6 @@ public sealed class PdfViewModel(
       var merged = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
       if (_options is not null)
         foreach (var pair in _options.ToWire(_recognitionMode!)) merged.Add(pair.Key, pair.Value);
-      if (_deviceOptions is not null)
-        foreach (var pair in _deviceOptions.ToWire(_recognitionMode!)) merged.Add(pair.Key, pair.Value);
       options = merged.Count == 0 ? null : merged;
     }
     catch (ArgumentException error)

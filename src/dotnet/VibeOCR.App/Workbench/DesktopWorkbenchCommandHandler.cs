@@ -220,8 +220,10 @@ public sealed class DesktopWorkbenchCommandHandler :
         _ => throw new InvalidOperationException("Unsupported desktop workbench command."),
       };
       state = Pdf.NormalizeOutcome(state);
-      if (command is SetModeDeviceCommand)
+      if (command is SetRecognitionOptionsCommand)
       {
+        // 保存的模式选项同时驱动批量/PDF 的引擎投影；与旧 Rapid 设备选项
+        // 链一样，保存后同步发布两个页面的状态。
         operations.Publish(Batch.CurrentBatchState());
         await Pdf.RefreshCatalogStateAsync(cancellationToken);
       }
@@ -252,7 +254,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
         code, WorkbenchProblemCategory.Unavailable, true, messageKey));
     }
-    catch (ArgumentException) when (command is SetRecognitionOptionsCommand or SetModeDeviceCommand)
+    catch (ArgumentException) when (command is SetRecognitionOptionsCommand)
     {
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
         "recognition_options_invalid", WorkbenchProblemCategory.InvalidCommand, false,

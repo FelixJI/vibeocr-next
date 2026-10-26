@@ -380,7 +380,6 @@ public sealed partial class App : Application
 
         // --shell-only: run the UI shell without launching the Supervisor. Useful
         // for inspecting layout / XAML without paying the dev cold-import cost.
-        // Ordinary launches prepare only after an explicit computing demand.
         if (options.ShellOnly)
         {
             diagnostics.UpdateSupervisor(new SupervisorHealth(
@@ -390,15 +389,13 @@ public sealed partial class App : Application
                 "外壳模式：未拉起后端（--shell-only）。"));
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
-        else if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) &&
-                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-first-frame-e2e" &&
-                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "capture-replacement-e2e" &&
-                 (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") != "managed-environment-e2e" ||
-                  Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE") == "restart"))
+        else if (ShouldStartBackgroundRuntime(
+                     Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
+                     Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE")))
         {
-            // Existing startup/failure/maintenance smoke contracts explicitly
-            // request startup. Ordinary Portable launch never creates demand.
-            _ = StartSelfTestRuntimeAsync();
+            // 首次普通启动在首窗后后台准备随包默认环境（Paddle CPU），首个
+            // 计算需求经同一 Coordinator 共享该尝试；关闭由 shutdown 令牌取消。
+            _ = StartBackgroundRuntimeAsync();
         }
 
         // Perf-gate smoke mode: exit shortly after first window so cold-start
@@ -979,10 +976,21 @@ public sealed partial class App : Application
         (_runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."))
             .EnsureReadyAsync(cancellationToken);
 
-    private async Task StartSelfTestRuntimeAsync()
+    /// <summary>首次启动策略：普通启动在首窗后后台就绪；截图首帧/替换与
+    /// managed-environment 安装阶段保持按需启动，restart 阶段恢复启动。</summary>
+    internal static bool ShouldStartBackgroundRuntime(
+        string? selfTestSmoke, string? managedEnvironmentPhase)
+    {
+        if (string.IsNullOrWhiteSpace(selfTestSmoke)) return true;
+        if (selfTestSmoke is "capture-first-frame-e2e" or "capture-replacement-e2e") return false;
+        if (selfTestSmoke == "managed-environment-e2e") return managedEnvironmentPhase == "restart";
+        return true;
+    }
+
+    private async Task StartBackgroundRuntimeAsync()
     {
         try { await EnsureRuntimeReadyAsync(_applicationShutdown.Token); }
-        catch (Exception error) { AppLog.Warn($"Selftest runtime startup ended: {error.GetType().Name}"); }
+        catch (Exception error) { AppLog.Warn($"Background runtime startup ended: {error.GetType().Name}"); }
     }
 
 

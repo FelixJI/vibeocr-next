@@ -71,14 +71,14 @@ public sealed class DefaultModeRequestContractTests
     var fake = Client("windows_text");
     await using TestHarness harness = await Harness(fake);
     await harness.Handler.ExecuteAsync(
-      new SetTaskEngineCommand("rapid_text"), TestContext.Current.CancellationToken);
+      new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken);
     await harness.Handler.ExecuteAsync(
       new SelectRecognitionImageCommand(), TestContext.Current.CancellationToken);
     await fake.WaitSubmittedAsync();
 
     PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
     Assert.Equal("OCR", pipeline.PipelineId);
-    Assert.Equal(OcrEngine.RapidOcr, pipeline.Engine);
+    Assert.Equal(OcrEngine.PaddleOcr, pipeline.Engine);
     Assert.Equal(0, fake.UpdateCalls);
     Assert.Equal("windows_text", harness.Settings.DefaultRecognitionMode?.ModeId);
   }
@@ -149,11 +149,11 @@ public sealed class DefaultModeRequestContractTests
     Assert.Empty(fake.Submissions);
 
     WorkbenchCommandOutcome saved = await harness.Handler.ExecuteAsync(
-      new SetDefaultRecognitionModeCommand("rapid_text"),
+      new SetDefaultRecognitionModeCommand("paddle_text"),
       TestContext.Current.CancellationToken);
     Assert.Null(saved.Error);
     Assert.Equal(
-      "rapid_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+      "paddle_text", harness.Settings.DefaultRecognitionMode?.ModeId);
     Assert.Empty(fake.Submissions);
 
     inputGate.TrySetResult();
@@ -162,7 +162,7 @@ public sealed class DefaultModeRequestContractTests
     Assert.Equal("OCR", pipeline.PipelineId);
     Assert.Equal(OcrEngine.Windows, pipeline.Engine);
     Assert.Equal(
-      "rapid_text", harness.Settings.DefaultRecognitionMode?.ModeId);
+      "paddle_text", harness.Settings.DefaultRecognitionMode?.ModeId);
   }
 
   [Fact]
@@ -187,9 +187,9 @@ public sealed class DefaultModeRequestContractTests
   }
 
   [Fact]
-  public async Task RapidTableDeviceOptionSubmitsOnPdfWire()
+  public async Task PaddleTableDeviceOptionSubmitsOnPdfWire()
   {
-    // PDF 入口与单次/批量共享同一 device 冻结链：显式 rapid_table 任务携带
+    // PDF 入口与单次/批量共享同一选项冻结链：显式 paddle_table 任务携带
     // options.device=cuda，不静默改 CPU。
     var fake = new RecordingClient
     {
@@ -210,12 +210,12 @@ public sealed class DefaultModeRequestContractTests
       if (state is PdfWorkbenchState pdfState) deviceState = pdfState;
     };
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetModeDeviceCommand("rapid_table", "cuda"),
+      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
       TestContext.Current.CancellationToken)).Error);
-    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "rapid_table")
+    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
       .Options!["device"].GetString());
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetPdfTaskEngineCommand("rapid_table"),
+      new SetPdfTaskEngineCommand("paddle_table"),
       TestContext.Current.CancellationToken)).Error);
     WorkbenchCommandOutcome opened = await harness.Handler.ExecuteAsync(
       new OpenDroppedPdfCommand("scan.pdf"), TestContext.Current.CancellationToken);
@@ -227,7 +227,7 @@ public sealed class DefaultModeRequestContractTests
     await fake.WaitSubmittedAsync();
 
     SubmitRequest request = Assert.Single(fake.Submissions);
-    Assert.Equal("RAPID_TABLE", request.Pipeline.PipelineId);
+    Assert.Equal("TABLE_RECOGNITION", request.Pipeline.PipelineId);
     Assert.Null(request.Pipeline.Engine);
     Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
   }
@@ -237,7 +237,7 @@ public sealed class DefaultModeRequestContractTests
   {
     // 冷启动竞态回归：未 attach 时不得以空快照冻结提交参数；输入先采集，
     // 权威目录与已提交默认加载后首个请求必须携带默认模式（旧实现提交
-    // engine=null，Runtime 落回 RapidOCR）。
+    // engine=null，Runtime 落回 PaddleOCR）。
     var deferred = new DeferredInferenceClient();
     deferred.MarkStartupPending();
     RecordingClient fake = Client("windows_text");
@@ -378,7 +378,7 @@ public sealed class DefaultModeRequestContractTests
       // 目录可加载后，用户在输入等待期间另选本次 override。
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
       WorkbenchCommandOutcome overridden = await handler.ExecuteAsync(
-        new SetTaskEngineCommand("rapid_text"),
+        new SetTaskEngineCommand("paddle_text"),
         TestContext.Current.CancellationToken);
       Assert.Null(overridden.Error);
 
@@ -387,7 +387,7 @@ public sealed class DefaultModeRequestContractTests
       PipelineSelection pipeline = Assert.Single(fake.Submissions).Pipeline;
       // 已启动任务按已提交默认提交；新选择只影响下一次。
       Assert.Equal(OcrEngine.Windows, pipeline.Engine);
-      Assert.Equal("rapid_text", recognition.TaskEngine);
+      Assert.Equal("paddle_text", recognition.TaskEngine);
     }
     finally
     {
@@ -413,11 +413,11 @@ public sealed class DefaultModeRequestContractTests
   }
 
   [Fact]
-  public async Task EnvironmentSwitchingCancelsBatchAndPdfSubmitWithoutRapidFallback()
+  public async Task EnvironmentSwitchingCancelsBatchAndPdfSubmitWithoutDefaultFallback()
   {
     // 真实 handler 提交路径回归：环境切换窗口（StartEnvironmentOperation
     // 置位的同一状态）内启动批量/PDF，提交必须取消而非以空快照提交
-    // （旧实现 engine=null 落回 RapidOCR）。
+    // （旧实现 engine=null 落回 Runtime 缺省引擎）。
     var fake = Client("windows_text");
     string root = Path.Combine(
       Path.GetTempPath(), $"vibeocr-default-switch-{Guid.NewGuid():N}");
@@ -485,7 +485,7 @@ public sealed class DefaultModeRequestContractTests
   {
     // F8 回归：提交点目录读取（Deferred 等待 attach 后的 health/settings
     // 读取）被代际失效（切换路径同款 ClearSelection）丢弃时，旧实现把
-    // null 快照当旧 Backend 兼容提交 engine=null（Runtime 落回 Rapid）；
+    // null 快照当旧 Backend 兼容提交 engine=null（Runtime 落回缺省引擎）；
     // 修复后直接取消本次提交（零提交、不重试），随后新任务按新代目录
     // 与已提交默认提交 Windows。
     var deferred = new DeferredInferenceClient();
@@ -730,7 +730,7 @@ public sealed class DefaultModeRequestContractTests
           RecognitionModeCatalog = catalog with
           {
             Modes = [.. catalog.Modes.Select(mode =>
-              mode.Id == Wire.RecognitionModeId.RapidTable
+              mode.Id == Wire.RecognitionModeId.PaddleTable
                 ? mode with { SupportedOptions = ["device"] }
                 : mode)],
           },
@@ -822,12 +822,10 @@ public sealed class DefaultModeRequestContractTests
         {
           Modes =
           [
-            Mode(Wire.RecognitionModeId.RapidText,
-              Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.WindowsText,
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleText,
-              Wire.RecognitionModeAvailability.PreparationRequired),
+              Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleStructure,
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.MineruDocument,
@@ -835,8 +833,6 @@ public sealed class DefaultModeRequestContractTests
                 : Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleTable,
               Wire.RecognitionModeAvailability.PreparationRequired),
-            Mode(Wire.RecognitionModeId.RapidTable,
-              Wire.RecognitionModeAvailability.Ready),
           ],
         },
       },
@@ -869,17 +865,13 @@ public sealed class DefaultModeRequestContractTests
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
-      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
         Wire.RecognitionModeProvisioning.OperatingSystem,
         Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
@@ -893,10 +885,6 @@ public sealed class DefaultModeRequestContractTests
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool notReady = availability != Wire.RecognitionModeAvailability.Ready;
@@ -910,7 +898,7 @@ public sealed class DefaultModeRequestContractTests
       Provisioning = provisioning,
       Availability = availability,
       ReasonCode = notReady ? "runtime_component_missing" : null,
-      RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-cpu") : null,
+      RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-ort-cpu") : null,
       SupportedOptions = [],
       Lifecycle = new Wire.RecognitionModeLifecycle
       {

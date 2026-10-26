@@ -90,7 +90,9 @@ class OcrEngine(StrEnum):
     """Stable engine ids for the plain-text ``OCR`` pipeline.
 
     Mirrors the authoritative ``OcrEngineId`` enum in ``openapi.yaml``; the
-    Backend default for an omitted selection is ``rapidocr``.
+    Backend default for an omitted selection is ``paddleocr``.  ``rapidocr``
+    is retired: the value stays deserializable for historical records but
+    every execution path rejects it fail closed.
     """
 
     RAPIDOCR = "rapidocr"
@@ -500,7 +502,7 @@ class PipelineSelection:
     ``engine`` is only valid for the plain-text ``OCR`` pipeline; the server
     rejects it for other pipelines with ``OCR_ENGINE_NOT_VALID_FOR_PIPELINE``
     and fails closed on unknown ids. Omitting it lets the server apply its own
-    default engine (``rapidocr``). The field is absent from the wire payload
+    default engine (``paddleocr``). The field is absent from the wire payload
     when unset because the request schema does not accept an explicit null.
 
     ``mineru`` carries the typed MinerU 4 configuration protected by the

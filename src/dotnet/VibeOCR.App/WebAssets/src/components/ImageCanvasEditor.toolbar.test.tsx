@@ -128,14 +128,21 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       const outputRow = document.querySelector(
         '.editor-output-settings [role="toolbar"]',
       );
-      expect(outputRow).not.toBeNull();
-      expect(outputRow).not.toContainElement(savePreset);
-      expect(
-        within(outputRow as HTMLElement).queryByRole("button", {
-          name: "按常用预设保存",
-          hidden: true,
-        }),
-      ).toBeNull();
+      // 截图现场不再渲染输出设置面板（格式/质量已内联主排）；
+      // 普通编辑页保留，且任一情形“按常用预设保存”都只在主排。
+      if (captureScene) {
+        expect(outputRow).toBeNull();
+        expect(screen.queryByLabelText("输出设置")).not.toBeInTheDocument();
+      } else {
+        expect(outputRow).not.toBeNull();
+        expect(outputRow).not.toContainElement(savePreset);
+        expect(
+          within(outputRow as HTMLElement).queryByRole("button", {
+            name: "按常用预设保存",
+            hidden: true,
+          }),
+        ).toBeNull();
+      }
       fireEvent.click(main.getByRole("button", { name: "矩形" }));
       const properties = within(
         screen.getByRole("toolbar", { name: "当前工具设置" }),

@@ -378,8 +378,9 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
                 "engine is only valid for the plain-text OCR pipeline; use "
                 "OCR_ENGINE_NOT_VALID_FOR_PIPELINE semantics"
             )
-    # device 选项组合门禁：rapidocr 系设备选项只对 rapidocr 引擎（含缺省
-    # 默认 rapidocr）合法；windows/paddleocr 携带 device 时 fail closed。
+    # device 选项组合门禁：device 系设备选项只对 paddleocr 引擎（含缺省
+    # 默认 paddleocr）与已退休 rapidocr 历史选择合法；windows 携带 device
+    # 时 fail closed（rapidocr 的执行拒绝在可用性门禁，reason=engine_retired）。
     if (
         pipeline is OCRPipeline.OCR
         and "device" in options
@@ -391,13 +392,16 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
         )
     ):
         raise ContractError(
-            "device option is only valid for the rapidocr engine; "
+            "device option is only valid for the rapidocr and paddleocr engines; "
             "reject with VALIDATION_ERROR semantics"
         )
     if pipeline is OCRPipeline.OCR:
-        if "model_preset" in options and engine is not OcrEngine.PADDLEOCR:
+        if "model_preset" in options and engine not in (None, OcrEngine.PADDLEOCR):
             raise ContractError("model_preset requires the paddleocr engine")
-        if options.get("device") == "directml" and engine is not OcrEngine.PADDLEOCR:
+        if options.get("device") == "directml" and engine not in (
+            None,
+            OcrEngine.PADDLEOCR,
+        ):
             raise ContractError("DirectML requires the paddleocr engine")
     mineru = None
     if "mineru" in payload:

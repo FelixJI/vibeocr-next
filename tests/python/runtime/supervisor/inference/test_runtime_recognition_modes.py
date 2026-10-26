@@ -25,19 +25,6 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
     }
 
     assert modes == {
-        "rapid_text": (
-            "text",
-            "OCR",
-            "rapidocr",
-            "base_runtime",
-            {
-                "kind": "unmanaged",
-                "supports_preload": False,
-                "supports_ttl": False,
-                "supports_pinning": False,
-                "supports_release": False,
-            },
-        ),
         "windows_text": (
             "text",
             "OCR",
@@ -55,7 +42,7 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
             "text",
             "OCR",
             "paddleocr",
-            "advanced_component",
+            "base_runtime",
             {
                 "kind": "model_residency",
                 "supports_preload": True,
@@ -101,19 +88,6 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
                 "supports_ttl": True,
                 "supports_pinning": True,
                 "supports_release": True,
-            },
-        ),
-        "rapid_table": (
-            "specialized",
-            "RAPID_TABLE",
-            None,
-            "base_runtime",
-            {
-                "kind": "unmanaged",
-                "supports_preload": False,
-                "supports_ttl": False,
-                "supports_pinning": False,
-                "supports_release": False,
             },
         ),
     }
@@ -162,11 +136,11 @@ def test_resolver_fail_closed_for_unknown_unavailable_and_mapping_mismatch() -> 
     registry = RecognitionModeRegistry(
         availability_probe=lambda definition: ModeAvailability(
             availability=(
-                "ready" if definition.mode_id.value == "rapid_text" else "unavailable"
+                "ready" if definition.mode_id.value == "windows_text" else "unavailable"
             ),
             reason_code=(
                 None
-                if definition.mode_id.value == "rapid_text"
+                if definition.mode_id.value == "windows_text"
                 else "runtime_component_missing"
             ),
             required_component=definition.required_component,
@@ -174,12 +148,12 @@ def test_resolver_fail_closed_for_unknown_unavailable_and_mapping_mismatch() -> 
     )
 
     resolved = registry.resolve_execution(
-        "rapid_text", pipeline_id="OCR", engine="rapidocr"
+        "windows_text", pipeline_id="OCR", engine="windows"
     )
-    assert resolved.mode_id.value == "rapid_text"
+    assert resolved.mode_id.value == "windows_text"
 
     with pytest.raises(RecognitionModeError) as unknown:
-        registry.resolve_execution("typo", pipeline_id="OCR", engine="rapidocr")
+        registry.resolve_execution("typo", pipeline_id="OCR", engine="windows")
     assert unknown.value.code_name == "RECOGNITION_MODE_UNKNOWN"
 
     with pytest.raises(RecognitionModeError) as unavailable:
@@ -188,22 +162,28 @@ def test_resolver_fail_closed_for_unknown_unavailable_and_mapping_mismatch() -> 
     assert unavailable.value.detail == {
         "recognition_mode": "paddle_text",
         "reason_code": "runtime_component_missing",
-        "required_component": "paddleocr-cpu",
+        "required_component": "paddleocr-ort-cpu",
     }
 
     with pytest.raises(RecognitionModeError) as mismatch:
-        registry.resolve_execution("rapid_text", pipeline_id="OCR", engine="paddleocr")
+        registry.resolve_execution(
+            "windows_text", pipeline_id="OCR", engine="paddleocr"
+        )
     assert mismatch.value.code_name == "RECOGNITION_MODE_PIPELINE_MISMATCH"
 
     with pytest.raises(RecognitionModeError) as missing_engine:
-        registry.resolve_execution("rapid_text", pipeline_id="OCR")
+        registry.resolve_execution("windows_text", pipeline_id="OCR")
     assert missing_engine.value.code_name == "RECOGNITION_MODE_PIPELINE_MISMATCH"
+
+    with pytest.raises(RecognitionModeError) as retired:
+        registry.resolve_execution("rapid_text", pipeline_id="OCR", engine="rapidocr")
+    assert retired.value.code_name == "RECOGNITION_MODE_RETIRED"
 
     assert (
         registry.resolve_execution_fields(
-            pipeline_id="OCR", engine="rapidocr"
+            pipeline_id="OCR", engine="windows"
         ).mode_id.value
-        == "rapid_text"
+        == "windows_text"
     )
     with pytest.raises(RecognitionModeError) as inverse_unavailable:
         registry.resolve_execution_fields(pipeline_id="OCR", engine="paddleocr")
@@ -225,7 +205,7 @@ def test_lifecycle_validation_distinguishes_models_processes_and_unmanaged() -> 
     )
 
     for mode, operation in (
-        ("rapid_text", "preload"),
+        ("windows_text", "preload"),
         ("windows_text", "release"),
         ("mineru_document", "pinning"),
     ):

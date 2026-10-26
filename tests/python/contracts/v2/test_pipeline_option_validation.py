@@ -22,8 +22,8 @@ def _selection(pipeline_id: str, options: dict) -> dict:
 
 
 @pytest.mark.parametrize("device", ["auto", "cpu", "cuda"])
-@pytest.mark.parametrize("engine", [None, "rapidocr"])
-def test_rapidocr_device_selection_reaches_options(device: str, engine: str | None):
+@pytest.mark.parametrize("engine", [None, "rapidocr", "paddleocr"])
+def test_paddle_device_selection_reaches_options(device: str, engine: str | None):
     payload = _selection("OCR", {"device": device})
     if engine is not None:
         payload["engine"] = engine
@@ -31,10 +31,28 @@ def test_rapidocr_device_selection_reaches_options(device: str, engine: str | No
 
 
 @pytest.mark.parametrize("engine", ["windows"])
-def test_other_text_engines_reject_rapid_device_selection(engine: str):
+def test_other_text_engines_reject_paddle_device_selection(engine: str):
     payload = {**_selection("OCR", {"device": "cpu"}), "engine": engine}
-    with pytest.raises(ContractError, match="only valid for the rapidocr engine"):
+    with pytest.raises(
+        ContractError, match="only valid for the rapidocr and paddleocr engines"
+    ):
         parse_pipeline_selection(payload)
+
+
+def test_retired_rapid_selections_stay_deserializable_but_rejected_downstream() -> None:
+    """退休兼容：rapidocr 引擎与 RAPID_TABLE 管道的枚举值保留供历史记录
+    反序列化（parser 可解析），执行拒绝发生在引擎/模式可用性门禁
+    （engine_retired / RECOGNITION_MODE_RETIRED，见 supervisor 测试）。"""
+    engine_selection = parse_pipeline_selection(
+        {**_selection("OCR", {"device": "cpu"}), "engine": "rapidocr"}
+    )
+    assert engine_selection.engine is not None
+    assert engine_selection.engine.value == "rapidocr"
+
+    pipeline_selection = parse_pipeline_selection(
+        _selection("RAPID_TABLE", {"device": "cpu"})
+    )
+    assert pipeline_selection.pipeline_id == "RAPID_TABLE"
 
 
 # ---------------------------------------------------------------------------
@@ -237,21 +255,22 @@ def test_mineru_options_accept_valid_values() -> None:
     assert selection.options["end_page_id"] is None
 
 
+@pytest.mark.parametrize("engine", [None, "paddleocr"])
 @pytest.mark.parametrize("preset", ["tiny", "small", "medium"])
 @pytest.mark.parametrize("device", ["auto", "cpu", "cuda", "directml"])
-def test_paddle_onnx_selection_keeps_model_and_provider(preset, device):
+def test_paddle_onnx_selection_keeps_model_and_provider(engine, preset, device):
     payload = {
         **_selection("OCR", {"model_preset": preset, "device": device}),
-        "engine": "paddleocr",
     }
+    if engine is not None:
+        payload["engine"] = engine
     assert parse_pipeline_selection(payload).options == payload["options"]
 
 
-@pytest.mark.parametrize("engine", [None, "rapidocr", "windows"])
 @pytest.mark.parametrize("options", [{"model_preset": "small"}, {"device": "directml"}])
-def test_paddle_onnx_options_do_not_change_other_engines(engine, options):
-    payload = _selection("OCR", options)
-    if engine is not None:
-        payload["engine"] = engine
+def test_paddle_onnx_options_do_not_change_other_engines(options):
+    # 显式 windows 引擎携带 Paddle 系选项仍 fail closed；缺省引擎现在
+    # 解析为 paddleocr，这些选项合法（见上一个测试）。
+    payload = {**_selection("OCR", options), "engine": "windows"}
     with pytest.raises(ContractError):
         parse_pipeline_selection(payload)

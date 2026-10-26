@@ -262,6 +262,7 @@ internal sealed class PinnedImageWindow : IDisposable
   internal Action? SmokeEditorSetupStep { get; set; }
   internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
   internal string SmokeStatus => status.Text;
+  internal double SmokeMoreButtonOpacity => moreButton.Opacity;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
   /// <summary>smoke：对当前编辑宿主注入 renderer 失败，覆盖空闲与保存交错。</summary>
   internal void SmokeResetEditorDocument() =>
@@ -605,6 +606,16 @@ internal sealed class PinnedImageWindow : IDisposable
     more.HorizontalAlignment = HorizontalAlignment.Left;
     more.VerticalAlignment = VerticalAlignment.Center;
     more.Margin = new Thickness(2, 0, 0, 0);
+    bool pointerOverMore = false;
+    void UpdateMoreOpacity() => more.Opacity = pointerOverMore ||
+      more.FocusState != FocusState.Unfocused || actionsFlyout.IsOpen ? 1 : 0.35;
+    more.PointerEntered += (_, _) => { pointerOverMore = true; UpdateMoreOpacity(); };
+    more.PointerExited += (_, _) => { pointerOverMore = false; UpdateMoreOpacity(); };
+    more.GotFocus += (_, _) => UpdateMoreOpacity();
+    more.LostFocus += (_, _) => UpdateMoreOpacity();
+    actionsFlyout.Opened += (_, _) => UpdateMoreOpacity();
+    actionsFlyout.Closed += (_, _) => UpdateMoreOpacity();
+    UpdateMoreOpacity();
     var buttons = new StackPanel
     {
       Orientation = Orientation.Horizontal,
@@ -1030,7 +1041,7 @@ internal sealed class PinnedImageWindow : IDisposable
       window.AppWindow.Resize(new SizeInt32(Math.Min(work.Width, Math.Max(800, window.AppWindow.Size.Width)),
         Math.Min(work.Height, Math.Max(600, window.AppWindow.Size.Height))));
       SyncEditButton();
-      status.Text = "贴图编辑中：完成后点击工具栏“完成贴图”";
+      status.Text = string.Empty;
       var overlay = new WebView2 { Margin = new Thickness(0, BandHeightDip, 0, 0) };
       editorView = overlay;
       Grid.SetRow(overlay, 0);
@@ -1100,7 +1111,7 @@ internal sealed class PinnedImageWindow : IDisposable
     if (previousSize is { } size && !disposed) window.AppWindow.Resize(size);
     if (!disposed)
     {
-      status.Text = "贴图编辑已结束";
+      status.Text = string.Empty;
     }
   }
 
@@ -1281,7 +1292,7 @@ internal sealed class PinnedImageWindow : IDisposable
       ? "旧快照：文字层已失效，可按贴图原图重新取字"
       : detached || oldSnapshot
         ? "旧快照：可在贴图上选字复制"
-        : "可在图片上选字复制";
+        : string.Empty;
     if (loaded) Render();
   }
 

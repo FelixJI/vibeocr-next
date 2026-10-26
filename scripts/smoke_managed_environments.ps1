@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [int]$TimeoutMinutes = 120,
     [switch]$ProgressOnly,
-    [ValidateSet('rapidocr-cpu', 'paddleocr-ort-cpu')][string]$ProgressRecipe = 'rapidocr-cpu',
+    [ValidateSet('paddleocr-ort-cpu')][string]$ProgressRecipe = 'paddleocr-ort-cpu',
     [string]$InstallerCacheRoot
 )
 
@@ -91,7 +91,7 @@ function Test-ManagedPython([string]$python, [bool]$expectEmpty) {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Managed interpreter missing: $python"
     }
-    $code = 'import importlib.util,json,sys; print(json.dumps({"prefix":sys.prefix,"executable":sys.executable,"packages":{p:importlib.util.find_spec(p) is not None for p in ("pip","fastapi","rapidocr","paddleocr","mineru","torch")}}))'
+    $code = 'import importlib.util,json,sys; print(json.dumps({"prefix":sys.prefix,"executable":sys.executable,"packages":{p:importlib.util.find_spec(p) is not None for p in ("pip","fastapi","onnxruntime","paddleocr","mineru","torch")}}))'
     $output = & $python -I -B -c $code
     if ($LASTEXITCODE -ne 0) { throw "Managed interpreter probe failed: $python" }
     $probe = $output | ConvertFrom-Json
@@ -99,7 +99,7 @@ function Test-ManagedPython([string]$python, [bool]$expectEmpty) {
         throw "Managed interpreter probe incomplete: $python"
     }
     if ($expectEmpty) {
-        foreach ($name in @('pip', 'fastapi', 'rapidocr', 'paddleocr', 'mineru', 'torch')) {
+        foreach ($name in @('pip', 'fastapi', 'onnxruntime', 'paddleocr', 'mineru', 'torch')) {
             if ($probe.packages.$name) { throw "Empty environment unexpectedly contains $name" }
         }
     }
@@ -145,8 +145,8 @@ try {
         throw 'Install and switch evidence is incomplete'
     }
     foreach ($environment in $installed.evidence.installed_environments) {
-        if ($environment.status -ne 'installed' -or $environment.recipe -ne 'rapidocr-cpu') {
-            throw "Expected publicly confirmed RapidOCR recipe for $($environment.name)"
+        if ($environment.status -ne 'installed' -or $environment.recipe -ne 'paddleocr-ort-cpu') {
+            throw "Expected publicly confirmed Paddle ONNX recipe for $($environment.name)"
         }
     }
     foreach ($task in $installed.evidence.recognition) {

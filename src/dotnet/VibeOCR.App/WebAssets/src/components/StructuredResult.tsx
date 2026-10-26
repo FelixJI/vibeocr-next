@@ -8,6 +8,7 @@ import { startEditOnEnterOrDoubleActivate } from "./lineEditorTrigger";
 import {
   confidenceLabel,
   isLowConfidence,
+  mapModeTextLineSegments,
   parseResultLines,
   parseResultModes,
   type ResultTextLine,
@@ -447,11 +448,16 @@ function LinesBlock({
   modes,
   mode,
   onUpdateLine,
+  highlightLineIndex,
+  onHoverLine,
 }: {
   readonly lines: readonly ResultTextLine[];
   readonly modes: ResultTextModes;
   readonly mode: ResultTextMode;
   readonly onUpdateLine?: LineEditHandler;
+  /** 双向高亮：左侧图上行框悬停时对应行加亮（同一宿主行下标）。 */
+  readonly highlightLineIndex?: number;
+  readonly onHoverLine?: (index: number | undefined) => void;
 }) {
   const [editing, setEditing] = useState<number | undefined>(undefined);
   const knownScores = lines.filter((line) => line.score !== null);
@@ -485,10 +491,13 @@ function LinesBlock({
                   "result-line",
                   isLowConfidence(line.score) ? "line-low-confidence" : "",
                   line.manuallyEdited ? "line-edited" : "",
+                  highlightLineIndex === index ? "line-hovered" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
                 title={confidenceLabel(line.score)}
+                onMouseEnter={() => onHoverLine?.(index)}
+                onMouseLeave={() => onHoverLine?.(undefined)}
                 {...trigger}
               >
                 {editing === index && editable ? (
@@ -521,7 +530,28 @@ function LinesBlock({
           })}
         </ol>
       ) : (
-        <pre className="result-document">{modeText}</pre>
+        <pre className="result-document">
+          {/* 原文（宿主拼接权威）整段保留：仅能精确映射的行文本拆为
+              可悬停 span；无法精确对应（改写/重排）的行不高亮不误亮。 */}
+          {mapModeTextLineSegments(modeText, lines).map((segment, position) =>
+            segment.lineIndex === undefined ? (
+              segment.text
+            ) : (
+              <span
+                key={position}
+                className={
+                  highlightLineIndex === segment.lineIndex
+                    ? "result-raw-line line-hovered"
+                    : "result-raw-line"
+                }
+                onMouseEnter={() => onHoverLine?.(segment.lineIndex)}
+                onMouseLeave={() => onHoverLine?.(undefined)}
+              >
+                {segment.text}
+              </span>
+            ),
+          )}
+        </pre>
       )}
     </section>
   );
@@ -537,12 +567,17 @@ export function StructuredResult({
   onCopy,
   onCopyCells,
   onUpdateLine,
+  highlightLineIndex,
+  onHoverLine,
   mode = "raw",
 }: {
   readonly source: string;
   readonly onCopy: StructuredCopyHandler;
   readonly onCopyCells?: CellsCopyHandler;
   readonly onUpdateLine?: LineEditHandler;
+  /** 双向高亮：与左侧校对图共享的悬停行下标（仅 lines 块消费）。 */
+  readonly highlightLineIndex?: number;
+  readonly onHoverLine?: (index: number | undefined) => void;
   /** 页级排版模式（lines 块展示形态；非 lines 块不受影响）。 */
   readonly mode?: ResultTextMode;
 }) {
@@ -583,6 +618,8 @@ export function StructuredResult({
               modes={lineModes}
               mode={mode}
               onUpdateLine={onUpdateLine}
+              highlightLineIndex={highlightLineIndex}
+              onHoverLine={onHoverLine}
             />
           ) : null;
         }

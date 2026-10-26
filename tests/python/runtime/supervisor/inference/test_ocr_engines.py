@@ -3,11 +3,11 @@
 覆盖计划 §3.2 的关键不变量：
 
 * 目录覆盖全部稳定 engine id，且来自实际探针（含 descriptor 抛错降级）。
-* resolver 只按显式 ID 选择；缺省用 rapidocr；不可用时返回结构化
+* resolver 只按显式 ID 选择；缺省用 paddleocr；不可用时返回结构化
   协议错误并回显可选引擎，绝不静默切换。
 * 未知 engine 值 fail closed 为 OCR_ENGINE_UNKNOWN；engine 只对
   ``OCR`` pipeline 合法。
-* 三个引擎 adapter（fake 驱动 rapidocr / windows / paddle）共享同一
+* 两个引擎 adapter（fake 驱动 windows / paddle）共享同一
   contract suite：descriptor/capabilities/recognize_many 顺序与形状。
 """
 
@@ -23,6 +23,7 @@ from vibeocr.runtime.recognition.ocr_engines import (
     REASON_ENGINE_INIT_FAILED,
     REASON_ENGINE_LANGUAGE_UNAVAILABLE,
     REASON_ENGINE_NOT_INSTALLED,
+    REASON_ENGINE_RETIRED,
     EngineAvailability,
     EngineDescriptor,
     LazyEngineHandle,
@@ -138,7 +139,7 @@ class TestEngineValidForPipeline:
     )
     def test_non_ocr_pipeline_rejects_engine(self, pipeline: str) -> None:
         with pytest.raises(OcrEngineError) as excinfo:
-            ensure_engine_valid_for_pipeline(OcrEngine.RAPIDOCR, pipeline)
+            ensure_engine_valid_for_pipeline(OcrEngine.PADDLEOCR, pipeline)
         assert excinfo.value.code is ErrorCode.OCR_ENGINE_NOT_VALID_FOR_PIPELINE
 
 
@@ -153,34 +154,33 @@ class TestOcrEngineRegistry:
         payload = resolver.catalog_payload()
         ids = [entry["id"] for entry in payload["engines"]]
         assert ids == ["rapidocr", "windows", "paddleocr"]
-        assert all(
-            entry["availability"] == "unavailable"
-            and entry["reason_code"] == REASON_ENGINE_NOT_INSTALLED
-            for entry in payload["engines"]
-        )
+        # rapidocr 是退休枚举值：未注册 adapter 时固定投影 engine_retired。
+        entries = {entry["id"]: entry for entry in payload["engines"]}
+        assert entries["rapidocr"]["reason_code"] == "engine_retired"
+        assert entries["windows"]["reason_code"] == "engine_not_installed"
+        assert entries["paddleocr"]["reason_code"] == "engine_not_installed"
+        assert all(entry["availability"] == "unavailable" for entry in entries.values())
 
     def test_catalog_reflects_registered_descriptors(self) -> None:
-        rapid = FakeEngine(OcrEngine.RAPIDOCR, included_in_base=True)
-        paddle = FakeEngine(
-            OcrEngine.PADDLEOCR,
+        paddle = FakeEngine(OcrEngine.PADDLEOCR, included_in_base=True)
+        windows = FakeEngine(
+            OcrEngine.WINDOWS,
             availability=EngineAvailability.PREPARATION_REQUIRED,
             reason_code=REASON_ENGINE_NOT_INSTALLED,
-            required_component="document_parsing",
+            required_component="winrt-ocr",
         )
-        registry = OcrEngineRegistry([rapid, paddle])
+        registry = OcrEngineRegistry([windows, paddle])
         resolver = OcrEngineResolver(registry=registry)
         entries = {e["id"]: e for e in resolver.catalog_payload()["engines"]}
-        assert entries["rapidocr"]["availability"] == "ready"
-        assert entries["rapidocr"]["included_in_base"] is True
-        assert entries["paddleocr"]["availability"] == "preparation_required"
-        assert entries["paddleocr"]["required_component"] == "document_parsing"
-        # 未注册的 windows 保持 unavailable 占位。
-        assert entries["windows"]["availability"] == "unavailable"
+        assert entries["paddleocr"]["availability"] == "ready"
+        assert entries["paddleocr"]["included_in_base"] is True
+        assert entries["windows"]["availability"] == "preparation_required"
+        assert entries["windows"]["required_component"] == "winrt-ocr"
 
     def test_duplicate_registration_rejected(self) -> None:
-        registry = OcrEngineRegistry([FakeEngine(OcrEngine.RAPIDOCR)])
+        registry = OcrEngineRegistry([FakeEngine(OcrEngine.WINDOWS)])
         with pytest.raises(ValueError, match="duplicate"):
-            registry.register(FakeEngine(OcrEngine.RAPIDOCR))
+            registry.register(FakeEngine(OcrEngine.WINDOWS))
 
     def test_invalid_engine_id_rejected(self) -> None:
         with pytest.raises(ValueError, match="engine_id"):
@@ -205,7 +205,6 @@ class TestOcrEngineRegistry:
         registry = OcrEngineRegistry(
             [
                 FakeEngine(OcrEngine.PADDLEOCR),
-                FakeEngine(OcrEngine.RAPIDOCR),
                 FakeEngine(
                     OcrEngine.WINDOWS,
                     availability=EngineAvailability.UNAVAILABLE,
@@ -214,7 +213,7 @@ class TestOcrEngineRegistry:
             ]
         )
         resolver = OcrEngineResolver(registry=registry)
-        assert resolver.selectable_engine_ids() == ("rapidocr", "paddleocr")
+        assert resolver.selectable_engine_ids() == ("paddleocr",)
 
 
 # ---------------------------------------------------------------------------
@@ -223,42 +222,54 @@ class TestOcrEngineRegistry:
 
 
 class TestOcrEngineResolver:
-    def test_default_engine_is_rapidocr(self) -> None:
-        assert DEFAULT_OCR_ENGINE is OcrEngine.RAPIDOCR
-        assert OcrEngineRegistry([]).default_engine is OcrEngine.RAPIDOCR
+    def test_retired_engine_fails_closed_with_retired_reason(self) -> None:
+        # RapidOCR 已退役：枚举值可反序列化，但解析一律以稳定
+        # reason=engine_retired 拒绝，绝不回退到默认引擎。
+        paddle = FakeEngine(OcrEngine.PADDLEOCR)
+        resolver = OcrEngineResolver(registry=OcrEngineRegistry([paddle]))
+        with pytest.raises(OcrEngineError) as excinfo:
+            resolver.validate(OcrEngine.RAPIDOCR)
+        assert excinfo.value.code is ErrorCode.OCR_ENGINE_UNAVAILABLE
+        assert excinfo.value.reason_code == REASON_ENGINE_RETIRED
+        assert excinfo.value.engine == "rapidocr"
+        assert excinfo.value.selectable_engines == ("paddleocr",)
+
+    def test_default_engine_is_paddleocr(self) -> None:
+        assert DEFAULT_OCR_ENGINE is OcrEngine.PADDLEOCR
+        assert OcrEngineRegistry([]).default_engine is OcrEngine.PADDLEOCR
 
     def test_resolve_ready_engine(self) -> None:
-        engine = FakeEngine(OcrEngine.RAPIDOCR, included_in_base=True)
+        engine = FakeEngine(OcrEngine.PADDLEOCR, included_in_base=True)
         resolver = OcrEngineResolver(registry=OcrEngineRegistry([engine]))
-        assert resolver.resolve(OcrEngine.RAPIDOCR) is engine
+        assert resolver.resolve(OcrEngine.PADDLEOCR) is engine
         # 缺省解析到同一引擎。
         assert resolver.resolve(None) is engine
 
     def test_unregistered_engine_fails_closed_without_fallback(self) -> None:
-        paddle = FakeEngine(OcrEngine.PADDLEOCR)
-        resolver = OcrEngineResolver(registry=OcrEngineRegistry([paddle]))
+        windows = FakeEngine(OcrEngine.WINDOWS)
+        resolver = OcrEngineResolver(registry=OcrEngineRegistry([windows]))
         with pytest.raises(OcrEngineError) as excinfo:
-            resolver.resolve(OcrEngine.RAPIDOCR)
+            resolver.resolve(OcrEngine.PADDLEOCR)
         assert excinfo.value.code is ErrorCode.OCR_ENGINE_UNAVAILABLE
         assert excinfo.value.reason_code == REASON_ENGINE_NOT_INSTALLED
-        assert excinfo.value.engine == "rapidocr"
-        # 可选回显只包含 ready 引擎，绝不返回 paddle 作为替代。
-        assert excinfo.value.selectable_engines == ("paddleocr",)
-        assert resolver.resolve(OcrEngine.PADDLEOCR) is paddle
+        assert excinfo.value.engine == "paddleocr"
+        # 可选回显只包含 ready 引擎，绝不返回 windows 作为替代。
+        assert excinfo.value.selectable_engines == ("windows",)
+        assert resolver.resolve(OcrEngine.WINDOWS) is windows
 
     def test_unavailable_engine_fails_closed_without_fallback(self) -> None:
-        rapid = FakeEngine(OcrEngine.RAPIDOCR)
+        paddle = FakeEngine(OcrEngine.PADDLEOCR)
         windows = FakeEngine(
             OcrEngine.WINDOWS,
             availability=EngineAvailability.UNAVAILABLE,
             reason_code=REASON_ENGINE_LANGUAGE_UNAVAILABLE,
         )
-        resolver = OcrEngineResolver(registry=OcrEngineRegistry([rapid, windows]))
+        resolver = OcrEngineResolver(registry=OcrEngineRegistry([paddle, windows]))
         with pytest.raises(OcrEngineError) as excinfo:
             resolver.resolve(OcrEngine.WINDOWS)
         assert excinfo.value.code is ErrorCode.OCR_ENGINE_UNAVAILABLE
         assert excinfo.value.reason_code == REASON_ENGINE_LANGUAGE_UNAVAILABLE
-        assert excinfo.value.selectable_engines == ("rapidocr",)
+        assert excinfo.value.selectable_engines == ("paddleocr",)
 
     def test_preparation_required_maps_to_428_code(self) -> None:
         paddle = FakeEngine(
@@ -283,35 +294,35 @@ class TestOcrEngineResolver:
         assert excinfo.value.selectable_engines == ("windows",)
 
     def test_probe_cache_and_invalidation(self) -> None:
-        engine = FakeEngine(OcrEngine.RAPIDOCR)
+        engine = FakeEngine(OcrEngine.PADDLEOCR)
         resolver = OcrEngineResolver(registry=OcrEngineRegistry([engine]))
         resolver.validate(None)
         # 变为不可用后缓存仍放行——component 修复/安装需显式失效。
         engine.availability = EngineAvailability.UNAVAILABLE
         resolver.validate(None)
-        resolver.invalidate_probe_cache(OcrEngine.RAPIDOCR)
+        resolver.invalidate_probe_cache(OcrEngine.PADDLEOCR)
         with pytest.raises(OcrEngineError):
             resolver.validate(None)
 
     def test_catalog_availability_refreshes_only_after_resolver_invalidation(
         self,
     ) -> None:
-        engine = FakeEngine(OcrEngine.RAPIDOCR)
+        engine = FakeEngine(OcrEngine.PADDLEOCR)
         resolver = OcrEngineResolver(registry=OcrEngineRegistry([engine]))
 
         initial = {e["id"]: e for e in resolver.catalog_payload()["engines"]}
-        assert initial["rapidocr"]["availability"] == "ready"
+        assert initial["paddleocr"]["availability"] == "ready"
 
         engine.availability = EngineAvailability.UNAVAILABLE
         engine.reason_code = REASON_ENGINE_LANGUAGE_UNAVAILABLE
         cached = {e["id"]: e for e in resolver.catalog_payload()["engines"]}
-        assert cached["rapidocr"]["availability"] == "ready"
+        assert cached["paddleocr"]["availability"] == "ready"
 
         resolver.invalidate_probe_cache()
         refreshed = {e["id"]: e for e in resolver.catalog_payload()["engines"]}
-        assert refreshed["rapidocr"]["availability"] == "unavailable"
+        assert refreshed["paddleocr"]["availability"] == "unavailable"
         assert (
-            refreshed["rapidocr"]["reason_code"] == REASON_ENGINE_LANGUAGE_UNAVAILABLE
+            refreshed["paddleocr"]["reason_code"] == REASON_ENGINE_LANGUAGE_UNAVAILABLE
         )
 
 
@@ -399,7 +410,6 @@ def engine_contract_suite(engine: Any, *, expected_id: OcrEngine) -> None:
 
 def test_fake_engines_satisfy_shared_contract() -> None:
     for engine in (
-        FakeEngine(OcrEngine.RAPIDOCR),
         FakeEngine(OcrEngine.WINDOWS),
         FakeEngine(OcrEngine.PADDLEOCR),
     ):

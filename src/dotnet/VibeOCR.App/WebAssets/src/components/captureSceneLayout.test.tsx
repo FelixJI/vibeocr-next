@@ -124,35 +124,59 @@ describe("截图原位编辑", () => {
     )!;
     expect(style["--capture-x"]).toBe("1000px");
     expect(style["--capture-y"]).toBe("500px");
-    expect(style["--capture-tools-left"]).toBe("520px");
-    // 两排工具栏（主操作+样式）高度预算 96px：优先放在选区下方，
-    // 放不下时改到选区上方（y - 96 - 8）。
-    expect(style["--capture-tools-height"]).toBe("184px");
-    expect(style["--capture-tools-top"]).toBe("308px");
+    expect(style["--capture-tools-left"]).toBe("80px");
+    // 单排工具栏高度预算 64px：优先放在选区下方，放不下时改到选区上方
+    // （y - 64 - 8）；宽度预算 1200px 保证内容自然宽至视口上限。
+    expect(style["--capture-tools-height"]).toBe("64px");
+    expect(style["--capture-tools-top"]).toBe("428px");
   });
-  it("两排工具栏的预算足够容纳主操作与样式两行控件", () => {
-    // 窄视口也不再把预算压到两行以下（剩余由排内换行+宿主滚动兑底）。
+  it("单排工具栏预算不高于视口，窄视口也不放大", () => {
+    // 预算始终钳到视口高；过宽内容由容器内水平滚动兑底，不再换行。
     expect(captureSceneStyle(scene, 1280, 90)!["--capture-tools-height"]).toBe(
-      "90px",
+      "64px",
     );
-    // 窄视口（<900px）两排换行后行数增多，预算自适应放宽到 144px，
-    // 避免主操作排被卷进覆盖层折叠区。
     expect(captureSceneStyle(scene, 640, 720)!["--capture-tools-height"]).toBe(
-      "184px",
+      "64px",
     );
   });
   it("选区几乎全屏、工具栏钉底时输出设置翻转到覆盖层上方且完整在视口内", () => {
     // y=0、height=1360（桌面 1440）→ 视口 720 下选区高 680，下方放不下
-    // 工具栏，回退到底部钉住（720-96=624，宽视口预算 96）。
+    // 单排工具栏，回退到底部钉住（720-64=656）。
     const style = captureSceneStyle(
       { ...scene, y: 0, height: 1360 },
       1280,
       720,
     )!;
-    expect(style["--capture-tools-top"]).toBe("536px");
-    // 624+96+4+132 放不下 → 翻转到覆盖层上方：488 + 132 = 620 ≤ 720。
-    expect(style["--capture-settings-top"]).toBe("400px");
+    expect(style["--capture-tools-top"]).toBe("656px");
+    // 656+64+4+132 放不下 → 翻转到覆盖层上方：520 + 132 = 652 ≤ 720。
+    expect(style["--capture-settings-top"]).toBe("520px");
     expect(style["--capture-settings-max-height"]).toBe("132px");
+  });
+  it("现场工具栏单排无设置入口：必要导出参数内联主排", () => {
+    const { unmount } = render(
+      <ImageCanvasEditor
+        actions={{
+          run: vi.fn().mockResolvedValue(true),
+          navigate: vi.fn(),
+          setTheme: vi.fn(),
+        }}
+        canExport
+        canRecognize
+        source={scene.inputUrl}
+        captureScene={scene}
+        session={{ sessionId: "capture", revision: 0 }}
+      />,
+    );
+    // 无独立“输出设置”入口（齿轮/文字 summary 均不渲染）。
+    expect(screen.queryByLabelText("输出设置")).not.toBeInTheDocument();
+    // 格式/JPEG 质量随输出集群内联；PNG 默认不显示质量选择。
+    expect(screen.getByLabelText("输出格式")).toBeInTheDocument();
+    expect(screen.queryByLabelText("JPEG 质量")).not.toBeInTheDocument();
+    // 圆角开关始终可达（可发现性）。
+    expect(
+      screen.getByRole("button", { name: "截图直角，点击切换圆角" }),
+    ).toBeInTheDocument();
+    unmount();
   });
   it("普通图片编辑不使用截图屏幕几何，拒绝超出冻结桌面的选区", () => {
     expect(captureSceneStyle(undefined, 1280, 720)).toBeUndefined();

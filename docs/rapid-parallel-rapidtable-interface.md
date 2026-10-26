@@ -1,5 +1,8 @@
 # RapidTable / RapidOCR 设备与并行：实现与实测说明
 
+> 历史设计记录：RapidOCR／RapidTable 已从当前产品退役，当前默认识别与表格能力转由 PaddleOCR 提供。
+> 本文保留当时的接口设计与兼容性背景，不作为当前实现或安装指南；当前行为见 README。
+
 ## 使用入口
 
 单次识别、批量识别和 PDF 页面选择 RapidOCR 文字或 RapidTable 表格模式后，可在“运行设备”中选择自动、CPU 或 GPU（CUDA）。设备偏好按模式保存；CPU 批量并行由 Runtime 自动控制，无需配置线程数。使用 Rapid GPU 时，在运行环境设置中准备并选用“RapidOCR + RapidTable · NVIDIA CUDA”。

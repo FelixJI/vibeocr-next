@@ -725,27 +725,25 @@ public sealed class ManagedEnvironmentSettings(
         ResidencyStatus residency, RuntimeStatusSnapshot status)
     {
         var catalog = new RuntimeSelectionService(health);
+        bool retired = environment.Recipe is "rapidocr-cpu" or "rapidocr-cuda" or
+            "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" or "paddleocr-cpu" or "paddleocr-cuda";
         string[] modeIds = environment.Recipe switch
         {
-            "rapidocr-cpu" or "rapidocr-cuda" => ["rapid_text", "rapid_table"],
-            "paddleocr-cpu" or "paddleocr-cuda" or "paddleocr-ort-cpu" or
-                "paddleocr-ort-cuda" or "paddleocr-ort-directml" => ["paddle_text"],
-            "mineru-cpu" => ["mineru_document"],
-            "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" =>
-                ["rapid_text", "rapid_table", "mineru_document"],
+            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" =>
+                ["paddle_text", "paddle_table", "paddle_structure"],
+            "mineru-cpu" or "mineru-cuda" => ["mineru_document"],
             _ => [],
         };
-        RecognitionModeOption[] modes = [.. catalog.RecognitionModes.Where(mode =>
+        RecognitionModeOption[] modes = retired ? [] : [.. catalog.RecognitionModes.Where(mode =>
             modeIds.Length == 0 || modeIds.Contains(mode.Id, StringComparer.Ordinal))];
-        string engineState = modes.Any(mode => mode.Availability == "ready") ? "ready"
+        string engineState = retired ? "unavailable"
+            : modes.Any(mode => mode.Availability == "ready") ? "ready"
             : modes.Any(mode => mode.Availability == "preparation_required") ? "preparation_required"
             : modes.Length > 0 ? "unavailable" : "unverified";
-        if (modes.Length == 0 && !catalog.SupportsRecognitionModes)
+        if (!retired && modes.Length == 0 && !catalog.SupportsRecognitionModes)
         {
-            OcrEngine? engine = environment.Recipe?.StartsWith("rapidocr", StringComparison.Ordinal) == true
-                ? OcrEngine.RapidOcr
-                : environment.Recipe?.StartsWith("paddleocr", StringComparison.Ordinal) == true
-                    ? OcrEngine.PaddleOcr : null;
+            OcrEngine? engine = environment.Recipe?.StartsWith("paddleocr", StringComparison.Ordinal) == true
+                ? OcrEngine.PaddleOcr : null;
             RuntimeEngineOption? option = catalog.EngineOptions.FirstOrDefault(item => item.Engine == engine);
             if (option is not null)
                 engineState = option.Availability switch

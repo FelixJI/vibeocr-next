@@ -668,7 +668,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("OCR masking modified the ordinary display/copy/save image.");
     double safeX = centerX < 500 ? 800 : 100, safeY = centerY < 500 ? 800 : 100;
     return new RecognitionTextLayerState("textlayer.ready", null, new(session.ToString("N"), revision),
-      "rapid_text", "pins-smoke", null,
+      "paddle_text", "pins-smoke", null,
       [new("hidden", centerX - 1, centerY - 1, centerX + 1, centerY + 1),
        new("visible", safeX, safeY, safeX + 5, safeY + 5)]);
   }

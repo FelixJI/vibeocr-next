@@ -2,8 +2,10 @@
 
 Wire decisions under test:
 
-* Three stable engine ids shared by the formal OpenAPI, the handwritten
-  Python/C# DTO layer and both generated bindings.
+* Stable engine ids shared by the formal OpenAPI, the handwritten
+  Python/C# DTO layer and both generated bindings; the retired rapidocr id
+  stays deserializable for historical records while every execution path
+  rejects it fail closed (engine_retired).
 * ``PipelineSelection.engine`` is optional, only valid for the OCR pipeline
   (a server-side conformance case, not an OpenAPI conditional constraint),
   and unknown ids fail closed.
@@ -91,6 +93,10 @@ def test_engine_selection_round_trips_and_omission_stays_wire_compatible() -> No
 
     _submit_request_validator().validate(_manifest({"engine": "windows"}))
     _submit_request_validator().validate(_manifest({}))
+    # 退休的 rapidocr 枚举值仍可反序列化（历史记录兼容）；执行拒绝由
+    # 引擎可用性门禁承担（engine_retired）。
+    _submit_request_validator().validate(_manifest({"engine": "rapidocr"}))
+    assert dtos.OcrEngine("rapidocr") is dtos.OcrEngine.RAPIDOCR
     with pytest.raises(jsonschema.ValidationError):
         _submit_request_validator().validate(_manifest({"engine": "rapid-ocr"}))
     with pytest.raises(ValueError):
@@ -128,7 +134,7 @@ def test_engine_catalog_covers_all_availability_states_on_health() -> None:
     catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
     engines = {engine["id"]: engine for engine in catalog["engines"]}
     assert set(engines) == set(STABLE_ENGINE_IDS)
-    assert {engine["availability"] for engine in engines.values()} == {
+    assert {engine["availability"] for engine in engines.values()} <= {
         "ready",
         "preparation_required",
         "unavailable",

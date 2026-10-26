@@ -22,25 +22,19 @@ ACCELERATOR_TO_PLAN = {
     "nvidia_cuda": "win-x64-cu126",
 }
 PROFILE_COMPONENTS = {
-    # 组件目录面向引擎/能力划分：基础（RapidOCR）+ Paddle + MinerU + 必要
-    # 环境（runtime_host/gpu_runtime）。PDF/二维码等工具库属于基础闭包的
-    # 一部分，不再作为并列组件身份展示（其依赖始终随闭包安装）。
-    # rapidocr-base 是 Base Runtime 的必备探针身份，不进入高级组件选择目录。
-    "win-x64-base": (
-        ("rapidocr-base", "RapidOCR 基础识别"),
-        ("runtime_host", "Runtime 服务环境"),
-    ),
+    # 组件目录面向引擎/能力划分。基础闭包只保留 Runtime 服务环境（远程
+    # 服务安装与 legacy runtime 的 host 底座）；RapidOCR/RapidTable 已随
+    # 引擎退役移除，Paddle OCR/表格/结构由 managed paddleocr-ort-* 环境承
+    # 载（绑定见 paddle_onnx_environments），MinerU 与 GPU 闭包仍是 full
+    # 档位的可选组件。
+    "win-x64-base": (("runtime_host", "Runtime 服务环境"),),
     "win-x64-cpu": (
-        ("rapidocr-base", "RapidOCR 基础识别"),
-        ("paddleocr-cpu", "PaddleOCR 引擎（CPU）"),
-        ("mineru-cpu", "MinerU 文档解析（CPU）"),
         ("runtime_host", "Runtime 服务环境"),
+        ("mineru-cpu", "MinerU 文档解析（CPU）"),
     ),
     "win-x64-cu126": (
-        ("rapidocr-base", "RapidOCR 基础识别"),
-        ("paddleocr-cuda", "PaddleOCR 引擎（CUDA）"),
-        ("mineru-cuda", "MinerU 文档解析（CUDA）"),
         ("runtime_host", "Runtime 服务环境"),
+        ("mineru-cuda", "MinerU 文档解析（CUDA）"),
         ("gpu_runtime", "CUDA/Torch 运行环境"),
     ),
 }
@@ -80,15 +74,15 @@ class RuntimeComponentBinding:
     import_name: str
 
 
+# 历史组件身份映射。rapidocr-base / 原生 paddleocr-* 已退役：旧 marker
+# 与旧请求里的这些 id 在读取时折叠掉（数据保留、不卸载），OCR 由 managed
+# Paddle ONNX 环境承载。
+_RETIRED_ENGINE_COMPONENT_REPLACEMENTS = {
+    "ocr_engine": (),
+    "rapidocr-base": (),
+}
 _RUNTIME_COMPONENT_BINDINGS = {
-    ("win-x64-base", "rapidocr-base"): RuntimeComponentBinding("rapidocr", "rapidocr"),
-    ("win-x64-cpu", "rapidocr-base"): RuntimeComponentBinding("rapidocr", "rapidocr"),
-    ("win-x64-cu126", "rapidocr-base"): RuntimeComponentBinding("rapidocr", "rapidocr"),
-    ("win-x64-cpu", "paddleocr-cpu"): RuntimeComponentBinding("paddleocr", "paddleocr"),
     ("win-x64-cpu", "mineru-cpu"): RuntimeComponentBinding("mineru", "mineru"),
-    ("win-x64-cu126", "paddleocr-cuda"): RuntimeComponentBinding(
-        "paddleocr", "paddleocr"
-    ),
     ("win-x64-cu126", "mineru-cuda"): RuntimeComponentBinding("mineru", "mineru"),
 }
 _SHARED_RUNTIME_COMPONENT_BINDINGS = {
@@ -100,32 +94,24 @@ _SHARED_RUNTIME_COMPONENT_BINDINGS = {
 def migrate_legacy_component_ids(
     profile_id: str, component_ids: tuple[str, ...]
 ) -> tuple[str, ...]:
-    """把 2.7 的歧义 component id 迁移到一义的 accelerator variant。
+    """把历史 component id 迁移到当前目录；退役 id 只折叠不拒绝。
 
-    ``ocr_engine`` 在 base 曾表示 RapidOCR、在 full 同时承担 base closure 与
-    PaddleOCR；因此 full 迁移必须同时保留两项。旧 ``document_parsing`` 仅表达
-    MinerU 产品能力；底层原子 full install scope 的额外闭包由 selection policy
-    决定，不能污染持久化的组件身份。
+    旧 ``ocr_engine`` 曾在 base 表示 RapidOCR、在 full 同时承担 base closure
+    与原生 PaddleOCR；两者均已退役，统一折叠为空。旧 ``document_parsing``
+    仅表达 MinerU 产品能力；``rapidocr-base`` 是已退役 Rapid 基础闭包身份，
+    旧 marker/请求读取时直接折叠，历史环境与模型数据不受影响。
     """
     if profile_id == "win-x64-base":
-        replacements = {
-            "ocr_engine": ("rapidocr-base",),
-            "document_parsing": ("mineru-cpu",),
-        }
+        replacements = {"document_parsing": ("mineru-cpu",)}
     elif profile_id == "win-x64-cpu":
-        replacements = {
-            "ocr_engine": ("rapidocr-base", "paddleocr-cpu"),
-            "document_parsing": ("mineru-cpu",),
-        }
+        replacements = {"document_parsing": ("mineru-cpu",)}
     elif profile_id == "win-x64-cu126":
-        replacements = {
-            "ocr_engine": ("rapidocr-base", "paddleocr-cuda"),
-            "document_parsing": ("mineru-cuda",),
-        }
+        replacements = {"document_parsing": ("mineru-cuda",)}
     else:
         raise ManifestError(f"unsupported profile: {profile_id}")
-    # 2.8 前的功能域组件已并入基础闭包，不再作为组件身份；历史请求与
-    # 持久化选择中的这两项直接丢弃，而不是拒绝整个选择。
+    # 退役引擎组件（ocr_engine/rapidocr-base）与 2.8 前并入基础闭包的功能域
+    # 组件统一折叠，而不是拒绝整个选择。
+    replacements.update(_RETIRED_ENGINE_COMPONENT_REPLACEMENTS)
     replacements.update(
         {
             "pdf_document_tools": (),
@@ -220,11 +206,28 @@ class PythonRuntime:
 
 
 @dataclass(frozen=True, slots=True)
-class InstallerArtifact:
+class PaddleModelPack:
+    """Manifest-bound offline bundle of the default Paddle ONNX models."""
+
     archive_path: Path
     sha256: str
-    executable_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstallerArtifact:
+    """Bound Runtime Installer executable.
+
+    当前 manifest 直接以 ``executable`` + ``executable_sha256`` 绑定冻结
+    安装器可执行文件。历史 manifest 通过单成员 zip（``archive`` 三元组）
+    绑定同一可执行文件；loader 两种形态都接受，生产端只产出新形态。
+    """
+
+    executable_name: str
     executable_sha256: str
+    # 以下仅历史 zip 绑定形态使用。
+    archive_path: Path | None = None
+    archive_sha256: str | None = None
+    archive_executable_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,10 +244,10 @@ class RuntimeManifest:
     source_commit: str
     build_workflow: str
     raw: dict[str, Any]
-    rapid_cuda_environment: RuntimeInstallScope | None = None
     paddle_onnx_environments: dict[str, RuntimeInstallScope] = field(
         default_factory=dict
     )
+    paddle_model_pack: PaddleModelPack | None = None
 
 
 def sha256_file(path: Path) -> str:
@@ -266,6 +269,26 @@ def installer_executable_sha256(path: Path, executable_path: str) -> str:
             return hashlib.sha256(archive.read(executable_path)).hexdigest()
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
         raise ManifestError("installer archive is invalid") from exc
+
+
+# 产品稳定执行路径里的安装器文件名（runtime/installer/ 下分发一次）。
+INSTALLER_EXECUTABLE_NAME = "vibeocr-runtime-installer.exe"
+
+
+def _installer_executable_candidates(
+    manifest_path: Path, executable_name: str
+) -> tuple[Path, ...]:
+    """Resolve the bound installer executable's two canonical locations.
+
+    新形态绑定在两个真实校验位置解析：manifest 同目录（扁平 runtime
+    bundle 构建输出）与规范产品布局 ``runtime/installer/``（manifest 位于
+    ``runtime/backend/`` 时）。任一存在即参与校验；全部缺失 fail closed。
+    """
+    sibling = manifest_path.parent / executable_name
+    product_layout = manifest_path.parent.parent / "installer" / executable_name
+    if sibling == product_layout:
+        return (sibling,)
+    return (sibling, product_layout)
 
 
 def _sha256(value: object, *, field: str) -> str:
@@ -396,42 +419,51 @@ def validate_requirements_lock(
         if "paddle" in declarations or "opencv-contrib-python" in declarations:
             raise ManifestError("isolated host lock contains Paddle dependencies")
     if profile == "win-x64-base":
-        # base 闭包必须自带缺省引擎（RapidOCR + 显式 ORT + Windows adapter），
-        # 且不得混入 full 闭包的重型组件或第二套 OpenCV。winrt 投影的跨命名
-        # 空间依赖只声明在 [all] extra 里，但 await 完成回调与集合投影在
-        # 运行时导入 foundation 两个包；缺包时 Windows OCR 永久挂起。
+        # base 闭包只保留 Runtime 服务环境（PDF/二维码/Windows OCR 适配层），
+        # RapidOCR/RapidTable/onnxruntime 已随引擎退役移除；也不得混入 full
+        # 闭包的重型组件或任何 OpenCV 发行物（本仓不使用 contrib 专用模块，
+        # Paddle 环境自带 opencv-contrib-python）。winrt 投影的跨命名空间
+        # 依赖只声明在 [all] extra 里，但 await 完成回调与集合投影在运行时
+        # 导入 foundation 两个包；缺包时 Windows OCR 永久挂起。
         for required in (
-            "rapidocr",
-            "onnxruntime",
             "winrt-runtime",
             "winrt-windows-foundation",
             "winrt-windows-foundation-collections",
-            "opencv-python",
         ):
             if required not in lowered:
                 raise ManifestError(f"base lock is missing {required}")
         for forbidden in (
+            "rapidocr",
+            "rapid-table",
+            "onnxruntime",
             "paddlepaddle",
             "paddleocr",
             "mineru",
             "torch",
             "cu126",
+            "opencv-python",
             "opencv-contrib-python",
         ):
             if forbidden in lowered:
                 raise ManifestError(f"base lock contains {forbidden}")
-    elif profile == "win-x64-rapid-cu13":
-        for required in ("rapidocr", "rapid-table", "onnxruntime", "nvidia-cudnn-cu13"):
-            if required not in lowered:
-                raise ManifestError(f"Rapid CUDA lock is missing {required}")
-        if "onnxruntime-gpu" in lowered or "torch==" in lowered:
-            raise ManifestError("Rapid CUDA lock contains another inference runtime")
     elif profile.startswith("win-x64-paddle-ort-"):
         device = profile.removeprefix("win-x64-paddle-ort-")
         if device not in {"cpu", "cuda", "directml"}:
             raise ManifestError(f"unsupported Paddle ONNX profile: {profile}")
         packages = {entry[0].split("==")[0].lower() for entry in entries}
-        required = {"paddleocr", "paddlex", "opencv-contrib-python", "fastapi"}
+        required = {
+            "paddleocr",
+            "paddlex",
+            "opencv-contrib-python",
+            "fastapi",
+            "winrt-runtime",
+            "winrt-windows-foundation",
+            "winrt-windows-foundation-collections",
+            "winrt-windows-globalization",
+            "winrt-windows-graphics-imaging",
+            "winrt-windows-media-ocr",
+            "winrt-windows-storage-streams",
+        }
         ort = "onnxruntime-directml" if device == "directml" else "onnxruntime"
         required.add(ort)
         if device == "cuda":
@@ -577,28 +609,68 @@ def load_runtime_manifest(
     installer_data = data.get("installer")
     if not isinstance(installer_data, dict):
         raise ManifestError("installer binding is required")
-    installer_archive = _relative_filename(
-        installer_data.get("archive"),
-        field="installer.archive",
+    # 单一权威摘要：executable_sha256 同时约束扁平 bundle 里的可执行文件与
+    # 产品 runtime/installer/ 稳定执行路径；不叠加第二层 hash。
+    executable_sha = _sha256(
+        installer_data.get("executable_sha256"),
+        field="installer.executable_sha256",
     )
-    executable_path = installer_data.get("executable_path")
-    if executable_path != "runtime-installer/vibeocr-runtime-installer.exe":
-        raise ManifestError("installer.executable_path is invalid")
-    installer_artifact = InstallerArtifact(
-        archive_path=manifest_path.parent / installer_archive,
-        sha256=_sha256(installer_data.get("sha256"), field="installer.sha256"),
-        executable_path=executable_path,
-        executable_sha256=_sha256(
-            installer_data.get("executable_sha256"),
-            field="installer.executable_sha256",
-        ),
-    )
+    legacy_archive = installer_data.get("archive")
+    if legacy_archive is None:
+        if "sha256" in installer_data or "executable_path" in installer_data:
+            raise ManifestError(
+                "installer binding must not mix archive and executable fields"
+            )
+        executable_name = _relative_filename(
+            installer_data.get("executable"),
+            field="installer.executable",
+        )
+        if executable_name != INSTALLER_EXECUTABLE_NAME:
+            raise ManifestError("installer.executable is invalid")
+        installer_artifact = InstallerArtifact(
+            executable_name=executable_name,
+            executable_sha256=executable_sha,
+        )
+    else:
+        # 历史 manifest：冻结安装器以单成员 zip 绑定在 manifest 旁。
+        if "executable" in installer_data:
+            raise ManifestError(
+                "installer binding must not mix archive and executable fields"
+            )
+        installer_archive = _relative_filename(
+            legacy_archive,
+            field="installer.archive",
+        )
+        archive_executable_path = installer_data.get("executable_path")
+        if archive_executable_path != "runtime-installer/vibeocr-runtime-installer.exe":
+            raise ManifestError("installer.executable_path is invalid")
+        installer_artifact = InstallerArtifact(
+            executable_name=INSTALLER_EXECUTABLE_NAME,
+            executable_sha256=executable_sha,
+            archive_path=manifest_path.parent / installer_archive,
+            archive_sha256=_sha256(
+                installer_data.get("sha256"), field="installer.sha256"
+            ),
+            archive_executable_path=archive_executable_path,
+        )
     profiles_data = data.get("profiles")
     if not isinstance(profiles_data, dict) or set(profiles_data) != set(PROFILE_NAMES):
         raise ManifestError(
             "runtime manifest must define base, CPU, and cu126 profiles"
         )
     profiles: dict[str, RuntimeProfile] = {}
+    # 共享 wheel pool 会把同一分片绑定到多个 profile/scope：同一文件在
+    # 一次加载内只哈希一次，每个绑定仍逐一与 manifest 摘要比对，校验语
+    # 义不变（冲突摘要依旧在对应绑定处报错）。
+    verified_pack_digests: dict[Path, str] = {}
+
+    def _verified_pack_digest(path: Path) -> str:
+        digest = verified_pack_digests.get(path)
+        if digest is None:
+            digest = sha256_file(path)
+            verified_pack_digests[path] = digest
+        return digest
+
     for name in PROFILE_NAMES:
         record = profiles_data[name]
         if not isinstance(record, dict):
@@ -719,7 +791,7 @@ def load_runtime_manifest(
             for pack_name, pack_sha in zip(
                 runtime_pack, runtime_pack_shas, strict=True
             ):
-                if sha256_file(manifest_path.parent / pack_name) != pack_sha:
+                if _verified_pack_digest(manifest_path.parent / pack_name) != pack_sha:
                     raise ManifestError(f"{name} runtime pack SHA-256 mismatch")
         default_scope = RuntimeInstallScope(
             paddle_environment=paddle_environment,
@@ -763,18 +835,7 @@ def load_runtime_manifest(
             scope_component_set = frozenset(scope_component_ids)
             if not scope_component_set.issubset(component_ids):
                 raise ManifestError(f"{scope_field}.component_ids must stay in profile")
-            standalone_mineru = (
-                name == "win-x64-cpu"
-                and scope_id == "mineru-standalone"
-                and scope_component_set == {"mineru-cpu", "runtime_host"}
-            )
-            if scope_id == "mineru-standalone" and not standalone_mineru:
-                raise ManifestError(
-                    f"{scope_field} has invalid standalone MinerU binding"
-                )
-            if not standalone_mineru and not base_component_ids.issubset(
-                scope_component_set
-            ):
+            if not base_component_ids.issubset(scope_component_set):
                 raise ManifestError(
                     f"{scope_field}.component_ids must include base components"
                 )
@@ -808,9 +869,7 @@ def load_runtime_manifest(
                 validate_requirements_lock(
                     scope_lock_path,
                     profile=(
-                        "win-x64-mineru-cpu"
-                        if standalone_mineru
-                        else name
+                        name
                         if "gpu_runtime" in scope_component_set
                         or any(
                             item.startswith("mineru-") for item in scope_component_set
@@ -822,7 +881,10 @@ def load_runtime_manifest(
                 for pack_name, pack_sha in zip(
                     scope_pack, scope_pack_shas, strict=True
                 ):
-                    if sha256_file(manifest_path.parent / pack_name) != pack_sha:
+                    if (
+                        _verified_pack_digest(manifest_path.parent / pack_name)
+                        != pack_sha
+                    ):
                         raise ManifestError(
                             f"{scope_field} runtime pack SHA-256 mismatch"
                         )
@@ -873,37 +935,35 @@ def load_runtime_manifest(
             raise ManifestError("Runtime wheel SHA-256 mismatch")
         if sha256_file(python_runtime.archive_path) != python_runtime.sha256:
             raise ManifestError("Python archive SHA-256 mismatch")
-        if sha256_file(installer_artifact.archive_path) != installer_artifact.sha256:
-            raise ManifestError("Installer archive SHA-256 mismatch")
-        actual_executable_sha = installer_executable_sha256(
-            installer_artifact.archive_path,
-            installer_artifact.executable_path,
-        )
-        if actual_executable_sha != installer_artifact.executable_sha256:
-            raise ManifestError("Installer executable SHA-256 mismatch")
-    rapid_cuda = None
-    rapid_record = data.get("rapid_cuda_environment")
-    if rapid_record is not None:
-        if not isinstance(rapid_record, dict):
-            raise ManifestError("rapid_cuda_environment must be an object")
-        rapid_lock = manifest_path.parent / _relative_filename(
-            rapid_record.get("lock"), field="rapid_cuda_environment.lock"
-        )
-        rapid_sha = _sha256(
-            rapid_record.get("sha256"), field="rapid_cuda_environment.sha256"
-        )
-        if verify_artifacts:
-            if sha256_file(rapid_lock) != rapid_sha:
-                raise ManifestError("Rapid CUDA lock SHA-256 mismatch")
-            validate_requirements_lock(rapid_lock, profile="win-x64-rapid-cu13")
-        rapid_cuda = RuntimeInstallScope(
-            scope_id="rapidocr-cuda",
-            component_ids=("rapidocr-base", "runtime_host"),
-            lock_path=rapid_lock,
-            sha256=rapid_sha,
-            runtime_pack=(),
-            runtime_pack_sha256=(),
-        )
+        if installer_artifact.archive_path is not None:
+            archive_sha = installer_artifact.archive_sha256
+            member_path = installer_artifact.archive_executable_path
+            if (
+                archive_sha is None
+                or member_path is None
+                or sha256_file(installer_artifact.archive_path) != archive_sha
+            ):
+                raise ManifestError("Installer archive SHA-256 mismatch")
+            actual_executable_sha = installer_executable_sha256(
+                installer_artifact.archive_path,
+                member_path,
+            )
+            if actual_executable_sha != installer_artifact.executable_sha256:
+                raise ManifestError("Installer executable SHA-256 mismatch")
+        else:
+            candidates = _installer_executable_candidates(
+                manifest_path, installer_artifact.executable_name
+            )
+            present = [path for path in candidates if path.is_file()]
+            if not present:
+                raise ManifestError("Installer executable is missing")
+            for executable in present:
+                if sha256_file(executable) != installer_artifact.executable_sha256:
+                    raise ManifestError("Installer executable SHA-256 mismatch")
+    # Rapid 专属引擎环境（rapid_cuda_environment）已随引擎退役移除：
+    # 新 manifest 不再绑定，历史产品继续使用其自带的旧代码与旧 manifest。
+    if "rapid_cuda_environment" in data:
+        raise ManifestError("rapid_cuda_environment is retired")
     paddle_onnx = {}
     ort_records = data.get("paddle_onnx_environments", {})
     if not isinstance(ort_records, dict) or (
@@ -917,14 +977,36 @@ def load_runtime_manifest(
             record.get("lock"), field="paddle_onnx.lock"
         )
         digest = _sha256(record.get("sha256"), field="paddle_onnx.sha256")
+        device_pack, device_pack_shas = _runtime_pack_binding(
+            record, field=f"paddle_onnx.{device}"
+        )
         if verify_artifacts:
             if sha256_file(lock) != digest:
                 raise ManifestError("Paddle ONNX lock SHA-256 mismatch")
             validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
+            for pack_name, pack_sha in zip(device_pack, device_pack_shas, strict=True):
+                if _verified_pack_digest(manifest_path.parent / pack_name) != pack_sha:
+                    raise ManifestError(
+                        f"paddle_onnx.{device} runtime pack SHA-256 mismatch"
+                    )
         recipe = f"paddleocr-ort-{device}"
         paddle_onnx[recipe] = RuntimeInstallScope(
-            recipe, (recipe,), lock, digest, (), ()
+            recipe, (recipe,), lock, digest, device_pack, device_pack_shas
         )
+    paddle_model_pack = None
+    model_pack_record = data.get("paddle_model_pack")
+    if model_pack_record is not None:
+        if not isinstance(model_pack_record, dict):
+            raise ManifestError("paddle_model_pack must be an object")
+        model_pack_archive = manifest_path.parent / _relative_filename(
+            model_pack_record.get("archive"), field="paddle_model_pack.archive"
+        )
+        model_pack_sha = _sha256(
+            model_pack_record.get("sha256"), field="paddle_model_pack.sha256"
+        )
+        if verify_artifacts and sha256_file(model_pack_archive) != model_pack_sha:
+            raise ManifestError("paddle model pack SHA-256 mismatch")
+        paddle_model_pack = PaddleModelPack(model_pack_archive, model_pack_sha)
     return RuntimeManifest(
         path=manifest_path,
         sha256=hashlib.sha256(raw_bytes).hexdigest(),
@@ -938,17 +1020,19 @@ def load_runtime_manifest(
         source_commit=source_commit,
         build_workflow=workflow,
         raw=data,
-        rapid_cuda_environment=rapid_cuda,
         paddle_onnx_environments=paddle_onnx,
+        paddle_model_pack=paddle_model_pack,
     )
 
 
 __all__ = [
     "ACCELERATOR_TO_PLAN",
+    "INSTALLER_EXECUTABLE_NAME",
     "PROFILE_NAMES",
     "PROFILE_COMPONENTS",
     "InstallerArtifact",
     "ManifestError",
+    "PaddleModelPack",
     "PythonRuntime",
     "RuntimeManifest",
     "RuntimeComponent",

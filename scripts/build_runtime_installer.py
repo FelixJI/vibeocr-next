@@ -1,46 +1,29 @@
-"""Build and deterministically package the standalone Runtime Installer EXE."""
+"""Build the standalone frozen Runtime Installer executable."""
 
 from __future__ import annotations
 
 import argparse
 import subprocess
 import sys
-import zipfile
 from importlib.metadata import distribution
 from pathlib import Path
 
 from vibeocr.runtime.environments.bundled_uv import UV_VERSION, uv_executable
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
-
-
-def package_runtime_installer(
-    executable: Path,
-    output_dir: Path,
-    *,
-    version: str,
-) -> Path:
-    executable = executable.resolve(strict=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / f"vibeocr-runtime-installer-v{version}-win-x64.zip"
-    info = zipfile.ZipInfo(
-        "runtime-installer/vibeocr-runtime-installer.exe",
-        date_time=FIXED_ZIP_TIME,
-    )
-    info.compress_type = zipfile.ZIP_DEFLATED
-    info.external_attr = 0o755 << 16
-    with zipfile.ZipFile(target, mode="w", compresslevel=9) as archive:
-        archive.writestr(info, executable.read_bytes())
-    return target
+INSTALLER_EXECUTABLE_NAME = "vibeocr-runtime-installer.exe"
 
 
 def build_runtime_installer(
     *,
     output_dir: Path,
     work_dir: Path,
-    version: str,
-) -> tuple[Path, Path]:
+) -> Path:
+    """Freeze the installer EXE and stage it once under ``output_dir``.
+
+    产品只携带这一份可执行安装器（manifest 直接绑定其字节摘要）；
+    历史“单成员 zip”中间层已随去重移除。
+    """
     uv_binary = uv_executable()
     uv_licenses = distribution("uv").locate_file(f"uv-{UV_VERSION}.dist-info/licenses")
     if not uv_licenses.is_dir():
@@ -76,6 +59,8 @@ def build_runtime_installer(
             "vibeocr.runtime_contracts",
             "--collect-data",
             "vibeocr.runtime_contracts",
+            "--collect-data",
+            "vibeocr.runtime.environments",
             "--distpath",
             str(dist),
             "--workpath",
@@ -87,28 +72,23 @@ def build_runtime_installer(
         cwd=ROOT,
         check=True,
     )
-    executable = dist / "vibeocr-runtime-installer.exe"
-    archive = package_runtime_installer(
-        executable,
-        output_dir,
-        version=version,
-    )
-    return executable, archive
+    output_dir.mkdir(parents=True, exist_ok=True)
+    staged = output_dir / INSTALLER_EXECUTABLE_NAME
+    staged.write_bytes((dist / INSTALLER_EXECUTABLE_NAME).read_bytes())
+    return staged
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--version", required=True)
     args = parser.parse_args(argv)
-    executable, archive = build_runtime_installer(
-        output_dir=args.output_dir,
-        work_dir=args.work_dir,
-        version=args.version,
+    print(
+        build_runtime_installer(
+            output_dir=args.output_dir,
+            work_dir=args.work_dir,
+        )
     )
-    for path in (executable, archive):
-        print(path)
     return 0
 
 

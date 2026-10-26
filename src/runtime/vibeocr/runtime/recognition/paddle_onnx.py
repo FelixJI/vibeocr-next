@@ -573,7 +573,7 @@ def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
     import onnxruntime as ort
 
     if snapshot["device"] == "cuda":
-        from vibeocr.runtime.recognition.rapid_devices import setup_cuda_plugin
+        from vibeocr.runtime.recognition.onnx_devices import setup_cuda_plugin
 
         if not setup_cuda_plugin():
             raise PaddleOnnxError(

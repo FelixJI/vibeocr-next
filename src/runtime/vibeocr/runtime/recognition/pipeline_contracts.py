@@ -123,14 +123,17 @@ _UNMANAGED_LIFECYCLE = RecognitionModeLifecycle(
     supports_pinning=False,
     supports_release=False,
 )
-# #270：paddle_document_vl / paddle_formula 已退役。历史枚举值保留以便
-# 识别旧请求/旧配置并给出可诊断拒绝；目录、执行与生命周期操作均不再
-# 暴露这两个模式。
+# #270：paddle_document_vl / paddle_formula 已退役；RapidOCR/RapidTable
+# 全面转向 Paddle 后 rapid_text / rapid_table 同样退役。历史枚举值保留
+# 以便识别旧请求/旧记录并给出可诊断拒绝（及旧持久化设置的安全迁移）；
+# 目录、执行与生命周期操作均不再暴露这些模式。
 _RETIRED_LIFECYCLE = _UNMANAGED_LIFECYCLE
 RETIRED_RECOGNITION_MODES: frozenset[RecognitionMode] = frozenset(
     {
         RecognitionMode.PADDLE_DOCUMENT_VL,
         RecognitionMode.PADDLE_FORMULA,
+        RecognitionMode.RAPID_TEXT,
+        RecognitionMode.RAPID_TABLE,
     }
 )
 
@@ -250,10 +253,12 @@ _PIPELINE_METADATA: dict[OCRPipeline, dict[str, Any]] = {
     OCRPipeline.RAPID_TABLE: {
         "display_name": "表格结构识别（RapidTable）",
         "short_name": "表格R",
+        # RapidTable 已随 RapidOCR 退役：不再可预热，仅供历史请求解析后
+        # 在模式门禁层拒绝。
         "preloadable": False,
         "heavy": False,
         "cache_kind": "rapid",
-        "description": "轻量表格结构识别（RapidTable + RapidOCR），基础运行时自带",
+        "description": "已退役的轻量表格结构识别管道；不再提供新推理，请改用 paddle_table。",
         "supported_options": ["device"],
     },
     OCRPipeline.FORMULA_RECOGNITION: {
@@ -302,8 +307,8 @@ _MINERU_PARSE_METHODS = ("auto", "txt", "ocr")
 _MINERU_BACKENDS = ("hybrid-engine", "vlm-engine", "pipeline")
 _MINERU_EFFORTS = ("medium", "high")
 
-# Rapid 系引擎设备选项（rapidocr 文本 OCR 与 RapidTable 表格识别）：
-# cuda 必须真实 provider 就绪，auto 仅在就绪时选 GPU，否则 CPU。
+# Paddle 系设备选项（auto/cpu/cuda/directml）：cuda 必须真实 provider 就绪，
+# auto 仅在就绪时选 GPU，否则 CPU；directml 仅 Paddle ONNX 环境支持。
 DEVICE_VALUES = ("auto", "cpu", "cuda")
 
 
@@ -322,7 +327,8 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
         )
     }
     | {
-        # 仅 engine 缺省或 rapidocr 合法（parser 执行组合门禁）。
+        # 仅 engine 缺省（默认 paddleocr）或显式 paddleocr 合法（parser
+        # 执行组合门禁；windows 引擎携带 device 时 fail closed）。
         "device": PipelineOptionSpec(
             "device", _ENUM, choices=(*DEVICE_VALUES, "directml")
         ),
@@ -419,18 +425,6 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
 
 
 _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] = {
-    RecognitionMode.RAPID_TEXT: RecognitionModeDefinition(
-        mode=RecognitionMode.RAPID_TEXT,
-        family=RecognitionModeFamily.TEXT,
-        pipeline=OCRPipeline.OCR,
-        engine="rapidocr",
-        provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
-        lifecycle=_UNMANAGED_LIFECYCLE,
-        display_name="快速 OCR（RapidOCR）",
-        short_name="快速文字",
-        description="随基础运行时提供的轻量文字识别，无需下载高级模型。",
-        supported_options=("device",),
-    ),
     RecognitionMode.WINDOWS_TEXT: RecognitionModeDefinition(
         mode=RecognitionMode.WINDOWS_TEXT,
         family=RecognitionModeFamily.TEXT,
@@ -448,11 +442,14 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         family=RecognitionModeFamily.TEXT,
         pipeline=OCRPipeline.OCR,
         engine="paddleocr",
-        provisioning=RecognitionModeProvisioning.ADVANCED_COMPONENT,
+        provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
         lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
         display_name="通用 OCR（PaddleOCR）",
         short_name="通用文字",
-        description="基于 PaddleOCR 模型的通用文字识别，需要高级组件。",
+        description=(
+            "随基础运行时离线提供的通用文字识别（默认 small 模型）；"
+            "更大模型与 CUDA 按需准备。"
+        ),
         supported_options=(
             "model_preset",
             "device",
@@ -528,17 +525,29 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         description="该模式已退役：不再提供新推理；历史结果仍可查看与导出。",
         supported_options=(),
     ),
+    RecognitionMode.RAPID_TEXT: RecognitionModeDefinition(
+        mode=RecognitionMode.RAPID_TEXT,
+        family=RecognitionModeFamily.TEXT,
+        pipeline=OCRPipeline.OCR,
+        engine="rapidocr",
+        provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
+        lifecycle=_RETIRED_LIFECYCLE,
+        display_name="快速 OCR（RapidOCR，已退役）",
+        short_name="快速文字",
+        description="该模式已随 RapidOCR 退役：不再提供新推理，请改用 paddle_text。",
+        supported_options=(),
+    ),
     RecognitionMode.RAPID_TABLE: RecognitionModeDefinition(
         mode=RecognitionMode.RAPID_TABLE,
         family=RecognitionModeFamily.SPECIALIZED,
         pipeline=OCRPipeline.RAPID_TABLE,
         engine=None,
         provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
-        lifecycle=_UNMANAGED_LIFECYCLE,
-        display_name="表格结构识别（RapidTable）",
+        lifecycle=_RETIRED_LIFECYCLE,
+        display_name="表格结构识别（RapidTable，已退役）",
         short_name="表格结构R",
-        description="随基础运行时提供的轻量表格结构识别；模型就绪即可用。",
-        supported_options=("device",),
+        description="该模式已随 RapidTable 退役：不再提供新推理，请改用 paddle_table。",
+        supported_options=(),
     ),
 }
 

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_runtime_installer import _release
+from test_runtime_installer import _lock_text, _release
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
 from vibeocr.runtime.environments.runtime_manifest import (
     ManifestError,
@@ -17,6 +17,36 @@ from vibeocr.runtime.environments.runtime_manifest import (
 )
 
 from scripts.build_runtime_manifest import build_runtime_manifest
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "directml"])
+def test_paddle_host_locks_include_windows_ocr_projection(device):
+    checkout = Path(__file__).resolve().parents[4]
+    profile = f"win-x64-paddle-ort-{device}"
+    lock = checkout / f"config/runtime/{profile}/requirements-{profile}.lock"
+    declarations = lock.read_text(encoding="utf-8").splitlines()
+    for package in (
+        "winrt-runtime",
+        "winrt-windows-foundation",
+        "winrt-windows-foundation-collections",
+        "winrt-windows-globalization",
+        "winrt-windows-graphics-imaging",
+        "winrt-windows-media-ocr",
+        "winrt-windows-storage-streams",
+    ):
+        assert any(line.startswith(f"{package}==") for line in declarations), package
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "directml"])
+def test_paddle_host_lock_rejects_missing_windows_ocr_projection(tmp_path, device):
+    profile = f"win-x64-paddle-ort-{device}"
+    lock = tmp_path / "requirements.lock"
+    lock.write_text(
+        _lock_text(profile).replace("winrt-windows-media-ocr==", "missing-ocr=="),
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="lacks its declared closure"):
+        validate_requirements_lock(lock, profile=profile)
 
 
 def test_generated_manifest_binds_three_locks_and_rejects_incomplete_or_changed_closure(
@@ -40,7 +70,7 @@ def test_generated_manifest_binds_three_locks_and_rejects_incomplete_or_changed_
         python_archive=root / value["python"]["archive"],
         python_version=value["python"]["version"],
         python_source_url=value["python"]["source_url"],
-        installer_archive=root / value["installer"]["archive"],
+        installer_executable=root / value["installer"]["executable"],
         version="0.7.0",
         source_commit="0" * 40,
         build_workflow="tests/runtime",

@@ -440,7 +440,7 @@ describe("editor export pixels and previews", () => {
   });
 
   it.each([
-    ["识别文字", "rapid_text"],
+    ["识别文字", "paddle_text"],
     ["表格识别", "paddle_table"],
   ])(
     "submits the completed image with the explicit %s mode",
@@ -450,7 +450,7 @@ describe("editor export pixels and previews", () => {
       // #270：独立公式识别已退役，图片编辑不再提供公式入口。
       const modes = [
         {
-          modeId: "rapid_text",
+          modeId: "paddle_text",
           displayName: "文字识别",
           availability: "ready",
         },
@@ -495,7 +495,7 @@ describe("editor export pixels and previews", () => {
     vi.stubGlobal("fetch", uploading);
     const actions = createActions();
     const modes = [
-      { modeId: "rapid_text", displayName: "文字识别", availability: "ready" },
+      { modeId: "paddle_text", displayName: "文字识别", availability: "ready" },
       {
         modeId: "paddle_table",
         displayName: "表格识别",

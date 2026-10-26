@@ -8,7 +8,8 @@ import {
   sendState,
 } from "./workbench-host";
 
-/** 工具/操作分组换行，内容高度决定浮层位置；窄屏与高 DPI 保持动作可达。 */
+/** 工具/操作单排同列（与原生 ScreenRegionPicker 对齐），内容高度决定浮层位置；
+ * 窄屏与高 DPI 靠容器内水平滚动保持动作可达。 */
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/__annotation/*", (route) =>
@@ -117,7 +118,10 @@ async function mainRowCount(page: Page): Promise<number> {
 /** 主排滚动到最右后，末尾按钮是否可达（仍在工具栏盒内可见）。 */
 async function mainRowScrollableToEnd(page: Page): Promise<boolean> {
   return page.evaluate(() => {
-    const toolbar = document.querySelector<HTMLElement>(".editor-toolbar-main");
+    // 截图现场：滚动区是主排内的工具+次要动作区；普通页是整条主排。
+    const toolbar =
+      document.querySelector<HTMLElement>(".editor-scene-scroll") ??
+      document.querySelector<HTMLElement>(".editor-toolbar-main");
     if (!toolbar) return false;
     toolbar.scrollLeft = toolbar.scrollWidth;
     const box = toolbar.getBoundingClientRect();
@@ -144,7 +148,7 @@ async function toolbarWithinViewport(page: Page): Promise<boolean> {
   });
 }
 
-test("宽视口：工具与操作分组换行，属性下排位于背景内", async ({ page }) => {
+test("宽视口：工具与操作单排同列，属性下排位于背景内", async ({ page }) => {
   await mountScene(page, 1280, 720);
   const main = page.getByRole("toolbar", { name: "图片编辑工具" });
   const settings = page.getByRole("toolbar", { name: "当前工具设置" });
@@ -166,8 +170,37 @@ test("宽视口：工具与操作分组换行，属性下排位于背景内", as
     type: "main-row-width",
     description: `${mainWidth.toFixed(1)}px`,
   });
-  expect(await mainRowCount(page)).toBeGreaterThan(1);
-  // 页面与工具栏盒均不横向溢出。
+  expect(await mainRowCount(page)).toBe(1);
+  // 按钮尺寸与原生 ScreenRegionPicker token 对齐（高 32/字号 14/圆角 6）。
+  const token = await main
+    .getByRole("button", { name: "矩形", exact: true })
+    .evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        height: Math.round(element.getBoundingClientRect().height),
+        fontSize: style.fontSize,
+        radius: style.borderRadius,
+      };
+    });
+  expect(token.height).toBeGreaterThanOrEqual(30);
+  expect(token.height).toBeLessThanOrEqual(34);
+  expect(token.fontSize).toBe("14px");
+  // 核心动作可见性：primary 按钮不得白字配透明/白底（root 实测回归）。
+  const blankCoreButtons = await page
+    .locator(".editor-scene-core")
+    .evaluate((core) =>
+      Array.from(core.querySelectorAll("button"))
+        .filter((button) => {
+          const style = getComputedStyle(button);
+          return (
+            style.color === "rgb(255, 255, 255)" &&
+            (style.backgroundColor === "rgba(0, 0, 0, 0)" ||
+              style.backgroundColor === "rgb(255, 255, 255)")
+          );
+        })
+        .map((button) => button.getAttribute("aria-label")),
+    );
+  expect(blankCoreButtons).toEqual([]);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -181,7 +214,7 @@ test("宽视口：工具与操作分组换行，属性下排位于背景内", as
 });
 
 for (const width of [640, 360]) {
-  test(`窄视口 ${width}px：工具和动作自动换行，识别与下排属性可见可交互`, async ({
+  test(`窄视口 ${width}px：工具和动作保持单排，识别与下排属性可见可交互`, async ({
     page,
   }) => {
     await mountScene(page, width, 720);
@@ -202,7 +235,7 @@ for (const width of [640, 360]) {
     expect(await toolbarWithinViewport(page)).toBe(true);
     await expectContentsContained(page);
     // 主排保持单行，且滚动到最右后末尾按钮（更多）可达。
-    expect(await mainRowCount(page)).toBeGreaterThan(1);
+    expect(await mainRowCount(page)).toBe(1);
     expect(await mainRowScrollableToEnd(page)).toBe(true);
     // 下排可见且可交互：点选常用色；线宽选择器在属性排且不出视口。
     const settings = page.getByRole("toolbar", { name: "当前工具设置" });
@@ -234,7 +267,7 @@ test("无属性工具收起下排；切换工具后属性排重新出现", async
   await expect(settings.getByLabel("线条宽度")).toBeVisible();
 });
 
-test("输出设置可达：正常位置展开、操作格式/尺寸输入与色板、Tab 可达", async ({
+test("导出参数内联主排可达：格式/JPEG 质量可直接操作、Tab 可达", async ({
   page,
 }) => {
   await mountScene(page, 1280, 720);
@@ -250,43 +283,34 @@ test("输出设置可达：正常位置展开、操作格式/尺寸输入与色�
   }));
   expect(focused.tag).toBe("BUTTON");
   expect(focused.label).not.toBe("选择");
-  // 展开 settings：面板在视口内，格式切换、尺寸输入均可操作。
-  await page.locator(".editor-output-settings > summary").click();
-  const panel = page.getByRole("toolbar", { name: "输出设置" });
-  await expect(panel).toBeVisible();
-  const panelBox = await panel.boundingBox();
-  expect(panelBox!.y).toBeGreaterThanOrEqual(0);
-  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(720 + 0.5);
-  await panel.getByLabel("输出格式").selectOption("image/jpeg");
-  await expect(panel.getByLabel("JPEG 质量")).toBeVisible();
-  await panel.getByLabel("JPEG 质量").selectOption("0.95");
-  await panel.getByLabel("输出宽度").fill("640");
-  await panel.getByRole("button", { name: "应用尺寸" }).click();
-  await expect(
-    panel.getByRole("button", { name: "检查文件大小" }),
-  ).toBeEnabled();
+  // 无独立设置入口：格式/质量内联主排，切换 JPEG 后质量选择出现并可修改。
+  await expect(page.locator(".editor-output-settings")).toHaveCount(0);
+  await page.getByLabel("输出格式").selectOption("image/jpeg");
+  await expect(page.getByLabel("JPEG 质量")).toBeVisible();
+  await page.getByLabel("JPEG 质量").selectOption("0.95");
+  await expect(page.getByLabel("JPEG 质量")).toHaveValue("0.95");
+  await page.getByLabel("输出格式").selectOption("image/png");
+  await expect(page.getByLabel("JPEG 质量")).toHaveCount(0);
 });
 
-test("大选区（y=0、高接近视口）时工具栏钉底，输出设置翻转上方仍完整可达", async ({
+test("大选区（y=0、高接近视口）时工具栏钉底，内联导出参数仍完整可达", async ({
   page,
 }) => {
-  // 桌面 y=0/height=1360 → 视口 720 下选区高 680：下方放不下，工具栏
-  // 回退钉底（720-96=624），设置面板翻转到覆盖层上方且在视口内。
+  // 桌面 y=0/height=1360 → 视口 720 下选区高 680：下方放不下单排工具栏，
+  // 回退钉底（720-64=656），内联格式/质量仍可操作且在视口内。
   await mountScene(page, 1280, 720, { y: 0, height: 1360 });
   const overlay = page.locator(".capture-scene-editor");
   const overlayBox = await overlay.boundingBox();
   expect(overlayBox!.y).toBeGreaterThanOrEqual(0);
   expect(overlayBox!.y + overlayBox!.height).toBeLessThanOrEqual(720);
-  await page.locator(".editor-output-settings > summary").click();
-  const panel = page.getByRole("toolbar", { name: "输出设置" });
-  await expect(panel).toBeVisible();
-  const panelBox = await panel.boundingBox();
-  expect(panelBox!.y).toBeGreaterThanOrEqual(0);
-  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(720 + 0.5);
+  const format = page.getByLabel("输出格式");
+  const formatBox = await format.boundingBox();
+  expect(formatBox!.x).toBeGreaterThanOrEqual(0);
+  expect(formatBox!.x + formatBox!.width).toBeLessThanOrEqual(1280);
   // 实际操作：切换 JPEG 出现质量选择并可修改。
-  await panel.getByLabel("输出格式").selectOption("image/jpeg");
-  await panel.getByLabel("JPEG 质量").selectOption("0.85");
-  await expect(panel.getByLabel("JPEG 质量")).toHaveValue("0.85");
+  await format.selectOption("image/jpeg");
+  await page.getByLabel("JPEG 质量").selectOption("0.85");
+  await expect(page.getByLabel("JPEG 质量")).toHaveValue("0.85");
 });
 
 test("选区覆盖工具栏时前景有实色背景，颜色面板在窄屏底部仍可操作", async ({
@@ -373,9 +397,7 @@ for (const [action, format] of [
     ).toHaveAttribute("aria-pressed", "false");
     await page.getByRole("button", { name: "重做", exact: true }).click();
     if (format === "image/jpeg") {
-      await page.locator(".editor-output-settings > summary").click();
       await page.getByLabel("输出格式").selectOption(format);
-      await page.locator(".editor-output-settings > summary").click();
     }
     await page.getByRole("button", { name: action, exact: true }).click();
     const exported = await uploads.submitted(
@@ -425,11 +447,22 @@ async function expectContentsContained(page: Page) {
         ),
       ].every((child) => {
         const rect = child.getBoundingClientRect();
+        // 主排单行横向滚动：滚出部分被滚动容器裁剪，按裁剪后的可见部分
+        // 判定；未滚出的控件仍须完整落在浮层盒内。
+        const scroller = child.closest(
+          ".editor-scene-scroll, .editor-toolbar-main",
+        );
+        const clip = scroller ? scroller.getBoundingClientRect() : null;
+        const left = clip ? Math.max(rect.left, clip.left) : rect.left;
+        const right = clip ? Math.min(rect.right, clip.right) : rect.right;
+        const top = clip ? Math.max(rect.top, clip.top) : rect.top;
+        const bottom = clip ? Math.min(rect.bottom, clip.bottom) : rect.bottom;
+        if (right - left < 1 || bottom - top < 1) return true;
         return (
-          rect.top >= box.top &&
-          rect.bottom <= box.bottom + 1 &&
-          rect.left >= box.left &&
-          rect.right <= box.right + 1
+          top >= box.top &&
+          bottom <= box.bottom + 1 &&
+          left >= box.left &&
+          right <= box.right + 1
         );
       });
     }),

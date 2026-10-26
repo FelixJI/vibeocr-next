@@ -144,7 +144,7 @@ public sealed class ImageImportWorkbenchTests
       SettingsReads++;
       return Task.FromResult(new SettingsSnapshot
       {
-        Extra = new Dictionary<string, JsonElement> { ["default_recognition_mode"] = JsonSerializer.SerializeToElement("rapid_text") },
+        Extra = new Dictionary<string, JsonElement> { ["default_recognition_mode"] = JsonSerializer.SerializeToElement("paddle_text") },
       });
     }
     public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
@@ -466,7 +466,7 @@ public sealed class ImageImportWorkbenchTests
       var modes = bootstrapState is ImageEditWorkbenchState image ? image.RecognitionModes : ((RecognitionWorkbenchState)bootstrapState!).RecognitionModes;
       // #270：公式入口退役后固定两类。
       Assert.Equal(2, modes!.Count);
-      Assert.Equal("rapid_text", modes[0].ModeId);
+      Assert.Equal("paddle_text", modes[0].ModeId);
       Guid session = Guid.Parse(descriptor.SessionId);
       WorkbenchCommand confirmation = (scope, acknowledge) switch
       {

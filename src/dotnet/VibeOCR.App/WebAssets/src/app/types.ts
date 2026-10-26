@@ -209,7 +209,6 @@ export type AppActionType =
   | "recognition.setTaskEngine"
   | "recognition.setTaskModelPreset"
   | "recognition.setOptions"
-  | "recognition.setDeviceOption"
   | "pdf.setTaskEngine"
   | "pdf.setTaskModelPreset"
   | "update.check"

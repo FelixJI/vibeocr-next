@@ -449,6 +449,31 @@ describe("截图现场工具栏与裁剪交互", () => {
 });
 
 describe("颜色工具：常用色、自定义与屏幕取色", () => {
+  it("默认标注色为红色，未选色直接绘制即用默认红", async () => {
+    stubCanvasStack();
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor();
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 900, 600);
+    harness.flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    // 默认色即红色：色板首项按下，无需先选色。
+    expect(
+      screen.getByRole("button", { name: "常用颜色 #e02020" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 220 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 220 });
+    harness.flush();
+
+    const styles = allCalls()
+      .filter((call) => call.op === "strokeStyle")
+      .map((call) => call.args[0]);
+    expect(styles).toContain("#e02020");
+    unmount();
+  });
   it("常用色色板直接切换标注颜色", async () => {
     stubCanvasStack();
     const harness = stubAnimationFrames();

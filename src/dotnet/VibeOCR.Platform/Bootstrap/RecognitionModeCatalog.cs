@@ -37,14 +37,18 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
     public const string Capability = "ocr.recognition-modes.v1";
 
     /// <summary>
-    /// #270：已退役模式 id（wire 枚举值保留供历史读取）。目录不再声明
+    /// 已退役模式 id（wire 枚举值保留供历史读取）。目录不再声明
     /// 它们；调用方用它把旧默认/固定/快捷键选择诊断为“已退役，请重新选择”。
+    /// rapid_text / rapid_table 随 RapidOCR/RapidTable 退役：旧保存的
+    /// 选择由设置迁移映射到 paddle_text / paddle_table，不再提供可执行分支。
     /// </summary>
     public static readonly IReadOnlySet<string> RetiredModeIds = new HashSet<string>(
         StringComparer.Ordinal)
     {
         "paddle_document_vl",
         "paddle_formula",
+        "rapid_text",
+        "rapid_table",
     };
 
     public static bool IsRetiredModeId(string? modeId) =>
@@ -60,22 +64,20 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
     private static readonly IReadOnlyDictionary<Wire.RecognitionModeId, ExpectedMode> Expected =
         new Dictionary<Wire.RecognitionModeId, ExpectedMode>
         {
-            [Wire.RecognitionModeId.RapidText] = Mode(
-                Wire.RecognitionModeFamily.Text,
-                Wire.ExecutionPipelineId.OCR,
-                Wire.OcrEngineId.Rapidocr,
-                Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.Unmanaged),
+            // RapidText 已退役：不再进入目录合同；wire 枚举值保留仅供识别旧
+            // 持久化/请求并提示重新选择（RetiredModeIds 同步收编）。
             [Wire.RecognitionModeId.WindowsText] = Mode(
                 Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR,
                 Wire.OcrEngineId.Windows,
                 Wire.RecognitionModeProvisioning.OperatingSystem,
                 Wire.RecognitionModeLifecycleKind.Unmanaged),
-            [Wire.RecognitionModeId.PaddleText] = Paddle(
+            [Wire.RecognitionModeId.PaddleText] = Mode(
                 Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR,
-                Wire.OcrEngineId.Paddleocr),
+                Wire.OcrEngineId.Paddleocr,
+                Wire.RecognitionModeProvisioning.BaseRuntime,
+                Wire.RecognitionModeLifecycleKind.ModelResidency),
             [Wire.RecognitionModeId.PaddleStructure] = Paddle(
                 Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.PPStructureV3),
@@ -90,14 +92,8 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             [Wire.RecognitionModeId.PaddleTable] = Paddle(
                 Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.TABLERECOGNITION),
-            // RapidTable 表格识别：独立 RAPID_TABLE 管线（engine-only-OCR
-            // 不变量保留），依赖随 base 离线闭包分发，unmanaged 惰性加载。
-            [Wire.RecognitionModeId.RapidTable] = Mode(
-                Wire.RecognitionModeFamily.Specialized,
-                Wire.ExecutionPipelineId.RAPIDTABLE,
-                null,
-                Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.Unmanaged),
+            // RapidTable 已退役：表格语义统一由 paddle_table 承载；RAPID_TABLE
+            // 管线映射保留仅供历史结果/记录的字符串投影。
         };
 
     public static RecognitionModeCatalog FromWire(Wire.RecognitionModeCatalog catalog)
@@ -180,6 +176,8 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
 
     private static string ModeId(Wire.RecognitionModeId value) => value switch
     {
+        // 退役值仅保留字符串投影：目录不再声明它们，历史记录反序列化不
+        // 经由本目录适配层。
         Wire.RecognitionModeId.RapidText => "rapid_text",
         Wire.RecognitionModeId.WindowsText => "windows_text",
         Wire.RecognitionModeId.PaddleText => "paddle_text",
@@ -207,13 +205,15 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
         Wire.ExecutionPipelineId.PaddleOCRVL => "PaddleOCR-VL",
         Wire.ExecutionPipelineId.MinerU => "MinerU",
         Wire.ExecutionPipelineId.TABLERECOGNITION => "TABLE_RECOGNITION",
-        Wire.ExecutionPipelineId.RAPIDTABLE => "RAPID_TABLE",
         Wire.ExecutionPipelineId.FORMULARECOGNITION => "FORMULA_RECOGNITION",
+        // RAPID_TABLE 管线已退役：仅历史记录字符串投影。
+        Wire.ExecutionPipelineId.RAPIDTABLE => "RAPID_TABLE",
         _ => throw new ArgumentOutOfRangeException(nameof(value), value, "Unknown execution pipeline."),
     };
 
     private static OcrEngine RequestEngine(Wire.OcrEngineId value) => value switch
     {
+        // Rapidocr 已退役：仅历史载荷映射；活跃引擎目录不再声明它。
         Wire.OcrEngineId.Rapidocr => OcrEngine.RapidOcr,
         Wire.OcrEngineId.Windows => OcrEngine.Windows,
         Wire.OcrEngineId.Paddleocr => OcrEngine.PaddleOcr,

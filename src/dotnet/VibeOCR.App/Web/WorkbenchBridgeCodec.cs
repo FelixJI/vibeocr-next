@@ -108,7 +108,6 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> DefaultModeArgumentFields = ["mode"];
   private const int MaxRecognitionModeIdLength = 64;
   private static readonly HashSet<string> TaskEngineArgumentFields = ["engine"];
-  private static readonly HashSet<string> ModeDeviceArgumentFields = ["modeId", "device"];
   private static readonly HashSet<string> ResourceUriArgumentFields = ["resourceUri"];
   private static readonly HashSet<string> SessionRevisionArgumentFields =
     ["sessionId", "revision"];
@@ -1058,9 +1057,8 @@ public static class WorkbenchBridgeCodec
           "command arguments");
         string recipeEnvironmentId = ParseEnvironmentId(arguments);
         string? recipe = arguments.GetProperty("recipe").GetString();
-        if (recipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
-            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+        if (recipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
+            "mineru-cpu" or "mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         // sourceId 省略 → 本次显式“跟随环境/全局配置”；目录 id 由管理器校验，
         // 桥只校验形状，不硬编码目录成员。
@@ -1148,21 +1146,19 @@ public static class WorkbenchBridgeCodec
         // 宿主按 Runtime 目录核验，未知输入拒绝，不降 input validation。
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? compatibleRecipe = arguments.GetProperty("recipe").GetString();
-        if (compatibleRecipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
-            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+        if (compatibleRecipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
+            "mineru-cpu" or "mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new FindCompatibleEnvironmentCommand(compatibleRecipe);
       }
       case ("settings", "prepareEnvironment"):
       {
-        // 与 preview/findCompatible 同一 7-id 协议白名单；目录真值仍由宿主
+        // 与 preview/findCompatible 同一 5-id 协议白名单；目录真值仍由宿主
         // 按 Runtime 目录核验。
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? prepareRecipe = arguments.GetProperty("recipe").GetString();
-        if (prepareRecipe is not ("rapidocr-cpu" or "rapidocr-cuda" or "paddleocr-cpu" or "paddleocr-cuda" or
-            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda"))
+        if (prepareRecipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
+            "mineru-cpu" or "mineru-cuda"))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new PrepareEnvironmentCommand(prepareRecipe);
       }
@@ -1342,16 +1338,6 @@ public static class WorkbenchBridgeCodec
         return new SetTaskModelPresetCommand(ParseTaskModelPreset(arguments));
       case ("recognition", "setTaskEngine"):
         return new SetTaskEngineCommand(ParseTaskEngine(arguments));
-      case ("recognition", "setDeviceOption"):
-        EnsureObjectWithFields(arguments, ModeDeviceArgumentFields, "command arguments");
-        string? deviceModeId = arguments.GetProperty("modeId").GetString();
-        string? device = arguments.GetProperty("device").GetString();
-        // 形状层白名单：值域与 mode id 长度；目录归属由宿主 fail closed 校验。
-        if (string.IsNullOrWhiteSpace(deviceModeId) ||
-          deviceModeId!.Length > MaxRecognitionModeIdLength ||
-          device is not ("auto" or "cpu" or "cuda"))
-          throw new WorkbenchBridgeProtocolException("Workbench mode device option is invalid.");
-        return new SetModeDeviceCommand(deviceModeId, device!);
       case ("update", "check"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CheckUpdateCommand();

@@ -39,12 +39,13 @@ _logger = logging.getLogger(__name__)
 # MinerU 由各自调用方单独硬编码标记（远程 API，独立路径）。
 # #270：PaddleOCR-VL / FORMULA_RECOGNITION 管道已退役，不再标记成功；
 # 历史 cache 记录按数据保护原则保留，不主动清除。
+# RapidOCR/RapidTable 引擎已全面退役，RAPID_TABLE 不再进入本地标记集合；
+# 历史记录同样保留。
 LOCAL_MARKABLE_PIPELINES = frozenset(
     {
         "OCR",
         "PP-StructureV3",
         "TABLE_RECOGNITION",
-        "RAPID_TABLE",
     }
 )
 

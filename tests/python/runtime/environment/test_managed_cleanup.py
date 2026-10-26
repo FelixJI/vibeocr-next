@@ -107,9 +107,9 @@ def test_failed_install_candidate_is_recoverable(tmp_path, monkeypatch):
 
     store, _ = _manager(tmp_path, monkeypatch, install=fail)
     target = store.create("安装失败")
-    plan = store.preview_install(target["id"], "rapidocr-cpu")
+    plan = store.preview_install(target["id"], "paddleocr-ort-cpu")
     with pytest.raises(RuntimeInstallError):
-        store.install(plan["plan_id"], target["id"], "rapidocr-cpu")
+        store.install(plan["plan_id"], target["id"], "paddleocr-ort-cpu")
     residual = next(
         item
         for item in store.preview_cleanup()["items"]
@@ -197,22 +197,22 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
     first, second, third = [
         store.create(name) for name in ("保留一", "保留二", "删除三")
     ]
-    scope, _ = store._recipe("rapidocr-cpu")
+    scope, _ = store._recipe("paddleocr-ort-cpu")
     allowed = _lock_allowed_hashes(scope.lock_path)
     name, hashes = next(iter(allowed.items()))
-    shared = _report(store, "rapidocr-cpu", "shared.whl", name, next(iter(hashes)))
-    gpu_scope, _ = store._recipe("rapidocr+mineru-cuda")
+    shared = _report(store, "paddleocr-ort-cpu", "shared.whl", name, next(iter(hashes)))
+    gpu_scope, _ = store._recipe("paddleocr-ort-cuda")
     gpu_allowed = _lock_allowed_hashes(gpu_scope.lock_path)
     gpu_name = next(name for name in gpu_allowed if name not in allowed)
     unused = _report(
         store,
-        "rapidocr+mineru-cuda",
+        "paddleocr-ort-cuda",
         "unused.whl",
         gpu_name,
         next(iter(gpu_allowed[gpu_name])),
     )
     if executor == "uv":
-        for recipe in ("rapidocr-cpu", "rapidocr+mineru-cuda"):
+        for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda"):
             recipe_scope, _ = store._recipe(recipe)
             report = (
                 store.paths.state_root
@@ -235,7 +235,7 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
     data = store._read()
     for item in (first, second):
         data["environments"][item["id"]].update(
-            status="installed", recipe="rapidocr-cpu", recipe_lock=scope.sha256
+            status="installed", recipe="paddleocr-ort-cpu", recipe_lock=scope.sha256
         )
     _atomic_json(store._registry, data)
     assert _clean(store, f"environment:{third['id']}")["items"][0]["state"] == "deleted"
@@ -396,9 +396,9 @@ def test_environment_and_residual_selection_does_not_double_count(
 
 def test_artifact_filename_does_not_claim_directory_contents(tmp_path, monkeypatch):
     store, _ = _manager(tmp_path, monkeypatch)
-    scope, _ = store._recipe("rapidocr-cpu")
+    scope, _ = store._recipe("paddleocr-ort-cpu")
     name, hashes = next(iter(_lock_allowed_hashes(scope.lock_path).items()))
-    path = _report(store, "rapidocr-cpu", "known.whl", name, next(iter(hashes)))
+    path = _report(store, "paddleocr-ort-cpu", "known.whl", name, next(iter(hashes)))
     path.unlink()
     path.mkdir()
     private = path / "unknown.txt"

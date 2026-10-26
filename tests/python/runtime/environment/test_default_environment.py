@@ -11,7 +11,9 @@ from vibeocr.runtime.environments.managed_environments import ManagedEnvironment
 
 def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install=None):
     _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(tmp_path / "release", with_base_pack=True)
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     calls = []
 
     def runner(python, scope, endpoint):
@@ -49,7 +51,7 @@ def test_first_launch_installs_and_selects_default_once(tmp_path, monkeypatch):
     assert len(listed["environments"]) == 1
     environment = listed["environments"][0]
     assert environment["name"] == "默认环境"
-    assert environment["recipe"] == "rapidocr-cpu"
+    assert environment["recipe"] == "paddleocr-ort-cpu"
     assert listed["active_id"] == environment["id"]
     assert listed["active_revision"] == 1
     assert len(calls) == 1 and calls[0][1]

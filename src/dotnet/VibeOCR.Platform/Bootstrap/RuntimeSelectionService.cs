@@ -619,7 +619,8 @@ public sealed class RuntimeSelectionService
 
     private static Wire.OcrEngineId ToWireEngineId(OcrEngine engine) => engine switch
     {
-        OcrEngine.RapidOcr => Wire.OcrEngineId.Rapidocr,
+        // OcrEngine.RapidOcr 已退役：不再出现在活跃引擎目录与新提交；
+        // 缺省臂 fail closed，避免把它写进新的 wire 载荷。
         OcrEngine.Windows => Wire.OcrEngineId.Windows,
         OcrEngine.PaddleOcr => Wire.OcrEngineId.Paddleocr,
         _ => throw new ArgumentOutOfRangeException(nameof(engine), engine, "Unknown engine."),
@@ -627,6 +628,7 @@ public sealed class RuntimeSelectionService
 
     private static OcrEngine ToRequestEngine(Wire.OcrEngineId engine) => engine switch
     {
+        // Rapidocr 已退役：仅历史载荷映射；活跃引擎目录不再声明它。
         Wire.OcrEngineId.Rapidocr => OcrEngine.RapidOcr,
         Wire.OcrEngineId.Windows => OcrEngine.Windows,
         Wire.OcrEngineId.Paddleocr => OcrEngine.PaddleOcr,

@@ -52,17 +52,18 @@ worker 仍在独立进程运行。
 
 ![真实 Windows 候选重启后的已安装环境与运行状态](docs/managed-environments.png)
 
-- 首次识别、批量执行、打开 PDF 或在运行环境分区点击“重新检查状态”（加载计算服务目录）时，从随包离线基础依赖准备并选中“默认环境”（RapidOCR · CPU）；
-  升级沿用已有环境，没有环境时补建默认环境。完成初始化后，删除环境不会触发自动重建。
-  普通启动、通用设置、纯截图编辑/复制保存和本地二维码工具不启动 Installer 或 Supervisor。
+- 普通启动在首窗显示后后台准备计算服务；首次使用从随包离线依赖准备并选中“默认环境”（PaddleOCR ONNX · CPU）；
+  升级沿用仍受支持的已有环境，旧 Rapid 环境按下方退役说明处理。完成初始化后，删除环境不会触发自动重建。
+  纯截图编辑、复制保存和本地二维码工具不等待计算服务就绪。
   并发计算请求共享准备，每个请求可独立取消；准备失败或取消保留输入供重试。
   “查看环境清单”仅只读检查已有环境，不初始化默认环境或启动计算服务。
-  默认环境使用固定目录 `state/environments/rapidocr-cpu`，按需准备的环境自动命名，重装不再新增 revision 路径。
+  默认环境使用固定目录 `state/environments/paddleocr-ort-cpu`，按需准备的环境自动命名，重装不再新增 revision 路径。
   已有名称和 UUID 环境继续兼容，旧 revision 布局在重装时迁移；详见[环境路径与迁移说明](docs/managed-environment-paths.md)。
-- 在“设置 → 运行环境”选择识别组件和加速方式，查看对应用途与主要依赖；选择只查询兼容环境，
-  不改变识别默认模式或当前任务。已有兼容环境可直接切换并启动验证；没有时，“准备此配置”
+- 在“设置 → 运行环境”选择 PaddleOCR 推理后端（CPU / DirectML / CUDA），或单独安装、移除 MinerU 本地引擎。
+  Paddle 文字、表格与版面结构共用推理依赖，额外模型按需下载。选择只查询兼容环境，
+  不改变识别默认模式或当前任务。已有兼容环境可直接切换并启动验证；没有时，“准备此后端”
   自动准备目标环境并在常规页面展示简短确认，明确确认后才安装。完整包清单和路径是可选只读详情，
-  无需高级设置或手动命名。改组件、加速方式、目标环境或保存来源后必须重新预览。
+  环境清单、依赖版本、下载来源与空间清理收进高级区域，无需手动命名。改后端、目标环境或保存来源后必须重新预览。
   准备失败可重试，导航返回可继续确认；旧空环境也可从环境列表继续准备或移除。
 - 下载来源只有两项：依赖默认使用 TUNA PyPI 镜像，模型默认使用 ModelScope（魔搭）。
   保存来源后统一用于各环境后续的依赖安装与模型下载，不立即下载或安装；已经进行中的安装使用原计划。
@@ -73,7 +74,7 @@ worker 仍在独立进程运行。
 
 - 可以保留多个环境；“切换到此环境”先启动并验证目标服务，再替换当前服务，不会重新安装
   已准备的依赖。有运行任务时拒绝切换，验证失败保留旧健康服务；任务记录绑定提交时的环境修订。
-- 配方区分 RapidOCR、PaddleOCR、MinerU 及可兼容共存的 RapidOCR + MinerU，支持的设备以
+- 配方区分 PaddleOCR 与 MinerU，支持的设备以
   当前配方为准。每个环境独立管理可写依赖目录，基础解释器和可信下载缓存可复用。
   选择 CUDA 配方不代表已完成 GPU 实际推理，界面分别展示目标设备与实际执行设备。
 - 环境列表展示解释器、依赖、引擎、模型与服务状态。可修复异常解释器，或删除未活动且
@@ -99,7 +100,9 @@ worker 仍在独立进程运行。
 
 ### 模型准备与就绪状态
 
-- 依赖安装、模型首次准备、引擎在所选设备上实际可用和服务就绪是不同的阶段。Paddle 三种保留模式的 ONNX 模型按冻结清单从所选 ModelScope/Hugging Face 来源准备，
+- PaddleOCR CPU 与 DirectML 的依赖随产品离线分发，默认 small 文字检测、识别及文档方向模型也随包携带；首次使用仍需在本地准备独立环境。基础 Runtime、PaddleOCR CPU 与 DirectML 的第三方 wheel 共用一个离线 wheel pool 随包分发一次（相同 wheel 不重复携带，同名不同版本共存），各环境仍按自身锁的精确清单独立安装，不混装 CPU/DirectML 的 ONNX Runtime。
+  DirectML 与 CPU 环境独立安装，模型可复用。DirectML 能否执行取决于本机设备与驱动，不以安装完成代替设备就绪检查。
+- 依赖安装、模型首次准备、引擎在所选设备上实际可用和服务就绪是不同的阶段。其他 Paddle ONNX 模型按冻结清单从所选 ModelScope/Hugging Face 来源准备，
   MinerU 沿自身模型机制准备；首次使用可能额外下载，服务就绪不代表模型全部就绪。
 - 识别模式在对应任务中选择，各模式的可用性（可用/需准备依赖/不可用）以任务中的实际显示为准。
 
@@ -110,9 +113,13 @@ Paddle 仅保留文字、表格和非 VLM 文档结构识别，使用 CPU、CUDA
 已退役，这是本产品迁移范围，不表示 ONNX Runtime 不能运行任何 VLM 或公式模型。MinerU 能力继续保留。
 
 旧环境和模型不会自动卸载。旧环境不再提供原生 Paddle 推理，请在设置中显式准备并切换对应 ORT 环境。
-保存的退役默认模式、截图固定模式或快捷键选择保留原值，执行时提示已退役，请重新选择；未设置默认仍用 RapidOCR。
+保存的上述退役默认模式、截图固定模式或快捷键选择保留原值，执行时提示已退役，请重新选择；未设置默认使用 PaddleOCR 文字识别。
 旧识别选项在读取副本中仅移除已知退役字段，保留方向等合法选项；读取不会写回配置，正常保存才原子写入。
 如需恢复旧设置，可使用原配置备份和旧版本；历史公式、VL、表格结果仍可查看和导出，原始数据不批量重写。
+
+RapidOCR 与 RapidTable 已退出当前产品的执行路径及发布依赖。已有 Rapid 文字／表格选择迁移到 Paddle 对应模式；
+旧 Rapid 环境和模型不会自动删除，也不会被当作可用的 Paddle 环境。表格与文档结构识别继续使用 Paddle，
+首次使用这些能力可能需要下载额外模型；历史任务结果保持可查看和导出。
 
 ### 识别类型与结构化结果
 
@@ -271,7 +278,9 @@ CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `pre
 （`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`
 和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 调用
 `scripts/build_internal_runtime.ps1` 从当前源码产出内部 Runtime wheel、冻结 Runtime Installer、
-固定第三方 offline base pack 与 runtime manifest；第三方 CPython 归档与各 Windows 运行环境
+共享第三方 offline wheel pool（base / Paddle ONNX CPU / DirectML 闭包去重后每个 wheel 只分发一次，
+各 profile 另附自身精确 requirements 清单 zip，经既有 `runtime_pack` 元组接口绑定）与 runtime manifest；
+第三方 CPython 归档与各 Windows 运行环境
 profile 锁保留在 `config/runtime/`。产品内部沿用 `runtime/backend/` 与
 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
 不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为

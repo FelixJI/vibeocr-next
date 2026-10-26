@@ -10,21 +10,21 @@ from vibeocr.runtime.recognition.native_runtime import (
 )
 
 
-def test_prepares_onnxruntime_without_initializing_rapidocr_models(
+def test_prepares_onnxruntime_without_initializing_engine_models(
     monkeypatch,
 ) -> None:
     imported: list[str] = []
     onnxruntime = types.ModuleType("onnxruntime")
-    rapidocr = types.ModuleType("rapidocr")
+    paddleocr = types.ModuleType("paddleocr")
 
-    class UnexpectedRapidOCR:
+    class UnexpectedPaddleOCR:
         def __init__(self) -> None:
             raise AssertionError("native preparation must not initialize models")
 
-    rapidocr.RapidOCR = UnexpectedRapidOCR  # type: ignore[attr-defined]
+    paddleocr.PaddleOCR = UnexpectedPaddleOCR  # type: ignore[attr-defined]
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(sys.modules, "onnxruntime", onnxruntime)
-    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr)
+    monkeypatch.setitem(sys.modules, "paddleocr", paddleocr)
 
     prepare_windows_ocr_native_runtime(imported.append)
 

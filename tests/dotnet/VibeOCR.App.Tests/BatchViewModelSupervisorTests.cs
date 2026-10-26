@@ -68,7 +68,7 @@ public sealed class BatchViewModelSupervisorTests
             var fake = new FakeBatchInferenceClient();
             var viewModel = new BatchViewModel(fake, files);
             var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
-                OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+                OcrEngine.PaddleOcr, "base_runtime", "ready", null, "paddleocr-ort-cpu",
                 ["model_preset", "device"], "model_residency", true, true, true, true);
             viewModel.SetRecognitionMode(mode,
                 options: new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
@@ -152,7 +152,7 @@ public sealed class BatchViewModelSupervisorTests
             "text",
             "OCR",
             OcrEngine.PaddleOcr,
-            "advanced_component",
+            "base_runtime",
             "ready",
             null,
             "paddleocr-ort-cpu",

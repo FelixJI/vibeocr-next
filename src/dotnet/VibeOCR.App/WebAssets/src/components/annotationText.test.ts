@@ -175,6 +175,40 @@ describe("annotationText", () => {
     });
     expect(inks).toEqual([expected]);
   });
+  it("序号数字按字形实际包围盒真正居中于圆心", () => {
+    const ctx = context();
+    // 字形墨水盒不对称（典型数字偏上）：旧实现用 em 盒 middle 会整体偏移。
+    ctx.measureText.mockImplementation(() => ({
+      width: 14,
+      actualBoundingBoxLeft: 6,
+      actualBoundingBoxRight: 8,
+      actualBoundingBoxAscent: 15,
+      actualBoundingBoxDescent: 3,
+    }));
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "numbering-center",
+      tool: "numbering",
+      start: { x: 100, y: 100 },
+      end: { x: 100, y: 100 },
+      ordinal: 1,
+      style: { numberShape: "circle" },
+    });
+    expect(ctx.fillText).toHaveBeenCalledWith("1", 99, 106);
+    expect((ctx as { textAlign?: string }).textAlign).toBe("center");
+    expect((ctx as { textBaseline?: string }).textBaseline).toBe("alphabetic");
+  });
+  it("序号字形度量缺失时回退零偏移（与旧渲染一致）", () => {
+    const ctx = context();
+    drawTextAnnotation(ctx as unknown as CanvasRenderingContext2D, {
+      id: "numbering-fallback",
+      tool: "numbering",
+      start: { x: 60, y: 40 },
+      end: { x: 60, y: 40 },
+      ordinal: 2,
+      style: { numberShape: "square" },
+    });
+    expect(ctx.fillText).toHaveBeenCalledWith("2", 60, 40);
+  });
   it("字体检测不会把不存在字体的浏览器fallback当已安装", () => {
     const ctx = context();
     const canvas = ctx as unknown as CanvasRenderingContext2D;

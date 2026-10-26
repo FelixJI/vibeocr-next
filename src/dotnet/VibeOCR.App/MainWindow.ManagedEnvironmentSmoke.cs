@@ -13,7 +13,7 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow
 {
-  private const string SmokeEnvironmentA = "RapidOCR + RapidTable · CPU";
+  private const string SmokeEnvironmentA = "PaddleOCR ONNX · CPU";
   private const string SmokeEnvironmentB = "Smoke B";
   private string managedSmokeStage = "starting";
   private readonly List<object> managedInstallProgressEvidence = [];
@@ -85,13 +85,13 @@ public sealed partial class MainWindow
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    await SelectSmokeValueAsync("#environment-component-select", "rapidocr");
+    await SelectSmokeValueAsync("#environment-component-select", "paddleocr-ort");
     await SelectSmokeValueAsync("#environment-device-select", "cpu");
     await ClickManagedSmokeButtonAsync("准备此配置");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('rapidocr-cpu') && " +
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-ort-cpu') && " +
       "!document.querySelector('.managed-environment-advanced') && " +
       "!document.querySelector(\"input[aria-label='新环境名称（留空自动命名）']\")",
       TimeSpan.FromMinutes(2));
@@ -257,9 +257,9 @@ public sealed partial class MainWindow
 
   private async Task<object> CompleteInstallProgressSmokeAsync()
   {
-    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "rapidocr-cpu";
-    if (recipe is not ("rapidocr-cpu" or "paddleocr-cpu"))
-      throw new InvalidOperationException("Progress smoke supports isolated CPU recipes only.");
+    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "paddleocr-ort-cpu";
+    if (recipe is not "paddleocr-ort-cpu")
+      throw new InvalidOperationException("Progress smoke supports the isolated Paddle ONNX CPU recipe only.");
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
@@ -278,11 +278,11 @@ public sealed partial class MainWindow
     return new { installed = SmokeEnvironmentEvidence(installed), install_progress = managedInstallProgressEvidence };
   }
 
-  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "rapidocr-cpu")
+  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "paddleocr-ort-cpu")
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-component-select", recipe.StartsWith("paddleocr", StringComparison.Ordinal) ? "paddleocr" : "rapidocr");
+    await SelectSmokeValueAsync("#environment-component-select", "paddleocr-ort");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +

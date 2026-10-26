@@ -180,8 +180,8 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         }),
       ).size,
   );
-  // 主排承载全部工具与操作，通过分组换行保持可达。
-  expect(actionRows).toBeGreaterThan(1);
+  // 主排承载全部工具与操作：单排同列，过宽时容器内水平滚动保持可达。
+  expect(actionRows).toBe(1);
   // 现场工具按钮按用户要求以纯中文文字呈现（无 SVG 图标）。
   await expect(
     page.getByRole("button", { name: "矩形", exact: true }),
@@ -228,7 +228,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
         return Array.from(pixel);
       }),
     )
-    .toEqual([243, 139, 53, 255]);
+    .toEqual([224, 32, 32, 255]);
   await page.mouse.up();
   await expect
     .poll(() =>
@@ -257,7 +257,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   const editedText = await uploads.forRevision("prepareScreenshotTextLayer", 1);
   await uploads.waitForDiscard(editedText.resourceUri);
   const editedImage = await decodeUpload(page, editedText.body);
-  expect(pixelAt(editedImage, 600, 150)).toEqual([243, 139, 53]);
+  expect(pixelAt(editedImage, 600, 150)).toEqual([224, 32, 32]);
   await page.getByRole("button", { name: "保存标注图" }).click();
   const saved = await uploads.submitted("saveScreenshotImage");
   await expectCommand(page, {
@@ -277,7 +277,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
     scope: "recognition",
     action: "recognizeScreenshotImage",
     arguments: {
-      modeId: "rapid_text",
+      modeId: "paddle_text",
       resourceUri: recognized.resourceUri,
       sessionId: "capture-scene",
       revision: 1,

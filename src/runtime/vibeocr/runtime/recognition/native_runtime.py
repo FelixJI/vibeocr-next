@@ -3,8 +3,8 @@
 PyWinRT 3.2.1 ships an app-local ``msvcp140.dll``.  If WinRT is imported
 before ONNX Runtime, Windows can bind ONNX Runtime to that older STL runtime
 and fail its module initializer.  Load ONNX Runtime first, without creating a
-RapidOCR instance or loading any model, so both adapters share a compatible
-process-wide runtime.
+Paddle engine instance or loading any model, so both adapters share a
+compatible process-wide runtime.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ def prepare_windows_ocr_native_runtime(
     """Load ONNX Runtime before any PyWinRT projection on Windows.
 
     Missing or intrinsically broken ONNX Runtime must not prevent the
-    Supervisor from serving the independent Windows OCR adapter.  The
-    RapidOCR descriptor will report that failure through its normal probe.
+    Supervisor from serving the independent Windows OCR adapter.  The Paddle
+    engine descriptor will report that failure through its normal probe.
     """
     if sys.platform != "win32":
         return

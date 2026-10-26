@@ -35,7 +35,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     Directory.CreateDirectory(root);
     try
     {
-      var inference = new SwitchCatalogInferenceClient { Health = SwitchHealth(Wire.OcrEngineId.Rapidocr) };
+      var inference = new SwitchCatalogInferenceClient { Health = SwitchHealth(Wire.OcrEngineId.Windows) };
       var manager = new SwitchCatalogManager();
       var environments = new ManagedEnvironmentSettings(manager, (id, _) =>
       {
@@ -159,7 +159,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     {
       var inference = new SwitchFailureInferenceClient
       {
-        Health = SwitchHealth(Wire.OcrEngineId.Rapidocr),
+        Health = SwitchHealth(Wire.OcrEngineId.Windows),
       };
       var manager = new SwitchCatalogManager();
       var environments = new ManagedEnvironmentSettings(manager, (_, _) =>
@@ -2322,7 +2322,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(SwitchHealth(Wire.OcrEngineId.Rapidocr));
+      Task.FromResult(SwitchHealth(Wire.OcrEngineId.Windows));
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
       Task.FromResult(new SettingsSnapshot());
     public override async Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
@@ -2335,7 +2335,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
   private sealed class SwitchCatalogManager : IManagedEnvironmentClient
   {
-    public string ActiveId { get; set; } = "rapid";
+    public string ActiveId { get; set; } = "paddle";
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
       Task.FromResult(new ManagedEnvironmentList(ActiveId, 1, []));
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>

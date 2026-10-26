@@ -464,6 +464,311 @@ it("falls back to basic per-line rendering when host modes are missing", () => {
   expect(items[0]!).toHaveTextContent("第一段第一行");
 });
 
+it("悬停结果行上报行下标，左侧图上行框下标回传时同步加亮", () => {
+  const onHoverLine = vi.fn();
+  const { rerender } = render(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+    />,
+  );
+  const items = document.querySelectorAll(".result-lines-list .result-line");
+  // 结果行悬停 → 上报宿主行下标（左侧图上行框同步加亮）。
+  fireEvent.mouseEnter(items[1]!);
+  expect(onHoverLine).toHaveBeenCalledWith(1);
+  fireEvent.mouseLeave(items[1]!);
+  expect(onHoverLine).toHaveBeenCalledWith(undefined);
+  // 左侧图上悬停回传的 highlightLineIndex 同步加亮结果行。
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+      highlightLineIndex={1}
+    />,
+  );
+  const highlighted = document.querySelectorAll(
+    ".result-lines-list .result-line",
+  );
+  expect(highlighted[1]!).toHaveClass("line-hovered");
+  expect(highlighted[0]!).not.toHaveClass("line-hovered");
+  expect(highlighted[2]!).not.toHaveClass("line-hovered");
+});
+
+it("raw 模式：原文整段保留，可精确映射的行可双向悬停高亮", () => {
+  const onHoverLine = vi.fn();
+  const raw = "引导语\n第一段第一行\n第一段第二行\n\n第二段首行";
+  const source = JSON.stringify([
+    linesBlock(fixtureLines, { ...fixtureModes, raw }),
+  ]);
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+    />,
+  );
+  // 原文完全保留：分隔/空白/引导语均为原文字节，不规范化。
+  const pre = document.querySelector(".result-document")!;
+  expect(pre.textContent).toBe(raw);
+  // 结果侧悬停 → 上报宿主行下标（左侧图上行框同步加亮）。
+  fireEvent.mouseEnter(screen.getByText("第一段第二行"));
+  expect(onHoverLine).toHaveBeenCalledWith(1);
+  fireEvent.mouseLeave(screen.getByText("第一段第二行"));
+  expect(onHoverLine).toHaveBeenCalledWith(undefined);
+  // 引导语/空白分隔是不可映射的纯文本节点：只有三行映射为可悬停 span。
+  expect(document.querySelectorAll(".result-raw-line")).toHaveLength(3);
+  // 左侧图上悬停回传的 highlightLineIndex 同步加亮对应片段。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+      highlightLineIndex={2}
+    />,
+  );
+  const highlighted = document.querySelector(".result-raw-line.line-hovered")!;
+  expect(highlighted.textContent).toBe("第二段首行");
+  // 无法映射的下标不误亮任何片段。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+      highlightLineIndex={9}
+    />,
+  );
+  expect(
+    document.querySelectorAll(".result-raw-line.line-hovered"),
+  ).toHaveLength(0);
+});
+
+it("重复行文本按出现顺序映射：高亮第二个重复行命中第二次出现", () => {
+  const lines = [
+    { text: "重复行", score: 0.9, bbox: [0, 0, 100, 20] },
+    { text: "间隔", score: 0.9, bbox: [0, 30, 100, 50] },
+    { text: "重复行", score: 0.9, bbox: [0, 60, 100, 80] },
+  ];
+  const raw = "重复行\n间隔\n重复行";
+  const source = JSON.stringify([linesBlock(lines, { raw })]);
+  const onHoverLine = vi.fn();
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+    />,
+  );
+  expect(document.querySelector(".result-document")!.textContent).toBe(raw);
+  // 第二个重复行（index=2）映射到第二次出现，而非第一次。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+      highlightLineIndex={2}
+    />,
+  );
+  const spans = document.querySelectorAll(".result-raw-line");
+  expect(spans).toHaveLength(3);
+  expect(spans[2]!.classList).toContain("line-hovered");
+  expect(spans[0]!.classList).not.toContain("line-hovered");
+  fireEvent.mouseEnter(spans[2]!);
+  expect(onHoverLine).toHaveBeenCalledWith(2);
+});
+
+it("merged/smart 模式文本只做完整行映射，拼接/改写的行不误亮", () => {
+  // smart 把两行拼接成段：非完整行（'第一段第一行' 只是首段子串）
+  // 不再映射；仍是独立整行的 '第二段首行' 可唯一锚定。
+  const source = JSON.stringify([linesBlock(fixtureLines, fixtureModes)]);
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="smart"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={0}
+    />,
+  );
+  expect(
+    document.querySelectorAll(".result-raw-line.line-hovered"),
+  ).toHaveLength(0);
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="smart"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={2}
+    />,
+  );
+  expect(
+    document.querySelector(".result-raw-line.line-hovered")!.textContent,
+  ).toBe("第二段首行");
+  // merged 整体拼接为一段：无完整行可映射，原文保留且不高亮。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="merged"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={1}
+    />,
+  );
+  expect(document.querySelectorAll(".result-raw-line")).toHaveLength(0);
+  expect(document.querySelector(".result-document")!.textContent).toBe(
+    fixtureModes.merged,
+  );
+  // 宿主改写后的行（原文中找不到完整行）同样不映射、不误亮。
+  const rewritten = {
+    ...fixtureModes,
+    merged: "宿主改写后的段落，与行文本不同",
+  };
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, rewritten)])}
+      mode="merged"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={1}
+    />,
+  );
+  expect(document.querySelectorAll(".result-raw-line")).toHaveLength(0);
+  expect(document.querySelector(".result-document")!.textContent).toBe(
+    rewritten.merged,
+  );
+});
+
+it("重排+子串：短行不得绑进其他行的子串，按完整行唯一锚点映射", () => {
+  // 宿主允许 raw 与 bbox 排序后的 lines 顺序不同（raw='123\n1'，
+  // lines=['1','123']）：旧逐行 indexOf 会把 '1' 错绑到首行 '123' 内部。
+  const lines = [
+    { text: "1", score: 0.9, bbox: [0, 100, 50, 120] },
+    { text: "123", score: 0.9, bbox: [0, 0, 150, 30] },
+  ];
+  const raw = "123\n1";
+  const source = JSON.stringify([linesBlock(lines, { raw })]);
+  const onHoverLine = vi.fn();
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+    />,
+  );
+  // 原文完全保留，且完整行各自成段：'123' 与 '1' 都是独立 span。
+  expect(document.querySelector(".result-document")!.textContent).toBe(raw);
+  const spans = document.querySelectorAll(".result-raw-line");
+  expect(spans).toHaveLength(2);
+  expect(spans[0]!.textContent).toBe("123");
+  expect(spans[1]!.textContent).toBe("1");
+  // 高亮行下标 0（'1'）命中末段，而非首行 '123' 内部。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={onHoverLine}
+      highlightLineIndex={0}
+    />,
+  );
+  expect(
+    document.querySelector(".result-raw-line.line-hovered")!.textContent,
+  ).toBe("1");
+  fireEvent.mouseEnter(spans[0]!);
+  expect(onHoverLine).toHaveBeenCalledWith(1);
+});
+
+it("重复行歧义：非同序且文本重复时保留原文不高亮，不猜顺序", () => {
+  // lines=['1','x','1'] 而 raw='1\n1\nx'（宿主重排）：'1' 的两次出现
+  // 无法证明对应关系；'x' 唯一可锚定，重复文本不高亮不误亮。
+  const lines = [
+    { text: "1", score: 0.9, bbox: [0, 0, 50, 20] },
+    { text: "x", score: 0.9, bbox: [0, 30, 50, 50] },
+    { text: "1", score: 0.9, bbox: [0, 60, 50, 80] },
+  ];
+  const raw = "1\n1\nx";
+  const source = JSON.stringify([linesBlock(lines, { raw })]);
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+    />,
+  );
+  expect(document.querySelector(".result-document")!.textContent).toBe(raw);
+  // 仅唯一文本 'x' 映射；重复 '1' 保留纯文本。
+  const spans = document.querySelectorAll(".result-raw-line");
+  expect(spans).toHaveLength(1);
+  expect(spans[0]!.textContent).toBe("x");
+  for (const index of [0, 2]) {
+    rerender(
+      <StructuredResult
+        source={source}
+        mode="raw"
+        onCopy={vi.fn(async () => true)}
+        onHoverLine={vi.fn()}
+        highlightLineIndex={index}
+      />,
+    );
+    expect(
+      document.querySelectorAll(".result-raw-line.line-hovered"),
+    ).toHaveLength(0);
+  }
+});
+
+it("CRLF 原文完整行匹配：同序/异序均不因行尾 \r 阻断，拼接原文不变", () => {
+  // Windows 原文行含 \r：匹配键忽略行尾 \r，输出片段保留原字节。
+  const lines = [
+    { text: "甲行", score: 0.9, bbox: [0, 0, 100, 20] },
+    { text: "乙行", score: 0.9, bbox: [0, 30, 100, 50] },
+  ];
+  const raw = "甲行\r\n乙行";
+  const source = JSON.stringify([linesBlock(lines, { raw })]);
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={1}
+    />,
+  );
+  // 原文逐字节保留（含 \r），同序 CRLF 两行均可映射，高亮命中第二行。
+  const pre = document.querySelector(".result-document")!;
+  expect(pre.textContent).toBe(raw);
+  const spans = document.querySelectorAll(".result-raw-line");
+  expect(spans).toHaveLength(2);
+  expect(spans[1]!.classList).toContain("line-hovered");
+  // 异序（bbox 排序后 lines 顺序与原文不同）：唯一完整行锚点仍可绑定。
+  const reordered = [lines[1]!, lines[0]!];
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(reordered, { raw })])}
+      mode="raw"
+      onCopy={vi.fn(async () => true)}
+      onHoverLine={vi.fn()}
+      highlightLineIndex={0}
+    />,
+  );
+  expect(document.querySelector(".result-document")!.textContent).toBe(raw);
+  const flipped = document.querySelectorAll(".result-raw-line");
+  expect(flipped).toHaveLength(2);
+  // 宿主行 0（乙行）→ 原文第二行片段加亮。
+  expect(flipped[1]!.classList).toContain("line-hovered");
+  expect(flipped[0]!.classList).not.toContain("line-hovered");
+});
+
 it("edits a line in place via double-click or Enter through the host handler", async () => {
   const onUpdateLine = vi.fn(async () => true);
   render(

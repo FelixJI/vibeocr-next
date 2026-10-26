@@ -326,12 +326,11 @@ public sealed class ScreenRegionPicker(
                 desktopBgra = [];
                 desktopBmp = [];
                 background = null;
-                await Task.Delay(180, cancellationToken);
-                CapturedFrame? stitched = await ScrollCaptureSession.CaptureAsync(
-                    owner, selected, cancellationToken);
-                return stitched is null ? null : CreateScrollingSelection(selected, stitched) with
+                ScreenRegionSelection? stitched = await ScrollCaptureSession.CaptureAsync(
+                    owner, selected, cancellationToken, selection.ScrollOverlay);
+                return stitched is null ? null : stitched with
                 {
-                    FrozenRegion = frozenLayout with { Bounds = selected },
+                    FrozenRegion = frozenLayout with { Bounds = stitched.Bounds },
                 };
             }
 
@@ -443,7 +442,8 @@ public sealed class ScreenRegionPicker(
     ScreenshotCaptureScene? Scene,
     ScreenshotSelectionAction? SelectionAction = null,
     string? RecognitionModeId = null,
-    ScreenshotRecognitionIntent? RecognitionIntent = null);
+    ScreenshotRecognitionIntent? RecognitionIntent = null,
+    Window? ScrollOverlay = null);
 
   // 自检仅复用已经捕获的 synthetic 子窗口像素，不采样其他桌面区域。
   internal static async Task<ScreenshotCaptureScene> CreateSyntheticSceneAsync(
@@ -538,6 +538,8 @@ public sealed class ScreenRegionPicker(
     {
       Padding = new Thickness(6),
       CornerRadius = new CornerRadius(8),
+      BorderThickness = new Thickness(1),
+      BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(80, 128, 128, 128)),
       Child = toolbarScroll,
     };
     canvas.Children.Add(sizeLabel);
@@ -549,6 +551,9 @@ public sealed class ScreenRegionPicker(
       {
         Content = new TextBlock { Text = name },
         Height = 32,
+        FontSize = 14,
+        CornerRadius = new CornerRadius(6),
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
         Padding = new Thickness(8, 0, 8, 0),
       };
       AutomationProperties.SetName(button, name);
@@ -741,6 +746,15 @@ public sealed class ScreenRegionPicker(
         };
         scene.SetBackground(EncodeTopDownBmp(pixels, desktop.Width, desktop.Height, desktop.Width * 4));
         completion.TrySetResult(new OverlaySelection(bounds, scene));
+      }
+      else if (result is { } scrollingBounds && (action is ScreenshotSelectionAction.ScrollCapture || !keepForEditing))
+      {
+        // 长截图把同一选区窗口移交给实时工具栏，冻结背景不再留在屏幕上。
+        overlay.Closed -= closeHandler;
+        canvas.ReleasePointerCaptures();
+        var scrollScene = new ScreenshotCaptureScene(overlay, root, desktop, scrollingBounds);
+        completion.TrySetResult(new OverlaySelection(scrollingBounds, scrollScene, action,
+          recognitionModeId, recognitionIntent, overlay));
       }
       else if (result is { } accepted)
       {
@@ -949,9 +963,6 @@ public sealed class ScreenRegionPicker(
         toolbarRowMain, "保存：保存所选区域图像"));
       selectionActionButtons.Add(AddButton("钉图", () => Finish(true, ScreenshotSelectionAction.Pin),
         toolbarRowMain, "钉图：将所选区域钉在桌面"));
-      AddSeparator(toolbarRowMain);
-      selectionActionButtons.Add(AddButton("设置", () => Finish(true, ScreenshotSelectionAction.OpenSettings),
-        toolbarRowMain, "设置：打开设置页"));
     }
     else
     {
