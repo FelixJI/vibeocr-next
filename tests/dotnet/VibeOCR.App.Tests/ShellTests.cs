@@ -72,7 +72,7 @@ public sealed class ShellTests
     {
         var report = new PrerequisiteReport(
         [
-            new(PrerequisiteKind.DotNetDesktopRuntime, true, "10.0.1", "10.0.0", "https://example.test/dotnet"),
+            new(PrerequisiteKind.DotNetRuntime, true, "10.0.1", "10.0.0", "https://example.test/dotnet"),
             new(PrerequisiteKind.WebView2Runtime, false, null, "Evergreen", "https://example.test/webview"),
         ]);
         var viewModel = new DiagnosticsViewModel("winui-dev", report);
@@ -164,7 +164,7 @@ public sealed class ShellTests
     private static PrerequisiteReport ReadyReport() =>
         new(
         [
-            new(PrerequisiteKind.DotNetDesktopRuntime, true, "10.0.1", "10.0.0", "https://example.test/dotnet"),
+            new(PrerequisiteKind.DotNetRuntime, true, "10.0.1", "10.0.0", "https://example.test/dotnet"),
             new(PrerequisiteKind.WindowsAppRuntime, true, "2.2.0", "2.2.0", "https://example.test/windows-app-runtime"),
             new(PrerequisiteKind.WebView2Runtime, true, "140.0", "Evergreen", "https://example.test/webview"),
             new(PrerequisiteKind.RuntimeInstaller, true, "Bundled", "Bundled", "repair://vibeocr/runtime-installer"),
