@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2
+
+### Bug Fixes
+
+- **bootstrapper:** 按实际依赖检测 .NET Runtime (#283) (15adeab)
+
 ## 0.8.1
 
 ### Features
