@@ -111,7 +111,7 @@ def main() -> int:
                     "-B",
                     "-c",
                     "import json,onnxruntime as ort; "
-                    "from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; "
+                    "from vibeocr.runtime.recognition.onnx_devices import cuda_provider_ready; "
                     + (
                         "assert cuda_provider_ready(); "
                         if recipe.endswith("cuda")

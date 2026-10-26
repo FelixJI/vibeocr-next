@@ -18,6 +18,16 @@ pynvml>=11.5.0
 packaging>=26.0
 python-multipart>=0.0.32
 
+# 此环境也承载 Runtime host；Windows OCR 不依赖 Paddle 推理。
+# Foundation/Collections 是 PyWinRT await 回调与结果集合的运行时依赖。
+winrt-runtime>=3.2,<4
+winrt-Windows.Foundation>=3.2,<4
+winrt-Windows.Foundation.Collections>=3.2,<4
+winrt-Windows.Media.Ocr>=3.2,<4
+winrt-Windows.Globalization>=3.2,<4
+winrt-Windows.Graphics.Imaging>=3.2,<4
+winrt-Windows.Storage.Streams>=3.2,<4
+
 paddleocr==3.7.0
 paddlex[ocr]==3.7.2
 numpy==2.3.5

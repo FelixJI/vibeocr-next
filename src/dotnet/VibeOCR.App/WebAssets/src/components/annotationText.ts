@@ -301,7 +301,7 @@ export function drawTextAnnotation(
     context.scale(mark.flipX ? -1 : 1, mark.flipY ? -1 : 1);
     context.translate(-center.x, -center.y);
   }
-  const color = mark.style?.color ?? "#f38b35";
+  const color = mark.style?.color ?? "#e02020";
   if (mark.tool === "numbering") {
     const box = unrotatedTextBox(context, mark, scale);
     const radius = box.width / 2;
@@ -322,12 +322,23 @@ export function drawTextAnnotation(
     if (shape !== "none") context.fill();
     context.font = annotationFont({ ...mark.style, fontBold: true }, scale);
     context.fillStyle = shape === "none" ? color : numberTextColor(color);
+    // 真正居中：em 盒中点（textBaseline middle）与数字视觉中心有系统性
+    // 偏差；按字形实际包围盒（TextMetrics actualBoundingBox*）把墨水中心
+    // 对齐圆心。度量依赖测量时的 textAlign/textBaseline（actualBoundingBox
+    // 相对测量时的对齐点/基线），先设目标对齐/基线再 measure；
+    // 缺失度量的环境回退 0（与旧渲染一致）。
     context.textAlign = "center";
-    context.textBaseline = "middle";
+    context.textBaseline = "alphabetic";
+    const label = numberLabel(mark.ordinal ?? 1, mark.style?.numberFormat);
+    const metrics = context.measureText(label);
+    const inkLeft = metrics.actualBoundingBoxLeft ?? 0;
+    const inkRight = metrics.actualBoundingBoxRight ?? 0;
+    const inkAscent = metrics.actualBoundingBoxAscent ?? 0;
+    const inkDescent = metrics.actualBoundingBoxDescent ?? 0;
     context.fillText(
-      numberLabel(mark.ordinal ?? 1, mark.style?.numberFormat),
-      mark.start.x,
-      mark.start.y,
+      label,
+      mark.start.x + (inkLeft - inkRight) / 2,
+      mark.start.y + (inkAscent - inkDescent) / 2,
     );
     context.restore();
     return;

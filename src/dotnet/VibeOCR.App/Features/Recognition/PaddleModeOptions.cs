@@ -41,11 +41,32 @@ public sealed record PaddleModeOptions
         "use_chart_recognition",
     ];
 
+    // Rapid 模式退役映射：旧 recognition_device_options[rapid_text/rapid_table]
+    // 的设备值（auto|cpu|cuda）迁移为对应 Paddle 模式的 device 选项；仅当
+    // 当前模式没有自己的记录时生效，不覆盖已有 Paddle 设置。
+    private static readonly IReadOnlyDictionary<string, string> LegacyRapidDeviceModeIds =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["paddle_text"] = "rapid_text",
+            ["paddle_table"] = "rapid_table",
+        };
+
     internal static PaddleModeOptions Load(PortableLayout layout, string modeId)
     {
         JsonObject root = AppSettingsStore.ReadForUpdate(layout);
         JsonNode? stored = root["recognition_options"]?[modeId];
-        if (stored is null) return new();
+        if (stored is null)
+        {
+            // 旧 Rapid 设备设置迁移（rapid_text→paddle_text、rapid_table→
+            // paddle_table）：auto|cpu|cuda 都是合法 Paddle device 值，其余
+            // 回退默认；是否真的支持 device 由目录 ProjectWire/ToWire 门控。
+            if (LegacyRapidDeviceModeIds.TryGetValue(modeId, out string? rapidModeId) &&
+                root["recognition_device_options"]?[rapidModeId] is JsonValue legacy &&
+                legacy.TryGetValue<string>(out string? device) &&
+                device is "auto" or "cpu" or "cuda")
+                return new PaddleModeOptions { Device = device };
+            return new();
+        }
         JsonNode compat = stored.DeepClone();
         if (compat is JsonObject options)
             foreach (string field in RetiredKnownFields)

@@ -168,7 +168,7 @@ public sealed class RecognitionViewModelSupervisorTests
       PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
       layout.EnsurePortableState();
       var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
-        OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-directml",
+        OcrEngine.PaddleOcr, "base_runtime", "ready", null, "paddleocr-ort-directml",
         ["model_preset", "device"], "model_residency", true, true, true, true);
       new PaddleModeOptions { ModelPreset = "medium", Device = "directml" }.Save(layout, mode.Id);
       var first = new VibeOCR.App.Workbench.WorkbenchSelectionOwner(null, null, layout, null!, () => null);
@@ -258,7 +258,7 @@ public sealed class RecognitionViewModelSupervisorTests
   {
     var selection = new VibeOCR.App.Workbench.WorkbenchSelectionOwner(null, null, null, null!, () => null);
     var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
-      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      OcrEngine.PaddleOcr, "base_runtime", "ready", null, "paddleocr-ort-cpu",
       ["model_preset", "device"], "model_residency", true, true, true, true);
     selection.SetModeOptions(mode.Id, new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
     selection.TaskModelPreset = "tiny";
@@ -280,7 +280,7 @@ public sealed class RecognitionViewModelSupervisorTests
     var inputs = new StubInputService();
     var viewModel = new RecognitionViewModel(inference, inputs);
     var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
-      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      OcrEngine.PaddleOcr, "base_runtime", "ready", null, "paddleocr-ort-cpu",
       ["model_preset", "device"], "model_residency", true, true, true, true);
     viewModel.SetRecognitionMode(mode, options: new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
     await viewModel.RecognizeViaSupervisorAsync(async ct =>

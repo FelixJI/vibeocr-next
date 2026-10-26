@@ -33,6 +33,7 @@ from vibeocr.runtime.environments.runtime_manifest import (
     RuntimeProfile,
     covering_profile_id,
     load_runtime_manifest,
+    migrate_legacy_component_ids,
     runtime_component_binding,
     scoped_component_version,
 )
@@ -1157,7 +1158,11 @@ def declared_installed_closure(
         component.component_id
         for component in manifest.profiles[ACCELERATOR_TO_PLAN[accelerator]].components
     }
-    closure = frozenset(installed)
+    # 旧 marker 里的退役 id（rapidocr-base/原生 paddle 等）先折叠再比对：
+    # 历史闭包应继续投影到覆盖 profile，而不是整体作废。
+    closure = frozenset(
+        migrate_legacy_component_ids(ACCELERATOR_TO_PLAN[accelerator], tuple(installed))
+    )
     return closure if closure <= plan_ids else None
 
 
@@ -1199,7 +1204,10 @@ def _legacy_closure_with_current_code(
         component.component_id
         for component in manifest.profiles[ACCELERATOR_TO_PLAN[accelerator]].components
     }
-    closure = frozenset(ids)
+    # 与 declared_installed_closure 同一退役折叠规则，保证旧闭包可投影。
+    closure = frozenset(
+        migrate_legacy_component_ids(ACCELERATOR_TO_PLAN[accelerator], tuple(ids))
+    )
     return closure if closure <= plan_ids else None
 
 

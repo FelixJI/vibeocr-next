@@ -115,8 +115,16 @@ class RecognitionModeError(ValueError):
 DEFAULT_RECOGNITION_MODE_EXTRA_KEY = "default_recognition_mode"
 """SettingsSnapshot.extra 内持久化默认识别模式的唯一键。"""
 
-COMPAT_DEFAULT_RECOGNITION_MODE = RecognitionModeId.RAPID_TEXT
-"""缺键时的兼容默认：与既有无 engine 提交的 Runtime 缺省一致。"""
+COMPAT_DEFAULT_RECOGNITION_MODE = RecognitionModeId.PADDLE_TEXT
+"""缺键时的兼容默认：与缺省 engine 提交（paddleocr）的 Runtime 缺省一致。"""
+
+LEGACY_RECOGNITION_MODE_ALIASES: Mapping[str, RecognitionModeId] = {
+    # RapidOCR/RapidTable 已退役：旧持久化设置仅在解析 seam 识别并安全
+    # 迁移到对应 Paddle 模式；提交/目录/生命周期路径一律不再接受这些值。
+    "rapid_text": RecognitionModeId.PADDLE_TEXT,
+    "rapid_table": RecognitionModeId.PADDLE_TABLE,
+}
+"""历史 rapid 模式 id → Paddle 替代（仅设置读取/保存迁移，非执行能力）。"""
 
 RECOGNITION_MODE_RETIRED_REASON = "recognition_mode_retired"
 """#270：退役模式的统一 reason_code（目录/执行/默认/生命周期共用）。"""
@@ -155,9 +163,10 @@ def resolve_default_recognition_mode(
 ) -> RecognitionModeId:
     """解析 SettingsSnapshot.extra 的默认识别模式。
 
-    仅缺键回退兼容默认 rapid_text；显式 null/非字符串与未知 id
-    fail closed；``require_available`` 时非 ready 同样拒绝，绝不静默
-    改用另一种识别。
+    仅缺键回退兼容默认 paddle_text；历史 rapid 值按别名安全迁移到对应
+    Paddle 模式（这是 rapid 旧字符串的唯一识别点，执行路径不参与）；
+    显式 null/非字符串与未知 id fail closed；``require_available`` 时
+    非 ready 同样拒绝，绝不静默改用另一种识别。
     """
     if extra is None or DEFAULT_RECOGNITION_MODE_EXTRA_KEY not in extra:
         return COMPAT_DEFAULT_RECOGNITION_MODE
@@ -169,6 +178,8 @@ def resolve_default_recognition_mode(
             reason_code="recognition_mode_default_invalid_type",
             detail={"field": f"extra.{DEFAULT_RECOGNITION_MODE_EXTRA_KEY}"},
         )
+    migrated = LEGACY_RECOGNITION_MODE_ALIASES.get(raw)
+    raw = migrated.value if migrated is not None else raw
     definition = registry.definition(raw)
     if require_available:
         _ensure_not_retired(definition)
@@ -177,12 +188,12 @@ def resolve_default_recognition_mode(
 
 
 _DEFAULT_REQUIRED_COMPONENTS = {
-    RecognitionModeId.PADDLE_TEXT: "paddleocr-cpu",
-    RecognitionModeId.PADDLE_STRUCTURE: "paddleocr-cpu",
-    RecognitionModeId.PADDLE_DOCUMENT_VL: "paddleocr-cpu",
+    RecognitionModeId.PADDLE_TEXT: "paddleocr-ort-cpu",
+    RecognitionModeId.PADDLE_STRUCTURE: "paddleocr-ort-cpu",
+    RecognitionModeId.PADDLE_DOCUMENT_VL: "paddleocr-ort-cpu",
     RecognitionModeId.MINERU_DOCUMENT: "mineru-cpu",
-    RecognitionModeId.PADDLE_TABLE: "paddleocr-cpu",
-    RecognitionModeId.PADDLE_FORMULA: "paddleocr-cpu",
+    RecognitionModeId.PADDLE_TABLE: "paddleocr-ort-cpu",
+    RecognitionModeId.PADDLE_FORMULA: "paddleocr-ort-cpu",
 }
 
 
@@ -475,6 +486,7 @@ class RecognitionModeRegistry:
 __all__ = [
     "COMPAT_DEFAULT_RECOGNITION_MODE",
     "DEFAULT_RECOGNITION_MODE_EXTRA_KEY",
+    "LEGACY_RECOGNITION_MODE_ALIASES",
     "LifecycleKind",
     "ModeAvailability",
     "ProvisioningKind",

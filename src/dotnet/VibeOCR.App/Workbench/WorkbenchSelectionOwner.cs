@@ -10,7 +10,6 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, PortableLayout? optionsLayout, WorkbenchSettingsOwner settingsOwner, Func<string?> currentTaskEngine)
 {
   private readonly Dictionary<string, PaddleModeOptions> modeOptions = new(StringComparer.Ordinal);
-  private readonly Dictionary<string, RapidDeviceOptions> modeDeviceOptions = new(StringComparer.Ordinal);
   internal string? TaskModelPreset { get; set; }
   internal string? RuntimeDefaultModeId =>
     settingsOwner.CurrentModel?.RecognitionSelection?.DefaultRecognitionModeId;
@@ -18,7 +17,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
   /// <summary>
   /// 单次/批量/PDF 共用的继承解析：显式本次 override 优先；能力已声明时
   /// 绑定回显默认，Invalid/Unread 在提交协商时明确拒绝并指向设置修复，
-  /// 不猜 rapid_text；仅能力缺失走旧语义。
+  /// 不猜 paddle_text；仅能力缺失走旧语义。
   /// </summary>
   internal static string? EffectiveModeIdOrDefault(
     RecognitionSelectionSnapshot? snapshot,
@@ -88,47 +87,22 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
 
   internal void SetModeOptions(string modeId, PaddleModeOptions options) => modeOptions[modeId] = options;
 
-  internal void SetDeviceOptions(string modeId, RapidDeviceOptions options) => modeDeviceOptions[modeId] = options;
-
-  /// <summary>device 选项存取：支持面由目录 supported_options 真值门控，不在宿主重复模式清单。</summary>
-  internal RapidDeviceOptions? GetDeviceOptions(RecognitionModeOption? mode)
-  {
-    if (mode?.SupportedOptions.Contains("device", StringComparer.Ordinal) is not true ||
-        mode.Id.StartsWith("paddle_", StringComparison.Ordinal)) return null;
-    if (!modeDeviceOptions.TryGetValue(mode.Id, out RapidDeviceOptions? options))
-    {
-      options = optionsLayout is null ? new() : RapidDeviceOptions.Load(optionsLayout, mode.Id);
-      modeDeviceOptions.Add(mode.Id, options);
-    }
-    return options;
-  }
-
-  /// <summary>提交冻结点合并投影：两类选项严格 ToWire，不支持/越界在此拒绝（#110 AC2）。</summary>
+  /// <summary>提交冻结点投影：选项严格 ToWire，不支持/越界在此拒绝（#110 AC2）。</summary>
   internal IReadOnlyDictionary<string, System.Text.Json.JsonElement>? GetWireOptions(
     RecognitionModeOption? mode)
   {
     if (mode is null) return null;
     IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetTaskModeOptions(mode, TaskModelPreset)?.ToWire(mode);
-    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? device = GetDeviceOptions(mode)?.ToWire(mode);
-    if (paddle is null || paddle.Count == 0) return device is null || device.Count == 0 ? null : device;
-    if (device is null || device.Count == 0) return paddle;
-    var merged = new Dictionary<string, System.Text.Json.JsonElement>(paddle, StringComparer.Ordinal);
-    foreach (var pair in device) merged.Add(pair.Key, pair.Value);
-    return merged;
+    return paddle is not null && paddle.Count > 0 ? paddle : null;
   }
 
-  /// <summary>状态展示合并投影：各自按目录过滤，不支持字段回退默认显示。</summary>
+  /// <summary>状态展示投影：按目录过滤，不支持字段回退默认显示。</summary>
   internal IReadOnlyDictionary<string, System.Text.Json.JsonElement>? GetProjectedOptions(
     RecognitionModeOption? mode)
   {
     if (mode is null) return null;
     IReadOnlyDictionary<string, System.Text.Json.JsonElement>? paddle = GetModeOptions(mode)?.ProjectWire(mode);
-    IReadOnlyDictionary<string, System.Text.Json.JsonElement>? device = GetDeviceOptions(mode)?.ProjectWire(mode);
-    if (paddle is null || paddle.Count == 0) return device is null || device.Count == 0 ? null : device;
-    if (device is null || device.Count == 0) return paddle;
-    var merged = new Dictionary<string, System.Text.Json.JsonElement>(paddle, StringComparer.Ordinal);
-    foreach (var pair in device) merged.Add(pair.Key, pair.Value);
-    return merged;
+    return paddle is not null && paddle.Count > 0 ? paddle : null;
   }
 
   internal PaddleModeOptions? GetModeOptions(RecognitionModeOption? mode)

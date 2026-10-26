@@ -1,4 +1,4 @@
-"""Release-pinned external RapidTable model and ONNX Runtime CUDA plugin."""
+"""Release-pinned external ONNX Runtime assets shared by engine environments."""
 
 from __future__ import annotations
 
@@ -10,15 +10,8 @@ from urllib.request import urlopen
 
 from vibeocr.runtime.environments.runtime_manifest import sha256_file
 
-RAPIDTABLE_MODEL = "slanet-plus.onnx"
-RAPIDTABLE_MODEL_URL = (
-    "https://www.modelscope.cn/models/RapidAI/RapidTable/resolve/v2.0.0/"
-    + RAPIDTABLE_MODEL
-)
-# RapidTable 3.0.2 default_models.yaml is the model digest authority.
-RAPIDTABLE_MODEL_SHA256 = (
-    "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b"
-)
+# Microsoft 官方 CUDA 13 EP 插件（独立于 onnxruntime wheel 的固定 DLL 资产）。
+# 该插件同时服务 Paddle ONNX CUDA 环境；无需 onnxruntime-gpu 发行物。
 CUDA_PLUGIN_ARCHIVE = "cuda_ep_cuda13_0.2.0_win-x64.zip"
 CUDA_PLUGIN_URL = (
     "https://github.com/microsoft/onnxruntime/releases/download/"
@@ -44,9 +37,7 @@ def pinned_download(
                 output.write(chunk)
         check_cancelled()
         if sha256_file(partial) != digest:
-            raise ValueError(
-                f"external Rapid asset digest mismatch: {destination.name}"
-            )
+            raise ValueError(f"external ONNX asset digest mismatch: {destination.name}")
         partial.replace(destination)
     finally:
         partial.unlink(missing_ok=True)

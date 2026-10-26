@@ -80,12 +80,14 @@ class TestPipelineNamesConstants:
     """常量完整性。"""
 
     def test_local_markable_pipelines_only_retained(self):
-        """#270：退役管道不再产生新的成功标记；仅保留模式在集合内。"""
+        """#270 + Rapid 退役：退役管道不再产生新的成功标记；历史 cache
+        记录保留但不进入集合。"""
         assert pipeline_status.LOCAL_MARKABLE_PIPELINES == frozenset(
-            {"OCR", "PP-StructureV3", "TABLE_RECOGNITION", "RAPID_TABLE"}
+            {"OCR", "PP-StructureV3", "TABLE_RECOGNITION"}
         )
         assert "PaddleOCR-VL" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
         assert "FORMULA_RECOGNITION" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
+        assert "RAPID_TABLE" not in pipeline_status.LOCAL_MARKABLE_PIPELINES
 
     def test_mineru_not_in_local_markable(self):
         """MinerU 走远程独立标记，不在本地集合。"""

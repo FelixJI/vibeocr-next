@@ -40,6 +40,20 @@
   background: rgba(209, 52, 56, 0.12);
 }
 
+/* 双向悬停高亮：与左侧图上行框同步（悬停任一侧时两侧同时加亮）。 */
+.result-line.line-hovered {
+  background: rgba(0, 120, 212, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(0, 120, 212, 0.55);
+}
+
+/* 模式文本（raw/merged/smart）内可精确映射的行片段：与每行模式同色高亮；
+   无法映射（改写/重排）的片段保持纯文本，不误亮。 */
+.result-raw-line.line-hovered {
+  background: rgba(0, 120, 212, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(0, 120, 212, 0.55);
+  border-radius: 2px;
+}
+
 /* 手动编辑过的行：左侧橙色条（与 Classic 手动修改标记语义一致）。 */
 .result-line.line-edited {
   border-left: 3px solid #ff8c00;

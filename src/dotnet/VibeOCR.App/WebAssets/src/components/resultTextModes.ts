@@ -102,6 +102,71 @@ export function confidenceLabel(score: number | null): string {
     : `置信度: ${(score * 100).toFixed(1)}%`;
 }
 
+/** 模式文本的可悬停片段：lineIndex 仅在能无歧义对应宿主行时存在。 */
+export interface ModeTextSegment {
+  readonly text: string;
+  readonly lineIndex?: number;
+}
+
+/** 把宿主预计算的模式文本映射为可悬停片段（raw/merged/smart 共用）。
+ *  只做可证实的完整行映射，不做子串模糊匹配：
+ *  1) 行序列与模式文本按 '\n' 拆分的整行序列完全一致（raw 的常规
+ *     形态）时同序整段映射，重复行也按同序绑定；
+ *  2) 否则仅“两侧都恰好出现一次的完整行文本”作唯一锚点绑定（宿主
+ *     允许 raw 与 bbox 排序后的 lines 顺序不同，唯一文本与顺序无关）；
+ *  3) 非同序下的重复文本无法证明对应关系，拼接/改写后的行也找不到
+ *     完整行 —— 一律保留原文不高亮，不误亮。
+ *  片段拼接恒等于原文，原文不做任何规范化。 */
+export function mapModeTextLineSegments(
+  modeText: string,
+  lines: readonly ResultTextLine[],
+): readonly ModeTextSegment[] {
+  const segments = modeText.split("\n");
+  // CRLF：匹配键忽略行尾 \r（Windows 原文行内容含 \r，宿主行不含），
+  // 输出片段仍保留原字节，拼接恒等于原文。
+  const segmentKeys = segments.map((text) =>
+    text.endsWith("\r") ? text.slice(0, -1) : text,
+  );
+  const lineKeys = lines.map((line) =>
+    line.text.endsWith("\r") ? line.text.slice(0, -1) : line.text,
+  );
+  const sameOrder =
+    lineKeys.length === segmentKeys.length &&
+    lineKeys.every((text, index) => text === segmentKeys[index]);
+  // 模式文本整行下标 → 宿主行下标（仅可证实映射写入）。
+  const segmentToLine = new Map<number, number>();
+  if (sameOrder) {
+    lineKeys.forEach((_, index) => segmentToLine.set(index, index));
+  } else {
+    const lineCount = new Map<string, number>();
+    const segmentCount = new Map<string, number>();
+    for (const text of lineKeys)
+      lineCount.set(text, (lineCount.get(text) ?? 0) + 1);
+    for (const text of segmentKeys)
+      segmentCount.set(text, (segmentCount.get(text) ?? 0) + 1);
+    for (let index = 0; index < lines.length; index += 1) {
+      const text = lineKeys[index]!;
+      // 唯一锚点：两侧都恰好出现一次才无歧义；重复文本不精顺序。
+      if (
+        !text ||
+        (lineCount.get(text) ?? 0) !== 1 ||
+        (segmentCount.get(text) ?? 0) !== 1
+      )
+        continue;
+      const segmentIndex = segmentKeys.indexOf(text);
+      if (segmentIndex >= 0) segmentToLine.set(segmentIndex, index);
+    }
+  }
+  const result: ModeTextSegment[] = [];
+  segments.forEach((text, index) => {
+    // 行分隔符作为独立纯文本片段回填，拼接恒等于原文。
+    if (index > 0) result.push({ text: "\n" });
+    const lineIndex = segmentToLine.get(index);
+    result.push(lineIndex === undefined ? { text } : { text, lineIndex });
+  });
+  return result;
+}
+
 /** lines 区块存在性、宿主可用模式与行数据的一次性解析。 */
 export function linesInfoFromSource(source: string): {
   hasLines: boolean;

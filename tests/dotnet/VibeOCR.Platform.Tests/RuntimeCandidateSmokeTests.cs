@@ -104,9 +104,9 @@ public sealed class RuntimeCandidateSmokeTests
         // 真实生产启动路径：默认具名环境由随包离线配方初始化，并可重复调用。
         ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
         ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
-        Assert.Equal("rapidocr-cpu", defaultEnvironment.Id);
+        Assert.Equal("paddleocr-ort-cpu", defaultEnvironment.Id);
         Assert.Equal("默认环境", defaultEnvironment.Name);
-        Assert.Equal("rapidocr-cpu", defaultEnvironment.Recipe);
+        Assert.Equal("paddleocr-ort-cpu", defaultEnvironment.Recipe);
         Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);
         Assert.Equal("installed", defaultEnvironment.Status);
         ManagedEnvironmentList repeated = await client.InitializeDefaultEnvironmentAsync(ensureToken);
@@ -121,7 +121,8 @@ public sealed class RuntimeCandidateSmokeTests
         Assert.True(
             Directory.Exists(launch.WorkingDirectory),
             $"缺少工作目录: {launch.WorkingDirectory}");
-        // 具名环境的模型根只声明私有路径；RapidOCR 读取 wheel 内置模型。
+        // 具名环境的模型根只声明私有路径；Paddle ONNX 默认 small 文字模型
+        // 随包离线就绪，其余模型按需下载。
         Assert.NotEmpty(launch.Environment);
         // Python/模型/运行时存储必须锚定在隔离的 state 存储内。
         AssertIsUnder(layout.DataRoot, launch.PythonExecutable, "python executable");

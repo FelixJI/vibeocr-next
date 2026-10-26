@@ -88,7 +88,7 @@ function setup(withResultImage: boolean) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("structured.json"))
+      if (url.includes("structured"))
         return new Response(JSON.stringify([structuredPayload]), {
           status: 200,
         });
@@ -187,6 +187,59 @@ describe("recognition page result actions", () => {
       "src",
       "https://resource.vibeocr/result-image.png",
     );
+  });
+
+  it("默认 raw 结果与 bbox 双向悬停高亮，新结果不残留旧 hover", async () => {
+    const { viewState, actions } = setup(true);
+    const { rerender } = render(
+      <RecognitionPage viewState={viewState} actions={actions} />,
+    );
+    // 默认 raw 模式：原文整段保留，可映射行是可悬停 span。
+    const rawSpan = await screen.findByText("第一段行二");
+    // jsdom 不解码图片：注入自然尺寸并触发 load，行框才会投影。
+    const image = screen.getByRole("img", { name: "识别结果参考图" });
+    Object.defineProperties(image, {
+      naturalWidth: { value: 800, configurable: true },
+      naturalHeight: { value: 400, configurable: true },
+    });
+    fireEvent.load(image);
+    await fireEvent.mouseEnter(rawSpan);
+    expect(rawSpan).toHaveClass("line-hovered");
+    // 图上对应 bbox 行框同步加亮（同一宿主行下标 1）。
+    const overlayLine = screen.getByLabelText("第一段行二");
+    expect(overlayLine).toHaveClass("hovered");
+    await fireEvent.mouseLeave(rawSpan);
+    expect(rawSpan).not.toHaveClass("line-hovered");
+    expect(overlayLine).not.toHaveClass("hovered");
+    // 图上悬停 → 右侧 raw 原文对应片段同步加亮。
+    await fireEvent.mouseEnter(overlayLine);
+    expect(rawSpan).toHaveClass("line-hovered");
+    // 新结果（structured 身份变化）：悬停状态清空，不残留旧高亮。
+    const nextViewState: AppViewState = {
+      ...viewState,
+      features: {
+        ...viewState.features,
+        recognition: {
+          ...(viewState.features.recognition as Record<string, unknown>),
+          structuredResult: {
+            url: "https://resource.vibeocr/structured-2.json",
+            mediaType: "application/json",
+            byteLength: 4,
+          },
+        },
+      },
+    };
+    rerender(<RecognitionPage viewState={nextViewState} actions={actions} />);
+    const nextSpan = await screen.findByText("第一段行二");
+    expect(nextSpan).not.toHaveClass("line-hovered");
+    // 校对层随绑定键重挂：新图重新触发 load 后行框无残留高亮。
+    const nextImage = screen.getByRole("img", { name: "识别结果参考图" });
+    Object.defineProperties(nextImage, {
+      naturalWidth: { value: 800, configurable: true },
+      naturalHeight: { value: 400, configurable: true },
+    });
+    fireEvent.load(nextImage);
+    expect(screen.getByLabelText("第一段行二")).not.toHaveClass("hovered");
   });
 
   it("hides the bbox proofreading view when resultImage is absent", async () => {

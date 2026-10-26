@@ -228,7 +228,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
         scope: "recognition",
         action: "recognizeScreenshotImage",
         arguments: expect.objectContaining({
-          modeId: "rapid_text",
+          modeId: "paddle_text",
           resourceUri: recognized.resourceUri,
           sessionId: "exclusion-e2e",
           revision: 1,

@@ -21,9 +21,9 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "runtime"))
 sys.path.insert(0, str(REPO_ROOT / "contracts" / "runtime" / "python"))
 
 from vibeocr.runtime.environments.runtime_manifest import (  # noqa: E402
+    INSTALLER_EXECUTABLE_NAME,
     PROFILE_NAMES,
     default_profile_components,
-    installer_executable_sha256,
     load_runtime_manifest,
     locked_distribution_version,
     runtime_component_binding,
@@ -161,8 +161,6 @@ def _independent_scopes(
     locks: dict[str, Path],
     gpu_lock: Path,
     base_packs: list[Path],
-    *,
-    mineru_cpu_lock: Path | None = None,
 ) -> list[dict[str, object]]:
     """Compose existing verified host/MinerU domains without new lock resolution.
 
@@ -200,13 +198,12 @@ def _independent_scopes(
     if cuda:
         add("gpu-runtime", [*base_ids, "gpu_runtime"], gpu_lock)
     suffix = "cuda" if cuda else "cpu"
-    add(
-        "mineru",
-        [*base_ids, f"mineru-{suffix}", *(["gpu_runtime"] if cuda else [])],
-        locks[profile],
-    )
-    if profile == "win-x64-cpu" and mineru_cpu_lock is not None:
-        add("mineru-standalone", ["runtime_host", "mineru-cpu"], mineru_cpu_lock)
+    # cpu 档位的 mineru 闭包与该 profile 缺省闭包相同（无独立锁），不重复
+    # 登记 scope；cu126 的 mineru 闭包不含 gpu_runtime，仍需独立安装域。
+    full_ids = [item.component_id for item in default_profile_components(profile)]
+    mineru_ids = [*base_ids, f"mineru-{suffix}", *(["gpu_runtime"] if cuda else [])]
+    if set(mineru_ids) != set(full_ids):
+        add("mineru", mineru_ids, locks[profile])
     return scopes
 
 
@@ -220,16 +217,16 @@ def build_runtime_manifest(
     python_archive: Path,
     python_version: str,
     python_source_url: str,
-    installer_archive: Path,
+    installer_executable: Path,
     version: str,
     source_commit: str,
     build_workflow: str,
     output_dir: Path,
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES,
     runtime_packs: dict[str, list[Path]] | None = None,
-    mineru_cpu_lock: Path | None = None,
-    rapid_cuda_lock: Path | None = None,
     paddle_onnx_locks: dict[str, Path] | None = None,
+    paddle_onnx_packs: dict[str, list[Path]] | None = None,
+    paddle_model_pack: Path | None = None,
 ) -> Path:
     if not _STABLE_SEMVER.fullmatch(version):
         raise ValueError("version must be stable SemVer")
@@ -242,7 +239,7 @@ def build_runtime_manifest(
 
     runtime_wheel = runtime_wheel.resolve(strict=True)
     python_archive = python_archive.resolve(strict=True)
-    installer_archive = installer_archive.resolve(strict=True)
+    installer_executable = installer_executable.resolve(strict=True)
     if not runtime_wheel.name.startswith(f"vibeocr_next_runtime-{version}-"):
         raise ValueError("Runtime wheel filename does not match product version")
 
@@ -255,15 +252,12 @@ def build_runtime_manifest(
     # paddle_isolated 语义要求原生 Paddle（见 validate_requirements_lock）。
     for profile in PROFILE_NAMES:
         validate_requirements_lock(profile_sources[profile], profile=profile)
-    if mineru_cpu_lock is not None:
-        mineru_cpu_lock = mineru_cpu_lock.resolve(strict=True)
-        validate_requirements_lock(mineru_cpu_lock, profile="win-x64-mineru-cpu")
-    if rapid_cuda_lock is not None:
-        rapid_cuda_lock = rapid_cuda_lock.resolve(strict=True)
-        validate_requirements_lock(rapid_cuda_lock, profile="win-x64-rapid-cu13")
     paddle_onnx_locks = paddle_onnx_locks or {}
     if paddle_onnx_locks and set(paddle_onnx_locks) != {"cpu", "cuda", "directml"}:
         raise ValueError("Paddle ONNX locks must cover CPU/CUDA/DirectML")
+    paddle_onnx_packs = paddle_onnx_packs or {}
+    if paddle_onnx_packs and set(paddle_onnx_packs) - {"cpu", "directml"}:
+        raise ValueError("only CPU and DirectML ship offline runtime packs")
     for device, lock in paddle_onnx_locks.items():
         validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
     cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
@@ -273,7 +267,13 @@ def build_runtime_manifest(
     copied_runtime = _copy_exact(runtime_wheel, output_dir)
     _extract_product_runtime_code(copied_runtime, output_dir, version)
     copied_python = _copy_exact(python_archive, output_dir)
-    copied_installer = _copy_exact(installer_archive, output_dir)
+    # 冻结安装器只分发一次：产品内 exe 位于 runtime/installer/，manifest
+    # 直接绑定其字节摘要（不再随 backend 携带重复的 zip 副本）。
+    copied_installer = _copy_exact(
+        installer_executable,
+        output_dir,
+        destination_name=INSTALLER_EXECUTABLE_NAME,
+    )
     pack_inputs = runtime_packs or {}
     copied_packs: dict[str, list[Path]] = {
         profile: [_copy_exact(pack, output_dir) for pack in packs]
@@ -288,27 +288,44 @@ def build_runtime_manifest(
         for profile in PROFILE_NAMES
     }
     copied_cu126_gpu_lock = _copy_exact(cu126_gpu_lock, output_dir)
-    copied_mineru_cpu = (
-        _copy_exact(mineru_cpu_lock, output_dir)
-        if mineru_cpu_lock is not None
-        else None
-    )
-    copied_rapid_cuda = (
-        _copy_exact(rapid_cuda_lock, output_dir)
-        if rapid_cuda_lock is not None
-        else None
-    )
 
     copied_paddle_onnx = {
         device: _copy_exact(lock, output_dir)
         for device, lock in paddle_onnx_locks.items()
     }
+    copied_paddle_onnx_packs: dict[str, list[Path]] = {
+        device: [_copy_exact(pack, output_dir) for pack in packs]
+        for device, packs in paddle_onnx_packs.items()
+        if packs
+    }
+    copied_paddle_model_pack = (
+        _copy_exact(paddle_model_pack, output_dir)
+        if paddle_model_pack is not None
+        else None
+    )
     manifest = {
         "schema_version": 2,
         **(
             {
                 "paddle_onnx_environments": {
-                    device: {"lock": lock.name, "sha256": sha256_file(lock)}
+                    device: {
+                        "lock": lock.name,
+                        "sha256": sha256_file(lock),
+                        **(
+                            {
+                                "runtime_pack": [
+                                    pack.name
+                                    for pack in copied_paddle_onnx_packs[device]
+                                ],
+                                "runtime_pack_sha256": [
+                                    sha256_file(pack)
+                                    for pack in copied_paddle_onnx_packs[device]
+                                ],
+                            }
+                            if copied_paddle_onnx_packs.get(device)
+                            else {}
+                        ),
+                    }
                     for device, lock in copied_paddle_onnx.items()
                 }
             }
@@ -332,13 +349,8 @@ def build_runtime_manifest(
             "sha256": sha256_file(copied_python),
         },
         "installer": {
-            "archive": copied_installer.name,
-            "sha256": sha256_file(copied_installer),
-            "executable_path": "runtime-installer/vibeocr-runtime-installer.exe",
-            "executable_sha256": installer_executable_sha256(
-                copied_installer,
-                "runtime-installer/vibeocr-runtime-installer.exe",
-            ),
+            "executable": copied_installer.name,
+            "executable_sha256": sha256_file(copied_installer),
         },
         "profiles": {
             profile: {
@@ -360,7 +372,6 @@ def build_runtime_manifest(
                     copied_profiles,
                     copied_cu126_gpu_lock,
                     copied_packs.get("win-x64-base", []),
-                    mineru_cpu_lock=copied_mineru_cpu,
                 ),
             }
             for profile in PROFILE_NAMES
@@ -368,12 +379,12 @@ def build_runtime_manifest(
         "capabilities": sorted(set(capabilities)),
         **(
             {
-                "rapid_cuda_environment": {
-                    "lock": copied_rapid_cuda.name,
-                    "sha256": sha256_file(copied_rapid_cuda),
+                "paddle_model_pack": {
+                    "archive": copied_paddle_model_pack.name,
+                    "sha256": sha256_file(copied_paddle_model_pack),
                 }
             }
-            if copied_rapid_cuda is not None
+            if copied_paddle_model_pack is not None
             else {}
         ),
         "build_workflow": build_workflow,
@@ -392,10 +403,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cpu-lock", type=Path, required=True)
     parser.add_argument("--cu126-lock", type=Path, required=True)
     parser.add_argument("--cu126-gpu-lock", type=Path, required=True)
-    parser.add_argument("--mineru-cpu-lock", type=Path, required=True)
-    parser.add_argument("--rapid-cuda-lock", type=Path, required=True)
     for device in ("cpu", "cuda", "directml"):
         parser.add_argument(f"--paddle-ort-{device}-lock", type=Path, required=True)
+    for device in ("cpu", "directml"):
+        parser.add_argument(
+            f"--paddle-ort-{device}-runtime-pack",
+            type=Path,
+            action="append",
+            default=None,
+            help=(
+                "Offline wheel-closure archive bound to the Paddle ONNX device "
+                "(repeatable)."
+            ),
+        )
+    parser.add_argument(
+        "--paddle-model-pack",
+        type=Path,
+        required=True,
+        help="Offline bundle of the default Paddle ONNX models.",
+    )
     parser.add_argument("--python-archive", type=Path, required=True)
     parser.add_argument("--python-version", default="3.13.16")
     parser.add_argument(
@@ -407,7 +433,12 @@ def main(argv: list[str] | None = None) -> int:
             "-install_only.tar.gz"
         ),
     )
-    parser.add_argument("--installer-archive", type=Path, required=True)
+    parser.add_argument(
+        "--installer-executable",
+        type=Path,
+        required=True,
+        help="Frozen Runtime Installer executable bound by the manifest.",
+    )
     parser.add_argument(
         "--base-runtime-pack",
         type=Path,
@@ -433,16 +464,19 @@ def main(argv: list[str] | None = None) -> int:
         cpu_lock=args.cpu_lock,
         cu126_lock=args.cu126_lock,
         cu126_gpu_lock=args.cu126_gpu_lock,
-        mineru_cpu_lock=args.mineru_cpu_lock,
-        rapid_cuda_lock=args.rapid_cuda_lock,
         paddle_onnx_locks={
             device: getattr(args, f"paddle_ort_{device}_lock")
             for device in ("cpu", "cuda", "directml")
         },
+        paddle_onnx_packs={
+            device: getattr(args, f"paddle_ort_{device}_runtime_pack") or []
+            for device in ("cpu", "directml")
+        },
+        paddle_model_pack=args.paddle_model_pack,
         python_archive=args.python_archive,
         python_version=args.python_version,
         python_source_url=args.python_source_url,
-        installer_archive=args.installer_archive,
+        installer_executable=args.installer_executable,
         version=args.version,
         source_commit=source_commit,
         build_workflow=args.build_workflow,

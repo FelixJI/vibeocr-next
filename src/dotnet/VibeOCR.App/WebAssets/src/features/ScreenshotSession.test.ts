@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { imageRecognitionModes } from "./ScreenshotSession";
 
 const readyModes = [
-  { modeId: "rapid_text", displayName: "文字识别", availability: "ready" },
+  { modeId: "paddle_text", displayName: "文字识别", availability: "ready" },
   { modeId: "paddle_table", displayName: "表格识别", availability: "ready" },
 ];
 

@@ -153,7 +153,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void EnvironmentCommandsAcceptRuntimeReadableIds(string environmentId)
   {
     Guid sessionId = Guid.NewGuid();
-    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
+    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "paddleocr-ort-cpu" });
     var command = Assert.IsType<PreviewEnvironmentInstallCommand>(
       ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId).Command);
     Assert.Equal(environmentId, command.EnvironmentId);
@@ -168,7 +168,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void EnvironmentCommandsRejectPathSegments(string environmentId)
   {
     Guid sessionId = Guid.NewGuid();
-    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "rapidocr-cpu" });
+    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "paddleocr-ort-cpu" });
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
   }
@@ -191,7 +191,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
             "action": "previewEnvironmentInstall",
             "arguments": {
               "environmentId": "{{environmentId}}",
-              "recipe": "rapidocr-cpu",
+              "recipe": "paddleocr-ort-cpu",
               "sourceId": "pypi"
             }
           }
@@ -224,7 +224,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
             "action": "previewEnvironmentInstall",
             "arguments": {
               "environmentId": "{{environmentId}}",
-              "recipe": "rapidocr-cpu"
+              "recipe": "paddleocr-ort-cpu"
             }
           }
         }
@@ -388,15 +388,15 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       EnvironmentRecipes:
       [
         new SettingsEnvironmentRecipeState(
-          "rapidocr-cpu", "RapidOCR · CPU",
+          "paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
           ["text"], "cpu", "cpu", "3.13.15", "cp313", "win_amd64",
-          "base", ["runtime_host", "rapidocr-base"], "locked-sha",
-          ["rapidocr==3.7.0"], "bundled_pack", "product_bundle", "product_bundle"),
+          "base", ["runtime_host", "paddleocr-ort-base"], "locked-sha",
+          ["paddleocr==3.1.0"], "bundled_pack", "product_bundle", "product_bundle"),
       ],
       EnvironmentHardware: new SettingsEnvironmentHardwareState(
         "unsupported", "nvidia_driver_incompatible", "527.00"),
       EnvironmentCompatibility: new SettingsEnvironmentCompatibilityState(
-        "rapidocr-cpu",
+        "paddleocr-ort-cpu",
         SelectedEnvironmentId: "abc",
         SelectedEnvironmentRevision: 2,
         SelectionReason: "active_environment",
@@ -412,15 +412,15 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
     // 配方目录/硬件/兼容结果都只投影 Runtime 真值，前台不另算依赖或检测硬件。
     JsonElement recipe = Assert.Single(settings.GetProperty("environmentRecipes").EnumerateArray());
-    Assert.Equal("rapidocr-cpu", recipe.GetProperty("id").GetString());
-    Assert.Equal("RapidOCR · CPU", recipe.GetProperty("displayName").GetString());
+    Assert.Equal("paddleocr-ort-cpu", recipe.GetProperty("id").GetString());
+    Assert.Equal("PaddleOCR ONNX · CPU", recipe.GetProperty("displayName").GetString());
     Assert.Equal("cpu", recipe.GetProperty("accelerator").GetString());
     JsonElement hardware = settings.GetProperty("environmentHardware");
     Assert.Equal("unsupported", hardware.GetProperty("nvidiaDriverStatus").GetString());
     Assert.Equal("nvidia_driver_incompatible", hardware.GetProperty("nvidiaDriverReason").GetString());
     Assert.Equal("527.00", hardware.GetProperty("nvidiaDriverVersion").GetString());
     JsonElement compatibility = settings.GetProperty("environmentCompatibility");
-    Assert.Equal("rapidocr-cpu", compatibility.GetProperty("recipe").GetString());
+    Assert.Equal("paddleocr-ort-cpu", compatibility.GetProperty("recipe").GetString());
     Assert.Equal("abc", compatibility.GetProperty("selectedEnvironmentId").GetString());
     JsonElement match = Assert.Single(compatibility.GetProperty("environments").EnumerateArray());
     Assert.Equal("selected_active_environment", match.GetProperty("reasonCode").GetString());
@@ -442,7 +442,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
             "scope": "settings",
             "action": "findCompatibleEnvironment",
             "arguments": {
-              "recipe": "rapidocr+mineru-cuda"
+              "recipe": "mineru-cpu"
             }
           }
         }
@@ -450,14 +450,14 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       """;
     var find = Assert.IsType<FindCompatibleEnvironmentCommand>(
       ParseForTest(json, sessionId).Command);
-    Assert.Equal("rapidocr+mineru-cuda", find.Recipe);
+    Assert.Equal("mineru-cpu", find.Recipe);
     // 桥只做协议 id 类型守卫；未知输入拒绝，不降 input validation。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(
-        json.Replace("rapidocr+mineru-cuda", "made-up-recipe"), sessionId));
+        json.Replace("mineru-cpu", "made-up-recipe"), sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(
-        json.Replace("\"recipe\": \"rapidocr+mineru-cuda\"", "\"environmentId\": \"abc\""),
+        json.Replace("\"recipe\": \"mineru-cpu\"", "\"environmentId\": \"abc\""),
         sessionId));
   }
 
@@ -465,7 +465,9 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   [InlineData("paddleocr-ort-cpu")]
   [InlineData("paddleocr-ort-cuda")]
   [InlineData("paddleocr-ort-directml")]
-  public void PaddleOnnxRecipesReachPrepareFindAndPreview(string recipe)
+  [InlineData("mineru-cpu")]
+  [InlineData("mineru-cuda")]
+  public void SupportedRecipesReachPrepareFindAndPreview(string recipe)
   {
     Guid session = Guid.NewGuid();
     string arguments = JsonSerializer.Serialize(new { recipe });
@@ -481,11 +483,11 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   public void PrepareEnvironmentDecodesOnlySupportedRecipe()
   {
     Guid session = Guid.NewGuid();
-    string json = CommandJson(session, "settings", "prepareEnvironment", "{\"recipe\":\"paddleocr-cuda\"}");
+    string json = CommandJson(session, "settings", "prepareEnvironment", "{\"recipe\":\"paddleocr-ort-cuda\"}");
     var command = Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(json, session).Command);
-    Assert.Equal("paddleocr-cuda", command.Recipe);
+    Assert.Equal("paddleocr-ort-cuda", command.Recipe);
     Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
-      json.Replace("paddleocr-cuda", "made-up-recipe"), session));
+      json.Replace("paddleocr-ort-cuda", "made-up-recipe"), session));
     Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
       CommandJson(session, "settings", "prepareEnvironment", "{}"), session));
   }
@@ -1281,7 +1283,13 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.NotNull(root);
     var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false,
       StatusMessage: new string('字', 4000));
-    string[] recipeLocks = ["win-x64-base", "win-x64-rapid-cu13", "win-x64-paddle-ort-cpu", "win-x64-paddle-ort-cuda", "win-x64-paddle-ort-directml", "win-x64-mineru-cpu", "win-x64-cpu", "win-x64-cu126"];
+    // 配方锁目录随 Runtime 交付集合演进（Rapid 锁已随 RapidOCR 退役删除）；
+    // 这里直接消费当前仓库的全部真实锁文件，不硬编码目录清单。
+    string[] recipeLocks = Directory.EnumerateDirectories(Path.Combine(root.FullName, "config", "runtime"))
+      .Select(dir => Path.GetFileName(dir))
+      .Where(id => File.Exists(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock")))
+      .OrderBy(id => id, StringComparer.Ordinal)
+      .ToArray();
     var recipes = recipeLocks.Select(id => new SettingsEnvironmentRecipeState(id, id,
       Dependencies: File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock"))
         .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))

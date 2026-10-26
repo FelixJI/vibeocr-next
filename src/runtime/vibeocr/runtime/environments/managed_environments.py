@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -27,6 +28,9 @@ from vibeocr.runtime.environments.managed_install_progress import (
     ManagedInstallObserver,
 )
 from vibeocr.runtime.environments.managed_references import environment_has_references
+from vibeocr.runtime.environments.model_cache import (
+    seed_bundled_paddle_onnx_models,
+)
 from vibeocr.runtime.environments.runtime_install_plan import (
     RuntimeInstallPlanStale,
 )
@@ -34,7 +38,6 @@ from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
     _extract_python_archive,
     _extract_runtime_pack,
-    _install_rapidtable_model,
     _load_component_lock,
     _local_install_requirements,
     _normalize_dist_name,
@@ -99,6 +102,9 @@ _FORBIDDEN_EMPTY = (
 )
 # 锁定配方是 Runtime 的唯一权威目录：展示名、真实用途（识别类型）与
 # 设备要求沿 manifest scope 锁投影；C#/TS 只消费目录，不得重算依赖图。
+# Rapid 系配方（rapidocr-* / rapidocr+mineru-*）已随引擎退役：不再进入
+# 可安装目录，旧记录按数据保护原则保留并继续健康探测（不自动卸载/
+# 删除），提示改用对应 Paddle ONNX 环境。
 _RECIPE_IDS = (
     "rapidocr-cpu",
     "rapidocr-cuda",
@@ -108,39 +114,46 @@ _RECIPE_IDS = (
     "paddleocr-ort-cuda",
     "paddleocr-ort-directml",
     "mineru-cpu",
+    "mineru-cuda",
     "rapidocr+mineru-cpu",
     "rapidocr+mineru-cuda",
 )
 _RECIPE_DISPLAY_NAMES = {
-    "rapidocr-cpu": "RapidOCR + RapidTable · CPU",
-    "rapidocr-cuda": "RapidOCR + RapidTable · NVIDIA CUDA",
-    "paddleocr-cpu": "PaddleOCR · CPU",
-    "paddleocr-cuda": "PaddleOCR · NVIDIA CUDA",
+    "rapidocr-cpu": "RapidOCR + RapidTable · CPU（已退役）",
+    "rapidocr-cuda": "RapidOCR + RapidTable · NVIDIA CUDA（已退役）",
+    "paddleocr-cpu": "PaddleOCR · CPU（已退役）",
+    "paddleocr-cuda": "PaddleOCR · NVIDIA CUDA（已退役）",
     "paddleocr-ort-cpu": "PaddleOCR ONNX · CPU",
     "paddleocr-ort-cuda": "PaddleOCR ONNX · NVIDIA CUDA",
     "paddleocr-ort-directml": "PaddleOCR ONNX · Windows DirectML",
     "mineru-cpu": "MinerU · CPU",
-    "rapidocr+mineru-cpu": "RapidOCR + RapidTable + MinerU · CPU",
-    "rapidocr+mineru-cuda": "RapidOCR + RapidTable + MinerU · NVIDIA CUDA",
+    "mineru-cuda": "MinerU · NVIDIA CUDA",
+    "rapidocr+mineru-cpu": "RapidOCR + RapidTable + MinerU · CPU（已退役）",
+    "rapidocr+mineru-cuda": "RapidOCR + RapidTable + MinerU · NVIDIA CUDA（已退役）",
 }
-# #270：旧原生 Paddle 配方已退役——不再进入可安装目录、不再宣称任何识别
-# 类型，也不再作为保留模式的后端；已安装记录按数据保护原则保留并继续
-# 健康探测（不自动卸载/删除），提示改用对应 Paddle ONNX 环境。
+# #270：旧原生 Paddle 配方退役；本仓已全面转向 PaddleOCR 后 Rapid 系配方
+# 同步退役：不再进入可安装目录、不再宣称任何识别类型，也不再作为保留
+# 模式的后端；已安装记录按数据保护原则保留并继续健康探测（不自动
+# 卸载/删除），提示改用对应 Paddle ONNX 环境。
 _RETIRED_NATIVE_PADDLE_RECIPES = frozenset({"paddleocr-cpu", "paddleocr-cuda"})
+_RETIRED_RAPID_RECIPES = frozenset(
+    {
+        "rapidocr-cpu",
+        "rapidocr-cuda",
+        "rapidocr+mineru-cpu",
+        "rapidocr+mineru-cuda",
+    }
+)
+_RETIRED_ENGINE_RECIPES = _RETIRED_NATIVE_PADDLE_RECIPES | _RETIRED_RAPID_RECIPES
 # 探针运行 Supervisor 实际执行的引擎导入：不实例化引擎、不下载模型。
-# rapidocr 必须导入真实符号，包级 __init__ 惰性解析无法证明原生闭包可用。
-# 历史配方维持原引擎基线；新 RapidTable 的缺失由模式 availability 单独报告。
+# 只为可安装配方保留引擎 import 探针；退役配方（Rapid 系 / 原生 Paddle）
+# 不再加载任何原生引擎库，读取时按 engine_recipe_retired 直接投影不可用。
 _RECIPE_IMPORT_PROBES = {
-    "rapidocr-cpu": "from rapidocr import RapidOCR",
-    "rapidocr-cuda": "from rapidocr import RapidOCR; from rapid_table import RapidTable; from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; assert cuda_provider_ready()",
-    "paddleocr-cpu": "from paddleocr import PaddleOCR",
-    "paddleocr-cuda": "from paddleocr import PaddleOCR",
     "paddleocr-ort-cpu": "from paddleocr import PaddleOCR; import onnxruntime",
-    "paddleocr-ort-cuda": "from paddleocr import PaddleOCR; from vibeocr.runtime.recognition.rapid_devices import cuda_provider_ready; assert cuda_provider_ready()",
+    "paddleocr-ort-cuda": "from paddleocr import PaddleOCR; from vibeocr.runtime.recognition.onnx_devices import cuda_provider_ready; assert cuda_provider_ready()",
     "paddleocr-ort-directml": "from paddleocr import PaddleOCR; import onnxruntime; from vibeocr.runtime.recognition.directml_devices import hardware_adapters; assert 'DmlExecutionProvider' in onnxruntime.get_available_providers() and hardware_adapters()",
     "mineru-cpu": "from mineru.parser.api_server import create_app",
-    "rapidocr+mineru-cpu": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
-    "rapidocr+mineru-cuda": "from mineru.parser.api_server import create_app; from rapidocr import RapidOCR",
+    "mineru-cuda": "from mineru.parser.api_server import create_app",
 }
 
 # 前后端同源一体发布后环境目录不需要 UUID：新环境目录用名称（用户创建）
@@ -162,8 +175,11 @@ _ENVIRONMENT_RESERVED_DIRECTORIES = frozenset(
         *(f"lpt{index}" for index in range(1, 10)),
     }
 )
-# 默认环境的用途/设备即目录名：RapidOCR + CPU。
-_DEFAULT_ENVIRONMENT_SLUG = "rapidocr-cpu"
+# 默认环境的用途/设备即目录名：Paddle ONNX + CPU（离线随包闭包）。
+_DEFAULT_ENVIRONMENT_SLUG = "paddleocr-ort-cpu"
+# 旧版默认环境 slug（RapidOCR · CPU）：仅用于识别旧初始化 marker 并迁到
+# 新 slug；从未完成的旧默认环境不迁移数据，只改用新目录名重建。
+_LEGACY_DEFAULT_ENVIRONMENT_SLUG = "rapidocr-cpu"
 # 固定路径布局：每个环境的 venv 直接位于 environments/<id>，不再嵌套
 # revisions/<N>，路径最短且升级前后不变。安装事务在 .staging/<id> 构建
 # 候选、提交时把旧 venv 移入 .retired/<id>（各一个固定槽位，绝不累积），
@@ -367,7 +383,7 @@ class ManagedEnvironmentStore:
             if record["recipe"].startswith("paddleocr-ort-"):
                 # Frozen source manifests own downloads; importing the catalog must stay offline.
                 environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-            if record["recipe"] in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
+            if record["recipe"] == "paddleocr-ort-cuda":
                 environment["VIBEOCR_ORT_CUDA_EP_DLL"] = str(
                     root / "providers" / "cuda" / "onnxruntime_providers_cuda.dll"
                 )
@@ -1135,13 +1151,18 @@ class ManagedEnvironmentStore:
                 "python": str(python),
             }
         if record["status"] == "installed":
-            expected = {"fastapi"}
             recipe = record.get("recipe")
-            if recipe in {"rapidocr-cpu", "rapidocr-cuda"}:
-                expected.update({"rapidocr", "onnxruntime"})
-                if recipe == "rapidocr-cuda":
-                    expected.update({"rapid-table", "nvidia-cudnn-cu13"})
-            elif recipe in self.manifest.paddle_onnx_environments:
+            if recipe in _RETIRED_ENGINE_RECIPES:
+                # 退役配方（Rapid 系 / 原生 Paddle）：不再加载任何原生引擎
+                # 库做健康探测，直接投影不可用；记录与数据保留，切换入口
+                # fail closed。
+                return {
+                    "healthy": False,
+                    "reason": "engine_recipe_retired",
+                    "python": str(python),
+                }
+            expected = {"fastapi"}
+            if recipe in self.manifest.paddle_onnx_environments:
                 ort = (
                     "onnxruntime-directml"
                     if recipe.endswith("directml")
@@ -1158,51 +1179,34 @@ class ManagedEnvironmentStore:
                     "transformers",
                     "paddle2onnx",
                 }
-                if packages & forbidden or packages & {
+                ort_packages = packages & {
                     "onnxruntime",
                     "onnxruntime-gpu",
                     "onnxruntime-directml",
-                } != {ort}:
+                }
+                if packages & forbidden or (ort_packages and ort_packages != {ort}):
                     return {
                         "healthy": False,
                         "reason": "engine_environment_contaminated",
                         "python": str(python),
                     }
-            elif recipe == "paddleocr-cpu":
-                expected.update({"paddleocr", "paddlepaddle"})
-            elif recipe == "paddleocr-cuda":
-                expected.update({"paddleocr", "paddlepaddle-gpu"})
-            elif recipe in {"rapidocr+mineru-cpu", "rapidocr+mineru-cuda"}:
-                expected.update({"rapidocr", "onnxruntime", "mineru"})
-                if recipe.endswith("cuda"):
-                    expected.add("torch")
             elif recipe == "mineru-cpu":
                 expected.add("mineru")
+            elif recipe == "mineru-cuda":
+                expected.update({"mineru", "torch"})
             if not expected.issubset(packages):
                 return {
                     "healthy": False,
                     "reason": "engine_packages_missing",
                     "python": str(python),
                 }
-            if (
-                "rapid-table" in expected
-                and not (root / "models" / "rapidtable" / "slanet-plus.onnx").is_file()
-            ):
-                return {
-                    "healthy": False,
-                    "reason": "engine_model_missing",
-                    "python": str(python),
-                }
             import_probe = _RECIPE_IMPORT_PROBES.get(recipe)
             if import_probe is not None:
                 # Probe the exact import the Supervisor performs at engine
-                # init, for every engine the recipe activates. rapidocr's
-                # package __init__ resolves RapidOCR lazily, so bare package
-                # imports (or leaf modules such as pyclipper/onnxruntime)
-                # prove nothing about the native transitive closure
-                # (rapidocr.main -> ch_ppocr_det -> shapely); importing the
-                # real symbols loads that closure without instantiating the
-                # engine or downloading models.
+                # init, for every engine the recipe activates: importing the
+                # real symbols loads the native transitive closure without
+                # instantiating the engine or downloading models.
+                probe_started = time.monotonic()
                 try:
                     subprocess.run(
                         [
@@ -1221,13 +1225,27 @@ class ManagedEnvironmentStore:
                         stdin=subprocess.DEVNULL,
                         capture_output=True,
                         text=True,
-                        timeout=20,
+                        # 首次导入 Paddle 的原生闭包可能超过 20 秒，缓存预热
+                        # 后仍较重；保持有界探针，不把冷启动误判为安装损坏。
+                        timeout=60
+                        if recipe in self.manifest.paddle_onnx_environments
+                        else 20,
                         check=True,
                     )
-                except (OSError, subprocess.SubprocessError):
+                except (OSError, subprocess.SubprocessError) as exc:
+                    detail = (
+                        f"{type(exc).__name__} after "
+                        f"{time.monotonic() - probe_started:.1f}s: {exc}"
+                    )
+                    stderr = getattr(exc, "stderr", None)
+                    if stderr:
+                        if isinstance(stderr, bytes):
+                            stderr = stderr.decode("utf-8", errors="replace")
+                        detail += f"\n{stderr[-2000:]}"
                     return {
                         "healthy": False,
                         "reason": "engine_import_failed",
+                        "detail": detail,
                         "python": str(python),
                         "python_version": actual_version,
                         "abi": actual_abi,
@@ -1256,14 +1274,11 @@ class ManagedEnvironmentStore:
             "paddleocr-ort-directml",
         }:
             return ["text", "table", "structure"]
-        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
-            # #270：退役配方不再宣称任何识别类型；记录与健康状态仍保留。
+        if recipe in _RETIRED_ENGINE_RECIPES:
+            # 退役配方（原生 Paddle / Rapid 系）不再宣称任何识别类型；记录
+            # 与健康状态仍保留。
             return []
-        if recipe.startswith("rapidocr+mineru"):
-            return ["text", "rapid_table", "document"]
-        if recipe in {"rapidocr-cpu", "rapidocr-cuda"}:
-            return ["text", "rapid_table"]
-        if recipe == "mineru-cpu":
+        if recipe in {"mineru-cpu", "mineru-cuda"}:
             return ["document"]
         return []
 
@@ -1312,7 +1327,7 @@ class ManagedEnvironmentStore:
                 "empty_environment_contaminated",
             }
             else "unavailable"
-            if probe["reason"] == "engine_import_failed"
+            if probe["reason"] in {"engine_import_failed", "engine_recipe_retired"}
             else record["status"]
             if python_ok
             else "unknown"
@@ -1447,9 +1462,9 @@ class ManagedEnvironmentStore:
         初始化状态独立保存，避免改变旧版仍需读取的注册表格式。独立锁
         覆盖创建/安装，store 锁只覆盖注册表提交；完成后不自动重建。
 
-        默认环境固定为 RapidOCR · CPU，依赖必须来自随包离线 base pack：
-        缺离线包代表发布闭包错误，保持 fail closed，不静默改用网络源。
-        只有真实安装或探针失败才保留可重试的失败证据。
+        默认环境固定为 PaddleOCR ONNX · CPU，依赖必须来自随包离线 base
+        pack：缺离线包代表发布闭包错误，保持 fail closed，不静默改用网络
+        源。只有真实安装或探针失败才保留可重试的失败证据。
         """
         marker = self.paths.state_root / "default-environment.json"
         with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
@@ -1470,6 +1485,16 @@ class ManagedEnvironmentStore:
                     raise ManagedEnvironmentError(
                         "default environment initialization is invalid"
                     )
+                # 旧版用 RapidOCR slug 预留过默认环境：未完成创建时直接改用
+                # 新 slug 重建（无数据可迁移）；已完成创建的旧环境保留不动。
+                if (
+                    state["environment_id"] == _LEGACY_DEFAULT_ENVIRONMENT_SLUG
+                    and not state["created"]
+                ):
+                    state = {
+                        "environment_id": _DEFAULT_ENVIRONMENT_SLUG,
+                        "created": False,
+                    }
             else:
                 with RuntimeStoreLock(self._lock):
                     existing = bool(self._read()["environments"])
@@ -1490,13 +1515,13 @@ class ManagedEnvironmentStore:
                     state["created"] = True
                     _atomic_json(marker, state)
                     if record["status"] == "empty":
-                        scope, _accelerator = self._recipe("rapidocr-cpu")
+                        scope, _accelerator = self._recipe("paddleocr-ort-cpu")
                         if not scope.runtime_pack:
                             raise ManagedEnvironmentError(
                                 "default environment requires the bundled offline base pack"
                             )
-                        plan = self.preview_install(default_id, "rapidocr-cpu")
-                        self.install(plan["plan_id"], default_id, "rapidocr-cpu")
+                        plan = self.preview_install(default_id, "paddleocr-ort-cpu")
+                        self.install(plan["plan_id"], default_id, "paddleocr-ort-cpu")
                     with RuntimeStoreLock(self._lock):
                         data = self._read()
                         record = data["environments"].get(default_id)
@@ -1828,7 +1853,8 @@ class ManagedEnvironmentStore:
             if not relocated["healthy"]:
                 raise ManagedEnvironmentError(
                     f"installed environment failed probe: {relocated['reason']}; "
-                    "check native dependencies and Portable path length",
+                    "check native dependencies and Portable path length"
+                    + (f"\n{relocated['detail']}" if relocated.get("detail") else ""),
                     reason_code=relocated["reason"],
                     next_action="repair_environment",
                 )
@@ -1969,49 +1995,32 @@ class ManagedEnvironmentStore:
                     "Paddle ONNX recipe is absent from manifest"
                 )
             return scope, "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
-        if recipe == "rapidocr-cpu":
-            return self.manifest.profiles["win-x64-base"].scopes[0], "cpu"
-        if recipe == "rapidocr-cuda":
-            if self.manifest.rapid_cuda_environment is None:
-                raise ManagedEnvironmentError(
-                    "Rapid CUDA recipe is absent from manifest"
-                )
-            return self.manifest.rapid_cuda_environment, "nvidia_cuda"
         if recipe == "mineru-cpu":
-            scope = next(
-                (
-                    item
-                    for item in self.manifest.profiles["win-x64-cpu"].scopes
-                    if item.scope_id == "mineru-standalone"
-                ),
-                None,
-            )
-            if scope is None:
+            # base 闭包退役 RapidOCR 后，独立 MinerU 环境与 full-cpu 闭包
+            # 内容一致（host + MinerU，无 Paddle/无 CUDA）；直接使用 cpu
+            # profile 的缺省 scope，不再维护重复的 standalone 锁。
+            scopes = self.manifest.profiles["win-x64-cpu"].scopes
+            if not scopes:
                 raise ManagedEnvironmentError(
                     "standalone MinerU recipe is absent from manifest"
                 )
-            return scope, "cpu"
-        if recipe in {"rapidocr+mineru-cpu", "rapidocr+mineru-cuda"}:
-            accelerator = "cpu" if recipe.endswith("cpu") else "nvidia_cuda"
-            profile_id = "win-x64-cpu" if accelerator == "cpu" else "win-x64-cu126"
-            scope = next(
-                (
-                    item
-                    for item in self.manifest.profiles[profile_id].scopes
-                    if item.scope_id == "mineru"
-                ),
-                None,
-            )
-            if scope is None:
-                raise ManagedEnvironmentError("MinerU recipe is absent from manifest")
-            return scope, accelerator
-        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
-            # #270：旧原生 Paddle 配方退役。新 manifest 不再绑定
-            # paddle_environment，也不能伪造安装 scope：预览/确认安装在此
-            # 明确拒绝；历史记录读取走 status_scope 的只读闭包投影。
+            return scopes[0], "cpu"
+        if recipe == "mineru-cuda":
+            # MinerU CUDA（无 Rapid）：直接使用 cu126 profile 的缺省闭包
+            # （host + MinerU + gpu_runtime），不再叠加 RapidOCR。
+            scopes = self.manifest.profiles["win-x64-cu126"].scopes
+            if not scopes:
+                raise ManagedEnvironmentError(
+                    "CUDA MinerU recipe is absent from manifest"
+                )
+            return scopes[0], "nvidia_cuda"
+        if recipe in _RETIRED_ENGINE_RECIPES:
+            # 原生 Paddle / Rapid 系配方退役。新 manifest 不再绑定对应 scope，
+            # 也不能伪造安装 scope：预览/确认安装在此明确拒绝；历史记录读取
+            # 走 status_scope 的只读闭包投影。
             raise ManagedEnvironmentError(
-                "native Paddle recipe is retired; prepare a Paddle ONNX environment",
-                reason_code="paddle_native_recipe_retired",
+                "engine recipe is retired; prepare a Paddle ONNX environment",
+                reason_code="engine_recipe_retired",
                 next_action="prepare_paddle_onnx",
             )
         raise ManagedEnvironmentError("unknown engine recipe")
@@ -2037,7 +2046,7 @@ class ManagedEnvironmentStore:
             or self._safe_path(record).resolve() != runtime_root.resolve()
         ):
             raise ManagedEnvironmentError("running environment revision is stale")
-        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+        if recipe in _RETIRED_ENGINE_RECIPES:
             accelerator = "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
             return None, frozenset({recipe, "runtime_host"}), accelerator
         scope, accelerator = self._recipe(recipe)
@@ -2046,21 +2055,31 @@ class ManagedEnvironmentStore:
     def preview_install(
         self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
     ) -> dict:
-        if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
-            # #270：旧原生 Paddle 配方退役，不再提供安装/下载入口；
+        if recipe in _RETIRED_ENGINE_RECIPES:
+            # 原生 Paddle / Rapid 系配方退役，不再提供安装/下载入口；
             # 已安装环境与健康记录保留，提示改用 Paddle ONNX 环境。
             raise ManagedEnvironmentError(
-                "native Paddle recipe is retired; prepare a Paddle ONNX environment",
-                reason_code="paddle_native_recipe_retired",
+                "engine recipe is retired; prepare a Paddle ONNX environment",
+                reason_code="engine_recipe_retired",
                 next_action="prepare_paddle_onnx",
             )
-        if recipe in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
+        if recipe == "mineru-cuda":
+            # cu126 torch 闭包沿用 CUDA 12.x minor-version compatibility 地板。
+            driver = probe_nvidia_driver()
+            if driver["status"] != "ok":
+                raise ManagedEnvironmentError(
+                    "MinerU CUDA 闭包需要可用的 NVIDIA 驱动（R528.33+）；"
+                    f"当前驱动：{driver['driver_version'] or '不可用'}",
+                    reason_code=driver["reason_code"] or "nvidia_driver_unavailable",
+                    next_action="update_nvidia_driver",
+                )
+        if recipe == "paddleocr-ort-cuda":
             # NVIDIA CUDA minor-version compatibility: CUDA 13 requires R580.
             # docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html
             driver = probe_nvidia_driver(minimum_version=(580, 0))
             if driver["status"] != "ok":
                 raise ManagedEnvironmentError(
-                    "RapidOCR / RapidTable CUDA 13 需要 NVIDIA R580 或更新驱动；"
+                    "PaddleOCR ONNX CUDA 13 需要 NVIDIA R580 或更新驱动；"
                     f"当前驱动：{driver['driver_version'] or '不可用'}",
                     reason_code=driver["reason_code"] or "nvidia_driver_unavailable",
                     next_action="update_nvidia_driver",
@@ -2074,30 +2093,14 @@ class ManagedEnvironmentStore:
                 )
             if env_id == data["active_id"] and record["status"] != "empty":
                 raise ManagedEnvironmentError("active environment cannot be modified")
-            requested_recipe = recipe
             current = record.get("recipe")
-            if (current == "rapidocr-cpu" and recipe == "mineru-cpu") or (
-                current == "mineru-cpu" and recipe == "rapidocr-cpu"
-            ):
-                recipe = "rapidocr+mineru-cpu"
-            elif (
-                current is not None
-                and current != recipe
-                and not (
-                    current in {"rapidocr-cpu", "mineru-cpu"}
-                    and recipe in {"rapidocr+mineru-cpu", "rapidocr+mineru-cuda"}
-                )
-            ):
-                # 单 venv 同时装 base 与 Paddle 隔离锁会让 opencv-python 与
-                # opencv-contrib-python 冲突（旧安装器为此用独立解释器），
-                # 未绑定的组合如实拒绝，不声称可用。
+            if current is not None and current != recipe:
+                # 单 venv 不允许混装引擎闭包：Paddle ONNX 锁与 MinerU 锁各自
+                # 独立解析（含不同 onnxruntime/opencv 发行物），叠加安装会把
+                # 两套推理运行时装进同一环境，未绑定的组合如实拒绝。
                 raise ManagedEnvironmentError(
                     "engine combination has no compatible locked recipe; "
                     "create another environment"
-                )
-            elif current is None and recipe == "mineru-cuda":
-                raise ManagedEnvironmentError(
-                    "standalone CUDA MinerU recipe is not bound by the current release"
                 )
             scope, accelerator = self._recipe(recipe)
             selection = self._plan_selection(data, record, accelerator, source_ids)
@@ -2132,7 +2135,7 @@ class ManagedEnvironmentStore:
                 "environment_id": env_id,
                 "environment_revision": record["revision"],
                 "active_revision": data["active_revision"],
-                "requested_recipe": requested_recipe,
+                "requested_recipe": recipe,
                 "recipe": recipe,
                 "recipe_lock": scope.sha256,
                 # 请求源（本次显式）与生效源（显式+继承叠加）分开冻结；
@@ -2180,7 +2183,7 @@ class ManagedEnvironmentStore:
         """
         entries: list[dict] = []
         for recipe in _RECIPE_IDS:
-            if recipe in _RETIRED_NATIVE_PADDLE_RECIPES:
+            if recipe in _RETIRED_ENGINE_RECIPES:
                 continue
             try:
                 scope, accelerator = self._recipe(recipe)
@@ -2471,7 +2474,8 @@ class ManagedEnvironmentStore:
                 if not staged["healthy"]:
                     raise ManagedEnvironmentError(
                         f"installed environment failed probe: {staged['reason']}; "
-                        "check native dependencies and Portable path length",
+                        "check native dependencies and Portable path length"
+                        + (f"\n{staged['detail']}" if staged.get("detail") else ""),
                         reason_code=staged["reason"],
                         next_action="repair_environment",
                     )
@@ -2639,17 +2643,26 @@ class ManagedEnvironmentStore:
                 "runtime_wheel",
                 "安装内部 Runtime wheel（随产品提供，独立于目标依赖计数）",
             )
-        if "rapidocr-base" in scope.component_ids:
-            self._check_install_cancelled()
-            _install_rapidtable_model(self.manifest, python.parent.parent, cache)
-        if scope.scope_id in {"rapidocr-cuda", "paddleocr-ort-cuda"}:
-            from vibeocr.runtime.environments.rapid_assets import install_cuda_plugin
+        if scope.scope_id == "paddleocr-ort-cuda":
+            from vibeocr.runtime.environments.onnx_assets import install_cuda_plugin
 
             if observer is not None:
                 observer.set_phase("download", "准备锁定的 ONNX Runtime CUDA 13 插件")
             install_cuda_plugin(
                 python.parent.parent,
-                cache / "rapid-assets",
+                cache / "onnx-assets",
+                self._check_install_cancelled,
+            )
+        if scope.scope_id in self.manifest.paddle_onnx_environments:
+            self._check_install_cancelled()
+            if observer is not None:
+                observer.set_phase(
+                    "models",
+                    "布置随包默认 Paddle ONNX 模型（small 检测/识别 + 文档方向）",
+                )
+            seed_bundled_paddle_onnx_models(
+                self.manifest,
+                self.paths.state_root / "model-cache",
                 self._check_install_cancelled,
             )
         _run_install_command(

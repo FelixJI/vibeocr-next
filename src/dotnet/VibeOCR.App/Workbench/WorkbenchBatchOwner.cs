@@ -238,8 +238,7 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
     // 原生 Office 仅 flash 档可整篇解析：flash 可用性随配置一起冻结给
     // 批量任务，提交时按原生格式分组，不改 PDF/图片默认档。
     bool mineruFlashUsable = mode is not null && selection.IsMineruTierUsable(MineruTier.Flash);
-    batch.SetRecognitionMode(mode, config, selectionPolicy.GetTaskModeOptions(mode, batchTaskModelPreset), batchTaskEngine, mineruFlashUsable,
-      deviceOptions: selectionPolicy.GetDeviceOptions(mode));
+    batch.SetRecognitionMode(mode, config, selectionPolicy.GetTaskModeOptions(mode, batchTaskModelPreset), batchTaskEngine, mineruFlashUsable);
   }
 
   /// <summary>

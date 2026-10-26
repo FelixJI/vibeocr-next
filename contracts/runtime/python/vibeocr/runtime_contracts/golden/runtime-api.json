@@ -48,9 +48,9 @@
           "engines": [
             {
               "id": "rapidocr",
-              "availability": "ready",
-              "included_in_base": true,
-              "reason_code": null,
+              "availability": "unavailable",
+              "included_in_base": false,
+              "reason_code": "engine_retired",
               "required_component": null
             },
             {
@@ -63,7 +63,7 @@
             {
               "id": "paddleocr",
               "availability": "unavailable",
-              "included_in_base": false,
+              "included_in_base": true,
               "reason_code": "unsupported_platform",
               "required_component": null
             }
@@ -79,18 +79,6 @@
         "replacement": null,
         "recognition_mode_catalog": {
           "modes": [
-            {
-              "id": "rapid_text",
-              "family": "text",
-              "pipeline_id": "OCR",
-              "engine": "rapidocr",
-              "provisioning": "base_runtime",
-              "availability": "ready",
-              "reason_code": null,
-              "required_component": null,
-              "supported_options": [],
-              "lifecycle": {"kind": "unmanaged", "supports_preload": false, "supports_ttl": false, "supports_pinning": false, "supports_release": false}
-            },
             {
               "id": "windows_text",
               "family": "text",
@@ -108,11 +96,11 @@
               "family": "text",
               "pipeline_id": "OCR",
               "engine": "paddleocr",
-              "provisioning": "advanced_component",
+              "provisioning": "base_runtime",
               "availability": "preparation_required",
               "reason_code": "runtime_component_missing",
               "required_component": "paddleocr-ort-cpu",
-              "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
+              "supported_options": ["model_preset", "device", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
               "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
             },
             {
@@ -150,18 +138,6 @@
               "required_component": "paddleocr-ort-cpu",
               "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_table_orientation_classify", "use_ocr_results_with_table_cells"],
               "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
-            },
-            {
-              "id": "rapid_table",
-              "family": "specialized",
-              "pipeline_id": "RAPID_TABLE",
-              "engine": null,
-              "provisioning": "base_runtime",
-              "availability": "ready",
-              "reason_code": null,
-              "required_component": null,
-              "supported_options": ["device"],
-              "lifecycle": {"kind": "unmanaged", "supports_preload": false, "supports_ttl": false, "supports_pinning": false, "supports_release": false}
             }
           ]
         }

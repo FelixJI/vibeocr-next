@@ -265,7 +265,7 @@ public sealed class PdfViewModelSupervisorTests
     var fake = new FakePdfInference { PendingRender = gate.Task };
     var viewModel = new PdfViewModel(fake, new StubPdfSource());
     var mode = new RecognitionModeOption("paddle_text", "text", "OCR",
-      OcrEngine.PaddleOcr, "advanced_component", "ready", null, "paddleocr-ort-cpu",
+      OcrEngine.PaddleOcr, "base_runtime", "ready", null, "paddleocr-ort-cpu",
       ["model_preset", "device"], "model_residency", true, true, true, true);
     viewModel.SetRecognitionMode(mode,
       new PaddleModeOptions { ModelPreset = "medium", Device = "cpu" });
@@ -331,7 +331,7 @@ public sealed class PdfViewModelSupervisorTests
         "text",
         "OCR",
         OcrEngine.PaddleOcr,
-        "advanced_component",
+        "base_runtime",
         "ready",
         null,
         "paddleocr-ort-cpu",

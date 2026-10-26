@@ -172,7 +172,7 @@ public sealed class InputService : IInputService, ISystemImportReader
             throw new InvalidDataException("Clipboard does not contain an image.");
         }
 
-        RandomAccessStreamReference reference = await content.GetBitmapAsync();
+        RandomAccessStreamReference reference = await content.GetBitmapAsync().AsTask(cancellationToken);
         using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync().AsTask(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         if (stream.Size > MaximumInputBytes)
@@ -182,7 +182,11 @@ public sealed class InputService : IInputService, ISystemImportReader
 
         using var reader = new DataReader(stream.GetInputStreamAt(0));
         uint size = checked((uint)stream.Size);
-        await reader.LoadAsync(size);
+        uint loaded = await reader.LoadAsync(size).AsTask(cancellationToken);
+        if (loaded != size)
+        {
+            throw new InvalidDataException("Clipboard image was not read completely.");
+        }
         byte[] data = new byte[size];
         reader.ReadBytes(data);
         await ValidateImageAsync(data, cancellationToken);

@@ -66,7 +66,9 @@ public enum JobPriority
 /// <summary>
 /// Stable engine ids for the plain-text OCR pipeline, mirroring the Python
 /// OcrEngine enum and the authoritative OcrEngineId OpenAPI schema. The
-/// Backend default for an omitted selection is rapidocr.
+/// Backend default for an omitted selection is paddleocr; the rapidocr id is
+/// retired (no active catalog or execution path) and stays on the wire only
+/// so historical records keep deserializing.
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter<OcrEngine>))]
 public enum OcrEngine
@@ -140,6 +142,8 @@ public enum ResidencyKind
 [JsonConverter(typeof(JsonStringEnumConverter<RecognitionMode>))]
 public enum RecognitionMode
 {
+    // rapid_text / rapid_table 已退役：不再进入活跃目录与执行路径；
+    // wire 值保留仅供历史记录（residency / pipeline spec）反序列化。
     [JsonStringEnumMemberName("rapid_text")] RapidText,
     [JsonStringEnumMemberName("windows_text")] WindowsText,
     [JsonStringEnumMemberName("paddle_text")] PaddleText,

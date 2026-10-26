@@ -34,6 +34,7 @@ public sealed class ImageEditIsolationWorkbenchTests
   {
     private int fileCalls;
     public ScreenshotSelectionActions? ReceivedActions { get; private set; }
+    public Func<CancellationToken, Task<RecognitionInput?>>? ReadClipboard { get; set; }
 
     private RecognitionInput Tagged(string name, string origin)
     {
@@ -45,6 +46,7 @@ public sealed class ImageEditIsolationWorkbenchTests
       Task.FromResult<RecognitionInput?>(Tagged("edit.png", "file"));
 
     public Task<RecognitionInput?> ReadClipboardAsync(CancellationToken cancellationToken) =>
+      ReadClipboard?.Invoke(cancellationToken) ??
       Task.FromResult<RecognitionInput?>(Tagged("clipboard.png", "clipboard"));
 
     public Task<RecognitionInput?> CaptureScreenAsync(CancellationToken cancellationToken) =>
@@ -239,6 +241,53 @@ public sealed class ImageEditIsolationWorkbenchTests
   private sealed class StubStartupRegistrar : IStartupRegistrar
   {
     public bool SetEnabled(bool enabled) => true;
+  }
+
+  [Theory]
+  [InlineData("clipboardUnavailable")]
+  [InlineData("invalidImage")]
+  [InlineData("cancelled")]
+  public async Task ClipboardReadFailureTerminatesBusyStateAndPreservesEditingSession(string outcome)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new CompletingInferenceClient();
+      var inputs = new TaggedInputService();
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        () => new RecognitionViewModel(inference, inputs),
+        root, broker, annotationStore, inference, inputs);
+      using var loaded = new StateAwaiter<ImageEditWorkbenchState>(handler,
+        state => state.IsTerminal && !state.IsBusy && state.Input is not null);
+      await handler.ExecuteAsync(new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+      ImageEditWorkbenchState previous = await loaded.Task;
+      inputs.ReadClipboard = async token =>
+      {
+        await Task.Yield();
+        throw outcome switch
+        {
+          "clipboardUnavailable" => new System.Runtime.InteropServices.COMException("Clipboard unavailable."),
+          "invalidImage" => new InvalidDataException("Clipboard does not contain an image."),
+          _ => new OperationCanceledException(token),
+        };
+      };
+      using var completed = new StateAwaiter<ImageEditWorkbenchState>(handler,
+        state => state.IsTerminal && !state.IsBusy);
+
+      await handler.ExecuteAsync(new ReadImageEditClipboardCommand(), TestContext.Current.CancellationToken);
+
+      ImageEditWorkbenchState terminal = await completed.Task;
+      Assert.Equal(outcome == "cancelled" ? "recognition.session" : "recognition.inputFailed", terminal.StatusCode);
+      Assert.Equal(previous.Input, terminal.Input);
+      Assert.Equal(previous.ScreenshotSession, terminal.ScreenshotSession);
+      Assert.Equal(0, inference.SubmitCalls);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Fact]

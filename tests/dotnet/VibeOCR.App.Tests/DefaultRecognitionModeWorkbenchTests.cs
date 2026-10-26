@@ -24,6 +24,8 @@ public sealed class DefaultRecognitionModeWorkbenchTests
   [Theory]
   [InlineData("paddle_formula")]
   [InlineData("paddle_document_vl")]
+  [InlineData("rapid_text")]
+  [InlineData("rapid_table")]
   public async Task RetiredDefaultRemainsReadableAndExplicitOverridesRejectWithoutReplacement(string modeId)
   {
     var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth(), Settings = Snapshot(modeId) };
@@ -40,12 +42,14 @@ public sealed class DefaultRecognitionModeWorkbenchTests
     Assert.Contains("重新选择", error.Message);
     Assert.Equal(0, fake.UpdateCalls);
     Assert.Equal(modeId, fake.Settings.Extra["default_recognition_mode"].GetString());
-    Assert.Equal("rapid_text", DesktopWorkbenchCommandHandler.EffectiveModeIdOrDefault(snapshot, "rapid_text", true));
+    Assert.Equal("paddle_text", DesktopWorkbenchCommandHandler.EffectiveModeIdOrDefault(snapshot, "paddle_text", true));
   }
 
   [Theory]
   [InlineData("paddle_formula")]
   [InlineData("paddle_document_vl")]
+  [InlineData("rapid_text")]
+  [InlineData("rapid_table")]
   public async Task RetiredModeProjectsWorkbenchProblemSettingsReasonAndScreenshotHint(string modeId)
   {
     var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth(), Settings = Snapshot(modeId) };
@@ -69,7 +73,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
         broker, root, static () => 0, annotations);
       WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
-        new SetModeDeviceCommand(modeId, "cpu"), TestContext.Current.CancellationToken);
+        new SetTaskEngineCommand(modeId), TestContext.Current.CancellationToken);
       Assert.Equal("recognition_mode_retired", refused.Error?.Code);
       Assert.Equal("workbench.error.recognitionModeRetired", refused.Error?.MessageKey);
       Assert.Equal(0, fake.UpdateCalls);
@@ -89,7 +93,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
       Assert.Contains("已退役", ScreenRegionPicker.UnavailableReason(capture.Availability));
       Assert.Contains("重新选择", ScreenRegionPicker.UnavailableReason(capture.Availability));
       WorkbenchCommandOutcome recovered = await handler.ExecuteAsync(
-        new SetDefaultRecognitionModeCommand("rapid_text"), TestContext.Current.CancellationToken);
+        new SetDefaultRecognitionModeCommand("paddle_text"), TestContext.Current.CancellationToken);
       Assert.Null(recovered.Error);
       Assert.Null(Assert.IsType<SettingsWorkbenchState>(Assert.Single(recovered.States)).DefaultRecognitionMode?.ReasonCode);
     }
@@ -150,7 +154,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
   public async Task UnparsableEchoedValueMarksSnapshotInvalidAndRefusesSubmit(string? storedValue)
   {
     // Runtime 原样回显损坏的持久值，null、空字符串与空白都必须拒绝，
-    // 不得当作“无默认”静默回退 RapidOCR，提交协商必须拒绝并指向修复。
+    // 不得当作“无默认”静默回退 PaddleOCR，提交协商必须拒绝并指向修复。
     var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth() };
     fake.Settings = new SettingsSnapshot
     {
@@ -178,9 +182,9 @@ public sealed class DefaultRecognitionModeWorkbenchTests
       snapshot, taskEngine: null, requireUsable: false));
     // 显式覆盖仍优先于无效默认。
     Assert.Equal(
-      "rapid_text",
+      "paddle_text",
       DesktopWorkbenchCommandHandler.EffectiveModeIdOrDefault(
-        snapshot, taskEngine: "rapid_text", requireUsable: true));
+        snapshot, taskEngine: "paddle_text", requireUsable: true));
   }
 
   [Fact]
@@ -222,7 +226,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
   public async Task SetDefaultPersistsModeAndPreservesOtherExtraKeys()
   {
     var fake = new DefaultModeInferenceClient { Health = DefaultModeHealth() };
-    fake.Settings = Snapshot("rapid_text", keep: "mineru_connection");
+    fake.Settings = Snapshot("paddle_text", keep: "mineru_connection");
     var viewModel = new SettingsViewModel(fake);
     await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
 
@@ -301,7 +305,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
     await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
 
     await viewModel.SetDefaultRecognitionModeAsync(
-      "rapid_text", TestContext.Current.CancellationToken);
+      "paddle_text", TestContext.Current.CancellationToken);
 
     Assert.Equal(1, fake.UpdateCalls);
     Assert.Equal("windows_text", viewModel.DefaultRecognitionMode?.ModeId);
@@ -342,35 +346,35 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         broker, resourceRoot, static () => 0, annotations);
       // 目录加载后继承绑定默认：Selected 标记默认项，IsTaskOverride 仅对
       // 显式选择为真，TaskEngine 保持 null（仍是“跟随默认”）。
-      WorkbenchCommandOutcome inherited = await handler.ExecuteAsync(
+      WorkbenchCommandOutcome inheritedOutcome = await handler.ExecuteAsync(
         new SetTaskEngineCommand(null), TestContext.Current.CancellationToken);
       var state = Assert.IsType<RecognitionWorkbenchState>(
-        Assert.Single(inherited.States));
+        Assert.Single(inheritedOutcome.States));
       Assert.Null(state.TaskEngine);
       RecognitionEngineChoice windows = Assert.Single(
         state.Engines!, engine => engine.Engine == "windows_text");
       Assert.True(windows.Selected);
       Assert.False(windows.IsTaskOverride);
-      RecognitionEngineChoice rapid = Assert.Single(
-        state.Engines!, engine => engine.Engine == "rapid_text");
-      Assert.False(rapid.Selected);
+      RecognitionEngineChoice inherited = Assert.Single(
+        state.Engines!, engine => engine.Engine == "paddle_text");
+      Assert.False(inherited.Selected);
 
       // 显式覆盖优先于默认。
       WorkbenchCommandOutcome overridden = await handler.ExecuteAsync(
-        new SetTaskEngineCommand("rapid_text"), TestContext.Current.CancellationToken);
+        new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken);
       var overrideState = Assert.IsType<RecognitionWorkbenchState>(
         Assert.Single(overridden.States));
-      Assert.Equal("rapid_text", overrideState.TaskEngine);
-      RecognitionEngineChoice rapidOverride = Assert.Single(
-        overrideState.Engines!, engine => engine.Engine == "rapid_text");
-      Assert.True(rapidOverride.Selected);
-      Assert.True(rapidOverride.IsTaskOverride);
+      Assert.Equal("paddle_text", overrideState.TaskEngine);
+      RecognitionEngineChoice overrideChoice = Assert.Single(
+        overrideState.Engines!, engine => engine.Engine == "paddle_text");
+      Assert.True(overrideChoice.Selected);
+      Assert.True(overrideChoice.IsTaskOverride);
       RecognitionEngineChoice windowsAfter = Assert.Single(
         overrideState.Engines!, engine => engine.Engine == "windows_text");
       Assert.False(windowsAfter.Selected);
       // 默认标识独立于本次选择：覆盖后仍标记已提交默认。
       Assert.True(windowsAfter.IsDefault);
-      Assert.False(rapidOverride.IsDefault);
+      Assert.False(overrideChoice.IsDefault);
 
       // 清除覆盖后回到默认绑定。
       WorkbenchCommandOutcome cleared = await handler.ExecuteAsync(
@@ -386,12 +390,12 @@ public sealed class DefaultRecognitionModeWorkbenchTests
       // 保存新默认后继承项立即切换，不重置用户选择。
       fake.Settings = Snapshot("windows_text");
       WorkbenchCommandOutcome saved = await handler.ExecuteAsync(
-        new SetDefaultRecognitionModeCommand("rapid_text"),
+        new SetDefaultRecognitionModeCommand("paddle_text"),
         TestContext.Current.CancellationToken);
       Assert.Null(saved.Error);
       Assert.IsType<SettingsWorkbenchState>(Assert.Single(saved.States));
       Assert.Equal(
-        "rapid_text",
+        "paddle_text",
         settings.RecognitionSelection?.DefaultRecognitionModeId);
       Assert.Equal(
         RuntimeDefaultModeBinding.Bound,
@@ -438,7 +442,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         Command("""{"mode":42}"""), sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       WorkbenchBridgeCodec.ParseCommand(
-        Command("""{"mode":"rapid_text","extra":1}"""), sessionId));
+        Command("""{"mode":"paddle_text","extra":1}"""), sessionId));
   }
 
   [Fact]
@@ -455,7 +459,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
       RecognitionModes:
       [
         new SettingsRecognitionModeOptionState(
-          "rapid_text", "快速 OCR（RapidOCR）", "ready", null),
+          "windows_text", "Windows OCR（系统内置）", "ready", null),
         new SettingsRecognitionModeOptionState(
           "paddle_text", "通用 OCR（PaddleOCR）", "preparation_required",
           "runtime_component_missing"),
@@ -521,8 +525,6 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         {
           Modes =
           [
-            Mode(Wire.RecognitionModeId.RapidText,
-              Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.WindowsText,
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleText,
@@ -532,8 +534,6 @@ public sealed class DefaultRecognitionModeWorkbenchTests
             Mode(Wire.RecognitionModeId.MineruDocument,
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleTable,
-              Wire.RecognitionModeAvailability.Ready),
-            Mode(Wire.RecognitionModeId.RapidTable,
               Wire.RecognitionModeAvailability.Ready),
           ],
         },
@@ -547,10 +547,6 @@ public sealed class DefaultRecognitionModeWorkbenchTests
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
-      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
         Wire.RecognitionModeProvisioning.OperatingSystem,
@@ -561,7 +557,7 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
@@ -571,10 +567,6 @@ public sealed class DefaultRecognitionModeWorkbenchTests
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

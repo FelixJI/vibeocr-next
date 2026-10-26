@@ -117,16 +117,16 @@ class TestDefaultRecognitionModeCapability:
 
 
 class TestDefaultRecognitionModeResolution:
-    def test_missing_key_resolves_compat_rapid_text(self) -> None:
+    def test_missing_key_resolves_compat_paddle_text(self) -> None:
         from vibeocr.runtime.recognition.pipeline_contracts import RecognitionMode
 
         assert (
             resolve_default_recognition_mode(None, _registry(), require_available=True)
-            is RecognitionMode.RAPID_TEXT
+            is RecognitionMode.PADDLE_TEXT
         )
         assert (
             resolve_default_recognition_mode({}, _registry(), require_available=True)
-            is RecognitionMode.RAPID_TEXT
+            is RecognitionMode.PADDLE_TEXT
         )
 
     def test_explicit_null_is_not_the_missing_key(self) -> None:
@@ -159,10 +159,10 @@ class TestDefaultRecognitionModeResolution:
         assert exc_info.value.code_name == "RECOGNITION_MODE_UNKNOWN"
 
     def test_unavailable_id_fails_closed_when_required(self) -> None:
-        # 静态缺省探针下 paddle_text 需要 paddleocr-cpu 组件：非 ready。
+        # 静态缺省探针下 paddle_structure 需要高级组件：非 ready。
         with pytest.raises(RecognitionModeError) as exc_info:
             resolve_default_recognition_mode(
-                {"default_recognition_mode": "paddle_text"},
+                {"default_recognition_mode": "paddle_structure"},
                 _registry(),
                 require_available=True,
             )
@@ -170,12 +170,41 @@ class TestDefaultRecognitionModeResolution:
         # 只读解析（GET 回显路径）不校验可用性：值仍可回显。
         assert (
             resolve_default_recognition_mode(
-                {"default_recognition_mode": "paddle_text"},
+                {"default_recognition_mode": "paddle_structure"},
                 _registry(),
                 require_available=False,
             ).value
-            == "paddle_text"
+            == "paddle_structure"
         )
+
+    def test_legacy_rapid_default_migrates_to_paddle(self) -> None:
+        """旧 rapid 持久值只在设置解析 seam 识别并迁移到 Paddle 替代。"""
+        from vibeocr.runtime.recognition.pipeline_contracts import RecognitionMode
+
+        assert (
+            resolve_default_recognition_mode(
+                {"default_recognition_mode": "rapid_text"},
+                _registry(),
+                require_available=False,
+            )
+            is RecognitionMode.PADDLE_TEXT
+        )
+        assert (
+            resolve_default_recognition_mode(
+                {"default_recognition_mode": "rapid_table"},
+                _registry(),
+                require_available=False,
+            )
+            is RecognitionMode.PADDLE_TABLE
+        )
+        # 迁移目标的可用性门禁同样生效：rapid_table → paddle_table 非 ready。
+        with pytest.raises(RecognitionModeError) as exc_info:
+            resolve_default_recognition_mode(
+                {"default_recognition_mode": "rapid_table"},
+                _registry(),
+                require_available=True,
+            )
+        assert exc_info.value.code_name == "RECOGNITION_MODE_UNAVAILABLE"
 
 
 def _registry() -> RecognitionModeRegistry:
@@ -189,7 +218,7 @@ class TestSettingsRoutes:
         async with _client(pdf_module, supervisor_token) as http:
             got = await http.get("/v2/settings")
         assert got.status_code == 200
-        assert got.json()["extra"]["default_recognition_mode"] == "rapid_text"
+        assert got.json()["extra"]["default_recognition_mode"] == "paddle_text"
 
     async def test_put_rejects_unknown_id_and_keeps_prior_settings(
         self, pdf_module: SupervisorModule, supervisor_token: str
@@ -237,13 +266,13 @@ class TestSettingsRoutes:
             assert accepted.status_code == 200
             rejected = await http.put(
                 "/v2/settings",
-                json=_settings_body({"default_recognition_mode": "paddle_text"}),
+                json=_settings_body({"default_recognition_mode": "paddle_structure"}),
             )
             assert rejected.status_code == 426, rejected.text
             assert rejected.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
             got = await http.get("/v2/settings")
-        # 保存失败：原已提交默认/持久值不变（缺键 → 兼容 rapid_text 回显）。
-        assert got.json()["extra"]["default_recognition_mode"] == "rapid_text"
+        # 保存失败：原已提交默认/持久值不变（缺键 → 兼容 paddle_text 回显）。
+        assert got.json()["extra"]["default_recognition_mode"] == "paddle_text"
 
     async def test_put_preserves_other_extra_keys(
         self, pdf_module: SupervisorModule, supervisor_token: str
@@ -286,11 +315,101 @@ class TestSettingsRoutes:
         async with _client(module, token) as http:
             repaired = await http.put(
                 "/v2/settings",
-                json=_settings_body({"default_recognition_mode": "rapid_text"}),
+                json=_settings_body({"default_recognition_mode": "windows_text"}),
             )
             assert repaired.status_code == 200
             got = await http.get("/v2/settings")
-        assert got.json()["extra"]["default_recognition_mode"] == "rapid_text"
+        assert got.json()["extra"]["default_recognition_mode"] == "windows_text"
+
+    async def test_legacy_rapid_default_is_migrated_on_read_and_save(
+        self, tmp_path: Path
+    ) -> None:
+        """旧 rapid_text 持久值：GET 回显迁移后的 paddle_text；保存 seam
+        将别名解析并落盘为 paddle_text，不再持久化退役字符串。"""
+        store_path = tmp_path / "state" / "supervisor-settings.json"
+        store_path.parent.mkdir(parents=True)
+        store_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "settings": _settings_body(
+                        {"default_recognition_mode": "rapid_text", "keep": 1}
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        module = _module_with_store(tmp_path)
+        token = generate_session_token()
+        async with _client(module, token) as http:
+            got = await http.get("/v2/settings")
+            assert got.status_code == 200
+            assert got.json()["extra"]["default_recognition_mode"] == "paddle_text"
+            saved = await http.put(
+                "/v2/settings",
+                json=_settings_body(
+                    {"default_recognition_mode": "rapid_text", "keep": 2}
+                ),
+            )
+            assert saved.status_code == 200
+            assert saved.json()["extra"] == {
+                "default_recognition_mode": "paddle_text",
+                "keep": 2,
+            }
+        persisted = json.loads(store_path.read_text(encoding="utf-8"))
+        assert persisted["settings"]["extra"]["default_recognition_mode"] == (
+            "paddle_text"
+        )
+
+    async def test_echoed_legacy_default_round_trip_does_not_block_unrelated_updates(
+        self, tmp_path: Path
+    ) -> None:
+        """旧 rapid_table 持久值：GET 回显迁移后的 paddle_table；客户端原样
+        回传回显值（仅改无关字段）时不得误判为切换默认（即使 paddle_table
+        未 ready 也 200），真实切换默认仍触发可用性门禁。"""
+        store_path = tmp_path / "state" / "supervisor-settings.json"
+        store_path.parent.mkdir(parents=True)
+        store_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "settings": _settings_body(
+                        {"default_recognition_mode": "rapid_table", "topic": 1}
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        module = _module_with_store(tmp_path)
+        token = generate_session_token()
+        async with _client(module, token) as http:
+            got = await http.get("/v2/settings")
+            assert got.status_code == 200
+            assert got.json()["extra"]["default_recognition_mode"] == "paddle_table"
+            # 客户端把回显 extra 原样回传，仅改无关字段（TTL/topic）。
+            put = await http.put(
+                "/v2/settings",
+                json={
+                    "schema_version": 2,
+                    "residency": {"default_ttl_seconds": 120, "pipelines": []},
+                    "extra": got.json()["extra"],
+                },
+            )
+            assert put.status_code == 200, put.text
+            assert put.json()["extra"]["default_recognition_mode"] == "paddle_table"
+            # 真实默认切换（paddle_table → paddle_structure）仍门控可用性。
+            changed = await http.put(
+                "/v2/settings",
+                json=_settings_body(
+                    {"default_recognition_mode": "paddle_structure", "topic": 2}
+                ),
+            )
+        assert changed.status_code == 426
+        assert changed.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
+        persisted = json.loads(store_path.read_text(encoding="utf-8"))
+        assert persisted["settings"]["extra"]["default_recognition_mode"] == (
+            "paddle_table"
+        )
 
     async def test_stale_default_does_not_block_unrelated_settings(
         self, tmp_path: Path
@@ -304,7 +423,7 @@ class TestSettingsRoutes:
                 {
                     "schema_version": 1,
                     "settings": _settings_body(
-                        {"default_recognition_mode": "paddle_text", "topic": 1}
+                        {"default_recognition_mode": "paddle_structure", "topic": 1}
                     ),
                 }
             ),
@@ -316,7 +435,8 @@ class TestSettingsRoutes:
             same_value = await http.put(
                 "/v2/settings",
                 json=_settings_body(
-                    {"default_recognition_mode": "paddle_text", "topic": 2}, ttl=120
+                    {"default_recognition_mode": "paddle_structure", "topic": 2},
+                    ttl=120,
                 ),
             )
             assert same_value.status_code == 200, same_value.text
@@ -333,7 +453,7 @@ class TestSettingsRoutes:
             stale = await http.put(
                 "/v2/settings",
                 json=_settings_body(
-                    {"default_recognition_mode": "paddle_text", "topic": 2}
+                    {"default_recognition_mode": "paddle_structure", "topic": 2}
                 ),
             )
             assert stale.status_code == 426
@@ -389,8 +509,9 @@ class TestPersistenceAndModuleSeam:
         async with _client(module, generate_session_token()) as http:
             recovered = await http.put("/v2/settings", json=edited)
         assert recovered.status_code == 200
+        # 旧 rapid 值在保存 seam 安全迁移：回显与落盘均为 paddle_text。
         assert recovered.json()["extra"] == {
-            "default_recognition_mode": "rapid_text",
+            "default_recognition_mode": "paddle_text",
             "keep": 1,
         }
 
@@ -456,7 +577,7 @@ class TestPersistenceAndModuleSeam:
     ) -> None:
         with pytest.raises(RecognitionModeError):
             pdf_module.update_settings(
-                SettingsSnapshot(extra={"default_recognition_mode": "paddle_text"})
+                SettingsSnapshot(extra={"default_recognition_mode": "paddle_structure"})
             )
         # 拒绝后模块内已提交设置不被替换。
         assert pdf_module.settings().extra == {}
@@ -495,7 +616,7 @@ class TestPersistenceAndModuleSeam:
                 "priority": "interactive",
                 "pipeline": {
                     "pipeline_id": "OCR",
-                    "engine": "rapidocr",
+                    "engine": "paddleocr",
                     "options_version": 1,
                     "options": {},
                 },
@@ -525,4 +646,4 @@ class TestPersistenceAndModuleSeam:
         record = next(r for r in module.registry if r.job_id == job_id)
         # 提交点冻结：任务 pipeline/engine 不被后续设置保存重写。
         assert record.pipeline.pipeline_id == "OCR"
-        assert record.pipeline.engine == "rapidocr"
+        assert record.pipeline.engine == "paddleocr"

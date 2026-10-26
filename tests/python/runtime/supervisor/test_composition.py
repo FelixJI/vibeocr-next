@@ -119,7 +119,7 @@ def test_build_supervisor_keeps_base_ocr_path_without_optional_backends(
     from vibeocr.runtime_contracts.dtos import OcrEngine
 
     class _BaseOcrEngine:
-        engine_id = OcrEngine.RAPIDOCR
+        engine_id = OcrEngine.PADDLEOCR
 
         def descriptor(self) -> EngineDescriptor:
             return EngineDescriptor(
@@ -153,9 +153,9 @@ def test_build_supervisor_keeps_base_ocr_path_without_optional_backends(
     )
     assert module.engine_resolver.catalog_payload()["engines"][0] == {
         "id": "rapidocr",
-        "availability": "ready",
-        "included_in_base": True,
-        "reason_code": None,
+        "availability": "unavailable",
+        "included_in_base": False,
+        "reason_code": "engine_retired",
         "required_component": None,
     }
     import pytest
@@ -425,6 +425,9 @@ def test_build_ocr_engine_registry_registers_all_stable_engines() -> None:
         OcrEngine.WINDOWS,
         OcrEngine.PADDLEOCR,
     ]
+    # rapidocr 已退役：不再注册 adapter，探针固定投影 engine_retired。
+    assert descriptors[0].availability.value == "unavailable"
+    assert descriptors[0].reason_code == "engine_retired"
     # Paddle 必须以惰性句柄注册（导入成本推迟）。
     paddle_engine = registry.get(OcrEngine.PADDLEOCR)
     assert isinstance(paddle_engine, LazyEngineHandle)
@@ -450,7 +453,7 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
             return EngineDescriptor(
                 engine_id=self.engine_id,
                 availability=self.availability,
-                included_in_base=self.engine_id is OcrEngine.RAPIDOCR,
+                included_in_base=self.engine_id is OcrEngine.PADDLEOCR,
                 reason_code=(
                     None
                     if self.availability is EngineAvailability.READY
@@ -459,10 +462,9 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
                 required_component="legacy-ambiguous-component",
             )
 
-    rapid = _Engine(OcrEngine.RAPIDOCR, EngineAvailability.UNAVAILABLE)
     windows = _Engine(OcrEngine.WINDOWS, EngineAvailability.UNAVAILABLE)
     paddle = _Engine(OcrEngine.PADDLEOCR, EngineAvailability.PREPARATION_REQUIRED)
-    resolver = OcrEngineResolver(OcrEngineRegistry([rapid, windows, paddle]))
+    resolver = OcrEngineResolver(OcrEngineRegistry([windows, paddle]))
     modes = composition._build_recognition_mode_registry(
         engine_resolver=resolver,
         use_paddle=False,
@@ -470,8 +472,6 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
     )
 
     entries = {item["id"]: item for item in modes.catalog_payload()["modes"]}
-    assert entries["rapid_text"]["availability"] == "preparation_required"
-    assert entries["rapid_text"]["required_component"] == "rapidocr-base"
     assert entries["windows_text"]["availability"] == "unavailable"
     assert entries["windows_text"]["required_component"] is None
     # #270：非 ONNX 环境中保留 Paddle 模式不再指向旧原生配方，而是提示
@@ -481,11 +481,11 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
         "mode_requires_paddle_onnx_environment"
     )
 
-    rapid.availability = EngineAvailability.READY
+    paddle.availability = EngineAvailability.READY
     resolver.invalidate_probe_cache()
     refreshed = {item["id"]: item for item in modes.catalog_payload()["modes"]}
-    assert refreshed["rapid_text"]["availability"] == "ready"
-    assert refreshed["rapid_text"]["required_component"] is None
+    assert refreshed["paddle_text"]["availability"] == "preparation_required"
+    assert refreshed["paddle_text"]["required_component"] == "paddleocr-ort-cpu"
 
 
 def test_build_paddle_executor_with_registry_wraps_router(

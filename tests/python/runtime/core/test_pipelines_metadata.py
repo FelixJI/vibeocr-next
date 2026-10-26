@@ -44,7 +44,8 @@ def test_table_formula_not_heavy():
 
 
 def test_every_pipeline_has_cache_kind() -> None:
-    """每个管道元数据必须声明 routed、rapid、paddle 或 mineru 所有权。"""
+    """每个管道元数据必须声明 routed、rapid、paddle 或 mineru 所有权；
+    rapid 仅作为已退役 RAPID_TABLE 的惰性历史标记。"""
     for pipeline in OCRPipeline:
         kind = _PIPELINE_METADATA[pipeline].get("cache_kind")
         assert kind in {"routed", "rapid", "paddle", "mineru"}, (
@@ -80,7 +81,8 @@ def test_mineru_pipelines_are_one() -> None:
 
 
 def test_paddle_and_mineru_partition_managed_pipelines() -> None:
-    """Paddle/MinerU 元数据分割受管资源，保留 routed OCR 与 rapid 表格。"""
+    """Paddle/MinerU 元数据分割受管资源，保留 routed OCR 与已退役
+    RAPID_TABLE（不再进入任何受管回收路径）。"""
     paddle = set(get_paddle_pipelines())
     mineru = set(get_mineru_pipelines())
     all_pipelines = set(get_all_pipelines())

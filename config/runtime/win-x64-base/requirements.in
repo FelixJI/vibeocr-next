@@ -1,13 +1,15 @@
 # Resolved for CPython 3.13 / Windows x64
 # Source-neutral lock command (uv 0.13.4):
-# uv pip compile config/runtime/win-x64-base/requirements.in --no-config --upgrade --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-base/requirements-win-x64-base.lock
+# uv pip compile config/runtime/win-x64-base/requirements.in --no-config --no-sources --python-version 3.13 --python-platform windows --generate-hashes --output-file config/runtime/win-x64-base/requirements-win-x64-base.lock
 #
-# base-offline 闭包（docs/ocr-engine-runtime-profiles-execution-plan.md §4.1）：
-# 随 Classic/Next Portable 携带、禁网可安装的必备闭包。只含 Backend/Protocol
-# 运行时、RapidOCR/RapidTable 与图片编解码；Paddle/MinerU/CUDA 等重型组件
-# 属于显式选择的附加闭包，不进入 base。RapidTable 模型随 base pack 携带。
+# base-offline 闭包：随 Next Portable 携带、禁网可安装的必备闭包。只含
+# Runtime 服务环境（HTTP/PDF/导出/二维码/字体）与 Windows Media OCR adapter；
+# RapidOCR/RapidTable 已随引擎退役移除，Paddle OCR/表格/结构由 managed
+# paddleocr-ort-* 环境承载，MinerU/CUDA 等重型组件属于显式选择的附加闭包，
+# 不进入 base。
 pillow>=12.3.0,<13
-numpy>=2.3.5
+# 与 PaddleX 的 numpy<2.4 约束共用离线 wheel。
+numpy==2.3.5
 httpx>=0.28.1
 jsonschema>=4.25.0
 pymupdf>=1.28.0
@@ -24,14 +26,6 @@ pyzbar>=0.1.9
 pynvml>=11.5.0
 packaging>=26.0
 python-multipart>=0.0.32
-# base 只保留一套 OpenCV 发行物（rapidocr 硬依赖 opencv-python，本仓不使用
-# contrib 专用模块），消除 opencv-python/opencv-contrib-python 并存风险。
-opencv-python>=4.10.0.84
-# RapidOCR：缺省引擎，wheel 内置 PP-OCRv6 模型。onnxruntime 由本仓显式
-# 锁定——rapidocr 的 metadata 不声明它，运行时动态导入。
-rapidocr>=3.9.2,<4
-rapid-table==3.0.2
-onnxruntime==1.30.0
 # Windows Media OCR adapter（pywinrt projection）；系统 OCR/语言包由
 # Windows 动态提供。winsdk 是 sdist-only 的 scikit-build 包，不适合离线
 # wheel 闭包；改用带 win_amd64 wheel 的 winrt-runtime + 组件包。

@@ -8,14 +8,8 @@ import { availabilityLabel } from "./FeatureValues";
 
 import type { RecognitionEngineState } from "./TaskEngineValues";
 
-// 目录 supported_options 声明 device 的模式（rapid_table / rapid_text）持久
-// 设备选项；缺省（无持久值）跟随 Runtime 默认 auto。
-function modeDevice(value: unknown): string {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    return "auto";
-  const device = (value as { readonly device?: unknown }).device;
-  return device === "cpu" || device === "cuda" ? device : "auto";
-}
+// 设备选项由 PaddleOptionsEditor 的 device 编辑器承载；Rapid 系模式的
+// 独立设备持久化链已随 RapidOCR/RapidTable 退役移除。
 
 function lifecycleHint(
   engine: RecognitionEngineState | undefined,
@@ -94,19 +88,16 @@ export function TaskEngineSelector({
         {(
           [
             ["文字", ["paddle_text"]],
-            ["表格", ["rapid_table", "paddle_table"]],
+            ["表格", ["paddle_table"]],
             ["文档结构", ["paddle_structure"]],
             ["其他引擎", []],
           ] as const
         ).map(([label, ids]) => {
           const choices = engines.filter((engine) =>
             ids.length === 0
-              ? ![
-                  "paddle_text",
-                  "rapid_table",
-                  "paddle_table",
-                  "paddle_structure",
-                ].includes(engine.engine)
+              ? !["paddle_text", "paddle_table", "paddle_structure"].includes(
+                  engine.engine,
+                )
               : (ids as readonly string[]).includes(engine.engine),
           );
           return choices.length ? (
@@ -170,31 +161,6 @@ export function TaskEngineSelector({
             actions={actions}
           />
         )}{" "}
-      {active?.supportedOptions?.includes("device") &&
-        !active.engine.startsWith("paddle_") && (
-          <div className="setting-row">
-            <label htmlFor={`${scope}-mode-device`}>运行设备</label>
-            <Select
-              id={`${scope}-mode-device`}
-              value={modeDevice(active.options)}
-              disabled={!enabled}
-              onChange={(_, data) =>
-                actions.run({
-                  type: "recognition.setDeviceOption",
-                  modeId: active.engine,
-                  device: String(data.value),
-                })
-              }
-            >
-              <option value="auto">自动（可用时用 GPU）</option>
-              <option value="cpu">CPU</option>
-              <option value="cuda">GPU（CUDA）</option>
-            </Select>
-            <p className="form-note">
-              GPU 需要 NVIDIA 显卡及 GPU 运行环境；不可用时会提示错误。
-            </p>
-          </div>
-        )}
       {lifecycleHint(active) ? (
         <p className="form-note">{lifecycleHint(active)}</p>
       ) : null}

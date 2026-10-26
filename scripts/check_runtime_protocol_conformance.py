@@ -125,8 +125,8 @@ def check_conformance() -> None:
 
 
 def _engine_selection_app():
-    """app + 确定性引擎目录 fixture：rapidocr ready / windows unavailable /
-    paddleocr preparation_required。"""
+    """app + 确定性引擎目录 fixture：rapidocr 退休投影 unavailable/
+    engine_retired（未注册 adapter）、windows unavailable、paddleocr ready。"""
     from vibeocr.runtime.recognition.ocr_engines import (
         EngineAvailability,
         EngineDescriptor,
@@ -144,7 +144,7 @@ def _engine_selection_app():
             return EngineDescriptor(
                 engine_id=self.engine_id,
                 availability=self._availability,
-                included_in_base=self.engine_id is not OcrEngine.PADDLEOCR,
+                included_in_base=self.engine_id is OcrEngine.PADDLEOCR,
                 reason_code=None
                 if self._availability is EngineAvailability.READY
                 else "engine_not_installed",
@@ -153,13 +153,8 @@ def _engine_selection_app():
 
     registry = OcrEngineRegistry(
         [
-            _Engine(OcrEngine.RAPIDOCR, EngineAvailability.READY),
             _Engine(OcrEngine.WINDOWS, EngineAvailability.UNAVAILABLE),
-            _Engine(
-                OcrEngine.PADDLEOCR,
-                EngineAvailability.PREPARATION_REQUIRED,
-                required_component="paddleocr-ort-cpu",
-            ),
+            _Engine(OcrEngine.PADDLEOCR, EngineAvailability.READY),
         ]
     )
     temp = tempfile.TemporaryDirectory(prefix="vibeocr-engine-conformance-")
@@ -202,7 +197,8 @@ async def _engine_selection_http_checks() -> None:
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {token}"},
     ) as client:
-        # 2. ready envelope：catalog 覆盖全部稳定 id，descriptor 形状合法。
+        # 2. ready envelope：catalog 覆盖全部稳定 id，descriptor 形状合法；
+        # 已退休的 rapidocr 固定投影 unavailable/engine_retired。
         health = (await client.get("/v2/health")).json()
         descriptor = next(
             d
@@ -215,6 +211,12 @@ async def _engine_selection_http_checks() -> None:
         entries = catalog["engines"]
         if [entry["id"] for entry in entries] != STABLE_ENGINE_IDS:
             raise RuntimeError(f"engine catalog ids differ: {entries}")
+        retired_entry = next(entry for entry in entries if entry["id"] == "rapidocr")
+        if (
+            retired_entry["availability"] != "unavailable"
+            or retired_entry["reason_code"] != "engine_retired"
+        ):
+            raise RuntimeError("retired rapidocr engine was not projected as retired")
         for entry in entries:
             missing_keys = {
                 "id",
@@ -235,6 +237,7 @@ async def _engine_selection_http_checks() -> None:
                 raise RuntimeError(f"invalid availability: {entry['availability']}")
 
         # 3. submit fixtures：显式 engine 进入 job；未知值与跨 pipeline 拒绝。
+        # 退役的 rapidocr id 现在同样 fail closed（OCR_ENGINE_UNKNOWN）。
         def _manifest(engine=None, pipeline="OCR"):
             pipeline_obj: dict[str, Any] = {
                 "pipeline_id": pipeline,
@@ -268,7 +271,7 @@ async def _engine_selection_http_checks() -> None:
                 files={"f": ("a.png", b"png", "image/png")},
             )
 
-        ok = await _submit(_manifest(engine="rapidocr"))
+        ok = await _submit(_manifest(engine="paddleocr"))
         if ok.status_code != 200:
             raise RuntimeError(
                 f"engine submit fixture failed: {ok.status_code} {ok.text}"
@@ -278,8 +281,16 @@ async def _engine_selection_http_checks() -> None:
         if unknown.status_code != 400 or unknown.json()["code"] != "OCR_ENGINE_UNKNOWN":
             raise RuntimeError("unknown engine fixture did not fail closed")
 
+        retired = await _submit(_manifest(engine="rapidocr"))
+        if (
+            retired.status_code != 426
+            or retired.json()["code"] != "OCR_ENGINE_UNAVAILABLE"
+            or retired.json()["detail"].get("reason_code") != "engine_retired"
+        ):
+            raise RuntimeError("retired rapidocr engine fixture did not fail closed")
+
         wrong_pipeline = await _submit(
-            _manifest(engine="rapidocr", pipeline="TABLE_RECOGNITION")
+            _manifest(engine="paddleocr", pipeline="TABLE_RECOGNITION")
         )
         if (
             wrong_pipeline.status_code != 400
@@ -351,7 +362,6 @@ async def _selection_http_checks() -> None:
                 snapshot["requested_component_ids"] = list(scope)
             if kwargs["operation"] == "ensure" and scope:
                 snapshot["effective_component_ids"] = [
-                    "rapidocr-base",
                     "paddleocr-ort-cpu",
                     "mineru-cpu",
                     "runtime_host",
@@ -428,13 +438,11 @@ async def _selection_http_checks() -> None:
             for entry in mode_catalog
         }
         if mode_execution != {
-            "rapid_text": ("OCR", "rapidocr", "base_runtime", "unmanaged"),
-            "rapid_table": ("RAPID_TABLE", None, "base_runtime", "unmanaged"),
             "windows_text": ("OCR", "windows", "operating_system", "unmanaged"),
             "paddle_text": (
                 "OCR",
                 "paddleocr",
-                "advanced_component",
+                "base_runtime",
                 "model_residency",
             ),
             "paddle_structure": (

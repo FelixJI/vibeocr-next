@@ -1146,6 +1146,37 @@ public sealed class RuntimeDemandCoordinatorTests
     }
     finally { await connection.DisconnectAsync(); Directory.Delete(root, recursive: true); }
   }
+
+  [Fact]
+  public async Task BackgroundStartupSharesAttemptWithFirstDemandAndShutdownCancelsBoth()
+  {
+    // App 首次启动后台 EnsureReady（shutdown 令牌）与首个计算需求共享同一
+    // 初始化尝试；应用关闭令牌取消时两者一并取消并只排空一次清理。
+    var maintenance = new ProductMaintenanceCoordinator();
+    var entered = Signal();
+    var release = Signal();
+    using var shutdown = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    using var caller = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+    int connects = 0;
+    int disconnects = 0;
+    var coordinator = new RuntimeDemandCoordinator(async (_, ct) =>
+    {
+      connects++;
+      entered.TrySetResult();
+      await release.Task.WaitAsync(ct);
+    }, () => { disconnects++; return Task.CompletedTask; }, maintenance, shutdown.Token);
+    Task background = coordinator.EnsureReadyAsync(shutdown.Token);
+    await entered.Task;
+    Task demand = coordinator.EnsureReadyAsync(caller.Token);
+    Assert.Equal(1, connects);
+    shutdown.Cancel();
+    release.TrySetResult();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => background);
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => demand);
+    Assert.Equal(1, disconnects);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
   private static ManagedEnvironmentSession StubSession(string instance) => new("environment", 1,
     new InferenceSupervisorProcess(new InferenceSupervisorOptions("unused", [], Path.GetTempPath(),
       Path.Combine(Path.GetTempPath(), "unused.log"), TimeSpan.FromSeconds(1), new HashSet<string>()), "test"),

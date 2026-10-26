@@ -54,7 +54,6 @@ def test_preview_is_contract_valid_and_does_not_create_operation_or_runtime(tmp_
     )
     parsed = parse_runtime_install_plan_response(response)
     assert set(parsed.plan.effective_component_ids) == {
-        "rapidocr-base",
         "runtime_host",
         "mineru-cpu",
     }
@@ -130,7 +129,6 @@ def test_restart_and_device_switch_preserve_selected_engine(tmp_path):
     cuda = factory(accelerator="nvidia_cuda")
     # #270：缺省 CUDA 闭包 = base + MinerU + gpu_runtime，不再含 paddleocr-cuda。
     assert set(cuda._desired_scope_ids()) == {
-        "rapidocr-base",
         "runtime_host",
         "mineru-cuda",
         "gpu_runtime",
@@ -1099,7 +1097,7 @@ def test_activation_failure_restores_previous_runtime_and_choice(
         monkeypatch.setattr(
             installer,
             "_drifted_component_ids",
-            lambda **kwargs: [] if is_new() else ["rapidocr-base"],
+            lambda **kwargs: [] if is_new() else ["runtime_host"],
         )
 
     def probe(root, components, profile):
@@ -1116,7 +1114,7 @@ def test_activation_failure_restores_previous_runtime_and_choice(
     # final-path validation fail through the same detector for that branch.
     if operation == "repair" and failure == "final_probe":
         monkeypatch.setattr(
-            installer, "_drifted_component_ids", lambda **kwargs: ["rapidocr-base"]
+            installer, "_drifted_component_ids", lambda **kwargs: ["runtime_host"]
         )
     mkdir = Path.mkdir
 
@@ -1190,7 +1188,7 @@ def test_durable_success_survives_projection_or_delivery_failure(
             installer,
             "_drifted_component_ids",
             lambda **kwargs: (
-                ["rapidocr-base"]
+                ["runtime_host"]
                 if json.loads(marker.read_text(encoding="utf-8")) == before
                 else []
             ),
@@ -1266,7 +1264,7 @@ def test_committed_event_failure_records_failed_and_allows_retry(
     )
     if operation == "repair":
         monkeypatch.setattr(
-            installer, "_drifted_component_ids", lambda **kwargs: ["rapidocr-base"]
+            installer, "_drifted_component_ids", lambda **kwargs: ["runtime_host"]
         )
     atomic = maintenance._atomic_json
     injected = False

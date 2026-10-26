@@ -302,14 +302,14 @@ def test_factory_cuda_layout_is_shared_by_all_models_and_isolated_from_other_dev
 ):
     import sys
 
-    from vibeocr.runtime.recognition import directml_devices, rapid_devices
+    from vibeocr.runtime.recognition import directml_devices, onnx_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", f"paddleocr-ort-{recipe}")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
     monkeypatch.setattr(
         directml_devices, "hardware_adapters", lambda: [{"device_id": 2}]
     )
-    monkeypatch.setattr(rapid_devices, "setup_cuda_plugin", lambda: device == "cuda")
+    monkeypatch.setattr(onnx_devices, "setup_cuda_plugin", lambda: device == "cuda")
     snapshot = onnx.freeze_request(
         {"device": device, "use_doc_unwarping": True, "use_textline_orientation": True}
     )
@@ -479,7 +479,7 @@ def test_cuda_plugin_failure_is_typed_before_any_factory_or_session(
 ):
     import sys
 
-    from vibeocr.runtime.recognition import rapid_devices
+    from vibeocr.runtime.recognition import onnx_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cuda")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
@@ -488,11 +488,11 @@ def test_cuda_plugin_failure_is_typed_before_any_factory_or_session(
         plugin.write_bytes(b"")
     monkeypatch.setenv("VIBEOCR_ORT_CUDA_EP_DLL", str(plugin))
     monkeypatch.delenv("VIBEOCR_RUNTIME_ROOT", raising=False)
-    monkeypatch.setattr(rapid_devices, "_state", {})
-    monkeypatch.setenv("PATH", rapid_devices.os.environ.get("PATH", ""))
+    monkeypatch.setattr(onnx_devices, "_state", {})
+    monkeypatch.setenv("PATH", onnx_devices.os.environ.get("PATH", ""))
     # The native loader is exercised separately; this unit seam needs no CUDA DLLs.
     monkeypatch.setattr(
-        rapid_devices,
+        onnx_devices,
         "_nvidia_dll_dirs",
         lambda: ({"unused.dll": tmp_path / "unused.dll"}, []),
     )
@@ -534,7 +534,7 @@ def test_cuda_plugin_failure_is_typed_before_any_factory_or_session(
         "factory": 0,
         "session": 0,
     }
-    assert rapid_devices._state == {"failed": True}
+    assert onnx_devices._state == {"failed": True}
 
 
 def test_directml_absent_hardware_rejects_admission_before_model_preparation(

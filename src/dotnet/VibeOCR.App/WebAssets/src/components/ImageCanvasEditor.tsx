@@ -241,7 +241,8 @@ type StyleChange =
   | { readonly kind: "arrowDouble"; readonly value: boolean };
 
 const EMPTY: EditorState = { rotation: 0, marks: [] };
-const DEFAULT_COLOR = "#f38b35";
+// 默认标注色红色：与选择态橙色 (#f38b35) 区分，选择高亮不再与默认标注同色。
+const DEFAULT_COLOR = "#e02020";
 
 // 沿用标注手势的8px阈值；聚光灯孔洞的两个维度都须有效。
 const MIN_DRAW_DISTANCE = 8;
@@ -344,7 +345,7 @@ const TOOLSETS: Readonly<Record<EditorToolset, readonly Tool[]>> = {
 
 const STROKE_COLORS = [
   DEFAULT_COLOR,
-  "#e02020",
+  "#f38b35",
   "#12a150",
   "#1f6feb",
   "#f2c94c",
@@ -769,6 +770,9 @@ interface ImageCanvasEditorProps {
     readonly bindingKey: string;
     readonly lines: readonly IndexedResultLine[];
     readonly onUpdateLine?: OverlayLineEditHandler;
+    /** 双向高亮：右侧结果行悬停时对应行框加亮。 */
+    readonly highlightIndex?: number;
+    readonly onHoverLine?: (index: number | undefined) => void;
   };
   /** 预览模式：有 proofread 数据时显示校对层，否则完整展示输入图片。 */
   readonly proofreadActive?: boolean;
@@ -1226,7 +1230,8 @@ export function ImageCanvasEditor({
     // The attempt belongs to this bootstrap/input, not later annotation revisions.
   }, [captureScene, source, session?.sessionId, actions]);
   const editorRef = useRef<HTMLDivElement>(null);
-  const [toolsHeight, setToolsHeight] = useState(184);
+  // 单排工具栏的初始高度预算：ResizeObserver 回报实际值后收敛。
+  const [toolsHeight, setToolsHeight] = useState(64);
   useLayoutEffect(() => {
     if (!captureGeometry || typeof ResizeObserver === "undefined") return;
     const element = editorRef.current;
@@ -7752,6 +7757,170 @@ export function ImageCanvasEditor({
     </Menu>
   );
 
+  // 截图现场输出集群：圆角开关 + 内联格式/JPEG 质量（普通页为 null，
+  // 输出参数仍在输出设置面板）。
+  const captureOutputControls = captureStyle ? (
+    <>
+      <ToolbarButton
+        aria-label={
+          state.composition?.radius
+            ? "截图圆角，点击切换直角"
+            : "截图直角，点击切换圆角"
+        }
+        aria-pressed={!!state.composition?.radius}
+        title="切换截图直角/圆角；PNG 保留透明圆角，JPEG 使用输出背景色"
+        disabled={isExporting || !!textEdit || interactionLocked}
+        onClick={() => {
+          cancelDrawing();
+          const radius = state.composition?.radius ?? 0;
+          if (radius > 0) lastCaptureRadius.current = radius;
+          commit({
+            ...state,
+            composition: {
+              ...(state.composition ?? DEFAULT_COMPOSITION),
+              radius: radius > 0 ? 0 : lastCaptureRadius.current,
+            },
+          });
+        }}
+      >
+        {state.composition?.radius ? "圆角" : "直角"}
+      </ToolbarButton>
+      <label className="editor-style-control">
+        <span aria-hidden="true">输出格式</span>
+        <Select
+          aria-label="输出格式"
+          size="small"
+          value={outputFormat}
+          onChange={(_, data) =>
+            changeOutputFormat(
+              data.value === "image/jpeg" ? "image/jpeg" : "image/png",
+            )
+          }
+        >
+          <option value="image/png">PNG</option>
+          <option value="image/jpeg">JPEG</option>
+        </Select>
+      </label>
+      {outputFormat === "image/jpeg" && (
+        <label className="editor-style-control">
+          <span aria-hidden="true">JPEG 质量</span>
+          <Select
+            aria-label="JPEG 质量"
+            size="small"
+            value={String(jpegQuality)}
+            onChange={(_, data) => changeJpegQuality(Number(data.value))}
+          >
+            {JPEG_QUALITIES.map((quality) => (
+              <option key={quality} value={String(quality)}>
+                {Math.round(quality * 100)}%
+              </option>
+            ))}
+          </Select>
+        </label>
+      )}
+    </>
+  ) : null;
+  // 现场主排中段：排版/对象操作/撤销重做/复制保存等次要动作（可滚动区）。
+  const sceneSecondaryActions = (
+    <>
+      {toolset === "full" && (
+        <ToolbarButton
+          aria-label="画布排版"
+          aria-pressed={compositionOpen}
+          onClick={() => setCompositionOpen((open) => !open)}
+        >
+          排版
+        </ToolbarButton>
+      )}
+      {toolset === "full" && (compositionOpen || state.composition) && (
+        <ToolbarButton
+          aria-label="重置排版"
+          disabled={!state.composition || isExporting || !!textEdit}
+          onClick={() => {
+            cancelDrawing();
+            commit({ ...state, composition: undefined });
+          }}
+        >
+          重置排版
+        </ToolbarButton>
+      )}
+      {textLayerControls}
+      {inpaintOperations}
+      {dupmatchOperations}
+      {objectActionControls}
+      {spotlightAddRegionControl}
+      {rotateControl}
+      {resetAttributesControl}
+      {contentMark && !textEdit && (
+        <ToolbarButton
+          aria-label="编辑文字"
+          onClick={() => beginTextEdit(selectedMark!)}
+        >
+          编辑文字
+        </ToolbarButton>
+      )}
+      {textEdit && (
+        <>
+          <ToolbarButton aria-label="完成文字编辑" onClick={finishTextEdit}>
+            完成文字
+          </ToolbarButton>
+          <ToolbarButton
+            aria-label="取消文字编辑"
+            onClick={() => {
+              cancelDrawing();
+              setOperationMessage("已取消文字编辑，原文字保留。");
+            }}
+          >
+            取消文字
+          </ToolbarButton>
+        </>
+      )}
+      {activeFontTool === "numbering" &&
+        state.marks.some((mark) => mark.tool === "numbering") && (
+          <ToolbarButton
+            aria-label="重新编号"
+            disabled={state.marks.some(
+              (mark) => mark.tool === "numbering" && mark.locked,
+            )}
+            onClick={renumber}
+          >
+            重新编号
+          </ToolbarButton>
+        )}
+      {captureStyle ? null : clearExclusionsButton}
+      {undoButton}
+      {redoButton}
+      {copyAnnotatedButton}
+      {captureStyle ? null : copyExcludedButton}
+      {saveAnnotatedButton}
+      {toolset === "full" && (
+        <ToolbarButton
+          disabled={
+            !canExport ||
+            isExporting ||
+            !!textEdit ||
+            !editorSettings.imageOutputDirectory
+          }
+          onClick={() => void saveWithPreset()}
+        >
+          按常用预设保存
+        </ToolbarButton>
+      )}
+      {captureStyle ? null : saveExcludedButton}
+      {pinSnapshotApply ? null : saveProjectButton}
+      {applyPinSnapshotButton}
+      {pinButton}
+    </>
+  );
+  // 现场核心动作区：识别/完成/更多（与输出集群一起固定，不随滚动离开）。
+  const sceneCoreActions = (
+    <>
+      {pinSnapshotApply ? null : recognizeButton}
+      {closeSessionButton}
+      {moreActionsMenu}
+    </>
+  );
+
   // 下排收起：仅当前工具参数（颜色/线宽/边框不透明度/填充/字号/强度、
   // 修补对比）或选中描边类标记的就地样式、会话取字偏好存在时渲染；
   // 上下文操作已归主排。
@@ -7852,129 +8021,33 @@ export function ImageCanvasEditor({
             captureStyle ? " editor-toolbar-scene-primary" : ""
           }`}
         >
-          <div className="editor-tools-group">{toolButtons}</div>
-          <div className="editor-actions-group">
-            {captureStyle && (
-              <ToolbarButton
-                aria-label={
-                  state.composition?.radius
-                    ? "截图圆角，点击切换直角"
-                    : "截图直角，点击切换圆角"
-                }
-                aria-pressed={!!state.composition?.radius}
-                title="切换截图直角/圆角；PNG 保留透明圆角，JPEG 使用输出背景色"
-                disabled={isExporting || !!textEdit || interactionLocked}
-                onClick={() => {
-                  cancelDrawing();
-                  const radius = state.composition?.radius ?? 0;
-                  if (radius > 0) lastCaptureRadius.current = radius;
-                  commit({
-                    ...state,
-                    composition: {
-                      ...(state.composition ?? DEFAULT_COMPOSITION),
-                      radius: radius > 0 ? 0 : lastCaptureRadius.current,
-                    },
-                  });
-                }}
-              >
-                {state.composition?.radius ? "圆角" : "直角"}
-              </ToolbarButton>
-            )}
-            {toolset === "full" && (
-              <ToolbarButton
-                aria-label="画布排版"
-                aria-pressed={compositionOpen}
-                onClick={() => setCompositionOpen((open) => !open)}
-              >
-                排版
-              </ToolbarButton>
-            )}
-            {toolset === "full" && (compositionOpen || state.composition) && (
-              <ToolbarButton
-                aria-label="重置排版"
-                disabled={!state.composition || isExporting || !!textEdit}
-                onClick={() => {
-                  cancelDrawing();
-                  commit({ ...state, composition: undefined });
-                }}
-              >
-                重置排版
-              </ToolbarButton>
-            )}
-            {textLayerControls}
-            {inpaintOperations}
-            {dupmatchOperations}
-            {objectActionControls}
-            {spotlightAddRegionControl}
-            {rotateControl}
-            {resetAttributesControl}
-            {contentMark && !textEdit && (
-              <ToolbarButton
-                aria-label="编辑文字"
-                onClick={() => beginTextEdit(selectedMark!)}
-              >
-                编辑文字
-              </ToolbarButton>
-            )}
-            {textEdit && (
-              <>
-                <ToolbarButton
-                  aria-label="完成文字编辑"
-                  onClick={finishTextEdit}
-                >
-                  完成文字
-                </ToolbarButton>
-                <ToolbarButton
-                  aria-label="取消文字编辑"
-                  onClick={() => {
-                    cancelDrawing();
-                    setOperationMessage("已取消文字编辑，原文字保留。");
-                  }}
-                >
-                  取消文字
-                </ToolbarButton>
-              </>
-            )}
-            {activeFontTool === "numbering" &&
-              state.marks.some((mark) => mark.tool === "numbering") && (
-                <ToolbarButton
-                  aria-label="重新编号"
-                  disabled={state.marks.some(
-                    (mark) => mark.tool === "numbering" && mark.locked,
-                  )}
-                  onClick={renumber}
-                >
-                  重新编号
-                </ToolbarButton>
-              )}
-            {captureStyle ? null : clearExclusionsButton}
-            {undoButton}
-            {redoButton}
-            {copyAnnotatedButton}
-            {captureStyle ? null : copyExcludedButton}
-            {saveAnnotatedButton}
-            {toolset === "full" && (
-              <ToolbarButton
-                disabled={
-                  !canExport ||
-                  isExporting ||
-                  !!textEdit ||
-                  !editorSettings.imageOutputDirectory
-                }
-                onClick={() => void saveWithPreset()}
-              >
-                按常用预设保存
-              </ToolbarButton>
-            )}
-            {captureStyle ? null : saveExcludedButton}
-            {pinSnapshotApply ? null : saveProjectButton}
-            {applyPinSnapshotButton}
-            {pinButton}
-            {pinSnapshotApply ? null : recognizeButton}
-            {closeSessionButton}
-            {captureStyle ? null : clearEditsButton}
-            {moreActionsMenu}
-          </div>
+          {captureStyle ? (
+            <>
+              {/* 现场主排：工具+次要动作在自身有限宽度内横向滚动；核心动作
+                  （输出开关/格式/识别/完成/更多）固定右缘独立分区，
+                  不随滚动离开可视区，也不遮挡工具。 */}
+              <div className="editor-scene-scroll">
+                <div className="editor-tools-group">{toolButtons}</div>
+                <div className="editor-actions-group">
+                  {sceneSecondaryActions}
+                </div>
+              </div>
+              <div className="editor-scene-core">
+                {captureOutputControls}
+                {sceneCoreActions}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="editor-tools-group">{toolButtons}</div>
+              <div className="editor-actions-group">
+                {captureOutputControls}
+                {sceneSecondaryActions}
+                {sceneCoreActions}
+                {captureStyle ? null : clearEditsButton}
+              </div>
+            </>
+          )}
         </Toolbar>
         {session && !canRecognize && !pinSnapshotApply && (
           <p className="form-note">
@@ -8100,7 +8173,9 @@ export function ImageCanvasEditor({
           />
         </fieldset>
       )}
-      {toolset === "full" && (
+      {/* 截图现场不再提供齿轮设置入口：格式/质量已内联主排；
+          等比缩放/输出尺寸留在普通编辑页的输出设置。 */}
+      {toolset === "full" && !captureStyle && (
         <details
           className="editor-output-settings"
           open={captureStyle ? undefined : true}
@@ -8350,6 +8425,8 @@ export function ImageCanvasEditor({
             imageUrl={proofread?.imageUrl ?? source ?? ""}
             lines={proofread?.lines ?? []}
             onUpdateLine={proofread?.onUpdateLine}
+            highlightIndex={proofread?.highlightIndex}
+            onHoverLine={proofread?.onHoverLine}
             fit
           />
         ) : layerReady ? (

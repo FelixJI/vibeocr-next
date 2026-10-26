@@ -58,7 +58,8 @@ Windows x64 CPython 3.13；具名候选由标准 `venv --without-pip` 创建。�
 工具来自 [Astral 官方 PyPI uv 0.13.4](https://pypi.org/project/uv/0.13.4/)，Windows wheel 来源与既有摘要
 由 `uv.lock` 记录。`build_runtime_installer.py` 将其 uv.exe 和 wheel 中的 `LICENSE-MIT` / `LICENSE-APACHE`
 一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.13.4)。
-Installer ZIP 仍只有绑定的一个 EXE，沿用产品现有 installer / manifest 完整性链。
+Installer 以单一可执行文件随产品 `runtime/installer/` 分发一次；manifest 直接绑定其字节摘要
+（历史单成员 zip 绑定仍可读），沿用产品现有 installer / manifest 完整性链。
 
 各 profile/recipe requirements lock 仍是唯一用户依赖权威，用户环境不消费根开发 `uv.lock`。
 在线解析的 pylock 只是临时派生结果：按真实目标解释器的版本/平台/ABI筛选，再核对原锁适用包集合、版本、

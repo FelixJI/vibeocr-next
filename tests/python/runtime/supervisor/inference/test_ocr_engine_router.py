@@ -138,29 +138,45 @@ def _router(
 
 
 class TestRouting:
-    def test_ocr_default_routes_to_rapidocr(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+    def test_ocr_default_routes_to_paddleocr(self) -> None:
+        windows = RecordingEngine(OcrEngine.WINDOWS)
         paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid, paddle], fallback)
+        router, _ = _router([windows, paddle], fallback)
         options = PipelineSelection(pipeline_id="OCR", options={})
         payloads = router.recognize_many([_input()], options=options)
-        assert payloads == [{"engine": "rapidocr"}]
-        assert rapid.recognize_calls and not paddle.recognize_calls
+        assert payloads == [{"engine": "paddleocr"}]
+        assert paddle.recognize_calls and not windows.recognize_calls
         assert not fallback.recognize_calls
 
     def test_explicit_engine_selection_is_honoured(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         windows = RecordingEngine(OcrEngine.WINDOWS)
         fallback = RecordingFallback()
-        router, _ = _router([rapid, windows], fallback)
+        router, _ = _router([paddle, windows], fallback)
         options = PipelineSelection(
             pipeline_id="OCR", options={}, engine=OcrEngine.WINDOWS
         )
         assert router.recognize_many([_input()], options=options) == [
             {"engine": "windows"}
         ]
-        assert not rapid.recognize_calls
+        assert not paddle.recognize_calls
+
+    def test_retired_rapidocr_engine_is_rejected_by_resolver(self) -> None:
+        # RapidOCR 已退役：rapidocr 枚举值保留（历史记录反序列化），
+        # resolver 以稳定 reason=engine_retired 拒绝，绝不路由执行。
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
+        fallback = RecordingFallback()
+        router, _ = _router([paddle], fallback)
+        options = PipelineSelection(
+            pipeline_id="OCR", options={}, engine=OcrEngine.RAPIDOCR
+        )
+        with pytest.raises(OcrEngineError) as excinfo:
+            router.recognize_many([_input()], options=options)
+        assert excinfo.value.code is ErrorCode.OCR_ENGINE_UNAVAILABLE
+        assert excinfo.value.reason_code == "engine_retired"
+        assert not paddle.recognize_calls
+        assert not fallback.recognize_calls
 
     def test_unavailable_engine_fails_closed_without_fallback(self) -> None:
         # paddle ready 但请求 windows（未注册）：错误，不落到 fallback/paddle。
@@ -189,21 +205,21 @@ class TestRouting:
             router.capabilities(options)
 
     def test_non_ocr_pipeline_goes_to_fallback(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid], fallback)
+        router, _ = _router([paddle], fallback)
         options = PipelineSelection(pipeline_id="TABLE_RECOGNITION", options={})
         assert router.recognize_many([_input()], options=options) == [
             {"engine": "fallback"}
         ]
-        assert not rapid.recognize_calls
+        assert not paddle.recognize_calls
         router.capabilities(options)
         assert fallback.capabilities_calls == [options]
 
     def test_ocr_capabilities_delegate_to_resolved_engine(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid], fallback)
+        router, _ = _router([paddle], fallback)
         options = PipelineSelection(pipeline_id="OCR", options={})
         capability = router.capabilities(options)
         assert capability.name == "OCR"
@@ -212,40 +228,40 @@ class TestRouting:
 
 class TestLifecycle:
     def test_preload_splits_ocr_from_other_pipelines(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid], fallback)
+        router, _ = _router([paddle], fallback)
         router.preload(("OCR", "TABLE_RECOGNITION", "FORMULA_RECOGNITION"))
         # OCR 走默认引擎，其余管道直达 fallback。
-        assert rapid.preload_calls == [("OCR",)]
+        assert paddle.preload_calls == [("OCR",)]
         assert fallback.preload_calls == [("TABLE_RECOGNITION", "FORMULA_RECOGNITION")]
 
     def test_preload_non_ocr_only_skips_engines(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid], fallback)
+        router, _ = _router([paddle], fallback)
         router.preload(("MinerU",))
-        assert rapid.preload_calls == []
+        assert paddle.preload_calls == []
         assert fallback.preload_calls == []
 
     def test_residency_and_settings_delegate_to_fallback(self) -> None:
         from vibeocr.runtime_contracts import ResidencyStatus, SettingsSnapshot
 
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid], fallback)
+        router, _ = _router([paddle], fallback)
         assert isinstance(router.residency_status(), ResidencyStatus)
         assert isinstance(router.release_idle("OCR"), ResidencyStatus)
         router.configure_settings(SettingsSnapshot())
 
     def test_close_closes_engines_and_fallback(self) -> None:
-        rapid = RecordingEngine(OcrEngine.RAPIDOCR)
         windows = RecordingEngine(OcrEngine.WINDOWS)
+        paddle = RecordingEngine(OcrEngine.PADDLEOCR)
         fallback = RecordingFallback()
-        router, _ = _router([rapid, windows], fallback)
+        router, _ = _router([windows, paddle], fallback)
         _ = router.fallback
         router.close()
-        assert rapid.closed and windows.closed and fallback.closed
+        assert windows.closed and paddle.closed and fallback.closed
 
 
 class TestExecutorFailFast:
@@ -295,7 +311,7 @@ class TestExecutorFailFast:
                 raise OcrEngineError(
                     ErrorCode.OCR_ENGINE_UNAVAILABLE,
                     reason_code="engine_not_installed",
-                    engine="rapidocr",
+                    engine="paddleocr",
                 )
 
             def residency_status(self) -> Any:
@@ -332,83 +348,51 @@ class TestExecutorFailFast:
         # 不进入恢复路径：没有 recovery_decision 事件。
         assert "recovery_decision" not in event_names
 
-    def test_rapid_table_unready_cuda_fails_items_through_real_engine(
-        self, tmp_path, monkeypatch
+    def test_retired_rapid_table_pipeline_is_rejected_at_mode_gate(
+        self, tmp_path
     ) -> None:
-        """RAPID_TABLE + device=cuda 且 CUDA 未就绪：真实引擎经 executor 映射为
-        per-item OCR_ENGINE_UNAVAILABLE（reason device_provider_unavailable），
-        capabilities 阶段不抛错、无恢复重试。"""
-        import sys as _sys
-        import types as _types
-
-        from vibeocr.runtime.jobs.registry import JobRegistry
-        from vibeocr.runtime.recognition import rapidtable_engine
-        from vibeocr.runtime.recognition.ocr_engine_router import (
-            OcrEngineRoutingAdapter,
+        """RAPID_TABLE 管道已随 RapidTable 引擎退役：枚举值保留供历史记录
+        反序列化（parser 可解析），但模式门禁以 RECOGNITION_MODE_RETIRED
+        明确拒绝，不再存在任何 rapid 执行路径。"""
+        from vibeocr.runtime.recognition.recognition_modes import (
+            RecognitionModeError,
+            RecognitionModeRegistry,
         )
-        from vibeocr.runtime.recognition.paddle_executor import AdapterExecutor
-
-        monkeypatch.setitem(
-            _sys.modules, "rapid_table", _types.ModuleType("rapid_table")
+        from vibeocr.runtime_contracts import (
+            parse_pipeline_selection,
+            parse_submit_request,
         )
-        monkeypatch.setattr(rapidtable_engine, "resolve_model_path", lambda: object())
-        monkeypatch.setattr(rapidtable_engine, "cuda_provider_ready", lambda: False)
 
-        registry = JobRegistry(instance_id="t-rapid-table")
-        record = registry.create(
-            kind=JobKind.RECOGNITION,
-            priority=JobPriority.INTERACTIVE,
-            items=[
-                JobItem(
-                    item_id="it-0",
-                    display_name="table.png",
-                    state=ItemState.QUEUED,
-                )
+        selection = parse_pipeline_selection(
+            {
+                "pipeline_id": "RAPID_TABLE",
+                "options_version": 1,
+                "options": {"device": "cpu"},
+            }
+        )
+        assert selection.pipeline_id == "RAPID_TABLE"
+        registry = RecognitionModeRegistry()
+        with pytest.raises(RecognitionModeError) as excinfo:
+            registry.resolve_execution_fields(pipeline_id="RAPID_TABLE", engine=None)
+        assert excinfo.value.code_name == "RECOGNITION_MODE_RETIRED"
+        manifest = {
+            "schema_version": 2,
+            "request_id": "retired-rapid-table",
+            "kind": "recognition",
+            "priority": "interactive",
+            "pipeline": {
+                "pipeline_id": "RAPID_TABLE",
+                "options_version": 1,
+                "options": {"device": "cpu"},
+            },
+            "items": [
+                {
+                    "client_item_key": "k",
+                    "ordinal": 0,
+                    "display_name": "t.png",
+                    "source": {"type": "upload.v1", "attachment": "f"},
+                }
             ],
-            progress_total=1,
-            pipeline=PipelineSelection(
-                pipeline_id="RAPID_TABLE", options={"device": "cuda"}
-            ),
-        )
-        record.transition(JobState.QUEUED)
-
-        def _staged_pngs_local(items: list[Any], base: Any) -> list[Any]:
-            import io
-
-            from PIL import Image
-            from vibeocr.runtime.jobs.staging import StagedInput
-
-            buffer = io.BytesIO()
-            Image.new("RGB", (1, 1)).save(buffer, format="PNG")
-            png = buffer.getvalue()
-            staged = []
-            for index, item in enumerate(items):
-                path = base / f"rapid-table-{index}.png"
-                path.write_bytes(png)
-                staged.append(
-                    StagedInput(
-                        item_id=item.item_id,
-                        display_name=item.display_name,
-                        path=path,
-                        size_bytes=len(png),
-                    )
-                )
-            return staged
-
-        staged = _staged_pngs_local(record.items, tmp_path)
-
-        engine = rapidtable_engine.RapidTableEngine()
-        router = OcrEngineRoutingAdapter(
-            fallback_factory=None,
-            resolver=OcrEngineResolver(registry=OcrEngineRegistry([])),
-            rapid_table_factory=lambda: engine,
-        )
-        executor = AdapterExecutor(adapter_factory=lambda: router, device="cpu:0")
-        executor.execute(record, staged)
-        assert list(record.item_errors.values()) == ["OCR_ENGINE_UNAVAILABLE"]
-        reject = next(
-            event for event in record.events if event.stage == "ocr_engine_rejected"
-        )
-        assert reject.detail["reason_code"] == "device_provider_unavailable"
-        assert reject.detail["engine"] == "rapidtable"
-        assert "recovery_decision" not in [event.stage for event in record.events]
+        }
+        # manifest 可解析（历史形状），拒绝发生在模式门禁层。
+        assert parse_submit_request(manifest).pipeline is not None

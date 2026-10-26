@@ -198,14 +198,14 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
                     "kind": "venv",
                     "path": str(Path(legacy_id) / "revisions" / "1"),
                     "status": "installed",
-                    "recipe": "rapidocr-cpu",
+                    "recipe": "paddleocr-ort-cpu",
                     "source_ids": ["tuna-pypi"],
                     "python_version": manager.manifest.python.version,
                     "abi": manager.manifest.python.abi,
                     "last_install_operation": {
                         "environment_revision": 1,
                         "plan_id": "d" * 32,
-                        "recipe": "rapidocr-cpu",
+                        "recipe": "paddleocr-ort-cpu",
                         "phase": "failed",
                         "reason_code": "io_error",
                         "next_action": "inspect_diagnostics",
@@ -246,7 +246,7 @@ def test_preview_binds_requested_effective_and_config_revision(
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
 
-    inherited = manager.preview_install(a["id"], "rapidocr-cpu")
+    inherited = manager.preview_install(a["id"], "paddleocr-ort-cpu")
     assert inherited["requested_source_ids"] is None
     assert inherited["source_ids"] == [
         "tuna-pypi",
@@ -272,7 +272,7 @@ def test_preview_binds_requested_effective_and_config_revision(
         "usage": "online_index",
     }
 
-    explicit = manager.preview_install(a["id"], "rapidocr-cpu", ("pypi",))
+    explicit = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
     assert explicit["requested_source_ids"] == ["pypi"]
     assert explicit["source_ids"] == [
         "pypi",
@@ -283,7 +283,7 @@ def test_preview_binds_requested_effective_and_config_revision(
 
     # 全局默认参与叠加：显式选模型源时 package 继承全局默认。
     manager.set_sources(None, "pypi", None)
-    combined = manager.preview_install(a["id"], "rapidocr-cpu", ("modelscope",))
+    combined = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("modelscope",))
     assert combined["requested_source_ids"] == ["modelscope"]
     assert combined["source_ids"] == [
         "pypi",
@@ -306,8 +306,8 @@ def test_preview_binds_requested_effective_and_config_revision(
 
     # 来源配置变化 → 旧计划 confirm 时 stale；重新预览拿到新修订。
     with pytest.raises(RuntimeInstallPlanStale, match="preview again"):
-        manager.install(explicit["plan_id"], a["id"], "rapidocr-cpu", ("pypi",))
-    refreshed = manager.preview_install(a["id"], "rapidocr-cpu", ("pypi",))
+        manager.install(explicit["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
+    refreshed = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
     assert refreshed["source_config_revision"] == 1
 
 
@@ -326,9 +326,9 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     _stub_installed_probe(manager, monkeypatch)
     _omit_unused_pip_bootstrap(monkeypatch)
     a = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(a["id"], "rapidocr-cpu", ("pypi",))
+    plan = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic download failure"):
-        manager.install(plan["plan_id"], a["id"], "rapidocr-cpu", ("pypi",))
+        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
 
     # 失败终态冻结请求/生效来源，重启（重建 store）后仍可查。
     failure = next(
@@ -345,7 +345,7 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     ]
 
     # 后续新预览不冲掉旧来源证据。
-    manager.preview_install(a["id"], "rapidocr-cpu", ("pypi",))
+    manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
     assert (
         next(item for item in manager.list()["environments"] if item["id"] == a["id"])[
             "last_install_failure"
@@ -354,14 +354,14 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     )
     # 旧 plan 已被新预览取代 → confirm 旧计划 stale（重新预览是显式动作）。
     with pytest.raises(RuntimeInstallPlanStale):
-        manager.install(plan["plan_id"], a["id"], "rapidocr-cpu", ("pypi",))
+        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
 
     # 未重新预览时同计划 retry 保留原意图：同来源、同计划成功并留下证据。
     retryable = _open(tmp_path, manifest, component, install_runner=flaky_install)
     _stub_installed_probe(retryable, monkeypatch)
-    retry_plan = retryable.preview_install(a["id"], "rapidocr-cpu", ("pypi",))
+    retry_plan = retryable.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
     installed = retryable.install(
-        retry_plan["plan_id"], a["id"], "rapidocr-cpu", ("pypi",)
+        retry_plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",)
     )
     assert installed["status"] == "installed"
     assert installed["source_ids"] == [
@@ -393,14 +393,14 @@ def test_inherited_install_uses_resolved_defaults(
     a = _write_record(manager, "a" * 32)
     manager.set_sources(None, "pypi", None)
     manager.set_sources(a["id"], "tuna-pypi", None)
-    plan = manager.preview_install(a["id"], "rapidocr-cpu")  # 继承环境配置
+    plan = manager.preview_install(a["id"], "paddleocr-ort-cpu")  # 继承环境配置
     assert plan["requested_source_ids"] is None
     assert plan["source_ids"] == [
         "tuna-pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
-    installed = manager.install(plan["plan_id"], a["id"], "rapidocr-cpu")
+    installed = manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu")
     assert installed["source_ids"] == [
         "tuna-pypi",
         "paddleocr-modelscope",
@@ -414,7 +414,7 @@ def test_launch_projects_model_source_environment(
 ) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
-    a = _write_record(manager, "a" * 32, status="installed", recipe="rapidocr-cpu")
+    a = _write_record(manager, "a" * 32, status="installed", recipe="paddleocr-ort-cpu")
 
     def healthy_probe(record: dict) -> dict:
         return {
@@ -548,7 +548,7 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
         "action": "preview_install",
         **base,
         "environment_id": a["id"],
-        "recipe": "rapidocr-cpu",
+        "recipe": "paddleocr-ort-cpu",
     }
     assert main(["--request-json", json.dumps(preview)]) == 0
     payload = json.loads(capsys.readouterr().out)["result"]
@@ -574,7 +574,7 @@ def test_interrupted_install_retains_frozen_sources_after_restart(
         last_install_operation={
             "environment_revision": 1,
             "plan_id": "b" * 32,
-            "recipe": "rapidocr-cpu",
+            "recipe": "paddleocr-ort-cpu",
             "phase": "installing",
             "reason_code": "",
             "next_action": "",
@@ -608,7 +608,7 @@ def test_venv_failure_retains_sanitized_diagnostics(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "rapidocr-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
     diagnostic = (
         "x" * 5000 + "\nvenv failed\nC:\\private\\fixture\npassword=fixture-secret"
     )
@@ -619,7 +619,7 @@ def test_venv_failure_retains_sanitized_diagnostics(
 
     monkeypatch.setattr(subprocess, "run", failed_venv)
     with pytest.raises(ManagedEnvironmentError, match=f"exit {returncode}"):
-        manager.install(plan["plan_id"], record["id"], "rapidocr-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
     persisted = manager._read()["environments"][record["id"]]
     failure = persisted["last_install_operation"]
     assert failure["reason_code"] == "venv_creation_failed"
@@ -743,7 +743,7 @@ def test_accepted_cancellation_prevents_failure_and_success_commits(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "rapidocr-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
     receipts = []
 
     def venv(args, **kwargs):
@@ -772,7 +772,7 @@ def test_accepted_cancellation_prevents_failure_and_success_commits(
 
     monkeypatch.setattr(manager, "_probe", probe)
     with pytest.raises(ManagedEnvironmentInstallCancelled):
-        manager.install(plan["plan_id"], record["id"], "rapidocr-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
     assert receipts == [True]
     persisted = manager._read()["environments"][record["id"]]
     assert persisted["revision"] == record["revision"]
@@ -794,7 +794,7 @@ def test_terminal_commit_rejects_late_cancellation(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component, install_runner=lambda *_args: None)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "rapidocr-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
 
     def run(args, **kwargs):
         result = subprocess.CompletedProcess(
@@ -809,9 +809,9 @@ def test_terminal_commit_rejects_late_cancellation(
     _stub_installed_probe(manager, monkeypatch)
     if failure:
         with pytest.raises(ManagedEnvironmentError, match="natural failure"):
-            manager.install(plan["plan_id"], record["id"], "rapidocr-cpu")
+            manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
     else:
-        manager.install(plan["plan_id"], record["id"], "rapidocr-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
     before = manager._registry.read_text(encoding="utf-8")
     receipts = []
     manager.cancel_install(receipts.append)

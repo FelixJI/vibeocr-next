@@ -46,8 +46,8 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection));
 
   [Fact]
-  public Task ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection() =>
-      RunUiSmokeAsync(nameof(ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection));
+  public Task ScrollCaptureContinuousFramesAndMissingOverlapRecoverWithoutInventingPixels() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureContinuousFramesAndMissingOverlapRecoverWithoutInventingPixels));
 
   [Fact]
   public Task ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops() =>
@@ -72,6 +72,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
   [Fact]
   public Task ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets() =>
       RunUiSmokeAsync(nameof(ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets));
+
+  [Fact]
+  public Task ScrollCapturePreviewPlacementRequiresVisibleGeometryBeforeConfirmation() =>
+      RunUiSmokeAsync(nameof(ScrollCapturePreviewPlacementRequiresVisibleGeometryBeforeConfirmation));
 
   [Fact]
   public Task ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure() =>

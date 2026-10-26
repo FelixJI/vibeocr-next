@@ -766,11 +766,14 @@ class SupervisorModule:
     def update_settings(self, snapshot: SettingsSnapshot) -> SettingsSnapshot:
         from vibeocr.runtime.recognition.pipeline_contracts import (
             RETIRED_RECOGNITION_MODES,
+            get_all_recognition_modes,
             get_recognition_mode_definition,
             is_recognition_mode_retired,
         )
         from vibeocr.runtime.recognition.recognition_modes import (
             DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
+            LEGACY_RECOGNITION_MODE_ALIASES,
+            RecognitionModeError,
             resolve_default_recognition_mode,
         )
 
@@ -782,6 +785,15 @@ class SupervisorModule:
             retired_by_pipeline = {
                 get_recognition_mode_definition(mode).pipeline.value: mode.value
                 for mode in RETIRED_RECOGNITION_MODES
+                # 仅当该管道再无活跃模式时才按管道名映射历史退役项；
+                # OCR 管道仍有 windows_text/paddle_text，rapid_text 不能
+                # 仅凭管道名被当作历史退役项。
+                if get_recognition_mode_definition(mode).pipeline.value
+                not in {
+                    get_recognition_mode_definition(active).pipeline.value
+                    for active in get_all_recognition_modes()
+                    if active not in RETIRED_RECOGNITION_MODES
+                }
             }
             for pipeline in snapshot.pipelines:
                 mode_id = (
@@ -804,14 +816,51 @@ class SupervisorModule:
                         pipeline_id=pipeline.name,
                         pinned=pipeline.pinned,
                     )
+
             # 未变默认不阻断其他设置；新默认仍须通过类型、known id 与可用性校验。
+            # “是否变更”的判定：
+            # * 旧值缺键（raw None）时显式写入任何默认均视为变更（#270 语义：
+            #   不可用模式不得被首次保存绕过门禁）；
+            # * 旧值存在时按迁移后的规范模式值比较：GET 回显已把旧 rapid 值
+            #   迁移为 Paddle 模式，客户端原样回传回显值（仅改无关字段）时
+            #   不得误判为切换默认，否则 Paddle 未就绪会阻断无关设置保存。
+            # 已提交持久值无法解析时容忍为 None；新值解析仍恒定执行类型/
+            # 未知 id 校验。
+            def _canonical_default(extra: dict[str, Any]) -> Any:
+                try:
+                    return resolve_default_recognition_mode(
+                        extra,
+                        self.recognition_mode_registry,
+                        require_available=False,
+                    )
+                except RecognitionModeError:
+                    return None
+
             old_raw = previous.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
             new_raw = snapshot.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+            require_available = new_raw is not None and (
+                old_raw is None
+                or _canonical_default(snapshot.extra)
+                != _canonical_default(previous.extra)
+            )
             resolve_default_recognition_mode(
                 snapshot.extra,
                 self.recognition_mode_registry,
-                require_available=new_raw != old_raw,
+                require_available=require_available,
             )
+            legacy_alias = LEGACY_RECOGNITION_MODE_ALIASES.get(
+                snapshot.extra.get(DEFAULT_RECOGNITION_MODE_EXTRA_KEY)
+            )
+            if legacy_alias is not None:
+                # 保存 seam 的安全迁移：旧 rapid 值按别名解析通过后，落盘
+                # 与回显一律写入对应 Paddle 模式，不再持久化退役字符串。
+                snapshot = replace(
+                    snapshot,
+                    extra={
+                        **snapshot.extra,
+                        DEFAULT_RECOGNITION_MODE_EXTRA_KEY: legacy_alias.value,
+                    },
+                )
             configure = getattr(self._executor, "configure_settings", None)
             status: ResidencyStatus | None = None
             if callable(configure):

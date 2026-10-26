@@ -103,7 +103,7 @@ describe("retained screenshot recognition actions", () => {
                   : recognitionWithResult),
                 recognitionModes: [
                   {
-                    modeId: "rapid_text",
+                    modeId: "paddle_text",
                     displayName: "文字识别",
                     availability: "ready",
                   },

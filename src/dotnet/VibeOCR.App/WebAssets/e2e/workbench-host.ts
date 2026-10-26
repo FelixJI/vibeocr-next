@@ -292,7 +292,7 @@ export async function expectCommand(
 
 // 模拟原生边界已加载的权威文字/表格目录；无目录用例应显式省略。
 export const readyImageRecognitionModes = [
-  { modeId: "rapid_text", displayName: "文字识别", availability: "ready" },
+  { modeId: "paddle_text", displayName: "文字识别", availability: "ready" },
   { modeId: "paddle_table", displayName: "表格识别", availability: "ready" },
 ];
 

@@ -3,11 +3,12 @@
 约束：
 
 * ``GeneralTextOcrEngine`` 是 application/core 边界上与具体库无关的接口；
-  RapidOCR / Windows Media OCR / PaddleOCR 三个 adapter 在接口之后实现。
+  Windows Media OCR / PaddleOCR 两个活跃 adapter 在接口之后实现；
+  RapidOCR 引擎已退役，仅保留 wire 枚举 id 供历史记录反序列化与明确拒绝。
 * ``OcrEngineRegistry`` 负责注册、探测和缓存；engine 目录来自实际探针和
   已安装 component，不从静态依赖列表猜测。
 * ``OcrEngineResolver`` 只按 Protocol 的显式 engine ID 选择：缺省时使用
-  Backend 默认引擎（rapidocr），用户选择的引擎不可用时返回结构化协议
+  Backend 默认引擎（paddleocr），用户选择的引擎不可用时返回结构化协议
   错误（OCR_ENGINE_UNAVAILABLE / OCR_ENGINE_PREPARATION_REQUIRED /
   OCR_ENGINE_LANGUAGE_UNAVAILABLE），绝不静默切换到其他引擎。
 * 未知 engine 值 fail closed 为 OCR_ENGINE_UNKNOWN；engine 只对纯文本
@@ -33,22 +34,28 @@ from vibeocr.runtime_contracts.dtos import OcrEngine
 
 logger = logging.getLogger(__name__)
 
-# Protocol 固定：请求缺省 engine 时 Backend 默认 rapidocr。
-DEFAULT_OCR_ENGINE = OcrEngine.RAPIDOCR
+# Protocol 固定：请求缺省 engine 时 Backend 默认 paddleocr（随基础
+# 运行时离线提供；windows 为操作系统可选能力）。
+DEFAULT_OCR_ENGINE = OcrEngine.PADDLEOCR
 
 # catalog 必须覆盖全部稳定 engine id（每个 id 恰好一个 descriptor）。
+# rapidocr 已退役：不再注册 adapter，探针目录固定投影为
+# unavailable/engine_retired（退休兼容，非活跃能力）。
 _STABLE_ENGINE_ORDER: tuple[OcrEngine, ...] = (
     OcrEngine.RAPIDOCR,
     OcrEngine.WINDOWS,
     OcrEngine.PADDLEOCR,
 )
 
-OCR_PIPELINE_ID = "OCR"
-
 # 稳定 reason_code（机器可读，前端自行本地化，Backend 不发展示文案）。
 REASON_ENGINE_NOT_INSTALLED = "engine_not_installed"
 REASON_ENGINE_INIT_FAILED = "engine_init_failed"
 REASON_ENGINE_LANGUAGE_UNAVAILABLE = "engine_language_unavailable"
+REASON_ENGINE_RETIRED = "engine_retired"
+#: 已退役引擎：枚举值仅供历史记录反序列化，解析一律 fail closed。
+RETIRED_OCR_ENGINES: frozenset[OcrEngine] = frozenset({OcrEngine.RAPIDOCR})
+
+OCR_PIPELINE_ID = "OCR"
 
 
 class EngineAvailability(StrEnum):
@@ -111,9 +118,9 @@ class OcrEngineError(Exception):
 class GeneralTextOcrEngine(Protocol):
     """纯文本 OCR 引擎的稳定接口。
 
-    实现方：``RapidOcrEngine``、``WindowsMediaOcrEngine``、Paddle
-    adapter（pipeline ``OCR`` 视角）。除 ``descriptor``/``engine_id`` 外，
-    其余方法与 supervisor adapter seam 同形，可直接被 executor 消费。
+    实现方：``WindowsMediaOcrEngine``、Paddle adapter（pipeline ``OCR``
+    视角）。除 ``descriptor``/``engine_id`` 外，其余方法与 supervisor
+    adapter seam 同形，可直接被 executor 消费。
     """
 
     @property
@@ -237,18 +244,31 @@ class OcrEngineResolver:
     )
 
     def probe_descriptors(self) -> list[EngineDescriptor]:
-        """Return one cached descriptor for every stable engine id."""
+        """Return one cached descriptor for every stable engine id.
+
+        已退休引擎（rapidocr）没有 adapter：目录固定投影
+        unavailable/engine_retired，绝不重新出现为活跃能力。
+        """
         descriptors: list[EngineDescriptor] = []
         for engine_id in _STABLE_ENGINE_ORDER:
             adapter = self.registry.get(engine_id)
             if adapter is None:
-                descriptors.append(
-                    EngineDescriptor(
-                        engine_id=engine_id,
-                        availability=EngineAvailability.UNAVAILABLE,
-                        reason_code=REASON_ENGINE_NOT_INSTALLED,
+                if engine_id in RETIRED_OCR_ENGINES:
+                    descriptors.append(
+                        EngineDescriptor(
+                            engine_id=engine_id,
+                            availability=EngineAvailability.UNAVAILABLE,
+                            reason_code=REASON_ENGINE_RETIRED,
+                        )
                     )
-                )
+                else:
+                    descriptors.append(
+                        EngineDescriptor(
+                            engine_id=engine_id,
+                            availability=EngineAvailability.UNAVAILABLE,
+                            reason_code=REASON_ENGINE_NOT_INSTALLED,
+                        )
+                    )
             else:
                 descriptors.append(self._descriptor_for(adapter))
         return descriptors
@@ -272,9 +292,15 @@ class OcrEngineResolver:
         target = engine if engine is not None else self.registry.default_engine
         adapter = self.registry.get(target)
         if adapter is None:
+            # 已退休引擎（rapidocr）与未安装引擎同样 fail closed，但给出
+            # 独立稳定 reason，便于客户端明确提示退休而非待准备。
             raise OcrEngineError(
                 ErrorCode.OCR_ENGINE_UNAVAILABLE,
-                reason_code=REASON_ENGINE_NOT_INSTALLED,
+                reason_code=(
+                    REASON_ENGINE_RETIRED
+                    if target in RETIRED_OCR_ENGINES
+                    else REASON_ENGINE_NOT_INSTALLED
+                ),
                 engine=target.value,
                 selectable_engines=self.selectable_engine_ids(),
             )
@@ -411,6 +437,8 @@ __all__ = [
     "REASON_ENGINE_INIT_FAILED",
     "REASON_ENGINE_LANGUAGE_UNAVAILABLE",
     "REASON_ENGINE_NOT_INSTALLED",
+    "REASON_ENGINE_RETIRED",
+    "RETIRED_OCR_ENGINES",
     "ensure_engine_valid_for_pipeline",
     "parse_wire_engine",
 ]

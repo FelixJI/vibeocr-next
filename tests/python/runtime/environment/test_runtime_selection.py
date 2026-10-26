@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from vibeocr.runtime.environments.runtime_manifest import (
+    ManifestError,
     RuntimeInstallScope,
     RuntimeProfile,
     default_profile_components,
@@ -193,29 +194,21 @@ def test_component_ids_have_one_meaning_and_legacy_selection_migrates() -> None:
         "fastapi"
     )
     for profile in ("win-x64-base", "win-x64-cpu", "win-x64-cu126"):
-        assert runtime_component_binding(profile, "rapidocr-base").import_name == (
-            "rapidocr"
+        for retired in ("rapidocr-base", "paddleocr-cpu", "paddleocr-cuda"):
+            with pytest.raises(ManifestError, match="binding is missing"):
+                runtime_component_binding(profile, retired)
+        assert (
+            migrate_legacy_component_ids(profile, ("ocr_engine", "rapidocr-base")) == ()
         )
-    assert (
-        runtime_component_binding("win-x64-cpu", "paddleocr-cpu").import_name
-        == "paddleocr"
-    )
     assert runtime_component_binding("win-x64-cpu", "mineru-cpu").import_name == (
         "mineru"
     )
-    with pytest.raises(Exception, match="binding is missing"):
+    with pytest.raises(ManifestError, match="binding is missing"):
         runtime_component_binding("win-x64-base", "ocr_engine")
 
-    assert migrate_legacy_component_ids("win-x64-base", ("ocr_engine",)) == (
-        "rapidocr-base",
-    )
-    assert migrate_legacy_component_ids("win-x64-cpu", ("ocr_engine",)) == (
-        "rapidocr-base",
-        "paddleocr-cpu",
-    )
     assert migrate_legacy_component_ids(
         "win-x64-cpu", ("ocr_engine", "document_parsing")
-    ) == ("rapidocr-base", "paddleocr-cpu", "mineru-cpu")
+    ) == ("mineru-cpu",)
     assert migrate_legacy_component_ids("win-x64-cu126", ("document_parsing",)) == (
         "mineru-cuda",
     )
@@ -238,15 +231,13 @@ def test_selection_policy_resolves_exact_cuda_dependency_closure() -> None:
     assert gpu_only.requested_component_ids == ("gpu_runtime",)
     assert gpu_only.install_scope.scope_id == "gpu-runtime"
     assert gpu_only.effective_component_ids == (
-        "rapidocr-base",
         "runtime_host",
         "gpu_runtime",
     )
-    assert document_parsing.install_scope.scope_id == "mineru"
+    assert document_parsing.install_scope.scope_id == "default"
     assert document_parsing.effective_component_ids == (
-        "rapidocr-base",
-        "mineru-cuda",
         "runtime_host",
+        "mineru-cuda",
         "gpu_runtime",
     )
 
@@ -376,7 +367,6 @@ def test_normalize_install_component_ids_rejects_retired_native_paddle() -> None
     for accelerator, retired in (
         ("cpu", "paddleocr-cpu"),
         ("nvidia_cuda", "paddleocr-cuda"),
-        ("cpu", "ocr_engine"),
     ):
         with pytest.raises(RuntimeSelectionError, match="retired") as excinfo:
             normalize_install_component_ids([retired], accelerator=accelerator)
@@ -430,19 +420,25 @@ def test_retired_native_paddle_excluded_from_catalog_request_and_default_closure
         download_source_ids=None,
     )
     assert set(default.effective_component_ids) == {
-        "rapidocr-base",
         "runtime_host",
         "mineru-cuda",
         "gpu_runtime",
     }
-    assert default.install_scope.scope_id == "mineru"
-    # 旧 ocr_engine 显式请求（迁移出原生 Paddle）同样拒绝。
-    with pytest.raises(RuntimeSelectionError, match="retired"):
-        policy.plan_start(
-            accelerator="cpu",
-            install_component_ids=("ocr_engine",),
-            download_source_ids=None,
+    assert default.install_scope.scope_id == "default"
+    # 旧基础 OCR 身份只折叠，不恢复已退役引擎；OCR 由托管 Paddle 环境提供。
+    legacy = policy.plan_start(
+        accelerator="cpu",
+        install_component_ids=("ocr_engine", "rapidocr-base"),
+        download_source_ids=None,
+    )
+    assert legacy.requested_component_ids == ()
+    assert legacy.effective_component_ids == ("runtime_host",)
+    assert (
+        normalize_install_component_ids(
+            ("ocr_engine", "rapidocr-base"), accelerator="cpu"
         )
+        == ()
+    )
     # 混合请求（退役 + 合法组件）整体拒绝，不部分安装。
     with pytest.raises(RuntimeSelectionError, match="retired"):
         policy.plan_start(

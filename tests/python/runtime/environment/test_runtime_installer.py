@@ -49,7 +49,6 @@ from vibeocr.runtime.environments.runtime_maintenance import (
 from vibeocr.runtime.environments.runtime_manifest import (
     ManifestError,
     load_runtime_manifest,
-    runtime_component_binding,
     validate_requirements_lock,
 )
 from vibeocr.runtime.environments.runtime_selection import BoundDownloadSource
@@ -68,19 +67,55 @@ def _lock_text(profile: str) -> str:
     base = "fastapi==1.0.0 \\\n    --hash=sha256:" + "1" * 64 + "\n"
     if profile == "win-x64-base":
         return base + (
-            "rapidocr==3.9.2 \\\n    --hash=sha256:" + "6" * 64 + "\n"
-            "onnxruntime==1.28.0 \\\n    --hash=sha256:" + "6" * 64 + "\n"
             "winrt-runtime==3.2.1 \\\n    --hash=sha256:" + "6" * 64 + "\n"
             "winrt-windows-foundation==3.2.1 \\\n    --hash=sha256:" + "6" * 64 + "\n"
             "winrt-windows-foundation-collections==3.2.1 \\\n"
             "    --hash=sha256:" + "6" * 64 + "\n"
-            "opencv-python==5.0.0.93 \\\n    --hash=sha256:" + "6" * 64 + "\n"
+        )
+    if profile.startswith("win-x64-paddle-ort-"):
+        base += "".join(
+            package + "==3.2.1 \\\n    --hash=sha256:" + "6" * 64 + "\n"
+            for package in (
+                "winrt-runtime",
+                "winrt-windows-foundation",
+                "winrt-windows-foundation-collections",
+                "winrt-windows-globalization",
+                "winrt-windows-graphics-imaging",
+                "winrt-windows-media-ocr",
+                "winrt-windows-storage-streams",
+            )
+        )
+        ort = (
+            "onnxruntime-directml==1.24.4"
+            if profile.endswith("directml")
+            else "onnxruntime==1.30.0"
+        )
+        extra = (
+            "nvidia-cudnn-cu13==9.27.0.42 \\\n    --hash=sha256:" + "8" * 64 + "\n"
+            if profile.endswith("cuda")
+            else ""
+        )
+        return base + (
+            "paddleocr==3.7.0 \\\n    --hash=sha256:" + "7" * 64 + "\n"
+            "paddlex==3.7.2 \\\n    --hash=sha256:" + "7" * 64 + "\n"
+            "opencv-contrib-python==5.0.0.93 \\\n    --hash=sha256:"
+            + "7" * 64
+            + "\n"
+            + ort
+            + " \\\n    --hash=sha256:"
+            + "7" * 64
+            + "\n"
+            + extra
         )
     if profile == "win-x64-cpu":
-        return base + ("paddlepaddle==3.3.1 \\\n    --hash=sha256:" + "2" * 64 + "\n")
+        return base + ("mineru==4.0.10 \\\n    --hash=sha256:" + "2" * 64 + "\n")
+    if profile == "win-x64-mineru-cpu":
+        return base + (
+            "mineru==4.0.10 \\\n    --hash=sha256:" + "2" * 64 + "\n"
+            "opencv-python==5.0.0.93 \\\n    --hash=sha256:" + "2" * 64 + "\n"
+        )
     return base + (
-        "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl \\\n"
-        "    --hash=sha256:" + "3" * 64 + "\n"
+        "mineru==4.0.10 \\\n    --hash=sha256:" + "3" * 64 + "\n"
         "torch @ https://example.invalid/cu126/torch.whl \\\n"
         "    --hash=sha256:" + "4" * 64 + "\n"
         "torchvision @ https://example.invalid/cu126/torchvision.whl \\\n"
@@ -92,6 +127,9 @@ def _release(
     root: Path,
     *,
     with_base_pack: bool = False,
+    with_paddle_packs: bool = False,
+    with_paddle_model_pack: bool = False,
+    with_shared_pool: bool = False,
 ) -> tuple[Path, Path]:
     root.mkdir()
     wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
@@ -113,12 +151,10 @@ def _release(
     _extract_product_runtime_code(wheel, root, "0.7.0")
     python_archive = root / "cpython-3.13.16-win_amd64-install_only.tar.gz"
     python_archive.write_bytes(b"python-archive")
-    installer_archive = root / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
-    with zipfile.ZipFile(installer_archive, mode="w") as archive:
-        archive.writestr(
-            "runtime-installer/vibeocr-runtime-installer.exe",
-            b"installer",
-        )
+    # 新形态：冻结安装器以裸可执行文件随 bundle 分发一次（manifest 直接
+    # 绑定其字节摘要）；产品端只落在 runtime/installer/ 稳定路径。
+    installer_executable = root / "vibeocr-runtime-installer.exe"
+    installer_executable.write_bytes(b"installer")
     profiles = {}
     for profile in ("win-x64-base", "win-x64-cpu", "win-x64-cu126"):
         lock = root / f"requirements-{profile}.lock"
@@ -134,7 +170,6 @@ def _release(
         {
             "scope_id": "gpu-runtime",
             "component_ids": [
-                "rapidocr-base",
                 "runtime_host",
                 "gpu_runtime",
             ],
@@ -143,41 +178,89 @@ def _release(
             "runtime_pack": None,
         }
     ]
-    base_ids = ["rapidocr-base", "runtime_host"]
-    for profile, suffix in [("win-x64-cpu", "cpu"), ("win-x64-cu126", "cuda")]:
-        for engine in ["paddleocr", "mineru"]:
-            host = (
-                profiles["win-x64-base"] if engine == "paddleocr" else profiles[profile]
-            )
-            profiles[profile].setdefault("install_scopes", []).append(
-                {
-                    "scope_id": engine,
-                    "component_ids": [
-                        *base_ids,
-                        f"{engine}-{suffix}",
-                        *(
-                            ["gpu_runtime"]
-                            if engine == "mineru" and suffix == "cuda"
-                            else []
-                        ),
-                    ],
-                    "lock": host["lock"],
-                    "sha256": host["sha256"],
-                    "runtime_pack": None,
-                }
-            )
+    # mineru 复合闭包与 cpu/cu126 缺省闭包相同：独立 MinerU 环境直接使用
+    # cpu 缺省 scope，不再登记重复的 standalone scope/锁。
+    paddle_onnx = {}
+    for device in ("cpu", "cuda", "directml"):
+        lock = root / f"requirements-win-x64-paddle-ort-{device}.lock"
+        lock.write_text(_lock_text(f"win-x64-paddle-ort-{device}"), encoding="utf-8")
+        paddle_onnx[device] = {
+            "lock": lock.name,
+            "sha256": _sha(lock.read_bytes()),
+        }
+    if with_paddle_packs:
+        for device in ("cpu", "directml"):
+            pack = root / f"vibeocr-runtime-pack-win-x64-paddle-ort-{device}-0.7.0.zip"
+            with zipfile.ZipFile(pack, mode="w") as archive:
+                archive.writestr("pack-requirements.txt", "paddleocr==3.7.0")
+                archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr-wheel")
+            paddle_onnx[device]["runtime_pack"] = [pack.name]
+            paddle_onnx[device]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
+    if with_paddle_model_pack:
+        pack = root / "vibeocr-paddle-models-0.7.0.zip"
+        with zipfile.ZipFile(pack, mode="w") as archive:
+            archive.writestr("PP-OCRv6_small_det/inference.onnx", b"det-model")
+        manifest_paddle_model_pack = {
+            "archive": pack.name,
+            "sha256": _sha(pack.read_bytes()),
+        }
     if with_base_pack:
         pack = root / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
         with zipfile.ZipFile(pack, mode="w") as archive:
-            archive.writestr("pack-requirements.txt", "rapidocr==3.9.2")
-            archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"rapidocr-wheel")
-            archive.writestr(
-                "onnxruntime-1.28.0-cp313-cp313-win_amd64.whl", b"ort-wheel"
-            )
+            archive.writestr("pack-requirements.txt", "fastapi==1.0.0")
+            archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi-wheel")
         profiles["win-x64-base"]["runtime_pack"] = [pack.name]
         profiles["win-x64-base"]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
+    if with_shared_pool:
+        # 共享离线 wheel pool：三个 profile 共指同一个 wheel-only zip，
+        # 各自的小 requirements zip 提供精确闭包清单（复用既有元组绑定）。
+        pool_stem = "vibeocr-runtime-pool-win-x64-0.7.0"
+        pool = root / f"{pool_stem}.zip"
+        with zipfile.ZipFile(pool, mode="w") as archive:
+            archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi-wheel")
+            archive.writestr("numpy-2.5.3-cp313-cp313-win_amd64.whl", b"numpy-base")
+            archive.writestr("numpy-2.3.5-cp313-cp313-win_amd64.whl", b"numpy-paddle")
+            archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr-wheel")
+            archive.writestr("onnxruntime-1.30.0-cp313-cp313-win_amd64.whl", b"ort-cpu")
+            archive.writestr(
+                "onnxruntime-directml-1.24.4-cp313-cp313-win_amd64.whl", b"ort-dml"
+            )
+
+        def bind_shared_pool(lock_stem: str, requirements: str) -> None:
+            requirements_zip = root / f"{pool_stem}.{lock_stem}.zip"
+            with zipfile.ZipFile(requirements_zip, mode="w") as archive:
+                archive.writestr("pack-requirements.txt", requirements)
+            binding = [requirements_zip.name, pool.name]
+            digests = [
+                _sha(requirements_zip.read_bytes()),
+                _sha(pool.read_bytes()),
+            ]
+            if lock_stem == "requirements-win-x64-base":
+                profiles["win-x64-base"]["runtime_pack"] = binding
+                profiles["win-x64-base"]["runtime_pack_sha256"] = digests
+            else:
+                device = lock_stem.removeprefix("requirements-win-x64-paddle-ort-")
+                paddle_onnx[device]["runtime_pack"] = binding
+                paddle_onnx[device]["runtime_pack_sha256"] = digests
+
+        bind_shared_pool("requirements-win-x64-base", "fastapi==1.0.0\nnumpy==2.5.3\n")
+        bind_shared_pool(
+            "requirements-win-x64-paddle-ort-cpu",
+            "fastapi==1.0.0\nnumpy==2.3.5\npaddleocr==3.7.0\nonnxruntime==1.30.0\n",
+        )
+        bind_shared_pool(
+            "requirements-win-x64-paddle-ort-directml",
+            "fastapi==1.0.0\nnumpy==2.3.5\npaddleocr==3.7.0\n"
+            "onnxruntime-directml==1.24.4\n",
+        )
     manifest = {
         "schema_version": 2,
+        "paddle_onnx_environments": paddle_onnx,
+        **(
+            {"paddle_model_pack": manifest_paddle_model_pack}
+            if with_paddle_model_pack
+            else {}
+        ),
         "product": {
             "component": "next",
             "repository": "FelixJI/vibeocr-next",
@@ -200,9 +283,7 @@ def _release(
             "sha256": _sha(python_archive.read_bytes()),
         },
         "installer": {
-            "archive": installer_archive.name,
-            "sha256": _sha(installer_archive.read_bytes()),
-            "executable_path": "runtime-installer/vibeocr-runtime-installer.exe",
+            "executable": installer_executable.name,
             "executable_sha256": _sha(b"installer"),
         },
         "profiles": profiles,
@@ -249,6 +330,125 @@ def _pypi_source() -> tuple[BoundDownloadSource, ...]:
             endpoint="https://pypi.org/simple",
         ),
     )
+
+
+def _rewrite_installer_binding(release: Path, binding: dict[str, str]) -> Path:
+    manifest_path = release / "runtime-manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["installer"] = binding
+    manifest_path.write_text(
+        json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest_path
+
+
+def test_installer_binding_resolves_bundle_sibling_and_product_layout(
+    tmp_path: Path,
+) -> None:
+    """新形态直接绑定可执行文件：扁平 bundle 与规范产品布局都能校验。"""
+    release = tmp_path / "release"
+    manifest_path, _ = _release(release)
+    loaded = load_runtime_manifest(manifest_path)
+    assert loaded.installer.executable_name == "vibeocr-runtime-installer.exe"
+    assert loaded.installer.archive_path is None
+    assert loaded.installer.executable_sha256 == _sha(b"installer")
+
+    product = tmp_path / "product"
+    backend = product / "runtime" / "backend"
+    backend.parent.mkdir(parents=True)
+    shutil.copytree(release, backend)
+    (backend / "vibeocr-runtime-installer.exe").unlink()
+    installer_root = product / "runtime" / "installer"
+    installer_root.mkdir()
+    (installer_root / "vibeocr-runtime-installer.exe").write_bytes(b"installer")
+    assert load_runtime_manifest(
+        backend / "runtime-manifest.json"
+    ).installer.executable_sha256 == _sha(b"installer")
+
+
+@pytest.mark.parametrize("kind", ["missing", "tampered"])
+def test_installer_binding_fails_closed_on_missing_or_tampered_executable(
+    tmp_path: Path, kind: str
+) -> None:
+    release = tmp_path / "release"
+    manifest_path, _ = _release(release)
+    executable = release / "vibeocr-runtime-installer.exe"
+    if kind == "missing":
+        executable.unlink()
+        expected = "Installer executable is missing"
+    else:
+        executable.write_bytes(b"tampered")
+        expected = "Installer executable SHA-256 mismatch"
+    with pytest.raises(ManifestError, match=expected):
+        load_runtime_manifest(manifest_path)
+
+
+def test_installer_binding_fails_closed_when_any_present_copy_is_tampered(
+    tmp_path: Path,
+) -> None:
+    """双候选位中任一存在的副本被篡改都必须 fail closed，不得被另一个遮蔽。"""
+    release = tmp_path / "release"
+    _release(release)
+    product = tmp_path / "product"
+    backend = product / "runtime" / "backend"
+    backend.parent.mkdir(parents=True)
+    shutil.copytree(release, backend)
+    installer_root = product / "runtime" / "installer"
+    installer_root.mkdir()
+    (installer_root / "vibeocr-runtime-installer.exe").write_bytes(b"tampered")
+    with pytest.raises(ManifestError, match="Installer executable SHA-256 mismatch"):
+        load_runtime_manifest(backend / "runtime-manifest.json")
+
+
+def test_installer_binding_rejects_mixed_shapes(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    manifest_path, _ = _release(release)
+    _rewrite_installer_binding(
+        release,
+        {
+            "executable": "vibeocr-runtime-installer.exe",
+            "executable_sha256": _sha(b"installer"),
+            "archive": "vibeocr-runtime-installer-v0.7.0-win-x64.zip",
+        },
+    )
+    with pytest.raises(ManifestError, match="must not mix"):
+        load_runtime_manifest(manifest_path)
+
+
+def test_legacy_zip_installer_manifest_still_loads_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """历史单成员 zip 绑定继续可读可验：旧 manifest 的离线修复/回滚兼容。"""
+    release = tmp_path / "release"
+    manifest_path, _ = _release(release)
+    (release / "vibeocr-runtime-installer.exe").unlink()
+    legacy_archive = release / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
+    with zipfile.ZipFile(legacy_archive, mode="w") as archive:
+        archive.writestr(
+            "runtime-installer/vibeocr-runtime-installer.exe", b"installer"
+        )
+    _rewrite_installer_binding(
+        release,
+        {
+            "archive": legacy_archive.name,
+            "sha256": _sha(legacy_archive.read_bytes()),
+            "executable_path": "runtime-installer/vibeocr-runtime-installer.exe",
+            "executable_sha256": _sha(b"installer"),
+        },
+    )
+    loaded = load_runtime_manifest(manifest_path)
+    assert loaded.installer.archive_path == legacy_archive
+
+    # zip 内容被替换且 zip 摘要同步更新：可执行文件摘要不匹配仍必须失败。
+    with zipfile.ZipFile(legacy_archive, mode="w") as archive:
+        archive.writestr("runtime-installer/vibeocr-runtime-installer.exe", b"tampered")
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["installer"]["sha256"] = _sha(legacy_archive.read_bytes())
+    manifest_path.write_text(
+        json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ManifestError, match="Installer executable SHA-256 mismatch"):
+        load_runtime_manifest(manifest_path)
 
 
 def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
@@ -348,10 +548,10 @@ def test_managed_status_uses_installed_scope_without_legacy_marker(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    created = manager.create("RapidOCR")
+    created = manager.create("Paddle ONNX")
     registry = json.loads(manager._registry.read_text(encoding="utf-8"))
     record = registry["environments"][created["id"]]
-    record.update(status="installed", recipe="rapidocr-cpu")
+    record.update(status="installed", recipe="paddleocr-ort-cpu")
     manager._registry.write_text(json.dumps(registry), encoding="utf-8")
     root = manager._safe_path(record)
     assert not (root / ".installed.json").exists()
@@ -370,7 +570,7 @@ def test_managed_status_uses_installed_scope_without_legacy_marker(
     runtime_maintenance._component_probe_cache.clear()
     status = runtime_status_from_environment("named", "ready")
     assert status["service_state"] == "ready", status
-    assert status["profile"]["profile_id"] == "win-x64-base"
+    assert status["profile"]["profile_id"] == "win-x64-cpu"
 
 
 def test_legacy_cuda_launch_preserves_marker_accelerator(
@@ -597,7 +797,7 @@ def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
     prepared = manager.prepare_switch(first["id"])
     assert prepared["requires_supervisor"] is False
     manager.commit_switch(prepared)
-    plan = manager.preview_install(first["id"], "rapidocr-cpu")
+    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu")
     assert plan["environment_id"] == first["id"]
     assert plan["source_ids"] == [
         "tuna-pypi",
@@ -655,7 +855,7 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         assert manager.list()["active_id"] == first["id"]
         with pytest.raises(ManagedEnvironmentError, match="active jobs"):
             manager.prepare_switch(second["id"])
-        assert manager.preview_install(second["id"], "rapidocr-cpu")
+        assert manager.preview_install(second["id"], "paddleocr-ort-cpu")
     finally:
         references.release(job_id)
     assert not (references.reference_root / f"{job_id}.lock").exists()
@@ -702,7 +902,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     active = manager.create("active")
     target = manager.create("target")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     original_probe = manager._probe
     monkeypatch.setattr(
         manager,
@@ -721,7 +921,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     worker = threading.Thread(
         target=lambda: installed.append(
             manager.install(
-                plan["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",)
+                plan["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
             )
         ),
         daemon=True,
@@ -817,7 +1017,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     target = manager.create("target")
     replacement = manager.create("replacement")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     # The deadline measures lock contention, not interpreter startup for replacement.
     original_probe = manager._probe
     monkeypatch.setattr(
@@ -838,7 +1038,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     def run_install() -> None:
         try:
             manager.install(
-                plan["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",)
+                plan["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
             )
         except Exception as error:
             install_errors.append(error)
@@ -892,7 +1092,7 @@ def test_installed_switch_rejects_unverified_supervisor_health(
     registry = manager.paths.state_root / "environments.json"
     value = json.loads(registry.read_text(encoding="utf-8"))
     value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "rapidocr-cpu"}
+        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
     )
     registry.write_text(json.dumps(value), encoding="utf-8")
     monkeypatch.setattr(
@@ -946,9 +1146,11 @@ def test_repair_after_failed_install_clears_stale_revision_failure_only_on_succe
         install_runner=fail_install,
     )
     item = manager.create("failed then repaired")
-    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     failure = manager.list()["environments"][0]["last_install_failure"]
     assert failure["environment_revision"] == 1
 
@@ -1031,13 +1233,17 @@ def test_failed_named_install_preserves_empty_revision(
     )
     item = manager.create("target")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("pypi",))
+        manager.install(plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic"):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     with pytest.raises(ManagedEnvironmentError, match="synthetic"):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     surviving = manager.list()["environments"][0]
     assert surviving["revision"] == 1
     assert surviving["status"] == "empty"
@@ -1046,7 +1252,7 @@ def test_failed_named_install_preserves_empty_revision(
     failure = surviving["last_install_failure"]
     assert failure["reason_code"] == "unknown"
     assert failure["phase"] == "failed"
-    assert failure["recipe"] == "rapidocr-cpu"
+    assert failure["recipe"] == "paddleocr-ort-cpu"
     assert failure["environment_revision"] == 1
     stored = json.loads(manager._registry.read_text(encoding="utf-8"))
     assert (
@@ -1088,9 +1294,11 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     )
     first = manager.create("failed")
     other = manager.create("unaffected")
-    plan = manager.preview_install(first["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     with pytest.raises(RuntimeInstallError):
-        manager.install(plan["plan_id"], first["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], first["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     registry_text = manager._registry.read_text(encoding="utf-8")
     assert "secretvalue" not in registry_text
     assert "example.invalid" not in registry_text
@@ -1107,7 +1315,9 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
 
     manager._install_runner = interrupted
     with pytest.raises(SystemExit):
-        manager.install(plan["plan_id"], first["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], first["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     recovered = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
@@ -1143,13 +1353,15 @@ def test_new_environment_preview_supersedes_old_plan(
     current = manager.create("current")
     target = manager.create("target")
     manager.commit_switch(manager.prepare_switch(current["id"]))
-    old = manager.preview_install(target["id"], "rapidocr-cpu", ("tuna-pypi",))
-    fresh = manager.preview_install(target["id"], "rapidocr-cpu", ("pypi",))
+    old = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    fresh = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("pypi",))
 
     with pytest.raises(
         runtime_maintenance.RuntimeInstallPlanStale, match="preview again"
     ):
-        manager.install(old["plan_id"], target["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            old["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     assert manager.list()["active_id"] == current["id"]
     assert manager.list()["environments"][1]["status"] == "empty"
 
@@ -1163,7 +1375,7 @@ def test_new_environment_preview_supersedes_old_plan(
         },
     )
     installed = manager.install(
-        fresh["plan_id"], target["id"], "rapidocr-cpu", ("pypi",)
+        fresh["plan_id"], target["id"], "paddleocr-ort-cpu", ("pypi",)
     )
     assert installed["revision"] == 2
     assert installed["status"] == "installed"
@@ -1172,7 +1384,7 @@ def test_new_environment_preview_supersedes_old_plan(
     assert manager.list()["active_id"] == current["id"]
 
 
-def test_named_recipe_addition_preserves_compatible_engine(tmp_path: Path) -> None:
+def test_named_recipe_addition_rejects_incompatible_engine(tmp_path: Path) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -1184,15 +1396,16 @@ def test_named_recipe_addition_preserves_compatible_engine(tmp_path: Path) -> No
     registry = manager.paths.state_root / "environments.json"
     value = json.loads(registry.read_text(encoding="utf-8"))
     value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "rapidocr-cpu"}
+        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
     )
     registry.write_text(json.dumps(value), encoding="utf-8")
-    plan = manager.preview_install(item["id"], "mineru-cpu")
-    assert plan["requested_recipe"] == "mineru-cpu"
-    assert plan["recipe"] == "rapidocr+mineru-cpu"
-    explicit = manager.preview_install(item["id"], "rapidocr+mineru-cpu")
-    assert explicit["requested_recipe"] == "rapidocr+mineru-cpu"
-    assert explicit["recipe"] == "rapidocr+mineru-cpu"
+    before = registry.read_bytes()
+    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
+        manager.preview_install(item["id"], "mineru-cpu")
+    assert registry.read_bytes() == before
+    explicit = manager.preview_install(item["id"], "paddleocr-ort-cpu")
+    assert explicit["requested_recipe"] == "paddleocr-ort-cpu"
+    assert explicit["recipe"] == "paddleocr-ort-cpu"
     # #270：旧原生 Paddle 配方退役，预览安装以明确退役错误拒绝。
     with pytest.raises(ManagedEnvironmentError, match="retired"):
         manager.preview_install(item["id"], "paddleocr-cpu")
@@ -1215,7 +1428,7 @@ def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> N
     registry = manager.paths.state_root / "environments.json"
     value = json.loads(registry.read_text(encoding="utf-8"))
     value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "rapidocr-cpu"}
+        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
     )
     registry.write_text(json.dumps(value), encoding="utf-8")
     # 模拟旧版本保存的退役配方计划（preview 拒绝之前已落盘的文件）。
@@ -1240,7 +1453,7 @@ def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> N
         manager.install(plan["plan_id"], item["id"], "paddleocr-cpu", ("tuna-pypi",))
     latest = json.loads(registry.read_text(encoding="utf-8"))
     # 拒绝发生在写入之前：环境记录不被改写。
-    assert latest["environments"][item["id"]]["recipe"] == "rapidocr-cpu"
+    assert latest["environments"][item["id"]]["recipe"] == "paddleocr-ort-cpu"
 
 
 def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
@@ -1252,32 +1465,17 @@ def test_named_preview_includes_direct_url_dependencies(tmp_path: Path) -> None:
         base_python=sys._base_executable,
     )
     item = manager.create("cuda")
-    dependencies = manager.preview_install(item["id"], "rapidocr+mineru-cuda")[
+    dependencies = manager.preview_install(item["id"], "paddleocr-ort-cuda")[
         "dependencies"
     ]
-    assert "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl" in dependencies
-    assert "torch @ https://example.invalid/cu126/torch.whl" in dependencies
+    assert "onnxruntime==1.30.0" in dependencies
+    assert "nvidia-cudnn-cu13==9.27.0.42" in dependencies
 
 
 def _all_recipes_release(root: Path) -> tuple[Path, Path]:
-    """默认 release + mineru-standalone scope + Paddle 隔离锁：六配方全部可解析。"""
+    """默认 release + Paddle 隔离锁：可安装配方全部可解析。"""
     manifest, component = _release(root)
-    lock = manifest.parent / "mineru-standalone.lock"
-    lock.write_text(
-        "fastapi==1.0.0 \\\n    --hash=sha256:" + "1" * 64 + "\n"
-        "mineru==4.0.2 \\\n    --hash=sha256:" + "2" * 64 + "\n",
-        encoding="utf-8",
-    )
     value = json.loads(manifest.read_text(encoding="utf-8"))
-    value["profiles"]["win-x64-cpu"]["install_scopes"].append(
-        {
-            "scope_id": "mineru-standalone",
-            "component_ids": ["runtime_host", "mineru-cpu"],
-            "lock": lock.name,
-            "sha256": _sha(lock.read_bytes()),
-            "runtime_pack": None,
-        }
-    )
     paddle_cpu = manifest.parent / "requirements-win-x64-paddle-cpu.lock"
     paddle_cpu.write_text(
         "paddlepaddle==3.3.1 \\\n    --hash=sha256:" + "7" * 64 + "\n",
@@ -1345,9 +1543,11 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     )
     # 未绑定 standalone scope/Paddle 隔离锁的 manifest 不提供对应配方（与 preview 同源）。
     assert [entry["id"] for entry in manager.recipe_catalog()] == [
-        "rapidocr-cpu",
-        "rapidocr+mineru-cpu",
-        "rapidocr+mineru-cuda",
+        "paddleocr-ort-cpu",
+        "paddleocr-ort-cuda",
+        "paddleocr-ort-directml",
+        "mineru-cpu",
+        "mineru-cuda",
     ]
 
     standalone_manifest, standalone_component = _all_recipes_release(
@@ -1363,38 +1563,37 @@ def test_recipe_catalog_projects_manifest_bound_scopes(tmp_path: Path) -> None:
     assert full.list()["recipes"] == catalog
     # #270：旧原生 Paddle 配方已从可安装目录退役（记录/诊断保留）。
     assert [entry["id"] for entry in catalog] == [
-        "rapidocr-cpu",
+        "paddleocr-ort-cpu",
+        "paddleocr-ort-cuda",
+        "paddleocr-ort-directml",
         "mineru-cpu",
-        "rapidocr+mineru-cpu",
-        "rapidocr+mineru-cuda",
+        "mineru-cuda",
     ]
     entry = {item["id"]: item for item in catalog}
-    assert entry["rapidocr-cpu"]["display_name"] == "RapidOCR + RapidTable · CPU"
-    assert entry["rapidocr-cpu"]["configured_recognition_types"] == [
+    assert entry["paddleocr-ort-cpu"]["display_name"] == "PaddleOCR ONNX · CPU"
+    assert entry["paddleocr-ort-cpu"]["configured_recognition_types"] == [
         "text",
-        "rapid_table",
+        "table",
+        "structure",
     ]
-    assert entry["rapidocr-cpu"]["accelerator"] == "cpu"
-    assert entry["rapidocr-cpu"]["target_device"] == "cpu"
-    assert entry["rapidocr-cpu"]["python_version"] == "3.13.16"
-    assert entry["rapidocr-cpu"]["abi"] == "cp313"
-    assert entry["rapidocr-cpu"]["platform"] == "win_amd64"
+    assert entry["paddleocr-ort-cpu"]["accelerator"] == "cpu"
+    assert entry["paddleocr-ort-cpu"]["target_device"] == "cpu"
+    assert entry["paddleocr-ort-cpu"]["python_version"] == "3.13.16"
+    assert entry["paddleocr-ort-cpu"]["abi"] == "cp313"
+    assert entry["paddleocr-ort-cpu"]["platform"] == "win_amd64"
     # 旧原生 Paddle 配方退役：不再宣称任何识别类型，预览安装明确拒绝。
     target_record = _write_record(full, "b" * 32)
     with pytest.raises(ManagedEnvironmentError, match="retired"):
         full.preview_install(target_record["id"], "paddleocr-cuda")
     assert full._recipe_modes("paddleocr-cuda") == []
     assert entry["mineru-cpu"]["configured_recognition_types"] == ["document"]
-    assert entry["mineru-cpu"]["scope_id"] == "mineru-standalone"
-    assert "paddlepaddle==3.3.1" in entry["rapidocr+mineru-cpu"]["dependencies"]
-    assert (
-        "paddlepaddle-gpu @ https://example.invalid/cu126/paddle.whl"
-        in entry["rapidocr+mineru-cuda"]["dependencies"]
-    )
+    assert entry["mineru-cpu"]["scope_id"] == "default"
+    assert "paddleocr==3.7.0" in entry["paddleocr-ort-cpu"]["dependencies"]
+    assert "nvidia-cudnn-cu13==9.27.0.42" in entry["paddleocr-ort-cuda"]["dependencies"]
 
     # 目录与 preview 同源：锁、pin 与来源分类完全一致，前台不得另算。
     target = _write_record(full, "a" * 32)
-    for recipe in ("rapidocr-cpu", "rapidocr+mineru-cuda", "mineru-cpu"):
+    for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda", "mineru-cpu"):
         plan = full.preview_install(target["id"], recipe)
         assert entry[recipe]["recipe_lock"] == plan["recipe_lock"]
         assert entry[recipe]["dependencies"] == plan["dependencies"]
@@ -1491,8 +1690,8 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    scope, _accelerator = manager._recipe("rapidocr-cpu")
-    pinned = _pinned_versions(manager, "rapidocr-cpu")
+    scope, _accelerator = manager._recipe("paddleocr-ort-cpu")
+    pinned = _pinned_versions(manager, "paddleocr-ort-cpu")
 
     def healthy_probe(record: dict) -> dict:
         return {
@@ -1508,19 +1707,19 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         manager,
         "a" * 32,
         status="installed",
-        recipe="rapidocr-cpu",
+        recipe="paddleocr-ort-cpu",
         recipe_lock=scope.sha256,
     )
     b = _write_record(
         manager,
         "b" * 32,
         status="installed",
-        recipe="rapidocr-cpu",
+        recipe="paddleocr-ort-cpu",
         recipe_lock=scope.sha256,
     )
     empty = _write_record(manager, "c" * 32)
     legacy_no_evidence = _write_record(
-        manager, "d" * 32, status="installed", recipe="rapidocr-cpu"
+        manager, "d" * 32, status="installed", recipe="paddleocr-ort-cpu"
     )
     _write_record(
         manager,
@@ -1546,14 +1745,14 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         _atomic_json(manager._registry, data)
 
     before = manager._registry.read_bytes()
-    result = manager.find_compatible("rapidocr-cpu")
+    result = manager.find_compatible("paddleocr-ort-cpu")
     assert manager._registry.read_bytes() == before
-    assert result["recipe"] == "rapidocr-cpu"
+    assert result["recipe"] == "paddleocr-ort-cpu"
     assert result["recipe_lock"] == scope.sha256
     assert result["selected"] == {
         "environment_id": a["id"],
         "environment_revision": 1,
-        "recipe": "rapidocr-cpu",
+        "recipe": "paddleocr-ort-cpu",
         "selection_reason": "deterministic_id_order",
     }
     assert [item["environment_id"] for item in result["environments"]] == [
@@ -1581,7 +1780,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         data["active_id"] = b["id"]
         data["active_revision"] += 1
         _atomic_json(manager._registry, data)
-    result = manager.find_compatible("rapidocr-cpu")
+    result = manager.find_compatible("paddleocr-ort-cpu")
     assert result["selected"]["environment_id"] == b["id"]
     assert result["selected"]["selection_reason"] == "active_environment"
     by_id = {item["environment_id"]: item for item in result["environments"]}
@@ -1595,7 +1794,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         "_probe",
         lambda record: {**healthy_probe(record), "platform": "win_arm64"},
     )
-    wrong_platform = manager.find_compatible("rapidocr-cpu")
+    wrong_platform = manager.find_compatible("paddleocr-ort-cpu")
     assert wrong_platform["selected"] is None
     assert {
         item["reason_code"]
@@ -1612,7 +1811,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
             "versions": {**pinned, "fastapi": "2.0.0"},
         },
     )
-    drifted = manager.find_compatible("rapidocr-cpu")
+    drifted = manager.find_compatible("paddleocr-ort-cpu")
     assert drifted["selected"] is None
     assert {
         item["reason_code"]
@@ -1630,7 +1829,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
             "python": str(manager._venv_python(manager._safe_path(record))),
         },
     )
-    broken = manager.find_compatible("rapidocr-cpu")
+    broken = manager.find_compatible("paddleocr-ort-cpu")
     assert broken["selected"] is None
     assert {
         item["reason_code"]
@@ -1692,7 +1891,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    scope, accelerator = manager._recipe("rapidocr-cpu")
+    scope, accelerator = manager._recipe("paddleocr-ort-cpu")
     lock = tmp_path / "query.lock"
     lock.write_text(f"Paddle.GPU @ {url}\n", encoding="utf-8")
     scope = replace(scope, lock_path=lock, sha256=_sha(lock.read_bytes()))
@@ -1701,7 +1900,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
         manager,
         "a" * 32,
         status="installed",
-        recipe="rapidocr-cpu",
+        recipe="paddleocr-ort-cpu",
         recipe_lock=scope.sha256,
     )
     monkeypatch.setattr(
@@ -1717,7 +1916,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
     assert manager._scope_pins(scope) == [
         ("paddle-gpu", f"Paddle.GPU @ {url}", expected_version)
     ]
-    result = manager.find_compatible("rapidocr-cpu")
+    result = manager.find_compatible("paddleocr-ort-cpu")
     assert result["environments"][0]["reason_code"] == reason
     assert (result["selected"] is not None) == (
         reason == "selected_compatible_environment"
@@ -1738,7 +1937,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         base_python=sys._base_executable,
         install_runner=lambda _python, _scope, _endpoint: None,
     )
-    pinned = _pinned_versions(manager, "rapidocr-cpu")
+    pinned = _pinned_versions(manager, "paddleocr-ort-cpu")
     monkeypatch.setattr(
         manager,
         "_probe",
@@ -1755,9 +1954,9 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         ),
     )
     item = manager.create("reusable")
-    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     installed = manager.install(
-        plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
     )
     assert installed["status"] == "installed"
     record = manager._read()["environments"][item["id"]]
@@ -1782,7 +1981,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         },
     )
     assert (
-        reopened.find_compatible("rapidocr-cpu")["selected"]["environment_id"]
+        reopened.find_compatible("paddleocr-ort-cpu")["selected"]["environment_id"]
         == (item["id"])
     )
 
@@ -1795,7 +1994,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         "protocol_version": 2,
         "request_kind": "environment",
         "action": "find_compatible",
-        "recipe": "rapidocr-cpu",
+        "recipe": "paddleocr-ort-cpu",
         **base,
     }
     # CLI 在新 store 实例上运行真实探针；本测试的合成 venv 无包，
@@ -1817,7 +2016,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
     assert envelope["action"] == "find_compatible"
     assert envelope["result"]["selected"]["environment_id"] == item["id"]
     assert [recipe["id"] for recipe in envelope["result"]["recipes"]][0] == (
-        "rapidocr-cpu"
+        "paddleocr-ort-cpu"
     )
 
     unknown = {**request, "recipe": "not-a-recipe"}
@@ -1825,6 +2024,84 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
     failure = json.loads(capsys.readouterr().out)
     assert failure["ok"] is False
     assert "unknown engine recipe" in failure["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "failure,recipe,timeout",
+    [
+        ("CalledProcessError", "paddleocr-ort-cpu", 60),
+        ("TimeoutExpired", "paddleocr-ort-cpu", 60),
+        ("TimeoutExpired", "mineru-cpu", 20),
+    ],
+)
+def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    recipe: str,
+    timeout: int,
+) -> None:
+    from types import SimpleNamespace
+
+    from vibeocr.runtime.environments import managed_environments
+
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    record = _write_record(
+        manager, "probe-diagnostic", status="installed", recipe=recipe
+    )
+    root = manager._safe_path(record)
+    python = manager._venv_python(root)
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"test interpreter")
+    stderr = (
+        "discarded diagnostic prefix" + "x" * 2200 + "\nnative import failed: 诊断尾部"
+    )
+    ticks = iter((10.0, 10.0 + timeout + 0.25))
+    monkeypatch.setattr(
+        managed_environments, "time", SimpleNamespace(monotonic=lambda: next(ticks))
+    )
+
+    def run(command, **kwargs):
+        if "-B" in command:
+            assert kwargs["timeout"] == timeout
+            if failure == "TimeoutExpired":
+                raise subprocess.TimeoutExpired(
+                    command, timeout, stderr=stderr.encode()
+                )
+            raise subprocess.CalledProcessError(1, command, stderr=stderr)
+        assert kwargs["timeout"] == 20
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "prefix": str(root),
+                    "base_prefix": str(manager._expected_base_python().parent),
+                    "version": [
+                        int(part) for part in manager.manifest.python.version.split(".")
+                    ],
+                    "packages": (
+                        ["fastapi", "mineru"]
+                        if recipe == "mineru-cpu"
+                        else ["fastapi", "paddleocr", "paddlex", "onnxruntime"]
+                    ),
+                }
+            ),
+        )
+
+    monkeypatch.setattr(managed_environments.subprocess, "run", run)
+    result = manager._probe(record)
+    assert result["healthy"] is False
+    assert result["reason"] == "engine_import_failed"
+    assert result["detail"].startswith(f"{failure} after {timeout}.2s:")
+    assert result["detail"].endswith("\n" + stderr[-2000:])
+    assert "discarded diagnostic prefix" not in result["detail"]
 
 
 def test_named_install_rejects_native_import_failure_without_committing(
@@ -1836,19 +2113,18 @@ def test_named_install_rejects_native_import_failure_without_committing(
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        model = python.parent.parent / "models/rapidtable/slanet-plus.onnx"
-        model.parent.mkdir(parents=True)
-        model.write_bytes(b"model")
-        for name in ("fastapi", "rapidocr", "rapid-table", "onnxruntime"):
+        for name in ("fastapi", "paddleocr", "paddlex", "onnxruntime"):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
                 f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
             )
         (site / "onnxruntime").mkdir()
-        (site / "onnxruntime" / "__init__.py").write_text("", encoding="utf-8")
-        (site / "pyclipper").mkdir()
-        (site / "pyclipper" / "__init__.py").write_text(
+        (site / "paddleocr").mkdir()
+        (site / "paddleocr" / "__init__.py").write_text(
+            "class PaddleOCR: pass", encoding="utf-8"
+        )
+        (site / "onnxruntime" / "__init__.py").write_text(
             "raise ImportError('native extension cannot load')\n", encoding="utf-8"
         )
 
@@ -1860,13 +2136,21 @@ def test_named_install_rejects_native_import_failure_without_committing(
         install_runner=install,
     )
     item = manager.create("native")
-    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
-    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    with pytest.raises(
+        ManagedEnvironmentError, match="engine_import_failed"
+    ) as excinfo:
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
+    assert "CalledProcessError after " in str(excinfo.value)
+    assert "native extension cannot load" in str(excinfo.value)
     surviving = manager.list()["environments"][0]
     assert surviving["status"] == "empty"
     assert surviving["revision"] == 1
     assert surviving["last_install_failure"]["reason_code"] == "engine_import_failed"
+    assert "CalledProcessError after " in surviving["last_install_failure"]["detail"]
+    assert "native extension cannot load" in surviving["last_install_failure"]["detail"]
     candidate = manager._staging_path(item["id"])
     assert candidate.is_dir()
     # 模拟旧实现把坏候选提交进注册表：候选换入固定路径，探针必须
@@ -1880,7 +2164,7 @@ def test_named_install_rejects_native_import_failure_without_committing(
             "revision": 2,
             "path": item["id"],
             "status": "installed",
-            "recipe": "rapidocr-cpu",
+            "recipe": "paddleocr-ort-cpu",
             "source_ids": ["tuna-pypi"],
         }
     )
@@ -1893,52 +2177,44 @@ def test_named_install_rejects_native_import_failure_without_committing(
     assert "shorter Portable location" in unavailable["reason"]
 
 
-def test_named_install_rapidocr_probe_imports_real_transitive_closure(
+def test_named_install_paddleocr_probe_imports_real_transitive_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 回归 #104：rapidocr 的 __init__ 惰性解析 RapidOCR，旧探针只
-    # import pyclipper/onnxruntime（甚至裸 import rapidocr）都能通过，
-    # 而 Supervisor 实际执行的 from rapidocr import RapidOCR 会在
-    # ch_ppocr_det → shapely.lib 的原生传递依赖上失败（长路径 DLL load
-    # failed）。探针必须运行同一导入闭包，在 install 提交与
-    # prepare_switch 之前 fail closed，且不实例化引擎、不下载模型。
+    # Paddle 惰性导入的真实符号闭包失败必须在安装/切换前被发现；不实例化引擎。
     _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        model = python.parent.parent / "models/rapidtable/slanet-plus.onnx"
-        model.parent.mkdir(parents=True)
-        model.write_bytes(b"model")
-        for name in ("fastapi", "rapidocr", "rapid-table", "onnxruntime", "shapely"):
+        for name in ("fastapi", "paddleocr", "paddlex", "onnxruntime", "shapely"):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
                 f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
             )
-        # 旧探针的叶子依赖必须健康：契约只在 rapidocr 真实导入闭包上失败。
+        # 旧探针的叶子依赖必须健康：契约只在 paddleocr 真实导入闭包上失败。
         for name in ("pyclipper", "onnxruntime"):
             (site / name).mkdir()
             (site / name / "__init__.py").write_text("", encoding="utf-8")
-        (site / "rapidocr").mkdir()
-        (site / "rapidocr" / "__init__.py").write_text(
+        (site / "paddleocr").mkdir()
+        (site / "paddleocr" / "__init__.py").write_text(
             "from importlib import import_module\n"
-            "_LAZY_IMPORTS = {'RapidOCR': 'rapidocr.main'}\n"
+            "_LAZY_IMPORTS = {'PaddleOCR': 'paddleocr.main'}\n"
             "def __getattr__(name):\n"
             "    if name in _LAZY_IMPORTS:\n"
             "        return getattr(import_module(_LAZY_IMPORTS[name]), name)\n"
             "    raise AttributeError(name)\n",
             encoding="utf-8",
         )
-        (site / "rapidocr" / "main.py").write_text(
-            "from rapidocr.ch_ppocr_det import TextDetector\n"
-            "class RapidOCR:\n"
+        (site / "paddleocr" / "main.py").write_text(
+            "from paddleocr.ch_ppocr_det import TextDetector\n"
+            "class PaddleOCR:\n"
             "    def __init__(self, *args, **kwargs):\n"
             "        raise AssertionError('probe must not instantiate the engine')\n",
             encoding="utf-8",
         )
-        det = site / "rapidocr" / "ch_ppocr_det"
+        det = site / "paddleocr" / "ch_ppocr_det"
         det.mkdir()
         (det / "__init__.py").write_text(
             "from .main import TextDetector\n", encoding="utf-8"
@@ -1970,9 +2246,11 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
     )
     item = manager.create("closure")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "rapidocr-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
-        manager.install(plan["plan_id"], item["id"], "rapidocr-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
     surviving = manager.list()["environments"][0]
     assert surviving["status"] == "empty"
     assert surviving["revision"] == 1
@@ -1996,7 +2274,7 @@ def test_named_install_rapidocr_probe_imports_real_transitive_closure(
             "revision": 2,
             "path": item["id"],
             "status": "installed",
-            "recipe": "rapidocr-cpu",
+            "recipe": "paddleocr-ort-cpu",
             "source_ids": ["tuna-pypi"],
         }
     )
@@ -2072,30 +2350,7 @@ def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) ->
 
 def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
     manifest, component = _release(tmp_path / "release")
-    lock = manifest.parent / "mineru-standalone.lock"
-    lock.write_text(
-        "fastapi==1.0.0 \\\n    --hash=sha256:" + "1" * 64 + "\n"
-        "mineru==4.0.2 \\\n    --hash=sha256:" + "2" * 64 + "\n",
-        encoding="utf-8",
-    )
     value = json.loads(manifest.read_text(encoding="utf-8"))
-    value["profiles"]["win-x64-cpu"]["install_scopes"].append(
-        {
-            "scope_id": "mineru-standalone",
-            "component_ids": ["runtime_host", "mineru-cpu"],
-            "lock": lock.name,
-            "sha256": _sha(lock.read_bytes()),
-            "runtime_pack": None,
-        }
-    )
-    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    binding = json.loads(component.read_text(encoding="utf-8"))
-    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
-    component.write_text(json.dumps(binding), encoding="utf-8")
-    assert (
-        load_runtime_manifest(manifest).profiles["win-x64-cpu"].scopes[-1].scope_id
-        == "mineru-standalone"
-    )
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
@@ -2113,19 +2368,18 @@ def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
         python_archive=manifest.parent / value["python"]["archive"],
         python_version=value["python"]["version"],
         python_source_url=value["python"]["source_url"],
-        installer_archive=manifest.parent / value["installer"]["archive"],
+        installer_executable=manifest.parent / value["installer"]["executable"],
         version="0.7.0",
         source_commit="0" * 40,
         build_workflow="tests/runtime",
         output_dir=tmp_path / "output",
         capabilities=("ocr.recognition.v2",),
-        mineru_cpu_lock=lock,
     )
     assert (generated.parent / "runtime-code/vibeocr/runtime/host/main.py").is_file()
-    assert any(
-        scope.scope_id == "mineru-standalone"
-        for scope in load_runtime_manifest(generated).profiles["win-x64-cpu"].scopes
-    )
+    scope = load_runtime_manifest(generated).profiles["win-x64-cpu"].scopes[0]
+    assert scope.scope_id == "default"
+    assert scope.component_ids == ("runtime_host", "mineru-cpu")
+    assert "rapidocr" not in scope.lock_path.read_text(encoding="utf-8")
 
 
 def test_frozen_manager_exposes_named_environment_list(
@@ -2153,9 +2407,11 @@ def test_frozen_manager_exposes_named_environment_list(
     response = json.loads(capsys.readouterr().out)
     assert response["response_kind"] == "environment"
     assert [entry["id"] for entry in response["result"].pop("recipes")] == [
-        "rapidocr-cpu",
-        "rapidocr+mineru-cpu",
-        "rapidocr+mineru-cuda",
+        "paddleocr-ort-cpu",
+        "paddleocr-ort-cuda",
+        "paddleocr-ort-directml",
+        "mineru-cpu",
+        "mineru-cuda",
     ]
     # 硬件投影与安装预检同一真相源：只读探测，不安装、不缓存。
     assert response["result"].pop("hardware") == {
@@ -2639,7 +2895,7 @@ def test_failed_repair_preserves_previous_runtime_until_verified_commit(
         accelerator="cpu",
         install_runner=fail,
         component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "rapidocr-base"
+            component_id: component_id != "runtime_host"
             for component_id in component_ids
         },
         operation_id="failed-repair",
@@ -2687,7 +2943,7 @@ def test_component_import_probe_reports_integrity_failed_drift(
         install_runner=_fake_install,
         install_component_ids=(),
         component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "rapidocr-base"
+            component_id: component_id != "runtime_host"
             for component_id in component_ids
         },
     )
@@ -2702,7 +2958,7 @@ def test_component_import_probe_reports_integrity_failed_drift(
     assert inspection.integrity == "not-installed"
 
 
-def test_base_component_probe_uses_rapidocr_binding(
+def test_base_component_probe_uses_runtime_host_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime_root = tmp_path / "runtime"
@@ -2713,7 +2969,7 @@ def test_base_component_probe_uses_rapidocr_binding(
     def run(command, **_kwargs):  # type: ignore[no-untyped-def]
         modules = json.loads(command[-1])
         result = {
-            component_id: module == "rapidocr"
+            component_id: module == "fastapi"
             for component_id, module in modules.items()
         }
         return subprocess.CompletedProcess(
@@ -2727,9 +2983,9 @@ def test_base_component_probe_uses_rapidocr_binding(
 
     assert probe_runtime_components(
         runtime_root,
-        ("rapidocr-base",),
+        ("runtime_host",),
         profile_id="win-x64-base",
-    ) == {"rapidocr-base": True}
+    ) == {"runtime_host": True}
 
 
 def test_runtime_control_inspect_probes_components_once(tmp_path: Path) -> None:
@@ -2859,7 +3115,6 @@ def test_inspect_and_ensure_report_covering_profile_after_base_only_install(
         assert result.profile["profile_id"] == "win-x64-base"
         assert result.profile["accelerator"] == "cpu"
         assert [item["component_id"] for item in result.profile["components"]] == [
-            "rapidocr-base",
             "runtime_host",
         ]
         # 覆盖 profile 投影内全部组件都属于已安装闭包，desired ready 如实。
@@ -2894,12 +3149,12 @@ def test_component_desired_state_not_required_outside_installed_closure(
     assert inspection.state.status == "ready"
     assert inspection.profile["profile_id"] == "win-x64-cu126"
     statuses = {item["component_id"]: item for item in inspection.profile["components"]}
-    for component_id in ("paddleocr-cuda", "mineru-cuda"):
+    for component_id in ("mineru-cuda",):
         assert statuses[component_id]["desired_state"] == "not_required"
         assert statuses[component_id]["state"] == "not_required"
         assert statuses[component_id]["drift_reason"] == "none"
         assert statuses[component_id]["repairable"] is False
-    for component_id in ("rapidocr-base", "gpu_runtime", "runtime_host"):
+    for component_id in ("gpu_runtime", "runtime_host"):
         assert statuses[component_id]["desired_state"] == "ready"
         assert statuses[component_id]["actual_state"] == "ready"
 
@@ -2937,7 +3192,7 @@ def test_runtime_status_ready_for_healthy_base_only_runtime(
     assert status["service_state"] == "ready"
     assert status["profile"]["profile_id"] == "win-x64-base"
     statuses = {item["component_id"]: item for item in status["profile"]["components"]}
-    assert statuses["rapidocr-base"]["actual_state"] == "ready"
+    assert statuses["runtime_host"]["actual_state"] == "ready"
     assert all(
         item["desired_state"] == "ready" for item in status["profile"]["components"]
     )
@@ -2959,7 +3214,7 @@ def test_repair_of_in_sync_component_succeeds_without_claiming_global_ready(
         runtime_manifest=manifest,
         accelerator="cpu",
         install_runner=install,
-        install_component_ids=(),
+        install_component_ids=("mineru-cpu",),
     )
     initial.ensure()
     repair = RuntimeInstaller(
@@ -2968,10 +3223,9 @@ def test_repair_of_in_sync_component_succeeds_without_claiming_global_ready(
         runtime_manifest=manifest,
         accelerator="cpu",
         install_runner=install,
-        install_component_ids=(),
+        install_component_ids=("mineru-cpu",),
         component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "rapidocr-base"
-            for component_id in component_ids
+            component_id: component_id != "mineru-cpu" for component_id in component_ids
         },
         component_ids=("runtime_host",),
         operation_id="repair-ready-component",
@@ -2986,7 +3240,14 @@ def test_repair_of_in_sync_component_succeeds_without_claiming_global_ready(
     assert snapshot["operation_state"] == "succeeded"
     assert snapshot["requested_component_ids"] == ["runtime_host"]
     assert "effective_component_ids" not in snapshot
-    assert repair.profile_payload()["components"][0]["actual_state"] == "drifted"
+    assert (
+        next(
+            item
+            for item in repair.profile_payload()["components"]
+            if item["component_id"] == "mineru-cpu"
+        )["actual_state"]
+        == "drifted"
+    )
 
 
 def test_component_lock_capability_mismatch_is_rejected(tmp_path: Path) -> None:
@@ -3129,17 +3390,16 @@ def test_component_repair_reports_requested_and_effective_scope(
         accelerator="cpu",
         install_runner=install,
         operation_id="repair-1",
-        component_ids=("rapidocr-base",),
+        component_ids=("runtime_host",),
     )
     repair.repair()
 
     assert len(calls) == 2
     snapshot = repair.maintenance_snapshot()
     assert snapshot is not None
-    assert snapshot["requested_component_ids"] == ["rapidocr-base"]
+    assert snapshot["requested_component_ids"] == ["runtime_host"]
     # #270：缺省闭包不再包含退役原生 Paddle 组件（base + MinerU）。
     assert set(snapshot["effective_component_ids"]) == {
-        "rapidocr-base",
         "runtime_host",
         "mineru-cpu",
     }
@@ -3153,20 +3413,12 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     manifest, component_lock = _release(tmp_path / "release")
     manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
     manifest_payload["profiles"]["win-x64-cpu"]["components"] = [
-        {
-            "component_id": "rapidocr-base",
-            "display_name": "RapidOCR base inference",
-        },
-        {
-            "component_id": "paddleocr-cpu",
-            "display_name": "PaddleOCR CPU inference",
-        },
+        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
         {
             "component_id": "mineru-cpu",
             "display_name": "MinerU CPU document parsing",
             "version": "4.0.0",
         },
-        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
     ]
     manifest.write_text(json.dumps(manifest_payload) + "\n", encoding="utf-8")
     lock_payload = json.loads(component_lock.read_text(encoding="utf-8"))
@@ -3414,8 +3666,8 @@ def test_install_progress_and_http_status_share_the_persisted_snapshot(
     assert status["maintenance"]["sequence"] == events[-1]["snapshot"]["sequence"]
     assert status["maintenance"]["message_code"] == "runtime.ensure_complete"
     assert status["profile"]["components"][0] == {
-        "component_id": "rapidocr-base",
-        "display_name": "RapidOCR 基础识别",
+        "component_id": "runtime_host",
+        "display_name": "Runtime 服务环境",
         "state": "ready",
         "desired_state": "ready",
         "desired_version": None,
@@ -3429,7 +3681,7 @@ def test_install_progress_and_http_status_share_the_persisted_snapshot(
     monkeypatch.setattr(
         "vibeocr.runtime.environments.runtime_maintenance.probe_runtime_components",
         lambda _root, component_ids, **_kwargs: {
-            component_id: component_id != "rapidocr-base"
+            component_id: component_id != "runtime_host"
             for component_id in component_ids
         },
     )
@@ -3609,6 +3861,7 @@ def _run_default_installer(
     *,
     with_base_pack: bool,
     profile: str = "win-x64-base",
+    with_shared_pool: bool = False,
 ) -> tuple[list[list[str]], Path, Path]:
     """Run ``_default_install_runner`` with captured uv commands.
 
@@ -3618,7 +3871,11 @@ def _run_default_installer(
     """
     from vibeocr.runtime.environments import runtime_installer as installer
 
-    manifest_path, _ = _release(tmp_path / "release", with_base_pack=with_base_pack)
+    manifest_path, _ = _release(
+        tmp_path / "release",
+        with_base_pack=with_base_pack,
+        with_shared_pool=with_shared_pool,
+    )
     manifest = load_runtime_manifest(manifest_path)
     partial_root = tmp_path / "runtimes" / "runtime-0" / "partial"
     partial_root.mkdir(parents=True)
@@ -3670,8 +3927,7 @@ class TestOfflineRuntimePack:
         ]
         pack_dir = Path(find_links)
         # pack 已解压到 state 缓存且包含全部 wheel。
-        assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
-        assert (pack_dir / "onnxruntime-1.28.0-cp313-cp313-win_amd64.whl").is_file()
+        assert (pack_dir / "fastapi-1.0.0-py3-none-any.whl").is_file()
         assert (pack_dir / ".complete").is_file()
         # 完整标记存在时重复安装幂等复用，不重复解压。
         marker_before = (pack_dir / ".complete").stat().st_mtime_ns
@@ -3697,14 +3953,14 @@ class TestOfflineRuntimePack:
         )
         first_command = commands[0]
         pack_dir = Path(first_command[first_command.index("--find-links") + 1])
-        assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
+        assert (pack_dir / "fastapi-1.0.0-py3-none-any.whl").is_file()
 
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
         profile = document["profiles"]["win-x64-base"]
         pack_path = manifest_path.parent / profile["runtime_pack"][0]
         with zipfile.ZipFile(pack_path, mode="w") as archive:
-            archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
-            archive.writestr("rapidocr-3.9.2-new-py3-none-any.whl", b"new-wheel")
+            archive.writestr("pack-requirements.txt", "fastapi==1.0.0\n")
+            archive.writestr("fastapi-1.0.0-new-py3-none-any.whl", b"new-wheel")
         profile["runtime_pack_sha256"] = [_sha(pack_path.read_bytes())]
         manifest_path.write_text(json.dumps(document), encoding="utf-8")
         manifest = load_runtime_manifest(manifest_path)
@@ -3717,8 +3973,8 @@ class TestOfflineRuntimePack:
             manifest.profiles["win-x64-base"].scopes[0],
             _pypi_source(),
         )
-        assert not (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").exists()
-        assert (pack_dir / "rapidocr-3.9.2-new-py3-none-any.whl").read_bytes() == (
+        assert not (pack_dir / "fastapi-1.0.0-py3-none-any.whl").exists()
+        assert (pack_dir / "fastapi-1.0.0-new-py3-none-any.whl").read_bytes() == (
             b"new-wheel"
         )
 
@@ -3899,7 +4155,6 @@ def test_cuda_gpu_only_selection_uses_exact_install_scope(
         (runtime.paths.runtime_root / ".installed.json").read_text(encoding="utf-8")
     )
     assert marker["component_ids"] == [
-        "rapidocr-base",
         "runtime_host",
         "gpu_runtime",
     ]
@@ -4076,7 +4331,7 @@ def test_full_profile_without_pack_falls_back_online(
             next(
                 scope
                 for scope in manifest.profiles["win-x64-cpu"].scopes
-                if scope.scope_id == "mineru"
+                if scope.scope_id == "default"
             ),
             _pypi_source(),
         )
@@ -4117,6 +4372,153 @@ def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
         [part1, part2], tmp_path / "cache", expected_sha256=binding
     )
     assert again == pack_dir
+
+
+def test_shared_pool_tuple_extracts_per_scope_cache(tmp_path: Path) -> None:
+    """共享 pool + 成员 requirements zip 的元组解包：各 scope 独立缓存目录。"""
+    from vibeocr.runtime.environments import runtime_installer as installer
+
+    base_requirements = tmp_path / "pool.requirements-win-x64-base.zip"
+    with zipfile.ZipFile(base_requirements, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "fastapi==1.0.0\n")
+    cpu_requirements = tmp_path / "pool.requirements-win-x64-paddle-ort-cpu.zip"
+    with zipfile.ZipFile(cpu_requirements, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "paddleocr==3.7.0\n")
+    pool = tmp_path / "pool.zip"
+    with zipfile.ZipFile(pool, mode="w") as archive:
+        archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi")
+        archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr")
+    cache = tmp_path / "cache"
+
+    base_dir = installer._extract_runtime_pack(
+        [base_requirements, pool],
+        cache,
+        expected_sha256=(
+            _sha(base_requirements.read_bytes()),
+            _sha(pool.read_bytes()),
+        ),
+    )
+    cpu_dir = installer._extract_runtime_pack(
+        [cpu_requirements, pool],
+        cache,
+        expected_sha256=(
+            _sha(cpu_requirements.read_bytes()),
+            _sha(pool.read_bytes()),
+        ),
+    )
+
+    # 缓存目录以首个成员命名：各 scope 独立，不互相重建。
+    assert base_dir.name == "pool.requirements-win-x64-base"
+    assert cpu_dir.name == "pool.requirements-win-x64-paddle-ort-cpu"
+    assert (base_dir / "pack-requirements.txt").read_text(encoding="utf-8") == (
+        "fastapi==1.0.0\n"
+    )
+    assert (cpu_dir / "pack-requirements.txt").read_text(encoding="utf-8") == (
+        "paddleocr==3.7.0\n"
+    )
+    for directory in (base_dir, cpu_dir):
+        assert (directory / "fastapi-1.0.0-py3-none-any.whl").is_file()
+        assert (directory / "paddleocr-3.7.0-py3-none-any.whl").is_file()
+        assert (directory / ".complete").is_file()
+
+
+def test_load_runtime_manifest_hashes_each_shared_pool_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一 pool 分片被多个绑定引用时，每次加载只对文件哈希一次。"""
+    from vibeocr.runtime.environments import runtime_manifest as manifest_module
+
+    manifest_path, _ = _release(tmp_path / "release", with_shared_pool=True)
+    counts: dict[str, int] = {}
+    original = manifest_module.sha256_file
+
+    def counting(path: Path) -> str:
+        key = str(path)
+        counts[key] = counts.get(key, 0) + 1
+        return original(path)
+
+    monkeypatch.setattr(manifest_module, "sha256_file", counting)
+    load_runtime_manifest(manifest_path)
+    pool_reads = [
+        count
+        for path, count in counts.items()
+        if path.endswith("pool-win-x64-0.7.0.zip")
+    ]
+    assert pool_reads == [1]
+
+
+class TestSharedWheelPool:
+    def test_base_scope_installs_precise_requirements_from_shared_pool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands, _partial_root, _manifest_path = _run_default_installer(
+            tmp_path, monkeypatch, with_base_pack=False, with_shared_pool=True
+        )
+        install = commands[0]
+        assert "--no-index" in install
+        assert "--require-hashes" not in install
+        assert "--only-binary=:all:" in install
+        pack_dir = Path(install[install.index("--find-links") + 1])  # type: ignore[arg-type]
+        assert pack_dir.name == (
+            "vibeocr-runtime-pool-win-x64-0.7.0.requirements-win-x64-base"
+        )
+        requirements = (pack_dir / "pack-requirements.txt").read_text(encoding="utf-8")
+        # 精确闭包：base 拿 base 的 numpy pin，不拿 Paddle 的 2.3.5。
+        assert "numpy==2.5.3" in requirements
+        assert "numpy==2.3.5" not in requirements
+        # 解包后的共享目录含全量 wheel（两个 numpy 版本共存，各取所需）。
+        assert (pack_dir / "numpy-2.5.3-cp313-cp313-win_amd64.whl").is_file()
+        assert (pack_dir / "numpy-2.3.5-cp313-cp313-win_amd64.whl").is_file()
+        assert install[install.index("-r") + 1] == str(  # type: ignore[arg-type]
+            pack_dir / "pack-requirements.txt"
+        )
+
+    def test_paddle_scopes_install_their_own_requirements_from_shared_pool(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibeocr.runtime.environments import managed_environments
+
+        manifest_path, component = _release(tmp_path / "release", with_shared_pool=True)
+        manifest = load_runtime_manifest(manifest_path)
+        commands: list[list[str]] = []
+        monkeypatch.setattr(
+            managed_environments,
+            "_run_install_command",
+            lambda command, **kwargs: commands.append(list(command)),
+        )
+        store = managed_environments.ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest_path,
+            base_python=Path(sys.executable),
+        )
+        expectations = {
+            "cpu": ("onnxruntime==1.30.0", "onnxruntime-directml"),
+            "directml": ("onnxruntime-directml==1.24.4", "onnxruntime=="),
+        }
+        for device, (required, forbidden) in expectations.items():
+            commands.clear()
+            store._install_scope(
+                Path(sys.executable),
+                manifest.paddle_onnx_environments[f"paddleocr-ort-{device}"],
+                "https://example.invalid/simple/",
+            )
+            install = commands[0]
+            assert "--no-index" in install
+            pack_dir = Path(install[install.index("--find-links") + 1])  # type: ignore[arg-type]
+            assert pack_dir.name == (
+                f"vibeocr-runtime-pool-win-x64-0.7.0.requirements-"
+                f"win-x64-paddle-ort-{device}"
+            )
+            requirements = (pack_dir / "pack-requirements.txt").read_text(
+                encoding="utf-8"
+            )
+            # CPU/DirectML 各自的 ONNX namespace 精确隔离。
+            assert required in requirements
+            assert forbidden not in requirements
+            assert install[install.index("-r") + 1] == str(  # type: ignore[arg-type]
+                pack_dir / "pack-requirements.txt"
+            )
 
 
 def test_old_runtime_pack_marker_rebuilds_only_its_cache_directory(
@@ -4216,10 +4618,10 @@ def test_ensure_with_explicit_base_only_scope_installs_base_lock(
 
 
 @pytest.mark.parametrize(
-    ("install_component_ids", "expected_profile", "expected_ocr_import"),
+    ("install_component_ids", "expected_profile"),
     [
-        ((), "win-x64-base", "rapidocr"),
-        (("document_parsing",), "win-x64-cpu", "rapidocr"),
+        ((), "win-x64-base"),
+        (("document_parsing",), "win-x64-cpu"),
     ],
 )
 def test_install_probe_uses_actual_install_scope_profile(
@@ -4227,7 +4629,6 @@ def test_install_probe_uses_actual_install_scope_profile(
     monkeypatch: pytest.MonkeyPatch,
     install_component_ids: tuple[str, ...],
     expected_profile: str,
-    expected_ocr_import: str,
 ) -> None:
     manifest, component = _release(tmp_path / "release")
 
@@ -4238,15 +4639,7 @@ def test_install_probe_uses_actual_install_scope_profile(
     ) -> dict[str, bool]:
         if runtime_root.name != "runtime.installing":
             return dict.fromkeys(component_ids, True)
-        return {
-            component_id: (
-                runtime_component_binding(profile_id, component_id).import_name
-                == expected_ocr_import
-                if component_id == "rapidocr-base"
-                else profile_id == expected_profile
-            )
-            for component_id in component_ids
-        }
+        return dict.fromkeys(component_ids, profile_id == expected_profile)
 
     installer = RuntimeInstaller(
         product_root=tmp_path / "product",
@@ -4354,9 +4747,8 @@ def test_ensure_with_optional_components_reports_independent_closure(
     snapshot = installer.maintenance_snapshot()
     assert snapshot["requested_component_ids"] == ["mineru-cpu"]
     assert snapshot["effective_component_ids"] == [
-        "rapidocr-base",
-        "mineru-cpu",
         "runtime_host",
+        "mineru-cpu",
     ]
 
 
@@ -4478,7 +4870,7 @@ def test_startup_selection_surfaces_retired_paddle_as_unsupported(
         component_probe=probe,
     )
     inspection = current.inspect_snapshot(emit=False)
-    assert inspection.state.integrity == "verified"
+    assert inspection.state.integrity == "not-installed"
     # 旧 marker 携带的退役选择不再回灌：启动选择被标注不支持（None），
     # 当前安装闭包也不含 paddleocr-cuda。
     assert inspection.state.startup_install_component_ids is None
@@ -4598,9 +4990,8 @@ def test_base_only_ensure_probes_with_base_binding_not_plan_binding(
 ) -> None:
     """base-only 安装的漂移探测必须用 base profile 的 import 绑定。
 
-    回归：accelerator=cpu + 显式空安装范围时，已安装 ocr_engine 的绑定是
-    RapidOCR；旧实现按 cpu plan 绑定 PaddleOCR 探测，会把刚装好的 base
-    闭包整体判为漂移，ensure 最终以 "did not verify" 失败。
+    accelerator=cpu + 显式空安装范围时，应按 base host 闭包探测，
+    不因当前计划为 cpu 而把尚未安装的 MinerU 视为基础闭包漂移。
     """
 
     manifest, component = _release(tmp_path / "release")
@@ -4610,8 +5001,7 @@ def test_base_only_ensure_probes_with_base_binding_not_plan_binding(
         _runtime_root: Path, component_ids: tuple[str, ...], profile_id: str
     ) -> dict[str, bool]:
         probe_profiles.append(profile_id)
-        # 只按“绑定是否来自 base profile”判定：base 绑定（rapidocr）已装，
-        # cpu plan 绑定（paddleocr）在 base-only 安装中不存在。
+        # 只按绑定是否来自 base profile 判定；full cpu 尚未安装。
         return {
             component_id: profile_id == "win-x64-base" for component_id in component_ids
         }
@@ -4679,35 +5069,29 @@ def test_drift_projection_uses_covering_profile_declared_versions(
         "_cached_runtime_component_probe",
         lambda _root, component_ids, **_kwargs: dict.fromkeys(component_ids, True),
     )
-    """base-only 安装的版本比对必须使用稳定的 rapidocr-base 身份。"""
+    """base-only 安装按 Runtime host 绑定比较版本，不能把 full MinerU 视为已安装。"""
 
     manifest_path, component = _release(tmp_path / "release")
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
     # 声明组件必须与 loader 派生的稳定 id 顺序一致，仅注入版本差异
     document["profiles"]["win-x64-base"]["components"] = [
         {
-            "component_id": "rapidocr-base",
-            "display_name": "RapidOCR base inference",
-            "version": "3.9.2",
+            "component_id": "runtime_host",
+            "display_name": "Runtime HTTP host",
+            "version": "1.0.0",
         },
-        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
     ]
     document["profiles"]["win-x64-cpu"]["components"] = [
         {
-            "component_id": "rapidocr-base",
-            "display_name": "RapidOCR base inference",
-            "version": "3.9.2",
-        },
-        {
-            "component_id": "paddleocr-cpu",
-            "display_name": "PaddleOCR CPU inference",
-            "version": "3.7.0",
+            "component_id": "runtime_host",
+            "display_name": "Runtime HTTP host",
+            "version": "1.0.0",
         },
         {
             "component_id": "mineru-cpu",
             "display_name": "MinerU CPU document parsing",
+            "version": "4.0.10",
         },
-        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
     ]
     manifest_path.write_text(
         json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
@@ -4723,10 +5107,10 @@ def test_drift_projection_uses_covering_profile_declared_versions(
     loaded = load_runtime_manifest(manifest_path)
 
     runtime_root = tmp_path / "product" / "runtime"
-    dist_info = runtime_root / "Lib" / "site-packages" / "rapidocr-3.9.2.dist-info"
+    dist_info = runtime_root / "Lib" / "site-packages" / "fastapi-1.0.0.dist-info"
     dist_info.mkdir(parents=True)
     (dist_info / "METADATA").write_text(
-        "Metadata-Version: 2.1\nName: rapidocr\nVersion: 3.9.2\n",
+        "Metadata-Version: 2.1\nName: fastapi\nVersion: 1.0.0\n",
         encoding="utf-8",
     )
     (runtime_root / "python.exe").write_bytes(b"python")
@@ -4738,7 +5122,6 @@ def test_drift_projection_uses_covering_profile_declared_versions(
                 "manifest_sha256": loaded.sha256,
                 "accelerator": "cpu",
                 "component_ids": [
-                    "rapidocr-base",
                     "runtime_host",
                 ],
             }
@@ -4775,10 +5158,9 @@ def test_drift_projection_uses_covering_profile_declared_versions(
         entry["component_id"]: entry["actual_state"] for entry in cpu_view["components"]
     }
 
-    assert base_states["rapidocr-base"] == "ready"
     assert base_states["runtime_host"] == "ready"
-    assert cpu_states["rapidocr-base"] == "ready"
-    assert cpu_states["paddleocr-cpu"] == "missing"
+    assert cpu_states["runtime_host"] == "ready"
+    assert cpu_states["mineru-cpu"] == "missing"
 
     installer = RuntimeInstaller(
         product_root=tmp_path / "product",
@@ -5052,9 +5434,12 @@ def test_install_runner_rejects_native_paddle_scopes(tmp_path, monkeypatch):
     manifest = load_runtime_manifest(manifest_path)
     paddle_lock = tmp_path / "paddle.lock"
     paddle_lock.write_text("paddlepaddle==3.3.1")
-    default_scope = manifest.profiles["win-x64-cpu"].scopes[0]
+    default_scope = replace(
+        manifest.profiles["win-x64-cpu"].scopes[0],
+        component_ids=("runtime_host", "paddleocr-cpu"),
+    )
     bound_scope = replace(
-        default_scope,
+        manifest.profiles["win-x64-cpu"].scopes[0],
         paddle_environment=PaddleEnvironment(paddle_lock, "a" * 64),
     )
     root = tmp_path / "candidate"
@@ -5158,7 +5543,7 @@ def test_resolve_report_accepts_only_files_in_bound_download_cache(tmp_path):
         installer._parse_resolve_report(report)
 
 
-@pytest.mark.parametrize("component", ["paddleocr-cuda", "gpu_runtime", "mineru-cuda"])
+@pytest.mark.parametrize("component", ["gpu_runtime", "mineru-cuda"])
 def test_gpu_probe_fails_when_import_works_but_device_is_unavailable(
     tmp_path, monkeypatch, component
 ):

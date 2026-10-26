@@ -696,7 +696,7 @@ test("批量同项重试立即分类解码不可用，无关 batch 快照不被�
   });
   await sendState(page, "imageConversion", {
     ...batch,
-    taskEngine: "rapid_text",
+    taskEngine: "paddle_text",
     exportImage: null,
     exportImageId: null,
     exportImageError: null,

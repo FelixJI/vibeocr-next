@@ -317,18 +317,10 @@ public sealed class SelectionUiTests
                     [
                         new Wire.OcrEngineDescriptor
                         {
-                            Id = Wire.OcrEngineId.Rapidocr,
+                            Id = Wire.OcrEngineId.Windows,
                             Availability = Wire.OcrEngineAvailability.Ready,
                             IncludedInBase = true,
                             ReasonCode = null,
-                            RequiredComponent = null,
-                        },
-                        new Wire.OcrEngineDescriptor
-                        {
-                            Id = Wire.OcrEngineId.Windows,
-                            Availability = Wire.OcrEngineAvailability.Unavailable,
-                            IncludedInBase = true,
-                            ReasonCode = "language_pack_missing",
                             RequiredComponent = null,
                         },
                         new Wire.OcrEngineDescriptor

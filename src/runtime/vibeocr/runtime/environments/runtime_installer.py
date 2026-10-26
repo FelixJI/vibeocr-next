@@ -90,7 +90,6 @@ from vibeocr.runtime.environments.runtime_manifest import (
     RuntimeManifest,
     covering_profile_id,
     load_runtime_manifest,
-    locked_distribution_version,
     migrate_legacy_component_ids,
 )
 from vibeocr.runtime.environments.runtime_selection import (
@@ -1396,8 +1395,6 @@ def _default_install_runner(
         heartbeat_code="runtime.install_profile",
         gate_python=python,
     )
-    if "rapidocr-base" in install_scope.component_ids:
-        _install_rapidtable_model(manifest, partial_root, cache)
     artifact_root = manifest.path.parent
     runtime_wheel = artifact_root / manifest.runtime_wheel
     if not runtime_wheel.is_file():
@@ -1598,34 +1595,10 @@ def _extract_runtime_pack(
     return destination
 
 
-def _install_rapidtable_model(
-    manifest: RuntimeManifest, runtime_root: Path, cache: Path
-) -> None:
-    """Copy the product-bound model offline, including online Rapid recipes."""
-    from vibeocr.runtime.environments.rapid_assets import RAPIDTABLE_MODEL
-
-    base = manifest.profiles["win-x64-base"]
-    if locked_distribution_version(base.lock_path, "rapid-table") is None:
-        return
-    if not base.runtime_pack:
-        raise RuntimeInstallError("RapidTable requires the bundled base model pack")
-    pack = _extract_runtime_pack(
-        [manifest.path.parent / name for name in base.runtime_pack],
-        cache / "runtime-packs",
-        expected_sha256=base.runtime_pack_sha256,
-    )
-    model = pack / RAPIDTABLE_MODEL
-    if not model.is_file():
-        raise RuntimeInstallError("bundled base pack lacks the RapidTable model")
-    target = runtime_root / "models" / "rapidtable" / RAPIDTABLE_MODEL
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(model, target)
-
-
 def probe_nvidia_driver(
     *, minimum_version: tuple[int, int] = (528, 33)
 ) -> dict[str, str | None]:
-    """只读探测 NVIDIA 驱动；默认 CUDA 12.x，Rapid CUDA 13 要求 R580。
+    """只读探测 NVIDIA 驱动；默认 CUDA 12.x，Paddle ONNX CUDA 13 要求 R580。
 
     - ``_installation_blockers``：安装预检 fail-closed 真值（非 ok 即阻断）；
     - managed environments ``list()`` 的 ``hardware`` 投影：前台据此如实

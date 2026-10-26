@@ -39,8 +39,8 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
         [ManagedEnvironment("base", "基础环境", "installed")],
         Recipes: Catalog()));
     manager.Compatibility = new ManagedEnvironmentQueryResult(
-      "rapidocr-cpu",
-      Selected: new ManagedEnvironmentSelection("base", 1, "rapidocr-cpu", "active_environment"));
+      "paddleocr-ort-cpu",
+      Selected: new ManagedEnvironmentSelection("base", 1, "paddleocr-ort-cpu", "active_environment"));
     var environments = new ManagedEnvironmentSettings(manager,
       (id, _) => { manager.SetActive(id); return Task.CompletedTask; },
       () => null, new ProductMaintenanceCoordinator());
@@ -85,7 +85,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       Assert.Equal(["远程基础服务"], manager.CreatedNames);
       string target = Assert.Single(manager.Switches);
       Assert.NotEqual("user", target);
-      Assert.Equal([(target, "rapidocr-cpu")], manager.Previews);
+      Assert.Equal([(target, "paddleocr-ort-cpu")], manager.Previews);
       Assert.Equal([("plan-1", target)], manager.Installs);
       ManagedEnvironment user = Assert.Single(
         manager.List.Environments, item => item.Id == "user");
@@ -168,14 +168,14 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       Assert.Empty(manager.Installs);
       Assert.Empty(manager.Switches);
 
-      manager.FindGate.SetResult(new ManagedEnvironmentQueryResult("rapidocr-cpu"));
+      manager.FindGate.SetResult(new ManagedEnvironmentQueryResult("paddleocr-ort-cpu"));
       await WaitUntilAsync(() => manager.Switches.Count == 1, "first chain did not finish");
       Assert.Equal(["远程基础服务"], manager.CreatedNames);
       Assert.Single(manager.Installs);
     }
     finally
     {
-      manager.FindGate.TrySetResult(new ManagedEnvironmentQueryResult("rapidocr-cpu"));
+      manager.FindGate.TrySetResult(new ManagedEnvironmentQueryResult("paddleocr-ort-cpu"));
       await handler.DisposeAsync();
       Directory.Delete(root, recursive: true);
     }
@@ -419,9 +419,9 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
 
   private static IReadOnlyList<ManagedEnvironmentRecipe> Catalog() =>
   [
-    new ManagedEnvironmentRecipe("rapidocr-cpu", "RapidOCR · CPU",
+    new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
       DependencyOrigin: "bundled_pack"),
-    new ManagedEnvironmentRecipe("paddleocr-cpu", "PaddleOCR · CPU",
+    new ManagedEnvironmentRecipe("mineru-cpu", "MinerU · CPU",
       DependencyOrigin: "online_index"),
   ];
 
@@ -587,7 +587,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
         {
           Engines = [new Wire.OcrEngineDescriptor
           {
-            Id = Wire.OcrEngineId.Rapidocr,
+            Id = Wire.OcrEngineId.Paddleocr,
             Availability = Wire.OcrEngineAvailability.Unavailable,
             IncludedInBase = true,
             ReasonCode = "engine_not_installed",
@@ -624,13 +624,11 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
         {
           Modes =
           [
-            Mode(Wire.RecognitionModeId.RapidText),
             Mode(Wire.RecognitionModeId.WindowsText),
             Mode(Wire.RecognitionModeId.PaddleText),
             Mode(Wire.RecognitionModeId.PaddleStructure),
             Mode(Wire.RecognitionModeId.MineruDocument, mineru: true),
             Mode(Wire.RecognitionModeId.PaddleTable),
-            Mode(Wire.RecognitionModeId.RapidTable),
           ],
         },
       },
@@ -642,15 +640,12 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
-      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
         Wire.RecognitionModeProvisioning.OperatingSystem, Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
@@ -660,9 +655,6 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     // 目录如实保持 preparation_required（本地组件缺失/远程未验证 tier），
@@ -676,7 +668,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       Provisioning = provisioning,
       Availability = Wire.RecognitionModeAvailability.PreparationRequired,
       ReasonCode = mineru ? "runtime_component_missing" : "runtime_component_missing",
-      RequiredComponent = mineru ? "mineru-cpu" : "rapidocr-base",
+      RequiredComponent = mineru ? "mineru-cpu" : "paddleocr-ort-cpu",
       SupportedOptions = [],
       Lifecycle = new Wire.RecognitionModeLifecycle
       {

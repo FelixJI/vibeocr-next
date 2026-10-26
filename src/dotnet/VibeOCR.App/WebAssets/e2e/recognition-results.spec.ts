@@ -422,6 +422,26 @@ test("bbox proofreading edits through the frozen result image", async ({
   await expect(line).toBeVisible();
   await expect(line).toHaveText("");
   await expect(line).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
+  // 双向悬停高亮：默认 raw 原文可精确映射行文本，图上/右侧任一侧
+  // 悬停时两侧同步加亮，移开后同步熄灭。
+  const rawSpan = page
+    .locator(".result-document .result-raw-line", { hasText: "第一段行一" })
+    .first();
+  await expect(rawSpan).toBeVisible();
+  await line.hover();
+  await expect(rawSpan).toHaveClass(/line-hovered/);
+  await page.screenshot({
+    path: testInfo.outputPath("hover-bbox-to-result.png"),
+  });
+  await rawSpan.hover();
+  await expect(line).toHaveClass(/hovered/);
+  await page.screenshot({
+    path: testInfo.outputPath("hover-result-to-bbox.png"),
+  });
+  await page.mouse.move(4, 4);
+  await expect(rawSpan).not.toHaveClass(/line-hovered/);
+  await expect(line).not.toHaveClass(/hovered/);
   await line.dblclick();
   const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
   await editor.fill("改后的行文本");

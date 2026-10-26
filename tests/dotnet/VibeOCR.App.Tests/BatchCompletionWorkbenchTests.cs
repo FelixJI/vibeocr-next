@@ -21,9 +21,9 @@ namespace VibeOCR.App.Tests;
 public sealed class BatchCompletionWorkbenchTests
 {
   [Fact]
-  public async Task RapidTableDeviceOptionSubmitsOnBatchWire()
+  public async Task PaddleTableDeviceOptionSubmitsOnBatchWire()
   {
-    // 批量入口与单次/截图共享同一 device 冻结链：显式 rapid_table 任务携带
+    // 批量入口与单次/截图共享同一选项冻结链：显式 paddle_table 任务携带
     // options.device=cuda，不静默改 CPU。
     var client = new BatchRunClient();
     await using var harness = await CompletionHarness.CreateAsync(client);
@@ -37,15 +37,16 @@ public sealed class BatchCompletionWorkbenchTests
       if (state is BatchWorkbenchState batchState) deviceState = batchState;
     };
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetModeDeviceCommand("rapid_table", "cuda"), cancellationToken)).Error);
-    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "rapid_table")
+      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
+      cancellationToken)).Error);
+    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
       .Options!["device"].GetString());
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetBatchTaskEngineCommand("rapid_table"), cancellationToken)).Error);
+      new SetBatchTaskEngineCommand("paddle_table"), cancellationToken)).Error);
     harness.Batch.AddFiles([TempPng(harness.Root, "table")]);
     Assert.True((await harness.StartAsync(cancellationToken)).Ok);
     await client.WaitSubmittedAsync(cancellationToken);
-    Assert.Equal("RAPID_TABLE", client.LastRequest!.Pipeline.PipelineId);
+    Assert.Equal("TABLE_RECOGNITION", client.LastRequest!.Pipeline.PipelineId);
     Assert.Null(client.LastRequest.Pipeline.Engine);
     Assert.Equal("cuda", client.LastRequest.Pipeline.Options["device"].GetString());
   }
@@ -745,8 +746,6 @@ public sealed class BatchCompletionWorkbenchTests
         {
           Modes =
           [
-            Mode(Wire.RecognitionModeId.RapidText,
-              Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.WindowsText,
               Wire.RecognitionModeAvailability.Ready),
             Mode(Wire.RecognitionModeId.PaddleText,
@@ -757,8 +756,6 @@ public sealed class BatchCompletionWorkbenchTests
               Wire.RecognitionModeAvailability.PreparationRequired),
             Mode(Wire.RecognitionModeId.PaddleTable,
               Wire.RecognitionModeAvailability.PreparationRequired),
-            Mode(Wire.RecognitionModeId.RapidTable,
-              Wire.RecognitionModeAvailability.Ready),
           ],
         },
       },
@@ -771,17 +768,13 @@ public sealed class BatchCompletionWorkbenchTests
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
-      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
         Wire.RecognitionModeProvisioning.OperatingSystem,
         Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.AdvancedComponent,
+        Wire.RecognitionModeProvisioning.BaseRuntime,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
@@ -795,10 +788,6 @@ public sealed class BatchCompletionWorkbenchTests
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
         Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool notReady = availability != Wire.RecognitionModeAvailability.Ready;
@@ -812,8 +801,8 @@ public sealed class BatchCompletionWorkbenchTests
       Provisioning = provisioning,
       Availability = availability,
       ReasonCode = notReady ? "runtime_component_missing" : null,
-      RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-cpu") : null,
-      SupportedOptions = id == Wire.RecognitionModeId.RapidTable ? ["device"] : [],
+      RequiredComponent = notReady ? (mineru ? "mineru-cpu" : "paddleocr-ort-cpu") : null,
+      SupportedOptions = id == Wire.RecognitionModeId.PaddleTable ? ["device"] : [],
       Lifecycle = new Wire.RecognitionModeLifecycle
       {
         Kind = lifecycle,

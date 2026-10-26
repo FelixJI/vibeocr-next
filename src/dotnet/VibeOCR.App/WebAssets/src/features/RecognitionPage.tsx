@@ -99,12 +99,24 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   // 排版模式为结果单一状态：唯一的一组复制/导出按钮按它提交，避免
   // 结果区再叠一套全局输出按钮。
   const [resultTextMode, setResultTextMode] = useState<ResultTextMode>("raw");
+  // OCR 双向高亮：左侧图上行框与右侧结果行悬停任一侧，两侧同步加亮。
+  const [hoveredLine, setHoveredLine] = useState<number | undefined>(undefined);
   const state = feature(viewState, "recognition");
   const input = resource(state.input);
   const result = resource(state.result);
   const resultText = useResourceText(result);
   const structured = resource(state.structuredResult);
   const structuredText = useResourceText(structured);
+  // 结果身份变化即清空悬停行（render 期派生调整，与下方校对绑定键同型）：
+  // 新结果不得残留旧结果的高亮下标。
+  const [hoverBinding, setHoverBinding] = useState<string | undefined>(
+    undefined,
+  );
+  const hoverBindingKey = structured?.url;
+  if (hoverBinding !== hoverBindingKey) {
+    setHoverBinding(hoverBindingKey);
+    if (hoveredLine !== undefined) setHoveredLine(undefined);
+  }
   // 识别时真实冻结的参考图（随结果原子替换/失效）：校对视图唯一图源；
   // 缺失时不渲染 bbox，不用会话基准图冒充。
   const resultImage = resource(state.resultImage);
@@ -151,6 +163,8 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   newText,
                 })
               : Promise.resolve(false),
+          highlightIndex: hoveredLine,
+          onHoverLine: setHoveredLine,
         }
       : undefined;
   // 仅结果身份变化时恢复默认校对；同一结果的宿主更新不打断编辑。
@@ -511,6 +525,8 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   key={structured.url}
                   source={structuredText}
                   mode={effectiveMode}
+                  highlightLineIndex={hoveredLine}
+                  onHoverLine={setHoveredLine}
                   onCopy={(blockIndex, format) =>
                     actions.run({
                       type: "recognition.copyStructured",

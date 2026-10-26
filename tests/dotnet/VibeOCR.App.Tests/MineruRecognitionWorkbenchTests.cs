@@ -164,9 +164,9 @@ public sealed class MineruRecognitionWorkbenchTests
         // 保存默认识别模式会重发布任务目录快照：已存 MinerU 偏好不得被
         // 清掉（回归：可选参数缺省曾把偏好/Invalid 标记抹平）。
         await viewModel.SetDefaultRecognitionModeAsync(
-            "rapid_text", TestContext.Current.CancellationToken);
+            "paddle_text", TestContext.Current.CancellationToken);
 
-        Assert.Equal("已保存默认识别模式：快速 OCR（RapidOCR）", viewModel.Status);
+        Assert.Equal("已保存默认识别模式：通用 OCR（PaddleOCR）", viewModel.Status);
         MineruConfig? config = viewModel.RecognitionSelection?.MineruConfigFor("mineru_document");
         Assert.NotNull(config);
         Assert.Equal(MineruTier.Flash, config.Tier);
@@ -197,7 +197,7 @@ public sealed class MineruRecognitionWorkbenchTests
         Assert.True(viewModel.MineruRecognition?.Invalid is true);
 
         await viewModel.SetDefaultRecognitionModeAsync(
-            "rapid_text", TestContext.Current.CancellationToken);
+            "paddle_text", TestContext.Current.CancellationToken);
 
         // Invalid fail-closed 标记同样不得被重发布抹掉。
         Assert.True(viewModel.MineruRecognition?.Invalid is true);
@@ -345,13 +345,8 @@ public sealed class MineruRecognitionWorkbenchTests
                 {
                     Modes =
                     [
-                        // FromWire 要求全部 8 个稳定模式恰好各声明一次。
-                        Mode(Wire.RecognitionModeId.RapidText,
-                            Wire.RecognitionModeFamily.Text,
-                            Wire.ExecutionPipelineId.OCR,
-                            Wire.OcrEngineId.Rapidocr,
-                            Wire.RecognitionModeProvisioning.BaseRuntime,
-                            Wire.RecognitionModeLifecycleKind.Unmanaged),
+                        // FromWire 要求全部未退役稳定模式恰好各声明一次；
+                        // Rapid 模式已退役，不再进入目录 fixture。
                         Mode(Wire.RecognitionModeId.WindowsText,
                             Wire.RecognitionModeFamily.Text,
                             Wire.ExecutionPipelineId.OCR,
@@ -362,7 +357,7 @@ public sealed class MineruRecognitionWorkbenchTests
                             Wire.RecognitionModeFamily.Text,
                             Wire.ExecutionPipelineId.OCR,
                             Wire.OcrEngineId.Paddleocr,
-                            Wire.RecognitionModeProvisioning.AdvancedComponent,
+                            Wire.RecognitionModeProvisioning.BaseRuntime,
                             Wire.RecognitionModeLifecycleKind.ModelResidency),
                         Mode(Wire.RecognitionModeId.PaddleStructure,
                             Wire.RecognitionModeFamily.Document,
@@ -382,12 +377,6 @@ public sealed class MineruRecognitionWorkbenchTests
                             null,
                             Wire.RecognitionModeProvisioning.AdvancedComponent,
                             Wire.RecognitionModeLifecycleKind.ModelResidency),
-                        Mode(Wire.RecognitionModeId.RapidTable,
-                            Wire.RecognitionModeFamily.Specialized,
-                            Wire.ExecutionPipelineId.RAPIDTABLE,
-                            null,
-                            Wire.RecognitionModeProvisioning.BaseRuntime,
-                            Wire.RecognitionModeLifecycleKind.Unmanaged),
                     ],
                 },
             },

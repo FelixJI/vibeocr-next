@@ -36,8 +36,8 @@ public sealed partial class App
         case "ScrollCaptureAmbiguousChoicesPreserveStateAndAllowFeasibleCorrection":
           await ScrollCaptureSession.Session.VerifyAmbiguousCorrectionsSelfCheckAsync();
           break;
-        case "ScrollCaptureNoOverlapStopsWithoutImpossibleCorrection":
-          await ScrollCaptureSession.Session.VerifyNoOverlapStopsSelfCheckAsync();
+        case "ScrollCaptureContinuousFramesAndMissingOverlapRecoverWithoutInventingPixels":
+          await ScrollCaptureSession.Session.VerifyContinuousScrollRecoverySelfCheckAsync();
           break;
         case "ScrollCaptureKeepsFirstFailureAcrossDeadlineAndConcurrentStops":
           await ScrollCaptureSession.Session.VerifyFirstFailureSelfCheckAsync();
@@ -56,6 +56,9 @@ public sealed partial class App
           break;
         case "ScrollCapturePreviewResumeGetsFreshDynamicWindowWithoutResettingBudgets":
           await ScrollCaptureSession.Session.VerifyPreviewResumeStableWindowSelfCheckAsync();
+          break;
+        case "ScrollCapturePreviewPlacementRequiresVisibleGeometryBeforeConfirmation":
+          await ScrollCaptureSession.Session.VerifyPreviewPlacementSelfCheckAsync();
           break;
         case "ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure":
           await ScrollCaptureSession.Session.VerifyPreviewGateSelfCheckAsync();

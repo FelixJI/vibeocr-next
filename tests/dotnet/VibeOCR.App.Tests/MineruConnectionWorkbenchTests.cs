@@ -737,13 +737,11 @@ public sealed class MineruConnectionWorkbenchTests
         {
           Modes =
           [
-            Mode(Wire.RecognitionModeId.RapidText, ready),
             Mode(Wire.RecognitionModeId.WindowsText, ready),
             Mode(Wire.RecognitionModeId.PaddleText, ready),
             Mode(Wire.RecognitionModeId.PaddleStructure, ready),
             Mode(Wire.RecognitionModeId.MineruDocument, ready, unavailable),
             Mode(Wire.RecognitionModeId.PaddleTable, ready),
-            Mode(Wire.RecognitionModeId.RapidTable, ready),
           ],
         },
       },
@@ -755,15 +753,12 @@ public sealed class MineruConnectionWorkbenchTests
   {
     var (family, pipeline, engine, provisioning, lifecycle) = id switch
     {
-      Wire.RecognitionModeId.RapidText => (Wire.RecognitionModeFamily.Text,
-        Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Rapidocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.WindowsText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Windows,
         Wire.RecognitionModeProvisioning.OperatingSystem, Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.ModelResidency),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
@@ -773,9 +768,6 @@ public sealed class MineruConnectionWorkbenchTests
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
-      Wire.RecognitionModeId.RapidTable => (Wire.RecognitionModeFamily.Specialized,
-        Wire.ExecutionPipelineId.RAPIDTABLE, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.Unmanaged),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

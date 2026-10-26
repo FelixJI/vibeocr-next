@@ -43,11 +43,16 @@ export function ResultImageTextOverlay({
   fit = false,
   lines,
   onUpdateLine,
+  highlightIndex,
+  onHoverLine,
 }: {
   readonly imageUrl: string;
   readonly fit?: boolean;
   readonly lines: readonly IndexedResultLine[];
   readonly onUpdateLine?: OverlayLineEditHandler;
+  /** 双向高亮：右侧结果行悬停时对应行框加亮（同一宿主行下标）。 */
+  readonly highlightIndex?: number;
+  readonly onHoverLine?: (index: number | undefined) => void;
 }) {
   const [aspectRatio, setAspectRatio] = useState(1);
   const [figure, setFigure] = useState<HTMLElement | null>(null);
@@ -189,7 +194,9 @@ export function ResultImageTextOverlay({
             return (
               <div key={index}>
                 <div
-                  className={`overlay-line${low ? " low-confidence" : ""}`}
+                  className={`overlay-line${
+                    low ? " low-confidence" : ""
+                  }${highlightIndex === index ? " hovered" : ""}`}
                   title={
                     line.score === null
                       ? undefined
@@ -202,6 +209,8 @@ export function ResultImageTextOverlay({
                     height: `${box.height}px`,
                   }}
                   aria-label={line.text}
+                  onMouseEnter={() => onHoverLine?.(index)}
+                  onMouseLeave={() => onHoverLine?.(undefined)}
                   {...trigger}
                 />
                 {editor &&

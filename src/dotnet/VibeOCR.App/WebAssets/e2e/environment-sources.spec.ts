@@ -31,6 +31,7 @@ const sources = [
     id: "paddleocr-modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
+    isDefault: true,
   },
   {
     kind: "paddleocr_model_registry",
@@ -49,30 +50,58 @@ const sources = [
     id: "mineru-modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
+    isDefault: true,
   },
 ];
 
+// 目录只提供 Paddle ONNX（CPU/DirectML/CUDA，同一套依赖覆盖文字/表格/
+// 结构）与独立闭包的 MinerU（CPU/CUDA）。依赖来源只显示随包/在线，
+// 不硬编码下载量估算。
 const recipes = [
   {
-    id: "rapidocr-cpu",
-    displayName: "RapidOCR · CPU",
-    configuredRecognitionTypes: ["text"],
+    id: "paddleocr-ort-cpu",
+    displayName: "PaddleOCR ONNX · CPU",
+    configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "cpu",
     targetDevice: "cpu",
+    dependencies: ["paddleocr==3.2.0", "onnxruntime==1.23.0"],
+    dependencyOrigin: "bundled_pack",
   },
   {
-    id: "rapidocr+mineru-cpu",
-    displayName: "RapidOCR + MinerU · CPU",
-    configuredRecognitionTypes: ["text", "document"],
-    accelerator: "cpu",
-    targetDevice: "cpu",
-  },
-  {
-    id: "rapidocr+mineru-cuda",
-    displayName: "RapidOCR + MinerU · NVIDIA CUDA",
-    configuredRecognitionTypes: ["text", "document"],
+    id: "paddleocr-ort-cuda",
+    displayName: "PaddleOCR ONNX · NVIDIA CUDA",
+    configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "nvidia_cuda",
     targetDevice: "cuda",
+    dependencies: ["paddleocr==3.2.0", "onnxruntime-gpu==1.23.0"],
+    dependencyOrigin: "online_index",
+  },
+  {
+    id: "paddleocr-ort-directml",
+    displayName: "PaddleOCR ONNX · Windows DirectML",
+    configuredRecognitionTypes: ["text", "table", "structure"],
+    accelerator: "cpu",
+    targetDevice: "directml",
+    dependencies: ["paddleocr==3.2.0", "onnxruntime-directml==1.23.0"],
+    dependencyOrigin: "bundled_pack",
+  },
+  {
+    id: "mineru-cpu",
+    displayName: "MinerU · CPU",
+    configuredRecognitionTypes: ["document"],
+    accelerator: "cpu",
+    targetDevice: "cpu",
+    dependencies: ["mineru==4.0.10"],
+    dependencyOrigin: "online_index",
+  },
+  {
+    id: "mineru-cuda",
+    displayName: "MinerU · NVIDIA CUDA",
+    configuredRecognitionTypes: ["document"],
+    accelerator: "nvidia_cuda",
+    targetDevice: "cuda",
+    dependencies: ["mineru==4.0.10", "torch==2.6.0"],
+    dependencyOrigin: "online_index",
   },
 ];
 
@@ -115,6 +144,8 @@ test("converged source setting keeps one simple global choice per kind", async (
       },
     },
   });
+  // 来源与清理收进高级折叠区：先展开再配置。
+  await page.locator("details.environment-advanced-maintenance").click();
   const section = page.locator(".environment-source-settings");
   await expect(section).toBeVisible();
   // 依赖默认 TUNA，模型默认魔搭；选项不暴露“跟随/覆盖”层。
@@ -150,7 +181,7 @@ test("converged source setting keeps one simple global choice per kind", async (
   });
 });
 
-test("recipe choice binds component and accelerator without advanced controls", async ({
+test("paddle backend is a single explicit choice without capability packages", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
@@ -182,38 +213,141 @@ test("recipe choice binds component and accelerator without advanced controls", 
       },
     },
   });
-  // 默认选择 = 文字识别 · CPU（RapidOCR），没有第二套“锁定依赖配方”入口。
-  await expect(page.getByLabel("识别组件", { exact: true })).toHaveValue(
-    "rapidocr",
-  );
-  await expect(page.getByLabel("加速方式", { exact: true })).toHaveValue("cpu");
+  // Paddle 分区：单一“推理后端”选择；不再有组件/能力套餐下拉。
+  const backend = page.getByLabel("Paddle 推理后端", { exact: true });
+  await expect(backend).toHaveValue("cpu");
+  await expect(backend.locator("option")).toHaveCount(3);
+  await expect(page.getByLabel("识别组件")).toHaveCount(0);
+  await expect(page.getByLabel("加速方式")).toHaveCount(0);
   await expect(page.locator("#managed-recipe-select")).toHaveCount(0);
+  await expect(
+    page.getByText(/文字、表格与版面结构识别共用同一套 PaddleOCR 依赖/),
+  ).toBeVisible();
+  await expect(page.getByText(/依赖随包提供，可离线安装/)).toBeVisible();
   // 快照已同步但未启动：如实展示默认配置“尚未启动”，不伪造就绪。
   await expect(
-    page.getByText("默认运行环境：RapidOCR · CPU（尚未启动）"),
+    page.getByText("默认运行环境：PaddleOCR ONNX · CPU（尚未启动）"),
   ).toBeVisible();
-  await expect(
-    page.getByText(/目标配置：RapidOCR · CPU（文字识别，设备 cpu/),
-  ).toBeVisible();
-  // 实际支持选项完整展示：文档解析用途来自 Runtime 目录分组。
-  await page
-    .getByLabel("识别组件", { exact: true })
-    .selectOption("rapidocr+mineru");
-  await expect(
-    page.getByText(/目标配置：RapidOCR \+ MinerU · CPU/),
-  ).toBeVisible();
-  await expect(
-    page.locator("details.managed-environment-advanced"),
-  ).toHaveCount(0);
-  await expect(page.getByLabel("新环境名称（留空自动命名）")).toHaveCount(0);
-  await page.getByRole("button", { name: "继续准备依赖", exact: true }).click();
+  // 只有聚焦的 Paddle 分区自动查询；MinerU 分区提供显式入口。
   await expectCommand(page, {
     scope: "settings",
-    action: "previewEnvironmentInstall",
-    arguments: {
-      environmentId: "env-1",
-      recipe: "rapidocr+mineru-cpu",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "paddleocr-ort-cpu" },
+  });
+  const mineruSection = page.locator(".engine-mineru-section");
+  await expect(mineruSection).toBeVisible();
+  await expect(
+    mineruSection.getByRole("button", { name: "查询可复用环境" }),
+  ).toBeVisible();
+  // 后端切换是显式选择：失效旧计划 + 只读查询新配方，不静默安装或切换。
+  await backend.selectOption("directml");
+  await expectCommand(page, {
+    scope: "settings",
+    action: "invalidateEnvironmentPlan",
+    arguments: {},
+  });
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "paddleocr-ort-directml" },
+  });
+});
+
+test("mineru engine install and removal stay explicit with active protection", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: {
+      settings: {
+        environmentSources: sources,
+        environments: [
+          {
+            id: "mineru-active",
+            name: "MinerU · CPU",
+            revision: 2,
+            kind: "venv",
+            status: "installed",
+            pythonState: "ready",
+            dependencyState: "installed",
+            engineState: "ready",
+            modelState: "ready",
+            serviceState: "ready",
+            configuredRecognitionTypes: ["document"],
+            targetDevice: "cpu",
+          },
+          {
+            id: "mineru-old",
+            name: "MinerU · NVIDIA CUDA",
+            revision: 1,
+            kind: "venv",
+            status: "installed",
+            pythonState: "ready",
+            dependencyState: "installed",
+            engineState: "unverified",
+            modelState: "not_checked",
+            serviceState: "not_started",
+            configuredRecognitionTypes: ["document"],
+            targetDevice: "cuda",
+          },
+        ],
+        activeEnvironmentId: "mineru-active",
+        environmentRecipes: recipes,
+        environmentHardware: { nvidiaDriverStatus: "ok" },
+        environmentBusy: false,
+      },
     },
+  });
+  const mineruSection = page.locator(".engine-mineru-section");
+  await expect(
+    mineruSection.getByText("MinerU 深度文档解析（本地引擎）"),
+  ).toBeVisible();
+  // MinerU 与 Paddle 独立、远程连接另列，不装本地 MinerU。
+  await expect(mineruSection.getByText(/不安装本地引擎/)).toBeVisible();
+  // 本地 MinerU 环境按分区列出：活动环境不提供移除按钮，只引导先切换。
+  const activeRow = mineruSection.locator(
+    "[data-environment-id='mineru-active']",
+  );
+  await expect(activeRow.getByText(/· 当前使用（修订/)).toBeVisible();
+  await expect(activeRow.getByRole("button", { name: "移除环境" })).toHaveCount(
+    0,
+  );
+  await expect(
+    activeRow.getByText(/当前使用中：请先切换到其他环境后再移除/),
+  ).toBeVisible();
+  // 非活动环境走既有安全删除路径：两步确认后才发命令。
+  const oldRow = mineruSection.locator("[data-environment-id='mineru-old']");
+  await oldRow.getByRole("button", { name: "移除环境" }).click();
+  await oldRow.getByRole("button", { name: "确认移除" }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "deleteEnvironment",
+    arguments: { environmentId: "mineru-old" },
+  });
+  // 移除语义：共享缓存与模型受保护保留。
+  await expect(
+    mineruSection.getByText(/共享模型缓存、下载缓存与基础/),
+  ).toBeVisible();
+  // 安装新闭包仍需显式查询 + 准备：MinerU CUDA 依赖在线安装。
+  await mineruSection.getByRole("button", { name: "查询可复用环境" }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "mineru-cpu" },
+  });
+  await mineruSection.getByLabel("MinerU 安装设备").selectOption("nvidia_cuda");
+  await expectCommand(page, {
+    scope: "settings",
+    action: "invalidateEnvironmentPlan",
+    arguments: {},
+  });
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "mineru-cuda" },
   });
 });
 
@@ -252,7 +386,7 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
     environments: [],
     environmentHardware: { nvidiaDriverStatus: "ok" },
     environmentCompatibility: {
-      recipe: "rapidocr-cpu",
+      recipe: "paddleocr-ort-cpu",
       selectedEnvironmentId: null,
     },
   };
@@ -262,9 +396,8 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
     capabilities: ["runtime.environments"],
     features: { settings },
   });
-  // 与原生 smoke 一样，向两个默认 Select 派发同值 change。
-  await page.getByLabel("识别组件", { exact: true }).selectOption("rapidocr");
-  await page.getByLabel("加速方式", { exact: true }).selectOption("cpu");
+  // 与原生 smoke 一样，向后端 Select 派发同值 change 不产生失效。
+  await page.getByLabel("Paddle 推理后端", { exact: true }).selectOption("cpu");
   const invalidations = await page.evaluate(() => {
     const host = (
       window as Window & {
@@ -279,13 +412,13 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
   });
   expect(invalidations).toBe(0);
   await expect(
-    page.getByRole("button", { name: "准备此配置", exact: true }),
+    page.getByRole("button", { name: "准备此后端", exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "准备此配置", exact: true }).click();
+  await page.getByRole("button", { name: "准备此后端", exact: true }).click();
   await expectCommand(page, {
     scope: "settings",
     action: "prepareEnvironment",
-    arguments: { recipe: "rapidocr-cpu" },
+    arguments: { recipe: "paddleocr-ort-cpu" },
   });
   const prepared = {
     ...settings,
@@ -304,13 +437,13 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
       planId: "plan-one",
       environmentId: "prepared-id",
       environmentRevision: 1,
-      requestedRecipe: "rapidocr-cpu",
-      recipe: "rapidocr-cpu",
+      requestedRecipe: "paddleocr-ort-cpu",
+      recipe: "paddleocr-ort-cpu",
       sourceIds: ["tuna-pypi"],
       requestedSourceIds: null,
       dependencies: [
-        "rapidocr==3.9.2",
-        "onnxruntime==1.24.4",
+        "paddleocr==3.2.0",
+        "onnxruntime==1.23.0",
         "hidden-transitive==1.0",
       ],
     },
@@ -319,33 +452,29 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
   const confirmation = page.locator(".runtime-install-plan");
   await expect(
     confirmation.getByText(
-      /主要组件：rapidocr==3.9.2、onnxruntime==1.24.4；\s*共 3 项依赖/,
+      /主要组件：paddleocr==3\.2\.0、onnxruntime==1\.23\.0；\s*共 3 项依赖/,
     ),
   ).toBeVisible();
   await expect(confirmation.getByText(/hidden-transitive/)).not.toBeVisible();
   await expect(
     page.getByRole("button", { name: "确认安装依赖", exact: true }),
   ).toBeVisible();
-  await page
-    .getByLabel("识别组件", { exact: true })
-    .selectOption("rapidocr+mineru");
+  // 新选择（MinerU 设备）使旧计划失效：即使旧预览换 planId 迟到也不能确认。
+  await page.getByLabel("MinerU 安装设备").selectOption("nvidia_cuda");
   await expect(
     page.getByRole("button", { name: "确认安装依赖", exact: true }),
   ).toHaveCount(0);
-  // 即使旧预览换了 planId 迟到，也不能挪进环境行继续确认。
   await sendState(page, "settings", {
     ...prepared,
     environmentPlan: { ...prepared.environmentPlan, planId: "late-plan" },
   });
-  await expect(page.getByLabel("识别组件", { exact: true })).toHaveValue(
-    "rapidocr+mineru",
-  );
   await expect(page.locator(".runtime-install-plan")).toHaveCount(0);
   await page.getByRole("link", { name: "单次识别", exact: true }).click();
   await sendState(page, "settings", prepared);
   await page.getByRole("link", { name: "设置", exact: true }).click();
-  await expect(page.getByLabel("识别组件", { exact: true })).toHaveValue(
-    "rapidocr",
+  // 导航回来从宿主待确认计划恢复 Paddle CPU 选择。
+  await expect(page.getByLabel("Paddle 推理后端", { exact: true })).toHaveValue(
+    "cpu",
   );
   await page.getByRole("button", { name: "确认安装依赖", exact: true }).click();
   await expectCommand(page, {
@@ -355,38 +484,11 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
   });
 });
 
-test("catalog exposes all six exact recipes and permanently rejects duplicate combinations", async ({
+test("catalog rejects duplicate combinations without silent merging", async ({
   page,
 }) => {
-  const allRecipes = [
-    ...recipes,
-    {
-      id: "mineru-cpu",
-      displayName: "MinerU · CPU",
-      configuredRecognitionTypes: ["document"],
-      accelerator: "cpu",
-      targetDevice: "cpu",
-      dependencies: ["mineru==4.0.10"],
-    },
-    {
-      id: "paddleocr-cpu",
-      displayName: "PaddleOCR · CPU",
-      configuredRecognitionTypes: ["text"],
-      accelerator: "cpu",
-      targetDevice: "cpu",
-      dependencies: ["paddleocr==3.4.0", "paddlepaddle==3.2.2"],
-    },
-    {
-      id: "paddleocr-cuda",
-      displayName: "PaddleOCR · NVIDIA CUDA",
-      configuredRecognitionTypes: ["text"],
-      accelerator: "nvidia_cuda",
-      targetDevice: "cuda",
-      dependencies: ["paddleocr==3.4.0", "paddlepaddle-gpu==3.2.2"],
-    },
-  ];
   const settings = {
-    environmentRecipes: allRecipes,
+    environmentRecipes: recipes,
     environments: [],
     environmentHardware: { nvidiaDriverStatus: "ok" },
   };
@@ -396,33 +498,30 @@ test("catalog exposes all six exact recipes and permanently rejects duplicate co
     capabilities: ["runtime.environments"],
     features: { settings },
   });
-  const component = page.getByLabel("识别组件", { exact: true });
-  const accelerator = page.getByLabel("加速方式", { exact: true });
-  await expect(component.locator("option")).toHaveCount(4);
-  for (const recipe of allRecipes) {
-    const base = recipe.id.replace(/-(cpu|cuda)$/, "");
-    await component.selectOption(base);
-    await accelerator.selectOption(recipe.accelerator);
-    await expectCommand(page, {
-      scope: "settings",
-      action: "findCompatibleEnvironment",
-      arguments: { recipe: recipe.id },
-    });
-    if (base === "rapidocr" || base === "mineru")
-      await expect(accelerator.locator("option")).toHaveCount(1);
-  }
-  await component.selectOption("paddleocr");
-  await accelerator.selectOption("nvidia_cuda");
+  const backend = page.getByLabel("Paddle 推理后端", { exact: true });
+  const mineruDevice = page.getByLabel("MinerU 安装设备", { exact: true });
+  await expect(backend.locator("option")).toHaveCount(3);
+  await expect(mineruDevice.locator("option")).toHaveCount(2);
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "paddleocr-ort-cpu" },
+  });
+  await backend.selectOption("directml");
   await expect(
-    page.getByText(/主要依赖：paddleocr==3.4.0、paddlepaddle-gpu==3.2.2/),
+    page.getByText(/主要依赖：\s*paddleocr==3\.2\.0、onnxruntime-directml/),
   ).toBeVisible();
+  // 重复/冲突目录明确拒绝，两分区选择都不再渲染。
   await sendState(page, "settings", {
     ...settings,
     environmentRecipes: [recipes[0], recipes[0], recipes[0]],
   });
-  await expect(page.getByRole("alert")).toHaveText(/重复或设备信息冲突/);
-  await expect(component).toHaveCount(0);
+  await expect(page.getByRole("alert").first()).toHaveText(
+    /重复或设备信息冲突/,
+  );
+  await expect(backend).toHaveCount(0);
+  await expect(mineruDevice).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "准备此配置", exact: true }),
+    page.getByRole("button", { name: "准备此后端", exact: true }),
   ).toHaveCount(0);
 });

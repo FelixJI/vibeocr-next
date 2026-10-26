@@ -411,14 +411,13 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
     python = _require_mapping(runtime_manifest.get("python"), "python")
     installer = _require_mapping(runtime_manifest.get("installer"), "installer")
     names.add(_release_file_name(python.get("archive"), "python.archive"))
-    names.add(_release_file_name(installer.get("archive"), "installer.archive"))
-    if "rapid_cuda_environment" in runtime_manifest:
-        rapid_cuda = _require_mapping(
-            runtime_manifest["rapid_cuda_environment"], "rapid_cuda_environment"
-        )
-        names.add(
-            _release_file_name(rapid_cuda.get("lock"), "rapid_cuda_environment.lock")
-        )
+    if installer.get("archive") is None:
+        # 新形态：安装器可执行文件只在产品 runtime/installer/ 分发一次，
+        # 不进入 runtime/backend/（去重旧 zip+exe 双副本）。仍校验名字形。
+        _release_file_name(installer.get("executable"), "installer.executable")
+    else:
+        # 历史 manifest：backend 目录继续携带绑定的单成员 zip。
+        names.add(_release_file_name(installer.get("archive"), "installer.archive"))
 
     ort = runtime_manifest.get("paddle_onnx_environments", {})
     for device, record in _require_mapping(ort, "paddle_onnx_environments").items():
@@ -428,6 +427,36 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
                 binding.get("lock"), f"paddle_onnx_environments.{device}.lock"
             )
         )
+        names.update(
+            _runtime_pack_file_names(
+                binding.get("runtime_pack"),
+                f"paddle_onnx_environments.{device}.runtime_pack",
+            )
+        )
+    model_pack = runtime_manifest.get("paddle_model_pack")
+    if model_pack is None:
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: paddle_model_pack must bind the bundled "
+            "default Paddle ONNX models"
+        )
+    model_pack_binding = _require_mapping(model_pack, "paddle_model_pack")
+    names.add(
+        _release_file_name(
+            model_pack_binding.get("archive"), "paddle_model_pack.archive"
+        )
+    )
+    # 断网可创建/重建 CPU 与 DirectML 两种 Paddle 环境：两者的离线 wheel
+    # 闭包必须随产品携带（CUDA 按需在线安装，不携带 pack）。
+    for device in ("cpu", "directml"):
+        record = _require_mapping(ort.get(device), f"paddle_onnx_environments.{device}")
+        if not _runtime_pack_file_names(
+            record.get("runtime_pack"),
+            f"paddle_onnx_environments.{device}.runtime_pack",
+        ):
+            raise ProductLayoutError(
+                "layout.invalid-descriptor: paddle_onnx_environments."
+                f"{device}.runtime_pack must contain the offline engine pack"
+            )
     profiles = _require_mapping(runtime_manifest.get("profiles"), "profiles")
     base_packs: tuple[str, ...] | None = None
     for profile_name, value in profiles.items():
@@ -575,17 +604,27 @@ def stage_product_layout(
             (backend_root / "runtime-manifest.json").read_text(encoding="utf-8")
         )
         installer = _require_mapping(runtime_manifest.get("installer"), "installer")
-        archive_name = installer.get("archive")
-        executable_name = installer.get("executable_path")
-        if not isinstance(archive_name, str) or not isinstance(executable_name, str):
-            raise ProductLayoutError(
-                "layout.invalid-descriptor: invalid runtime installer"
-            )
-        with zipfile.ZipFile(backend_root / archive_name) as archive:
-            executable = archive.read(executable_name)
         installer_path = installer_root / "vibeocr-runtime-installer.exe"
-        installer_path.write_bytes(executable)
         expected_hash = installer.get("executable_sha256")
+        archive_name = installer.get("archive")
+        if isinstance(archive_name, str):
+            # 历史 manifest：从绑定的单成员 zip 提取可执行文件。
+            executable_name = installer.get("executable_path")
+            if not isinstance(executable_name, str):
+                raise ProductLayoutError(
+                    "layout.invalid-descriptor: invalid runtime installer"
+                )
+            with zipfile.ZipFile(backend_root / archive_name) as archive:
+                executable = archive.read(executable_name)
+            installer_path.write_bytes(executable)
+        else:
+            executable_name = installer.get("executable")
+            if executable_name != installer_path.name:
+                raise ProductLayoutError(
+                    "layout.invalid-descriptor: invalid runtime installer"
+                )
+            _require_non_reparse_regular_file(backend_source / executable_name)
+            shutil.copyfile(backend_source / executable_name, installer_path)
         if (
             not isinstance(expected_hash, str)
             or _sha256(installer_path) != expected_hash

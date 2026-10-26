@@ -67,12 +67,17 @@ public sealed class OcrEngineSelectionContractTests
 
         var catalog = JsonSerializer.Deserialize<OcrEngineCatalog>(fixture.GetRawText())!;
         Assert.Equal(3, catalog.Engines.Count);
+        // 退休引擎 rapidocr 在 golden 中保留为 unavailable/engine_retired，
+        // 仅供历史记录反序列化；活跃引擎是 windows/paddleocr。
         Assert.Equal(OcrEngineId.Rapidocr, catalog.Engines[0].Id);
-        Assert.Equal(OcrEngineAvailability.Ready, catalog.Engines[0].Availability);
+        Assert.Equal(OcrEngineAvailability.Unavailable, catalog.Engines[0].Availability);
+        Assert.Equal("engine_retired", catalog.Engines[0].ReasonCode);
+        Assert.False(catalog.Engines[0].IncludedInBase);
         Assert.Equal(
             OcrEngineAvailability.PreparationRequired,
             catalog.Engines[1].Availability);
         Assert.Equal("winrt-ocr", catalog.Engines[1].RequiredComponent);
+        Assert.Equal(OcrEngineId.Paddleocr, catalog.Engines[2].Id);
         Assert.Equal(OcrEngineAvailability.Unavailable, catalog.Engines[2].Availability);
         Assert.Null(catalog.Engines[2].RequiredComponent);
 

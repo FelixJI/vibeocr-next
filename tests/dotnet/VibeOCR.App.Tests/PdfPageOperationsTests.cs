@@ -100,7 +100,7 @@ public sealed class PdfPageOperationsTests
     await model.OpenPathAsync("synthetic.pdf", CancellationToken.None);
     await model.CorrectOrientationAsync([0], CancellationToken.None);
     Assert.Contains("已配置且就绪", model.Summary);
-    model.SetRecognitionMode(Mode(engine: OcrEngine.RapidOcr));
+    model.SetRecognitionMode(Mode(engine: OcrEngine.Windows));
     await model.CorrectOrientationAsync([0], CancellationToken.None);
     Assert.Contains("不支持", model.Summary);
     Assert.Equal(0, client.SubmitCount);

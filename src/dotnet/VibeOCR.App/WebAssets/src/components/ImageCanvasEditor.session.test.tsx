@@ -318,7 +318,7 @@ describe("screenshot session editor wiring", () => {
         textLayer={{
           status: "textlayer.ready",
           binding: { sessionId: "session-a", revision: 0 },
-          modeId: "rapid_text",
+          modeId: "paddle_text",
           image: {
             url: "https://app.vibeocr/__resource/final.png",
             mediaType: "image/png",
@@ -484,7 +484,7 @@ describe("screenshot session editor wiring", () => {
         textLayer={{
           status: "textlayer.ready",
           binding: { sessionId: "session-a", revision: 0 },
-          modeId: "rapid_text",
+          modeId: "paddle_text",
           image: {
             url: "https://app.vibeocr/__resource/final.png",
             mediaType: "image/png",

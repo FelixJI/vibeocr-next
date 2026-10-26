@@ -9,8 +9,9 @@ export interface CaptureSceneGeometry {
   readonly initialTool?: string;
 }
 
-/** 现场浮动工具的宽度预算（DIP）：工具栏左缘钳制的唯一事实源。 */
-const TOOLS_WIDTH_BUDGET = 760;
+/** 现场浮动工具的宽度预算（DIP）：工具栏左缘钳制的唯一事实源。
+ *  与原生 ScreenRegionPicker 对齐：单排自然宽，视口内水平滚动兑底。 */
+const TOOLS_WIDTH_BUDGET = 1200;
 /** 输出设置面板的翻转决策预算（换行后约 3 行控件的估算高度）。 */
 const SETTINGS_PANEL_BUDGET = 132;
 
@@ -18,7 +19,7 @@ export function captureSceneStyle(
   geometry: CaptureSceneGeometry | undefined,
   viewportWidth: number,
   viewportHeight: number,
-  measuredToolsHeight = 184,
+  measuredToolsHeight = 64,
 ): Record<string, string> | undefined {
   if (!geometry) return undefined;
   const values = [

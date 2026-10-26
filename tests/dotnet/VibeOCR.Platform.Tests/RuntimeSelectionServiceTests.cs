@@ -29,7 +29,7 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionService service = new(Health(
             [EngineCapability, SourceCapability, VariantCapability],
             engines: EngineCatalog(
-                (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null),
+                (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Ready, true, null, null),
                 (Wire.OcrEngineId.Paddleocr, Wire.OcrEngineAvailability.PreparationRequired, false, null, "paddle-engine")),
             sources: SourceCatalog(
                 ("package_index", "tuna-pypi", "https://mirrors.tuna.example/pypi/simple"),
@@ -43,10 +43,10 @@ public sealed class RuntimeSelectionServiceTests
         Assert.True(service.SupportsDownloadSources);
         Assert.True(service.SupportsComponentSelection);
 
-        RuntimeEngineOption rapid = service.EngineOptions.Single(
-            option => option.Engine == OcrEngine.RapidOcr);
-        Assert.True(rapid.IsUsable);
-        Assert.True(rapid.IncludedInBase);
+        RuntimeEngineOption windows = service.EngineOptions.Single(
+            option => option.Engine == OcrEngine.Windows);
+        Assert.True(windows.IsUsable);
+        Assert.True(windows.IncludedInBase);
         RuntimeEngineOption paddle = service.EngineOptions.Single(
             option => option.Engine == OcrEngine.PaddleOcr);
         Assert.True(paddle.IsUsable);
@@ -70,7 +70,7 @@ public sealed class RuntimeSelectionServiceTests
         Assert.Empty(service.Variants);
 
         RuntimeSelectionException engineError = Assert.Throws<RuntimeSelectionException>(
-            () => service.SelectEngine(OcrEngine.RapidOcr));
+            () => service.SelectEngine(OcrEngine.PaddleOcr));
         Assert.Equal(RuntimeSelectionErrorKind.CapabilityMissing, engineError.Kind);
 
         RuntimeSelectionException componentError = Assert.Throws<RuntimeSelectionException>(
@@ -105,8 +105,8 @@ public sealed class RuntimeSelectionServiceTests
             () => new RuntimeSelectionService(Health(
                 [EngineCapability],
                 engines: EngineCatalog(
-                    (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null),
-                    (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null)))));
+                    (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Ready, true, null, null),
+                    (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Ready, true, null, null)))));
         Assert.Equal(RuntimeSelectionErrorKind.DuplicateCatalogEntry, duplicateEngine.Kind);
 
         RuntimeSelectionException blankSource = Assert.Throws<RuntimeSelectionException>(
@@ -126,9 +126,9 @@ public sealed class RuntimeSelectionServiceTests
             CapabilityDescriptors =
             [
                 Descriptor(EngineCapability, engines: EngineCatalog(
-                    (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null))),
+                    (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Ready, true, null, null))),
                 Descriptor(EngineCapability, engines: EngineCatalog(
-                    (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null))),
+                    (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Ready, true, null, null))),
             ],
         };
         RuntimeSelectionException repeatedCatalog = Assert.Throws<RuntimeSelectionException>(
@@ -142,12 +142,11 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionService service = new(Health(
             [EngineCapability],
             engines: EngineCatalog(
-                (Wire.OcrEngineId.Rapidocr, Wire.OcrEngineAvailability.Ready, true, null, null),
                 (Wire.OcrEngineId.Windows, Wire.OcrEngineAvailability.Unavailable, false, "language_pack_missing", null),
                 (Wire.OcrEngineId.Paddleocr, Wire.OcrEngineAvailability.PreparationRequired, false, null, "paddle-engine"))));
 
-        RuntimeEngineOption ready = service.SelectEngine(OcrEngine.RapidOcr);
-        Assert.Equal(OcrEngine.RapidOcr, ready.Engine);
+        RuntimeEngineOption ready = service.SelectEngine(OcrEngine.PaddleOcr);
+        Assert.Equal(OcrEngine.PaddleOcr, ready.Engine);
         Assert.True(ready.IsUsable);
 
         RuntimeEngineOption preparation = service.SelectEngine(OcrEngine.PaddleOcr);
@@ -169,20 +168,25 @@ public sealed class RuntimeSelectionServiceTests
 
         Assert.True(service.SupportsRecognitionModes);
         Assert.Empty(service.EngineOptions);
-        // #270：目录仅含未退役模式（7 个）。
-        Assert.Equal(7, service.RecognitionModes.Count);
+        // 目录仅含未退役模式（5 个：Rapid 模式已随 RapidOCR/RapidTable 退役）。
+        Assert.Equal(5, service.RecognitionModes.Count);
         // 退役 id 诊断为明确错误（可改选），不隐式回退。
         RuntimeSelectionException retired = Assert.Throws<RuntimeSelectionException>(
             () => service.SelectRecognitionMode("paddle_formula"));
         Assert.Equal(RuntimeSelectionErrorKind.RecognitionModeRetired, retired.Kind);
         Assert.Contains("已退役", retired.Message);
+        RuntimeSelectionException retiredRapid = Assert.Throws<RuntimeSelectionException>(
+            () => service.SelectRecognitionMode("rapid_text"));
+        Assert.Equal(RuntimeSelectionErrorKind.RecognitionModeRetired, retiredRapid.Kind);
 
-        RecognitionModeOption rapid = service.SelectRecognitionMode("rapid_text");
-        Assert.Equal("OCR", rapid.PipelineId);
-        Assert.Equal(OcrEngine.RapidOcr, rapid.Engine);
-        Assert.Equal("base_runtime", rapid.Provisioning);
-        Assert.Equal("unmanaged", rapid.LifecycleKind);
-        Assert.False(rapid.SupportsPreload);
+        RecognitionModeOption paddleText = service.SelectRecognitionMode("paddle_text");
+        Assert.Equal("OCR", paddleText.PipelineId);
+        Assert.Equal(OcrEngine.PaddleOcr, paddleText.Engine);
+        // paddle_text provisioning 已迁移 base_runtime（#paddle-offline-default）：
+        // 真实 Runtime pipeline_contracts.py 声明即此，目录合同必须如实投影。
+        Assert.Equal("base_runtime", paddleText.Provisioning);
+        Assert.Equal("model_residency", paddleText.LifecycleKind);
+        Assert.True(paddleText.SupportsPreload);
 
         RecognitionModeOption paddle = service.SelectRecognitionMode("paddle_structure");
         Assert.Equal("PP-StructureV3", paddle.PipelineId);
@@ -246,13 +250,12 @@ public sealed class RuntimeSelectionServiceTests
         {
             Modes =
             [
-                unavailable.Modes[0],
-                unavailable.Modes[1] with
+                unavailable.Modes[0] with
                 {
                     Availability = Wire.RecognitionModeAvailability.Unavailable,
                     ReasonCode = "language_pack_missing",
                 },
-                .. unavailable.Modes.Skip(2),
+                .. unavailable.Modes.Skip(1),
             ],
         };
         RuntimeSelectionService service = new(Health(
@@ -264,6 +267,46 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionException rejected = Assert.Throws<RuntimeSelectionException>(
             () => service.SelectRecognitionMode("windows_text"));
         Assert.Equal(RuntimeSelectionErrorKind.EngineUnavailable, rejected.Kind);
+    }
+
+    [Fact]
+    public void PaddleTextProvisioningContractAcceptsBaseRuntimeAndKeepsPaddleModesAdvanced()
+    {
+        RuntimeSelectionService service = new(Health(
+            [RecognitionModesCapability],
+            recognitionModes: RecognitionCatalog()));
+
+        // 回归（paddle-offline-default）：真实 Runtime pipeline_contracts.py 已把
+        // paddle_text 声明为 base_runtime；共享目录必须如实接受，不得再用旧
+        // advanced_component 伪装（否则单测通过而真实 UI 启动失败）。
+        RecognitionModeOption paddleText = service.SelectRecognitionMode("paddle_text");
+        Assert.Equal("base_runtime", paddleText.Provisioning);
+        // 迁移仅针对 paddle_text：表格/文档 Paddle 模式保持 advanced_component。
+        Assert.Equal("advanced_component", service.SelectRecognitionMode("paddle_table").Provisioning);
+        Assert.Equal("advanced_component", service.SelectRecognitionMode("paddle_structure").Provisioning);
+    }
+
+    [Fact]
+    public void PaddleTextProvisioningContractRejectsLegacyAdvancedComponent()
+    {
+        Wire.RecognitionModeCatalog legacy = RecognitionCatalog();
+        legacy = legacy with
+        {
+            Modes =
+            [
+                legacy.Modes[0],
+                legacy.Modes[1] with
+                {
+                    Provisioning = Wire.RecognitionModeProvisioning.AdvancedComponent,
+                },
+                .. legacy.Modes.Skip(2),
+            ],
+        };
+
+        InvalidDataException rejected = Assert.Throws<InvalidDataException>(() => new RuntimeSelectionService(
+            Health([RecognitionModesCapability], recognitionModes: legacy)));
+        Assert.Contains("paddle_text", rejected.Message, StringComparison.Ordinal);
+        Assert.Contains("violates its execution or lifecycle contract", rejected.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -576,24 +619,21 @@ public sealed class RuntimeSelectionServiceTests
     {
         Modes =
         [
-            Mode(Wire.RecognitionModeId.RapidText, Wire.RecognitionModeFamily.Text,
-                Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Rapidocr,
-                Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
             Mode(Wire.RecognitionModeId.WindowsText, Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Windows,
                 Wire.RecognitionModeProvisioning.OperatingSystem,
                 Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
             Mode(Wire.RecognitionModeId.PaddleText, Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Paddleocr,
-                Wire.RecognitionModeProvisioning.AdvancedComponent,
+                Wire.RecognitionModeProvisioning.BaseRuntime,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
             Mode(Wire.RecognitionModeId.PaddleStructure, Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.PPStructureV3, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
             // #270：paddle_document_vl / paddle_formula 已退役，不再进入
-            // 目录 fixture（真实目录同样不再声明它们）。
+            // 目录 fixture（真实目录同样不再声明它们）；rapid_text / rapid_table
+            // 同样已退役，不再出现在目录。
             Mode(Wire.RecognitionModeId.MineruDocument, Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.MinerU, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
@@ -602,10 +642,6 @@ public sealed class RuntimeSelectionServiceTests
                 Wire.ExecutionPipelineId.TABLERECOGNITION, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
                 Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
-            Mode(Wire.RecognitionModeId.RapidTable, Wire.RecognitionModeFamily.Specialized,
-                Wire.ExecutionPipelineId.RAPIDTABLE, null,
-                Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.Unmanaged, false, false, false, false),
         ],
     };
 

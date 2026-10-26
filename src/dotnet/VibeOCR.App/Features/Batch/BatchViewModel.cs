@@ -27,7 +27,6 @@ public sealed class BatchViewModel(
     private MineruConfig? _mineruConfig;
     private string? _taskModeId;
     private PaddleModeOptions? _options;
-    private RapidDeviceOptions? _deviceOptions;
     private bool _mineruFlashTierAvailable;
 
     /// <summary>队列中是否存在原生 Office 文档（决定是否需要 flash 组）。</summary>
@@ -62,11 +61,9 @@ public sealed class BatchViewModel(
         MineruConfig? mineruConfig = null,
         PaddleModeOptions? options = null,
         string? taskModeId = null,
-        bool mineruFlashTierAvailable = false,
-        RapidDeviceOptions? deviceOptions = null)
+        bool mineruFlashTierAvailable = false)
     {
         _options = mode is null ? null : options;
-        _deviceOptions = mode is null ? null : deviceOptions;
         _recognitionMode = mode;
         _mineruConfig = mode is null ? null : mineruConfig;
         _taskModeId = taskModeId;
@@ -123,8 +120,6 @@ public sealed class BatchViewModel(
             var merged = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal);
             if (_options is not null)
                 foreach (var pair in _options.ToWire(_recognitionMode!)) merged.Add(pair.Key, pair.Value);
-            if (_deviceOptions is not null)
-                foreach (var pair in _deviceOptions.ToWire(_recognitionMode!)) merged.Add(pair.Key, pair.Value);
             options = merged.Count == 0 ? null : merged;
         }
         catch (ArgumentException error)

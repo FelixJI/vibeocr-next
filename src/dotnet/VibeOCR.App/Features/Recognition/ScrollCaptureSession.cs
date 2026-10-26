@@ -19,18 +19,25 @@ internal static class ScrollCaptureSession
 {
   /// <summary>
   /// 在 UI 线程调用；owner 已隐藏，任务栏/悬浮栏管理与 owner 恢复由调用方负责。
-  /// 正常完成返回拼接后的 <see cref="CapturedFrame"/>；用户取消或关闭控制窗返回 null；
+  /// 正常完成返回拼接后的选区及实际尺寸；用户取消或关闭控制窗返回 null；
   /// 外部 token 取消抛 OperationCanceledException；失败在用户关闭控制窗后抛出
   /// InvalidOperationException/InvalidDataException，不返回不完整长图。
   /// 返回前控制窗已关闭、全部资源已清理。
   /// </summary>
-  internal static async Task<CapturedFrame?> CaptureAsync(
+  internal static async Task<ScreenRegionSelection?> CaptureAsync(
       nint owner,
       PhysicalRectangle bounds,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      Window? selectionWindow = null)
   {
-    var session = new Session(owner, bounds, cancellationToken);
-    return await session.RunAsync();
+    var session = new Session(owner, bounds, cancellationToken, selectionWindow);
+    try
+    {
+      selectionWindow?.AppWindow.Hide();
+      CapturedFrame? frame = await session.RunAsync();
+      return frame is null ? null : ScreenRegionPicker.CreateScrollingSelection(session.Bounds, frame);
+    }
+    finally { session.CloseControlWindow(); }
   }
 
   /// <summary>
@@ -39,16 +46,15 @@ internal static class ScrollCaptureSession
   /// </summary>
   internal sealed class Session
   {
-    private const int CaptureIntervalMs = 550; // 约 500–600ms 采集节奏。
-    // 静止判定为连续两帧完全相同（一次比较）：内容静止后最迟 1 个采集间隔（550ms）内上交；
+    private const int CaptureIntervalMs = 100; // 连续滚动也保留可验证重叠的中间帧。
+    // 静止判定为连续两帧完全相同（一次比较）：内容静止后最迟 1 个采集间隔（100ms）内上交；
     // 内容持续变化超过 DynamicContentTimeoutMs 判为动态失败。
     private const int StableComparisonsRequired = 1;
     private const int DynamicContentTimeoutMs = 5000; // 持续变化上限，避免无限忙循环。
     private const int ForegroundRestoreTimeoutMs = 5000; // 完成采样等待源窗口恢复前台的上限，防止无限挂起。
     private const int MinSelectionSidePx = 32; // 方向尚未选择时，两边采用同一最小值；开始时另验滚动轴至少 64px。
     private const int PlacementGapPx = 16; // 控制窗与选区间距（physical px）。
-    private const int WindowLogicalWidth = 320; // 控制窗固定逻辑宽度，长文本按此换行。
-    private const int WindowChromeSlackPx = 60; // 标题栏等非客户区估算冗余。
+    private const int WindowLogicalWidth = 500; // 紧凑工具栏逻辑宽度。
     private const int PreviewMaxLogicalPx = 220; // 预览框逻辑尺寸上限。
     private const int PreviewMaxDecodePx = PreviewMaxLogicalPx * 2; // 按小尺寸解码，避免保留全帧位图。
     private const int TotalTimeoutMs = 180_000;
@@ -58,7 +64,7 @@ internal static class ScrollCaptureSession
     private const uint MonitorDefaultToNearest = 2;
 
     private readonly nint _owner;
-    private readonly PhysicalRectangle _bounds;
+    private PhysicalRectangle _bounds;
     private readonly CancellationToken _external;
     private readonly CancellationTokenSource _lifecycle = new();
     private readonly TaskCompletionSource<CapturedFrame?> _completion =
@@ -67,7 +73,15 @@ internal static class ScrollCaptureSession
     private readonly object _terminalGate = new();
 
     private Window _window = null!;
+    private readonly Window? _selectionWindow;
+    private ScrollCaptureMask? _mask;
+    private NumberBox? _widthBox, _heightBox;
+    private volatile bool _overlapMissing;
     private nint _controlHandle;
+    private StackPanel? _toolbarContent;
+    private int _acceptedPreviewWidth, _acceptedPreviewHeight;
+    private Window? _previewWindow;
+    private nint _previewHandle;
     private TextBlock _statusText = null!;
     private TextBlock _errorText = null!;
     private Image _previewImage = null!;
@@ -124,17 +138,20 @@ internal static class ScrollCaptureSession
     private CancellationTokenRegistration _registration;
 
     internal Window ControlWindow => _window;
+    internal PhysicalRectangle Bounds => _bounds;
     internal string DiagnosticState =>
         $"automatic={_automatic}, review={_reviewPending}, confirmed={_initialPreviewConfirmed}, " +
         $"stable={_stableStreak}, appended={_appendedForCurrentStreak}, input={_scrollInputDiagnostic}, failure={_failure?.Message}";
     internal bool HasReleasedCaptureResources => _loop?.IsCompleted != false && _previewTask.IsCompleted &&
-        _stitcher is null && _lastCaptured is null && _pendingFrame is null && _finalFrame is null && _correctionAuthorization is null;
+        _stitcher is null && _lastCaptured is null && _pendingFrame is null && _finalFrame is null && _correctionAuthorization is null &&
+        _mask is null && _previewWindow is null;
 
-    public Session(nint owner, PhysicalRectangle bounds, CancellationToken external)
+    public Session(nint owner, PhysicalRectangle bounds, CancellationToken external, Window? selectionWindow = null)
     {
       _owner = owner;
       _bounds = bounds;
       _external = external;
+      _selectionWindow = selectionWindow;
     }
 
     public async Task<CapturedFrame?> RunAsync()
@@ -151,7 +168,17 @@ internal static class ScrollCaptureSession
       ValidateSelectionSize();
       _desktop = SmartScreenCandidates.CurrentDesktop();
       string? sourceError = IdentifySource();
-      CreateWindow(); // 无合法位置时在开始前直接抛“需缩小选区”。
+      try { CreateWindow(); }
+      catch
+      {
+        _mask?.Dispose();
+        _mask = null;
+        _previewWindow?.Close();
+        _previewWindow = null;
+        CloseControlWindow();
+        _lifecycle.Dispose();
+        throw;
+      }
       _registration = _external.Register(OnExternalCancelled);
       try
       {
@@ -194,6 +221,10 @@ internal static class ScrollCaptureSession
         _pendingImage.Source = null;
         _stitcher = null;
         _acceptedPreviewQueued = false;
+        _previewWindow?.Close();
+        _previewWindow = null;
+        _mask?.Dispose();
+        _mask = null;
         CloseControlWindow(); // owner/任务栏恢复由调用方负责，此处只关本模块控制窗。
         _lifecycle.Dispose();
       }
@@ -251,11 +282,7 @@ internal static class ScrollCaptureSession
     /// <summary>构建原生 WinUI 控制窗：置顶、禁最大/最小/resize，按选区四边在工作区内找空位。</summary>
     private void CreateWindow()
     {
-      _statusText = new TextBlock { Text = "准备中…", TextWrapping = TextWrapping.Wrap };
-      double aspect = (double)_bounds.Height / Math.Max(1, _bounds.Width);
-      int previewWidth = Math.Clamp(_bounds.Width, 80, PreviewMaxLogicalPx);
-      int previewHeight = (int)Math.Clamp(Math.Round(previewWidth * aspect), 60, 160);
-      _previewImage = new Image { Width = previewWidth, Height = previewHeight, Stretch = Stretch.Uniform };
+      _statusText = new TextBlock { Text = "准备中…", TextWrapping = TextWrapping.Wrap, FontSize = 12 };
       _errorText = new TextBlock
       {
         Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed),
@@ -271,86 +298,190 @@ internal static class ScrollCaptureSession
       _cancelButton = new Button { Content = "取消" };
       AutomationProperties.SetAutomationId(_cancelButton, "scroll-capture-cancel");
       _cancelButton.Click += OnCancel;
-      var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-      buttons.Children.Add(_startButton);
-      buttons.Children.Add(_finishButton);
-      buttons.Children.Add(_cancelButton);
-      // 固定逻辑宽度 + 有限宽 Measure：长说明/错误文本按该宽度换行，高度随内容计算，
-      // 避免 infinite 宽度下按单行测出巨宽、窗口被钳制后内容不重排。
-      var root = new StackPanel { Spacing = 8, Padding = new Thickness(12), Width = WindowLogicalWidth };
-      root.Children.Add(new TextBlock
-      {
-        Text = "仅支持静态、可重叠的普通窗口内容。选择方向与固定边缘范围，首帧预览后确认；"
-            + "自动模式会短暂定位光标到选区中心发送标准滚轮；请松开鼠键和 Ctrl/Shift/Alt。不支持游戏、受保护画面、提权窗口或自定义滚动控件。",
-        TextWrapping = TextWrapping.Wrap,
-      });
-      _directionBox = new ComboBox { Header = "滚动方向", SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+      _directionBox = new ComboBox { Width = 90 };
       foreach (string direction in new[] { "向下", "向上", "向右", "向左" }) _directionBox.Items.Add(direction);
       _directionBox.SelectedIndex = 0;
       AutomationProperties.SetAutomationId(_directionBox, "scroll-capture-direction");
-      _automaticBox = new CheckBox { Content = "自动滚动（普通窗口标准滚轮）" };
+      _automaticBox = new CheckBox { Content = "自动" };
       AutomationProperties.SetAutomationId(_automaticBox, "scroll-capture-automatic");
-      _leadingBox = EdgeNumber("固定顶部 / 左侧（像素）", "scroll-capture-leading");
-      _trailingBox = EdgeNumber("固定底部 / 右侧（像素）", "scroll-capture-trailing");
-      var edgeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-      _leadingBox.Width = 144;
-      _trailingBox.Width = 144;
-      edgeRow.Children.Add(_leadingBox);
-      edgeRow.Children.Add(_trailingBox);
-      _options = new StackPanel { Spacing = 4 };
-      _options.Children.Add(_directionBox);
-      _options.Children.Add(_automaticBox);
-      _options.Children.Add(edgeRow);
+      _widthBox = EdgeNumber("宽", "scroll-capture-width");
+      _heightBox = EdgeNumber("高", "scroll-capture-height");
+      _widthBox.Value = _bounds.Width;
+      _heightBox.Value = _bounds.Height;
+      _widthBox.Width = _heightBox.Width = 110;
+      var resize = new Button { Content = "应用尺寸" };
+      AutomationProperties.SetAutomationId(resize, "scroll-capture-resize");
+      resize.Click += (_, _) => { try { ApplySelectionDimensions(); } catch (Exception error) { Fail(error); } };
+      _leadingBox = EdgeNumber("固定顶部 / 左侧（px）", "scroll-capture-leading");
+      _trailingBox = EdgeNumber("固定底部 / 右侧（px）", "scroll-capture-trailing");
+      var edges = new StackPanel { Spacing = 6, Width = 220 };
+      edges.Children.Add(_leadingBox);
+      edges.Children.Add(_trailingBox);
+      var edgeButton = new Button { Content = "固定边缘", Flyout = new Flyout { Content = edges } };
+      _options = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+      _options.Children.Add(_widthBox);
+      _options.Children.Add(_heightBox);
+      _options.Children.Add(resize);
+      _options.Children.Add(edgeButton);
+      var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+      buttons.Children.Add(_directionBox);
+      buttons.Children.Add(_automaticBox);
+      buttons.Children.Add(_startButton);
+      buttons.Children.Add(_finishButton);
+      buttons.Children.Add(_cancelButton);
+      var root = new StackPanel { Spacing = 4, Padding = new Thickness(6), Width = WindowLogicalWidth };
+      _toolbarContent = root;
+      root.Children.Add(buttons);
       root.Children.Add(_options);
       root.Children.Add(_statusText);
-      root.Children.Add(_previewImage);
-      _pendingImage = new Image { Width = previewWidth, Height = previewHeight, Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed };
-      root.Children.Add(_pendingImage);
-      _offsetBox = EdgeNumber("纠偏位移（所选方向的像素数）", "scroll-capture-offset");
+      _offsetBox = EdgeNumber("纠偏位移（px）", "scroll-capture-offset");
       _offsetBox.Minimum = 1;
       _offsetBox.Visibility = Visibility.Collapsed;
       root.Children.Add(_offsetBox);
-      _confirmButton = new Button { Content = "确认预览并继续", Visibility = Visibility.Collapsed };
+      _confirmButton = new Button { Content = "继续", Visibility = Visibility.Collapsed };
       AutomationProperties.SetAutomationId(_confirmButton, "scroll-capture-confirm");
       _confirmButton.Click += OnConfirm;
       root.Children.Add(_confirmButton);
       root.Children.Add(_errorText);
-      root.Children.Add(buttons);
-      var scroller = new ScrollViewer
+      _window = _selectionWindow ?? new Window();
+      _window.Title = "VibeOCR 长截图";
+      _window.Content = new ScrollViewer
       {
         Content = root,
         VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
       };
-      _window = new Window { Title = "VibeOCR 滚动截图", Content = scroller };
+      ConfigureOverlayWindow(_window);
+      _controlHandle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+      root.Measure(new Windows.Foundation.Size(WindowLogicalWidth, double.PositiveInfinity));
+      double scale = _sourceDpi > 0 ? _sourceDpi / 96.0 : 1.0;
+      if (!PlaceWindow((int)Math.Ceiling(WindowLogicalWidth * scale), (int)Math.Ceiling(root.DesiredSize.Height * scale)))
+      {
+        throw new InvalidOperationException("选区旁没有工具栏空间，请缩小选区后重试。");
+      }
+      _previewImage = new Image { Stretch = Stretch.Uniform };
+      _pendingImage = new Image { Stretch = Stretch.Uniform, Visibility = Visibility.Collapsed };
+      var previews = new StackPanel { Spacing = 4 };
+      previews.Children.Add(_previewImage);
+      previews.Children.Add(_pendingImage);
+      _previewWindow = new Window { Content = new Border { Padding = new Thickness(3), Child = previews } };
+      try
+      {
+        ConfigureOverlayWindow(_previewWindow);
+        _previewHandle = WinRT.Interop.WindowNative.GetWindowHandle(_previewWindow);
+        nint style = GetWindowLongPtrW(_previewHandle, -20);
+        SetWindowLongPtrW(_previewHandle, -20, (nint)((long)style | 0x08000020));
+        if (!PositionPreview(_bounds.Width, _bounds.Height))
+          throw new InvalidOperationException("选区旁没有预览空间，请缩小选区后重试。");
+        _mask = new ScrollCaptureMask(_desktop, _bounds);
+        _window.Closed += OnWindowClosed;
+        _window.Activate();
+      }
+      catch
+      {
+        _mask?.Dispose();
+        _mask = null;
+        throw;
+      }
+    }
+
+    private static void ConfigureOverlayWindow(Window window)
+    {
       OverlappedPresenter presenter = OverlappedPresenter.Create();
+      presenter.SetBorderAndTitleBar(false, false);
       presenter.IsAlwaysOnTop = true;
       presenter.IsResizable = false;
       presenter.IsMaximizable = false;
       presenter.IsMinimizable = false;
-      _window.AppWindow.SetPresenter(presenter);
-      _window.AppWindow.IsShownInSwitchers = false;
-      _controlHandle = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-      // Keep the controller and its compositor shadow out of captured pixels.
-      if (!SetWindowDisplayAffinity(_controlHandle, 0x00000011)) // WDA_EXCLUDEFROMCAPTURE
-      {
-        int error = Marshal.GetLastPInvokeError();
-        _window.Close();
-        throw new System.ComponentModel.Win32Exception(error, "无法将滚动截图控制窗排除出屏幕采集。");
-      }
-      root.Measure(new Windows.Foundation.Size(WindowLogicalWidth, double.PositiveInfinity));
-      double scale = _sourceDpi > 0 ? _sourceDpi / 96.0 : 1.0;
-      int width = (int)Math.Ceiling(WindowLogicalWidth * scale) + WindowChromeSlackPx;
-      int height = (int)Math.Ceiling(root.DesiredSize.Height * scale) + WindowChromeSlackPx;
-      if (!PlaceWindow(width, height))
-      {
-        _window.Close();
-        throw new InvalidOperationException("选区周围的工作区内没有足够空间放置控制窗，请缩小选区后重试。");
-      }
-
-      _window.Closed += OnWindowClosed;
-      _window.Activate();
+      window.AppWindow.SetPresenter(presenter);
+      window.AppWindow.IsShownInSwitchers = false;
+      nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+      if (!SetWindowDisplayAffinity(handle, 0x00000011))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "无法将长截图遮罩排除出采集。");
     }
+
+    private bool PositionPreview(int width, int height)
+    {
+      if (_previewWindow is null) return true; // 自检的内嵌预览由宿主控件布局。
+      _acceptedPreviewWidth = width;
+      _acceptedPreviewHeight = height;
+      double dpiScale = _sourceDpi > 0 ? _sourceDpi / 96.0 : 1;
+      PhysicalRectangle work = GetWorkArea(_bounds);
+      int sideSpace = Math.Max(work.Right - _bounds.Right, _bounds.X - work.X) - PlacementGapPx - 6;
+      bool horizontal = _direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
+      double maxWidth = Math.Clamp(sideSpace / dpiScale, 48, horizontal ? 380 : 140);
+      bool pending = _pendingImage.Visibility == Visibility.Visible && _pendingImage.Source is BitmapImage;
+      double preferredScale = horizontal ? 96.0 / height : 140.0 / width;
+      double scale = Math.Min(1, Math.Min(preferredScale, Math.Min(maxWidth / width, (pending ? 180.0 : 380.0) / height)));
+      _previewImage.Width = Math.Max(1, width * scale);
+      _previewImage.Height = Math.Max(1, height * scale);
+      if (pending && _pendingImage.Source is BitmapImage pendingBitmap)
+      {
+        double pendingScale = Math.Min(1, Math.Min(maxWidth / Math.Max(1, pendingBitmap.PixelWidth), 180.0 / Math.Max(1, pendingBitmap.PixelHeight)));
+        _pendingImage.Width = Math.Max(1, pendingBitmap.PixelWidth * pendingScale);
+        _pendingImage.Height = Math.Max(1, pendingBitmap.PixelHeight * pendingScale);
+      }
+      int physicalWidth = (int)Math.Ceiling((Math.Max(_previewImage.Width, pending ? _pendingImage.Width : 0) + 6) * dpiScale);
+      int physicalHeight = (int)Math.Ceiling((_previewImage.Height + (pending ? _pendingImage.Height + 4 : 0) + 6) * dpiScale);
+      foreach (RectInt32 candidate in PlacementCandidates(work, physicalWidth, physicalHeight).OrderBy(rect =>
+          rect.X >= _bounds.Right ? 0 : rect.X + rect.Width <= _bounds.X ? 1 : 2))
+      {
+        var rect = new PhysicalRectangle(candidate.X, candidate.Y, candidate.Width, candidate.Height);
+        if (!ContainsRect(work, rect) || SmartScreenCandidates.Intersect(rect, _bounds) is not null ||
+            SmartScreenCandidates.Intersect(rect, ControlRectangle()) is not null) continue;
+        _previewWindow.AppWindow.MoveAndResize(candidate);
+        if (!GetWindowRect(_previewHandle, out RectL actual)) continue;
+        var actualRect = new PhysicalRectangle(actual.Left, actual.Top, actual.Right - actual.Left, actual.Bottom - actual.Top);
+        if (!ContainsRect(work, actualRect) || SmartScreenCandidates.Intersect(actualRect, _bounds) is not null ||
+            SmartScreenCandidates.Intersect(actualRect, ControlRectangle()) is not null) continue;
+        ShowWindow(_previewHandle, 8);
+        if (SetWindowPos(_previewHandle, -1, 0, 0, 0, 0, 0x0013) && IsWindowVisible(_previewHandle)) return true;
+      }
+      _previewWindow.AppWindow.Hide();
+      return false;
+    }
+
+    private bool EnsurePreviewVisible()
+    {
+      if (_previewWindow is null || (_acceptedPreviewWidth > 0 && PositionPreview(_acceptedPreviewWidth, _acceptedPreviewHeight))) return true;
+      Fail(new InvalidOperationException("选区旁没有预览空间，无法确认截图。请取消并缩小选区后重试。"));
+      return false;
+    }
+
+    private void ApplySelectionDimensions()
+    {
+      if (_loop is not null || _widthBox is null || _heightBox is null) return;
+      double width = _widthBox.Value, height = _heightBox.Value;
+      if (!double.IsFinite(width) || !double.IsFinite(height) || width != Math.Truncate(width) || height != Math.Truncate(height) ||
+          width < MinSelectionSidePx || height < MinSelectionSidePx ||
+          width > VerticalScrollStitcher.MaximumDimension || height > VerticalScrollStitcher.MaximumDimension || width * height > VerticalScrollStitcher.MaximumPixels ||
+          !SelectionFitsCaptureArea(_bounds with { Width = (int)width, Height = (int)height }))
+      {
+        _errorText.Text = "尺寸需位于源窗口与桌面范围内，且为整数并不超过像素上限。";
+        _errorText.Visibility = Visibility.Visible;
+        return;
+      }
+      PhysicalRectangle previous = _bounds;
+      _bounds = _bounds with { Width = (int)width, Height = (int)height };
+      SizeInt32 size = _window.AppWindow.Size;
+      if (!PlaceWindow(size.Width, size.Height))
+      {
+        _bounds = previous;
+        PlaceWindow(size.Width, size.Height);
+        _errorText.Text = "选区旁没有工具栏空间，请减小尺寸。";
+        _errorText.Visibility = Visibility.Visible;
+        return;
+      }
+      _mask?.Dispose();
+      _mask = new ScrollCaptureMask(_desktop, _bounds);
+      _acceptedPreviewWidth = _bounds.Width;
+      _acceptedPreviewHeight = _bounds.Height;
+      if (!EnsurePreviewVisible()) return;
+      _errorText.Visibility = Visibility.Collapsed;
+    }
+
+    private bool SelectionFitsCaptureArea(PhysicalRectangle bounds) =>
+        ContainsRect(_sourceRect, bounds) && ContainsRect(_desktop, bounds);
 
     /// <summary>
     /// 依次尝试选区下方/右侧/左侧/上方；每次都用真实 GetWindowRect 校验“完全在选区外
@@ -358,6 +489,8 @@ internal static class ScrollCaptureSession
     /// </summary>
     private bool PlaceWindow(int width, int height)
     {
+      PointInt32 oldPosition = _window.AppWindow.Position;
+      SizeInt32 oldSize = _window.AppWindow.Size;
       PhysicalRectangle work = GetWorkArea(_bounds);
       width = Math.Min(width, work.Width);
       height = Math.Min(height, work.Height);
@@ -375,7 +508,19 @@ internal static class ScrollCaptureSession
         }
       }
 
+      _window.AppWindow.MoveAndResize(new RectInt32(oldPosition.X, oldPosition.Y, oldSize.Width, oldSize.Height));
       return false;
+    }
+
+    private void FitToolbar()
+    {
+      if (_toolbarContent is null) return;
+      _toolbarContent.Measure(new Windows.Foundation.Size(WindowLogicalWidth, double.PositiveInfinity));
+      double scale = _sourceDpi > 0 ? _sourceDpi / 96.0 : 1;
+      int height = (int)Math.Ceiling(_toolbarContent.DesiredSize.Height * scale);
+      SizeInt32 current = _window.AppWindow.Size;
+      if (height != current.Height) PlaceWindow(current.Width, height);
+      if (_acceptedPreviewWidth > 0 && _failure is null && !_lifecycle.IsCancellationRequested) EnsurePreviewVisible();
     }
 
     private RectInt32[] PlacementCandidates(PhysicalRectangle work, int width, int height)
@@ -512,13 +657,13 @@ internal static class ScrollCaptureSession
 
           await ObserveFrameAsync(frame);
           if (_failure is not null || _completion.Task.IsCompleted) return;
-          if (!_reviewPending && _finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak)
+          if (!_reviewPending && _finishSamplingStarted && _stitcher is not null && _appendedForCurrentStreak && _stableStreak >= StableComparisonsRequired && !_overlapMissing)
           {
             CompleteBuild(_stitcher);
             return;
           }
 
-          if (_automatic && !_reviewPending && !_finishRequested && _appendedForCurrentStreak)
+          if (_automatic && !_reviewPending && !_finishRequested && _appendedForCurrentStreak && _stableStreak >= StableComparisonsRequired)
           {
             if (_scrollOutstanding && ++_noProgressAttempts >= AutomaticNoProgressAttempts)
             {
@@ -578,6 +723,9 @@ internal static class ScrollCaptureSession
       {
         _stableStreak = 0;
         _appendedForCurrentStreak = false;
+        // 完整重叠就是静态内容的证据；无需等待停止滚动才接收可拼接帧。
+        if (_stitcher is not null && _initialPreviewConfirmed && !_reviewPending)
+          HandleStable(frame, moving: true);
         if (now - _lastStableWitness > DynamicContentTimeoutMs)
         {
           Fail(new InvalidDataException("选区内容持续变化（动态内容），始终未能稳定，已停止采集。"));
@@ -675,7 +823,7 @@ internal static class ScrollCaptureSession
           return false;
         }
 
-        if (handle == _controlHandle || handle == _owner)
+        if (handle == _controlHandle || handle == _previewHandle || _mask?.Contains(handle) == true || handle == _owner)
         {
           return true;
         }
@@ -697,9 +845,9 @@ internal static class ScrollCaptureSession
     }
 
     /// <summary>连续两帧完全一致即视为静止并上交拼接器；同一段静止内容只上交一次，重复帧不增加接收数。</summary>
-    private void HandleStable(CapturedFrame frame)
+    private void HandleStable(CapturedFrame frame, bool moving = false)
     {
-      if (_stableStreak < StableComparisonsRequired)
+      if (!moving && _stableStreak < StableComparisonsRequired)
       {
         return;
       }
@@ -709,7 +857,7 @@ internal static class ScrollCaptureSession
         _stitcher = new VerticalScrollStitcher(frame, _direction, _fixedLeading, _fixedTrailing);
         _appendedForCurrentStreak = true;
         ReportAccepted(_stitcher, frame);
-        PauseForReview($"请检查首帧。红色预览标出固定顶部/左侧 {_fixedLeading}px，底部/右侧 {_fixedTrailing}px；这些边缘将各保留一次，范围必须仅包含固定内容。确认后开始滚动。", null);
+        PauseForReview("核对首帧后继续，滚动源窗口。", null);
         return;
       }
 
@@ -719,9 +867,14 @@ internal static class ScrollCaptureSession
       }
 
       ScrollAppendResult result = _stitcher.Append(frame, _lifecycle.Token);
+      // 动画/重绘中的不匹配帧不终止采集；稳定后才提示恢复或报告真实失败。
+      if (moving && result.Status is not (ScrollAppendStatus.Added or ScrollAppendStatus.Duplicate or ScrollAppendStatus.LimitReached)) return;
       switch (result.Status)
       {
         case ScrollAppendStatus.Added:
+          _overlapMissing = false;
+          _lastStableWitness = Environment.TickCount64;
+          RunOnUi(() => _errorText.Visibility = Visibility.Collapsed);
           _reverseReviewIssued = false;
           _appendedForCurrentStreak = true;
           _lastProgress = Environment.TickCount64;
@@ -730,6 +883,11 @@ internal static class ScrollCaptureSession
           ReportAccepted(_stitcher, frame);
           break;
         case ScrollAppendStatus.Duplicate:
+          if (_overlapMissing)
+          {
+            _overlapMissing = false;
+            RunOnUi(() => { _errorText.Visibility = Visibility.Collapsed; _finishButton.IsEnabled = !_reviewPending && !_overlapMissing; });
+          }
           _reverseReviewIssued = false;
           _appendedForCurrentStreak = true;
           break;
@@ -747,7 +905,16 @@ internal static class ScrollCaptureSession
           }
           break;
         case ScrollAppendStatus.NoOverlap:
-          Fail(new InvalidDataException("没有足够重叠：已检查全部支持的位移，无法用正向纠偏恢复。本次尚未完成，未生成长图；请取消后减少滚动量重试。"));
+          _automatic = false;
+          _scrollOutstanding = false;
+          _overlapMissing = true;
+          _appendedForCurrentStreak = true;
+          RunOnUi(() =>
+          {
+            _finishButton.IsEnabled = false;
+            _errorText.Text = "滚动过快或内容变化，请向回滚动到预览末尾，再缓慢继续。";
+            _errorText.Visibility = Visibility.Visible;
+          });
           break;
         case ScrollAppendStatus.Ambiguous:
           _automatic = false;
@@ -855,7 +1022,7 @@ internal static class ScrollCaptureSession
       byte[]? preview = EncodePreviewBmp(frame);
       RunOnUi(() =>
       {
-        _statusText.Text = $"选段预览：{frame.Width} × {frame.Height}px。请核对方向、固定栏和接缝；只包含本次已收范围，不保证整个文档已到末尾。";
+        _statusText.Text = $"已收 {frame.Width} × {frame.Height}px · 核对接缝后确认";
         _errorText.Visibility = Visibility.Collapsed;
         _confirmButton.Content = "确认选段并送入编辑器";
         _confirmButton.Visibility = Visibility.Visible;
@@ -870,7 +1037,7 @@ internal static class ScrollCaptureSession
       RunOnUi(() =>
       {
         _statusText.Text = status;
-        _finishButton.IsEnabled = !_reviewPending;
+        _finishButton.IsEnabled = !_reviewPending && !_overlapMissing;
       });
       lock (_terminalGate)
       {
@@ -998,7 +1165,12 @@ internal static class ScrollCaptureSession
         }
 
         if (!_lifecycle.IsCancellationRequested)
+        {
           _previewImage.Source = bitmap;
+          _acceptedPreviewWidth = width;
+          _acceptedPreviewHeight = height;
+          EnsurePreviewVisible();
+        }
       }
       catch (Exception error)
       {
@@ -1028,10 +1200,11 @@ internal static class ScrollCaptureSession
         _errorText.Visibility = Visibility.Visible;
         // 固定高度窗口中为错误说明和取消按钮腾出空间。
         _previewImage.Visibility = Visibility.Collapsed;
+        _previewWindow?.AppWindow.Hide();
         _startButton.IsEnabled = false;
         _finishButton.IsEnabled = false;
         _cancelButton.IsEnabled = true;
-        _statusText.Text = "本次未完成，未生成长图：请查看原因后取消或关闭窗口。";
+        _statusText.Text = "采集已停止 · 取消退出";
       }, allowAfterFailure: true);
     }
 
@@ -1094,7 +1267,7 @@ internal static class ScrollCaptureSession
       RunOnUi(() =>
       {
         if (!IsCurrentReview(pending)) return;
-        _statusText.Text = "采集已暂停，等待明确确认；尚未生成成品。";
+        _statusText.Text = "已暂停 · 确认后继续";
         _errorText.Text = message;
         _errorText.Visibility = Visibility.Visible;
         _confirmButton.Content = pending is null ? "确认预览并继续" : "确认位移并校验拼接";
@@ -1126,7 +1299,11 @@ internal static class ScrollCaptureSession
       lock (_terminalGate)
       {
         if (!IsCurrentReview(pending)) return;
-        if (bytes is null) { _confirmButton.IsEnabled = true; return; }
+        if (bytes is null)
+        {
+          if (EnsurePreviewVisible()) _confirmButton.IsEnabled = true;
+          return;
+        }
       }
       try
       {
@@ -1144,7 +1321,7 @@ internal static class ScrollCaptureSession
         {
           if (!IsCurrentReview(pending)) return;
           _pendingImage.Source = bitmap;
-          _confirmButton.IsEnabled = true;
+          if (EnsurePreviewVisible()) _confirmButton.IsEnabled = true;
         }
       }
       catch (Exception error) { Fail(new InvalidOperationException($"无法显示待拼预览，本次未完成：{error.Message}", error)); }
@@ -1164,6 +1341,7 @@ internal static class ScrollCaptureSession
     {
       if (!_reviewPending || !_confirmButton.IsEnabled || _failure is not null ||
           _lifecycle.IsCancellationRequested || _completion.Task.IsCompleted) return;
+      if (!EnsurePreviewVisible()) return;
       if (_finalFrame is { } final)
       {
         lock (_terminalGate)
@@ -1195,7 +1373,7 @@ internal static class ScrollCaptureSession
       // 预览等待不属于动态变化；恢复前丢弃旧见证，保留总时限与无进展计时。
       DiscardStableWitness();
       _reviewPending = false;
-      _statusText.Text = "采集中：按所选方向滚动并停稳；可点击完成预览已收选段。";
+      _statusText.Text = "滚动源窗口 · 完成后核对结果";
       SetForegroundWindow(_source);
     }
 
@@ -1219,7 +1397,7 @@ internal static class ScrollCaptureSession
         if (!input.TrySetCursor(center) || !input.TryGetCursor(out Point positioned) ||
             positioned.X != center.X || positioned.Y != center.Y || !CanSend()) return false;
         bool horizontal = direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right;
-        int delta = direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120;
+        int delta = direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -40 : 40;
         return input.SendWheel(horizontal, delta);
       }
       finally
@@ -1287,7 +1465,7 @@ internal static class ScrollCaptureSession
         var input = new SyntheticScrollInput();
         Check(TrySendScrollInput(input, center, 1, direction), "Allowed system wheel must be sent.");
         Check(input.Horizontal == (direction is ScrollCaptureDirection.Left or ScrollCaptureDirection.Right) &&
-            input.Delta == (direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -120 : 120),
+            input.Delta == (direction is ScrollCaptureDirection.Down or ScrollCaptureDirection.Left ? -40 : 40),
             "Wheel flags and signs must follow the selected direction.");
         Check(input.Position.X == 12 && input.Position.Y == 34, "Cursor must restore after accepted input.");
       }
@@ -1504,6 +1682,12 @@ internal static class ScrollCaptureSession
           for (int x = 0; x < 48; x++) pixels[(y * 48 + x) * 4] = (byte)(top + y);
         return new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
       }
+      static CapturedFrame RepaintingFrame(int top)
+      {
+        CapturedFrame frame = Frame(top);
+        frame.Pixels[0] ^= 0xA5; // 重绘像素破坏真实重叠，不能被当作滚动进展接收。
+        return frame;
+      }
       var sessions = new[] { CreateSelfCheckSession(), CreateSelfCheckSession() };
       try
       {
@@ -1531,7 +1715,7 @@ internal static class ScrollCaptureSession
           long elapsedBefore = session._elapsed.ElapsedTicks;
           long confirmedAt = Environment.TickCount64;
           session.OnConfirm(session, new RoutedEventArgs());
-          await session.ObserveFrameAsync(Frame(52));
+          await session.ObserveFrameAsync(RepaintingFrame(52));
           if (session._failure is not null)
             throw new InvalidOperationException("A changed frame immediately after a long preview must get a fresh dynamic window.", session._failure);
           if (session._lastStableWitness < confirmedAt || session._stableStreak != 0)
@@ -1539,11 +1723,11 @@ internal static class ScrollCaptureSession
           if (session._lastProgress != progressBefore || !session._elapsed.IsRunning || session._elapsed.ElapsedTicks < elapsedBefore)
             throw new InvalidOperationException("Preview confirmation must preserve the no-progress and total capture budgets.");
           session._lastStableWitness = Environment.TickCount64 - DynamicContentTimeoutMs + 1000;
-          await session.ObserveFrameAsync(Frame(53));
+          await session.ObserveFrameAsync(RepaintingFrame(53));
           if (session._failure is not null)
             throw new InvalidOperationException("Changing content inside the fresh five-second window must be allowed.");
           session._lastStableWitness = Environment.TickCount64 - DynamicContentTimeoutMs - 1;
-          await session.ObserveFrameAsync(Frame(54));
+          await session.ObserveFrameAsync(RepaintingFrame(54));
           if (session._failure is not InvalidDataException || session._lastProgress != progressBefore)
             throw new InvalidOperationException("Changing content beyond the same five-second window must still stop without granting progress.");
         }
@@ -1561,8 +1745,112 @@ internal static class ScrollCaptureSession
       }
     }
 
+    internal static async Task VerifyPreviewPlacementSelfCheckAsync()
+    {
+      PhysicalRectangle work = GetWorkArea(DesktopScreenQuery.GetPrimaryMonitor());
+      byte[] pixels = new byte[48 * 96 * 4];
+      for (int y = 0; y < 96; y++) pixels[y * 48 * 4] = (byte)y;
+      var frame = new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+      byte[] bmp = EncodePreviewBmp(frame) ?? throw new InvalidOperationException("Preview fixture encoding failed.");
+      string[] stages = ["initial", "pending", "final", "confirm"];
+      Session[] sessions = stages.Select(_ => CreateSelfCheckSession()).ToArray();
+      try
+      {
+        foreach ((string stage, Session session) in stages.Zip(sessions))
+        {
+          CaptureUiSmokeTrace.Stage($"scroll-preview-geometry.{stage}.begin");
+          session._window.Content = new Grid();
+          ConfigureOverlayWindow(session._window);
+          session._controlHandle = WinRT.Interop.WindowNative.GetWindowHandle(session._window);
+          session._window.AppWindow.MoveAndResize(new RectInt32(work.X + 20, work.Y + 20, 200, 60));
+          session._sourceDpi = GetDpiForWindow(session._controlHandle);
+          session._bounds = new PhysicalRectangle(work.X + work.Width / 4, work.Y + work.Height / 4, 200, 200);
+          var previews = new StackPanel();
+          previews.Children.Add(session._previewImage);
+          previews.Children.Add(session._pendingImage);
+          session._previewWindow = new Window { Content = previews };
+          ConfigureOverlayWindow(session._previewWindow);
+          session._previewHandle = WinRT.Interop.WindowNative.GetWindowHandle(session._previewWindow);
+          session._reviewPending = true;
+          session._confirmButton.IsEnabled = false;
+          CaptureUiSmokeTrace.Stage($"scroll-preview-geometry.{stage}.decode");
+          await session.RenderPreviewAsync(bmp, frame.Width, frame.Height);
+          await session.RenderReviewPreviewAsync(Task.CompletedTask, null, null);
+          if (session._failure is not null || !IsWindowVisible(session._previewHandle) ||
+              session._previewImage.Source is null || !session._confirmButton.IsEnabled)
+            throw new InvalidOperationException("A decoded preview with legal real HWND geometry must enable initial confirmation.");
+
+          CaptureUiSmokeTrace.Stage($"scroll-preview-geometry.{stage}.visible");
+          // 工具栏仍有自己的矩形，但工作区已无任何可放预览的选区外空间。
+          session._bounds = work;
+          session._confirmButton.IsEnabled = false;
+          if (stage == "initial") await session.RenderReviewPreviewAsync(Task.CompletedTask, null, null);
+          else if (stage == "pending")
+          {
+            session._pendingFrame = frame;
+            session._pendingImage.Visibility = Visibility.Visible;
+            await session.RenderReviewPreviewAsync(Task.CompletedTask, bmp, frame);
+          }
+          else if (stage == "final") await session.RenderFinalPreviewAsync(Task.CompletedTask, bmp, frame);
+          else
+          {
+            session._finalFrame = frame;
+            session._confirmButton.IsEnabled = true;
+            session.OnConfirm(session, new RoutedEventArgs());
+          }
+          if (session._failure is null || !session._errorText.Text.Contains("预览空间", StringComparison.Ordinal) ||
+              session._confirmButton.IsEnabled || session._finishButton.IsEnabled ||
+              IsWindowVisible(session._previewHandle) || session._completion.Task.IsCompleted || session._correctionAuthorization is not null)
+            throw new InvalidOperationException($"An invisible {stage} preview must fail closed with shrink-selection guidance.");
+          session.OnConfirm(session, new RoutedEventArgs());
+          if (session._completion.Task.IsCompleted) throw new InvalidOperationException("Hidden preview confirmation returned output.");
+          CaptureUiSmokeTrace.Stage($"scroll-preview-geometry.{stage}.rejected");
+        }
+      }
+      finally
+      {
+        foreach ((string stage, Session session) in stages.Zip(sessions))
+        {
+          session._lifecycle.Cancel();
+          await session._previewTask;
+          session._previewWindow?.Close();
+          session._window.Close();
+          session._lifecycle.Dispose();
+          CaptureUiSmokeTrace.Stage($"scroll-preview-geometry.{stage}.closed");
+        }
+      }
+    }
+
     internal static void VerifySelectionGeometrySelfCheck()
     {
+      ScrollCaptureMask.VerifySelfCheck();
+      var boundary = new Session(1, new PhysicalRectangle(-350, -150, 300, 300), CancellationToken.None)
+      {
+        _sourceRect = new PhysicalRectangle(-500, -300, 1200, 900),
+        _desktop = new PhysicalRectangle(-400, -200, 800, 600),
+        _widthBox = new NumberBox { Value = 800 },
+        _heightBox = new NumberBox { Value = 300 },
+        _errorText = new TextBlock(),
+      };
+      try
+      {
+        PhysicalRectangle accepted = boundary._bounds;
+        if (!boundary.SelectionFitsCaptureArea(accepted)) throw new InvalidOperationException("Valid negative-coordinate selections must remain supported.");
+        boundary.ApplySelectionDimensions();
+        if (boundary._bounds != accepted || boundary._errorText.Visibility != Visibility.Visible)
+          throw new InvalidOperationException("Resizing into a source window's off-desktop area must be rejected before any capture/window mutation.");
+        foreach (PhysicalRectangle outside in new[]
+        {
+          new PhysicalRectangle(-350, -150, 800, 300),
+          new PhysicalRectangle(-350, -150, 300, 600),
+          new PhysicalRectangle(-450, -150, 100, 100),
+          new PhysicalRectangle(-350, -250, 100, 100),
+        })
+          if (boundary.SelectionFitsCaptureArea(outside)) throw new InvalidOperationException("Every desktop edge must bound resizing even when the source window extends beyond it.");
+        boundary._sourceRect = new PhysicalRectangle(-300, -100, 400, 300);
+        if (boundary.SelectionFitsCaptureArea(accepted)) throw new InvalidOperationException("The source window boundary must also remain enforced.");
+      }
+      finally { boundary._lifecycle.Dispose(); }
       foreach ((int width, int height, ScrollCaptureDirection direction) in new[]
           { (200, 40, ScrollCaptureDirection.Right), (40, 200, ScrollCaptureDirection.Down) })
       {
@@ -1683,39 +1971,54 @@ internal static class ScrollCaptureSession
       }
     }
 
-    internal static async Task VerifyNoOverlapStopsSelfCheckAsync()
+    internal static async Task VerifyContinuousScrollRecoverySelfCheckAsync()
     {
-      static CapturedFrame Frame(int top)
+      static CapturedFrame Frame(int top, int height = 96)
       {
-        byte[] pixels = new byte[48 * 96 * 4];
-        for (int y = 0; y < 96; y++) pixels[y * 48 * 4] = (byte)(top + y);
-        return new CapturedFrame(pixels, 48, 96, 48 * 4, "BGRA8");
+        byte[] pixels = new byte[48 * height * 4];
+        for (int y = 0; y < height; y++)
+        {
+          pixels[y * 48 * 4] = (byte)(top + y);
+          pixels[y * 48 * 4 + 1] = (byte)((top + y) >> 8);
+        }
+        return new CapturedFrame(pixels, 48, height, 48 * 4, "BGRA8");
       }
       var session = CreateSelfCheckSession();
       try
       {
-        CapturedFrame first = Frame(0);
         session._lastStableWitness = Environment.TickCount64;
-        await session.ObserveFrameAsync(first);
-        await session.ObserveFrameAsync(first);
+        await session.ObserveFrameAsync(Frame(0));
+        await session.ObserveFrameAsync(Frame(0));
         await session._previewTask;
         session.OnConfirm(session, new RoutedEventArgs());
-        await session.ObserveFrameAsync(Frame(128));
-        await session.ObserveFrameAsync(Frame(128));
+        // 连续滚动没有两张相同帧，但每步有经完整校验的重叠。
+        foreach (int top in new[] { 40, 80, 120 }) await session.ObserveFrameAsync(Frame(top));
         await session._previewTask;
-        if (session._failure is null || session._pendingFrame is not null ||
-            session._confirmButton.Visibility != Visibility.Collapsed || session._finishButton.IsEnabled)
-          throw new InvalidOperationException("Exhaustive NoOverlap must terminate without an impossible correction or partial output.");
-        if (session._stitcher?.FrameCount != 1 || !session._stitcher.BuildFrame().Pixels.SequenceEqual(first.Pixels))
-          throw new InvalidOperationException("NoOverlap must preserve accepted pixels until cleanup.");
-        session.OnConfirm(session, new RoutedEventArgs());
+        if (session._stitcher?.FrameCount != 4 ||
+            !session._stitcher.BuildFrame().Pixels.SequenceEqual(Frame(0, 216).Pixels))
+          throw new InvalidOperationException("Continuous overlapping scroll frames were skipped before settling.");
+        CapturedFrame accepted = session._stitcher.BuildFrame();
+        await session.ObserveFrameAsync(Frame(280));
+        await session.ObserveFrameAsync(Frame(280));
+        await session._previewTask;
+        if (session._failure is not null || session._finishButton.IsEnabled ||
+            !session._stitcher.BuildFrame().Pixels.SequenceEqual(accepted.Pixels))
+          throw new InvalidOperationException("A gap must remain recoverable without changing accepted pixels or allowing completion.");
         session.OnFinish(session, new RoutedEventArgs());
-        if (session._completion.Task.IsCompleted || session._finishRequested)
-          throw new InvalidOperationException("A terminal NoOverlap cannot be confirmed or finished.");
-        Exception original = session._failure;
+        if (session._finishRequested || session._completion.Task.IsCompleted)
+          throw new InvalidOperationException("An unresolved gap must never publish an incomplete long image.");
+        // 回滚到与最后接收位置 120 重叠的位置，再向前连接；280 没有被伪造加入。
+        await session.ObserveFrameAsync(Frame(160));
+        await session.ObserveFrameAsync(Frame(200));
+        await session.ObserveFrameAsync(Frame(240));
+        await session.ObserveFrameAsync(Frame(280));
+        await session._previewTask;
+        if (session._failure is not null || !session._finishButton.IsEnabled ||
+            !session._stitcher.BuildFrame().Pixels.SequenceEqual(Frame(0, 376).Pixels))
+          throw new InvalidOperationException("Returning to an overlapping frame must safely resume and fill every missing strip.");
         session.CancelFromUi();
-        try { await session._completion.Task; throw new InvalidOperationException("NoOverlap returned partial output."); }
-        catch (Exception error) when (ReferenceEquals(error, original)) { }
+        if (await session._completion.Task is not null)
+          throw new InvalidOperationException("Cancellation must discard recovered output.");
       }
       finally
       {
@@ -1951,7 +2254,7 @@ internal static class ScrollCaptureSession
 
     private void SetReadyUi()
     {
-      _statusText.Text = "就绪：选择方向、滚动模式和固定边缘，点击开始采样首帧。";
+      _statusText.Text = "调整宽高与方向后开始，滚动源窗口以延长截图。";
       _startButton.IsEnabled = true;
     }
 
@@ -1975,7 +2278,9 @@ internal static class ScrollCaptureSession
       _automatic = _automaticBox.IsChecked == true;
       _fixedLeading = (int)_leadingBox.Value;
       _fixedTrailing = (int)_trailingBox.Value;
-      _options.Visibility = Visibility.Collapsed;
+      foreach (Control option in _options.Children.OfType<Control>()) option.IsEnabled = false;
+      _directionBox.IsEnabled = false;
+      _automaticBox.IsEnabled = false;
       _errorText.Visibility = Visibility.Collapsed;
       _startButton.IsEnabled = false;
       _statusText.Text = "采集中：请保持首帧静止，稍后确认预览。";
@@ -1990,13 +2295,13 @@ internal static class ScrollCaptureSession
         return;
       }
 
-      if (_pendingFrame is not null || !_initialPreviewConfirmed) return;
+      if (_pendingFrame is not null || !_initialPreviewConfirmed || _overlapMissing) return;
       HideReview();
       _reviewPending = false;
       _automatic = false;
       _finishButton.IsEnabled = false;
       _finishRequested = true;
-      _statusText.Text = "正在收尾：正在把源窗口恢复前台，请停止滚动，等待最后一帧稳定。";
+      _statusText.Text = "请停止滚动，正在收尾…";
     }
 
     private void OnCancel(object sender, RoutedEventArgs args) => CancelFromUi();
@@ -2082,24 +2387,20 @@ internal static class ScrollCaptureSession
       finally { user._lifecycle.Dispose(); }
     }
 
-    private void CloseControlWindow()
+    internal void CloseControlWindow()
     {
       try
       {
-        Window window = _window;
-        if (window is null || _closed)
+        Window? window = _window ?? _selectionWindow;
+        if (window is null || _closed) return;
+        void Close()
         {
-          return;
-        }
-
-        if (window.DispatcherQueue.HasThreadAccess)
-        {
+          if (_closed) return;
+          _closed = true;
           window.Close();
         }
-        else
-        {
-          window.DispatcherQueue.TryEnqueue(window.Close);
-        }
+        if (window.DispatcherQueue.HasThreadAccess) Close();
+        else window.DispatcherQueue.TryEnqueue(Close);
       }
       catch (Exception error)
       {
@@ -2124,6 +2425,8 @@ internal static class ScrollCaptureSession
           try
           {
             action();
+            if (_loop is not null && _automaticBox is not null) _automaticBox.IsChecked = _automatic;
+            FitToolbar();
           }
           catch (Exception error)
           {
@@ -2182,6 +2485,17 @@ internal static class ScrollCaptureSession
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowDisplayAffinity(nint window, uint affinity);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(nint handle, nint after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")]
+    private static extern nint GetWindowLongPtrW(nint window, int index);
+    [DllImport("user32.dll")]
+    private static extern nint SetWindowLongPtrW(nint window, int index, nint value);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint window, int command);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint count, Input[] inputs, int size);
 
@@ -2206,6 +2520,10 @@ internal static class ScrollCaptureSession
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindow(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint window);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

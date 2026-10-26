@@ -626,6 +626,8 @@ public sealed partial class MainWindow
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
+    if (pin.SmokeMoreButtonOpacity != 1)
+      throw new InvalidOperationException("Pinned actions must remain visible while their menu is open.");
     JsonElement root = geometry.RootElement;
     string expected = root.GetProperty("expected").GetString() ?? string.Empty;
     JsonElement start = root.GetProperty("start");
