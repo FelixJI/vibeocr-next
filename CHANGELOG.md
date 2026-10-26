@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.1
+
+### Features
+
+- **ocr:** 退役原生 Paddle 与公式视觉推理入口 (#280) (765a67f)
+- **paddle:** 将表格与版面解析迁移到 ONNX Runtime (#279) (ec9ec2b)
+- **ocr:** 贯通 Paddle ONNX 三类设备与模型档位 (#276) (6276026)
+- **recognition:** 接入 RapidTable 与设备加速并简化截图工具栏 (#269) (eab903b)
+- **workbench:** 优化截图编辑与预览并拆分图像转换 (#265) (747f1b6)
+
+### Bug Fixes
+
+- **ci:** 按内容修订校验自动取字并移除重复构建 (#282) (a6b0ae0)
+- **runtime:** 固定环境目录并阻止过期发布计划 (#263) (442b466)
+
+### Dependencies
+
+- **web:** 升级 Vite 修复开发服务器安全漏洞 (#266) (10b650c)
+- **runtime:** 统一安装器和运行环境依赖版本 (#264) (b3afd9a)
+
 ## 0.8.0
 
 ### Features
