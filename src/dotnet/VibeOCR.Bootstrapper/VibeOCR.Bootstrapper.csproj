@@ -14,6 +14,7 @@
     <PackageReference Include="Velopack" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="../VibeOCR.ProductLayout.Shared/DotNetRuntimeProbe.cs" Link="ProductLayout/DotNetRuntimeProbe.cs" />
     <Compile Include="../VibeOCR.ProductLayout.Shared/ProductLayout.cs"
              Link="ProductLayout/ProductLayout.cs" />
     <Reference Include="System.Runtime.Serialization" />

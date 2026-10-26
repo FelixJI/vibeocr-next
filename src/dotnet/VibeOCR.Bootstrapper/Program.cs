@@ -71,7 +71,7 @@ internal static class Program
         }
         : new string?[]
         {
-          HasDotNetDesktop10() ? null : ".NET Desktop Runtime 10 x64",
+          DotNetRuntimeProbe.FindVersion() != null ? null : ".NET Runtime 10 x64",
           HasWindowsAppRuntime() ? null : "Windows App Runtime 2.5 x64",
           HasWebView2(layout) ? null : "Microsoft Edge WebView2 Evergreen Runtime",
           HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
@@ -139,18 +139,6 @@ internal static class Program
       File.Exists(layout.ComponentLock) &&
       File.Exists(layout.RuntimeManifest) &&
       File.Exists(layout.RuntimeInstaller);
-
-  private static bool HasDotNetDesktop10()
-  {
-    string root = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-        "dotnet",
-        "shared",
-        "Microsoft.WindowsDesktop.App");
-    return Directory.Exists(root) && Directory.EnumerateDirectories(root)
-        .Select(Path.GetFileName)
-        .Any(value => Version.TryParse(value, out Version version) && version.Major >= 10);
-  }
 
   // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
   // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using VibeOCR.ProductLayout;
 using Windows.ApplicationModel;
 using Windows.Management.Deployment;
 using Windows.System;
@@ -7,14 +8,14 @@ namespace VibeOCR.Platform.Bootstrap;
 
 public enum PrerequisiteKind
 {
-    DotNetDesktopRuntime,
+    DotNetRuntime,
     WindowsAppRuntime,
     WebView2Runtime,
     RuntimeInstaller,
 }
 
 public sealed record PrerequisiteSnapshot(
-    string? DotNetDesktopVersion,
+    string? DotNetVersion,
     string? WindowsAppRuntimeVersion,
     string? WebView2Version,
     bool RuntimeInstallerPresent);
@@ -34,7 +35,7 @@ public sealed record PrerequisiteReport(IReadOnlyList<PrerequisiteStatus> Items)
 
 public sealed class PrerequisiteDetector
 {
-    public const string MinimumDotNetDesktopVersion = "10.0.0";
+    public const string MinimumDotNetVersion = "10.0.0";
     // Framework-dependent Windows App SDK pin (Directory.Packages.props
     // Microsoft.WindowsAppSDK); the app cannot start on an older runtime.
     public const string MinimumWindowsAppRuntimeVersion = "2.5.1";
@@ -57,9 +58,9 @@ public sealed class PrerequisiteDetector
         return new PrerequisiteReport(
         [
             Status(
-                PrerequisiteKind.DotNetDesktopRuntime,
-                snapshot.DotNetDesktopVersion,
-                MinimumDotNetDesktopVersion,
+                PrerequisiteKind.DotNetRuntime,
+                snapshot.DotNetVersion,
+                MinimumDotNetVersion,
                 "https://dotnet.microsoft.com/download/dotnet/10.0"),
             Status(
                 PrerequisiteKind.WindowsAppRuntime,
@@ -102,29 +103,10 @@ internal static class WindowsPrerequisiteProbe
     public static PrerequisiteSnapshot Capture(PortableLayout layout)
     {
         return new PrerequisiteSnapshot(
-            FindDotNetDesktopVersion(),
+            DotNetRuntimeProbe.FindVersion(),
             FindWindowsAppRuntimeVersion(),
             FindWebView2Version(),
             File.Exists(RuntimeInstallerConfiguration.ForNext(layout).Executable));
-    }
-
-    private static string? FindDotNetDesktopVersion()
-    {
-        string root = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            "dotnet",
-            "shared",
-            "Microsoft.WindowsDesktop.App");
-        if (!Directory.Exists(root))
-        {
-            return null;
-        }
-
-        return Directory.EnumerateDirectories(root)
-            .Select(Path.GetFileName)
-            .Where(value => Version.TryParse(value, out _))
-            .OrderByDescending(value => Version.Parse(value!))
-            .FirstOrDefault();
     }
 
     private static string? FindWindowsAppRuntimeVersion()

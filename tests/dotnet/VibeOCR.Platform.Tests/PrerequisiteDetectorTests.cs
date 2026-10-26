@@ -18,7 +18,7 @@ public sealed class PrerequisiteDetectorTests
     Assert.False(report.IsReady);
     Assert.Equal(
         [
-            PrerequisiteKind.DotNetDesktopRuntime,
+            PrerequisiteKind.DotNetRuntime,
                 PrerequisiteKind.WindowsAppRuntime,
                 PrerequisiteKind.WebView2Runtime,
                 PrerequisiteKind.RuntimeInstaller,
@@ -45,7 +45,7 @@ public sealed class PrerequisiteDetectorTests
   [InlineData("10.0.9", "2.5.1", true)]
   [InlineData("10.0.9", "2.5.1.0", true)]
   [InlineData("10.0.9", "2.6.0", true)]
-  public void EnforcesMinimumDesktopAndWindowsAppRuntimeVersions(
+  public void EnforcesMinimumDotNetAndWindowsAppRuntimeVersions(
       string desktop,
       string windowsAppRuntime,
       bool expectedReady)
