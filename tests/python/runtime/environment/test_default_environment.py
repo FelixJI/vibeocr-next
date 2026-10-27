@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from test_runtime_installer import _omit_unused_pip_bootstrap, _release
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
+from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 
 
 def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install=None):
@@ -106,6 +107,137 @@ def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch):
     assert calls == []
 
 
+def _retired_default(tmp_path, monkeypatch, install=None):
+    manager, calls = _manager(tmp_path, monkeypatch, install)
+    old = manager._create("默认环境", as_default=True, environment_id="rapidocr-cpu")
+    registry = manager._read()
+    registry["environments"][old["id"]].update(
+        status="installed", recipe="rapidocr-cpu", revision=2
+    )
+    registry["active_id"] = old["id"]
+    registry["active_revision"] = 1
+    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
+    marker = manager.paths.state_root / "default-environment.json"
+    marker.write_text(
+        json.dumps({"environment_id": None, "created": True}), encoding="utf-8"
+    )
+    probe = manager._probe
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda record: (
+            ManagedEnvironmentStore._probe(manager, record)
+            if record["id"] == old["id"]
+            else probe(record)
+        ),
+    )
+    return manager, calls, old, registry
+
+
+@pytest.mark.parametrize("unfinished_marker", [False, True])
+def test_upgrade_replaces_retired_default_without_removing_old_environment(
+    tmp_path, monkeypatch, unfinished_marker
+):
+    manager, calls, old, registry = _retired_default(tmp_path, monkeypatch)
+    if unfinished_marker:
+        (manager.paths.state_root / "default-environment.json").write_text(
+            json.dumps({"environment_id": old["id"], "created": True}),
+            encoding="utf-8",
+        )
+
+    listed = manager.initialize_default()
+    # The real startup path prepares the selected environment after initialization.
+    prepared = manager.prepare_switch(listed["active_id"])
+
+    assert prepared["environment_id"] == "paddleocr-ort-cpu"
+    assert prepared["requires_supervisor"]
+    assert (
+        manager._read()["environments"][old["id"]]
+        == registry["environments"][old["id"]]
+    )
+    assert Path(old["path"]).is_dir()
+    assert len(calls) == 1
+    assert manager.initialize_default()["active_id"] == "paddleocr-ort-cpu"
+    assert len(calls) == 1
+
+
+def test_retired_default_upgrade_failure_retries_without_changing_selection(
+    tmp_path, monkeypatch
+):
+    failed = True
+
+    def install(_python, _scope, _source):
+        if failed:
+            raise RuntimeError("offline pack unavailable")
+
+    manager, calls, old, registry = _retired_default(tmp_path, monkeypatch, install)
+    with pytest.raises(RuntimeError, match="offline pack unavailable"):
+        manager.initialize_default()
+    assert manager._read()["active_id"] == old["id"]
+    assert (
+        manager._read()["environments"][old["id"]]
+        == registry["environments"][old["id"]]
+    )
+    assert len(manager._read()["environments"]) == 2
+
+    failed = False
+    assert manager.initialize_default()["active_id"] == "paddleocr-ort-cpu"
+    assert len(manager._read()["environments"]) == 2
+    assert len(calls) == 2
+
+
+def test_retired_default_upgrade_does_not_repurpose_existing_environment(
+    tmp_path, monkeypatch
+):
+    manager, calls, old, _ = _retired_default(tmp_path, monkeypatch)
+    existing = manager._create(
+        "默认环境（PaddleOCR）", environment_id="paddleocr-ort-cpu"
+    )
+    before = manager._read()["environments"][existing["id"]]
+
+    listed = manager.initialize_default()
+
+    assert listed["active_id"] == "paddleocr-ort-cpu-2"
+    assert manager._read()["environments"][existing["id"]] == before
+    assert Path(old["path"]).is_dir()
+    assert len(calls) == 1
+
+
+def test_retired_default_upgrade_keeps_concurrent_user_selection(tmp_path, monkeypatch):
+    def install(_python, _scope, _source):
+        manager.commit_switch(manager.prepare_switch(selected["id"]))
+
+    manager, _calls, _old, _ = _retired_default(tmp_path, monkeypatch, install)
+    selected = manager.create("用户选择")
+
+    # Installation rejects the changed revision; the user's selection survives.
+    with pytest.raises(RuntimeInstallPlanStale):
+        manager.initialize_default()
+    assert manager._read()["active_id"] == selected["id"]
+    assert manager.initialize_default()["active_id"] == selected["id"]
+
+
+def test_retired_default_upgrade_reserves_id_against_concurrent_create(
+    tmp_path, monkeypatch
+):
+    manager, _calls, _old, _ = _retired_default(tmp_path, monkeypatch)
+    create = manager._create
+    concurrent = []
+
+    def create_after_user(name, **kwargs):
+        if kwargs.get("environment_id") == "paddleocr-ort-cpu" and not concurrent:
+            user = create("paddleocr-ort-cpu")
+            concurrent.append(manager._read()["environments"][user["id"]])
+        return create(name, **kwargs)
+
+    monkeypatch.setattr(manager, "_create", create_after_user)
+
+    listed = manager.initialize_default()
+
+    assert concurrent[0]["id"] != listed["active_id"]
+    assert manager._read()["environments"][concurrent[0]["id"]] == concurrent[0]
+
+
 def test_failed_default_install_retries_same_environment(tmp_path, monkeypatch):
     failed = True
 
@@ -140,16 +272,19 @@ def test_deleting_initialized_environment_does_not_recreate(tmp_path, monkeypatc
     assert len(calls) == 1
 
 
-def test_interrupted_creation_reuses_reserved_environment_id(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reserved_id", ["b" * 32, "rapidocr-cpu"])
+def test_interrupted_creation_reuses_reserved_environment_id(
+    tmp_path, monkeypatch, reserved_id
+):
     manager, calls = _manager(tmp_path, monkeypatch)
     marker = manager.paths.state_root / "default-environment.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    reserved_id = "b" * 32
     marker.write_text(
         json.dumps({"environment_id": reserved_id, "created": False}), encoding="utf-8"
     )
     listed = manager.initialize_default()
-    assert listed["active_id"] == reserved_id
+    expected_id = "paddleocr-ort-cpu" if reserved_id == "rapidocr-cpu" else reserved_id
+    assert listed["active_id"] == expected_id
     assert len(listed["environments"]) == 1 and len(calls) == 1
 
 

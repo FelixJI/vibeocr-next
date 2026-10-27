@@ -990,7 +990,8 @@ public sealed partial class App : Application
     private async Task StartBackgroundRuntimeAsync()
     {
         try { await EnsureRuntimeReadyAsync(_applicationShutdown.Token); }
-        catch (Exception error) { AppLog.Warn($"Background runtime startup ended: {error.GetType().Name}"); }
+        catch (OperationCanceledException) when (_applicationShutdown.IsCancellationRequested) { }
+        catch (Exception error) { AppLog.Error("Background runtime startup failed", error); }
     }
 
 

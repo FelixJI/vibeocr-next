@@ -8,9 +8,11 @@ namespace VibeOCR.Platform.Tests;
 public sealed class ManagedEnvironmentSwitchCoordinatorTests
 {
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task SwitchControlSessionStaysAliveUntilCommitOrAbort(bool commit)
+    [InlineData(true, "")]
+    [InlineData(false, "")]
+    [InlineData(false, "prepare_switch")]
+    [InlineData(true, "commit_switch")]
+    public async Task SwitchControlSessionStaysAliveUntilCommitOrAbort(bool commit, string errorAction)
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-reservation-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -20,10 +22,20 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
         {
             await File.WriteAllTextAsync(script, """
                 $Marker = $args[0]
+                $ErrorAction = $args[1]
+                $Failure = '{"protocol_version":2,"ok":false,"error":{"code":"install_failed","canonical_code":"RUNTIME_IO_ERROR","category":"transient","message":"target environment is unhealthy: engine_import_failed","retryable":true,"retry_after":1}}'
+                if ($ErrorAction -eq 'prepare_switch') {
+                    [Console]::WriteLine($Failure)
+                    exit 1
+                }
                 [Console]::WriteLine('{"protocol_version":2,"response_kind":"environment","action":"prepare_switch","result":{"environment_id":"fixture","environment_revision":1,"active_id":null,"active_revision":0,"python":"python","requires_supervisor":false,"launch":null}}')
                 $command = [Console]::In.ReadLine() | ConvertFrom-Json
                 Set-Content -LiteralPath $Marker -Value $command.action
                 if ($command.action -eq 'commit_switch') {
+                    if ($ErrorAction -eq 'commit_switch') {
+                        [Console]::WriteLine($Failure)
+                        exit 1
+                    }
                     [Console]::WriteLine('{"protocol_version":2,"response_kind":"environment","action":"commit_switch","result":{"active_id":"fixture","active_revision":1}}')
                 }
                 """, TestContext.Current.CancellationToken);
@@ -33,7 +45,7 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
                 UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
                 RedirectStandardOutput = true, RedirectStandardError = true,
             };
-            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script, marker }) start.ArgumentList.Add(arg);
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script, marker, errorAction }) start.ArgumentList.Add(arg);
             // The synthetic child follows the same executable/manifest binding as production.
             string manifest = Path.Combine(root, "runtime-manifest.json");
             string componentLock = Path.Combine(root, "component-lock.json");
@@ -48,14 +60,41 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
             }), TestContext.Current.CancellationToken);
             start.ArgumentList.Add("--request-json");
             start.ArgumentList.Add(System.Text.Json.JsonSerializer.Serialize(new { component_lock = componentLock, runtime_manifest = manifest }));
+            if (errorAction == "prepare_switch")
+            {
+                RuntimeInstallerException error = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                    EnvironmentSwitchReservation.StartAsync(start, "fixture", TestContext.Current.CancellationToken));
+                AssertSwitchError(error);
+                Assert.False(File.Exists(marker));
+                return;
+            }
             IManagedEnvironmentSwitchReservation reservation = await EnvironmentSwitchReservation.StartAsync(start, "fixture", TestContext.Current.CancellationToken);
-            Assert.False(File.Exists(marker));
-            Assert.Equal("fixture", reservation.Prepared.EnvironmentId);
-            if (commit) Assert.Equal("fixture", (await reservation.CommitAsync(null, TestContext.Current.CancellationToken)).ActiveId);
-            await reservation.DisposeAsync();
+            try
+            {
+                Assert.False(File.Exists(marker));
+                Assert.Equal("fixture", reservation.Prepared.EnvironmentId);
+                if (errorAction == "commit_switch")
+                {
+                    RuntimeInstallerException error = await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+                        reservation.CommitAsync(null, TestContext.Current.CancellationToken));
+                    AssertSwitchError(error);
+                    return;
+                }
+                if (commit) Assert.Equal("fixture", (await reservation.CommitAsync(null, TestContext.Current.CancellationToken)).ActiveId);
+            }
+            finally { await reservation.DisposeAsync(); }
             Assert.Equal(commit ? "commit_switch" : "abort_switch", (await File.ReadAllTextAsync(marker, TestContext.Current.CancellationToken)).Trim());
         }
         finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private static void AssertSwitchError(RuntimeInstallerException error)
+    {
+        Assert.Equal("target environment is unhealthy: engine_import_failed", error.Message);
+        Assert.Equal("RUNTIME_IO_ERROR", error.CanonicalCode);
+        Assert.Equal("transient", error.Category);
+        Assert.True(error.Retryable);
+        Assert.Equal(1, error.RetryAfter);
     }
 
     [Fact]

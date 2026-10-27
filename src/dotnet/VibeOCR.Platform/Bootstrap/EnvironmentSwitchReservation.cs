@@ -54,7 +54,10 @@ internal sealed class EnvironmentSwitchReservation : IManagedEnvironmentSwitchRe
             using JsonDocument document = JsonDocument.Parse(line);
             JsonElement envelope = document.RootElement;
             if (envelope.TryGetProperty("error", out JsonElement error))
-                throw new RuntimeInstallerException(error.GetProperty("message").GetString() ?? "环境切换失败。");
+            {
+                RuntimeHostError? failure = error.Deserialize<RuntimeHostError>();
+                throw new RuntimeInstallerException(failure?.Message ?? "环境切换失败。", failure);
+            }
             if (envelope.GetProperty("protocol_version").GetInt32() != 2 ||
                 envelope.GetProperty("response_kind").GetString() != "environment" ||
                 envelope.GetProperty("action").GetString() != action)
@@ -62,7 +65,8 @@ internal sealed class EnvironmentSwitchReservation : IManagedEnvironmentSwitchRe
             return envelope.GetProperty("result").Deserialize<T>(new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                 ?? throw new RuntimeInstallerException("环境切换 reservation 响应为空。");
         }
-        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
+        catch (Exception exception) when (exception is not RuntimeInstallerException &&
+            exception is JsonException or KeyNotFoundException or InvalidOperationException)
         {
             throw new RuntimeInstallerException($"环境切换 reservation 响应无效：{exception.Message}");
         }
