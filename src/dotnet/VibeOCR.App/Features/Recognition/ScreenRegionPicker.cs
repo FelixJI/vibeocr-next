@@ -364,13 +364,15 @@ public sealed class ScreenRegionPicker(
 
     /// <summary>
     /// 截图后恢复宿主窗口原状态的实际执行路径：可见→按原形态显示（最小化
-    /// SW_SHOWMINNOACTIVE=7，普通 SW_SHOWNA=8，均不夺取激活）；原本隐藏
+    /// SW_SHOWMINNOACTIVE=7；非最小化时，原本前台用 SW_SHOW=5 激活，其余用
+    /// SW_SHOWNA=8 不激活）；原本隐藏
     /// （托盘）→保持隐藏；截图前前台非空句柄时恢复其前台。production
     /// finally 与无 Runtime 的窗口恢复自检共用同一方法。
     /// </summary>
     internal static void RestoreOwnerState(nint owner, bool visible, bool minimized, nint foreground)
     {
-        if (visible) ShowWindow(owner, minimized ? 7 : 8);
+        // 原本就是前台的宿主应在显示时激活；先 SHOWNA 再抢前台可能被 Windows 拒绝。
+        if (visible) ShowWindow(owner, minimized ? 7 : foreground == owner ? 5 : 8);
         if (foreground != 0) SetForegroundWindow(foreground);
     }
 
@@ -411,7 +413,7 @@ public sealed class ScreenRegionPicker(
             // 原本隐藏（托盘）：恢复调用后保持隐藏。准备阶段用 SW_RESTORE
             // 明确解除最小化回到普通可见（SW_SHOWNA 不保证解除最小化），
             // 以便“保持隐藏”结果可区分于未变化；仅自检准备，生产恢复语义
-            // 仍是最小化 SW_SHOWMINNOACTIVE / 普通 SW_SHOWNA。
+            // 仍保留最小化形态，仅原本前台的非最小化宿主随显示激活。
             ShowWindow(handle, 9);
             await WaitForSelfCheckStateAsync(
                 () => IsWindowVisible(handle) && !IsIconic(handle), "自检窗口回到普通可见", cancellationToken);

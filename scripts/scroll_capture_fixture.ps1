@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet(
         'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
         'mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'key', 'hide', 'lower', 'close', 'quit',
-        'selection-scroll', 'uia-find', 'uia-invoke', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
+        'selection-scroll', 'uia-find', 'uia-invoke', 'uia-toggle', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [long]$Handle = 0,
@@ -655,6 +655,19 @@ try {
                 [System.Windows.Automation.InvokePattern]::Pattern)
             $evidence = Convert-ElementToEvidence $found
             $invokable.Invoke()
+            $evidence | ConvertTo-Json -Compress
+        }
+        'uia-toggle' {
+            $found = Find-AppElementById $AppPid $AutomationId
+            if ($null -eq $found) { throw "AutomationId not found in app PID $($AppPid): $($AutomationId)" }
+            if (-not $found.Element.Current.IsEnabled) {
+                throw "AutomationId is disabled: $($AutomationId)"
+            }
+            $toggle = $found.Element.GetCurrentPattern(
+                [System.Windows.Automation.TogglePattern]::Pattern)
+            $evidence = Convert-ElementToEvidence $found
+            $toggle.Toggle()
+            $evidence['toggled'] = [string]$toggle.Current.ToggleState
             $evidence | ConvertTo-Json -Compress
         }
         'uia-bar-text' {
