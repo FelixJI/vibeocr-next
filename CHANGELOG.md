@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.5
+
+### Bug Fixes
+
+- **runtime:** 修复 UUID 默认环境迁移并更新兼容依赖 (#289) (2f78ceb)
+
 ## 0.8.4
 
 ### Bug Fixes
