@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -107,13 +108,28 @@ def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch):
     assert calls == []
 
 
-def _retired_default(tmp_path, monkeypatch, install=None):
+def _retired_default(
+    tmp_path, monkeypatch, install=None, *, environment_id="rapidocr-cpu"
+):
     manager, calls = _manager(tmp_path, monkeypatch, install)
-    old = manager._create("默认环境", as_default=True, environment_id="rapidocr-cpu")
+    old = manager._create("默认环境", as_default=True, environment_id=environment_id)
     registry = manager._read()
     registry["environments"][old["id"]].update(
         status="installed", recipe="rapidocr-cpu", revision=2
     )
+    if len(environment_id) == 32:
+        # 早期 UUID 默认环境没有 cleanup ledger，venv 位于修订子目录。
+        source = Path(old["path"])
+        temporary = source.with_name("legacy-fixture")
+        source.rename(temporary)
+        target = source / "revisions" / ("2-" + "a" * 16)
+        target.parent.mkdir(parents=True)
+        temporary.rename(target)
+        registry["environments"][old["id"]]["path"] = str(
+            target.relative_to(manager.root)
+        )
+        old["path"] = str(target)
+        (manager.paths.state_root / "environment-cleanup.json").unlink()
     registry["active_id"] = old["id"]
     registry["active_revision"] = 1
     manager._registry.write_text(json.dumps(registry), encoding="utf-8")
@@ -135,10 +151,15 @@ def _retired_default(tmp_path, monkeypatch, install=None):
 
 
 @pytest.mark.parametrize("unfinished_marker", [False, True])
+@pytest.mark.parametrize(
+    "environment_id", ["rapidocr-cpu", "0123456789abcdef0123456789abcdef"]
+)
 def test_upgrade_replaces_retired_default_without_removing_old_environment(
-    tmp_path, monkeypatch, unfinished_marker
+    tmp_path, monkeypatch, unfinished_marker, environment_id
 ):
-    manager, calls, old, registry = _retired_default(tmp_path, monkeypatch)
+    manager, calls, old, registry = _retired_default(
+        tmp_path, monkeypatch, environment_id=environment_id
+    )
     if unfinished_marker:
         (manager.paths.state_root / "default-environment.json").write_text(
             json.dumps({"environment_id": old["id"], "created": True}),
@@ -161,8 +182,11 @@ def test_upgrade_replaces_retired_default_without_removing_old_environment(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "environment_id", ["rapidocr-cpu", "0123456789abcdef0123456789abcdef"]
+)
 def test_retired_default_upgrade_failure_retries_without_changing_selection(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, environment_id
 ):
     failed = True
 
@@ -170,7 +194,9 @@ def test_retired_default_upgrade_failure_retries_without_changing_selection(
         if failed:
             raise RuntimeError("offline pack unavailable")
 
-    manager, calls, old, registry = _retired_default(tmp_path, monkeypatch, install)
+    manager, calls, old, registry = _retired_default(
+        tmp_path, monkeypatch, install, environment_id=environment_id
+    )
     with pytest.raises(RuntimeError, match="offline pack unavailable"):
         manager.initialize_default()
     assert manager._read()["active_id"] == old["id"]
@@ -184,6 +210,138 @@ def test_retired_default_upgrade_failure_retries_without_changing_selection(
     assert manager.initialize_default()["active_id"] == "paddleocr-ort-cpu"
     assert len(manager._read()["environments"]) == 2
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_migration_cleans_uuid_environment_only_after_healthy_switch(
+    tmp_path, monkeypatch, reserved
+):
+    manager, _, old, _ = _retired_default(
+        tmp_path, monkeypatch, environment_id="0123456789abcdef0123456789abcdef"
+    )
+    listed = manager.initialize_default()
+    env_id = listed["active_id"]
+    prepared = manager.prepare_switch(env_id)
+    with pytest.raises(Exception, match="Supervisor is not healthy"):
+        manager.commit_switch(prepared)
+    assert Path(old["path"]).is_dir()
+    monkeypatch.setattr(manager, "_verified_health", lambda evidence: True)
+    if reserved:
+        with manager.switch_reservation(env_id) as prepared:
+            manager.commit_switch(prepared)
+            assert Path(old["path"]).is_dir()
+    else:
+        manager.commit_switch(prepared)
+    assert old["id"] not in manager._read()["environments"]
+    assert not Path(old["path"]).exists()
+    assert not (
+        manager.paths.state_root / "default-environment-migration.json"
+    ).exists()
+    assert manager.initialize_default()["active_id"] == env_id
+
+
+def test_migration_cleanup_failure_retries_after_restart(tmp_path, monkeypatch):
+    import shutil
+
+    manager, _, old, _ = _retired_default(tmp_path, monkeypatch)
+    env_id = manager.initialize_default()["active_id"]
+    monkeypatch.setattr(manager, "_verified_health", lambda evidence: True)
+    original = shutil.rmtree
+
+    def fail(path):
+        raise PermissionError("fixture file in use")
+
+    monkeypatch.setattr(shutil, "rmtree", fail)
+    manager.commit_switch(manager.prepare_switch(env_id))
+    assert manager._read()["active_id"] == env_id
+    assert Path(old["path"]).exists()
+    assert (manager.paths.state_root / "default-environment-migration.json").exists()
+    monkeypatch.setattr(shutil, "rmtree", original)
+    # A new manager has no in-memory migration state.
+    reopened = ManagedEnvironmentStore(
+        product_root=manager.product_root,
+        component_lock=manager.component_lock_path,
+        runtime_manifest=manager.manifest.path,
+        base_python=sys._base_executable,
+    )
+    monkeypatch.setattr(reopened, "_probe", manager._probe)
+    monkeypatch.setattr(reopened, "_verified_health", lambda evidence: True)
+    reopened.commit_switch(reopened.prepare_switch(env_id))
+    assert not Path(old["path"]).exists()
+
+
+def test_custom_uuid_environment_is_not_a_default(tmp_path, monkeypatch):
+    manager, calls, old, registry = _retired_default(
+        tmp_path, monkeypatch, environment_id="0123456789abcdef0123456789abcdef"
+    )
+    registry["environments"][old["id"]]["name"] = "用户的 Rapid 环境"
+    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
+    assert manager.initialize_default()["active_id"] == old["id"]
+    assert calls == []
+
+
+def test_switch_control_reports_success_after_migration_cleanup(tmp_path, monkeypatch):
+    manager, _, old, _ = _retired_default(
+        tmp_path, monkeypatch, environment_id="0123456789abcdef0123456789abcdef"
+    )
+    env_id = manager.initialize_default()["active_id"]
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "product_root": str(manager.product_root),
+        "component_lock": str(manager.component_lock_path),
+        "runtime_manifest": str(manager.manifest.path),
+        "action": "prepare_switch",
+        "environment_id": env_id,
+    }
+    harness = """
+import sys, time
+from pathlib import Path
+from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
+from vibeocr.runtime.environments.runtime_installer import main
+ManagedEnvironmentStore._expected_base_python = lambda self: Path(sys._base_executable)
+ManagedEnvironmentStore._probe = lambda self, record: {
+    'healthy': True, 'reason': None,
+    'python': str(self._venv_python(self._safe_path(record))),
+}
+ManagedEnvironmentStore._verified_health = staticmethod(lambda evidence: True)
+original = ManagedEnvironmentStore._finish_default_migration
+def finish(self, env_id):
+    time.sleep(0.5)
+    original(self, env_id)
+ManagedEnvironmentStore._finish_default_migration = finish
+sys.exit(main(sys.argv[1:]))
+"""
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            harness,
+            "--request-json",
+            json.dumps(request),
+            "--environment-switch-control",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        assert json.loads(child.stdout.readline())["action"] == "prepare_switch"
+        child.stdin.write(
+            json.dumps({"action": "commit_switch", "started_health": None}) + "\n"
+        )
+        child.stdin.flush()
+        response = json.loads(child.stdout.readline())
+        assert response["action"] == "commit_switch", response
+        assert not Path(old["path"]).exists()
+        child.wait(timeout=20)
+        assert child.returncode == 0, child.stderr.read()
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=10)
 
 
 def test_retired_default_upgrade_does_not_repurpose_existing_environment(

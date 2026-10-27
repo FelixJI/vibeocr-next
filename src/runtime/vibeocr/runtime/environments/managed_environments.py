@@ -1473,7 +1473,15 @@ class ManagedEnvironmentStore:
                 active = data["environments"].get(data["active_id"])
                 retired_default = (
                     active is not None
-                    and active["id"] == _LEGACY_DEFAULT_ENVIRONMENT_SLUG
+                    and active["kind"] == "venv"
+                    and active["status"] == "installed"
+                    and (
+                        active["id"] == _LEGACY_DEFAULT_ENVIRONMENT_SLUG
+                        or (
+                            re.fullmatch(r"[0-9a-f]{32}", active["id"]) is not None
+                            and active["name"] == "默认环境"
+                        )
+                    )
                     and active.get("recipe") in _RETIRED_ENGINE_RECIPES
                 )
                 previous_selection = (data["active_id"], data["active_revision"])
@@ -1520,9 +1528,9 @@ class ManagedEnvironmentStore:
                     _atomic_json(marker, state)
             if retired_default and state["environment_id"] in (
                 None,
-                _LEGACY_DEFAULT_ENVIRONMENT_SLUG,
+                previous_selection[0],
             ):
-                # 旧默认环境已无法启动：另建离线默认环境，保留旧环境及用户数据。
+                # 先准备替代环境，旧环境仅在 Supervisor 健康切换后回收。
                 with RuntimeStoreLock(self._lock):
                     default_id = self._new_environment_id(
                         _DEFAULT_ENVIRONMENT_SLUG, self._read()
@@ -1572,6 +1580,16 @@ class ManagedEnvironmentStore:
                                 == previous_selection
                             ):
                                 self._reject_referenced(data)
+                                if retired_default:
+                                    _atomic_json(
+                                        self.paths.state_root
+                                        / "default-environment-migration.json",
+                                        {
+                                            "retired_id": active["id"],
+                                            "retired_revision": active["revision"],
+                                            "replacement_id": default_id,
+                                        },
+                                    )
                                 data["active_id"] = default_id
                                 data["active_revision"] += 1
                                 _atomic_json(self._registry, data)
@@ -2753,10 +2771,13 @@ class ManagedEnvironmentStore:
     def switch_reservation(self, env_id: str) -> Iterator[dict]:
         with self._target_operation(env_id):
             self._switch_guarded = env_id
+            self._switch_committed = False
             try:
                 yield self.prepare_switch(env_id)
             finally:
                 self._switch_guarded = None
+        if self._switch_committed:
+            self._finish_default_migration(env_id)
 
     def prepare_switch(self, env_id: str) -> dict:
         with (
@@ -2856,10 +2877,79 @@ class ManagedEnvironmentStore:
                     _atomic_json(self._registry, data)
                 elif not self._registry.is_file():
                     _atomic_json(self._registry, data)
-                return {
+                result = {
                     "active_id": data["active_id"],
                     "active_revision": data["active_revision"],
                 }
+            if self._switch_guarded == env_id:
+                self._switch_committed = record["status"] == "installed"
+        if self._switch_guarded is None and record["status"] == "installed":
+            self._finish_default_migration(env_id)
+        return result
+
+    def _finish_default_migration(self, env_id: str) -> None:
+        """健康切换后续做归属清理；清理失败不撤销已健康的服务。"""
+        marker = self.paths.state_root / "default-environment-migration.json"
+        try:
+            with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
+                if not marker.is_file():
+                    return
+                migration = json.loads(marker.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(migration, dict)
+                    or set(migration)
+                    != {"retired_id", "retired_revision", "replacement_id"}
+                    or any(
+                        not isinstance(migration[key], str)
+                        or not _is_valid_environment_id(migration[key])
+                        for key in ("retired_id", "replacement_id")
+                    )
+                    or type(migration["retired_revision"]) is not int
+                    or migration["retired_revision"] < 1
+                    or migration["retired_id"] == migration["replacement_id"]
+                ):
+                    raise ManagedEnvironmentError(
+                        "default environment migration is invalid"
+                    )
+                if migration["replacement_id"] != env_id:
+                    return
+                plan = managed_cleanup.preview_cleanup(self)
+                with RuntimeStoreLock(self._lock):
+                    data = self._read()
+                    old = data["environments"].get(migration["retired_id"])
+                    if data["active_id"] != env_id:
+                        return
+                    if old is not None and (
+                        old["revision"] != migration["retired_revision"]
+                        or old.get("recipe") not in _RETIRED_ENGINE_RECIPES
+                    ):
+                        return
+                    pending = (
+                        migration["retired_id"]
+                        in managed_cleanup.read_ledger(self)["pending"]
+                    )
+                if old is not None or pending:
+                    item_id = (
+                        f"environment:{migration['retired_id']}"
+                        if old is not None
+                        else f"pending:{migration['retired_id']}"
+                    )
+                    result = managed_cleanup.run_cleanup(
+                        self, plan["plan_id"], [item_id]
+                    )
+                    if result["items"][0]["state"] != "deleted":
+                        raise ManagedEnvironmentError(result["items"][0]["detail"])
+                marker.unlink()
+        except (
+            OSError,
+            ValueError,
+            RuntimeInstallError,
+            RuntimeLockTimeout,
+            RuntimeInstallPlanStale,
+        ) as exc:
+            logging.getLogger(__name__).warning(
+                "Default environment cleanup pending: %s", safe_runtime_detail(str(exc))
+            )
 
     @staticmethod
     def _verified_health(evidence: dict | None) -> bool:

@@ -79,7 +79,8 @@ internal sealed class EnvironmentSwitchReservation : IManagedEnvironmentSwitchRe
         await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { action = "commit_switch", started_health = health })).ConfigureAwait(false);
         await process.StandardInput.FlushAsync().ConfigureAwait(false);
         // Once commit was sent, observe its actual CAS result before honoring a late cancellation.
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        // 健康提交还会回收退役默认环境；等待清理完成再交还宿主，避免 Dispose 提前终止删除。
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         CommittedEnvironmentSwitch committed = await ReadAsync<CommittedEnvironmentSwitch>("commit_switch", deadline.Token).ConfigureAwait(false);
         if (committed.ActiveId != Prepared.EnvironmentId || committed.ActiveRevision < Prepared.ActiveRevision)
             throw new RuntimeInstallerException("环境切换提交结果与 reservation 不匹配。");

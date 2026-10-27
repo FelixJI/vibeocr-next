@@ -3415,15 +3415,15 @@ def main(argv: list[str] | None = None) -> int:
                     payload = manager.commit_switch(
                         prepared, started_health=command["started_health"]
                     )
-                    _emit(
-                        {
-                            "protocol_version": PROTOCOL_VERSION,
-                            "response_kind": "environment",
-                            "action": "commit_switch",
-                            "result": payload,
-                        }
-                    )
-                    return 0
+                _emit(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "response_kind": "environment",
+                        "action": "commit_switch",
+                        "result": payload,
+                    }
+                )
+                return 0
             if action == "list":
                 payload = manager.list()
             elif action == "initialize_default":
