@@ -4,12 +4,12 @@
     "torch": "torch>=2.6.0",
     "paddleocr": "paddleocr==3.7.0",
     "mineru": "mineru==4.0.10",
-    "markdown": "markdown>=3.10.2",
+    "markdown": "markdown>=3.11.2",
     "pymupdf": "pymupdf>=1.28.0",
     "fastapi": "fastapi>=0.139.0",
     "uvicorn": "uvicorn>=0.51.0",
-    "pydantic": "pydantic>=2.13.4",
-    "fonttools": "fonttools>=4.63.0"
+    "pydantic": "pydantic>=2.14.1",
+    "fonttools": "fonttools>=4.67.0"
   },
   "locked_versions": {}
 }
