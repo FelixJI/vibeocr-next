@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.3
+
+### Features
+
+- **ocr:** 随包提供 Paddle 推理并完善截图与环境管理 (#285) (47a9526)
+
+### Bug Fixes
+
+- **bootstrapper:** 按实际依赖检测 .NET Runtime (#283) (15adeab)
+
 ## 0.8.2
 
 ### Bug Fixes
