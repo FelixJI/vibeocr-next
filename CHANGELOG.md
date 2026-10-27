@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4
+
+### Bug Fixes
+
+- **app:** 修复升级启动与长截图流程 (#287) (90bb23b)
+
 ## 0.8.3
 
 ### Features
