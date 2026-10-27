@@ -38,6 +38,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task CaptureRestoresVisibleMinimizedAndHiddenOwnerState() =>
+      RunUiSmokeAsync(nameof(CaptureRestoresVisibleMinimizedAndHiddenOwnerState));
+
+  [Fact]
   public Task ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame() =>
       RunUiSmokeAsync(nameof(ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame));
 
@@ -82,8 +86,12 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure));
 
   [Fact]
-  public Task ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment() =>
-      RunUiSmokeAsync(nameof(ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment));
+  public Task ScrollCaptureNoProgressBoundaryKeepsConfirmedSegment() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureNoProgressBoundaryKeepsConfirmedSegment));
+
+  [Fact]
+  public Task ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment() =>
+      RunUiSmokeAsync(nameof(ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment));
 
   [Theory]
   [InlineData(null, false, false)] // DispatcherQueue 不存在。

@@ -1457,7 +1457,7 @@ class ManagedEnvironmentStore:
             }
 
     def initialize_default(self) -> dict:
-        """首次无环境时安装离线基础配方；升级沿用已有环境，失败可续装。
+        """首次或旧默认引擎退役时准备离线默认环境；失败可续装。
 
         初始化状态独立保存，避免改变旧版仍需读取的注册表格式。独立锁
         覆盖创建/安装，store 锁只覆盖注册表提交；完成后不自动重建。
@@ -1468,6 +1468,15 @@ class ManagedEnvironmentStore:
         """
         marker = self.paths.state_root / "default-environment.json"
         with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
+            with RuntimeStoreLock(self._lock):
+                data = self._read()
+                active = data["environments"].get(data["active_id"])
+                retired_default = (
+                    active is not None
+                    and active["id"] == _LEGACY_DEFAULT_ENVIRONMENT_SLUG
+                    and active.get("recipe") in _RETIRED_ENGINE_RECIPES
+                )
+                previous_selection = (data["active_id"], data["active_revision"])
             if marker.is_file():
                 state = json.loads(marker.read_text(encoding="utf-8"))
                 if (
@@ -1491,25 +1500,56 @@ class ManagedEnvironmentStore:
                     state["environment_id"] == _LEGACY_DEFAULT_ENVIRONMENT_SLUG
                     and not state["created"]
                 ):
-                    state = {
-                        "environment_id": _DEFAULT_ENVIRONMENT_SLUG,
-                        "created": False,
-                    }
+                    with RuntimeStoreLock(self._lock):
+                        state = {
+                            "environment_id": self._new_environment_id(
+                                _DEFAULT_ENVIRONMENT_SLUG, self._read()
+                            ),
+                            "created": False,
+                        }
+                        _atomic_json(marker, state)
             else:
                 with RuntimeStoreLock(self._lock):
                     existing = bool(self._read()["environments"])
-                state = {
-                    "environment_id": (None if existing else _DEFAULT_ENVIRONMENT_SLUG),
-                    "created": existing,
-                }
-                _atomic_json(marker, state)
+                    state = {
+                        "environment_id": (
+                            None if existing else _DEFAULT_ENVIRONMENT_SLUG
+                        ),
+                        "created": existing,
+                    }
+                    _atomic_json(marker, state)
+            if retired_default and state["environment_id"] in (
+                None,
+                _LEGACY_DEFAULT_ENVIRONMENT_SLUG,
+            ):
+                # 旧默认环境已无法启动：另建离线默认环境，保留旧环境及用户数据。
+                with RuntimeStoreLock(self._lock):
+                    default_id = self._new_environment_id(
+                        _DEFAULT_ENVIRONMENT_SLUG, self._read()
+                    )
+                    state = {"environment_id": default_id, "created": False}
+                    _atomic_json(marker, state)
             default_id = state["environment_id"]
             if default_id is not None:
                 with RuntimeStoreLock(self._lock):
                     record = self._read()["environments"].get(default_id)
                 if record is None and not state["created"]:
+                    name = "默认环境"
+                    if retired_default:
+                        with RuntimeStoreLock(self._lock):
+                            names = {
+                                item["name"].casefold()
+                                for item in self._read()["environments"].values()
+                            }
+                        name = "默认环境（PaddleOCR）"
+                        suffix = 2
+                        while name.casefold() in names:
+                            name = f"默认环境（PaddleOCR {suffix}）"
+                            suffix += 1
                     record = self._create(
-                        "默认环境", as_default=True, environment_id=default_id
+                        name,
+                        as_default=not retired_default,
+                        environment_id=default_id,
                     )
                 if record is not None:
                     state["created"] = True
@@ -1526,7 +1566,12 @@ class ManagedEnvironmentStore:
                         data = self._read()
                         record = data["environments"].get(default_id)
                         if record is not None and record["status"] == "installed":
-                            if data["active_id"] is None:
+                            if data["active_id"] is None or (
+                                retired_default
+                                and (data["active_id"], data["active_revision"])
+                                == previous_selection
+                            ):
+                                self._reject_referenced(data)
                                 data["active_id"] = default_id
                                 data["active_revision"] += 1
                                 _atomic_json(self._registry, data)
@@ -1551,6 +1596,17 @@ class ManagedEnvironmentStore:
             base = f"environment-{base}"
         base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
         taken = {record_id.casefold() for record_id in data["environments"]}
+        # 默认初始化在创建前持久预留 id，普通 create 不能抢占该恢复槽位。
+        marker = self.paths.state_root / "default-environment.json"
+        if marker.is_file():
+            state = json.loads(marker.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise ManagedEnvironmentError(
+                    "default environment initialization is invalid"
+                )
+            reserved = state.get("environment_id")
+            if isinstance(reserved, str):
+                taken.add(reserved.casefold())
         # 待完成删除仍占用 id：目录已删但 pending 引用仍在，复用会破坏
         # ledger 校验，一律跳过。
         taken.update(

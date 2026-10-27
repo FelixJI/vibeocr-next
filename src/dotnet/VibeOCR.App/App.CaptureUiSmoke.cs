@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
@@ -63,7 +64,10 @@ public sealed partial class App
         case "ScrollCapturePreviewWaitsForDecodeAndRejectsPendingEncodingFailure":
           await ScrollCaptureSession.Session.VerifyPreviewGateSelfCheckAsync();
           break;
-        case "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment":
+        case "ScrollCaptureNoProgressBoundaryKeepsConfirmedSegment":
+          await ScrollCaptureSession.Session.VerifyNoProgressBoundarySelfCheckAsync();
+          break;
+        case "ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment":
         case "ScrollCaptureCancellationDiscardsFramesAndClosesController":
         case "ScrollCaptureVanishedSourceFailsWithoutReturningPartialFrame":
           await VerifyScrollCaptureUiAsync(scenario);
@@ -85,6 +89,9 @@ public sealed partial class App
           break;
         case "RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds":
           await VerifyRegionPickerLayoutChangeAsync();
+          break;
+        case "CaptureRestoresVisibleMinimizedAndHiddenOwnerState":
+          await ScreenRegionPicker.VerifyOwnerRestoreSelfCheckAsync(CancellationToken.None);
           break;
         default:
           throw new InvalidOperationException("Unknown capture UI smoke scenario.");
@@ -148,55 +155,59 @@ public sealed partial class App
           FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Button>(root, id);
       void Invoke(string id)
       {
-        var peer = new ButtonAutomationPeer(Button(id));
+        var button = Button(id);
+        Check(button.IsEnabled, $"Control {id} is disabled; {session.DiagnosticState}");
+        var peer = new ButtonAutomationPeer(button);
         ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
       }
-      bool success = scenario == "ScrollCaptureAutoScrollRequiresPreviewAndReturnsConfirmedSegment";
-      FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.CheckBox>(root, "scroll-capture-automatic").IsChecked = success;
-      Invoke("scroll-capture-start");
+      void SelectDirection(string id)
+      {
+        var peer = new ToggleButtonAutomationPeer(
+            FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Primitives.ToggleButton>(root, id));
+        ((IToggleProvider)peer.GetPattern(PatternInterface.Toggle)).Toggle();
+      }
+      bool success = scenario == "ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment";
       var confirm = Button("scroll-capture-confirm");
-      await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled, cancellation.Token);
-      Check(viewer.VerticalOffset == 0 && !capture.IsCompleted, "Initial preview must precede scrolling/output.");
+      var finish = Button("scroll-capture-finish");
+      Check(!finish.IsEnabled, "Finishing must stay closed until a direction has been picked and a frame accepted.");
+      SelectDirection("scroll-capture-direction-down");
       if (scenario == "ScrollCaptureCancellationDiscardsFramesAndClosesController")
       {
+        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
         Invoke("scroll-capture-cancel");
         Check(await capture is null, "Cancellation after the first accepted frame must not return a partial image.");
       }
+      else if (!success)
+      {
+        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
+        source.Close();
+        sourceClosed = true;
+        await WaitForScrollUiAsync(() => !finish.IsEnabled && confirm.Visibility == Visibility.Collapsed,
+            cancellation.Token);
+        Invoke("scroll-capture-cancel");
+        try { await capture; throw new InvalidOperationException("Vanished source returned a partial image."); }
+        catch (InvalidOperationException error)
+        {
+          Check(error.Message.Contains("源窗口", StringComparison.Ordinal),
+              $"Failure must identify the source window: {error.Message}; {session.DiagnosticState}");
+        }
+      }
       else
       {
-        if (!success)
+        Check(viewer.VerticalOffset == 0 && !capture.IsCompleted,
+            "Picking a direction must start capture without any further confirmation step.");
+        try { await WaitForScrollUiAsync(() => viewer.VerticalOffset >= 32, cancellation.Token); }
+        catch (InvalidOperationException error)
         {
-          source.Close();
-          sourceClosed = true;
-          await WaitForScrollUiAsync(() => !Button("scroll-capture-finish").IsEnabled && confirm.Visibility == Visibility.Collapsed,
-              cancellation.Token);
-          Invoke("scroll-capture-cancel");
-          try { await capture; throw new InvalidOperationException("Vanished source returned a partial image."); }
-          catch (InvalidOperationException error)
-          {
-            Check(error.Message.Contains("源窗口", StringComparison.Ordinal), "Failure must identify the source window.");
-          }
+          throw new InvalidOperationException(
+              $"{error.Message} offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
         }
-        else
-        {
-          Invoke("scroll-capture-confirm");
-          try { await WaitForScrollUiAsync(() => viewer.VerticalOffset >= 32, cancellation.Token); }
-          catch (InvalidOperationException error)
-          {
-            throw new InvalidOperationException(
-                $"{error.Message} offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
-          }
-          Check(wheelEvents > 0, "Automatic scrolling must enter the real XAML pointer wheel input pipeline.");
-          await Task.Delay(1400, cancellation.Token);
-          Invoke("scroll-capture-finish");
-          await WaitForScrollUiAsync(() => confirm.Visibility == Visibility.Visible && confirm.IsEnabled &&
-              Equals(confirm.Content, "确认选段并送入编辑器"), cancellation.Token);
-          Check(!capture.IsCompleted, "Final preview must require explicit user confirmation.");
-          Invoke("scroll-capture-confirm");
-          CapturedFrame? output = await capture;
-          Check(output is not null && output.Width == bounds.Width && output.Height > bounds.Height,
-              "Automatic standard scrolling must return the confirmed multi-frame segment.");
-        }
+        Check(wheelEvents > 0, "Automatic scrolling must enter the real XAML pointer wheel input pipeline.");
+        await Task.Delay(1400, cancellation.Token);
+        Invoke("scroll-capture-finish");
+        CapturedFrame? output = await capture;
+        Check(output is not null && output.Width == bounds.Width && output.Height > bounds.Height,
+            "Finishing after automatic scrolling must deliver the multi-frame segment directly.");
       }
       Check(session.HasReleasedCaptureResources, "The capture loop and retained frames must be released before returning.");
       Check(!IsWindowVisible(controllerHandle),
@@ -403,6 +414,8 @@ public sealed partial class App
     try
     {
       await ActivateAndWaitForegroundAsync(owner, handle);
+      Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
+          "Activation cleanup must preserve owned foreground.");
       var input = new InputService(() => handle);
       try
       {
@@ -415,7 +428,7 @@ public sealed partial class App
       {
         Check(IsWindowVisible(handle), "Direct capture failure must restore owner visibility.");
         Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
-            "Direct capture failure must restore owned foreground.");
+            $"Direct capture failure must restore owned foreground; owner={handle}, current={ScreenTargetQuery.GetForegroundWindowHandle()}.");
       }
       using (var stopped = new CancellationTokenSource())
       {
@@ -489,37 +502,81 @@ public sealed partial class App
   private static uint SendRealEscapeKey()
   {
     const uint keyEventfKeyUp = 0x0002;
-    var down = new SmokeKeyInput { Type = 1, VirtualKey = 0x1B };
-    var up = new SmokeKeyInput { Type = 1, VirtualKey = 0x1B, Flags = keyEventfKeyUp };
-    return SendInput(2, [down, up], Marshal.SizeOf<SmokeKeyInput>());
+    var down = new SmokeInput { Type = 1, VirtualKey = 0x1B };
+    var up = new SmokeInput { Type = 1, VirtualKey = 0x1B, Flags = keyEventfKeyUp };
+    return SendInput(2, [down, up], Marshal.SizeOf<SmokeInput>());
   }
 
   [StructLayout(LayoutKind.Explicit)]
-  private struct SmokeKeyInput
+  private struct SmokeInput
   {
     [FieldOffset(0)] public uint Type;
     [FieldOffset(8)] public ushort VirtualKey;
     [FieldOffset(10)] public ushort Scan;
     [FieldOffset(12)] public uint Flags;
     [FieldOffset(16)] public uint Time;
+    [FieldOffset(20)] public uint MouseFlags;
     [FieldOffset(24)] public nint ExtraInfo;
     [FieldOffset(32)] private readonly long _padding;
   }
 
   [DllImport("user32.dll", SetLastError = true)]
-  private static extern uint SendInput(uint count, SmokeKeyInput[] inputs, int size);
+  private static extern uint SendInput(uint count, SmokeInput[] inputs, int size);
 
   /// <summary>
-  /// 单次激活并等待真实前台；拒绝时如实失败并携带当时前台窗口诊断
-  /// （不重试、不削弱断言；前台许可与启动环境的关系由主代理复测裁决）。
+  /// 点击本测试窗口取得真实前台，避免后台 testhost 依赖 Windows 的抢焦点许可。
+  /// 点击前后验证命中归属，离开后恢复置顶与光标；前台断言仍按真实 HWND 判断。
   /// </summary>
   private static async Task ActivateAndWaitForegroundAsync(Window window, nint handle)
   {
     window.Activate();
-    for (int poll = 0; poll < 40; poll++)
+    Check(WinRT.Interop.WindowNative.GetWindowHandle(window) == handle,
+        "Activation must target this smoke window.");
+    var presenter = window.AppWindow.Presenter as OverlappedPresenter
+        ?? throw new InvalidOperationException("Smoke window requires an overlapped presenter.");
+    bool wasTopmost = presenter.IsAlwaysOnTop;
+    Check(GetCursorPos(out PointL original), "Cannot read the cursor before smoke activation.");
+    PointL target = original;
+    bool moved = false;
+    try
     {
-      if (ScreenTargetQuery.GetForegroundWindowHandle() == handle) return;
-      await Task.Delay(25);
+      presenter.IsAlwaysOnTop = true;
+      PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(handle)
+          ?? throw new InvalidOperationException("Smoke activation requires a visible client area.");
+      target = new PointL { X = client.X + client.Width / 2, Y = client.Y + client.Height / 2 };
+      nint HitRoot() => GetAncestor(WindowFromPoint(target), 2);
+      int[] HeldKeys() => [.. new[] { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12 }.Where(key => (GetAsyncKeyState(key) & 0x8000) != 0)];
+      // 新窗口呈现后才会参与命中测试；只等待就绪，不重复发送点击。
+      await WaitForCaptureUiAsync(() => HitRoot() == handle);
+      Check(HeldKeys().Length == 0, $"User input is held during smoke activation: {string.Join(',', HeldKeys())}.");
+      Check(SetCursorPos(target.X, target.Y), "Cannot position the cursor for smoke activation.");
+      moved = true;
+      Check(HitRoot() == handle && HeldKeys().Length == 0 && GetCursorPos(out PointL positioned) && positioned.X == target.X && positioned.Y == target.Y,
+          "Smoke activation point changed before the click.");
+      try
+      {
+        Check(SendInput(1, [new SmokeInput { MouseFlags = 0x0002 }], Marshal.SizeOf<SmokeInput>()) == 1,
+            "Smoke activation press was rejected.");
+        await WaitForCaptureUiAsync(() => (GetAsyncKeyState(0x01) & 0x8000) != 0);
+      }
+      finally
+      {
+        Check(SendInput(1, [new SmokeInput { MouseFlags = 0x0004 }], Marshal.SizeOf<SmokeInput>()) == 1,
+            "Smoke activation release was rejected.");
+        // 激活点击可能被窗口消费而不产生 XAML 事件；失败路径也先确认抬键再恢复光标。
+        await WaitForCaptureUiAsync(() => (GetAsyncKeyState(0x01) & 0x8000) == 0);
+      }
+      for (int poll = 0; poll < 40; poll++)
+      {
+        if (ScreenTargetQuery.GetForegroundWindowHandle() == handle) return;
+        await Task.Delay(25);
+      }
+    }
+    finally
+    {
+      presenter.IsAlwaysOnTop = wasTopmost;
+      if (moved && GetCursorPos(out PointL currentCursor) && currentCursor.X == target.X && currentCursor.Y == target.Y)
+        SetCursorPos(original.X, original.Y);
     }
 
     nint current = ScreenTargetQuery.GetForegroundWindowHandle();
@@ -527,6 +584,19 @@ public sealed partial class App
         $"Capture UI foreground activation was denied; owner={handle} current={current} " +
         $"title='{(current == 0 ? "" : GetWindowTextDiagnostics(current))}'.");
   }
+
+  [DllImport("user32.dll")]
+  private static extern nint WindowFromPoint(PointL point);
+
+  [DllImport("user32.dll")]
+  private static extern nint GetAncestor(nint window, uint flags);
+
+  [DllImport("user32.dll")]
+  private static extern short GetAsyncKeyState(int key);
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool SetCursorPos(int x, int y);
 
   private static string GetWindowTextDiagnostics(nint window)
   {

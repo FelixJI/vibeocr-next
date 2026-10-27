@@ -539,22 +539,23 @@ async function startScrollSession(app, fixture) {
   selection.width = selection.right - selection.left;
   selection.height = selection.bottom - selection.top;
   await dragSelection(app, fixture, selection, overlay.Handle);
-  const start = await waitForControlBar(app.child.pid, 'scroll-capture-start', 15000);
-  assert(start.enabled, 'scroll-capture-start is disabled.');
+  const direction = await waitForControlBar(app.child.pid, 'scroll-capture-direction-down', 15000);
+  assert(direction.enabled, 'The direction segment is disabled before a direction is chosen.');
   // A topmost source can hide the controller's compositor shadow and mask #127.
   // Keep the real source in the normal window band for capture verification.
   await native('lower', { FixturePid: fixture.pid, Handle: fixture.root });
   assert.equal(Number(await native('taskbar-state')), app.evidence.taskbarStateBefore,
     'Opening the scroll controller changed the Windows taskbar preference.');
-  const barBounds = { left: start.left, top: start.top, right: start.right, bottom: start.bottom };
+  const barBounds = { left: direction.left, top: direction.top, right: direction.right, bottom: direction.bottom };
   assert(!rectsOverlap(barBounds, selection),
     'Scroll control bar overlaps the fixed selection region.');
-  for (const id of ['scroll-capture-finish', 'scroll-capture-cancel'])
+  for (const id of ['scroll-capture-finish', 'scroll-capture-cancel', 'scroll-capture-settings'])
     assert((await controlBar(app.child.pid, id)).found, `Control bar is missing ${id}.`);
-  return { overlayHandle: overlay.Handle, selection, start };
+  await disableAutoScroll(app.child.pid);
+  return { overlayHandle: overlay.Handle, selection, direction };
 }
 
-async function waitForCapturePreview(appPid, expectedText = '确认预览并继续') {
+async function waitForCapturePreview(appPid, expectedText) {
   const until = Date.now() + 15000;
   while (Date.now() < until) {
     const confirm = await controlBar(appPid, 'scroll-capture-confirm');
@@ -564,10 +565,33 @@ async function waitForCapturePreview(appPid, expectedText = '确认预览并继�
   throw new Error(`Capture preview confirmation was not ready: ${expectedText}`);
 }
 
-async function confirmCapturePreview(appPid, expectedText = '确认预览并继续', pauseMs = 0) {
-  await waitForCapturePreview(appPid, expectedText);
-  if (pauseMs) await delay(pauseMs);
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
+// Selecting one direction segment starts capture immediately: the controller
+// disables every segment (single select) and returns foreground to the source
+// window. Uses the owned UIA toggle pattern, no desktop-wide scanning.
+async function pickDirection(appPid) {
+  const segment = await waitForControlBar(appPid, 'scroll-capture-direction-down', 15000);
+  assert(segment.enabled, 'Direction segment is disabled before a direction is chosen.');
+  await native('uia-toggle', { AppPid: appPid, AutomationId: 'scroll-capture-direction-down' });
+  const until = Date.now() + 10000;
+  while (Date.now() < until) {
+    const state = await controlBar(appPid, 'scroll-capture-direction-down');
+    if (state.found && !state.enabled) return segment;
+    await delay(180);
+  }
+  throw new Error('Picking a direction did not lock the segmented control.');
+}
+
+// The product scrolls automatically by default; this harness needs
+// deterministic manual wheel steps, so every round opts out through the public
+// settings flyout before picking a direction (manual scrolling path).
+async function disableAutoScroll(appPid) {
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-settings' });
+  const box = await waitForControlBar(appPid, 'scroll-capture-automatic', 5000);
+  assert(box.enabled && box.name.includes('自动滚动'), 'The auto-scroll setting must stay adjustable.');
+  const toggled = JSON.parse(
+    await native('uia-toggle', { AppPid: appPid, AutomationId: 'scroll-capture-automatic' }));
+  assert(toggled.toggled === 'Off', `Auto-scroll opt-out failed: ${toggled.toggled}.`);
+  await native('key', { AppPid: appPid, Key: 'escape' }); // light-dismiss the settings flyout
 }
 
 async function runScrollCapture(app, fixture, { cancel }) {
@@ -577,14 +601,14 @@ async function runScrollCapture(app, fixture, { cancel }) {
   const barTexts = [];
   app.evidence.activeCapture = { selection: opened.selection, barTexts };
   const recordBar = async (phase) => {
-    const snapshot = await barText(appPid, 'scroll-capture-start').catch(() => null);
+    const snapshot = await barText(appPid, 'scroll-capture-finish').catch(() => null);
     if (snapshot) barTexts.push({ phase, text: snapshot.text });
   };
   await recordBar('selected');
 
   if (cancel) {
     await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
-    await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
+    await waitForControlBarGone(appPid, 'scroll-capture-finish', 10000);
     const restored = await windows(appPid);
     assert(restored.some((item) => item.Handle === app.main.Handle && item.Visible),
       'Cancelled scroll capture did not restore the main window.');
@@ -592,12 +616,15 @@ async function runScrollCapture(app, fixture, { cancel }) {
     return { cancelled: true, preservedOutput: outputBefore, barTexts, ...opened };
   }
 
-  const controlWindow = (await windows(appPid)).find((item) => item.Handle === opened.start.windowHandle);
+  const controlWindow = (await windows(appPid)).find((item) => item.Handle === opened.direction.windowHandle);
   assert(controlWindow, 'Owned scroll control window is missing.');
+  // Focus through a click on the non-interactive status area only: the toolbar
+  // now starts with the direction segments at the left window edge.
   await native('focus', { FixturePid: appPid, Handle: controlWindow.Handle,
-    X: controlWindow.Bounds.Left + 80, Y: controlWindow.Bounds.Top + 20 });
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
-  await recordBar('start-invoked');
+    X: Math.floor((controlWindow.Bounds.Left + controlWindow.Bounds.Right) / 2),
+    Y: Math.floor(controlWindow.Bounds.Top + controlWindow.Bounds.Height * 0.75) });
+  await pickDirection(appPid);
+  await recordBar('direction-picked');
   // The source window must be activated by the controller before scrolling.
   const until = Date.now() + 10000;
   for (;;) {
@@ -613,7 +640,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   assert(!during.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Main window stayed visible while the scroll controller owned the screen.');
   await recordBar('started');
-  await confirmCapturePreview(appPid, '确认预览并继续', previewPauseMs);
+  await waitForFirstFrameAccepted(appPid);
   await delay(stableWaitMs);
   await native('frame', { FixturePid: fixture.pid, Handle: fixture.root, X: opened.selection.left, Y: opened.selection.top, Width: opened.selection.width, Height: opened.selection.height, EvidenceRoot: app.evidence.smokeRoot, OutputPath: path.join(app.evidence.smokeRoot, 'source-before.png') });
 
@@ -636,15 +663,16 @@ async function runScrollCapture(app, fixture, { cancel }) {
   const finishingWindow = (await windows(appPid)).find((item) => item.Handle === finish.windowHandle);
   assert(finishingWindow, 'Owned finish window is missing.');
   await native('focus', { FixturePid: appPid, Handle: finish.windowHandle,
-    X: finishingWindow.Bounds.Left + 80, Y: finishingWindow.Bounds.Top + 20 });
+    X: Math.floor((finishingWindow.Bounds.Left + finishingWindow.Bounds.Right) / 2),
+    Y: Math.floor(finishingWindow.Bounds.Top + finishingWindow.Bounds.Height * 0.75) });
   await delay(5500); // Pausing on the controls must not contaminate frames or trip dynamic-content timeout.
   await recordBar('control-focused-before-finish');
   assert((await controlBar(appPid, 'scroll-capture-finish')).enabled, 'Focusing capture controls invalidated a stable capture.');
-  await native('focus', { FixturePid: appPid, Handle: finish.windowHandle,
-    X: Math.floor((finish.left + finish.right) / 2), Y: Math.floor((finish.top + finish.bottom) / 2) });
   try {
-    await confirmCapturePreview(appPid, '确认选段并送入编辑器');
-    await waitForControlBarGone(appPid, 'scroll-capture-start', 15000);
+    // Finishing delivers the segment directly: the editor is the result
+    // preview and the controller closes with the completed session.
+    await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
+    await waitForControlBarGone(appPid, 'scroll-capture-finish', 15000);
   } catch (error) {
     await recordBar('finish-failed');
     app.evidence.finishProbe = JSON.parse(await native('probe', { AppPid: appPid, FixturePid: fixture.pid,
@@ -991,14 +1019,14 @@ async function waitForControllerError(appPid, scenario, expectedParts, timeoutMs
   const until = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < until) {
-    last = await barText(appPid, 'scroll-capture-start').catch(() => null);
+    last = await barText(appPid, 'scroll-capture-finish').catch(() => null);
     if (last && expectedParts.every((part) => last.text.includes(part))) {
       const finish = await controlBar(appPid, 'scroll-capture-finish');
       assert.equal(finish.enabled, false,
         `${scenario} failure left 完成 enabled.`);
-      const start = await controlBar(appPid, 'scroll-capture-start');
-      assert.equal(start.enabled, false,
-        `${scenario} failure left 开始 enabled.`);
+      const segment = await controlBar(appPid, 'scroll-capture-direction-down');
+      assert.equal(segment.enabled, false,
+        `${scenario} failure left a direction segment enabled.`);
       const confirm = await controlBar(appPid, 'scroll-capture-confirm');
       assert(!confirm.found || !confirm.enabled,
         `${scenario} terminal failure exposed a confirmation/correction action.`);
@@ -1012,12 +1040,13 @@ async function waitForControllerError(appPid, scenario, expectedParts, timeoutMs
 }
 
 // Bounded wait for the first accepted stable frame: 完成 becomes enabled only
-// after ReportAccepted, so jump/move are triggered on an existing first frame.
+// after the first frame enters the stitcher, so jump/move are triggered on an
+// existing first frame (the initial preview confirmation step is gone).
 async function waitForFirstFrameAccepted(appPid, timeoutMs = 20000) {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
-    const preview = await controlBar(appPid, 'scroll-capture-confirm');
-    if (preview.found && preview.enabled && preview.name === '确认预览并继续') return;
+    const finish = await controlBar(appPid, 'scroll-capture-finish');
+    if (finish.found && finish.enabled) return finish;
     await delay(250);
   }
   throw new Error(`First stable frame was not accepted within ${timeoutMs} ms.`);
@@ -1035,23 +1064,24 @@ async function verifyControllerFailureModes(app, fixture) {
   const setScenario = (scenario) => native('scenario',
     { FixturePid: fixture.pid, Handle: fixture.root, Scenario: scenario });
   const results = [];
-  const runNegative = async ({ scenario, before, expectedParts, trigger, restore = true }) => {
+  const runNegative = async ({ scenario, before, expectedParts, trigger, restore = true,
+    terminalStatus = 'recognition.failed' }) => {
     const sessionsBefore = await sessionEvidence(app.page);
     const outputBefore = await screenshotOutput(app.page);
     if (before) await setScenario(before);
     await startScrollSession(app, fixture);
-    await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
+    await pickDirection(appPid);
     if (trigger) await trigger();
     const bar = await waitForControllerError(appPid, scenario, expectedParts,
       controllerErrorTimeoutMs);
     await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
-    await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
-    await assertStoppedOutput(app, outputBefore, 'recognition.failed');
+    await waitForControlBarGone(appPid, 'scroll-capture-finish', 10000);
+    await assertStoppedOutput(app, outputBefore, terminalStatus);
     const sessionsAfter = await sessionEvidence(app.page);
     assert.deepEqual(sessionsAfter, sessionsBefore,
       `${scenario} round created or changed a screenshot session.`);
     if (restore) await setScenario('normal');
-    results.push({ scenario, barText: bar.text, terminalStatus: 'recognition.failed',
+    results.push({ scenario, barText: bar.text, terminalStatus,
       preservedOutput: outputBefore });
   };
 
@@ -1061,7 +1091,7 @@ async function verifyControllerFailureModes(app, fixture) {
   await runNegative({
     scenario: 'low-texture',
     before: 'low-texture',
-    expectedParts: ['滚动截图采集失败', 'no vertical variation'],
+    expectedParts: ['首帧沿滚动方向没有可辨识的内容变化', '已停止采集'],
   });
 
   // Continuously repainting content set before start: no two captures ever
@@ -1074,12 +1104,15 @@ async function verifyControllerFailureModes(app, fixture) {
 
   // A single +1000 px jump after the first accepted frame: no overlap can be
   // verified at any offset, so the append is rejected.
+  // A recoverable gap (finish disabled with explicit guidance) is not a
+  // terminal failure: cancelling preserves the prior session; the gap
+  // boundary confirmation itself is covered by the App self-check.
   await runNegative({
     scenario: 'jump',
-    expectedParts: ['没有足够重叠', '无法用正向纠偏恢复', '尚未完成'],
+    expectedParts: ['滚动过快或内容变化', '向回滚动'],
+    terminalStatus: 'recognition.cancelled',
     trigger: async () => {
       await waitForFirstFrameAccepted(appPid);
-      await confirmCapturePreview(appPid);
       await setScenario('jump');
     },
   });
@@ -1100,7 +1133,7 @@ async function verifyControllerFailureModes(app, fixture) {
 
 // A reverse frame is a recoverable review, not a terminal failure. Exercise
 // the real discard action, return to the accepted boundary, then append one
-// new strip. Export only after explicit final confirmation and verify every
+// new strip. Export only after explicit completion and verify every
 // encoded pixel row so retaining only the last viewport cannot pass.
 async function verifyReverseRecovery(app, fixture) {
   const appPid = app.child.pid;
@@ -1109,20 +1142,20 @@ async function verifyReverseRecovery(app, fixture) {
   const opened = await startScrollSession(app, fixture);
   const wheel = (delta) => native('wheel', { FixturePid: fixture.pid, Handle: fixture.root,
     X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100, Delta: delta });
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
-  await confirmCapturePreview(appPid);
+  await pickDirection(appPid);
+  await waitForFirstFrameAccepted(appPid);
   await wheel(120);
   const discard = await waitForCapturePreview(appPid, '丢弃反向帧并继续');
-  const rejected = await barText(appPid, 'scroll-capture-start');
+  const rejected = await barText(appPid, 'scroll-capture-finish');
   assert(rejected.text.includes('反向滚动') && rejected.text.includes('该帧未加入已收选段'),
     `Reverse review did not identify the rejected frame: ${rejected.text}`);
   assert((await controlBar(appPid, 'scroll-capture-finish')).enabled,
-    'Reverse review must allow previewing the already accepted segment.');
+    'Reverse review must allow finishing the already accepted segment.');
   const offset = await controlBar(appPid, 'scroll-capture-offset');
   assert(!offset.found || offset.right <= offset.left || offset.bottom <= offset.top,
     'Reverse review exposed an impossible positive-offset correction.');
   assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
-    'Reverse review published a screenshot before explicit final confirmation.');
+    'Reverse review published a screenshot before explicit completion.');
   await delay(previewPauseMs);
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
   await wheel(-120); // Back to the first accepted viewport: no new strip.
@@ -1132,32 +1165,29 @@ async function verifyReverseRecovery(app, fixture) {
     'Discarding the reverse frame did not resume capture.');
   await wheel(-120); // Beyond that viewport: exactly one new strip.
   await delay(stableWaitMs);
-  const resumed = await barText(appPid, 'scroll-capture-start');
+  const resumed = await barText(appPid, 'scroll-capture-finish');
   const expectedHeight = opened.selection.height + fixture.wheelStepPixels;
   assert(resumed.text.includes('已收 2 帧') &&
     resumed.text.includes(`${opened.selection.width} × ${expectedHeight}`),
     `Forward capture did not resume from the retained first frame: ${resumed.text}`);
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
-  await waitForCapturePreview(appPid, '确认选段并送入编辑器');
-  const finalPreview = await barText(appPid, 'scroll-capture-start');
-  assert(finalPreview.text.includes(`${opened.selection.width} × ${expectedHeight}px`),
-    `Final preview did not preserve the confirmed segment bounds: ${finalPreview.text}`);
+  // Finishing delivers the retained segment directly: the editor is the
+  // result preview, so the controller closes with the completed session.
   assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
-    'The final preview published output before explicit user confirmation.');
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-confirm' });
-  await waitForControlBarGone(appPid, 'scroll-capture-start', 15000);
+    'Capture published output before the finish action.');
+  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
+  await waitForControlBarGone(appPid, 'scroll-capture-finish', 15000);
   await app.page.waitForFunction((ids) => {
     const session = window.__scrollCaptureCurrentSession;
     return typeof session?.sessionId === 'string' && !ids.includes(session.sessionId);
   }, priorIds, { timeout: 15000 });
   const sessionsAfter = await sessionEvidence(app.page);
   assert.deepEqual(sessionsAfter.slice(0, sessionsBefore.length), sessionsBefore,
-    'Confirming a recovered capture rewrote the prior session history.');
+    'Finishing a recovered capture rewrote the prior session history.');
   const added = sessionsAfter.slice(sessionsBefore.length);
   const recoveredId = added[0]?.sessionId;
   assert(recoveredId && !priorIds.includes(recoveredId) &&
     added.every((item) => item.sessionId === recoveredId),
-    'Explicit confirmation must create exactly one new screenshot session.');
+    'Explicit completion must create exactly one new screenshot session.');
   await connectEditor(app);
   const outputName = 'scroll-capture-reverse-recovered.png';
   const png = await copySessionPng(app, app.evidence.smokeRoot, outputName);
@@ -1172,24 +1202,24 @@ async function verifyReverseRecovery(app, fixture) {
   assert(analysis.minDark >= 8, 'Recovered complete rows lost rendered text.');
 
   // Preserve the original reverse cancellation check as a separate real round.
-  // Its history now includes the explicitly confirmed recovered output above.
+  // Its history now includes the completed recovered output above.
   const beforeCancel = await sessionEvidence(app.page);
   const outputBeforeCancel = await screenshotOutput(app.page);
   await startScrollSession(app, fixture);
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-start' });
-  await confirmCapturePreview(appPid);
+  await pickDirection(appPid);
+  await waitForFirstFrameAccepted(appPid);
   await wheel(120);
   await waitForCapturePreview(appPid, '丢弃反向帧并继续');
   await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-cancel' });
-  await waitForControlBarGone(appPid, 'scroll-capture-start', 10000);
+  await waitForControlBarGone(appPid, 'scroll-capture-finish', 10000);
   await assertStoppedOutput(app, outputBeforeCancel);
   assert.deepEqual(await sessionEvidence(app.page), beforeCancel,
     'Cancelling reverse review created or changed a screenshot session.');
   return {
-    rejected, discardAction: discard.name, reviewPauseMs: previewPauseMs, resumed: resumed.text, finalPreview: finalPreview.text,
+    rejected, discardAction: discard.name, reviewPauseMs: previewPauseMs, resumed: resumed.text,
     sessionId: recoveredId, startOffsetPixels, stitched: analysis,
     output: path.join(app.evidence.smokeRoot, outputName),
-    noOutputBeforeFinalConfirmation: true, cancelPreservedHistory: true,
+    noOutputBeforeFinish: true, cancelPreservedHistory: true,
   };
 }
 
