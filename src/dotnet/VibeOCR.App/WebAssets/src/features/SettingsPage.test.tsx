@@ -570,7 +570,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
   });
 
-  it("技术环境清单、依赖版本与来源收进默认折叠的高级区", () => {
+  it("环境清单与来源直接呈现在常规页面，不再有折叠高级区", () => {
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
@@ -579,6 +579,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentSupportsCleanup: false,
       environmentBusy: false,
+      maintenanceStatus: "旧运行时维护投影不得混入 managed 页面",
     };
     render(
       <SettingsPage
@@ -586,23 +587,22 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         actions={buildActions()}
       />,
     );
-    const advanced = document.querySelector(
-      "details.environment-advanced-maintenance",
-    );
-    expect(advanced).not.toBeNull();
-    expect(advanced).not.toHaveAttribute("open", "");
+    // #294：环境清单/来源/清理不再藏进折叠高级区，无需任何展开即可见。
     expect(
-      within(advanced as HTMLDetailsElement).getByText("已安装环境"),
-    ).toBeInTheDocument();
+      document.querySelector("details.environment-advanced-maintenance"),
+    ).toBeNull();
+    expect(screen.getByLabelText("已安装环境")).toBeVisible();
+    expect(screen.getByLabelText("下载来源")).toBeVisible();
     expect(
-      within(advanced as HTMLDetailsElement).getByText(
-        "下载来源（依赖与模型）",
-      ),
-    ).toBeInTheDocument();
-    // 安装进度不属于高级设置：空闲时自身不渲染，不需要展开即可见。
-    expect(
-      within(advanced as HTMLDetailsElement).queryByLabelText("依赖安装进度"),
+      screen.queryByText("高级：环境清单、依赖版本、下载来源与空间清理"),
     ).not.toBeInTheDocument();
+    // managed 分支不渲染旧 RuntimeStatus 维护投影，避免旧健康/idle 被当成
+    // 环境维护结果（legacy capability 分支保留）。
+    expect(
+      screen.queryByText("本次维护：旧运行时维护投影不得混入 managed 页面"),
+    ).not.toBeInTheDocument();
+    // 安装进度不属于设置项：空闲时自身不渲染。
+    expect(screen.queryByLabelText("依赖安装进度")).not.toBeInTheDocument();
   });
 });
 
@@ -653,9 +653,7 @@ it("saves model source identifiers from provider metadata", async () => {
       actions={actions}
     />,
   );
-  await userEvent.click(
-    screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-  );
+  // #294：来源设置在常规页面直接可见，无需先展开折叠区。
   expect(screen.getByLabelText("模型来源")).toHaveValue("modelscope");
   await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
   expect(actions.run).toHaveBeenCalledWith({

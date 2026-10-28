@@ -901,8 +901,8 @@ function acceleratorLabel(accelerator: string): string {
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
   // #283：按引擎分区选择（Paddle 推理后端 / MinerU 本地引擎）→准备→确认；
-  // 技术环境清单、来源与清理收进折叠高级区。选择以目录配方 id 绑定，
-  // 导航回来时从宿主待确认计划恢复。
+  // #294：环境清单、来源与清理直接呈现在常规页面，不再藏进折叠高级区。
+  // 选择以目录配方 id 绑定，导航回来时从宿主待确认计划恢复。
   const managedEnvironmentsAvailable = viewState.capabilities.includes(
     "runtime.environments",
   );
@@ -1190,25 +1190,32 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               </>
             )}
             <p>当前服务：{serviceText}</p>
-            <p>本次维护：{maintenanceLine}</p>
-            {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
-            {state.progressActive === true ? (
-              <ProgressBar
-                value={
-                  typeof state.progressPercent === "number" &&
-                  Number.isFinite(state.progressPercent)
-                    ? state.progressPercent / 100
-                    : undefined
-                }
-                aria-label="运行环境维护进度"
-              />
-            ) : null}
-            {progressText ? <p>{progressText}</p> : null}
-            {stringValue(state.progressDetail) ? (
-              <details>
-                <summary>进度明细</summary>
-                <p>{stringValue(state.progressDetail)}</p>
-              </details>
+            {/* #294：managed 分支不再渲染旧 RuntimeStatus 维护投影，避免把
+                legacy 健康/idle 当成环境维护结果；维护状态由环境行、安装
+                进度与清理结果各自承载。legacy capability 分支保留原样。 */}
+            {!managedEnvironmentsAvailable ? (
+              <>
+                <p>本次维护：{maintenanceLine}</p>
+                {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
+                {state.progressActive === true ? (
+                  <ProgressBar
+                    value={
+                      typeof state.progressPercent === "number" &&
+                      Number.isFinite(state.progressPercent)
+                        ? state.progressPercent / 100
+                        : undefined
+                    }
+                    aria-label="运行环境维护进度"
+                  />
+                ) : null}
+                {progressText ? <p>{progressText}</p> : null}
+                {stringValue(state.progressDetail) ? (
+                  <details>
+                    <summary>进度明细</summary>
+                    <p>{stringValue(state.progressDetail)}</p>
+                  </details>
+                ) : null}
+              </>
             ) : null}
           </div>
           <CapabilityGate
@@ -1274,30 +1281,26 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               {/* 安装进度是操作状态而非设置项，保留在折叠区外可见；空闲时
                   自身不渲染。 */}
               <EnvironmentInstallDetails state={state} />
-              <details className="environment-advanced-maintenance">
-                <summary>高级：环境清单、依赖版本、下载来源与空间清理</summary>
-                <p className="form-note">
-                  技术环境清单与来源维护默认折叠；只读取状态与保存来源配置，
-                  删除类操作仍需逐项确认。
-                </p>
-                <InstalledEnvironmentList
-                  state={state}
-                  actions={actions}
-                  selectedRecipeId={
-                    focusedEngine === "mineru"
-                      ? (mineruRecipe?.id ?? "")
-                      : (paddleRecipe?.id ?? "")
-                  }
-                  plan={paddlePlan ?? mineruPlan}
-                  onPreview={previewEnvironment}
-                />
-                <EnvironmentSourceSettings
-                  state={state}
-                  busy={state.environmentBusy === true}
-                  actions={actions}
-                  onInvalidate={invalidateSelectionPlan}
-                />
-              </details>
+              {/* #294：环境清单、来源与空间清理是常规维护能力，直接呈现；
+                  仅包清单/长日志/路径等技术详情在各自区块内折叠，必需
+                  按钮不随技术详情隐藏。 */}
+              <InstalledEnvironmentList
+                state={state}
+                actions={actions}
+                selectedRecipeId={
+                  focusedEngine === "mineru"
+                    ? (mineruRecipe?.id ?? "")
+                    : (paddleRecipe?.id ?? "")
+                }
+                plan={paddlePlan ?? mineruPlan}
+                onPreview={previewEnvironment}
+              />
+              <EnvironmentSourceSettings
+                state={state}
+                busy={state.environmentBusy === true}
+                actions={actions}
+                onInvalidate={invalidateSelectionPlan}
+              />
             </>
           ) : (
             <>
@@ -1633,9 +1636,64 @@ function InstalledEnvironmentList({
           取消安装
         </Button>
       ) : null}
+      <EmptyEnvironmentCreator busy={busy} actions={actions} />
       <EnvironmentCleanup state={state} busy={busy} actions={actions} />
       <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
     </section>
+  );
+}
+
+// 具名空环境是显式管理操作（#294）：仅供隔离配置/手动排查等可控用途，
+// 不插入普通安装必经路径（普通准备自动复用或创建目标环境，无需命名）；
+// 创建后仍是空环境，不安装任何依赖，也不改变默认识别模式或在途任务。
+function EmptyEnvironmentCreator({
+  busy,
+  actions,
+}: {
+  readonly busy: boolean;
+  readonly actions: AppActions;
+}) {
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const trimmed = name.trim();
+  const create = async () => {
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    try {
+      if (
+        await actions.run({
+          type: "settings.createEnvironment",
+          name: trimmed,
+        })
+      )
+        setName("");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div className="empty-environment-creator" aria-label="创建具名空环境">
+      <h4>创建具名空环境（可选）</h4>
+      <p className="form-note">
+        仅创建空环境记录，不安装依赖；普通安装无需先命名环境。失败会保留
+        在下方状态行，不影响已有环境。
+      </p>
+      <div className="setting-row">
+        <label htmlFor="settings-empty-environment-name">环境名称</label>
+        <Input
+          id="settings-empty-environment-name"
+          value={name}
+          disabled={busy || submitting}
+          onChange={(_, data) => setName(data.value)}
+        />
+        <Button
+          disabled={busy || submitting || trimmed.length === 0}
+          onClick={() => void create()}
+        >
+          创建空环境
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1893,6 +1951,10 @@ interface EnvironmentInstallProgress {
   }[];
   readonly download_files_total: number | null;
   readonly download_files_completed: number;
+  // 当前下载工件的字节测量（bytes_current/bytes_total）；总量未知时
+  // bytes_total 为 null，只显示已传字节，不造百分比或总下载量。
+  readonly bytes_current?: number;
+  readonly bytes_total?: number | null;
 }
 
 function EnvironmentInstallDetails({
@@ -1960,6 +2022,14 @@ function EnvironmentInstallDetails({
           ? progress.dependencies.length
           : "unknown"
       }
+      data-install-bytes-current={
+        typeof progress.bytes_current === "number" ? progress.bytes_current : ""
+      }
+      data-install-bytes-total={
+        typeof progress.bytes_total === "number"
+          ? progress.bytes_total
+          : "unknown"
+      }
     >
       <h4>
         {phases[progress.phase] ?? progress.phase} ·{" "}
@@ -1976,7 +2046,13 @@ function EnvironmentInstallDetails({
         {progress.dependency_total_known
           ? progress.dependencies.length
           : "未知"}{" "}
-        项
+        项｜当前下载工件已传{" "}
+        {typeof progress.bytes_current === "number"
+          ? formatBytes(progress.bytes_current)
+          : "未知"}
+        {typeof progress.bytes_total === "number"
+          ? ` / ${formatBytes(progress.bytes_total)}`
+          : "（总量未知）"}
       </p>
       <p>
         当前：{progress.current || "等待安装事件"}；最后事件：

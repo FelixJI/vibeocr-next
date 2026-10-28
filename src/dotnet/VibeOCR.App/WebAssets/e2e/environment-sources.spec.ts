@@ -172,8 +172,7 @@ test("converged source setting keeps one simple global choice per kind", async (
       },
     },
   });
-  // 来源与清理收进高级折叠区：先展开再配置。
-  await page.locator("details.environment-advanced-maintenance").click();
+  // #294：来源设置在常规页面直接可见，无需展开折叠区。
   const section = page.locator(".environment-source-settings");
   await expect(section).toBeVisible();
   // 依赖默认 TUNA，模型默认魔搭；选项不暴露“跟随/覆盖”层。
@@ -600,9 +599,7 @@ test("same Paddle environment switches selected device without another install",
     action: "switchEnvironment",
     arguments: { environmentId: "shared", device: "cpu" },
   });
-  await page
-    .locator("details.environment-advanced-maintenance > summary")
-    .click();
+  // 环境行在常规页面直接可见（#294），无需展开。
   await page.getByRole("button", { name: "预览移除 CUDA（保留 CPU）" }).click();
   await expectCommand(page, {
     scope: "settings",
@@ -725,9 +722,6 @@ test("healthy CPU upgrades through the public CUDA prepare action", async ({
     .getByLabel("Paddle 推理后端", { exact: true })
     .selectOption("nvidia_cuda");
   await sendState(page, "settings", settings);
-  await page
-    .locator("details.environment-advanced-maintenance > summary")
-    .click();
   const row = page.locator(
     '.managed-environment-item[data-environment-id="shared-cpu"]',
   );
@@ -861,4 +855,96 @@ test("same-id device commit automatically refreshes compatibility without manual
   await expect(
     page.getByRole("button", { name: "重新查询兼容环境", exact: true }),
   ).toHaveCount(0);
+});
+
+test("named empty environment stays an explicit optional management entry", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const settings = {
+    environmentRecipes: recipes,
+    environments: [],
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    environmentBusy: false,
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings },
+  });
+  // #294：可选管理入口在常规页面直接可达；空名禁用，不插入普通准备路径。
+  const create = page.getByRole("button", { name: "创建空环境" });
+  await expect(create).toBeVisible();
+  await expect(create).toBeDisabled();
+  const name = page.getByLabel("环境名称");
+  await name.fill("手动隔离");
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "createEnvironment",
+    arguments: { name: "手动隔离" },
+  });
+  await sendState(page, "settings", { ...settings, environmentBusy: true });
+  await expect(name).toBeDisabled();
+  await expect(create).toBeDisabled();
+});
+
+test("install progress shows measured artifact bytes without a fake percentage", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const base = {
+    environmentRecipes: recipes,
+    environments: [],
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    environmentSupportsInstallProgress: true,
+    maintenanceStatus: "旧运行时维护投影不得混入 managed 页面",
+    maintenancePhase: "idle",
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings: base },
+  });
+  // managed 页面不渲染旧 RuntimeStatus 维护投影（#294）。
+  await expect(page.getByText(/本次维护：旧运行时维护投影/)).toHaveCount(0);
+  const progress = {
+    attempt_id: "e2e-attempt",
+    seq: 3,
+    environment_id: "env",
+    timestamp: "2026-10-08T00:00:00Z",
+    phase: "download",
+    state: "running",
+    current: "下载依赖工件",
+    dependency_total_known: true,
+    download_files_total: 2,
+    download_files_completed: 1,
+    bytes_current: 2048,
+    bytes_total: null,
+    dependencies: [
+      {
+        name: "a",
+        version: "1",
+        download_state: "downloading",
+        install_state: "pending",
+      },
+    ],
+  };
+  await sendState(page, "settings", {
+    ...base,
+    environmentInstallProgress: progress,
+  });
+  const panel = page.getByRole("region", { name: "依赖安装进度" });
+  // 总量未知：显示已传字节与“总量未知”，不造百分比或总下载量。
+  await expect(panel).toHaveAttribute("data-install-bytes-total", "unknown");
+  await expect(panel).toContainText("当前下载工件已传 2 KiB（总量未知）");
+  await sendState(page, "settings", {
+    ...base,
+    environmentInstallProgress: { ...progress, seq: 4, bytes_total: 4096 },
+  });
+  await expect(panel).toHaveAttribute("data-install-bytes-total", "4096");
+  await expect(panel).toContainText("当前下载工件已传 2 KiB / 4 KiB");
 });

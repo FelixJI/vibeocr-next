@@ -415,6 +415,103 @@ public sealed class DiagnosticsViewModelTests
     }
   }
 
+  [Fact]
+  public void RedactCoversApiKeysBearerAuthorizationAndUrlCredentials()
+  {
+    var viewModel = new DiagnosticsViewModel(
+      "test",
+      new PrerequisiteReport([]),
+      environmentInstallLog: () =>
+      (IReadOnlyList<string>)[
+        "2026-10-08T00:00:00Z [download/stdout] GET https://user:secretpw@mirror.example.com/simple/pkg",
+        "2026-10-08T00:00:01Z [install/stderr] Authorization: Bearer eyJhbGciOi.abc.def",
+        "2026-10-08T00:00:01Z [download/stdout] Bearer standalone-token-xyz",
+        "2026-10-08T00:00:02Z [download/stdout] api_key=sk-live-123456 && token=tok-987 && apikey: quoted-secret",
+        "2026-10-08T00:00:03Z [verify/stdout] 使用路径 C:\\Users\\felji\\cache 验证完成",
+      ]);
+
+    using JsonDocument document = JsonDocument.Parse(viewModel.BuildRedactedExportJson());
+    JsonElement lines = document.RootElement
+      .GetProperty("environment_install").GetProperty("lines");
+    string joined = string.Join("\n", lines.EnumerateArray().Select(item => item.GetString()));
+
+    // 凭据值不进入文档；键名、scheme、主机与正常文本保留。
+    Assert.DoesNotContain("secretpw", joined);
+    Assert.DoesNotContain("eyJhbGciOi.abc.def", joined);
+    Assert.DoesNotContain("standalone-token-xyz", joined);
+    Assert.DoesNotContain("sk-live-123456", joined);
+    Assert.DoesNotContain("tok-987", joined);
+    Assert.DoesNotContain("quoted-secret", joined);
+    Assert.DoesNotContain("C:\\Users", joined);
+    Assert.Contains("https://<redacted>@mirror.example.com", joined);
+    Assert.Contains("Authorization: <redacted>", joined);
+    Assert.Contains("Bearer <redacted>", joined);
+    Assert.Contains("api_key=<redacted>", joined);
+    Assert.Contains("token=<redacted>", joined);
+    Assert.Contains("apikey: <redacted>", joined);
+    Assert.Contains("使用路径 <redacted>", joined);
+  }
+
+  [Fact]
+  public async Task ExportAndCopyShareOneInstallLogSnapshotPerDocument()
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-diag-install-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      int providerCalls = 0;
+      var viewModel = new DiagnosticsViewModel(
+        "test",
+        new PrerequisiteReport([]),
+        environmentInstallLog: () =>
+        {
+          providerCalls++;
+          return (IReadOnlyList<string>)[
+            "2026-10-08T00:00:00Z [download/stdout] token=abc123 下载中",
+          ];
+        });
+
+      string copied = viewModel.BuildRedactedExportJson();
+      string destination = Path.Combine(root, "diagnostics.json");
+      await viewModel.ExportAsync(destination, TestContext.Current.CancellationToken);
+
+      // 复制与导出各自只读一次单一日志 getter：同一文档、同一脱敏，不把进度
+      // 与日志两次独立读取拼成伪原子组合。
+      Assert.Equal(2, providerCalls);
+      using JsonDocument copyDocument = JsonDocument.Parse(copied);
+      using JsonDocument exportDocument = JsonDocument.Parse(
+        await File.ReadAllTextAsync(destination, TestContext.Current.CancellationToken));
+      foreach (JsonDocument document in new[] { copyDocument, exportDocument })
+      {
+        JsonElement section = document.RootElement.GetProperty("environment_install");
+        string line = Assert.Single(section.GetProperty("lines").EnumerateArray()).GetString()!;
+        Assert.DoesNotContain("abc123", line);
+        Assert.Contains("token=<redacted>", line);
+        // 生命周期诚实性：不宣称退出后后台继续安装。
+        Assert.Contains("后台", section.GetProperty("note").GetString()!);
+      }
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void InstallLogSectionIsEmptyWithoutProviderOrSnapshot()
+  {
+    var withoutProvider = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    using JsonDocument document = JsonDocument.Parse(withoutProvider.BuildRedactedExportJson());
+    JsonElement section = document.RootElement.GetProperty("environment_install");
+    Assert.Empty(section.GetProperty("lines").EnumerateArray());
+
+    var emptyProvider = new DiagnosticsViewModel(
+      "test", new PrerequisiteReport([]), environmentInstallLog: () => null);
+    using JsonDocument emptyDocument = JsonDocument.Parse(emptyProvider.BuildRedactedExportJson());
+    Assert.Empty(emptyDocument.RootElement
+      .GetProperty("environment_install").GetProperty("lines").EnumerateArray());
+  }
+
   private sealed class RecordingStructuredClipboard : IStructuredClipboardPlatform
   {
     public string? Text { get; private set; }

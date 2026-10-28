@@ -227,7 +227,11 @@ public sealed partial class App : Application
             _runtimeStatus,
             () => _managedSession is { } session
                 ? (session.InstanceId, session.Process.LogLines)
-                : (null, Array.Empty<string>()));
+                : (null, Array.Empty<string>()),
+            // 惰性读取当前会话的有界安装日志：诊断导出/复制时才取一次
+            // 同一快照，不新建状态库或轮询；_environmentSettings 尚未构造
+            // 时返回 null，文档对应空日志段。
+            environmentInstallLog: () => _environmentSettings?.InstallLog);
         // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
         if (!string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("VIBEOCR_SUPERVISOR_HEALTH_TRACE")))
