@@ -2716,7 +2716,7 @@ function EngineEnvironmentSection({
               <p className="form-note">
                 移除环境只删除该环境的专属依赖目录；共享模型缓存、下载缓存与基础
                 Python
-                受保护保留（空间清理在下方高级区）。当前活动环境需先切换到
+                受保护保留（可在下方使用空间清理）。当前活动环境需先切换到
                 其他环境后才能移除。
               </p>
             </div>
