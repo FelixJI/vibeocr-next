@@ -960,6 +960,102 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Same(failure, settings.Snapshot?.Environments[0].LastInstallFailure);
   }
 
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task FailedInstallOverlaysRestoredServiceWithoutHidingFailure(bool probeHealthy)
+  {
+    string root = CreateReadyEchoScript();
+    InferenceSupervisorProcess process = CreateReadyEchoProcess(root);
+    try
+    {
+      await process.StartAsync(TestContext.Current.CancellationToken);
+      var client = new InferenceHttpClient(
+        new Uri("http://127.0.0.1:1"), "test", new HealthyTransport());
+      var qr = new QrCodeHttpClient(new Uri("http://127.0.0.1:1"), "test");
+      await using var session = new ManagedEnvironmentSession(
+        "environment", 1, process, client, qr, ReadyStatus());
+      // 恢复失败的探针会如实标注未核验，不伪造 ready。
+      await using var disconnected = new ManagedEnvironmentSession(
+        "environment", 1,
+        new InferenceSupervisorProcess(new InferenceSupervisorOptions(
+          "unused", [], root, Path.Combine(root, "unused.log"),
+          TimeSpan.FromSeconds(1), new HashSet<string>()), "test"),
+        new InferenceHttpClient(new Uri("http://127.0.0.1:12345"), "test",
+          new UnavailableTransport()),
+        new QrCodeHttpClient(new Uri("http://127.0.0.1:12345"), "test"),
+        ReadyStatus());
+      // 服务在安装失败期间停止（无会话），恢复完成后才重新可用。
+      ManagedEnvironmentSession? current = null;
+      var failure = new ManagedEnvironmentInstallFailure("failed", 1, "paddleocr-ort-cpu",
+        "network_error", "check_source_and_retry", "下载源连接失败。");
+      var manager = new MutableManager
+      {
+        RequiresServiceStop = true,
+        LastInstallFailure = failure,
+        BeforeInstall = () => Task.FromException(new InvalidOperationException("install failed")),
+      };
+      var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+        () => ("environment", 1), new ProductMaintenanceCoordinator(), () => current,
+        stopService: _ => Task.CompletedTask,
+        restoreService: () =>
+        {
+          current = probeHealthy ? session : disconnected;
+          return Task.CompletedTask;
+        });
+      await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
+        TestContext.Current.CancellationToken);
+
+      var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
+
+      // 原安装异常原样传播；恢复后的运行证据如实叠加。
+      Assert.Equal("install failed", error.Message);
+      ManagedEnvironment restored = ActiveEnvironment(settings);
+      Assert.Equal(probeHealthy ? "ready" : "unverified", restored.ServiceState);
+      if (!probeHealthy)
+        Assert.Equal("无法读取活动环境状态，请刷新或重新切换环境。", restored.Reason);
+      // 安装失败终态不被旧健康盖成成功。
+      Assert.Same(failure, restored.LastInstallFailure);
+      Assert.Equal("安装未完成；失败原因请查看该环境记录。", settings.Status);
+      Assert.Null(settings.InstallProgress);
+      Assert.False(settings.IsRestoringService);
+      Assert.False(settings.IsBusy);
+    }
+    finally
+    {
+      process.Dispose();
+      DeleteScriptDirectory(root);
+    }
+  }
+
+  [Fact]
+  public async Task FailedInstallRestoreFailureKeepsNotStartedAndOriginalError()
+  {
+    var manager = new MutableManager
+    {
+      RequiresServiceStop = true,
+      BeforeInstall = () => Task.FromException(new InvalidOperationException("install failed")),
+    };
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => ("environment", 1), new ProductMaintenanceCoordinator(),
+      stopService: _ => Task.CompletedTask,
+      restoreService: () => Task.FromException(new InvalidOperationException("restore failed")));
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", "pypi",
+      TestContext.Current.CancellationToken);
+
+    AggregateException error = await Assert.ThrowsAsync<AggregateException>(() =>
+      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
+
+    Assert.StartsWith("环境维护失败，释放维护或恢复原服务也失败。", error.Message,
+      StringComparison.Ordinal);
+    Assert.Contains(error.InnerExceptions, item => item.Message == "install failed");
+    Assert.Contains(error.InnerExceptions, item => item.Message == "restore failed");
+    // 恢复失败不得伪造 ready；快照保持服务停止期间读取的投影。
+    Assert.Equal("not_started", ActiveEnvironment(settings).ServiceState);
+    Assert.False(settings.IsRestoringService);
+  }
+
   [Fact]
   public async Task DisconnectedRunningProbePreservesEnvironmentAndReturnsRecoverableError()
   {
@@ -1359,6 +1455,7 @@ public sealed class ManagedEnvironmentSettingsTests
     public int CleanupCalls { get; private set; }
     public Func<CancellationToken, Task>? BeforeCleanup { get; set; }
     public ManagedCleanupPlan? CleanupPreview { get; set; }
+    public ManagedEnvironmentInstallFailure? LastInstallFailure { get; set; }
     public Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
       Task.FromResult(CleanupPreview ?? new ManagedCleanupPlan(new string('a', 32),
       [new ManagedCleanupItem("residual:fixture", "residual", "fixture", null, 12, true, "owned", ["fixture"], PathCount: 1),
@@ -1400,7 +1497,11 @@ public sealed class ManagedEnvironmentSettingsTests
     {
       if (BeforeList is not null) await BeforeList();
       if (FailListAfterCreate && CreateCalls > 0) throw new HttpRequestException("list unavailable");
-      return new ManagedEnvironmentList("environment", 1, [.. environments], Recipes: Catalog);
+      return new ManagedEnvironmentList("environment", 1,
+        [.. environments.Select(item =>
+          item.Id == "environment" && LastInstallFailure is not null
+            ? item with { LastInstallFailure = LastInstallFailure }
+            : item)], Recipes: Catalog);
     }
 
     private string? preparedTargetId;

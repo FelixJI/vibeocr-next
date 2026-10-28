@@ -3187,6 +3187,10 @@ class ManagedEnvironmentStore:
                     raise ManagedEnvironmentError(
                         f"target environment is unhealthy: {probe['reason']}"
                     )
+                # 无注册表的旧 legacy 用户：候选服务的启动租约必须读到
+                # 注册表，而首次落盘原本要等 commit_switch 的健康检查。
+                if not self._registry.is_file() and data["environments"]:
+                    _atomic_json(self._registry, data)
                 return {
                     "environment_id": env_id,
                     "environment_revision": record["revision"],

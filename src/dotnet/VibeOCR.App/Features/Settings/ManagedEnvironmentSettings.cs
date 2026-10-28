@@ -448,6 +448,13 @@ public sealed class ManagedEnvironmentSettings(
                     if (recoveryError is not null)
                         throw installError is null ? recoveryError : new AggregateException(
                             "环境维护失败，释放维护或恢复原服务也失败。", installError, recoveryError);
+                    // App 侧刷新因 IsRestoringService 跳过：恢复完成后由本 gate
+                    // 所有者叠加运行证据；安装失败终态与原异常保持不变。
+                    if (installError is not null && stopped)
+                    {
+                        try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
+                        catch (Exception) { /* 展示刷新失败不影响原安装错误传播。 */ }
+                    }
                 }
                 finally
                 {
