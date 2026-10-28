@@ -969,3 +969,76 @@ test("install progress shows measured artifact bytes without a fake percentage",
   await expect(panel).toHaveAttribute("data-install-bytes-total", "4096");
   await expect(panel).toContainText("当前依赖下载批次累计 3 KiB / 4 KiB");
 });
+
+test("initial empty projection auto-loads the managed catalog without manual actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  // 实机首启接线契约：宿主只给构造默认状态时页面自动补齐目录/快照；
+  // 判定用 typed 事实字段，状态文案可为任意文本。
+  const initial = {
+    environmentStatus: "【任意宿主文案】不参与加载判定",
+    environmentSnapshotLoaded: false,
+    environmentListFetchAttempted: false,
+    environments: [],
+    environmentRecipes: [],
+    environmentBusy: false,
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings: initial },
+  });
+  await expect(page.getByText("运行环境状态尚未读取")).toBeVisible();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "refreshEnvironmentList",
+    arguments: {},
+  });
+  const refreshCount = () =>
+    page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __testHost: { commands: { scope: string; action: string }[] };
+          }
+        ).__testHost.commands.filter(
+          (command) =>
+            command.scope === "settings" &&
+            command.action === "refreshEnvironmentList",
+        ).length,
+    );
+  await expect.poll(refreshCount).toBe(1);
+  // 真实快照到达：无需手动“查看环境清单”，聚焦分区自动只读查询。
+  await sendState(page, "settings", {
+    ...initial,
+    environmentStatus: "运行环境状态已更新",
+    environmentSnapshotLoaded: true,
+    environmentSources: sources,
+    environmentRecipes: recipes,
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+  });
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "paddleocr-ort-cpu" },
+  });
+  // 宿主只读查询回包（无兼容环境）后才出现准备入口，无需任何手动操作。
+  await sendState(page, "settings", {
+    ...initial,
+    environmentStatus: "运行环境状态已更新",
+    environmentSnapshotLoaded: true,
+    environmentSources: sources,
+    environmentRecipes: recipes,
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    environmentCompatibility: {
+      recipe: "paddleocr-ort-cpu",
+      selectedEnvironmentId: null,
+    },
+  });
+  await expect(
+    page.getByRole("button", { name: "准备此后端", exact: true }),
+  ).toBeVisible();
+  await expect.poll(refreshCount).toBe(1);
+});

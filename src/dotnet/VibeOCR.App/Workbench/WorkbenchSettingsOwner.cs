@@ -823,6 +823,9 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
         environmentPlan.RequiresServiceStop, environmentPlan.CudaPluginAction)
       : null,
     EnvironmentStatus: viewModel.Environments?.Status ?? "",
+    // 加载判定事实（不随文案变化）：快照是否已读到位、清单读取是否已尝试。
+    EnvironmentSnapshotLoaded: viewModel.Environments?.SnapshotLoaded == true,
+    EnvironmentListFetchAttempted: viewModel.Environments?.ListFetchAttempted == true,
     // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU
     // 编辑器：不能只依赖各步 RunAsync 的瞬时 IsBusy。
     EnvironmentBusy: (viewModel.Environments?.IsBusy ?? false) ||

@@ -2032,6 +2032,8 @@ public static class WorkbenchBridgeCodec
       settings.ActiveEnvironmentId,
       environmentPlan = settings.EnvironmentPlan,
       settings.EnvironmentStatus,
+      settings.EnvironmentSnapshotLoaded,
+      settings.EnvironmentListFetchAttempted,
       settings.EnvironmentBusy,
       environmentSources = settings.EnvironmentSources ?? [],
       environmentDefaultSourceIds = settings.EnvironmentDefaultSourceIds ?? [],

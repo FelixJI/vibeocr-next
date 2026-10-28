@@ -984,12 +984,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       ? paddleGroup?.byDevice.get(device)?.id
       : mineruGroup?.byDevice.get(device)?.id) ?? null;
   // 快照已同步但仍无活动环境（初始化失败或默认环境被删）时，如实展示
-  // 默认配置“尚未启动”；仅目录/快照未到时才显示“尚未读取”。
-  const environmentStatusLine = stringValue(state.environmentStatus);
+  // 默认配置“尚未启动”；加载判定用宿主 typed 事实（快照是否已读到位），
+  // 不依赖状态文案，空串/未投影不当作已加载。
   const managedRuntimeLoaded =
+    state.environmentSnapshotLoaded === true ||
     recipes.length > 0 ||
-    environments.length > 0 ||
-    (environmentStatusLine ?? "") !== "";
+    environments.length > 0;
   const defaultRuntimeRecipe =
     recipes.find((recipe) => recipe.defaultRemoteHost)?.displayName ??
     "PaddleOCR ONNX · CPU";
@@ -1003,6 +1003,31 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     setQueryGeneration((current) => current + 1);
     void actions.run({ type: "settings.invalidateEnvironmentPlan" });
   };
+  // 首次进入 managed 设置页：宿主明确投影 typed 事实（快照未读到位且
+  // 清单读取从未尝试，均严格 false）时自动发一次只读清单刷新（与
+  // refreshRuntime 不同，不 ensure 服务、无安装/启动副作用）。旧宿主/字段
+  // 缺失不自动，保留手动入口；启动初始化期间读取成功会得到中间快照，
+  // 终态由宿主激活后补刷；失败后不再自动重试，错误留给显式重试；在途
+  // busy/已有快照/待确认计划都不被触碰，legacy 主机不触发。
+  const initialListRequested = useRef(false);
+  useEffect(() => {
+    if (
+      !managedEnvironmentsAvailable ||
+      initialListRequested.current ||
+      state.environmentSnapshotLoaded !== false ||
+      state.environmentListFetchAttempted !== false ||
+      state.environmentBusy === true
+    )
+      return;
+    initialListRequested.current = true;
+    void actions.run({ type: "settings.refreshEnvironmentList" });
+  }, [
+    managedEnvironmentsAvailable,
+    state.environmentSnapshotLoaded,
+    state.environmentListFetchAttempted,
+    state.environmentBusy,
+    actions,
+  ]);
   const onEngineDeviceChange = (
     engine: "paddle" | "mineru",
     device: string,
