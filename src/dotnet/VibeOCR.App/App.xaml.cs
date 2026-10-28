@@ -453,7 +453,9 @@ public sealed partial class App : Application
             new WindowsStartupRegistrar(layout.ProductEntry),
             () => _window!.AppWindow.Hide(),
             () => _window!.Close(),
-            configuredHotkey ?? string.Empty);
+            configuredHotkey ?? string.Empty,
+            new ShellPreferencesStore(layout));
+        _window!.AppWindow.Changed += OnMainWindowChanged;
         // 旧单键路径兼容：同键为无操作成功；启动时被占用则重试并回显冲突。
         _shellViewModel.InitializeHotkey();
         _updateViewModel = new UpdateViewModel(
@@ -787,6 +789,8 @@ public sealed partial class App : Application
             return;
         }
 
+        if (window.AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+            presenter.Restore();
         window.AppWindow.Show();
         window.Activate();
         // 仅明确打开主窗的用户动作执行；托盘菜单展示/取消不经过此入口。
@@ -1391,6 +1395,13 @@ public sealed partial class App : Application
 
 
     private bool _pdfCloseReview;
+    private void OnMainWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (sender.IsVisible && !_shutdownStarted && _trayIcon is not null &&
+            sender.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized })
+            _shellViewModel?.OnMinimized();
+    }
+
     internal Func<Task>? SmokeBeforePinShutdown { get; set; }
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
@@ -1447,6 +1458,7 @@ public sealed partial class App : Application
         {
             _applicationShutdown.Dispose();
             appWindow.Closing -= OnAppWindowClosing;
+            appWindow.Changed -= OnMainWindowChanged;
             _window?.CloseAfterPreparation();
             if (_window is not null) await _window.ShutdownCompletion;
             Exit();

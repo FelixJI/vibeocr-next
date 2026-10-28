@@ -666,6 +666,15 @@ internal sealed class WindowsStartupRegistrar(string bootstrapperPath) : IStartu
     private const string ValueName = "VibeOCR";
     private readonly string _command = $"\"{bootstrapperPath}\" --profile production";
 
+    public bool IsEnabled
+    {
+        get
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunKey);
+            return string.Equals(key?.GetValue(ValueName) as string, _command, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     public bool SetEnabled(bool enabled)
     {
         try
@@ -681,7 +690,7 @@ internal sealed class WindowsStartupRegistrar(string bootstrapperPath) : IStartu
             }
             return true;
         }
-        catch (Exception error) when (error is UnauthorizedAccessException or IOException)
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException or System.Security.SecurityException)
         {
             return false;
         }

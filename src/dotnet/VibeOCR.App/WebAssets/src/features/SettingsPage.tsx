@@ -7,6 +7,7 @@ import {
   Input,
   ProgressBar,
   Select,
+  Switch,
 } from "@fluentui/react-components";
 
 import {
@@ -1089,15 +1090,13 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const recognition = mineruRecognition(state.mineruRecognition);
   const defaultMode = defaultRecognitionMode(state.defaultRecognitionMode);
   return (
-    <Workspace
-      eyebrow="PREFERENCES / 05"
-      title="设置"
-      description="管理快捷操作、运行环境与下载来源。默认识别类型在此设置，单次/批量/PDF 中的选择仅覆盖当次任务。"
-    >
+    <Workspace title="设置">
       <div className="settings-grid">
-        <Panel label="APPLICATION" title="应用" className="settings-app-panel">
+        <Panel title="应用" className="settings-app-panel">
           <div className="setting-row">
-            <Checkbox
+            <Switch
+              className="application-switch"
+              labelPosition="before"
               label="开机自启动"
               checked={booleanValue(state.startupEnabled)}
               disabled={!viewState.capabilities.includes("settings.shell")}
@@ -1109,12 +1108,28 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               }
             />
           </div>
+          <div className="setting-row">
+            <Switch
+              className="application-switch"
+              labelPosition="before"
+              label="最小化到托盘"
+              checked={booleanValue(state.minimizeToTray)}
+              disabled={!viewState.capabilities.includes("settings.tray")}
+              onChange={(_, data) =>
+                actions.run({
+                  type: "settings.setMinimizeToTray",
+                  enabled: data.checked,
+                })
+              }
+            />
+          </div>
+          {stringValue(state.shellSettingsError) ? (
+            <p role="alert" className="form-note">
+              {stringValue(state.shellSettingsError)}
+            </p>
+          ) : null}
         </Panel>
-        <Panel
-          label="RECOGNITION"
-          title="识别默认模式"
-          className="settings-default-mode-panel"
-        >
+        <Panel title="识别默认模式" className="settings-default-mode-panel">
           <DefaultRecognitionModeEditor
             key={defaultMode?.modeId ?? ""}
             mode={defaultMode}
@@ -1124,26 +1139,15 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             actions={actions}
           />
         </Panel>
-        <Panel
-          label="SHORTCUTS"
-          title="快捷操作"
-          className="settings-shortcuts-panel"
-        >
-          <p className="form-note">
-            全局快捷键在系统任意位置可用，必须包含 Ctrl、Alt 或 Win
-            修饰键，在输入框打字不会误触。修改会先注册新键、保存成功后才替换旧键；冲突或保存失败时原键继续生效。
-          </p>
+        <Panel title="快捷操作" className="settings-shortcuts-panel">
+          <p className="form-note">快捷键需包含 Ctrl、Alt 或 Win。</p>
           <HotkeyActions
             actions={hotkeyActions(state.hotkeyActions)}
             enabled={viewState.capabilities.includes("settings.hotkeys")}
             dispatch={actions}
           />
         </Panel>
-        <Panel
-          label="TOOLBAR"
-          title="悬浮工具栏"
-          className="settings-toolbar-panel"
-        >
+        <Panel title="悬浮工具栏" className="settings-toolbar-panel">
           <FloatingToolbarPanel
             toolbar={toolbarState(state.floatingToolbar)}
             enabled={viewState.capabilities.includes(
@@ -1152,11 +1156,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             dispatch={actions}
           />
         </Panel>
-        <Panel
-          label="RUNTIME"
-          title="运行环境"
-          className="settings-runtime-panel"
-        >
+        <Panel title="运行环境" className="settings-runtime-panel">
           <div className="runtime-summary">
             {managedEnvironmentsAvailable ? (
               <>
@@ -1319,11 +1319,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               statusLabel(state.statusCode, "运行环境状态已同步。")}
           </p>
         </Panel>
-        <Panel
-          label="MINERU"
-          title="MinerU 连接"
-          className="settings-mineru-panel"
-        >
+        <Panel title="MinerU 连接" className="settings-mineru-panel">
           <MineruConnectionEditor
             key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
             connection={mineru}
@@ -1338,7 +1334,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           />
         </Panel>
         <Panel
-          label="MINERU"
           title="MinerU 识别参数"
           className="settings-mineru-recognition-panel"
         >
@@ -1365,11 +1360,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         {/* #136：管理模式下 DOWNLOADS 卡片已迁移删除（来源全部在“环境与依赖”
             内配置）；无该 capability 的旧宿主路径完整保留 SourceSelector。 */}
         {viewState.capabilities.includes("runtime.environments") ? null : (
-          <Panel
-            label="DOWNLOADS"
-            title="下载来源"
-            className="settings-download-panel"
-          >
+          <Panel title="下载来源" className="settings-download-panel">
             <SourceSelector
               sources={sources}
               loaded={sourcesLoaded}

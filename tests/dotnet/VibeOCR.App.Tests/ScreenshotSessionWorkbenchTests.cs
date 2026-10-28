@@ -3281,6 +3281,7 @@ public sealed class ScreenshotSessionWorkbenchTests
 
   private sealed class StubStartupRegistrar : IStartupRegistrar
   {
+    public bool IsEnabled => false;
     public bool SetEnabled(bool enabled) => true;
   }
 

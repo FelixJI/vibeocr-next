@@ -185,6 +185,7 @@ export type AppActionType =
   | "settings.findCompatibleEnvironment"
   | "settings.prepareEnvironment"
   | "settings.setStartup"
+  | "settings.setMinimizeToTray"
   | "settings.beginHotkeyRecording"
   | "settings.endHotkeyRecording"
   | "settings.setActionHotkey"
@@ -215,6 +216,7 @@ export type AppActionType =
   | "update.download"
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
+  | "update.setSource"
   | "diagnostics.export"
   | "diagnostics.copy";
 

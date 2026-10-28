@@ -106,8 +106,17 @@ export function statusLabel(value: unknown, fallback: string): string {
     "qrcode.cancelled": "二维码处理已取消",
     "settings.ready": "运行环境设置已同步",
     "settings.restartRequired": "更改将在重启后生效",
+    "update.unchecked": "尚未检查更新",
+    "update.checking": "正在检查更新",
     "update.available": "发现可用更新",
-    "update.current": "当前已是最新版本",
+    "update.current": "已是最新版本",
+    "update.error": "更新检查或下载失败",
+    "update.cancelled": "更新已取消",
+    "update.downloaded": "更新已下载",
+    "update.applying": "更新器已就绪，应用即将退出",
+    "update.runtimeBusy": "运行时维护进行中，暂不能更新",
+    "update.waitingRuntime": "正在等待运行时维护退出",
+    "update.runtimeReleased": "运行时维护已退出，可继续更新",
   };
   return typeof value === "string" ? (labels[value] ?? fallback) : fallback;
 }

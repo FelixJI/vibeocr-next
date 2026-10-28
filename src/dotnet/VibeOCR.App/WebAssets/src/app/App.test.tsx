@@ -373,7 +373,7 @@ describe("AppShell", () => {
       screen.getByText("已保存 Ctrl+Alt+Q，但当前未注册生效"),
     ).toBeVisible();
     expect(screen.getByText(/该组合可能已被其他应用占用/)).toBeVisible();
-    expect(screen.getByText(/全局快捷键在系统任意位置可用/)).toBeVisible();
+    expect(screen.getByText("快捷键需包含 Ctrl、Alt 或 Win。")).toBeVisible();
 
     const input = screen.getByLabelText("剪贴板识别新快捷键");
     await user.click(input);
@@ -1274,7 +1274,7 @@ describe("AppShell", () => {
     // 随包基础能力展示已移除（纯视觉）：二维码能力不受设置页影响。
     expect(screen.queryByText("二维码与条形码")).not.toBeInTheDocument();
     expect(screen.queryByText("随包可用")).not.toBeInTheDocument();
-    expect(screen.getByText(/默认识别类型在此设置/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "识别默认模式" })).toBeVisible();
 
     const packageSource = screen.getByLabelText("Python 包下载源");
     expect(packageSource).toHaveValue("tuna-pypi");

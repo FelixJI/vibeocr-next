@@ -85,6 +85,64 @@ public sealed class WorkbenchApplicationTests
       state => Assert.Equal("shell", state.Scope));
   }
 
+  /// <summary>
+  /// 初始化事务回归（v0.8.3“二维码正常但关于/更新等待宿主连接”根因）：
+  /// 旧实现先标记已加载再读取 InitialStates，任一初始快照一次失败后，
+  /// 重试 bootstrap 会跳过初始化，只返回 shell 等少数快照——命令仍可
+  /// 自行发布状态（二维码正常），但 about/update 永久缺失。初始化必须
+  /// 失败可重试：首次抛出、第二次成功后包含全部初始快照。
+  /// </summary>
+  [Fact]
+  public async Task InitialStateFailureDoesNotPermanentlySkipInitialization()
+  {
+    var handler = new FlakyStreamingCommandHandler(failures: 1);
+    await using var application = new WorkbenchApplication(
+      ["recognition.capture"],
+      WorkbenchRoute.Recognition,
+      handler);
+
+    await Assert.ThrowsAsync<InvalidOperationException>(
+      () => application.BootstrapAsync(CancellationToken.None).AsTask());
+
+    WorkbenchBootstrap recovered = await application.BootstrapAsync(
+      CancellationToken.None);
+
+    Assert.Equal(
+      ["batch", "recognition", "shell"],
+      recovered.States.Select(state => state.Scope).OrderBy(scope => scope).ToArray());
+    Assert.Equal(0, handler.FailuresRemaining);
+  }
+
+  private sealed class FlakyStreamingCommandHandler(int failures) :
+    IWorkbenchCommandHandler,
+    IWorkbenchStateSource
+  {
+    public int FailuresRemaining { get; private set; } = failures;
+
+    public IReadOnlyList<WorkbenchState> InitialStates
+    {
+      get
+      {
+        if (FailuresRemaining > 0)
+        {
+          FailuresRemaining--;
+          throw new InvalidOperationException("initial snapshot unavailable");
+        }
+        return
+        [
+          new RecognitionWorkbenchState(false, "recognition.ready"),
+          new BatchWorkbenchState(false, 0, 0, 0),
+        ];
+      }
+    }
+
+    public event Action<WorkbenchState>? StateChanged { add { } remove { } }
+
+    public ValueTask<WorkbenchCommandOutcome> ExecuteAsync(
+      WorkbenchCommand command, CancellationToken cancellationToken) => ValueTask.FromResult(
+        new WorkbenchCommandOutcome([], null));
+  }
+
   [Fact]
   public async Task BootstrapPreparesRuntimeCatalogBeforeReadingInitialStates()
   {

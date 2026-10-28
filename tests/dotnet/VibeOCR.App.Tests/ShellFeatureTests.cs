@@ -77,6 +77,58 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
+    public void TrayPreferencePersistsAndOnlyHidesWhenEnabled()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-tray-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+        layout.EnsurePortableState();
+        try
+        {
+            File.WriteAllText(layout.ConfigFile, "{\"untouched\":42}");
+            var store = new ShellPreferencesStore(layout);
+            int hidden = 0;
+            var shell = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
+                hideWindow: () => hidden++, preferences: store);
+            shell.OnMinimized();
+            Assert.Equal(0, hidden);
+            shell.SetMinimizeToTray(true);
+            var reopened = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
+                hideWindow: () => hidden++, preferences: store);
+            Assert.True(reopened.MinimizeToTray);
+            reopened.OnMinimized();
+            Assert.Equal(1, hidden);
+            Assert.Contains("\"untouched\": 42", File.ReadAllText(layout.ConfigFile));
+            File.WriteAllText(layout.ConfigFile, "{invalid");
+            reopened.SetMinimizeToTray(false);
+            Assert.True(reopened.MinimizeToTray);
+            Assert.NotEmpty(reopened.SettingsError);
+            Assert.Equal("{invalid", File.ReadAllText(layout.ConfigFile));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void StartupSelectionSurvivesShellRecreation()
+    {
+        var registrar = new FakeStartupRegistrar();
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), registrar);
+        shell.SetStartWithSystem(true);
+        Assert.True(new ShellViewModel(new FakeHotkeyRegistrar(), registrar).StartWithSystem);
+    }
+
+    [Fact]
+    public void FailedStartupDisableKeepsActualSelection()
+    {
+        var registrar = new FakeStartupRegistrar();
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), registrar);
+        shell.SetStartWithSystem(true);
+        registrar.Ok = false;
+        shell.SetStartWithSystem(false);
+        Assert.True(shell.StartWithSystem);
+    }
+
+    [Fact]
     public void SetStartWithSystemPersistsAndReflectsFailure()
     {
         var startup = new FakeStartupRegistrar { Ok = false };
@@ -138,6 +190,79 @@ public sealed class ShellFeatureTests
         Assert.True(vm.UpdateAvailable);
         Assert.Equal("1.2.0", vm.LatestVersion);
         Assert.Contains("1.2.0", vm.Status);
+    }
+
+    [Fact]
+    public void AboutMetadataReflectsRepositoryFacts()
+    {
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar());
+
+        Assert.Equal("MIT", shell.License);
+        Assert.Equal(
+            "https://github.com/FelixJI/vibeocr-next",
+            shell.ProjectUri.AbsoluteUri);
+    }
+
+    [Fact]
+    public void InitialUpdateStateIsUncheckedInsteadOfClaimingLatest()
+    {
+        var vm = new UpdateViewModel(new FakeUpdateCoordinator());
+
+        // 未检查时不得误报已是最新：受限网络机器上的误导性“最新”曾让用户
+        // 放弃排查真实无法访问的更新源。
+        Assert.Equal("update.unchecked", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Null(vm.LatestVersion);
+    }
+
+    [Fact]
+    public async Task CheckFailureSurfacesUnderstandableErrorInsteadOfWaitingForever()
+    {
+        var coordinator = new FailingUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator);
+
+        await vm.CheckAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("update.error", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Contains("无法连接更新源", vm.StatusMessage);
+        Assert.Contains("无法连接更新源", vm.Status);
+    }
+
+    [Fact]
+    public void SetSourceResetsPreviousCheckResultForNewSource()
+    {
+        var coordinator = new SelectableUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator)
+        {
+        };
+        Assert.Single(vm.Sources!);
+
+        vm.SetSource("custom", "url_prefix", "https://mirror.example.com/vibeocr");
+
+        Assert.Equal("update.unchecked", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Null(vm.LatestVersion);
+        Assert.Equal(2, vm.Sources!.Count);
+        Assert.Contains(vm.Sources!, source => source.Id == "custom" && source.Selected);
+        Assert.Equal("custom", coordinator.LastSelectedSourceId);
+        Assert.Equal("url_prefix", coordinator.LastSelectedKind);
+        Assert.Equal("https://mirror.example.com/vibeocr", coordinator.LastSelectedUrl);
+    }
+
+    [Fact]
+    public async Task SetSourceIsRefusedWhileUpdateOperationIsBusy()
+    {
+        var coordinator = new BlockingUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator);
+        Task check = vm.CheckAsync(TestContext.Current.CancellationToken);
+        Assert.True(vm.IsBusy);
+
+        Assert.Throws<UpdateSourceBusyException>(
+            () => vm.SetSource("direct", null, null));
+
+        coordinator.Release();
+        await check;
     }
 
     [Fact]
@@ -250,7 +375,96 @@ public sealed class ShellFeatureTests
     private sealed class FakeStartupRegistrar : IStartupRegistrar
     {
         public bool Ok { get; set; } = true;
-        public bool SetEnabled(bool enabled) => Ok;
+        public bool IsEnabled { get; private set; }
+        public bool SetEnabled(bool enabled)
+        {
+            if (Ok) IsEnabled = enabled;
+            return Ok;
+        }
+    }
+
+    private sealed class FailingUpdateCoordinator : IUpdateCoordinator
+    {
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateCheckResult(
+                UpdateCheckStatus.Error, ErrorMessage: "无法连接更新源。"));
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Failed));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
+    }
+
+    private sealed class SelectableUpdateCoordinator : IUpdateCoordinator
+    {
+        public string? LastSelectedSourceId { get; private set; }
+        public string? LastSelectedKind { get; private set; }
+        public string? LastSelectedUrl { get; private set; }
+
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateCheckResult(UpdateCheckStatus.Latest, "0.3.0"));
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url)
+        {
+            LastSelectedSourceId = sourceId;
+            LastSelectedKind = kind;
+            LastSelectedUrl = url;
+            return new(
+            [
+                new UpdateSourceOption(
+                    "direct", "direct", "官方直连（GitHub）",
+                    VelopackFeedFactory.DirectBaseUrl, Selected: false),
+                new UpdateSourceOption(
+                    "custom", kind ?? "url_prefix", "自定义镜像前缀",
+                    url ?? "https://mirror.example.com/vibeocr", Selected: true),
+            ],
+            $"{url}/https://github.com/FelixJI/vibeocr-next/releases/latest/download/");
+        }
+    }
+
+    private sealed class BlockingUpdateCoordinator : IUpdateCoordinator
+    {
+        private readonly TaskCompletionSource _release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken)
+        {
+            await _release.Task.WaitAsync(cancellationToken);
+            return new UpdateCheckResult(UpdateCheckStatus.Latest, "0.3.0");
+        }
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
     }
 
     private sealed class FakeUpdateCoordinator : IUpdateCoordinator
@@ -266,5 +480,14 @@ public sealed class ShellFeatureTests
         public Task<UpdateApplyResult> DownloadAndApplyAsync(
             IProgress<int>? progress,
             CancellationToken cancellationToken) => Task.FromResult(ApplyResult);
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
     }
 }

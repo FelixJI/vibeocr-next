@@ -597,6 +597,8 @@ public sealed partial class MainWindow : Window
 
   internal void ShowAndNavigate(string? destination)
   {
+    if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+      presenter.Restore();
     AppWindow.Show();
     Activate();
     NavigateTo(destination);

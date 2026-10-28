@@ -2,9 +2,9 @@ import type { ReactNode } from "react";
 
 interface WorkspaceProps {
   readonly className?: string;
-  readonly eyebrow: string;
+  readonly eyebrow?: string;
   readonly title: string;
-  readonly description: string;
+  readonly description?: string;
   readonly actions?: ReactNode;
   readonly children: ReactNode;
 }
@@ -24,9 +24,11 @@ export function Workspace({
     >
       <header className="workspace-header">
         <div>
-          <p className="eyebrow">{eyebrow}</p>
+          {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
           <h1 id={`${title}-heading`}>{title}</h1>
-          <p className="workspace-description">{description}</p>
+          {description ? (
+            <p className="workspace-description">{description}</p>
+          ) : null}
         </div>
         {actions ? <div className="workspace-actions">{actions}</div> : null}
       </header>

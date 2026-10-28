@@ -147,6 +147,48 @@ function buildActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
 }
 
 describe("SettingsPage 环境管理（#283 分区方向）", () => {
+  it("应用开关显示宿主状态并发送托盘设置，旧宿主禁用新能力", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    const state = {
+      ...buildViewState({ startupEnabled: true, minimizeToTray: false }),
+      capabilities: ["settings.shell", "settings.tray"],
+    };
+    const { rerender } = render(
+      <SettingsPage viewState={state} actions={actions} />,
+    );
+    expect(screen.getByRole("switch", { name: "开机自启动" })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "最小化到托盘" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setMinimizeToTray",
+      enabled: true,
+    });
+    rerender(
+      <SettingsPage
+        viewState={{
+          ...state,
+          features: {
+            settings: {
+              startupEnabled: true,
+              minimizeToTray: true,
+              shellSettingsError: "保存失败",
+            },
+          },
+        }}
+        actions={actions}
+      />,
+    );
+    expect(screen.getByRole("switch", { name: "最小化到托盘" })).toBeChecked();
+    expect(screen.getByRole("alert")).toHaveTextContent("保存失败");
+    rerender(
+      <SettingsPage
+        viewState={{ ...state, capabilities: ["settings.shell"] }}
+        actions={actions}
+      />,
+    );
+    expect(screen.getByRole("switch", { name: "最小化到托盘" })).toBeDisabled();
+  });
+
   it("Paddle 分区只按推理后端选择且只有聚焦分区自动查询", async () => {
     const user = userEvent.setup();
     const actions = buildActions();

@@ -1,5 +1,6 @@
 using VibeOCR.App.Web;
 using VibeOCR.App.Features.Configuration;
+using VibeOCR.App.Features.Update;
 using VibeOCR.App.Workbench;
 using Xunit;
 using System.Text.Json;
@@ -9,6 +10,17 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Fact]
+  public void TrayCommandRequiresOnlyBooleanEnabled()
+  {
+    Guid session = Guid.NewGuid();
+    Assert.True(Assert.IsType<SetMinimizeToTrayCommand>(ParseForTest(
+      CommandJson(session, "settings", "setMinimizeToTray", "{\"enabled\":true}"), session).Command).Enabled);
+    foreach (string arguments in new[] { "{}", "{\"enabled\":\"true\"}", "{\"enabled\":true,\"path\":\"private\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+        CommandJson(session, "settings", "setMinimizeToTray", arguments), session));
+  }
+
   [Theory]
   [InlineData("recognition", typeof(SetTaskModelPresetCommand))]
   [InlineData("batch", typeof(SetBatchTaskModelPresetCommand))]
@@ -92,6 +104,52 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       Guid.NewGuid(),
       new WorkbenchStateEnvelope(4, "imageConversion", WorkbenchStateChange.Replace, new ImageConversionWorkbenchState(0, [])));
     Assert.Contains("\"exportImageError\":null", idle);
+  }
+
+  [Fact]
+  public void UpdateSourceSelectionEnforcesClosedContract()
+  {
+    Guid session = Guid.NewGuid();
+    var direct = Assert.IsType<SetUpdateSourceCommand>(ParseForTest(
+      CommandJson(session, "update", "setSource", "{\"sourceId\":\"direct\"}"), session).Command);
+    Assert.Equal("direct", direct.SourceId);
+    Assert.Null(direct.Kind);
+    var custom = Assert.IsType<SetUpdateSourceCommand>(ParseForTest(
+      CommandJson(session, "update", "setSource",
+        "{\"sourceId\":\"custom\",\"kind\":\"forward_proxy\",\"url\":\"http://127.0.0.1:7890\"}"), session).Command);
+    Assert.Equal("custom", custom.SourceId);
+    Assert.Equal("forward_proxy", custom.Kind);
+    Assert.Equal("http://127.0.0.1:7890", custom.Url);
+    foreach (string invalid in new[] {
+      "{\"sourceId\":\"custom\"}",
+      "{\"sourceId\":\"unknown\"}",
+      "{\"sourceId\":\"custom\",\"kind\":\"unknown_kind\",\"url\":\"https://mirror.example.com/\"}",
+      "{\"sourceId\":\"custom\",\"kind\":\"url_prefix\",\"url\":\"\"}",
+      "{\"sourceId\":\"custom\",\"kind\":\"url_prefix\",\"url\":\"https://mirror.example.com/" + new string('a', 2100) + "\"}",
+      "{\"sourceId\":\"direct\",\"kind\":\"url_prefix\",\"url\":\"https://mirror.example.com/\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() =>
+        ParseForTest(CommandJson(session, "update", "setSource", invalid), session));
+  }
+
+  [Fact]
+  public void UpdateStateSerializesSourcesAndStatusMessage()
+  {
+    Guid session = Guid.NewGuid();
+    string json = WorkbenchBridgeCodec.SerializeState(session, new WorkbenchStateEnvelope(
+      7, "update", WorkbenchStateChange.Replace,
+      new UpdateWorkbenchState(
+        false, "update.unchecked", null, false,
+        StatusMessage: "已切换更新源，请重新检查更新",
+        DetectionEndpoint: "https://mirror.example.com/" + VelopackFeedFactory.DirectBaseUrl,
+        Sources: [new UpdateSourceOptionState(
+          "custom", "url_prefix", "自定义镜像前缀",
+          "https://mirror.example.com", true)])));
+    Assert.Contains("\"statusCode\":\"update.unchecked\"", json);
+    Assert.Contains("\"statusMessage\":", json);
+    Assert.Contains("\"detectionEndpoint\":\"https://mirror.example.com/", json);
+    Assert.Contains("\"selected\":true", json);
+    Assert.Contains("\"id\":\"custom\"", json);
+    Assert.Contains("\"kind\":\"url_prefix\"", json);
   }
 
   [Fact]
@@ -810,6 +868,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       ("settings", "showFloatingToolbar", "{}", typeof(ShowFloatingToolbarCommand)),
       ("settings", "hideFloatingToolbar", "{}", typeof(HideFloatingToolbarCommand)),
       ("update", "check", "{}", typeof(CheckUpdateCommand)),
+      ("update", "setSource", "{\"sourceId\":\"direct\"}", typeof(SetUpdateSourceCommand)),
       ("diagnostics", "export", "{}", typeof(ExportDiagnosticsCommand)),
       ("diagnostics", "copy", "{}", typeof(CopyDiagnosticsCommand)),
     ];

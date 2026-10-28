@@ -4,7 +4,7 @@ export function Panel({
   className,
   children,
 }: {
-  readonly label: string;
+  readonly label?: string;
   readonly title: string;
   readonly className?: string;
   readonly children: React.ReactNode;
@@ -15,7 +15,7 @@ export function Panel({
       aria-label={title}
     >
       <header className="panel-heading">
-        <span>{label}</span>
+        {label ? <span>{label}</span> : null}
         <h2>{title}</h2>
       </header>
       <div className="panel-content">{children}</div>

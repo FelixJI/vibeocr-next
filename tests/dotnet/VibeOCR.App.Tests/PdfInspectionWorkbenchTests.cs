@@ -293,6 +293,7 @@ public sealed class PdfInspectionWorkbenchTests
 
   private sealed class NoShellActions : IHotkeyRegistrar, IStartupRegistrar
   {
+    public bool IsEnabled => false;
     public bool Register(string hotkey, out string? conflict) => throw new NotSupportedException();
     public void Unregister() => throw new NotSupportedException();
     public bool SetEnabled(bool enabled) => throw new NotSupportedException();

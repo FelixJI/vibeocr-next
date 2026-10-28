@@ -56,6 +56,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "runtime.refresh",
       "runtime.environments",
       "settings.shell",
+      "settings.tray",
       "settings.hotkeys",
       "settings.floatingToolbar",
       "settings.selection",
@@ -64,6 +65,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "recognition.options",
       "update.check",
       "update.install",
+      "update.selectSource",
       "diagnostics.export",
       "diagnostics.copy",
     ],
@@ -116,7 +118,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       throw new ArgumentNullException(nameof(settingsFactory));
     ArgumentNullException.ThrowIfNull(shellFactory);
     ArgumentNullException.ThrowIfNull(updateFactory);
-    var shell = new Lazy<ShellViewModel>(shellFactory);
+    var shell = new RecoverableLazy<ShellViewModel>(shellFactory);
     diagnostics = diagnostics ?? throw new ArgumentNullException(nameof(diagnostics));
     resourceBroker = resourceBroker ??
       throw new ArgumentNullException(nameof(resourceBroker));
@@ -159,7 +161,9 @@ public sealed class DesktopWorkbenchCommandHandler :
     Pdf.EmptyPdfState(),
     new QrCodeWorkbenchState(false, "qrcode.ready", [], null),
     Settings.CurrentState(),
-    new UpdateWorkbenchState(false, "update.current", null, false),
+    // 初始更新状态必须如实呈现“未检查”，不得谎称已是最新；
+    // 不依赖更新 VM 接线时序。
+    System.InitialUpdateState(),
     System.AboutState(),
     System.DiagnosticsState(),
   ];
@@ -181,17 +185,42 @@ public sealed class DesktopWorkbenchCommandHandler :
   internal event Action? ScreenshotSelectionRecognized { add => Image.ScreenshotSelectionRecognized += value; remove => Image.ScreenshotSelectionRecognized -= value; }
   /// <summary>普通截图动作栏“打开设置”意图：放弃本次截图并显式进入现有设置页。</summary>
   internal event Action? ScreenshotSelectionSettingsRequested { add => Image.ScreenshotSelectionSettingsRequested += value; remove => Image.ScreenshotSelectionSettingsRequested -= value; }
+  /// <summary>bootstrap 目录预取上限：目录请求挂起或失败时，基础快照
+  /// （about/update/诊断等）不得依赖目录成功；超时同时取消内部加载，
+  /// 释放设置单飞门，首个命令仍经同一门重新协商目录。</summary>
+  internal static readonly TimeSpan BootstrapCatalogTimeout = TimeSpan.FromSeconds(5);
+
   public async ValueTask PrepareBootstrapAsync(CancellationToken cancellationToken)
   {
+    // 独立 linked CTS：超时即取消内部 LoadSelection（真实 HTTP 观察同一
+    // 令牌），不残留占用 SettingsViewModel 单飞门的后台任务。
+    using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    bound.CancelAfter(BootstrapCatalogTimeout);
     try
     {
-      await Selection.EnsureSelectionLoadedAsync(cancellationToken);
+      await Selection.EnsureSelectionLoadedAsync(bound.Token);
     }
     catch (InferenceClientNotAttachedException)
     {
       // The window intentionally appears before Supervisor startup completes.
       // Bootstrap exposes no guessed catalog; the first command after attach
       // crosses the same gate and negotiates the authoritative runtime state.
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+      // 目录预取超时：基础快照继续发布，目录由后续命令按需重载。
+      AppLog.Warn("Workbench bootstrap catalog load timed out; publishing base snapshot without catalog.");
+    }
+    catch (OperationCanceledException)
+    {
+      // 生命周期取消（应用关闭/释放）必须继续传播，不得被下方通用异常
+      // 分支吞成一次“成功”的 bootstrap。
+      throw;
+    }
+    catch (Exception error)
+    {
+      // 目录加载失败（HTTP/运行时异常等）同样不得阻断基础快照握手。
+      AppLog.Warn($"Workbench bootstrap catalog load failed: {error.GetType().Name}: {error.Message}");
     }
   }
 
@@ -269,6 +298,37 @@ public sealed class DesktopWorkbenchCommandHandler :
           WorkbenchProblemCategory.Conflict,
           false,
           "workbench.error.annotationOperationCancelled"));
+    }
+    catch (VibeOCR.App.Features.Update.UpdateSourceBusyException)
+    {
+      // 更新操作进行中拒绝切源：避免检查/下载与所选源不一致。
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "update_source_busy",
+          WorkbenchProblemCategory.Conflict,
+          false,
+          "workbench.error.updateSourceBusy"));
+    }
+    catch (InvalidDataException) when (command is SetUpdateSourceCommand)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "update_source_invalid",
+          WorkbenchProblemCategory.InvalidCommand,
+          false,
+          "workbench.error.updateSourceInvalid"));
+    }
+    catch (NotSupportedException) when (command is SetUpdateSourceCommand)
+    {
+      return new WorkbenchCommandOutcome(
+        [],
+        new WorkbenchProblem(
+          "update_source_unavailable",
+          WorkbenchProblemCategory.Unavailable,
+          false,
+          "workbench.error.updateSourceUnavailable"));
     }
     catch (WorkbenchImageOwner.ScreenshotSessionStaleException)
     {
