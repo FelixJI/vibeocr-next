@@ -376,8 +376,21 @@ function dependencyName(pin: string): string {
 
 function mainDependencies(
   dependencies: readonly string[] | null | undefined,
+  includeCuda = false,
 ): readonly string[] {
-  const whitelist = new Set(mainDependencyNames.map(normalizeDependencyName));
+  const names = includeCuda
+    ? [
+        ...mainDependencyNames,
+        "nvidia-cuda-runtime",
+        "nvidia-cuda-nvrtc",
+        "nvidia-cudnn-cu13",
+        "nvidia-curand",
+        "nvidia-cufft",
+        "nvidia-cublas",
+        "nvidia-nvjitlink",
+      ]
+    : mainDependencyNames;
+  const whitelist = new Set(names.map(normalizeDependencyName));
   const byName = new Map(
     (dependencies ?? [])
       .map(
@@ -390,7 +403,7 @@ function mainDependencies(
       .filter(([name]) => whitelist.has(name)),
   );
   // 按白名单顺序稳定展示，保留实际锁定版本串。
-  return mainDependencyNames
+  return names
     .map((name) => byName.get(normalizeDependencyName(name)))
     .filter((pin): pin is string => pin !== undefined);
 }
@@ -1489,8 +1502,11 @@ function EnvironmentPlanPanel({
       </p>
       <p className="form-note">
         本次新增或替换组件：
-        {mainDependencies(plan.dependencies).join("、") || "无需新增组件"}； 共{" "}
-        {plan.dependencies.length} 项依赖。
+        {mainDependencies(plan.dependencies, true).join("、") ||
+          (plan.dependencies.length === 0
+            ? "无需新增组件"
+            : "详见完整依赖明细")}
+        ； 共 {plan.dependencies.length} 项依赖。
         {plan.dependencyOrigin === "bundled_pack"
           ? "依赖来自随包离线包，无需下载。"
           : "依赖按所选来源安装。"}

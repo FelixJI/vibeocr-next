@@ -361,3 +361,62 @@ def test_explicit_cuda_removal_rebuilds_cpu_without_changing_environment_identit
     assert not (Path(cpu["path"]) / "synthetic-cuda.dll").exists()
     assert marker.read_bytes() == b"keep"
     assert len(manager._read()["environments"]) == 1
+
+
+@pytest.mark.parametrize(
+    "condition", ["current", "old_lock", "missing_package", "changed_version"]
+)
+def test_cuda_preview_only_folds_verified_installed_cpu_pins(
+    tmp_path, monkeypatch, condition
+):
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    cpu, _ = manager._recipe("paddleocr-ort-cpu")
+    cuda, _ = manager._recipe("paddleocr-ort-cuda")
+    record = _write_record(
+        manager,
+        "paddle",
+        status="installed",
+        recipe="paddleocr-ort-cpu",
+        recipe_lock=cpu.sha256 if condition != "old_lock" else "f" * 64,
+    )
+    versions = _pinned_versions(manager, "paddleocr-ort-cpu")
+    if condition == "missing_package":
+        versions.pop("paddlex")
+    if condition == "changed_version":
+        versions["paddlex"] = "0.0.0"
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda _: {
+            "healthy": condition != "missing_package",
+            "versions": versions,
+            "reason": "engine_packages_missing"
+            if condition == "missing_package"
+            else None,
+            "python": "python",
+            "platform": "win_amd64",
+        },
+    )
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
+        lambda **_: {"status": "ok", "driver_version": "630.20"},
+    )
+    plan = manager.preview_install(record["id"], "paddleocr-ort-cuda")
+    target = manager._scope_pins(cuda)
+    if condition in {"old_lock", "missing_package"}:
+        assert plan["dependencies"] == [display for _, display, _ in target]
+    else:
+        assert plan["dependencies"] == [
+            display
+            for name, display, version in target
+            if versions.get(name) != version
+        ]
+        if condition == "current":
+            assert plan["dependencies"]
+            assert all(pin.startswith("nvidia-") for pin in plan["dependencies"])

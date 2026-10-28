@@ -2526,23 +2526,32 @@ class ManagedEnvironmentStore:
                 "runtime_manifest": self.manifest.sha256,
             }
             previous_pins = {}
+            installed_versions = {}
             if self._paddle_shared(current) and self._paddle_shared(recipe):
                 previous_scope, _ = self._recipe(current)
+                # Only a matching installed closure can justify folding the plan
+                # to a delta. An old lock or unavailable probe requires the full
+                # target repair; today's recipe is not evidence of installed bits.
                 previous_pins = {
                     name: version
                     for name, _display, version in self._scope_pins(previous_scope)
                 }
+                if record.get("recipe_lock") == previous_scope.sha256:
+                    probe = self._probe(record)
+                    if probe.get("healthy"):
+                        installed_versions = probe.get("versions") or {}
+            target_pins = self._scope_pins(scope)
             dependencies = [
                 display
-                for name, display, version in self._scope_pins(scope)
+                for name, display, version in target_pins
                 if current == recipe
-                or name not in previous_pins
-                or previous_pins[name] != version
+                or version is None
+                or installed_versions.get(name) != version
             ]
             removed_dependencies = [
                 name
                 for name in previous_pins
-                if name not in {item[0] for item in self._scope_pins(scope)}
+                if name not in {item[0] for item in target_pins}
             ]
             _atomic_json(self._plan_path(env_id), plan)
             return {

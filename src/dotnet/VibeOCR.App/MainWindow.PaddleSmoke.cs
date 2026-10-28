@@ -34,6 +34,20 @@ public sealed partial class MainWindow
   private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-ort-cpu";
   private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
     ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
+  private static bool PaddleSmokeInstalledRecipeMatches(ManagedEnvironment environment) =>
+    environment.Status == "installed" && (environment.Recipe == PaddleSmokeRecipe ||
+      PaddleSmokeRecipe == "paddleocr-ort-cpu" && environment.Recipe == "paddleocr-ort-cuda");
+
+  private static ManagedEnvironment? FindPaddleSmokeEnvironment(ManagedEnvironmentList list) =>
+    list.Environments.FirstOrDefault(item => item.Id == list.ActiveId &&
+      (PaddleSmokeInstalledRecipeMatches(item) ||
+       PaddleSmokeRecipe == "paddleocr-ort-cuda" && item.Recipe == "paddleocr-ort-cpu"))
+    ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName)
+    ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches);
+
+  private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
+    ? "directml" : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
+
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
@@ -188,7 +202,7 @@ public sealed partial class MainWindow
     await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
     await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
+    if (FindPaddleSmokeEnvironment(list) is null)
     {
       RecordPaddleSmokeStage("create isolated environment");
       // 公共一键准备按配方展示名自动命名；先用既有宿主命令创建 ASCII 测试容器。
@@ -200,25 +214,23 @@ public sealed partial class MainWindow
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
     }
-    ManagedEnvironment environment = list.Environments
-      .Single(item => item.Name == PaddleSmokeEnvironmentName);
-    if (environment.Status == "installed" && environment.Recipe == PaddleSmokeRecipe)
+    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
+      ?? throw new InvalidOperationException("Paddle smoke environment is missing.");
+    if (PaddleSmokeInstalledRecipeMatches(environment))
     {
       paddleSmokeOutcome = "passed";
       return new { reused = true, environment = SmokeEnvironmentEvidence(environment) };
     }
-    if (environment.Status != "empty")
+    if (environment.Status != "empty" &&
+        !(environment.Status == "installed" && environment.Recipe == "paddleocr-ort-cpu" &&
+          PaddleSmokeRecipe == "paddleocr-ort-cuda"))
       throw new InvalidOperationException(
         $"Unexpected environment status: {environment.Status} ({environment.Reason}).");
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    bool ort = PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal);
-    string device = PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal) ? "directml"
-      : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
-    await SelectSmokeValueAsync("#environment-component-select", ort ? "paddleocr-ort" : "paddleocr");
-    await SelectSmokeValueAsync("#environment-device-select", device);
-    await ClickManagedSmokeButtonAsync("继续准备依赖");
+    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
+    await ClickManagedSmokeButtonAsync(environment.Status == "empty" ? "继续准备依赖" : "重新准备依赖");
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
@@ -315,21 +327,27 @@ public sealed partial class MainWindow
     // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
-      [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(2));
-    ManagedEnvironment environment = list.Environments
-      .Single(item => item.Name == PaddleSmokeEnvironmentName);
-    if (environment.Status != "installed" || environment.Recipe != PaddleSmokeRecipe)
+    ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(2));
+    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
+      ?? throw new InvalidOperationException("No installed compatible Paddle smoke environment.");
+    if (!PaddleSmokeInstalledRecipeMatches(environment))
       throw new InvalidOperationException(
         $"Environment is not installed with {PaddleSmokeRecipe}: {environment.Status}.");
-    await SelectSmokeEnvironmentAsync(environment.Id);
-    if (list.ActiveId != environment.Id)
-      await ClickManagedSmokeButtonAsync("切换到此环境");
-    else
-    {
-      await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
-      await ClickManagedSmokeButtonAsync("查看环境清单");
-    }
+    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
+    // Use the public backend action: the advanced row intentionally preserves
+    // the current selection, while this action carries the requested device.
+    await WaitForSmokeDomAsync(
+      "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
+      "if (!root) return false; if(root.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。')) return true; " +
+      "const b=Array.from(root.querySelectorAll('button')).find(b => " +
+      "['启动并验证当前环境','切换到此环境并启动验证'].includes(b.textContent?.trim()) && !b.disabled); " +
+      "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
+    // The id can stay the same while the provider changes. Wait for the
+    // device-aware public projection before accepting the new service session.
+    await WaitForSmokeDomAsync(
+      "document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section')" +
+      "?.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。') === true",
+      TimeSpan.FromMinutes(2));
     await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",

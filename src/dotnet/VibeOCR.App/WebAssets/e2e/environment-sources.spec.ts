@@ -632,3 +632,57 @@ test("same Paddle environment switches selected device without another install",
   ).toBeVisible();
   await expect(page.getByText(/确认后暂停当前识别服务/)).toBeVisible();
 });
+
+test("CUDA upgrade confirmation exposes all seven added NVIDIA pins", async ({
+  page,
+}) => {
+  const dependencies = [
+    "nvidia-cuda-runtime==13.4.92",
+    "nvidia-cuda-nvrtc==13.4.92",
+    "nvidia-cudnn-cu13==9.27.0.42",
+    "nvidia-curand==10.4.4.72",
+    "nvidia-cufft==12.4.0.43",
+    "nvidia-cublas==13.8.0.4",
+    "nvidia-nvjitlink==13.4.92",
+  ];
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: {
+      settings: {
+        environmentRecipes: recipes,
+        environmentSources: sources,
+        environmentHardware: { nvidiaDriverStatus: "ok" },
+        environments: [
+          { id: "shared", name: "Paddle", revision: 2, status: "installed" },
+        ],
+        environmentPlan: {
+          planId: "cuda-delta",
+          environmentId: "shared",
+          environmentRevision: 2,
+          recipe: "paddleocr-ort-cuda",
+          requestedRecipe: "paddleocr-ort-cuda",
+          sourceIds: ["tuna-pypi"],
+          dependencies,
+          requiresServiceStop: true,
+          cudaPluginAction: "prepare",
+        },
+      },
+    },
+  });
+  const summary = page
+    .locator(".runtime-install-plan > p")
+    .filter({ hasText: "本次新增或替换组件" });
+  await expect(summary).not.toContainText("无需新增组件");
+  for (const pin of dependencies) await expect(summary).toContainText(pin);
+  await expect(
+    page.getByText(/同时准备锁定的 ONNX Runtime CUDA 13 执行插件/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认安装依赖", exact: true }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "confirmEnvironmentInstall",
+    arguments: { planId: "cuda-delta" },
+  });
+});
