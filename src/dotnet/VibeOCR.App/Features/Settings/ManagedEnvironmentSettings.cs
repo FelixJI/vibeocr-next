@@ -15,11 +15,16 @@ public sealed class ManagedEnvironmentSettings(
     Func<(string Id, int Revision)?> runningSession,
     ProductMaintenanceCoordinator productMaintenance,
     Func<ManagedEnvironmentSession?>? currentSession = null,
-    Action? installAttempted = null)
+    Action? installAttempted = null,
+    Func<string, string?, CancellationToken, Task>? activateDevice = null,
+    Func<CancellationToken, Task>? stopService = null,
+    Func<Task>? restoreService = null)
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private CancellationTokenSource? activeInstall;
     private CancellationTokenSource? activeCleanup;
+    private int restoringService;
+    public bool IsRestoringService => Volatile.Read(ref restoringService) != 0;
     private readonly object progressLock = new();
     private ManagedEnvironmentInstallProgress? installProgress;
     private string[] installLog = [];
@@ -377,9 +382,21 @@ public sealed class ManagedEnvironmentSettings(
         Apply();
             }
             bool cancelled = false;
+            IAsyncDisposable? maintenance = null;
+            bool stopped = false;
+            Exception? installError = null;
             try
             {
                 StateChanged?.Invoke();
+                // Runtime freezes admission and checks job leases before we stop any process.
+                if (plan.RequiresServiceStop)
+                {
+                    if (stopService is null || restoreService is null)
+                        throw new InvalidOperationException("当前宿主不支持活动环境维护，请更新应用。");
+                    maintenance = await manager.BeginEnvironmentMaintenanceAsync(plan.EnvironmentId, linked.Token);
+                    stopped = true;
+                    await stopService(linked.Token);
+                }
                 installAttempted?.Invoke();
                 await manager.InstallEnvironmentAsync(
                     plan, sourceId is null ? null : [sourceId], Progress, linked.Token);
@@ -401,6 +418,7 @@ public sealed class ManagedEnvironmentSettings(
             }
             catch (Exception error)
             {
+                installError = error;
                 Interlocked.Increment(ref installGeneration);
                 lock (progressLock)
                     if (installProgress is { State: "running" } observed)
@@ -411,9 +429,38 @@ public sealed class ManagedEnvironmentSettings(
             }
             finally
             {
-                // #123：安装事务一结束就关闭取消入口；成功后的刷新只是结果展示。
+                // Installation has reached a terminal outcome. Restoration is a
+                // separate, non-cancellable phase, still owned by the settings gate.
+                Volatile.Write(ref restoringService, stopped ? 1 : 0);
                 Volatile.Write(ref activeInstall, null);
                 StateChanged?.Invoke();
+                Exception? recoveryError = null;
+                try
+                {
+                    try { if (maintenance is not null) await maintenance.DisposeAsync(); }
+                    catch (Exception error) { recoveryError = error; }
+                    // Even a reservation disposal failure must not skip the bounded restore.
+                    try { if (stopped && restoreService is not null) await restoreService(); }
+                    catch (Exception error)
+                    {
+                        recoveryError = recoveryError is null ? error : new AggregateException(recoveryError, error);
+                    }
+                    if (recoveryError is not null)
+                        throw installError is null ? recoveryError : new AggregateException(
+                            "环境维护失败，释放维护或恢复原服务也失败。", installError, recoveryError);
+                    // App 侧刷新因 IsRestoringService 跳过：恢复完成后由本 gate
+                    // 所有者叠加运行证据；安装失败终态与原异常保持不变。
+                    if (installError is not null && stopped)
+                    {
+                        try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
+                        catch (Exception) { /* 展示刷新失败不影响原安装错误传播。 */ }
+                    }
+                }
+                finally
+                {
+                    Volatile.Write(ref restoringService, 0);
+                    StateChanged?.Invoke();
+                }
             }
             if (cancelled)
             {
@@ -436,7 +483,8 @@ public sealed class ManagedEnvironmentSettings(
             try
             {
                 await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
-                Status = "依赖已安装；请切换环境以验证并启动服务。";
+                Status = plan.RequiresServiceStop ? "依赖已更新，已恢复识别服务。"
+                    : "依赖已安装；请切换环境以验证并启动服务。";
             }
             catch (OperationCanceledException)
             {
@@ -601,9 +649,14 @@ public sealed class ManagedEnvironmentSettings(
         StateChanged?.Invoke();
     }
 
-    public Task SwitchAsync(string environmentId, CancellationToken cancellationToken) => RunAsync(async () =>
+    public Task SwitchAsync(string environmentId, CancellationToken cancellationToken, string? device = null) => RunAsync(async () =>
     {
-        await activate(environmentId, cancellationToken);
+        if (device is not null)
+        {
+            if (activateDevice is null) throw new NotSupportedException("当前宿主不支持独立设备选择。");
+            await activateDevice(environmentId, device, cancellationToken);
+        }
+        else await activate(environmentId, cancellationToken);
         InvalidateSelectionPlans();
         try
         {

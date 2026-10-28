@@ -2784,6 +2784,7 @@ def _request(value: object) -> dict[str, Any]:
             "layout_manifest",
             "product_id",
             "name",
+            "device",
             "environment_id",
             "recipe",
             "source_ids",
@@ -2889,6 +2890,7 @@ def _request(value: object) -> dict[str, Any]:
             "prepare_target": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
+            "prepare_maintenance": {"environment_id"},
             "commit_switch": {"prepared"},
             "repair_empty": {"environment_id"},
             "delete": {"environment_id"},
@@ -2916,6 +2918,7 @@ def _request(value: object) -> dict[str, Any]:
             - fields[action]
             - ({"source_ids"} if action == "preview_install" else set())
             - ({"environment_id"} if action == "find_compatible" else set())
+            - ({"device"} if action == "prepare_switch" else set())
             - (
                 {
                     "environment_id",
@@ -2942,6 +2945,11 @@ def _request(value: object) -> dict[str, Any]:
             or len(set(value["item_ids"])) != len(value["item_ids"])
         ):
             raise RuntimeInstallError("Runtime cleanup selection is invalid")
+        if "device" in value and (
+            not isinstance(value["device"], str)
+            or value["device"] not in {"cpu", "cuda", "directml"}
+        ):
+            raise RuntimeInstallError("Runtime environment device is invalid")
         for field in ("name", "environment_id", "recipe", "plan_id"):
             if field not in value:
                 continue
@@ -3386,12 +3394,34 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     daemon=True,
                 ).start()
+            if action == "prepare_maintenance":
+                if not args.environment_switch_control:
+                    raise RuntimeInstallError("maintenance requires a held reservation")
+                with manager.maintenance_reservation(
+                    request["environment_id"]
+                ) as prepared:
+                    _emit(
+                        {
+                            "protocol_version": PROTOCOL_VERSION,
+                            "response_kind": "environment",
+                            "action": action,
+                            "result": prepared,
+                        }
+                    )
+                    line = sys.stdin.readline(65537)
+                    if line and json.loads(line) != {"action": "abort_switch"}:
+                        raise RuntimeInstallError(
+                            "maintenance control command is invalid"
+                        )
+                return 0
             if action in {"prepare_switch", "commit_switch"}:
                 if action != "prepare_switch" or not args.environment_switch_control:
                     raise RuntimeInstallError(
                         "environment switch requires a held reservation"
                     )
-                with manager.switch_reservation(request["environment_id"]) as prepared:
+                with manager.switch_reservation(
+                    request["environment_id"], request.get("device")
+                ) as prepared:
                     _emit(
                         {
                             "protocol_version": PROTOCOL_VERSION,

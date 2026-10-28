@@ -28,6 +28,18 @@ CUDA 对所有启用模型统一设置官方 [`prefer_nhwc=1`](https://onnxrunti
 
 DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁直到 predict generator 消费完毕。worker 的 stdio 请求继续串行。PaddleX 3.7.2 的 ONNX runner `close()` 为空，因此本地 owner 在 TTL、切档和退出时显式清除其全部 session 引用；不调用 Paddle allocator。原生崩溃、OOM 或 EP 失效终止当前任务，不进入通用 batch 重试；普通坏输入仍走既有隔离语义。已确认取消会停止自有 worker，下一新任务才可重建，绝不重放原任务。
 
+## 同一 Paddle 环境的能力与维护
+
+CPU 与 CUDA 共享受管环境身份、固定目录及 CPU 基础闭包。`recipe` / `recipe_lock` 记录实际安装的完整闭包；可选 `selected_device` 独立记录下一次任务的默认设备，旧记录按原配方设备读取。CPU 查询可以复用 CUDA 闭包，但必须同时验证已安装闭包锁与所请求 CPU 子集的版本。DirectML 和 MinerU 仍使用独立环境。
+
+普通切换 CPU 不卸载 CUDA；同一 id 切换 CPU/CUDA 也要启动新 Supervisor、验证并提交设备选择。选择提交推进 `active_revision`；新任务冻结实际 device/provider，旧 host 不能再准入新任务，原任务不重放。CUDA 插件、驱动或会话失败不改变 CPU 基础依赖的健康状态，显式 CUDA 请求仍失败，不假装 CPU 成功。
+
+增装、修复和明确移除 CUDA 均先预览并确认。增装计划仅在旧安装锁匹配且实际包版本可验证时折叠为新增/替换依赖；旧锁、缺包或探测不可用时列完整目标闭包，明确包含基础修复范围。七个 NVIDIA 包的实际名称和版本在确认摘要中显示；移除计划列移除的 NVIDIA 包。安装仍构造完整目标候选，再按既有 journal 换入/回滚，移除不在运行中的 venv 内执行 pip uninstall。普通切换不安装依赖；旧环境、来源偏好、下载缓存和共享模型缓存保留。退役槽位与缓存的物理释放量不能由逻辑文件大小推断。
+
+活动环境维护按顺序执行：桌面产品维护 lease → Runtime stdin `prepare_maintenance` 冻结任务准入并验证零任务 → 停止服务 → 安装进程持 service-start/maintenance 门，确认无服务 lease，构建及验证候选 → 提交或回滚 → 释放 stdin reservation → 恢复选中设备的服务。嵌套锁顺序为任务准入、服务启动/维护、registry；服务 lease 与 job lease 复用 references 下的 OS 文件锁，不用 PID 判断崩溃存活。stdin 断开/取消自动释放 reservation，服务退出自动释放 lease；待恢复 journal 阻止新 host 启动。候选导入探针不启动 host，因此不会自锁。
+
+停服失败不进入安装；候选失败保留旧 revision、旧设备选择与健康 CPU，同时把本次操作记录为失败。恢复服务也失败时保留两项错误，不把旧失败任务重放。目录交换失败继续沿既有 journal 收敛；缓存命中、网络下载与模型复用采用现有事件，未知物理占用/峰值保持未知。
+
 ## 模型、来源和完整性
 
 | preset | det | rec |
@@ -52,7 +64,7 @@ C# `PaddleModeOptions` 是权威设置，TS 只展示 Runtime `supported_options
 
 主无辅助合成文本须完整返回 `VibeOCR 12345 TEST`。公开 smoke 保留 `paddle_smoke_fixtures.py` 的 `GOAL103|1120|2244`（既有 `Any`/`some`：命中任一配置 token）/ `1120` token 与 score、bbox/polygon、方向合同；8 页 `document_orientation.pdf` 按既有 `expected_rotate` 判断。启用 UVDoc 的简单合成行已观察到首字偏差，不能据此声称全文无误，辅助路径必须用既有文档 token 和有效几何另行验收。
 
-候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。默认 `-Provider cpu`，仅允许三个保留模式，不再安装或运行原生 Paddle/公式/VL。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
+候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。smoke 优先复用当前兼容环境，CPU 可复用已增装 CUDA 的同一环境；公共后端按钮显式切换设备，并等待设备对应的就绪投影，不把同 id 当作切换已完成。默认 `-Provider cpu`，仅允许三个保留模式，不再安装或运行原生 Paddle/公式/VL。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
 
 单次识别、批量和 PDF 的“本次模型档位”分别继承已保存默认，或临时选择 tiny/small/medium。临时选择不落盘，重启后恢复继承；PDF 沿每个文档已有 TaskEngine 范围隔离。截图与选字沿单次识别的有效设置。提交前冻结有效档位，批量整批沿同一快照；后续切换只影响新的提交。
 

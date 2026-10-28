@@ -52,14 +52,14 @@ internal sealed class ManagedRuntimeConnection(
     finally { gate.Release(); }
   }
 
-  public async Task SwitchAsync(string environmentId, CancellationToken cancellationToken, Action? committed = null)
+  public async Task SwitchAsync(string environmentId, CancellationToken cancellationToken, Action? committed = null, string? device = null)
   {
     await EnterAsync(cancellationToken);
-    try { await ActivateCoreAsync(environmentId, cancellationToken, committed: committed); }
+    try { await ActivateCoreAsync(environmentId, cancellationToken, committed: committed, device: device); }
     finally { gate.Release(); }
   }
 
-  private async Task ActivateCoreAsync(string environmentId, CancellationToken cancellationToken, bool injectSoakCrash = false, Action? committed = null)
+  private async Task ActivateCoreAsync(string environmentId, CancellationToken cancellationToken, bool injectSoakCrash = false, Action? committed = null, string? device = null)
   {
     AppLog.Info("Runtime demand: activate begin");
     var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
@@ -72,7 +72,7 @@ internal sealed class ManagedRuntimeConnection(
         Publish(next);
       },
       Path.Combine(layout.DataRoot, "supervisor.log"), TimeSpan.FromSeconds(90),
-      RuntimeCapabilityRequirements.Read(layout.ComponentLock), cancellationToken, injectSoakCrash);
+      RuntimeCapabilityRequirements.Read(layout.ComponentLock), cancellationToken, injectSoakCrash, device);
     if (session is null) status.ReportServiceUnavailable();
     else status.ApplySnapshot(session.Status);
   }

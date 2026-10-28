@@ -1993,6 +1993,7 @@ def runtime_status_from_environment(
             int(os.environ["VIBEOCR_MANAGED_ENVIRONMENT_REVISION"]),
             Path(runtime_root_value),
             managed_recipe,
+            os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"),
         )
         if managed_accelerator != accelerator:
             raise RuntimeError("managed Runtime accelerator differs from registry")

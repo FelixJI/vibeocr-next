@@ -349,11 +349,12 @@ def test_cuda_combined_upgrade_uses_bound_cu126_lock(
             full._registry.write_text(json.dumps(data), encoding="utf-8")
             return record
 
-    # Rapid 组合升级退役：不同引擎/不同设备闭包不再允许叠加到同一
-    # venv（Paddle ONNX CPU 与 CUDA 是两份独立锁，MinerU 也是独立锁）。
+    # Paddle CPU/CUDA 使用同一受管身份，但计划仍绑定完整目标锁；
+    # MinerU 和 DirectML 保留独立闭包。
     rapid = write_installed("a" * 32, "paddleocr-ort-cpu")
-    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
-        full.preview_install(rapid["id"], "paddleocr-ort-cuda")
+    paddle_plan = full.preview_install(rapid["id"], "paddleocr-ort-cuda")
+    assert paddle_plan["recipe_lock"] == full._recipe("paddleocr-ort-cuda")[0].sha256
+    assert paddle_plan["environment_id"] == rapid["id"]
     with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
         full.preview_install(rapid["id"], "mineru-cuda")
 

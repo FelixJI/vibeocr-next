@@ -73,11 +73,14 @@ def freeze_request(
     if preset not in PRESETS:
         raise PaddleOnnxError("Unsupported Paddle ONNX model preset")
     recipe = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "")
-    default_device = recipe.removeprefix("paddleocr-ort-")
+    installed_device = recipe.removeprefix("paddleocr-ort-")
+    default_device = os.environ.get(
+        "VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", installed_device
+    )
     device = options.get("device", default_device)
     if device == "auto":
         device = default_device
-    if recipe not in RECIPES or device not in {"cpu", default_device}:
+    if recipe not in RECIPES or device not in {"cpu", installed_device}:
         raise PaddleOnnxError("Provider requires its matching Paddle ONNX environment")
     source = next(
         (

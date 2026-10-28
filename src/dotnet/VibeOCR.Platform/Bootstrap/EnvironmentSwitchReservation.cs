@@ -45,6 +45,29 @@ internal sealed class EnvironmentSwitchReservation : IManagedEnvironmentSwitchRe
         }
     }
 
+    public static async Task<IAsyncDisposable> StartMaintenanceAsync(
+        ProcessStartInfo startInfo, string environmentId, CancellationToken cancellationToken,
+        Action<ProcessStartInfo>? commandStarting = null)
+    {
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        cancellationToken.ThrowIfCancellationRequested();
+        RuntimeInstallerCommandRunner.VerifyBoundExecutable(startInfo);
+        commandStarting?.Invoke(startInfo);
+        var process = new Process { StartInfo = startInfo };
+        if (!process.Start()) throw new RuntimeInstallerException("无法启动环境维护 reservation。");
+        var session = new EnvironmentSwitchReservation(process);
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromMinutes(2));
+            JsonElement prepared = await session.ReadAsync<JsonElement>("prepare_maintenance", deadline.Token).ConfigureAwait(false);
+            if (prepared.GetProperty("environment_id").GetString() != environmentId)
+                throw new RuntimeInstallerException("环境维护 reservation 与请求不匹配。");
+            return session;
+        }
+        catch { await session.DisposeAsync().ConfigureAwait(false); throw; }
+    }
+
     private async Task<T> ReadAsync<T>(string action, CancellationToken cancellationToken)
     {
         string? line = await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);

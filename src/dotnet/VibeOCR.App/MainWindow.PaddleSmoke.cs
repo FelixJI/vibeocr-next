@@ -34,6 +34,20 @@ public sealed partial class MainWindow
   private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-ort-cpu";
   private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
     ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
+  private static bool PaddleSmokeInstalledRecipeMatches(ManagedEnvironment environment) =>
+    environment.Status == "installed" && (environment.Recipe == PaddleSmokeRecipe ||
+      PaddleSmokeRecipe == "paddleocr-ort-cpu" && environment.Recipe == "paddleocr-ort-cuda");
+
+  private static ManagedEnvironment? FindPaddleSmokeEnvironment(ManagedEnvironmentList list) =>
+    list.Environments.FirstOrDefault(item => item.Id == list.ActiveId && PaddleSmokeInstalledRecipeMatches(item))
+    ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches)
+    ?? list.Environments.FirstOrDefault(item => item.Id == list.ActiveId &&
+      PaddleSmokeRecipe == "paddleocr-ort-cuda" && item.Recipe == "paddleocr-ort-cpu")
+    ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName);
+
+  private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
+    ? "directml" : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
+
   // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
   private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
@@ -188,7 +202,7 @@ public sealed partial class MainWindow
     await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
     await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    if (!list.Environments.Any(item => item.Name == PaddleSmokeEnvironmentName))
+    if (FindPaddleSmokeEnvironment(list) is null)
     {
       RecordPaddleSmokeStage("create isolated environment");
       // 公共一键准备按配方展示名自动命名；先用既有宿主命令创建 ASCII 测试容器。
@@ -200,30 +214,43 @@ public sealed partial class MainWindow
       list = await WaitForSmokeEnvironmentsAsync(
         [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
     }
-    ManagedEnvironment environment = list.Environments
-      .Single(item => item.Name == PaddleSmokeEnvironmentName);
-    if (environment.Status == "installed" && environment.Recipe == PaddleSmokeRecipe)
+    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
+      ?? throw new InvalidOperationException("Paddle smoke environment is missing.");
+    if (PaddleSmokeInstalledRecipeMatches(environment))
     {
       paddleSmokeOutcome = "passed";
       return new { reused = true, environment = SmokeEnvironmentEvidence(environment) };
     }
-    if (environment.Status != "empty")
+    if (environment.Status != "empty" &&
+        !(environment.Status == "installed" && environment.Recipe == "paddleocr-ort-cpu" &&
+          PaddleSmokeRecipe == "paddleocr-ort-cuda"))
       throw new InvalidOperationException(
         $"Unexpected environment status: {environment.Status} ({environment.Reason}).");
 
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    bool ort = PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal);
-    string device = PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal) ? "directml"
-      : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
-    await SelectSmokeValueAsync("#environment-component-select", ort ? "paddleocr-ort" : "paddleocr");
-    await SelectSmokeValueAsync("#environment-device-select", device);
-    await ClickManagedSmokeButtonAsync("继续准备依赖");
+    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
+    if (environment.Status == "empty")
+      await ClickManagedSmokeButtonAsync("继续准备依赖");
+    else
+    {
+      // A healthy CPU row has no repair button. The public backend preparation
+      // action asks Runtime to reuse the active CPU target for the CUDA upgrade.
+      await WaitForSmokeDomAsync(
+        "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
+        "const b=Array.from(root?.querySelectorAll('button') ?? []).find(b => " +
+        "b.textContent?.trim() === '准备此后端' && !b.disabled); " +
+        "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
+    }
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
+    SettingsEnvironmentPlanState? preparedPlan =
+      (await PaddleSmokeSettingsStateAsync(timeout.Token)).EnvironmentPlan;
+    if (preparedPlan?.EnvironmentId != environment.Id || preparedPlan.Recipe != PaddleSmokeRecipe)
+      throw new InvalidOperationException("Paddle preparation did not reuse the expected environment and recipe.");
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
 
     RecordPaddleSmokeStage("confirm install");
@@ -315,21 +342,27 @@ public sealed partial class MainWindow
     // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
-      [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(2));
-    ManagedEnvironment environment = list.Environments
-      .Single(item => item.Name == PaddleSmokeEnvironmentName);
-    if (environment.Status != "installed" || environment.Recipe != PaddleSmokeRecipe)
+    ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(2));
+    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
+      ?? throw new InvalidOperationException("No installed compatible Paddle smoke environment.");
+    if (!PaddleSmokeInstalledRecipeMatches(environment))
       throw new InvalidOperationException(
         $"Environment is not installed with {PaddleSmokeRecipe}: {environment.Status}.");
-    await SelectSmokeEnvironmentAsync(environment.Id);
-    if (list.ActiveId != environment.Id)
-      await ClickManagedSmokeButtonAsync("切换到此环境");
-    else
-    {
-      await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
-      await ClickManagedSmokeButtonAsync("查看环境清单");
-    }
+    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
+    // Use the public backend action: the advanced row intentionally preserves
+    // the current selection, while this action carries the requested device.
+    await WaitForSmokeDomAsync(
+      "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
+      "if (!root) return false; if(root.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。')) return true; " +
+      "const b=Array.from(root.querySelectorAll('button')).find(b => " +
+      "['启动并验证当前环境','切换到此环境并启动验证'].includes(b.textContent?.trim()) && !b.disabled); " +
+      "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
+    // The id can stay the same while the provider changes. Wait for the
+    // device-aware public projection before accepting the new service session.
+    await WaitForSmokeDomAsync(
+      "document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section')" +
+      "?.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。') === true",
+      TimeSpan.FromMinutes(2));
     await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
     await WaitForSmokeDomAsync(
       "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
@@ -1680,6 +1713,17 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Unexpected picker dialog after file selection.");
   }
 
+  private async Task ClickPaddleExportMenuAsync(string triggerLabel, string itemLabel)
+  {
+    await ClickManagedSmokeButtonAsync(triggerLabel);
+    // Fluent MenuItem renders a menuitem, not a button; use the public open menu.
+    await WaitForSmokeDomAsync("(() => { const item = Array.from(" +
+      "document.querySelectorAll('[role=menu] [role=menuitem]')).find(item => " +
+      "item.textContent?.trim() === " + JsonSerializer.Serialize(itemLabel) +
+      " && item.getAttribute('aria-disabled') !== 'true' && item.getClientRects().length > 0); " +
+      "if (!item) return false; item.click(); return true; })()", TimeSpan.FromSeconds(30));
+  }
+
   private async Task<object> RunPaddleBatchExportAsync(string buttonLabel)
   {
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
@@ -1702,7 +1746,7 @@ public sealed partial class MainWindow
     };
     string[] before = Directory.GetFiles(exportDir);
     RecordPaddleSmokeStage($"batch export {publicLabel}");
-    await ClickManagedSmokeButtonAsync(publicLabel);
+    await ClickPaddleExportMenuAsync("导出全部", publicLabel["导出全部 ".Length..]);
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
@@ -1769,7 +1813,7 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 真实公共 UI 导出：点击导出按钮后只操作“被本实例主窗口直接 owned”
+  /// 真实公共 UI 导出：打开导出菜单并点击格式项后，只操作“被本实例主窗口直接 owned”
   /// 的 FileSavePicker（#32770，WinRT broker 独立进程承载）；归属不明立
   /// 即停止。定向设置原生文件名控件并点击确认；确认后再出现意外
   /// 弹窗定向取消并记失败。不新增生产任意路径入口。
@@ -1795,7 +1839,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException($"Export target must be a fresh file: {target}");
 
     RecordPaddleSmokeStage($"ui export {buttonLabel}");
-    await ClickManagedSmokeButtonAsync(buttonLabel);
+    await ClickPaddleExportMenuAsync("导出", buttonLabel["导出 ".Length..]);
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     Exception? dialogError = null;
     try

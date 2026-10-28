@@ -689,3 +689,130 @@ it("saves model source identifiers from provider metadata", async () => {
     expect.objectContaining({ type: "settings.prepareEnvironment" }),
   );
 });
+
+it("CUDA 七包增量在确认摘要中显示实际新增组件", () => {
+  const dependencies = [
+    "nvidia-cuda-runtime==13.4.92",
+    "nvidia-cuda-nvrtc==13.4.92",
+    "nvidia-cudnn-cu13==9.27.0.42",
+    "nvidia-curand==10.4.4.72",
+    "nvidia-cufft==12.4.0.43",
+    "nvidia-cublas==13.8.0.4",
+    "nvidia-nvjitlink==13.4.92",
+  ];
+  render(
+    <SettingsPage
+      actions={buildActions()}
+      viewState={buildViewState({
+        environmentRecipes: recipes,
+        environmentSources: sources,
+        environmentHardware: { nvidiaDriverStatus: "ok" },
+        environments: [
+          { id: "shared", name: "Paddle", status: "installed", revision: 2 },
+        ],
+        environmentPlan: {
+          planId: "cuda-delta",
+          environmentId: "shared",
+          environmentRevision: 2,
+          recipe: "paddleocr-ort-cuda",
+          requestedRecipe: "paddleocr-ort-cuda",
+          sourceIds: ["tuna-pypi"],
+          dependencies,
+          requiresServiceStop: true,
+          cudaPluginAction: "prepare",
+        },
+      })}
+    />,
+  );
+  const summary = screen.getByText(/本次新增或替换组件/);
+  expect(summary).not.toHaveTextContent("无需新增组件");
+  for (const pin of dependencies) expect(summary).toHaveTextContent(pin);
+  expect(
+    screen.getByText(/同时准备锁定的 ONNX Runtime CUDA 13 执行插件/),
+  ).toBeVisible();
+});
+
+it.each(["device", "service", "active"] as const)(
+  "兼容结果失效后随运行选择变化补发一次查询：%s",
+  async (change) => {
+    const actions = buildActions();
+    const environment = {
+      id: "shared",
+      name: "Paddle",
+      revision: 3,
+      kind: "venv",
+      status: "installed",
+      recipe: "paddleocr-ort-cuda",
+      targetDevice: change === "device" ? "cuda" : "cpu",
+      serviceState: change === "service" ? "not_started" : "ready",
+    };
+    const settings = {
+      environmentRecipes: recipes,
+      environmentSources: sources,
+      environmentHardware: { nvidiaDriverStatus: "ok" },
+      environmentBusy: false,
+      activeEnvironmentId: change === "active" ? "other" : "shared",
+      environments: [environment],
+    };
+    const query = {
+      type: "settings.findCompatibleEnvironment",
+      recipe: "paddleocr-ort-cpu",
+    };
+    const view = render(
+      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
+    );
+    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
+    const compatibility = {
+      recipe: "paddleocr-ort-cpu",
+      selectedEnvironmentId: "shared",
+    };
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...settings,
+          environmentCompatibility: compatibility,
+        })}
+        actions={actions}
+      />,
+    );
+    actions.run.mockClear();
+    // A real same-id switch or background attach clears compatibility while
+    // preserving the installed environment revision. Busy must defer dispatch.
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({ ...settings, environmentBusy: true })}
+        actions={actions}
+      />,
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(query);
+    const complete = {
+      ...settings,
+      activeEnvironmentId: "shared",
+      environments: [
+        { ...environment, targetDevice: "cpu", serviceState: "ready" },
+      ],
+    };
+    view.rerender(
+      <SettingsPage viewState={buildViewState(complete)} actions={actions} />,
+    );
+    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
+    expect(
+      actions.run.mock.calls.filter(([command]) => command.type === query.type),
+    ).toHaveLength(1);
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...complete,
+          environmentCompatibility: compatibility,
+        })}
+        actions={actions}
+      />,
+    );
+    expect(
+      screen.getByText("该兼容环境已是当前环境并通过启动验证，无需重装。"),
+    ).toBeVisible();
+    expect(
+      actions.run.mock.calls.filter(([command]) => command.type === query.type),
+    ).toHaveLength(1);
+  },
+);

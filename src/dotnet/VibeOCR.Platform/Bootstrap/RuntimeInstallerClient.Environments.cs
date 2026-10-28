@@ -94,7 +94,10 @@ public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("sources")] IReadOnlyList<ManagedEnvironmentPlanSource>? Sources = null,
     [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
     [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
-    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null,
+    [property: JsonPropertyName("removed_dependencies")] IReadOnlyList<string>? RemovedDependencies = null,
+    [property: JsonPropertyName("requires_service_stop")] bool RequiresServiceStop = false,
+    [property: JsonPropertyName("cuda_plugin_action")] string? CudaPluginAction = null);
 
 /// <summary>计划内单来源：请求/继承标记、用途与脱敏端点。</summary>
 public sealed record ManagedEnvironmentPlanSource(
@@ -114,7 +117,8 @@ public sealed record PreparedEnvironmentSwitch(
     [property: JsonPropertyName("active_revision")] int ActiveRevision,
     [property: JsonPropertyName("python")] string Python,
     [property: JsonPropertyName("requires_supervisor")] bool RequiresSupervisor,
-    [property: JsonPropertyName("launch")] RuntimeLaunch? Launch);
+    [property: JsonPropertyName("launch")] RuntimeLaunch? Launch,
+    [property: JsonPropertyName("selected_device")] string? SelectedDevice = null);
 
 public sealed record CommittedEnvironmentSwitch(
     [property: JsonPropertyName("active_id")] string ActiveId,
@@ -233,6 +237,11 @@ public interface IManagedEnvironmentClient
         throw new NotSupportedException("当前 Runtime 不支持空间清理，请更新运行组件。");
     Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("当前 Runtime 不支持受保护的环境切换，请更新运行组件。");
+    Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, string? device, CancellationToken cancellationToken = default) =>
+        device is null ? BeginEnvironmentSwitchAsync(environmentId, cancellationToken)
+            : throw new NotSupportedException("当前 Runtime 不支持独立设备选择。");
+    Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持环境维护租约。");
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
         ListEnvironmentsAsync(cancellationToken);
@@ -280,12 +289,16 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
     public Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedCleanupResult>("run_cleanup", new() { ["plan_id"] = planId, ["item_ids"] = itemIds }, cancellationToken);
 
-    public async Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default)
+    public Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
+        BeginEnvironmentSwitchAsync(environmentId, null, cancellationToken);
+
+    public async Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, string? device, CancellationToken cancellationToken = default)
     {
         var request = BindingRequest();
         request.Remove("accelerator");
         request["request_kind"] = "environment";
         request["action"] = "prepare_switch";
+        if (device is not null) request["device"] = device;
         request["environment_id"] = environmentId;
         ProcessStartInfo startInfo = StartInfo(request);
         startInfo.RedirectStandardInput = true;
@@ -294,11 +307,91 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
     }
 
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
-        InvokeEnvironmentAsync<ManagedEnvironmentList>("list", [], cancellationToken);
+    public async Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default)
+    {
+        var request = BindingRequest();
+        request.Remove("accelerator");
+        request["request_kind"] = "environment";
+        request["action"] = "prepare_maintenance";
+        request["environment_id"] = environmentId;
+        ProcessStartInfo startInfo = StartInfo(request);
+        startInfo.RedirectStandardInput = true;
+        startInfo.ArgumentList.Add("--environment-switch-control");
+        return await EnvironmentSwitchReservation.StartMaintenanceAsync(startInfo, environmentId, cancellationToken,
+            _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
+    }
 
-    public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
-        InvokeEnvironmentAsync<ManagedEnvironmentList>("initialize_default", [], cancellationToken);
+  // Startup already returns a fully probed list. Share only that in-flight
+  // result, and order an earlier refresh before initialization, so this
+  // client does not compete with itself for Runtime's registry lock.
+  private readonly object environmentReadSync = new();
+  private readonly SemaphoreSlim environmentReadGate = new(1, 1);
+  private Task<ManagedEnvironmentList>? environmentInitialization;
+
+  public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default)
+  {
+    Task admission;
+    lock (environmentReadSync)
+    {
+      if (environmentInitialization is { } initialization)
+        return initialization.WaitAsync(cancellationToken);
+      admission = environmentReadGate.WaitAsync(cancellationToken);
+    }
+    return ReadEnvironmentListAsync("list", admission, cancellationToken);
+  }
+
+  public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default)
+  {
+    Task admission;
+    TaskCompletionSource<ManagedEnvironmentList> completion;
+    lock (environmentReadSync)
+    {
+      if (environmentInitialization is { } initialization)
+        return initialization.WaitAsync(cancellationToken);
+      completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      environmentInitialization = completion.Task;
+      admission = environmentReadGate.WaitAsync(cancellationToken);
+    }
+    _ = CompleteEnvironmentInitializationAsync(completion, admission, cancellationToken);
+    return completion.Task;
+  }
+
+  private async Task<ManagedEnvironmentList> ReadEnvironmentListAsync(
+    string action, Task admission, CancellationToken cancellationToken)
+  {
+    await admission.ConfigureAwait(false);
+    try
+    {
+      return await InvokeEnvironmentAsync<ManagedEnvironmentList>(action, [], cancellationToken).ConfigureAwait(false);
+    }
+    finally { environmentReadGate.Release(); }
+  }
+
+  private async Task CompleteEnvironmentInitializationAsync(
+    TaskCompletionSource<ManagedEnvironmentList> completion, Task admission, CancellationToken cancellationToken)
+  {
+    try
+    {
+      ManagedEnvironmentList result;
+      try
+      {
+        result = await ReadEnvironmentListAsync("initialize_default", admission, cancellationToken).ConfigureAwait(false);
+      }
+      finally
+      {
+        // Clear before publishing completion, including synchronous
+        // failures and cancellation while queued. Never cache health.
+        lock (environmentReadSync)
+        {
+          if (ReferenceEquals(environmentInitialization, completion.Task))
+            environmentInitialization = null;
+        }
+      }
+      completion.TrySetResult(result);
+    }
+    catch (OperationCanceledException error) { completion.TrySetCanceled(error.CancellationToken); }
+    catch (Exception error) { completion.TrySetException(error); }
+  }
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,

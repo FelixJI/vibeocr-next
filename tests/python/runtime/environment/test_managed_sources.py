@@ -731,7 +731,7 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
 
 
 @pytest.mark.parametrize("failure", ["venv", "packages", "probe", "none"])
-def test_accepted_cancellation_prevents_failure_and_success_commits(
+def test_accepted_cancellation_records_terminal_failure_before_return(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     import subprocess
@@ -777,7 +777,12 @@ def test_accepted_cancellation_prevents_failure_and_success_commits(
     persisted = manager._read()["environments"][record["id"]]
     assert persisted["revision"] == record["revision"]
     assert persisted["path"] == record["path"]
-    assert persisted["last_install_operation"]["phase"] == "installing"
+    assert persisted["last_install_operation"]["phase"] == "failed"
+    assert persisted["last_install_operation"]["reason_code"] == "install_interrupted"
+    assert persisted["last_install_operation"]["next_action"] == "preview_again"
+    late_receipts = []
+    manager.cancel_install(late_receipts.append)
+    assert late_receipts == [False]
     restarted = _open(tmp_path, manifest, component)
     interrupted = restarted.list()["environments"][0]["last_install_failure"]
     assert interrupted["reason_code"] == "install_interrupted"

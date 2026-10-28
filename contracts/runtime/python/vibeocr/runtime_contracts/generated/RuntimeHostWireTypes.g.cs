@@ -595,6 +595,9 @@ public sealed record ManagedEnvironmentRequest
     [JsonPropertyName("recipe")]
     public string? Recipe { get; init; }
 
+    [JsonPropertyName("device")]
+    public string? Device { get; init; }
+
     [JsonPropertyName("source_ids")]
     public IReadOnlyList<string>? SourceIds { get; init; }
 

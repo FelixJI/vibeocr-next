@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 from test_runtime_installer import _omit_unused_pip_bootstrap, _release
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
+from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
 from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 
 
@@ -106,6 +109,86 @@ def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch):
     assert listed["active_id"] == "legacy"
     assert [item["id"] for item in listed["environments"]] == ["legacy"]
     assert calls == []
+
+
+def test_legacy_user_persists_registry_before_first_service_start(
+    tmp_path, monkeypatch
+):
+    # 无注册表的旧 legacy 用户：候选 Supervisor 的启动租约必须读到注册表，
+    # 而 commit_switch 要等目标健康后才首次落盘，因此 prepare_switch 要在
+    # 返回 launch 前先把合成记录按 store 锁落盘。
+    manager, _ = _manager(tmp_path, monkeypatch)
+    legacy = manager.paths.runtime_root
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / "python.exe").write_bytes(b"test interpreter")
+    (legacy / ".installed.json").write_text(
+        json.dumps({"accelerator": "cpu"}), encoding="utf-8"
+    )
+    assert not manager._registry.is_file()
+
+    assert manager.initialize_default()["active_id"] == "legacy"
+    assert manager.list()["active_id"] == "legacy"
+    assert not manager._registry.is_file()
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert self.path == "/v2/health"
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "protocol_version": 2,
+                        "ready": True,
+                        "draining": False,
+                        "instance_id": "legacy-instance",
+                    }
+                ).encode()
+            )
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with manager.switch_reservation("legacy") as prepared:
+            persisted = json.loads(manager._registry.read_text(encoding="utf-8"))
+            assert persisted["active_id"] == "legacy"
+            assert persisted["active_revision"] == 1
+            assert persisted["environments"]["legacy"]["kind"] == "legacy"
+            assert persisted["environments"]["legacy"]["revision"] == 1
+
+            # 候选服务只用 launch 投影自举启动租约并准入任务。
+            for key, value in prepared["launch"]["environment"].items():
+                monkeypatch.setenv(key, value)
+            references = ManagedEnvironmentReferences.from_environment()
+            assert references is not None and references.env_id == "legacy"
+            job_id = "0d1a7a85-c6de-4c60-9f36-0ea41d0dd5a0"
+            try:
+                references.admit(job_id)
+            finally:
+                references.release(job_id)
+                references._service.release()
+
+            committed = manager.commit_switch(
+                prepared,
+                started_health={
+                    "port": server.server_port,
+                    "instance_id": "legacy-instance",
+                },
+            )
+            assert committed == {"active_id": "legacy", "active_revision": 1}
+            # 健康提交后注册表保持 prepare 落盘的初值，不新增协议字段。
+            assert (
+                json.loads(manager._registry.read_text(encoding="utf-8")) == persisted
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def _retired_default(

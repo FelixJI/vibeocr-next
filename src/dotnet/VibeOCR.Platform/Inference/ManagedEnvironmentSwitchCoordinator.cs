@@ -66,11 +66,11 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
         TimeSpan startupTimeout,
         IReadOnlySet<string> requiredCapabilities,
         CancellationToken cancellationToken = default,
-        bool injectSoakCrash = false)
+        bool injectSoakCrash = false, string? device = null)
     {
         ArgumentNullException.ThrowIfNull(publish);
         await using IManagedEnvironmentSwitchReservation reservation = await manager.BeginEnvironmentSwitchAsync(
-            environmentId, cancellationToken).ConfigureAwait(false);
+            environmentId, device, cancellationToken).ConfigureAwait(false);
         PreparedEnvironmentSwitch prepared = reservation.Prepared;
         ManagedEnvironmentSession? candidate = null;
         StartedEnvironmentHealth? evidence = null;
