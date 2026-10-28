@@ -85,14 +85,13 @@ public sealed partial class MainWindow
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    await SelectSmokeValueAsync("#environment-component-select", "paddleocr-ort");
-    await SelectSmokeValueAsync("#environment-device-select", "cpu");
-    await ClickManagedSmokeButtonAsync("准备此配置");
+    await SelectSmokeValueAsync("#paddle-backend-select", "cpu");
+    await ClickManagedSmokeButtonAsync("准备此后端");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-ort-cpu') && " +
-      "!document.querySelector('.managed-environment-advanced') && " +
+      "document.querySelector('.environment-advanced-maintenance')?.open === false && " +
       "!document.querySelector(\"input[aria-label='新环境名称（留空自动命名）']\")",
       TimeSpan.FromMinutes(2));
     await SaveManagedSmokePreviewAsync("confirmation");
@@ -195,6 +194,7 @@ public sealed partial class MainWindow
     ManagedEnvironment[] pair = SmokePair(list);
     if (list.ActiveId != pair[0].Id || pair.Any(item => item.Status != "installed"))
       throw new InvalidOperationException("Cleanup requires the isolated installed A/B fixture.");
+    await OpenManagedSmokeAdvancedAsync();
     await ClickManagedSmokeButtonAsync("检查可清理项");
     await WaitForSmokeDomAsync("document.querySelector('[aria-label=可清理项]')?.textContent.includes('Smoke B') === true",
       TimeSpan.FromMinutes(2));
@@ -284,7 +284,7 @@ public sealed partial class MainWindow
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#environment-component-select", "paddleocr-ort");
+    await SelectSmokeValueAsync("#paddle-backend-select", "cpu");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +
@@ -581,8 +581,14 @@ public sealed partial class MainWindow
 
   private string? selectedSmokeEnvironmentId;
 
+  private Task OpenManagedSmokeAdvancedAsync() => WaitForSmokeDomAsync(
+    "(() => { const section = document.querySelector('.environment-advanced-maintenance'); " +
+    "if (!section) return false; if (!section.open) section.querySelector('summary')?.click(); " +
+    "return section.open; })()", TimeSpan.FromSeconds(30));
+
   private async Task SelectSmokeEnvironmentAsync(string id)
   {
+    await OpenManagedSmokeAdvancedAsync();
     await WaitForSmokeDomAsync(
       "(() => { const row=Array.from(document.querySelectorAll('.managed-environment-item'))" +
       ".find(e => e.dataset.environmentId === " + JsonSerializer.Serialize(id) +
@@ -612,6 +618,7 @@ public sealed partial class MainWindow
   {
     bool progress = stage.Contains("progress", StringComparison.Ordinal);
     string selector = progress ? ".environment-install-progress" : stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
+    if (selector == ".managed-environment-list") await OpenManagedSmokeAdvancedAsync();
     await WaitForSmokeDomAsync(
       "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(selector) +
       "); if (!e" + (progress ? "" : " || !e.querySelector('button:not(:disabled)')") + ") return false; " +
@@ -668,7 +675,7 @@ public sealed partial class MainWindow
         string probe = "probe-unavailable";
         if ((editorSurface ? SmokeEditorWebView : WorkbenchWebView).CoreWebView2 is { } failed)
           probe = await failed.ExecuteScriptAsync(
-            "(() => { const s=document.querySelector('#managed-environment-select'); " +
+            "(() => { const s=document.querySelector('#paddle-backend-select'); " +
             "return { managedSelect: s ? { value: s.value, disabled: s.disabled } : null, " +
             "buttons: Array.from(document.querySelectorAll('button')).map(b => " +
             "({ label: (b.textContent || '').trim(), disabled: b.disabled })) }; })()");
