@@ -101,11 +101,11 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
-  public void RunningCatalogAndResidencyDistinguishPendingFromReadyModel()
+  public void RunningCatalogAndResidencyDistinguishUncheckedFromReadyModel()
   {
     var environment = new ManagedEnvironment("environment", "Paddle", 2, "venv", "installed", "python",
       "ready", "installed", "unverified", "not_checked", "not_started", null,
-      Recipe: "paddleocr-ort-cpu");
+      Recipe: "opaque-identifier.v2", Engine: "paddle", Family: "paddle-onnx");
     var health = new Wire.Health
     {
       SchemaVersion = 2, InstanceId = "sup", ProtocolVersion = 2, Ready = true,
@@ -133,7 +133,7 @@ public sealed class ManagedEnvironmentSettingsTests
     ManagedEnvironment pending = ManagedEnvironmentSettings.ProjectRunning(
       environment, health, new ResidencyStatus(), status);
     Assert.Equal("ready", pending.EngineState);
-    Assert.Equal("pending", pending.ModelState);
+    Assert.Equal("not_checked", pending.ModelState);
     Assert.Null(pending.ActualDevice);
 
     ManagedEnvironment unrelated = ManagedEnvironmentSettings.ProjectRunning(environment, health,
@@ -143,7 +143,7 @@ public sealed class ManagedEnvironmentSettingsTests
         RecognitionMode = RecognitionMode.MineruDocument,
         ResourceKind = RecognitionResourceKind.Process,
       }] }, status);
-    Assert.Equal("pending", unrelated.ModelState);
+    Assert.Equal("not_checked", unrelated.ModelState);
     Assert.Null(unrelated.ActualDevice);
 
     ManagedEnvironment evicted = ManagedEnvironmentSettings.ProjectRunning(environment, health,
@@ -153,7 +153,7 @@ public sealed class ManagedEnvironmentSettingsTests
         RecognitionMode = RecognitionMode.PaddleText,
         ResourceKind = RecognitionResourceKind.Model,
       }] }, status);
-    Assert.Equal("pending", evicted.ModelState);
+    Assert.Equal("not_checked", evicted.ModelState);
 
     ManagedEnvironment ready = ManagedEnvironmentSettings.ProjectRunning(environment, health,
       new ResidencyStatus { Entries = [new ResidencyEntry
@@ -178,13 +178,13 @@ public sealed class ManagedEnvironmentSettingsTests
   public void RetiredEnvironmentCannotBorrowReadyCatalogOrEngine(string recipe)
   {
     var environment = new ManagedEnvironment("environment", "Retired", 2, "venv", "installed", "python",
-      "ready", "installed", "unverified", "not_checked", "not_started", null, Recipe: recipe);
+      "ready", "installed", "unavailable", "not_checked", "not_started", null, Recipe: recipe);
     foreach (Wire.Health health in new[] { DefaultRecognitionModeWorkbenchTests.DefaultModeHealth(), PaddleReadyHealth() })
     {
       ManagedEnvironment projected = ManagedEnvironmentSettings.ProjectRunning(
         environment, health, new ResidencyStatus(), ReadyStatus());
       Assert.Equal("unavailable", projected.EngineState);
-      Assert.Equal("unavailable", projected.ModelState);
+      Assert.Equal("not_checked", projected.ModelState);
       Assert.Null(projected.ActualDevice);
     }
   }
@@ -195,7 +195,7 @@ public sealed class ManagedEnvironmentSettingsTests
   public void MineruEnvironmentUsesItsOwnModeReadiness(string recipe)
   {
     var environment = new ManagedEnvironment("environment", "MinerU", 2, "venv", "installed", "python",
-      "ready", "installed", "unverified", "not_checked", "not_started", null, Recipe: recipe);
+      "ready", "installed", "unverified", "not_checked", "not_started", null, Recipe: recipe, Engine: "mineru", Family: "mineru");
     ManagedEnvironment projected = ManagedEnvironmentSettings.ProjectRunning(environment,
       DefaultRecognitionModeWorkbenchTests.DefaultModeHealth(), new ResidencyStatus(), ReadyStatus());
     Assert.Equal("preparation_required", projected.EngineState);
@@ -307,6 +307,19 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task EnvironmentThatBecomesCompatibleDuringPrepareDoesNotEnterInstaller()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false, BecomesCompatibleDuringPrepare = true };
+    var settings = NewSettings(manager);
+    await settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
+    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
+    Assert.Null(settings.Plan);
+    Assert.Equal(0, manager.CreateCalls);
+    Assert.Equal(0, manager.PreviewCalls);
+    Assert.Equal(0, manager.InstallCalls);
+  }
+
+  [Fact]
   public async Task PrepareDoubleClickAndPreviewFailureReuseExactEnvironment()
   {
     var manager = new MutableManager { HasCompatibleEnvironment = false };
@@ -320,6 +333,19 @@ public sealed class ManagedEnvironmentSettingsTests
       settings.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken));
     Assert.Equal(1, manager.CreateCalls);
     Assert.Equal("fresh", settings.Plan?.EnvironmentId);
+    Assert.Equal(0, manager.InstallCalls);
+  }
+
+  [Fact]
+  public async Task PrepareAfterSettingsRecreationReusesRuntimeOwnedTarget()
+  {
+    var manager = new MutableManager { HasCompatibleEnvironment = false };
+    var first = NewSettings(manager);
+    await first.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
+    var reopened = NewSettings(manager);
+    await reopened.PrepareAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
+    Assert.Equal(first.Plan?.EnvironmentId, reopened.Plan?.EnvironmentId);
+    Assert.Equal(1, manager.CreateCalls);
     Assert.Equal(0, manager.InstallCalls);
   }
 
@@ -877,9 +903,9 @@ public sealed class ManagedEnvironmentSettingsTests
       await settings.RefreshAsync(TestContext.Current.CancellationToken);
       ManagedEnvironment active = ActiveEnvironment(settings);
       Assert.Equal("ready", active.EngineState);
-      // Paddle ONNX 环境的模型在 residency 出现前如实标注 pending，
+      // Paddle ONNX 环境的模型在 residency 出现前保持 not_checked，
       // 不因随包 small 默认模型流报 ready。
-      Assert.Equal("pending", active.ModelState);
+      Assert.Equal("not_checked", active.ModelState);
       Assert.Equal("ready", active.ServiceState);
 
       // 旧代码在 Create/Install/Delete/Repair 后直接重置为管理器列表，
@@ -1194,6 +1220,7 @@ public sealed class ManagedEnvironmentSettingsTests
   {
     public List<string> SourceSaves { get; } = [];
     public bool HasCompatibleEnvironment { get; set; } = true;
+    public bool BecomesCompatibleDuringPrepare { get; set; }
     public bool FailListAfterCreate { get; set; }
     public int CreateCalls { get; private set; }
     public int PreviewCalls { get; private set; }
@@ -1231,7 +1258,7 @@ public sealed class ManagedEnvironmentSettingsTests
     [
       new ManagedEnvironment("environment", "活动环境", 1, "venv", "installed", "python",
         "ready", "installed", "unverified", "not_checked", "not_started", null,
-        Recipe: "paddleocr-ort-cpu",
+        Recipe: "paddleocr-ort-cpu", Engine: "paddle", Family: "paddle-onnx",
         ResolvedSources:
         [
           new ManagedEnvironmentResolvedSource("package_index", "tuna-pypi", "TUNA PyPI 镜像", "product_default"),
@@ -1245,6 +1272,21 @@ public sealed class ManagedEnvironmentSettingsTests
       if (BeforeList is not null) await BeforeList();
       if (FailListAfterCreate && CreateCalls > 0) throw new HttpRequestException("list unavailable");
       return new ManagedEnvironmentList("environment", 1, [.. environments], Recipes: Catalog);
+    }
+
+    private string? preparedTargetId;
+    public Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(
+      string recipe, CancellationToken cancellationToken = default)
+    {
+      if (BecomesCompatibleDuringPrepare)
+      {
+        HasCompatibleEnvironment = true;
+        return Task.FromResult(environments[0]);
+      }
+      ManagedEnvironment? owned = environments.FirstOrDefault(item => item.Id == preparedTargetId);
+      if (owned is not null) return Task.FromResult(owned);
+      preparedTargetId = "fresh";
+      return CreateEnvironmentAsync("Runtime 准备目标", cancellationToken);
     }
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(

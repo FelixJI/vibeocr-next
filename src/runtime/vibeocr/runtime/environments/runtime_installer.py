@@ -2886,6 +2886,7 @@ def _request(value: object) -> dict[str, Any]:
             "set_sources": {"package_source_id"},
             "preview_install": {"environment_id", "recipe"},
             "find_compatible": {"recipe"},
+            "prepare_target": {"recipe"},
             "install": {"plan_id", "environment_id", "recipe", "source_ids"},
             "prepare_switch": {"environment_id"},
             "commit_switch": {"prepared"},
@@ -2914,6 +2915,7 @@ def _request(value: object) -> dict[str, Any]:
             extras
             - fields[action]
             - ({"source_ids"} if action == "preview_install" else set())
+            - ({"environment_id"} if action == "find_compatible" else set())
             - (
                 {
                     "environment_id",
@@ -3462,7 +3464,11 @@ def main(argv: list[str] | None = None) -> int:
                     else None,
                 )
             elif action == "find_compatible":
-                payload = manager.find_compatible(request["recipe"])
+                payload = manager.find_compatible(
+                    request["recipe"], request.get("environment_id")
+                )
+            elif action == "prepare_target":
+                payload = manager.prepare_target(request["recipe"])
             elif action == "preview_cleanup":
                 payload = manager.preview_cleanup()
             elif action == "run_cleanup":

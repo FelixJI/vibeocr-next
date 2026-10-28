@@ -19,6 +19,11 @@ afterEach(cleanup);
 const recipes = [
   {
     id: "paddleocr-ort-cpu",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "CPUExecutionProvider",
+    defaultRemoteHost: true,
     displayName: "PaddleOCR ONNX · CPU",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "cpu",
@@ -29,6 +34,10 @@ const recipes = [
   },
   {
     id: "paddleocr-ort-directml",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "DmlExecutionProvider",
     displayName: "PaddleOCR ONNX · Windows DirectML",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "cpu",
@@ -39,6 +48,10 @@ const recipes = [
   },
   {
     id: "paddleocr-ort-cuda",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "CUDAExecutionProvider",
     displayName: "PaddleOCR ONNX · NVIDIA CUDA",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "nvidia_cuda",
@@ -49,6 +62,10 @@ const recipes = [
   },
   {
     id: "mineru-cpu",
+    engine: "mineru",
+    family: "mineru",
+    familyDisplayName: "MinerU",
+    provider: "CPUExecutionProvider",
     displayName: "MinerU · CPU",
     configuredRecognitionTypes: ["document"],
     accelerator: "cpu",
@@ -59,6 +76,10 @@ const recipes = [
   },
   {
     id: "mineru-cuda",
+    engine: "mineru",
+    family: "mineru",
+    familyDisplayName: "MinerU",
+    provider: "CUDAExecutionProvider",
     displayName: "MinerU · NVIDIA CUDA",
     configuredRecognitionTypes: ["document"],
     accelerator: "nvidia_cuda",
@@ -80,6 +101,7 @@ const sources = [
   {
     kind: "paddleocr_model_registry",
     id: "paddleocr-modelscope",
+    provider: "modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
     isDefault: true,
@@ -87,6 +109,7 @@ const sources = [
   {
     kind: "mineru_model_registry",
     id: "mineru-modelscope",
+    provider: "modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
     isDefault: true,
@@ -581,4 +604,88 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       within(advanced as HTMLDetailsElement).queryByLabelText("依赖安装进度"),
     ).not.toBeInTheDocument();
   });
+});
+
+it("uses explicit metadata when recipe identifiers and display names change", async () => {
+  const actions = buildActions();
+  const renamed = recipes.map((recipe, index) => ({
+    ...recipe,
+    id: `custom.engine_${index}`,
+    displayName: `名称 ${index}`,
+  }));
+  render(
+    <SettingsPage
+      viewState={buildViewState({
+        environmentRecipes: renamed,
+        environments: [],
+        environmentHardware: { nvidiaDriverStatus: "ok" },
+      })}
+      actions={actions}
+    />,
+  );
+  const section = screen.getByLabelText("PaddleOCR 推理后端");
+  await userEvent.selectOptions(
+    within(section).getByRole("combobox"),
+    "nvidia_cuda",
+  );
+  await userEvent.click(
+    within(section).getByRole("button", { name: "重新查询兼容环境" }),
+  );
+  expect(actions.run).toHaveBeenCalledWith({
+    type: "settings.findCompatibleEnvironment",
+    recipe: "custom.engine_2",
+  });
+});
+
+it("saves model source identifiers from provider metadata", async () => {
+  const actions = buildActions();
+  const renamed = sources.map((source, index) => ({
+    ...source,
+    id: `source-${index}`,
+  }));
+  const view = render(
+    <SettingsPage
+      viewState={buildViewState({
+        environmentRecipes: recipes,
+        environmentSources: renamed,
+        environments: [],
+      })}
+      actions={actions}
+    />,
+  );
+  await userEvent.click(
+    screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
+  );
+  expect(screen.getByLabelText("模型来源")).toHaveValue("modelscope");
+  await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
+  expect(actions.run).toHaveBeenCalledWith({
+    type: "settings.setEnvironmentSources",
+    packageSourceId: "source-0",
+    paddleocrModelSourceId: "source-1",
+    mineruModelSourceId: "source-2",
+  });
+  view.rerender(
+    <SettingsPage
+      viewState={buildViewState({
+        environmentRecipes: recipes,
+        environmentSources: renamed.map((source) => ({
+          ...source,
+          provider: undefined,
+        })),
+        environments: [],
+      })}
+      actions={actions}
+    />,
+  );
+  actions.run.mockClear();
+  await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
+  expect(actions.run).toHaveBeenCalledWith({
+    type: "settings.setEnvironmentSources",
+    packageSourceId: "source-0",
+    paddleocrModelSourceId: "source-1",
+    mineruModelSourceId: "source-2",
+  });
+  expect(actions.run).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "settings.prepareEnvironment" }),
+  );
 });

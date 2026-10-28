@@ -31,7 +31,11 @@ public sealed record ManagedEnvironment(
     [property: JsonPropertyName("unknown_source_ids")] IReadOnlyList<string>? UnknownSourceIds = null,
     [property: JsonPropertyName("resolved_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedSources = null,
     [property: JsonPropertyName("resolved_source_ids")] IReadOnlyList<string>? ResolvedSourceIds = null,
-    [property: JsonPropertyName("last_install_failure")] ManagedEnvironmentInstallFailure? LastInstallFailure = null);
+    [property: JsonPropertyName("last_install_failure")] ManagedEnvironmentInstallFailure? LastInstallFailure = null,
+    [property: JsonPropertyName("engine")] string? Engine = null,
+    [property: JsonPropertyName("family")] string? Family = null,
+    [property: JsonPropertyName("provider")] string? Provider = null,
+    [property: JsonPropertyName("operation_blocks")] IReadOnlyDictionary<string, string?>? OperationBlocks = null);
 
 /// <summary>目录内下载源：id/kind/展示名与脱敏端点（模型源实际下载端点未知）。</summary>
 public sealed record ManagedDownloadSource(
@@ -39,7 +43,8 @@ public sealed record ManagedDownloadSource(
     [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("display_name")] string DisplayName,
     [property: JsonPropertyName("endpoint")] string Endpoint,
-    [property: JsonPropertyName("is_default")] bool IsDefault = false);
+    [property: JsonPropertyName("is_default")] bool IsDefault = false,
+    [property: JsonPropertyName("provider")] string? Provider = null);
 
 /// <summary>单环境每 kind 的权威解析结果；模型偏好与原生下载器的实际端点分别表达。</summary>
 public sealed record ManagedEnvironmentResolvedSource(
@@ -135,7 +140,13 @@ public sealed record ManagedEnvironmentRecipe(
     [property: JsonPropertyName("dependencies")] IReadOnlyList<string>? Dependencies = null,
     [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
     [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
-    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null,
+    [property: JsonPropertyName("engine")] string? Engine = null,
+    [property: JsonPropertyName("family")] string? Family = null,
+    [property: JsonPropertyName("family_display_name")] string? FamilyDisplayName = null,
+    [property: JsonPropertyName("provider")] string? Provider = null,
+    [property: JsonPropertyName("supports_remote_host")] bool SupportsRemoteHost = false,
+    [property: JsonPropertyName("default_remote_host")] bool DefaultRemoteHost = false);
 
 /// <summary>list.hardware 投影：nvidia 驱动真值只由 Runtime 探测，宿主/前端只消费不检测。</summary>
 public sealed record ManagedEnvironmentHardware(
@@ -230,6 +241,8 @@ public interface IManagedEnvironmentClient
         string? mineruModelSourceId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("当前 Runtime 客户端不支持独立模型来源，请先更新 Runtime。");
     Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default);
+    Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(string recipe, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持持久准备目标，请先更新 Runtime。");
     Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? packageSourceId, string? modelSourceId,
         CancellationToken cancellationToken = default);
@@ -297,6 +310,9 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             ["paddleocr_model_source_id"] = paddleocrModelSourceId,
             ["mineru_model_source_id"] = mineruModelSourceId,
         }, cancellationToken);
+
+    public Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(string recipe, CancellationToken cancellationToken = default) =>
+        InvokeEnvironmentAsync<ManagedEnvironment>("prepare_target", new() { ["recipe"] = recipe }, cancellationToken);
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironment>("create", new() { ["name"] = name }, cancellationToken);

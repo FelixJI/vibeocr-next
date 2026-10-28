@@ -1134,7 +1134,8 @@ public sealed record SettingsEnvironmentState(
   IReadOnlyList<string>? OverrideSourceIds = null,
   IReadOnlyList<string>? UnknownSourceIds = null,
   IReadOnlyList<SettingsEnvironmentResolvedSourceState>? ResolvedSources = null,
-  SettingsEnvironmentInstallFailureState? LastInstallFailure = null);
+  SettingsEnvironmentInstallFailureState? LastInstallFailure = null,
+  IReadOnlyDictionary<string, string?>? OperationBlocks = null);
 
 /// <summary>目录内下载源投影：展示名 + 脱敏端点。</summary>
 public sealed record SettingsEnvironmentSourceState(
@@ -1144,7 +1145,8 @@ public sealed record SettingsEnvironmentSourceState(
   string Endpoint,
   bool IsDefault = false,
   string? TaskModelPreset = null,
-  string? DefaultModelPreset = null);
+  string? DefaultModelPreset = null,
+  string? Provider = null);
 
 /// <summary>
 /// Runtime 权威配方目录投影（list.recipes）：用途/设备分组与 GPU 门禁在
@@ -1165,7 +1167,13 @@ public sealed record SettingsEnvironmentRecipeState(
   IReadOnlyList<string>? Dependencies = null,
   string? DependencyOrigin = null,
   string? PythonOrigin = null,
-  string? RuntimeWheelOrigin = null);
+  string? RuntimeWheelOrigin = null,
+  string? Engine = null,
+  string? Family = null,
+  string? FamilyDisplayName = null,
+  string? Provider = null,
+  bool SupportsRemoteHost = false,
+  bool DefaultRemoteHost = false);
 
 /// <summary>
 /// 硬件可用性投影（list.hardware）：nvidia 驱动真值只由 Runtime 探测，

@@ -2829,6 +2829,11 @@ describe("AppShell", () => {
           environmentRecipes: [
             {
               id: "paddleocr-ort-cpu",
+              engine: "paddle",
+              family: "paddle-onnx",
+              familyDisplayName: "PaddleOCR ONNX",
+              provider: "CPUExecutionProvider",
+              defaultRemoteHost: true,
               displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
@@ -2944,6 +2949,11 @@ describe("AppShell", () => {
     const recipes = [
       {
         id: "paddleocr-ort-cpu",
+        engine: "paddle",
+        family: "paddle-onnx",
+        familyDisplayName: "PaddleOCR ONNX",
+        provider: "CPUExecutionProvider",
+        defaultRemoteHost: true,
         displayName: "PaddleOCR ONNX · CPU",
         configuredRecognitionTypes: ["text"],
         accelerator: "cpu",
@@ -2951,6 +2961,10 @@ describe("AppShell", () => {
       },
       {
         id: "mineru-cpu",
+        engine: "mineru",
+        family: "mineru",
+        familyDisplayName: "MinerU",
+        provider: "CPUExecutionProvider",
         displayName: "MinerU · CPU",
         configuredRecognitionTypes: ["text", "document"],
         accelerator: "cpu",
@@ -2958,6 +2972,10 @@ describe("AppShell", () => {
       },
       {
         id: "paddleocr-ort-cuda",
+        engine: "paddle",
+        family: "paddle-onnx",
+        familyDisplayName: "PaddleOCR ONNX",
+        provider: "CUDAExecutionProvider",
         displayName: "PaddleOCR ONNX · NVIDIA CUDA",
         configuredRecognitionTypes: ["text"],
         accelerator: "nvidia_cuda",
@@ -3130,6 +3148,11 @@ describe("AppShell", () => {
       environmentRecipes: [
         {
           id: "paddleocr-ort-cpu",
+          engine: "paddle",
+          family: "paddle-onnx",
+          familyDisplayName: "PaddleOCR ONNX",
+          provider: "CPUExecutionProvider",
+          defaultRemoteHost: true,
           displayName: "PaddleOCR ONNX · CPU",
           configuredRecognitionTypes: ["text"],
           accelerator: "cpu",
@@ -3137,6 +3160,10 @@ describe("AppShell", () => {
         },
         {
           id: "mineru-cpu",
+          engine: "mineru",
+          family: "mineru",
+          familyDisplayName: "MinerU",
+          provider: "CPUExecutionProvider",
           displayName: "MinerU · CPU",
           configuredRecognitionTypes: ["document"],
           accelerator: "cpu",
@@ -3381,6 +3408,11 @@ describe("AppShell", () => {
       environmentRecipes: [
         {
           id: "paddleocr-ort-cpu",
+          engine: "paddle",
+          family: "paddle-onnx",
+          familyDisplayName: "PaddleOCR ONNX",
+          provider: "CPUExecutionProvider",
+          defaultRemoteHost: true,
           displayName: "PaddleOCR ONNX · CPU",
           configuredRecognitionTypes: ["text"],
           accelerator: "cpu",
@@ -3388,6 +3420,10 @@ describe("AppShell", () => {
         },
         {
           id: "mineru-cpu",
+          engine: "mineru",
+          family: "mineru",
+          familyDisplayName: "MinerU",
+          provider: "CPUExecutionProvider",
           displayName: "MinerU · CPU",
           configuredRecognitionTypes: ["document"],
           accelerator: "cpu",
@@ -3682,6 +3718,11 @@ describe("AppShell", () => {
           environmentRecipes: [
             {
               id: "paddleocr-ort-cpu",
+              engine: "paddle",
+              family: "paddle-onnx",
+              familyDisplayName: "PaddleOCR ONNX",
+              provider: "CPUExecutionProvider",
+              defaultRemoteHost: true,
               displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
@@ -4014,6 +4055,11 @@ describe("AppShell", () => {
           environmentRecipes: [
             {
               id: "paddleocr-ort-cpu",
+              engine: "paddle",
+              family: "paddle-onnx",
+              familyDisplayName: "PaddleOCR ONNX",
+              provider: "CPUExecutionProvider",
+              defaultRemoteHost: true,
               displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
@@ -4021,6 +4067,10 @@ describe("AppShell", () => {
             },
             {
               id: "mineru-cpu",
+              engine: "mineru",
+              family: "mineru",
+              familyDisplayName: "MinerU",
+              provider: "CPUExecutionProvider",
               displayName: "MinerU · CPU",
               configuredRecognitionTypes: ["document"],
               accelerator: "cpu",
@@ -4147,6 +4197,7 @@ describe("AppShell", () => {
                 {
                   kind: "paddleocr_model_registry",
                   id: "paddleocr-huggingface",
+                  provider: "huggingface",
                   displayName: "Hugging Face",
                   origin: "product_default",
                 },
@@ -4175,6 +4226,7 @@ describe("AppShell", () => {
                 {
                   kind: "paddleocr_model_registry",
                   id: "paddleocr-modelscope",
+                  provider: "modelscope",
                   displayName: "ModelScope",
                   origin: "environment_override",
                 },
@@ -4185,6 +4237,11 @@ describe("AppShell", () => {
           environmentRecipes: [
             {
               id: "paddleocr-ort-cpu",
+              engine: "paddle",
+              family: "paddle-onnx",
+              familyDisplayName: "PaddleOCR ONNX",
+              provider: "CPUExecutionProvider",
+              defaultRemoteHost: true,
               displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",
@@ -4208,30 +4265,35 @@ describe("AppShell", () => {
             },
             {
               id: "paddleocr-huggingface",
+              provider: "huggingface",
               kind: "paddleocr_model_registry",
               displayName: "Hugging Face",
               endpoint: "https://huggingface.co",
             },
             {
               id: "paddleocr-modelscope",
+              provider: "modelscope",
               kind: "paddleocr_model_registry",
               displayName: "ModelScope",
               endpoint: "https://www.modelscope.cn",
             },
             {
               id: "paddleocr-bos",
+              provider: "bos",
               kind: "paddleocr_model_registry",
               displayName: "百度 BOS",
               endpoint: "https://paddle-model-ecology.bj.bcebos.com",
             },
             {
               id: "mineru-huggingface",
+              provider: "huggingface",
               kind: "mineru_model_registry",
               displayName: "Hugging Face",
               endpoint: "https://huggingface.co",
             },
             {
               id: "mineru-modelscope",
+              provider: "modelscope",
               kind: "mineru_model_registry",
               displayName: "ModelScope",
               endpoint: "https://www.modelscope.cn",
@@ -4252,12 +4314,14 @@ describe("AppShell", () => {
             {
               kind: "paddleocr_model_registry",
               id: "paddleocr-huggingface",
+              provider: "huggingface",
               displayName: "Hugging Face",
               origin: "product_default",
             },
             {
               kind: "mineru_model_registry",
               id: "mineru-huggingface",
+              provider: "huggingface",
               displayName: "Hugging Face",
               origin: "product_default",
             },
@@ -4390,6 +4454,11 @@ describe("AppShell", () => {
           environmentRecipes: [
             {
               id: "paddleocr-ort-cpu",
+              engine: "paddle",
+              family: "paddle-onnx",
+              familyDisplayName: "PaddleOCR ONNX",
+              provider: "CPUExecutionProvider",
+              defaultRemoteHost: true,
               displayName: "PaddleOCR ONNX · CPU",
               configuredRecognitionTypes: ["text"],
               accelerator: "cpu",

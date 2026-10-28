@@ -857,3 +857,19 @@ def test_cancel_control_uses_unbuffered_process_pipes(
         assert json.loads(reader.readline()) == {
             "environment_cancel": "accepted" if accepted else "rejected"
         }
+
+
+@pytest.mark.parametrize(
+    "source_id,provider",
+    [
+        ("paddleocr-modelscope", "modelscope"),
+        ("mineru-modelscope", "modelscope"),
+        ("paddleocr-huggingface", "huggingface"),
+        ("mineru-huggingface", "huggingface"),
+        ("tuna-pypi", None),
+    ],
+)
+def test_model_source_provider_is_runtime_owned(source_id, provider):
+    from vibeocr.runtime.environments.runtime_selection import download_source_provider
+
+    assert download_source_provider(source_id) == provider

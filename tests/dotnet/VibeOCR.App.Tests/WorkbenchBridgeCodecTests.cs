@@ -449,7 +449,9 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
           "paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
           ["text"], "cpu", "cpu", "3.13.15", "cp313", "win_amd64",
           "base", ["runtime_host", "paddleocr-ort-base"], "locked-sha",
-          ["paddleocr==3.1.0"], "bundled_pack", "product_bundle", "product_bundle"),
+          ["paddleocr==3.1.0"], "bundled_pack", "product_bundle", "product_bundle",
+          Engine: "paddle", Family: "paddle-onnx", FamilyDisplayName: "PaddleOCR ONNX",
+          Provider: "CPUExecutionProvider", SupportsRemoteHost: true, DefaultRemoteHost: true),
       ],
       EnvironmentHardware: new SettingsEnvironmentHardwareState(
         "unsupported", "nvidia_driver_incompatible", "527.00"),
@@ -473,6 +475,10 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal("paddleocr-ort-cpu", recipe.GetProperty("id").GetString());
     Assert.Equal("PaddleOCR ONNX · CPU", recipe.GetProperty("displayName").GetString());
     Assert.Equal("cpu", recipe.GetProperty("accelerator").GetString());
+    Assert.Equal("paddle", recipe.GetProperty("engine").GetString());
+    Assert.Equal("paddle-onnx", recipe.GetProperty("family").GetString());
+    Assert.Equal("CPUExecutionProvider", recipe.GetProperty("provider").GetString());
+    Assert.True(recipe.GetProperty("defaultRemoteHost").GetBoolean());
     JsonElement hardware = settings.GetProperty("environmentHardware");
     Assert.Equal("unsupported", hardware.GetProperty("nvidiaDriverStatus").GetString());
     Assert.Equal("nvidia_driver_incompatible", hardware.GetProperty("nvidiaDriverReason").GetString());
@@ -512,7 +518,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     // 桥只做协议 id 类型守卫；未知输入拒绝，不降 input validation。
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(
-        json.Replace("mineru-cpu", "made-up-recipe"), sessionId));
+        json.Replace("mineru-cpu", "invalid/recipe"), sessionId));
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(
         json.Replace("\"recipe\": \"mineru-cpu\"", "\"environmentId\": \"abc\""),
@@ -525,6 +531,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
   [InlineData("paddleocr-ort-directml")]
   [InlineData("mineru-cpu")]
   [InlineData("mineru-cuda")]
+  [InlineData("custom.engine+gpu_v2")]
   public void SupportedRecipesReachPrepareFindAndPreview(string recipe)
   {
     Guid session = Guid.NewGuid();
@@ -545,7 +552,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     var command = Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(json, session).Command);
     Assert.Equal("paddleocr-ort-cuda", command.Recipe);
     Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
-      json.Replace("paddleocr-ort-cuda", "made-up-recipe"), session));
+      json.Replace("paddleocr-ort-cuda", "invalid/recipe"), session));
     Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
       CommandJson(session, "settings", "prepareEnvironment", "{}"), session));
   }

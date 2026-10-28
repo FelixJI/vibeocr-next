@@ -23,12 +23,14 @@ const sources = [
   {
     kind: "paddleocr_model_registry",
     id: "paddleocr-huggingface",
+    provider: "huggingface",
     displayName: "Hugging Face",
     endpoint: "https://huggingface.co",
   },
   {
     kind: "paddleocr_model_registry",
     id: "paddleocr-modelscope",
+    provider: "modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
     isDefault: true,
@@ -36,18 +38,21 @@ const sources = [
   {
     kind: "paddleocr_model_registry",
     id: "paddleocr-bos",
+    provider: "bos",
     displayName: "百度 BOS",
     endpoint: "https://paddle-model-ecology.bj.bcebos.com",
   },
   {
     kind: "mineru_model_registry",
     id: "mineru-huggingface",
+    provider: "huggingface",
     displayName: "Hugging Face",
     endpoint: "https://huggingface.co",
   },
   {
     kind: "mineru_model_registry",
     id: "mineru-modelscope",
+    provider: "modelscope",
     displayName: "ModelScope",
     endpoint: "https://www.modelscope.cn",
     isDefault: true,
@@ -60,6 +65,11 @@ const sources = [
 const recipes = [
   {
     id: "paddleocr-ort-cpu",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "CPUExecutionProvider",
+    defaultRemoteHost: true,
     displayName: "PaddleOCR ONNX · CPU",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "cpu",
@@ -69,6 +79,10 @@ const recipes = [
   },
   {
     id: "paddleocr-ort-cuda",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "CUDAExecutionProvider",
     displayName: "PaddleOCR ONNX · NVIDIA CUDA",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "nvidia_cuda",
@@ -78,6 +92,10 @@ const recipes = [
   },
   {
     id: "paddleocr-ort-directml",
+    engine: "paddle",
+    family: "paddle-onnx",
+    familyDisplayName: "PaddleOCR ONNX",
+    provider: "DmlExecutionProvider",
     displayName: "PaddleOCR ONNX · Windows DirectML",
     configuredRecognitionTypes: ["text", "table", "structure"],
     accelerator: "cpu",
@@ -87,6 +105,10 @@ const recipes = [
   },
   {
     id: "mineru-cpu",
+    engine: "mineru",
+    family: "mineru",
+    familyDisplayName: "MinerU",
+    provider: "CPUExecutionProvider",
     displayName: "MinerU · CPU",
     configuredRecognitionTypes: ["document"],
     accelerator: "cpu",
@@ -96,6 +118,10 @@ const recipes = [
   },
   {
     id: "mineru-cuda",
+    engine: "mineru",
+    family: "mineru",
+    familyDisplayName: "MinerU",
+    provider: "CUDAExecutionProvider",
     displayName: "MinerU · NVIDIA CUDA",
     configuredRecognitionTypes: ["document"],
     accelerator: "nvidia_cuda",
@@ -127,12 +153,14 @@ test("converged source setting keeps one simple global choice per kind", async (
           {
             kind: "paddleocr_model_registry",
             id: "paddleocr-modelscope",
+            provider: "modelscope",
             displayName: "ModelScope",
             origin: "product_default",
           },
           {
             kind: "mineru_model_registry",
             id: "mineru-modelscope",
+            provider: "modelscope",
             displayName: "ModelScope",
             origin: "product_default",
           },
