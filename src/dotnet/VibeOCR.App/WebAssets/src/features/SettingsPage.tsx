@@ -1190,9 +1190,8 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               </>
             )}
             <p>当前服务：{serviceText}</p>
-            {/* #294：managed 分支不再渲染旧 RuntimeStatus 维护投影，避免把
-                legacy 健康/idle 当成环境维护结果；维护状态由环境行、安装
-                进度与清理结果各自承载。legacy capability 分支保留原样。 */}
+            {/* #294：旧 RuntimeStatus 维护投影只在 legacy 分支渲染，
+                避免 legacy 健康/idle 被当成 managed 环境维护结果。 */}
             {!managedEnvironmentsAvailable ? (
               <>
                 <p>本次维护：{maintenanceLine}</p>
@@ -1281,9 +1280,8 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               {/* 安装进度是操作状态而非设置项，保留在折叠区外可见；空闲时
                   自身不渲染。 */}
               <EnvironmentInstallDetails state={state} />
-              {/* #294：环境清单、来源与空间清理是常规维护能力，直接呈现；
-                  仅包清单/长日志/路径等技术详情在各自区块内折叠，必需
-                  按钮不随技术详情隐藏。 */}
+              {/* #294：环境清单/来源/清理是常规维护能力，直接呈现；技术
+                  详情只在各自区块内折叠，必需按钮不随之隐藏。 */}
               <InstalledEnvironmentList
                 state={state}
                 actions={actions}
@@ -1643,9 +1641,8 @@ function InstalledEnvironmentList({
   );
 }
 
-// 具名空环境是显式管理操作（#294）：仅供隔离配置/手动排查等可控用途，
-// 不插入普通安装必经路径（普通准备自动复用或创建目标环境，无需命名）；
-// 创建后仍是空环境，不安装任何依赖，也不改变默认识别模式或在途任务。
+// 具名空环境是可选管理操作（#294）：不插入普通安装必经路径（普通准备
+// 自动复用或创建目标环境，无需命名），创建后仍是空环境。
 function EmptyEnvironmentCreator({
   busy,
   actions,
@@ -1951,8 +1948,10 @@ interface EnvironmentInstallProgress {
   }[];
   readonly download_files_total: number | null;
   readonly download_files_completed: number;
-  // 当前下载工件的字节测量（bytes_current/bytes_total）；总量未知时
-  // bytes_total 为 null，只显示已传字节，不造百分比或总下载量。
+  // 当前依赖下载批次的字节累计（bytes_current 跨待下载工件累加，
+  // bytes_total 为全部待下载工件 Content-Length 之和；任一未知则为
+  // null）。只覆盖依赖工件下载，不含模型、CUDA 插件与隔离构建临时
+  // 依赖；未知分母不造百分比。
   readonly bytes_current?: number;
   readonly bytes_total?: number | null;
 }
@@ -2046,7 +2045,7 @@ function EnvironmentInstallDetails({
         {progress.dependency_total_known
           ? progress.dependencies.length
           : "未知"}{" "}
-        项｜当前下载工件已传{" "}
+        项｜当前依赖下载批次累计{" "}
         {typeof progress.bytes_current === "number"
           ? formatBytes(progress.bytes_current)
           : "未知"}
@@ -2060,8 +2059,10 @@ function EnvironmentInstallDetails({
       </p>
       <p className="form-note">
         包数与下载文件数分别统计；Python 和内部 Runtime wheel
-        随产品提供，模型尚未下载。安装批次成功后才确认依赖，整体完成须通过验证与提交。
-        源分发包的隔离构建临时依赖按所选来源获取，单独于目标包与目标工件下载数量。
+        随产品提供，模型尚未下载。字节是当前依赖下载批次的累计（跨待下载
+        工件累加），不含模型、CUDA 插件与源分发包隔离构建临时依赖；总量
+        未知时不显示百分比。安装批次成功后才确认依赖，整体完成须通过验证
+        与提交。
       </p>
       <details>
         <summary>依赖状态（只读）</summary>

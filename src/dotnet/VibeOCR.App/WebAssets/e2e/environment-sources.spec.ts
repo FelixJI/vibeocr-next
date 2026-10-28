@@ -940,11 +940,32 @@ test("install progress shows measured artifact bytes without a fake percentage",
   const panel = page.getByRole("region", { name: "依赖安装进度" });
   // 总量未知：显示已传字节与“总量未知”，不造百分比或总下载量。
   await expect(panel).toHaveAttribute("data-install-bytes-total", "unknown");
-  await expect(panel).toContainText("当前下载工件已传 2 KiB（总量未知）");
+  await expect(panel).toContainText("当前依赖下载批次累计 2 KiB（总量未知）");
+  // 字节跨待下载工件累计（received 汇总，total 为全部 HEAD 和）：切换到
+  // 下一个工件时累计继续增长，不重置为单工件计数。
   await sendState(page, "settings", {
     ...base,
-    environmentInstallProgress: { ...progress, seq: 4, bytes_total: 4096 },
+    environmentInstallProgress: {
+      ...progress,
+      seq: 4,
+      bytes_current: 3072,
+      bytes_total: 4096,
+      dependencies: [
+        {
+          name: "a",
+          version: "1",
+          download_state: "downloaded",
+          install_state: "pending",
+        },
+        {
+          name: "b",
+          version: "2",
+          download_state: "downloading",
+          install_state: "pending",
+        },
+      ],
+    },
   });
   await expect(panel).toHaveAttribute("data-install-bytes-total", "4096");
-  await expect(panel).toContainText("当前下载工件已传 2 KiB / 4 KiB");
+  await expect(panel).toContainText("当前依赖下载批次累计 3 KiB / 4 KiB");
 });

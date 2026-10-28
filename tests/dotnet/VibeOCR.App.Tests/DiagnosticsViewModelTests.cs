@@ -427,7 +427,12 @@ public sealed class DiagnosticsViewModelTests
         "2026-10-08T00:00:01Z [install/stderr] Authorization: Bearer eyJhbGciOi.abc.def",
         "2026-10-08T00:00:01Z [download/stdout] Bearer standalone-token-xyz",
         "2026-10-08T00:00:02Z [download/stdout] api_key=sk-live-123456 && token=tok-987 && apikey: quoted-secret",
-        "2026-10-08T00:00:03Z [verify/stdout] 使用路径 C:\\Users\\felji\\cache 验证完成",
+        "2026-10-08T00:00:03Z [download/stdout] Authorization: Basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ=",
+        "2026-10-08T00:00:04Z [install/stderr] Authorization=[redacted] b3RoZXItaGlzdG9yeS1yZXNpZHVl",
+        "2026-10-08T00:00:05Z [install/stderr] authorization: <redacted> b3RoZXItaGlzdG9yeS1yZXNpZHVl",
+        "2026-10-08T00:00:06Z [download/stdout] {\"Authorization\": \"Basic anNvbi1jcmVkZW50aWFs\"}",
+        "2026-10-08T00:00:07Z [verify/stdout] Authorization: \"Basic cXVvdGVkLWNyZWQ=\"",
+        "2026-10-08T00:00:08Z [verify/stdout] 使用路径 C:\\Users\\felji\\cache 验证完成",
       ]);
 
     using JsonDocument document = JsonDocument.Parse(viewModel.BuildRedactedExportJson());
@@ -442,9 +447,16 @@ public sealed class DiagnosticsViewModelTests
     Assert.DoesNotContain("sk-live-123456", joined);
     Assert.DoesNotContain("tok-987", joined);
     Assert.DoesNotContain("quoted-secret", joined);
+    // Basic 完整负载与历史半脱敏残值（含 JSON/引号形式）绝不残留。
+    Assert.DoesNotContain("c3ludGhldGljLXVzZXI6cGFzc3dvcmQ", joined);
+    Assert.DoesNotContain("b3RoZXItaGlzdG9yeS1yZXNpZHVl", joined);
+    Assert.DoesNotContain("anNvbi1jcmVkZW50aWFs", joined);
+    Assert.DoesNotContain("cXVvdGVkLWNyZWQ", joined);
     Assert.DoesNotContain("C:\\Users", joined);
     Assert.Contains("https://<redacted>@mirror.example.com", joined);
     Assert.Contains("Authorization: <redacted>", joined);
+    Assert.Contains("Authorization=<redacted>", joined);
+    Assert.Contains("authorization: <redacted>", joined);
     Assert.Contains("Bearer <redacted>", joined);
     Assert.Contains("api_key=<redacted>", joined);
     Assert.Contains("token=<redacted>", joined);

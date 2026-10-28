@@ -48,8 +48,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         _repair = repair ?? (static (_, _) => Task.CompletedTask);
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
         _deviceEvidence = deviceEvidence;
-        // 只读有界快照 provider：每次文档构建只调用一次，返回宿主持有的
-        // 同一安装日志快照（日志行自带时间戳/阶段，无需另造进度 DTO）。
+        // 单一只读快照 provider：日志行自带时间戳/阶段，无需另造 DTO。
         _environmentInstallLog = environmentInstallLog;
     }
 
@@ -276,11 +275,11 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
             return null;
         }
 
-        // 最小凭据脱敏：token/password/secret/authorization/api key 赋值、
-        // 独立 Bearer 令牌、URL 内嵌认证三元组。Runtime 侧已在源头脱敏，
-        // 这里覆盖复制/导出文档这一真实出口的补漏；MinerU 明文 Key 本就
-        // 不过桥，不进入诊断文档。
+        // 最小凭据脱敏：token/password/secret/authorization/api key 赋值
+        // （含 Basic/Bearer 完整负载与旧版半脱敏残值）、独立 Bearer、URL
+        // 内嵌认证；MinerU 明文 Key 不过桥，不进入诊断文档。
         string sanitized = Credential().Replace(value, "$1$2<redacted>");
+        sanitized = AuthorizationResidue().Replace(sanitized, "$1$2<redacted>");
         sanitized = BearerToken().Replace(sanitized, "Bearer <redacted>");
         sanitized = UrlCredential().Replace(sanitized, "$1<redacted>@");
         return WindowsPath().Replace(sanitized, "<redacted>");
@@ -292,8 +291,11 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     [GeneratedRegex("^T[0-6]$", RegexOptions.CultureInvariant)]
     private static partial Regex StartupName();
 
-    [GeneratedRegex("(?i)\\b([\\w-]*(?:token|password|secret|authorization|api[_-]?key))([\"']?\\s*[:=]\\s*)(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|(?:Bearer\\s+)?[^\\s,;\"]+)")]
+    [GeneratedRegex("(?i)\\b([\\w-]*(?:token|password|secret|authorization|api[_-]?key))([\"']?\\s*[:=]\\s*)(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|(?:Bearer\\s+|Basic\\s+)?[^\\s,;\"]+)")]
     private static partial Regex Credential();
+
+    [GeneratedRegex("(?i)\\b(authorization)([\"']?\\s*[:=]\\s*)(?:<redacted>|\\[redacted\\])\\s*[^\\s,;\"]+")]
+    private static partial Regex AuthorizationResidue();
 
     [GeneratedRegex("(?i)\\bBearer\\s+\\S+")]
     private static partial Regex BearerToken();

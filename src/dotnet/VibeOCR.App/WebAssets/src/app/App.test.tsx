@@ -2605,7 +2605,7 @@ describe("AppShell", () => {
     expect(
       screen.getByRole("region", { name: "依赖安装进度" }),
     ).toHaveTextContent(
-      "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项｜当前下载工件已传 2 KiB（总量未知）",
+      "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项｜当前依赖下载批次累计 2 KiB（总量未知）",
     );
     await userEvent.click(
       screen.getByText("实时命令输出（只读，最多保留 200 行，超限截断）"),
@@ -2662,7 +2662,7 @@ describe("AppShell", () => {
     expect(panel).toHaveAttribute("data-install-bytes-current", "4096");
     expect(panel).toHaveAttribute("data-install-bytes-total", "4096");
     expect(panel).toHaveTextContent("批次已安装 2/2 项");
-    expect(panel).toHaveTextContent("当前下载工件已传 4 KiB / 4 KiB");
+    expect(panel).toHaveTextContent("当前依赖下载批次累计 4 KiB / 4 KiB");
     expect(actions.run).not.toHaveBeenCalled();
     second.unmount();
   });
@@ -2751,6 +2751,41 @@ describe("AppShell", () => {
     );
     expect(screen.getByLabelText("环境名称")).toBeDisabled();
     expect(screen.getByRole("button", { name: "创建空环境" })).toBeDisabled();
+  });
+
+  it("keeps the empty-environment entry single-shot and preserves input on failure", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    let release: ((value: boolean) => void) | undefined;
+    const run = vi.fn().mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "已连接",
+      features: { settings: { environments: [], environmentBusy: false } },
+    };
+    await renderLoaded(<App actions={actions} viewState={viewState} />);
+    await user.type(screen.getByLabelText("环境名称"), "手动隔离");
+    // 回执未到时重复点击：只发出一次创建命令。
+    const create = screen.getByRole("button", { name: "创建空环境" });
+    fireEvent.click(create);
+    fireEvent.click(create);
+    expect(run).toHaveBeenCalledTimes(1);
+    act(() => release!(false));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "创建空环境" })).toBeEnabled(),
+    );
+    // 失败保留输入，便于修正后重试。
+    expect(screen.getByLabelText("环境名称")).toHaveValue("手动隔离");
   });
 
   it("requires explicit cleanup selection and confirmation while protecting shared resources", async () => {

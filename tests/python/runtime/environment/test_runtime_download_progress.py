@@ -413,6 +413,10 @@ def test_heartbeat_keeps_last_real_activity_and_progress(tmp_path, monkeypatch):
         '{"client_secret": "synthetic-credential"}',
         'accessToken="synthetic-credential"',
         "X-API-Key: synthetic-credential",
+        "Authorization: Basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ=",
+        "authorization: basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ=",
+        'Authorization: "Basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ="',
+        '{"Authorization": "Basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ="}',
     ],
 )
 def test_credential_key_families_are_redacted_before_durable_public_events(
