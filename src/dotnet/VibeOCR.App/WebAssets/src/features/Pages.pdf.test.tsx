@@ -72,6 +72,10 @@ function setup(
     },
   };
   const view = render(<PdfPage viewState={state} actions={actions} />);
+  // 低频页操作/插入/参数收进“高级与导出”：默认展开供各用例直接触达；
+  // 空状态不渲染该入口。
+  const advanced = screen.queryByText("高级与导出");
+  if (advanced) fireEvent.click(advanced);
   return Object.assign(actions, {
     unmount: () => view.unmount(),
     openFromNative: () =>
@@ -114,7 +118,7 @@ describe("PDF text layer actions", () => {
   it("uses explicit ranges for both directions and prevents empty-selection book rotation", () => {
     const actions = setup({ selectedPages: [] });
     expect(screen.getByRole("button", { name: "逆时针 90°" })).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("页面处理范围"), {
+    fireEvent.change(screen.getByLabelText("方向操作范围"), {
       target: { value: "all" },
     });
     fireEvent.click(screen.getByRole("button", { name: "逆时针 90°" }));
@@ -306,7 +310,14 @@ it.each([
     // 关闭前先等待预览状态排空完成，命令异步发出。
     await waitFor(() => expect(actions.run).toHaveBeenLastCalledWith(command));
     actions.updatePdf(patch);
-    expect(screen.getByText("选择页面后查看预览。")).toBeInTheDocument();
+    // 关闭文档后主区回到空状态；仅取消选择时保留预览占位。
+    if ((patch as { pageCount?: number }).pageCount === 0) {
+      expect(
+        screen.getByText("打开 PDF 后在此检查页面、提取结果并添加文字层。"),
+      ).toBeInTheDocument();
+    } else {
+      expect(screen.getByText("选择页面后查看预览。")).toBeInTheDocument();
+    }
     expect(
       screen.queryByRole("button", { name: "适应页面" }),
     ).not.toBeInTheDocument();
@@ -361,7 +372,7 @@ describe("PDF close retry entry", () => {
     });
   });
 
-  it("keeps close disabled for an actually empty workspace without failed documents", () => {
+  it("only offers open for an actually empty workspace without failed documents", () => {
     setup({
       sessionId: undefined,
       pageCount: 0,
@@ -370,7 +381,15 @@ describe("PDF close retry entry", () => {
       pages: [],
       documents: [],
     });
-    expect(screen.getByRole("button", { name: "关闭文档" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "关闭文档" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^保存$/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /^页面$/ }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -617,7 +636,6 @@ describe("PDF copy export status", () => {
       ],
       exportItems: exportDocuments,
     });
-    fireEvent.click(screen.getByText("批量导出副本"));
     const item = screen
       .getAllByText(/b\.pdf/)
       .find((element) => element.tagName === "LI");
@@ -638,7 +656,6 @@ describe("PDF copy export status", () => {
       ],
       exportItems: exportDocuments,
     });
-    fireEvent.click(screen.getByText("批量导出副本"));
     expect(screen.getByRole("button", { name: "重试未完成项" })).toBeDisabled();
     actions.updatePdf({
       exportItems: [

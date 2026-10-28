@@ -59,7 +59,7 @@ interface AnnotationFormatHost {
 }
 
 /** 两个编码测试共享的前置：视口、真实上传收集与 80×40 半透明 SVG 源挂载，
- *  确认实时画布、原图信息行与按需检查入口可见（无第二幅常驻预览）。 */
+ *  确认实时画布与按需检查入口可见，展开图像信息验证编码（无第二幅常驻预览）。 */
 async function setupAnnotationFormatHost(
   page: Page,
   sourceSvg?: string,
@@ -111,6 +111,7 @@ async function setupAnnotationFormatHost(
 
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/原图 80×40/)).toBeVisible();
   await expect(
     page.getByRole("button", { name: "检查文件大小" }),

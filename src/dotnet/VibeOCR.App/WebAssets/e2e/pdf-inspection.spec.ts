@@ -245,7 +245,7 @@ test("same named PDF documents bind commands and restore only their own draft at
     },
   });
   await expect(page.getByLabel("校正文字")).toHaveValue("ONLY A DRAFT202");
-  await page.locator("details.pdf-export summary").click();
+  await page.getByText("高级与导出", { exact: true }).click();
   await expect(
     page.getByText(/导出副本保留原文档修改状态和保存目标/),
   ).toBeVisible();

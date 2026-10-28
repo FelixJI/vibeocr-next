@@ -120,7 +120,9 @@ for (const [label, modeId] of [
     await expect(canvas).toBeVisible();
     // 旋转成竖图 + 真实标注 + 部分遮罩：全部由生产编辑器完成。
     await page.getByRole("button", { name: "旋转 90°" }).click();
+    await page.getByText("使用帮助与图像信息").click();
     await expect(page.getByText(/输出 40×80/)).toBeVisible();
+    await page.getByText("使用帮助与图像信息").click();
     await page.getByRole("button", { name: "矩形" }).click();
     await canvas.scrollIntoViewIfNeeded();
     const box = async () => (await canvas.boundingBox())!;
@@ -220,7 +222,7 @@ for (const [label, modeId] of [
     // 识别页：冻结基准保持已编辑普通像素（40×80，非原图 80×40），
     // 遮罩标记已重建且可清除；不再退回原图。
     await page.getByRole("button", { name: "编辑图片", exact: true }).click();
-    await expect(page.getByText(/原图 40×80/)).toBeVisible();
+    await expect(page.getByText(/原图 40×80/)).toBeAttached();
     const clearMask = page.getByRole("button", { name: "清空屏蔽" });
     await expect(clearMask).toBeEnabled();
     await clearMask.click();

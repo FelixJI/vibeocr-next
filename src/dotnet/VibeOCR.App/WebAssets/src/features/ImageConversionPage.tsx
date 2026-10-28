@@ -31,9 +31,7 @@ export function ImageConversionPage({ viewState, actions }: FeatureProps) {
   const available = viewState.capabilities.includes("imageConversion.convert");
   return (
     <Workspace
-      eyebrow="IMAGE CONVERSION"
       title="图像转换"
-      description="批量转换图片格式、质量和尺寸；使用独立队列，无需进行文字识别。"
       actions={
         <>
           <CapabilityGate
@@ -60,7 +58,7 @@ export function ImageConversionPage({ viewState, actions }: FeatureProps) {
       }
     >
       <div className="image-conversion-workspace">
-        <Panel label="IMAGES" title="转换队列">
+        <Panel title="转换队列">
           <p>{count} 张图片</p>
           {count === 0 ? (
             <EmptyStage
@@ -155,7 +153,7 @@ export function ImageConversionPage({ viewState, actions }: FeatureProps) {
             </>
           )}
         </Panel>
-        <Panel label="OUTPUT" title="转换与输出">
+        <Panel title="转换与输出">
           <ImageConversionExport
             state={state}
             settings={feature(viewState, "settings")}

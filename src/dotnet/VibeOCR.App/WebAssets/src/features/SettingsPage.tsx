@@ -1090,7 +1090,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const recognition = mineruRecognition(state.mineruRecognition);
   const defaultMode = defaultRecognitionMode(state.defaultRecognitionMode);
   return (
-    <Workspace title="设置">
+    <Workspace title="设置" className="reading-limited">
       <div className="settings-grid">
         <Panel title="应用" className="settings-app-panel">
           <div className="setting-row">

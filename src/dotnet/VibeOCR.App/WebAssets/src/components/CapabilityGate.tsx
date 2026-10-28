@@ -1,5 +1,5 @@
 import { Button, Tooltip } from "@fluentui/react-components";
-import type { ReactElement, ReactNode } from "react";
+import { useId, type ReactElement, type ReactNode } from "react";
 
 import type { AppAction, AppActions } from "../app/types";
 
@@ -23,14 +23,16 @@ export function CapabilityGate({
   disabled,
   ...buttonProps
 }: CapabilityGateProps) {
+  // 原因按需展示并保留键盘访问；同一能力的多个入口使用独立描述 id。
+  const noteId = useId();
   const available = capabilities.includes(capability);
-  const blocked = disabled || !available;
   const reason = `此功能需要宿主能力：${capability}`;
   const button = (
     <Button
       {...buttonProps}
-      aria-describedby={blocked ? `${capability}-capability` : undefined}
-      disabled={blocked}
+      aria-describedby={available ? undefined : noteId}
+      disabled={disabled || !available}
+      disabledFocusable={!available}
       onClick={() => actions.run(action)}
     >
       {children}
@@ -39,13 +41,13 @@ export function CapabilityGate({
 
   if (available) return button;
   return (
-    <span className="capability-gate">
-      <Tooltip content="宿主能力不可用" relationship="description">
+    <>
+      <Tooltip content={reason} relationship="description">
         {button}
       </Tooltip>
-      <span className="capability-note" id={`${capability}-capability`}>
+      <span className="capability-note" id={noteId}>
         {reason}
       </span>
-    </span>
+    </>
   );
 }

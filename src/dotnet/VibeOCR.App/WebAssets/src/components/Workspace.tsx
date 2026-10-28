@@ -2,33 +2,22 @@ import type { ReactNode } from "react";
 
 interface WorkspaceProps {
   readonly className?: string;
-  readonly eyebrow?: string;
   readonly title: string;
-  readonly description?: string;
   readonly actions?: ReactNode;
   readonly children: ReactNode;
 }
 
 export function Workspace({
   className,
-  eyebrow,
   title,
-  description,
   actions,
   children,
 }: WorkspaceProps) {
   return (
-    <section
-      className={`workspace ${className ?? ""}`}
-      aria-labelledby={`${title}-heading`}
-    >
+    <section className={`workspace ${className ?? ""}`} aria-label={title}>
       <header className="workspace-header">
         <div>
-          {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
-          <h1 id={`${title}-heading`}>{title}</h1>
-          {description ? (
-            <p className="workspace-description">{description}</p>
-          ) : null}
+          <h1>{title}</h1>
         </div>
         {actions ? <div className="workspace-actions">{actions}</div> : null}
       </header>

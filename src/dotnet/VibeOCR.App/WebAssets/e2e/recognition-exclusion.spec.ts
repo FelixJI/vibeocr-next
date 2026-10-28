@@ -126,6 +126,8 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
+  // 图像信息收进“使用帮助与图像信息”：展开后断言尺寸。
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/原图 160×80/)).toBeVisible();
   // 固定自动准备先完成，再验证显式识别/保存各自的上传。
   const initialText = await uploads.forRevision(
@@ -140,14 +142,17 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await uploads.waitForDiscard(initialText.resourceUri);
 
   // 先编辑后识别入口：识别面专用 recognition 命令（宿主在 recognition
-  // scope 创建同一会话/修订），不再借用 imageEdit scope；直接识别入口不变。
-  await page.getByRole("button", { name: "选图编辑" }).click();
+  // scope 创建同一会话/修订），不再借用 imageEdit scope；直接识别入口
+  // 不变。入口收在图片面板的“编辑导入”菜单里，展开后触发。
+  await page.getByRole("button", { name: "编辑导入" }).click();
+  await page.getByRole("menuitem", { name: "选图编辑" }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "openImageForEdit",
     arguments: {},
   });
-  await page.getByRole("button", { name: "粘贴编辑" }).click();
+  await page.getByRole("button", { name: "编辑导入" }).click();
+  await page.getByRole("menuitem", { name: "粘贴编辑" }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "pasteImageForEdit",

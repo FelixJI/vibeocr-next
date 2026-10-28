@@ -202,20 +202,22 @@ test("reading order renders real content and block actions use original indexes"
     exact: true,
   });
   const panelBox = await resultPanel.boundingBox();
+  // 多格式导出收纳进“导出”菜单：触发器常驻结果面板内，条目展开后可达。
+  const exportTrigger = page.getByRole("button", { name: "导出", exact: true });
+  await expect(exportTrigger).toBeVisible();
+  const triggerBox = await exportTrigger.boundingBox();
+  expect(triggerBox!.x).toBeGreaterThanOrEqual(panelBox!.x);
+  expect(triggerBox!.x + triggerBox!.width).toBeLessThanOrEqual(
+    panelBox!.x + panelBox!.width,
+  );
+  expect(triggerBox!.height).toBeLessThanOrEqual(36);
+  await exportTrigger.click();
   for (const format of ["Markdown", "Word", "Excel"]) {
-    const button = page.getByRole("button", {
-      name: `导出 ${format}`,
-      exact: true,
-    });
-    await expect(button).toBeVisible();
-    const box = await button.boundingBox();
-    expect(box!.x).toBeGreaterThanOrEqual(panelBox!.x);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(
-      panelBox!.x + panelBox!.width,
-    );
-    expect(box!.height).toBeLessThanOrEqual(36);
+    await expect(
+      page.getByRole("menuitem", { name: format, exact: true }),
+    ).toBeVisible();
   }
-  await page.getByRole("button", { name: "导出 Word" }).click();
+  await page.getByRole("menuitem", { name: "Word", exact: true }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "export",

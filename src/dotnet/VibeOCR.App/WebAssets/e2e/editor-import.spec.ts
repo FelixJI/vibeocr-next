@@ -124,7 +124,7 @@ for (const scope of ["imageEdit", "recognition"] as const) {
     );
     await expect(
       page.getByText("原图 900×600", { exact: false }),
-    ).toBeVisible();
+    ).toBeAttached();
     await action(page, "粘贴系统内容");
     await expectCommand(page, {
       scope,
@@ -447,7 +447,7 @@ test("图片编辑离开设置再返回释放满额资源并可再次导入", as
     },
   });
   await page.getByRole("link", { name: "图片编辑", exact: true }).click();
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   await expect(list).toHaveCount(0);
   await sendState(page, "imageEdit", {
     ...resumed,
@@ -527,7 +527,7 @@ test("merge integration imported pixels survive cached preview, brush sampling a
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  await expect(page.getByText(/原图 900×600/)).toBeAttached();
   await sendState(page, "imageEdit", {
     ...state,
     import: {

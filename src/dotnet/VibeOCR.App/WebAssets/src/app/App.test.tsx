@@ -538,12 +538,10 @@ describe("AppShell", () => {
     expect(
       await screen.findByRole("heading", { name: "批量识别" }),
     ).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "导出全部 Markdown" }),
-    ).toBeDisabled();
-    expect(
-      screen.getAllByText("此功能需要宿主能力：batch.export"),
-    ).toHaveLength(3);
+    // 多格式导出收纳进“导出全部”菜单：未完成项时触发器禁用，
+    // 能力缺失原因不占布局（视觉隐藏描述 + Tooltip）。
+    expect(screen.getByRole("button", { name: "导出全部" })).toBeDisabled();
+    expect(screen.queryByRole("menuitem", { name: "Markdown" })).toBeNull();
 
     unmount();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -707,6 +705,7 @@ describe("AppShell", () => {
     });
     await user.click(screen.getByRole("tab", { name: "识别" }));
     // 解码能力说明基于预装解码器的真实支持清单，不再误导“取决于已安装解码器”。
+    await user.click(screen.getByText("支持的格式"));
     expect(screen.getByText(/解码能力已随产品预装/)).toBeVisible();
     expect(screen.queryByText(/取决于已安装解码器/)).not.toBeInTheDocument();
     expect(actions.run).toHaveBeenCalledWith({
@@ -952,6 +951,8 @@ describe("AppShell", () => {
     expect(screen.queryByRole("button", { name: "文字" })).toBeNull();
     expect(screen.getByRole("button", { name: "复制标注图" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "保存标注图" })).toBeEnabled();
+    // 静态用法收进“使用帮助与图像信息”：展开后仍可读。
+    fireEvent.click(screen.getByText("使用帮助与图像信息"));
     expect(
       screen.getByText(/拖拽框选“屏蔽”区，识别时忽略其中内容/),
     ).toBeVisible();
@@ -2419,6 +2420,8 @@ describe("AppShell", () => {
         }}
       />,
     );
+    // 生命周期技术提示收纳在“高级选项”折叠区：展开后仍完整可读。
+    fireEvent.click(screen.getByText("高级选项"));
     expect(
       screen.getByText(
         "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
@@ -2525,6 +2528,7 @@ describe("AppShell", () => {
       (option) => (option as HTMLOptionElement).value,
     );
     expect(grouped).toEqual(["paddle_table"]);
+    fireEvent.click(screen.getByText("高级选项"));
     expect(
       screen.getByText(
         "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
@@ -4536,7 +4540,8 @@ describe("AppShell", () => {
         name: "跟随默认（Windows OCR（系统内置））",
       }),
     ).toBeInTheDocument();
-    // 可点击入口直达设置页的默认识别模式区。
+    // 可点击入口直达设置页的默认识别模式区（收纳在高级选项内）。
+    await user.click(screen.getByText("高级选项"));
     await user.click(screen.getByRole("button", { name: "修改默认识别类型" }));
     expect(actions.navigate).toHaveBeenCalledWith("settings");
     unmount();

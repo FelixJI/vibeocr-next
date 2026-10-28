@@ -189,7 +189,7 @@ async function setup(
   );
   await expect(
     page.getByText(new RegExp(`原图 ${size.width}×${size.height}`)),
-  ).toBeVisible();
+  ).toBeAttached();
   const automatic = await uploads.forRevision("prepareScreenshotTextLayer", 0);
   await uploads.waitForDiscard(automatic.resourceUri);
   return { uploads, projects, state, imported };
@@ -631,9 +631,7 @@ test("批量逐张复用预设，JPEG 白底，部分失败保留成功并保留
   await expect(
     page.getByText("已成功文件保留", { exact: false }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "导出全部 Markdown" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "导出全部" })).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "图像转换", exact: true }),
   ).toBeVisible();

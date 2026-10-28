@@ -33,7 +33,9 @@ test("narrow PDF page operations remain keyboard reachable and keep explicit sco
       },
     },
   });
-  await page.getByLabel("页面处理范围").selectOption("all");
+  // 方向三件套收进“高级与导出”：先展开再操作。
+  await page.getByText("高级与导出").click();
+  await page.getByLabel("方向操作范围").selectOption("all");
   const reverse = page.getByRole("button", { name: "逆时针 90°" });
   await reverse.focus();
   await reverse.press("Enter");
@@ -56,6 +58,7 @@ test("narrow PDF page operations remain keyboard reachable and keep explicit sco
     action: "selectAll",
     arguments: { selected: true },
   });
+  // 插入输入在已展开的高级区内：直接可达。
   await expect(page.getByLabel("插入到第几页后（0 为开头）")).toBeVisible();
   await page.getByLabel("插入到第几页后（0 为开头）").fill("129");
   await page.getByLabel("空白页宽度 pt").fill("640");
@@ -113,9 +116,17 @@ test("public drag reorders a PDF page with its revision", async ({ page }) => {
       },
     },
   });
-  await page
-    .locator('[data-page-index="0"]')
-    .dragTo(page.locator('[data-page-index="1"]'));
+  const source = (await page.locator('[data-page-index="0"]').boundingBox())!;
+  const target = (await page.locator('[data-page-index="1"]').boundingBox())!;
+  const list = (await page.getByLabel("PDF 页面缩略图").boundingBox())!;
+  // 侧栏内部滚动时第二页仅顶部可见：拖到可见区域，不滚动到卡片中心。
+  expect(target.y + 8).toBeLessThan(list.y + list.height);
+  await page.mouse.move(source.x + source.width / 2, source.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width / 2, target.y + 8, {
+    steps: 10,
+  });
+  await page.mouse.up();
   await expectCommand(page, {
     scope: "pdf",
     action: "movePage",

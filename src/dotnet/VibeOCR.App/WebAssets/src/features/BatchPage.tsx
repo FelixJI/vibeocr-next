@@ -1,14 +1,21 @@
-import { Badge, Button, Input, ProgressBar } from "@fluentui/react-components";
+import {
+  Badge,
+  Button,
+  Input,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
+  ProgressBar,
+} from "@fluentui/react-components";
 
 import {
   ArrowDown,
   ArrowUp,
   Download,
-  FileSpreadsheet,
   FilePlus2,
   Play,
-  ScanText,
-  FileText,
   Square,
   Trash2,
 } from "lucide-react";
@@ -80,6 +87,9 @@ function batchItemLabel(statusCode: string): string {
   return labels[statusCode] ?? "未知";
 }
 
+const PAGE_RANGE_HINT =
+  "页码从 1 开始；留空沿用 MinerU 默认范围，其他管道默认全部。图片按单页处理。";
+
 export function BatchPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "batch");
   const itemCount = numberValue(state.itemCount);
@@ -102,9 +112,8 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
   const inspectedText = useResourceText(inspectedStructured);
   return (
     <Workspace
-      eyebrow="QUEUE / 02"
+      className="batch-workspace"
       title="批量识别"
-      description="按队列处理图片与文档，并集中检查单项结果。"
       actions={
         <>
           <CapabilityGate
@@ -157,7 +166,7 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
         scope="batch"
       />
       <div className="collection-workspace">
-        <Panel label="QUEUE" title="文件队列">
+        <Panel title="文件队列">
           <div className="queue-summary">
             <span>{itemCount} 个文件</span>
             <Badge appearance="tint">
@@ -170,9 +179,8 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                     : "等待输入"}
             </Badge>
           </div>
-          <p className="batch-scheduling-note">
-            页码从 1 开始；留空沿用 MinerU
-            默认范围，其他管道默认全部。图片按单页处理。
+          <p className="capability-note" id="batch-page-range-hint">
+            {PAGE_RANGE_HINT}
           </p>
           {inputKindNotice && (
             <p role="status" className="batch-scheduling-note">
@@ -207,6 +215,8 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                           key={`${item.id}-${item.pageRange ?? ""}`}
                           size="small"
                           aria-label={`${item.name} 的页码范围`}
+                          aria-describedby="batch-page-range-hint"
+                          title={PAGE_RANGE_HINT}
                           placeholder="默认页码（all 或 1,3-5）"
                           defaultValue={item.pageRange ?? ""}
                           disabled={queueLocked}
@@ -227,10 +237,11 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
                       {resource(item.structuredResult) && (
                         <Button
                           appearance="subtle"
+                          size="small"
                           aria-label={`查看 ${item.name} 的结构化结果`}
                           onClick={() => setInspectId(item.id)}
                         >
-                          <ScanText aria-hidden="true" size={15} />
+                          查看结果
                         </Button>
                       )}
                       <Button
@@ -317,7 +328,56 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             </>
           )}
         </Panel>
-        <Panel label="INSPECT" title="文件预览">
+        {/* 多格式导出收纳进菜单：仅在存在可导出结果时可用，命令与原按钮
+            一致；结果预览优先，不再用整列承载低频导出设置。 */}
+        <Panel
+          title="结果预览"
+          actions={
+            <Menu>
+              <MenuTrigger disableButtonEnhancement>
+                <Button
+                  appearance="subtle"
+                  size="small"
+                  disabled={
+                    completed === 0 ||
+                    !viewState.capabilities.includes("batch.export")
+                  }
+                  icon={<Download aria-hidden="true" size={14} />}
+                >
+                  导出全部
+                </Button>
+              </MenuTrigger>
+              <MenuPopover>
+                <MenuList>
+                  {(
+                    [
+                      ["markdown", "Markdown"],
+                      ["docx", "Word"],
+                      ["xlsx", "Excel"],
+                    ] as const
+                  ).map(([format, label]) => (
+                    <MenuItem
+                      key={format}
+                      onClick={() =>
+                        void actions.run({
+                          type: "batch.exportAll",
+                          format,
+                        })
+                      }
+                    >
+                      {label}
+                    </MenuItem>
+                  ))}
+                </MenuList>
+              </MenuPopover>
+            </Menu>
+          }
+        >
+          {exportIncomplete && (
+            <p role="alert" className="form-note">
+              文件已保存，但部分图片缺失或目标格式无法容纳图片；请检查原始结果。
+            </p>
+          )}
           {inspected && inspectedStructured ? (
             <StructuredResult
               key={inspectedStructured.url}
@@ -333,48 +393,10 @@ export function BatchPage({ viewState, actions }: FeatureProps) {
             />
           ) : (
             <EmptyStage
-              title="未选择文件"
-              detail="从队列中选择带结构化结果的项目，检查表格、公式与版面区块。"
+              title="尚无结果预览"
+              detail="从队列中选择带结构化结果的项目，检查表格、公式与版面区块；完成后可导出全部。"
             />
           )}
-        </Panel>
-        <Panel label="RESULT" title="识别结果">
-          {exportIncomplete && (
-            <p role="alert" className="form-note">
-              文件已保存，但部分图片缺失或目标格式无法容纳图片；请检查原始结果。
-            </p>
-          )}
-          <EmptyStage title="尚无结果" detail="批处理完成后在此检查文本。" />
-          <CapabilityGate
-            capability="batch.export"
-            capabilities={viewState.capabilities}
-            action={{ type: "batch.exportAll", format: "markdown" }}
-            actions={actions}
-            icon={<Download aria-hidden="true" size={16} />}
-            disabled={completed === 0}
-          >
-            导出全部 Markdown
-          </CapabilityGate>
-          <CapabilityGate
-            capability="batch.export"
-            capabilities={viewState.capabilities}
-            action={{ type: "batch.exportAll", format: "docx" }}
-            actions={actions}
-            icon={<FileText aria-hidden="true" size={16} />}
-            disabled={completed === 0}
-          >
-            导出全部 Word
-          </CapabilityGate>
-          <CapabilityGate
-            capability="batch.export"
-            capabilities={viewState.capabilities}
-            action={{ type: "batch.exportAll", format: "xlsx" }}
-            actions={actions}
-            icon={<FileSpreadsheet aria-hidden="true" size={16} />}
-            disabled={completed === 0}
-          >
-            导出全部 Excel
-          </CapabilityGate>
         </Panel>
       </div>
     </Workspace>

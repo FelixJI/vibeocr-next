@@ -45,7 +45,7 @@ async function setup(page: Page, natural = { width: 900, height: 600 }) {
   });
   await expect(
     page.getByText(new RegExp("原图 " + natural.width + "×" + natural.height)),
-  ).toBeVisible();
+  ).toBeAttached();
   return {
     uploads,
     canvas: page.getByLabel("图片检查画布"),

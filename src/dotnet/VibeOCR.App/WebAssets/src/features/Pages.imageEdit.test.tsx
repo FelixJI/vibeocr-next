@@ -340,11 +340,14 @@ describe("RecognitionPage lean editor", () => {
         ])}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "选图编辑" }));
+    // 编辑导入收纳在图片面板的“编辑导入”菜单：展开后触发同一命令。
+    fireEvent.click(screen.getByRole("button", { name: "编辑导入" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "选图编辑" }));
     expect(run).toHaveBeenCalledWith({
       type: "recognition.openImageForEdit",
     });
-    fireEvent.click(screen.getByRole("button", { name: "粘贴编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑导入" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "粘贴编辑" }));
     expect(run).toHaveBeenCalledWith({
       type: "recognition.pasteImageForEdit",
     });

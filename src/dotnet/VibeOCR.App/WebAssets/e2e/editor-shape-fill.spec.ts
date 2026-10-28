@@ -79,7 +79,7 @@ async function setupShapeHost(
   });
   const canvas = page.getByLabel("图片检查画布");
   await expect(canvas).toBeVisible();
-  await expect(page.getByText(/原图 80×40/)).toBeVisible();
+  await expect(page.getByText(/原图 80×40/)).toBeAttached();
   return { uploads };
 }
 

@@ -54,7 +54,9 @@ test("1280x800 light recognition workspace", async ({ page }) => {
   });
 });
 
-test("1280x800 light annotation workspace with guidance", async ({ page }) => {
+test("1280x800 light annotation workspace with on-demand guidance", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await mockTextLayerUploads(page);
   await mount(page, {
@@ -84,6 +86,8 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
   await expect(
     page.getByRole("toolbar", { name: "图片编辑工具" }),
   ).toBeVisible();
+  // 静态用法说明收进“使用帮助与图像信息”折叠区：展开后仍完整可读。
+  await page.getByText("使用帮助与图像信息").click();
   await expect(
     page.getByText(/拖拽框选“屏蔽”区，识别时忽略其中内容/),
   ).toBeVisible();
@@ -91,6 +95,7 @@ test("1280x800 light annotation workspace with guidance", async ({ page }) => {
   await expect(
     page.getByText("无法导出或提交文字层准备，请重试。"),
   ).toHaveCount(0);
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page).toHaveScreenshot("annotation-light-1280x800.png", {
     fullPage: true,
   });
@@ -332,8 +337,8 @@ test("1280x800 light PDF review workspace", async ({ page }) => {
       },
     },
   });
-  // 展开批量导出区后截图：未确认导出状态与重试入口对用户可见。
-  await page.getByText("批量导出副本").click();
+  // 展开高级与导出后截图：未确认导出状态与重试入口对用户可见。
+  await page.getByText("高级与导出").click();
   await expect(page.getByText(/扫描合同-审阅\.pdf · 结果未确认/)).toBeVisible();
   await expect(page).toHaveScreenshot("pdf-light-1280x800.png", {
     fullPage: true,
@@ -534,6 +539,13 @@ test("mode selector stays above batch and PDF panel grids", async ({
             },
           ],
           taskEngine: "paddle_structure",
+          // PDF 页面在空状态隐藏任务模式区：补最小文档状态供布局断言。
+          ...(route === "pdf"
+            ? {
+                pageCount: 1,
+                pages: [{ index: 0, statusCode: "pdf.page.none" }],
+              }
+            : {}),
           ...(route === "batch"
             ? {
                 itemCount: 1,

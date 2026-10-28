@@ -77,6 +77,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   return (
     <Workspace
       title="关于与诊断"
+      className="reading-limited"
       actions={
         <>
           <CapabilityGate

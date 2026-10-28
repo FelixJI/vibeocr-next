@@ -139,10 +139,16 @@ describe("recognition page result actions", () => {
           />,
         );
       const initial = feature(viewState, "recognition");
-      fireEvent.click(screen.getByRole("button", { name: "收起图片预览" }));
-      fireEvent.click(screen.getByRole("button", { name: label }));
+      // 编辑导入收纳在图片面板的“编辑导入”菜单：先展开菜单再触发命令；
+      // 预览折叠后面板隐藏，导入入口随面板一起收起（展开按钮回到顶栏）。
+      const importForEdit = () => {
+        fireEvent.click(screen.getByRole("button", { name: "编辑导入" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: label }));
+      };
+      importForEdit();
       await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
       update({ ...initial, isBusy: true, statusCode: "recognition.running" });
+      fireEvent.click(screen.getByRole("button", { name: "收起图片预览" }));
       expect(
         screen.getByRole("button", { name: "展开图片预览" }),
       ).toBeInTheDocument();
@@ -150,7 +156,8 @@ describe("recognition page result actions", () => {
       expect(
         screen.getByRole("button", { name: "展开图片预览" }),
       ).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: label }));
+      fireEvent.click(screen.getByRole("button", { name: "展开图片预览" }));
+      importForEdit();
       await waitFor(() => expect(run).toHaveBeenCalledTimes(2));
       update({ ...initial, isBusy: true, statusCode: "recognition.running" });
       update({
