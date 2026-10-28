@@ -7,22 +7,40 @@ using Windows.System;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics, string resourceRoot, Lazy<ShellViewModel> shell, IStructuredClipboardPlatform structuredClipboard, Func<UpdateViewModel> updateFactory, WorkbenchOperations operations)
+internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics, string resourceRoot, RecoverableLazy<ShellViewModel> shell, IStructuredClipboardPlatform structuredClipboard, Func<UpdateViewModel> updateFactory, WorkbenchOperations operations)
 {
-  private Lazy<UpdateViewModel>? updateHolder;
-  private Lazy<UpdateViewModel> update => updateHolder ??= new Lazy<UpdateViewModel>(() =>
+  private readonly object updateGate = new();
+  private UpdateViewModel? updateModel;
+  /// <summary>
+  /// 可恢复取值（不缓存异常）：工厂抛出（如桌面壳初始化前尚未接线）后，
+  /// 接线完成即可创建真实模型；创建与事件订阅在同一临界区。
+  /// </summary>
+  private UpdateViewModel update
   {
-    UpdateViewModel model = updateFactory(); model.PropertyChanged += OnUpdatePropertyChanged; return model;
-  });
-  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or CancelRuntimeForUpdateCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand;
+    get
+    {
+      lock (updateGate)
+      {
+        if (updateModel is null)
+        {
+          UpdateViewModel model = updateFactory();
+          model.PropertyChanged += OnUpdatePropertyChanged;
+          updateModel = model;
+        }
+        return updateModel;
+      }
+    }
+  }
+  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or CancelRuntimeForUpdateCommand or SetUpdateSourceCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
     OpenProjectPageCommand => await OpenProjectPageAsync(cancellationToken),
-    CheckUpdateCommand => await CheckUpdateAsync(cancellationToken),
+    CheckUpdateCommand => StartUpdateCheck(cancellationToken),
     DownloadUpdateCommand => StartUpdateDownload(cancellationToken),
     CancelUpdateCommand => CancelUpdate(),
     CancelRuntimeForUpdateCommand => await CancelRuntimeForUpdateAsync(cancellationToken),
+    SetUpdateSourceCommand setSource => SetUpdateSource(setSource),
     ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
     CopyDiagnosticsCommand => await CopyDiagnosticsAsync(cancellationToken),
     _ => throw new InvalidOperationException("Unsupported System workbench command."),
@@ -50,27 +68,73 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
     return AboutState();
   }
 
-  private async Task<UpdateWorkbenchState> CheckUpdateAsync(
+  /// <summary>
+  /// 检查更新立即发布 busy 快照（update.checking），慢网络期间前端可
+  /// 见进行中状态、取消与切源控件可正确联动；终态经后台完成回调发布。
+  /// 已在进行中的更新操作不得再启动：忙时直接返回当前状态，不推进
+  /// generation（否则首次真实完成会被当作过期被抑制，UI 永久 busy）。
+  /// </summary>
+  private UpdateWorkbenchState? StartUpdateCheck(CancellationToken cancellationToken)
+  {
+    UpdateViewModel model = update;
+    if (model.IsBusy)
+    {
+      return UpdateState();
+    }
+    long generation = Interlocked.Increment(ref updateGeneration);
+    return operations.Start(
+      UpdateState() with
+      {
+        IsBusy = true,
+        StatusCode = UpdateViewModel.CheckingStatusCode,
+      },
+      () => CompleteUpdateCheckAsync(generation, cancellationToken));
+  }
+
+  private async Task CompleteUpdateCheckAsync(
+    long generation,
     CancellationToken cancellationToken)
   {
-    Interlocked.Increment(ref updateGeneration);
-    await update.Value.CheckAsync(cancellationToken);
-    return new UpdateWorkbenchState(
-      update.Value.IsBusy,
-      update.Value.StatusCode,
-      update.Value.LatestVersion,
-      update.Value.UpdateAvailable);
+    try
+    {
+      await update.CheckAsync(cancellationToken);
+      if (generation == Volatile.Read(ref updateGeneration))
+      {
+        operations.PublishTerminal(UpdateState());
+      }
+    }
+    catch (OperationCanceledException)
+    {
+      if (generation == Volatile.Read(ref updateGeneration))
+      {
+        operations.PublishTerminal(UpdateState());
+      }
+    }
+    catch (Exception error)
+    {
+      AppLog.Error("Update check workbench operation failed", error);
+      if (generation == Volatile.Read(ref updateGeneration))
+      {
+        operations.PublishTerminal(UpdateState());
+      }
+    }
   }
 
   private async Task<UpdateWorkbenchState> DownloadUpdateAsync(
     CancellationToken cancellationToken)
   {
-    await update.Value.DownloadAndApplyAsync(cancellationToken);
+    await update.DownloadAndApplyAsync(cancellationToken);
     return UpdateState();
   }
 
   private UpdateWorkbenchState? StartUpdateDownload(CancellationToken cancellationToken)
   {
+    UpdateViewModel model = update;
+    if (model.IsBusy || !model.UpdateAvailable)
+    {
+      // 下载进行中/无可用更新不启动新任务，也不作废在途完成的发布权。
+      return UpdateState();
+    }
     long generation = Interlocked.Increment(ref updateGeneration);
     return operations.Start(UpdateState() with { IsBusy = true },
       () => CompleteUpdateDownloadAsync(generation, cancellationToken));
@@ -107,15 +171,22 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
 
   private UpdateWorkbenchState CancelUpdate()
   {
-    Interlocked.Increment(ref updateGeneration);
-    update.Value.Cancel();
+    // 不推进 generation：取消后完成的检查/下载仍需发布“已取消”终态，
+    // 否则 UI 永远停在 busy。终态读取的是 VM 当前状态，不会田旧覆新。
+    update.Cancel();
     return UpdateState();
   }
 
   private async Task<UpdateWorkbenchState> CancelRuntimeForUpdateAsync(
     CancellationToken cancellationToken)
   {
-    await update.Value.CancelRuntimeMaintenanceAndWaitAsync(cancellationToken);
+    await update.CancelRuntimeMaintenanceAndWaitAsync(cancellationToken);
+    return UpdateState();
+  }
+
+  private UpdateWorkbenchState SetUpdateSource(SetUpdateSourceCommand command)
+  {
+    update.SetSource(command.SourceId, command.Kind, command.Url);
     return UpdateState();
   }
 
@@ -142,12 +213,34 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
     return DiagnosticsState();
   }
 
-  private UpdateWorkbenchState UpdateState() => new(
-    update.Value.IsBusy,
-    update.Value.StatusCode,
-    update.Value.LatestVersion,
-    update.Value.UpdateAvailable,
-    update.Value.CanCancelRuntimeMaintenance);
+  internal UpdateWorkbenchState UpdateState() => new(
+    update.IsBusy,
+    update.StatusCode,
+    update.LatestVersion,
+    update.UpdateAvailable,
+    update.CanCancelRuntimeMaintenance,
+    update.StatusMessage,
+    update.DetectionEndpoint,
+    update.Sources?.Select(option => new UpdateSourceOptionState(
+      option.Id, option.Kind, option.DisplayName, option.Endpoint, option.Selected)).ToArray());
+
+  /// <summary>
+  /// 初始更新快照：更新 VM 尚未接线（宿主壳初始化前）时仍发布基础
+  /// “未检查”状态，不让 about/update 依赖桌面壳初始化时序；源目录随
+  /// VM 就绪后的首次状态发布补齐。
+  /// </summary>
+  internal UpdateWorkbenchState InitialUpdateState()
+  {
+    try
+    {
+      return UpdateState();
+    }
+    catch (InvalidOperationException)
+    {
+      return new UpdateWorkbenchState(
+        false, UpdateViewModel.UncheckedStatusCode, null, false);
+    }
+  }
 
   internal void OnUpdatePropertyChanged(object? sender, PropertyChangedEventArgs args)
   {
@@ -176,10 +269,12 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
   internal void Stop()
   {
     Interlocked.Increment(ref updateGeneration);
-    if (updateHolder?.IsValueCreated == true)
+    UpdateViewModel? model;
+    lock (updateGate) model = updateModel;
+    if (model is not null)
     {
-      update.Value.PropertyChanged -= OnUpdatePropertyChanged;
-      update.Value.Cancel(); update.Value.Dispose();
+      model.PropertyChanged -= OnUpdatePropertyChanged;
+      model.Cancel(); model.Dispose();
     }
     diagnostics.PropertyChanged -= OnDiagnosticsPropertyChanged;
   }

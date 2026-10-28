@@ -530,6 +530,33 @@ input {
 .diagnostics-health-panel {
   grid-column: 1 / -1;
 }
+/* 更新源分段控制：同一行的两个互斥选项；编辑器为纵向表单。 */
+.update-source-segments {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.update-source-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+}
+.update-source-editor .setting-row {
+  min-height: 0;
+  flex-wrap: wrap;
+}
+.update-source-editor .setting-row > span,
+.update-source-editor .setting-row > label {
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+}
+.update-source-editor input {
+  flex: 1;
+  min-width: 220px;
+}
 .diagnostics-tech-details {
   display: grid;
   gap: 10px;

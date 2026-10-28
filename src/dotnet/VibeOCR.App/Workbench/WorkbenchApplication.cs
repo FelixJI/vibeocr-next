@@ -229,9 +229,17 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
   private void EnsureInitialStates()
   {
     if (_initialStatesLoaded) return;
-    _initialStatesLoaded = true;
-    if (_commandHandler is not IWorkbenchStateSource stateSource) return;
-    foreach (WorkbenchState state in stateSource.InitialStates)
+    if (_commandHandler is not IWorkbenchStateSource stateSource)
+    {
+      _initialStatesLoaded = true;
+      return;
+    }
+    // 初始化是可重试事务：完整读取（可能抛出）与全部写入成功后才标记
+    // 完成。旧实现先置位再读取，任何初始快照一次失败会让后续 bootstrap
+    // 永久跳过初始化，只返回 shell 等少数快照——桥可用、命令可自行发布
+    // 状态（二维码正常），但 about/update 永远缺失。
+    IReadOnlyList<WorkbenchState> states = stateSource.InitialStates;
+    foreach (WorkbenchState state in states)
     {
       _snapshots.TryAdd(
         state.Scope,
@@ -241,5 +249,6 @@ public sealed class WorkbenchApplication : IWorkbenchApplication
           WorkbenchStateChange.Replace,
           state));
     }
+    _initialStatesLoaded = true;
   }
 }

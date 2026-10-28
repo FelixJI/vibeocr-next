@@ -215,6 +215,7 @@ export type AppActionType =
   | "update.download"
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
+  | "update.setSource"
   | "diagnostics.export"
   | "diagnostics.copy";
 

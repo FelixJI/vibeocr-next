@@ -81,6 +81,8 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> UrlArgumentFields = ["url"];
   private static readonly HashSet<string> SourceKindOnlyFields = ["kind"];
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
+  private static readonly HashSet<string> SourceIdOnlyArgumentFields = ["sourceId"];
+  private static readonly HashSet<string> UpdateSourceArgumentFields = ["sourceId", "kind", "url"];
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
   private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
   private static readonly HashSet<string> EnvironmentNameArgumentFields = ["name"];
@@ -1350,6 +1352,8 @@ public static class WorkbenchBridgeCodec
       case ("update", "cancelRuntimeMaintenance"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelRuntimeForUpdateCommand();
+      case ("update", "setSource"):
+        return ParseSetUpdateSource(arguments);
       case ("diagnostics", "export"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ExportDiagnosticsCommand();
@@ -1690,6 +1694,36 @@ public static class WorkbenchBridgeCodec
     if (hasPreset && preset is not ("tiny" or "small" or "medium"))
       throw new WorkbenchBridgeProtocolException("Workbench task model preset is invalid.");
     return preset;
+  }
+
+  /// <summary>
+  /// 解析更新源选择：sourceId 仅接受 direct/custom；custom 必须携带
+  /// kind（url_prefix/forward_proxy）与受长度限制的 url；direct 不得携带
+  /// 额外字段。URL 语义边界由宿主端 ValidateCustomSource fail closed。
+  /// </summary>
+  private static SetUpdateSourceCommand ParseSetUpdateSource(JsonElement arguments)
+  {
+    if (HasExactFields(arguments, SourceIdOnlyArgumentFields))
+    {
+      string? directId = arguments.GetProperty("sourceId").GetString();
+      if (directId == "direct") return new SetUpdateSourceCommand(directId);
+      if (directId == "custom")
+      {
+        throw new WorkbenchBridgeProtocolException(
+          "Workbench custom update source requires kind and url.");
+      }
+      throw new WorkbenchBridgeProtocolException("Workbench update source id is invalid.");
+    }
+    EnsureObjectWithFields(arguments, UpdateSourceArgumentFields, "command arguments");
+    string? sourceId = arguments.GetProperty("sourceId").GetString();
+    string? kind = arguments.GetProperty("kind").GetString();
+    string? url = arguments.GetProperty("url").GetString();
+    if (sourceId is not "custom" || kind is not ("url_prefix" or "forward_proxy") ||
+      string.IsNullOrEmpty(url) || url.Length > VibeOCR.App.Features.Update.VelopackFeedFactory.MaximumUrlLength)
+    {
+      throw new WorkbenchBridgeProtocolException("Workbench update source selection is invalid.");
+    }
+    return new SetUpdateSourceCommand(sourceId, kind, url);
   }
 
   private static string? ParseTaskEngine(JsonElement arguments)
@@ -2078,6 +2112,16 @@ public static class WorkbenchBridgeCodec
       update.LatestVersion,
       update.UpdateAvailable,
       update.CanCancelRuntimeMaintenance,
+      update.StatusMessage,
+      update.DetectionEndpoint,
+      sources = update.Sources?.Select(source => new
+      {
+        source.Id,
+        source.Kind,
+        source.DisplayName,
+        source.Endpoint,
+        source.Selected,
+      }).ToArray(),
     },
     AboutWorkbenchState about => new
     {

@@ -17,10 +17,324 @@ namespace VibeOCR.App.Tests;
 
 public sealed class VelopackTransportTests
 {
+    [Theory]
+    [InlineData("https://user:secret@example.com:80/feed?token=secret#fragment", "https://example.com:80/feed")]
+    [InlineData("http://example.com:443/feed", "http://example.com:443/feed")]
+    [InlineData("https://example.com:443/feed", "https://example.com/feed")]
+    [InlineData("http://[::1]:7890/", "http://[::1]:7890/")]
+    public void DisplayEndpointPreservesAddressWhileRemovingCredentials(string address, string expected)
+    {
+        Assert.Equal(expected, VelopackFeedFactory.DisplayEndpoint(new Uri(address)));
+    }
+
     [Fact]
     public void UpdatePolicyAllowsOnlyOneAdjacentDelta()
     {
         Assert.Equal(1, VelopackUpdateCoordinator.MaximumDeltasBeforeFallback);
+    }
+
+    [Fact]
+    public void ResolveTreatsMissingNullOrMalformedUpdateSectionAsUnconfigured()
+    {
+        foreach (string content in new[]
+        {
+            "{}",
+            "{\"hotkeys\":{\"screenshot_recognize\":\"Ctrl+Alt+Q\"}}",
+            "{\"update\":null}",
+            "{\"update\":[1,2]}",
+            "{\"update\":{\"sources\":null}}",
+            "{\"update\":{\"sources\":{}}}",
+            "{\"update\":{\"selected\":123}}",
+            "{\"update\":{\"custom\":\"not-an-object\"}}",
+        })
+        {
+            string configFile = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllText(configFile, content);
+
+                ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+                UpdateSourceOption option = Assert.Single(resolved.Options);
+                Assert.Equal("direct", option.Id);
+                Assert.True(option.Selected);
+                Assert.Equal(VelopackFeedFactory.DirectBaseUrl, resolved.DetectionEndpoint);
+                Assert.Null(resolved.Error);
+            }
+            finally
+            {
+                File.Delete(configFile);
+            }
+        }
+    }
+
+    [Fact]
+    public void ResolveSkipsMalformedSourceEntriesWithoutTypeCrashes()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            // 数组内非对象/非字符串字段都是真实用户边界：不得抛
+            // InvalidOperationException/InvalidOperationException(JsonElement)，
+            // 只跳过畸形项并回落可用项/官方直连。
+            File.WriteAllText(configFile, "{\"update\":{\"sources\":["
+                + "null,42,\"text\","
+                + "{\"kind\":123,\"url\":\"https://mirror.invalid/\"},"
+                + "{\"kind\":\"url_prefix\",\"url\":{\"nested\":true}},"
+                + "{\"kind\":\"url_prefix\",\"url\":\"https://user:pass@mirror.invalid/p/\"},"
+                + "{\"kind\":\"forward_proxy\",\"url\":\"https://proxy.invalid/?token=1\"}"
+                + "]}}");
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+            // 首个可用项是携带凭据的 url_prefix（transport 仍接受）；投影
+            // 选中它且脱敏，官方直连为未选中备选。
+            UpdateSourceOption selected = Assert.Single(resolved.Options,
+                option => option.Selected);
+            Assert.Equal("source-0", selected.Id);
+            Assert.Equal("url_prefix", selected.Kind);
+            Assert.Equal("https://mirror.invalid/p/", selected.Endpoint);
+            Assert.Contains(resolved.Options, option => option.Id == "direct" && !option.Selected);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void LegacyCredentialBearingUrlsNeverReachTheBridgeProjection()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(configFile, "{\"update\":{\"sources\":["
+                + "{\"kind\":\"url_prefix\",\"url\":\"https://user:secret@mirror.invalid/prefix/?token=abc\"}"
+                + "]}}");
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+            // transport 保持既有行为（原始 URL），但投影与检测地址必须脱敏。
+            Assert.Equal(
+                "https://user:secret@mirror.invalid/prefix/?token=abc/" + VelopackFeedFactory.DirectBaseUrl,
+                resolved.Feed.BaseUri.AbsoluteUri);
+            UpdateSourceOption legacy = Assert.Single(resolved.Options,
+                option => option.Id == "source-0");
+            Assert.Equal("https://mirror.invalid/prefix/", legacy.Endpoint);
+            Assert.Equal(
+                "https://mirror.invalid/prefix/" + VelopackFeedFactory.DirectBaseUrl,
+                resolved.DetectionEndpoint);
+            Assert.DoesNotContain("secret", legacy.Endpoint);
+            Assert.DoesNotContain("token", legacy.Endpoint);
+            Assert.DoesNotContain("secret", resolved.DetectionEndpoint);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void ExplicitCustomSelectionBindsCheckAndDownloadToThatSource()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(configFile, JsonSerializer.Serialize(new
+            {
+                update = new
+                {
+                    selected = "custom",
+                    custom = new
+                    {
+                        kind = "url_prefix",
+                        url = "https://mirror.example.com/vibeocr",
+                    },
+                },
+            }));
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+            Assert.Equal(
+                "https://mirror.example.com/vibeocr/" + VelopackFeedFactory.DirectBaseUrl,
+                resolved.Feed.BaseUri.AbsoluteUri);
+            Assert.Equal(
+                "https://mirror.example.com/vibeocr/" + VelopackFeedFactory.DirectBaseUrl,
+                resolved.DetectionEndpoint);
+            UpdateSourceOption direct = Assert.Single(resolved.Options,
+                option => option.Id == "direct");
+            UpdateSourceOption custom = Assert.Single(resolved.Options,
+                option => option.Id == "custom");
+            Assert.False(direct.Selected);
+            Assert.True(custom.Selected);
+            Assert.Equal("url_prefix", custom.Kind);
+            // 无凭据配置的完整 URL 可作为可编辑预填值返回。
+            Assert.Equal("https://mirror.example.com/vibeocr", custom.Endpoint);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void ExplicitDirectSelectionIgnoresLegacySourceList()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(configFile, JsonSerializer.Serialize(new
+            {
+                update = new
+                {
+                    selected = "direct",
+                    sources = new object[]
+                    {
+                        new { kind = "url_prefix", url = "https://mirror.invalid/prefix/" },
+                    },
+                },
+            }));
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+            Assert.Equal(VelopackFeedFactory.DirectBaseUrl, resolved.Feed.BaseUri.AbsoluteUri);
+            UpdateSourceOption option = Assert.Single(resolved.Options);
+            Assert.Equal("direct", option.Id);
+            Assert.True(option.Selected);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void InvalidExplicitCustomSelectionFallsBackToDirectWithExplanation()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(configFile, JsonSerializer.Serialize(new
+            {
+                update = new
+                {
+                    selected = "custom",
+                    custom = new { kind = "forward_proxy", url = "file:///C:/proxy" },
+                },
+            }));
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+
+            Assert.Equal(VelopackFeedFactory.DirectBaseUrl, resolved.Feed.BaseUri.AbsoluteUri);
+            Assert.NotNull(resolved.Error);
+            Assert.Contains("官方直连", resolved.Error);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void SaveSelectionPreservesUnrelatedConfigFields()
+    {
+        string configFile = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(configFile, JsonSerializer.Serialize(new
+            {
+                hotkeys = new { screenshot_recognize = "Ctrl+Alt+Q" },
+                update = new { sources = new object[] { new { kind = "direct" } } },
+            }));
+
+            VelopackFeedFactory.SaveSelection(
+                configFile, "custom", "forward_proxy", "http://127.0.0.1:7890");
+
+            using JsonDocument saved = JsonDocument.Parse(File.ReadAllText(configFile));
+            Assert.Equal("Ctrl+Alt+Q",
+                saved.RootElement.GetProperty("hotkeys").GetProperty("screenshot_recognize").GetString());
+            JsonElement update = saved.RootElement.GetProperty("update");
+            // 旧 sources 数组保留：旧版本回滚后仍可按旧语义解析。
+            Assert.Equal(JsonValueKind.Array, update.GetProperty("sources").ValueKind);
+            Assert.Equal("custom", update.GetProperty("selected").GetString());
+            Assert.Equal("forward_proxy",
+                update.GetProperty("custom").GetProperty("kind").GetString());
+            Assert.Equal("http://127.0.0.1:7890/",
+                update.GetProperty("custom").GetProperty("url").GetString());
+
+            ResolvedUpdateFeeds resolved = VelopackFeedFactory.Resolve(configFile);
+            UpdateSourceOption custom = Assert.Single(resolved.Options, option => option.Id == "custom");
+            Assert.True(custom.Selected);
+            Assert.Equal("http://127.0.0.1:7890/", custom.Endpoint);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void CustomSourceValidationRejectsCredentialBearingAndNonHttpUrls()
+    {
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("url_prefix",
+            "https://user:pass@mirror.example.com/"));
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("url_prefix", "https://mirror.example.com/?token=1"));
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("url_prefix", "https://mirror.example.com/#fragment"));
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("forward_proxy", "ftp://mirror.example.com/"));
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("unknown_kind", "https://mirror.example.com/"));
+        Assert.Null(VelopackFeedFactory.ValidateCustomSource("url_prefix",
+            "https://mirror.example.com/" + new string('a', 2100)));
+        Assert.NotNull(VelopackFeedFactory.ValidateCustomSource("url_prefix", "https://mirror.example.com/vibeocr"));
+        Assert.NotNull(VelopackFeedFactory.ValidateCustomSource("forward_proxy", "http://127.0.0.1:7890"));
+    }
+
+    [Fact]
+    public async Task SelectSourceInvalidatesPreviousCheckBeforeDownload()
+    {
+        string configFile = Path.Combine(Path.GetTempPath(),
+            $"vibeocr-update-select-{Guid.NewGuid():N}.json");
+        try
+        {
+            var coordinator = VelopackUpdateCoordinator.Create(configFile);
+            // 开发环境无 Velopack 安装上下文：检查返回错误，不产生 pending。
+            UpdateCheckResult check = await coordinator.CheckAsync(
+                TestContext.Current.CancellationToken);
+            Assert.Equal(UpdateCheckStatus.Error, check.Status);
+
+            coordinator.SelectSource("custom", "url_prefix", "https://mirror.example.com/vibeocr");
+
+            UpdateApplyResult apply = await coordinator.DownloadAndApplyAsync(
+                null, TestContext.Current.CancellationToken);
+            Assert.Equal(UpdateApplyStatus.Failed, apply.Status);
+            Assert.Equal("请先检查更新。", apply.ErrorMessage);
+            UpdateSourceCatalog catalog = coordinator.LoadSources();
+            Assert.Contains(catalog.Options, option => option.Id == "custom" && option.Selected);
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
+    }
+
+    [Fact]
+    public void SaveSelectionRejectsInvalidCustomSourceFailClosed()
+    {
+        string configFile = Path.Combine(Path.GetTempPath(),
+            $"vibeocr-update-source-{Guid.NewGuid():N}.json");
+        try
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                VelopackFeedFactory.SaveSelection(
+                    configFile, "custom", "url_prefix", "https://user:pass@mirror.example.com/"));
+            Assert.Throws<InvalidDataException>(() =>
+                VelopackFeedFactory.SaveSelection(configFile, "unknown", null, null));
+            // 无效写入不得产生部分更新配置。
+            Assert.False(File.Exists(configFile));
+        }
+        finally
+        {
+            File.Delete(configFile);
+        }
     }
 
     [Fact]

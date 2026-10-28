@@ -1331,6 +1331,15 @@ public sealed class DesktopWorkbenchCommandHandlerTests
       IProgress<int>? progress,
       CancellationToken cancellationToken) =>
       Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+
+    public UpdateSourceCatalog LoadSources() =>
+      new([new UpdateSourceOption(
+        "direct", "direct", "官方直连（GitHub）",
+        VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+        VelopackFeedFactory.DirectBaseUrl);
+
+    public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+      LoadSources();
   }
 
   [Fact]

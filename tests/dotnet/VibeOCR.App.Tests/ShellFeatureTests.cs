@@ -141,6 +141,79 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
+    public void AboutMetadataReflectsRepositoryFacts()
+    {
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar());
+
+        Assert.Equal("MIT", shell.License);
+        Assert.Equal(
+            "https://github.com/FelixJI/vibeocr-next",
+            shell.ProjectUri.AbsoluteUri);
+    }
+
+    [Fact]
+    public void InitialUpdateStateIsUncheckedInsteadOfClaimingLatest()
+    {
+        var vm = new UpdateViewModel(new FakeUpdateCoordinator());
+
+        // 未检查时不得误报已是最新：受限网络机器上的误导性“最新”曾让用户
+        // 放弃排查真实无法访问的更新源。
+        Assert.Equal("update.unchecked", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Null(vm.LatestVersion);
+    }
+
+    [Fact]
+    public async Task CheckFailureSurfacesUnderstandableErrorInsteadOfWaitingForever()
+    {
+        var coordinator = new FailingUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator);
+
+        await vm.CheckAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("update.error", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Contains("无法连接更新源", vm.StatusMessage);
+        Assert.Contains("无法连接更新源", vm.Status);
+    }
+
+    [Fact]
+    public void SetSourceResetsPreviousCheckResultForNewSource()
+    {
+        var coordinator = new SelectableUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator)
+        {
+        };
+        Assert.Single(vm.Sources!);
+
+        vm.SetSource("custom", "url_prefix", "https://mirror.example.com/vibeocr");
+
+        Assert.Equal("update.unchecked", vm.StatusCode);
+        Assert.False(vm.UpdateAvailable);
+        Assert.Null(vm.LatestVersion);
+        Assert.Equal(2, vm.Sources!.Count);
+        Assert.Contains(vm.Sources!, source => source.Id == "custom" && source.Selected);
+        Assert.Equal("custom", coordinator.LastSelectedSourceId);
+        Assert.Equal("url_prefix", coordinator.LastSelectedKind);
+        Assert.Equal("https://mirror.example.com/vibeocr", coordinator.LastSelectedUrl);
+    }
+
+    [Fact]
+    public async Task SetSourceIsRefusedWhileUpdateOperationIsBusy()
+    {
+        var coordinator = new BlockingUpdateCoordinator();
+        var vm = new UpdateViewModel(coordinator);
+        Task check = vm.CheckAsync(TestContext.Current.CancellationToken);
+        Assert.True(vm.IsBusy);
+
+        Assert.Throws<UpdateSourceBusyException>(
+            () => vm.SetSource("direct", null, null));
+
+        coordinator.Release();
+        await check;
+    }
+
+    [Fact]
     public async Task UpdateDownloadWithoutAvailableIsNoOp()
     {
         var coordinator = new FakeUpdateCoordinator();
@@ -253,6 +326,90 @@ public sealed class ShellFeatureTests
         public bool SetEnabled(bool enabled) => Ok;
     }
 
+    private sealed class FailingUpdateCoordinator : IUpdateCoordinator
+    {
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateCheckResult(
+                UpdateCheckStatus.Error, ErrorMessage: "无法连接更新源。"));
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Failed));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
+    }
+
+    private sealed class SelectableUpdateCoordinator : IUpdateCoordinator
+    {
+        public string? LastSelectedSourceId { get; private set; }
+        public string? LastSelectedKind { get; private set; }
+        public string? LastSelectedUrl { get; private set; }
+
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateCheckResult(UpdateCheckStatus.Latest, "0.3.0"));
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url)
+        {
+            LastSelectedSourceId = sourceId;
+            LastSelectedKind = kind;
+            LastSelectedUrl = url;
+            return new(
+            [
+                new UpdateSourceOption(
+                    "direct", "direct", "官方直连（GitHub）",
+                    VelopackFeedFactory.DirectBaseUrl, Selected: false),
+                new UpdateSourceOption(
+                    "custom", kind ?? "url_prefix", "自定义镜像前缀",
+                    url ?? "https://mirror.example.com/vibeocr", Selected: true),
+            ],
+            $"{url}/https://github.com/FelixJI/vibeocr-next/releases/latest/download/");
+        }
+    }
+
+    private sealed class BlockingUpdateCoordinator : IUpdateCoordinator
+    {
+        private readonly TaskCompletionSource _release = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release() => _release.TrySetResult();
+
+        public async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken)
+        {
+            await _release.Task.WaitAsync(cancellationToken);
+            return new UpdateCheckResult(UpdateCheckStatus.Latest, "0.3.0");
+        }
+
+        public Task<UpdateApplyResult> DownloadAndApplyAsync(
+            IProgress<int>? progress, CancellationToken cancellationToken) =>
+            Task.FromResult(new UpdateApplyResult(UpdateApplyStatus.Downloaded));
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
+    }
+
     private sealed class FakeUpdateCoordinator : IUpdateCoordinator
     {
         public UpdateCheckResult CheckResult { get; set; } =
@@ -266,5 +423,14 @@ public sealed class ShellFeatureTests
         public Task<UpdateApplyResult> DownloadAndApplyAsync(
             IProgress<int>? progress,
             CancellationToken cancellationToken) => Task.FromResult(ApplyResult);
+
+        public UpdateSourceCatalog LoadSources() => new(
+            [new UpdateSourceOption(
+                "direct", "direct", "官方直连（GitHub）",
+                VelopackFeedFactory.DirectBaseUrl, Selected: true)],
+            VelopackFeedFactory.DirectBaseUrl);
+
+        public UpdateSourceCatalog SelectSource(string sourceId, string? kind, string? url) =>
+            LoadSources();
     }
 }

@@ -30,8 +30,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     public string HotkeyStatus { get => _hotkeyStatus; private set => SetField(ref _hotkeyStatus, value); }
 
     public string AppVersion { get; } = typeof(ShellViewModel).Assembly.GetName().Version?.ToString() ?? "0.0.0";
-    public string License { get; } = "Proprietary";
-    public Uri ProjectUri { get; } = new("https://github.com/felji/VibeOCR", UriKind.Absolute);
+    public string License { get; } = "MIT";
+    public Uri ProjectUri { get; } = new("https://github.com/FelixJI/vibeocr-next", UriKind.Absolute);
 
     private readonly IHotkeyRegistrar _hotkeyRegistrar;
     private readonly IStartupRegistrar _startupRegistrar;

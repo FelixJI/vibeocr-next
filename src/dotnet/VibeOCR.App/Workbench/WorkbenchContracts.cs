@@ -790,6 +790,16 @@ public sealed record DownloadUpdateCommand : WorkbenchCommand;
 
 public sealed record CancelUpdateCommand : WorkbenchCommand;
 
+/// <summary>
+/// 选择应用更新源：SourceId 为 direct 或 custom；自定义源需携带
+/// Kind（url_prefix/forward_proxy）与 Url。切换后旧检查结果失效，
+/// 下载必须基于新源的重新检查；更新操作进行中拒绝切换。
+/// </summary>
+public sealed record SetUpdateSourceCommand(
+    string SourceId,
+    string? Kind = null,
+    string? Url = null) : WorkbenchCommand;
+
 /// <summary>Cancel the active Runtime operation before retrying an app update.</summary>
 public sealed record CancelRuntimeForUpdateCommand : WorkbenchCommand;
 
@@ -1345,10 +1355,21 @@ public sealed record UpdateWorkbenchState(
   string StatusCode,
   string? LatestVersion,
   bool UpdateAvailable,
-  bool CanCancelRuntimeMaintenance = false) : WorkbenchState
+  bool CanCancelRuntimeMaintenance = false,
+  string StatusMessage = "",
+  string DetectionEndpoint = "",
+  IReadOnlyList<UpdateSourceOptionState>? Sources = null) : WorkbenchState
 {
   public override string Scope => "update";
 }
+
+/// <summary>可选更新源选项：脱敏端点（不含凭据），供分段控制器展示。</summary>
+public sealed record UpdateSourceOptionState(
+  string Id,
+  string Kind,
+  string DisplayName,
+  string Endpoint,
+  bool Selected);
 
 public sealed record AboutWorkbenchState(
   string Version,

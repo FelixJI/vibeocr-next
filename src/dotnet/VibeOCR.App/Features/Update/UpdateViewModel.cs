@@ -4,18 +4,30 @@ using VibeOCR.App.Features.Maintenance;
 
 namespace VibeOCR.App.Features.Update;
 
+/// <summary>切换更新源被拒绝：更新操作进行中，禁止不一致切换。</summary>
+public sealed class UpdateSourceBusyException : InvalidOperationException
+{
+    public UpdateSourceBusyException() : base("更新操作进行中，请稍后再切换更新源。") { }
+}
+
 /// <summary>Maps stable update coordinator results to user-visible state.</summary>
 public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
 {
+    /// <summary>初始状态：尚未检查更新；不得在未检查时宣称已是最新。</summary>
+    public const string UncheckedStatusCode = "update.unchecked";
+    public const string CheckingStatusCode = "update.checking";
+
     private readonly IUpdateCoordinator _coordinator;
     private readonly Action _requestShutdown;
     private readonly ProductMaintenanceCoordinator _productMaintenance;
     private CancellationTokenSource? _activeRun;
     private bool _isBusy;
     private string _status = string.Empty;
-    private string _statusCode = "update.current";
+    private string _statusCode = UncheckedStatusCode;
     private string? _latestVersion;
     private bool _updateAvailable;
+    private IReadOnlyList<UpdateSourceOption>? _sources;
+    private string _detectionEndpoint = string.Empty;
     private int _disposed;
 
     public UpdateViewModel(
@@ -27,6 +39,17 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
         _requestShutdown = requestShutdown ?? (() => { });
         _productMaintenance = productMaintenance ?? new ProductMaintenanceCoordinator();
         _productMaintenance.StateChanged += OnProductMaintenanceStateChanged;
+        try
+        {
+            UpdateSourceCatalog catalog = _coordinator.LoadSources();
+            Sources = catalog.Options;
+            DetectionEndpoint = catalog.DetectionEndpoint;
+            if (!string.IsNullOrEmpty(catalog.Error)) Status = catalog.Error;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            Sources = [];
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -36,6 +59,10 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
     public string StatusCode { get => _statusCode; private set => SetField(ref _statusCode, value); }
     public string? LatestVersion { get => _latestVersion; private set => SetField(ref _latestVersion, value); }
     public bool UpdateAvailable { get => _updateAvailable; private set => SetField(ref _updateAvailable, value); }
+    /// <summary>宿主侧状态详情（含具体失败原因），随状态码一起投影到前端。</summary>
+    public string StatusMessage => Status;
+    public IReadOnlyList<UpdateSourceOption>? Sources { get => _sources; private set => SetField(ref _sources, value); }
+    public string DetectionEndpoint { get => _detectionEndpoint; private set => SetField(ref _detectionEndpoint, value); }
     public bool CanCancelRuntimeMaintenance =>
         _productMaintenance.State.ActiveOwner == ProductMaintenanceOwner.RuntimeMaintenance &&
         _productMaintenance.State.CanCancelActive;
@@ -46,6 +73,7 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
         using var run = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _activeRun = run;
         IsBusy = true;
+        StatusCode = CheckingStatusCode;
         Status = "正在检查更新";
         try
         {
@@ -80,7 +108,7 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
         catch (Exception)
         {
             StatusCode = "update.error";
-            Status = "检查更新失败，请检查网络";
+            Status = "检查更新失败，请检查网络或更新源设置";
         }
         finally
         {
@@ -139,13 +167,31 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
         catch (Exception)
         {
             StatusCode = "update.error";
-            Status = "下载失败，请检查网络";
+            Status = "下载失败，请检查网络或更新源设置";
         }
         finally
         {
             Interlocked.CompareExchange(ref _activeRun, null, run);
             IsBusy = false;
         }
+    }
+
+    /// <summary>
+    /// 选择更新源：忙时拒绝（不得在检查/下载进行中切换造成不一致）；
+    /// 切换成功后旧检查结果立即失效，需在新源上重新检查。
+    /// </summary>
+    public void SetSource(string sourceId, string? kind, string? url)
+    {
+        if (IsBusy) throw new UpdateSourceBusyException();
+        UpdateSourceCatalog catalog = _coordinator.SelectSource(sourceId, kind, url);
+        Sources = catalog.Options;
+        DetectionEndpoint = catalog.DetectionEndpoint;
+        UpdateAvailable = false;
+        LatestVersion = null;
+        StatusCode = UncheckedStatusCode;
+        Status = !string.IsNullOrEmpty(catalog.Error)
+            ? catalog.Error
+            : "已切换更新源，请重新检查更新";
     }
 
     public void Cancel() => _activeRun?.Cancel();
