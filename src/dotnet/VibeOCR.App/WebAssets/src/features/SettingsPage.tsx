@@ -61,6 +61,7 @@ interface FeatureOptionState {
 }
 
 interface ManagedEnvironmentState {
+  readonly recipe?: string | null;
   readonly operationBlocks?: Readonly<Record<string, string | null>>;
   readonly id: string;
   readonly name: string;
@@ -137,6 +138,9 @@ interface ManagedEnvironmentPlanState {
   readonly dependencyOrigin?: string | null;
   readonly pythonOrigin?: string | null;
   readonly runtimeWheelOrigin?: string | null;
+  readonly removedDependencies?: readonly string[];
+  readonly requiresServiceStop?: boolean;
+  readonly cudaPluginAction?: "prepare" | "remove" | null;
 }
 
 function sourceKindLabel(kind: string): string {
@@ -1484,16 +1488,26 @@ function EnvironmentPlanPanel({
         {plan.sourceIds.map((id) => sourceName(id)).join("、") || "产品默认"}
       </p>
       <p className="form-note">
-        主要组件：
-        {mainDependencies(plan.dependencies).join("、") || "见完整依赖清单"}；
-        共 {plan.dependencies.length} 项依赖。
+        本次新增或替换组件：
+        {mainDependencies(plan.dependencies).join("、") || "无需新增组件"}； 共{" "}
+        {plan.dependencies.length} 项依赖。
         {plan.dependencyOrigin === "bundled_pack"
           ? "依赖来自随包离线包，无需下载。"
           : "依赖按所选来源安装。"}
       </p>
       <p className="form-note">
-        依赖安装只写入此目标环境，不会停止当前识别服务；模型在需要时从所选
-        来源下载，已缓存模型直接复用。
+        {plan.requiresServiceStop
+          ? "确认后暂停当前识别服务，完整候选验证后换入；失败恢复原环境。运行中任务需先结束。"
+          : "依赖安装只写入此目标环境。"}
+        {plan.cudaPluginAction === "prepare"
+          ? "同时准备锁定的 ONNX Runtime CUDA 13 执行插件。"
+          : plan.cudaPluginAction === "remove"
+            ? "同时移除 ONNX Runtime CUDA 13 执行插件。"
+            : ""}
+        模型在需要时从所选来源下载，已缓存模型直接复用。
+        {(plan.removedDependencies?.length ?? 0) > 0
+          ? `本次明确移除 CUDA 附加依赖：${plan.removedDependencies?.join("、")}。`
+          : ""}
       </p>
       <div className="setting-row">
         <Button
@@ -1505,7 +1519,9 @@ function EnvironmentPlanPanel({
             })
           }
         >
-          确认安装依赖
+          {(plan.removedDependencies?.length ?? 0) > 0
+            ? "确认移除 CUDA"
+            : "确认安装依赖"}
         </Button>
         <Button disabled={busy} onClick={onCancel}>
           取消
@@ -1521,7 +1537,7 @@ function EnvironmentPlanPanel({
         ) : null}
       </div>
       <details>
-        <summary>完整依赖与来源明细（只读）</summary>
+        <summary>本次依赖与来源明细（只读）</summary>
         <p>环境修订：{plan.environmentRevision}</p>
         <p>锁定依赖（{plan.dependencies.length} 项）</p>
         <p>{plan.dependencies.join("、")}</p>
@@ -2275,7 +2291,8 @@ function EngineEnvironmentSection({
   const activeReady =
     compatibleEnvironment?.id === activeId &&
     compatibleEnvironment?.status === "installed" &&
-    compatibleEnvironment.serviceState === "ready";
+    compatibleEnvironment.serviceState === "ready" &&
+    compatibleEnvironment.targetDevice === target?.targetDevice;
   const pendingPlan = plan?.requestedRecipe === targetId ? plan : undefined;
   const preparing = useRef(false);
   const prepare = async () => {
@@ -2529,6 +2546,7 @@ function EngineEnvironmentSection({
                       void actions.run({
                         type: "settings.switchEnvironment",
                         environmentId: compatibleEnvironment.id,
+                        device: target?.targetDevice,
                       })
                     }
                   >
@@ -2717,6 +2735,16 @@ function EnvironmentRow({
             {environment.id === activeId
               ? "启动并验证当前环境"
               : "切换到此环境"}
+          </Button>
+        ) : null}
+        {environment.recipe === "paddleocr-ort-cuda" && onPreview ? (
+          <Button
+            disabled={
+              busy || Boolean(environment.operationBlocks?.preview_install)
+            }
+            onClick={() => onPreview(environment.id, "paddleocr-ort-cpu")}
+          >
+            预览移除 CUDA（保留 CPU）
           </Button>
         ) : null}
         {continueRecipe && onPreview ? (

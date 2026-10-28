@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from vibeocr.runtime.environments.managed_references import environment_has_references
+from vibeocr.runtime.environments.managed_references import (
+    environment_has_references,
+    environment_has_services,
+)
 from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
@@ -460,6 +463,10 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
         env_id: environment_has_references(store._references, env_id)
         for env_id in sorted(owners)
     }
+    services = {
+        env_id: environment_has_services(store._references, env_id)
+        for env_id in sorted(owners)
+    }
     model_busy = False if held else _model_busy(store)
     shared_busy = any(busy.values()) or model_busy
     items = []
@@ -482,8 +489,8 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
             if record["kind"] == "legacy"
             else "当前环境受保护；先切换到需要保留的配置"
             if env_id == data["active_id"]
-            else "环境被任务引用，受保护"
-            if references[env_id]
+            else "环境被服务或任务引用，受保护"
+            if references[env_id] or services[env_id]
             else "环境正在安装、修复或切换，受保护"
             if busy[env_id]
             else None
@@ -506,7 +513,7 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
             "环境换入事务未收敛，受保护"
             if env_id in swapping
             else "环境仍在操作或被引用，受保护"
-            if busy.get(env_id) or references.get(env_id)
+            if busy.get(env_id) or references.get(env_id) or services.get(env_id)
             else None
         )
         if env_id in environments and env_id == data["active_id"]:
@@ -538,7 +545,7 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
             "环境换入事务未收敛，受保护"
             if env_id in swapping
             else "环境操作或任务仍在使用此目录"
-            if busy.get(env_id) or references.get(env_id)
+            if busy.get(env_id) or references.get(env_id) or services.get(env_id)
             else None
         )
         items.append(
@@ -768,6 +775,7 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
         "ledger": ledger,
         "busy": busy,
         "references": references,
+        "services": services,
         "model_busy": model_busy,
         "pending_swaps": sorted(swapping),
         "reports": reports,
@@ -849,6 +857,7 @@ def _unregister(
             env_id == data["active_id"]
             or record["kind"] != "venv"
             or environment_has_references(store._references, env_id)
+            or environment_has_services(store._references, env_id)
         ):
             raise RuntimeInstallError(
                 "active, referenced or legacy environment cannot be deleted"

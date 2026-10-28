@@ -43,7 +43,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     CancelEnvironmentInstallCommand => CancelEnvironmentInstall(),
     InvalidateEnvironmentPlanCommand => InvalidateEnvironmentPlan(),
     SwitchEnvironmentCommand switchEnvironment => StartEnvironmentOperation(
-      environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken),
+      environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken, switchEnvironment.Device),
       refreshCatalog: true),
     SetEnvironmentCleanupPageCommand page => await RunEnvironmentAsync(
       environment => environment.SetCleanupPageAsync(page.Page, cancellationToken), cancellationToken),
@@ -805,7 +805,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
             failure.Phase, failure.EnvironmentRevision, failure.Recipe,
             failure.ReasonCode, failure.NextAction, failure.Detail,
             failure.RequestedSourceIds, failure.EffectiveSourceIds)
-          : null, item.OperationBlocks)).ToArray(),
+          : null, item.OperationBlocks, item.Recipe)).ToArray(),
     ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
     EnvironmentPlan: viewModel.Environments?.Plan is { } environmentPlan
       ? new SettingsEnvironmentPlanState(
@@ -819,7 +819,8 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
           source.Id, source.Kind, source.DisplayName, source.Endpoint,
           source.Requested, source.InheritedFrom, source.Usage, source.ActualEndpoint)).ToArray(),
         environmentPlan.DependencyOrigin, environmentPlan.PythonOrigin,
-        environmentPlan.RuntimeWheelOrigin)
+        environmentPlan.RuntimeWheelOrigin, environmentPlan.RemovedDependencies,
+        environmentPlan.RequiresServiceStop, environmentPlan.CudaPluginAction)
       : null,
     EnvironmentStatus: viewModel.Environments?.Status ?? "",
     // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU

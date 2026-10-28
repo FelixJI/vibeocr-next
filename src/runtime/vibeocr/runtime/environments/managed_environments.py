@@ -27,7 +27,12 @@ from vibeocr.runtime.environments.managed_install_progress import (
 from vibeocr.runtime.environments.managed_install_progress import (
     ManagedInstallObserver,
 )
-from vibeocr.runtime.environments.managed_references import environment_has_references
+from vibeocr.runtime.environments.managed_references import (
+    admission_lock,
+    environment_has_references,
+    environment_has_services,
+    maintenance_lock,
+)
 from vibeocr.runtime.environments.model_cache import (
     seed_bundled_paddle_onnx_models,
 )
@@ -352,6 +357,36 @@ class ManagedEnvironmentStore:
                 next_action="preview_again",
             )
 
+    @staticmethod
+    def _selected_device(record: dict) -> str:
+        return record.get("selected_device") or _recipe_metadata(
+            record.get("recipe", "")
+        ).get("target_device", "cpu")
+
+    @staticmethod
+    def _paddle_shared(recipe: str | None) -> bool:
+        return recipe in {"paddleocr-ort-cpu", "paddleocr-ort-cuda"}
+
+    def _with_device(self, record: dict, device: str | None) -> dict:
+        device = device or self._selected_device(record)
+        declared = _recipe_metadata(record.get("recipe", "")).get(
+            "target_device", "cpu"
+        )
+        allowed = (
+            {declared, "cpu"}
+            if record.get("recipe", "").startswith("paddleocr-ort-")
+            else {declared}
+        )
+        if device not in allowed:
+            raise ManagedEnvironmentError(
+                "requested device is not installed in this environment"
+            )
+        return {**record, "selected_device": device}
+
+    def _probe_device(self, record: dict, device: str | None = None) -> dict:
+        selected = self._with_device(record, device)
+        return self._probe({**selected, "_device_probe": selected["selected_device"]})
+
     def _launch(self, record: dict, python: str) -> dict | None:
         if record["status"] == "empty":
             return None
@@ -371,7 +406,7 @@ class ManagedEnvironmentStore:
             accelerator = marker["accelerator"]
         else:
             accelerator = (
-                "nvidia_cuda" if record.get("recipe", "").endswith("cuda") else "cpu"
+                "nvidia_cuda" if self._selected_device(record) == "cuda" else "cpu"
             )
         environment = {
             "VIBEOCR_PRODUCT_ROOT": str(self.product_root),
@@ -388,6 +423,7 @@ class ManagedEnvironmentStore:
             "VIBEOCR_MANAGED_ENVIRONMENT_REVISION": str(record["revision"]),
             "VIBEOCR_MANAGED_REGISTRY_PATH": str(self._registry),
             "VIBEOCR_MANAGED_STORE_LOCK": str(self._lock),
+            "VIBEOCR_MANAGED_SELECTION_REVISION": str(self._read()["active_revision"]),
             "VIBEOCR_MANAGED_REFERENCES_ROOT": str(self._references),
             "PIP_CACHE_DIR": str(state / "cache" / "pip"),
             "UV_CACHE_DIR": str(state / "cache" / "uv"),
@@ -426,6 +462,9 @@ class ManagedEnvironmentStore:
             environment["VIBEOCR_PRODUCT_CODE_ROOT"] = str(code_root)
         if record["kind"] == "venv":
             environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] = record["recipe"]
+            environment["VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"] = self._selected_device(
+                record
+            )
             if record["recipe"].startswith("paddleocr-ort-"):
                 # Frozen source manifests own downloads; importing the catalog must stay offline.
                 environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
@@ -928,6 +967,7 @@ class ManagedEnvironmentStore:
                     "abi",
                     "recipe",
                     "recipe_lock",
+                    "selected_device",
                     "source_ids",
                     "override_source_ids",
                     "last_install_operation",
@@ -974,6 +1014,14 @@ class ManagedEnvironmentStore:
                 or record["recipe"] not in _RECIPE_IDS
             ):
                 raise ManagedEnvironmentError("environment recipe is invalid")
+            if "selected_device" in record:
+                if not isinstance(record["selected_device"], str) or record[
+                    "selected_device"
+                ] not in {"cpu", "cuda", "directml"}:
+                    raise ManagedEnvironmentError(
+                        "environment selected device is invalid"
+                    )
+                self._with_device(record, record["selected_device"])
             # 安装时冻结的 manifest scope 锁证据（旧 schema_version=1 记录
             # 缺失该键：list/手工切换不受影响，兼容查询按未验证处理）。
             if "recipe_lock" in record and (
@@ -1229,7 +1277,7 @@ class ManagedEnvironmentStore:
                     else "onnxruntime"
                 )
                 expected.update({"paddleocr", "paddlex", ort})
-                if recipe.endswith("cuda"):
+                if record.get("_device_probe") == "cuda":
                     expected.add("nvidia-cudnn-cu13")
                 forbidden = {
                     "paddlepaddle",
@@ -1260,7 +1308,13 @@ class ManagedEnvironmentStore:
                     "reason": "engine_packages_missing",
                     "python": str(python),
                 }
-            import_probe = _RECIPE_IMPORT_PROBES.get(recipe)
+            probe_recipe = (
+                "paddleocr-ort-cpu"
+                if recipe == "paddleocr-ort-cuda"
+                and record.get("_device_probe") != "cuda"
+                else recipe
+            )
+            import_probe = _RECIPE_IMPORT_PROBES.get(probe_recipe)
             if import_probe is not None:
                 # Probe the exact import the Supervisor performs at engine
                 # init, for every engine the recipe activates: importing the
@@ -1413,7 +1467,12 @@ class ManagedEnvironmentStore:
             "service_state": "not_started",
             "configured_recognition_types": modes,
             **_recipe_metadata(recipe),
-            "target_device": _recipe_metadata(recipe).get("target_device"),
+            "target_device": self._selected_device(record),
+            "provider": _recipe_metadata(
+                f"paddleocr-ort-{self._selected_device(record)}"
+            ).get("provider")
+            if recipe.startswith("paddleocr-ort-")
+            else _recipe_metadata(recipe).get("provider"),
             "actual_device": None,
             "operation_blocks": self._operation_blocks(record, probe, data),
             "reason": (
@@ -1448,7 +1507,9 @@ class ManagedEnvironmentStore:
             )
         )
         return {
-            "preview_install": mutation,
+            "preview_install": None
+            if self._paddle_shared(record.get("recipe")) and not referenced
+            else mutation,
             "switch": "environment_has_active_jobs"
             if busy
             else (
@@ -1465,6 +1526,8 @@ class ManagedEnvironmentStore:
                 if active
                 else "environment_has_active_jobs"
                 if referenced
+                else "environment_has_live_service"
+                if environment_has_services(self._references, record["id"])
                 else None
             ),
         }
@@ -1718,6 +1781,27 @@ class ManagedEnvironmentStore:
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 targets = data.setdefault("prepare_targets", {})
+                if self._paddle_shared(recipe):
+                    owned_ids = {
+                        item["environment_id"]
+                        for key, item in targets.items()
+                        if self._paddle_shared(key)
+                    }
+                    owned_ids.add(data["active_id"])
+                    candidates = sorted(
+                        data["environments"].values(),
+                        key=lambda item: (item["id"] != data["active_id"], item["id"]),
+                    )
+                    for item in candidates:
+                        if item["id"] in owned_ids and self._paddle_shared(
+                            item.get("recipe")
+                        ):
+                            targets[recipe] = {
+                                "environment_id": item["id"],
+                                "name": item["name"],
+                            }
+                            _atomic_json(self._registry, data)
+                            return self._public_record(item, self._probe(item), data)
                 target = targets.get(recipe)
                 if target is not None:
                     record = data["environments"].get(target["environment_id"])
@@ -2104,7 +2188,13 @@ class ManagedEnvironmentStore:
             # venv 随目录迁移后在最终固定路径复检：入口按 python -m 启动不
             # 依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；导入闭包复检
             # 兑底 relocation 破损（长路径 DLL load failed 等）。
-            relocated = self._probe(candidate)
+            relocated = (
+                self._probe_device(
+                    candidate, _recipe_metadata(candidate["recipe"])["target_device"]
+                )
+                if candidate.get("recipe")
+                else self._probe(candidate)
+            )
             if not relocated["healthy"]:
                 raise ManagedEnvironmentError(
                     f"installed environment failed probe: {relocated['reason']}; "
@@ -2163,6 +2253,8 @@ class ManagedEnvironmentStore:
             # 保守回滚，不前滚候选；guard 先验证、数据保全，journal 仅由
             # _rollback_swap 在收敛成功后清除，失败保留证据与保护，下次
             # 扫描重试。
+            if environment_has_services(self._references, env_id):
+                raise ManagedEnvironmentError("pending swap has a live service lease")
             self._rollback_swap(env_id, candidate["revision"])
             raise ManagedEnvironmentError(
                 "a previous environment install was rolled back; retry the operation"
@@ -2283,7 +2375,12 @@ class ManagedEnvironmentStore:
         raise ManagedEnvironmentError("unknown engine recipe")
 
     def status_scope(
-        self, env_id: str, revision: int, runtime_root: Path, recipe: str
+        self,
+        env_id: str,
+        revision: int,
+        runtime_root: Path,
+        recipe: str,
+        device: str | None = None,
     ) -> tuple[RuntimeInstallScope | None, frozenset[str] | None, str]:
         """Resolve the running revision's installed scope from the registry.
 
@@ -2307,6 +2404,15 @@ class ManagedEnvironmentStore:
             accelerator = "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
             return None, frozenset({recipe, "runtime_host"}), accelerator
         scope, accelerator = self._recipe(recipe)
+        if self._paddle_shared(recipe):
+            selected = self._with_device(record, device)
+            accelerator = (
+                "nvidia_cuda" if selected["selected_device"] == "cuda" else "cpu"
+            )
+            if selected["selected_device"] == "cpu":
+                # Runtime readiness follows the selected capability. Optional GPU
+                # package/driver failure must not degrade the independent CPU service.
+                scope, _ = self._recipe("paddleocr-ort-cpu")
         return scope, None, accelerator
 
     def preview_install(
@@ -2348,10 +2454,18 @@ class ManagedEnvironmentStore:
                 raise ManagedEnvironmentError(
                     "target must be a managed virtual environment"
                 )
-            if env_id == data["active_id"] and record["status"] != "empty":
+            if (
+                env_id == data["active_id"]
+                and record["status"] != "empty"
+                and not self._paddle_shared(record.get("recipe"))
+            ):
                 raise ManagedEnvironmentError("active environment cannot be modified")
             current = record.get("recipe")
-            if current is not None and current != recipe:
+            if (
+                current is not None
+                and current != recipe
+                and not (self._paddle_shared(current) and self._paddle_shared(recipe))
+            ):
                 # 单 venv 不允许混装引擎闭包：Paddle ONNX 锁与 MinerU 锁各自
                 # 独立解析（含不同 onnxruntime/opencv 发行物），叠加安装会把
                 # 两套推理运行时装进同一环境，未绑定的组合如实拒绝。
@@ -2411,13 +2525,37 @@ class ManagedEnvironmentStore:
                 "source_config_revision": int(data.get("source_config_revision") or 0),
                 "runtime_manifest": self.manifest.sha256,
             }
+            previous_pins = {}
+            if self._paddle_shared(current) and self._paddle_shared(recipe):
+                previous_scope, _ = self._recipe(current)
+                previous_pins = {
+                    name: version
+                    for name, _display, version in self._scope_pins(previous_scope)
+                }
             dependencies = [
-                display for _name, display, _version in self._scope_pins(scope)
+                display
+                for name, display, version in self._scope_pins(scope)
+                if current == recipe
+                or name not in previous_pins
+                or previous_pins[name] != version
+            ]
+            removed_dependencies = [
+                name
+                for name in previous_pins
+                if name not in {item[0] for item in self._scope_pins(scope)}
             ]
             _atomic_json(self._plan_path(env_id), plan)
             return {
                 **plan,
                 "dependencies": dependencies,
+                "removed_dependencies": removed_dependencies,
+                "cuda_plugin_action": "prepare"
+                if recipe == "paddleocr-ort-cuda"
+                else "remove"
+                if current == "paddleocr-ort-cuda" and recipe == "paddleocr-ort-cpu"
+                else None,
+                "requires_service_stop": record["status"] == "installed"
+                and data["active_id"] == env_id,
                 "sources": sources,
                 # 资产来源分类：固定解释器归档与内部 wheel 随产品分发；
                 # 依赖来自随包离线包或锁定的在线索引；模型只是偏好，
@@ -2517,16 +2655,25 @@ class ManagedEnvironmentStore:
                     reason = "legacy_environment"
                 elif record["status"] != "installed":
                     reason = "environment_empty"
-                elif record.get("recipe") != recipe:
+                elif record.get("recipe") != recipe and not (
+                    recipe == "paddleocr-ort-cpu"
+                    and record.get("recipe") == "paddleocr-ort-cuda"
+                ):
                     reason = "recipe_mismatch"
                 elif "recipe_lock" not in record:
                     reason = "lock_evidence_missing"
-                elif record["recipe_lock"] != scope.sha256:
+                elif record["recipe_lock"] != self._recipe(record["recipe"])[0].sha256:
                     reason = "lock_evidence_mismatch"
                 else:
                     reason = None
                 if reason is None:
-                    probe = self._probe(record)
+                    probe = (
+                        self._probe_device(
+                            record, _recipe_metadata(recipe).get("target_device")
+                        )
+                        if recipe == "paddleocr-ort-cuda"
+                        else self._probe(record)
+                    )
                     if not probe["healthy"]:
                         reason = probe["reason"]
                     elif probe.get("platform") != self.manifest.python.platform:
@@ -2584,7 +2731,7 @@ class ManagedEnvironmentStore:
         ):
             raise RuntimeInstallPlanStale("invalid environment plan")
         requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
-        with self._target_operation(env_id):
+        with self._target_operation(env_id), maintenance_lock(self._references, env_id):
             self._recover_pending_swap(env_id)
             plan_path = self._plan_path(env_id)
             with RuntimeStoreLock(self._lock):
@@ -2617,7 +2764,11 @@ class ManagedEnvironmentStore:
                     or record["kind"] != "venv"
                     or record["revision"] != plan.get("environment_revision")
                     or data["active_revision"] != plan.get("active_revision")
-                    or (data["active_id"] == env_id and record["status"] != "empty")
+                    or (
+                        data["active_id"] == env_id
+                        and record["status"] != "empty"
+                        and not self._paddle_shared(record.get("recipe"))
+                    )
                     or plan.get("recipe_lock") != scope.sha256
                     or plan.get("runtime_manifest") != self.manifest.sha256
                     # 来源配置修订变化 → 旧计划失效；在途操作不受影响
@@ -2630,6 +2781,10 @@ class ManagedEnvironmentStore:
                     )
                 if environment_has_references(self._references, env_id):
                     raise ManagedEnvironmentError("environment has active jobs")
+                if environment_has_services(self._references, env_id):
+                    raise ManagedEnvironmentError(
+                        "environment service must stop before maintenance"
+                    )
                 selection = self._plan_selection(
                     data, record, accelerator, requested_ids
                 )
@@ -2716,6 +2871,11 @@ class ManagedEnvironmentStore:
                         "path": env_id,
                         "status": "installed",
                         "recipe": plan["recipe"],
+                        "selected_device": "cpu"
+                        if plan["recipe"] == "paddleocr-ort-cpu"
+                        else self._selected_device(record)
+                        if record.get("recipe")
+                        else _recipe_metadata(plan["recipe"])["target_device"],
                         # 安装时冻结的 scope 锁证据（旧记录缺省该键）。
                         "recipe_lock": scope.sha256,
                         "source_ids": plan["source_ids"],
@@ -2726,8 +2886,9 @@ class ManagedEnvironmentStore:
                 observer.set_phase("verify", "检查环境解释器与识别依赖；模型尚未下载")
                 # 候选在 staging 槽位先行探针：发生在终态提交之前，可被
                 # 取消；换入后在最终固定路径再复检一次。
-                staged = self._probe(
-                    {**candidate, "path": str(Path(_SWAP_STAGING_ROOT) / env_id)}
+                staged = self._probe_device(
+                    {**candidate, "path": str(Path(_SWAP_STAGING_ROOT) / env_id)},
+                    _recipe_metadata(candidate["recipe"])["target_device"],
                 )
                 if not staged["healthy"]:
                     raise ManagedEnvironmentError(
@@ -2952,18 +3113,37 @@ class ManagedEnvironmentStore:
         )
 
     @contextmanager
-    def switch_reservation(self, env_id: str) -> Iterator[dict]:
+    def maintenance_reservation(self, env_id: str) -> Iterator[dict]:
+        if not _is_valid_environment_id(env_id):
+            raise ManagedEnvironmentError("unknown environment")
+        with admission_lock(self._references, env_id):
+            with RuntimeStoreLock(self._lock):
+                record = self._read()["environments"].get(env_id)
+                if record is None:
+                    raise ManagedEnvironmentError("unknown environment")
+                if environment_has_references(self._references, env_id):
+                    raise ManagedEnvironmentError("environment has active jobs")
+                prepared = {
+                    "environment_id": env_id,
+                    "environment_revision": record["revision"],
+                }
+            yield prepared
+
+    @contextmanager
+    def switch_reservation(
+        self, env_id: str, device: str | None = None
+    ) -> Iterator[dict]:
         with self._target_operation(env_id):
             self._switch_guarded = env_id
             self._switch_committed = False
             try:
-                yield self.prepare_switch(env_id)
+                yield self.prepare_switch(env_id, device)
             finally:
                 self._switch_guarded = None
         if self._switch_committed:
             self._finish_default_migration(env_id)
 
-    def prepare_switch(self, env_id: str) -> dict:
+    def prepare_switch(self, env_id: str, device: str | None = None) -> dict:
         with (
             nullcontext()
             if self._switch_guarded == env_id
@@ -2977,7 +3157,8 @@ class ManagedEnvironmentStore:
                     record = data["environments"][env_id]
                 except KeyError as exc:
                     raise ManagedEnvironmentError("unknown environment") from exc
-                probe = self._probe(record)
+                record = self._with_device(record, device)
+                probe = self._probe_device(record)
                 if not probe["healthy"]:
                     raise ManagedEnvironmentError(
                         f"target environment is unhealthy: {probe['reason']}"
@@ -2989,15 +3170,27 @@ class ManagedEnvironmentStore:
                     "active_revision": data["active_revision"],
                     "python": probe["python"],
                     "requires_supervisor": record["status"] == "installed",
-                    "launch": self._launch(record, probe["python"]),
+                    "launch": self._switch_launch(record, probe["python"], data),
+                    "selected_device": record["selected_device"],
                 }
+
+    def _switch_launch(self, record: dict, python: str, data: dict) -> dict | None:
+        launch = self._launch(record, python)
+        if launch is not None:
+            changed = data["active_id"] != record["id"] or self._selected_device(
+                data["environments"][record["id"]]
+            ) != self._selected_device(record)
+            launch["environment"]["VIBEOCR_MANAGED_SELECTION_REVISION"] = str(
+                data["active_revision"] + int(changed)
+            )
+        return launch
 
     def commit_switch(
         self, prepared: dict, *, started_health: dict | None = None
     ) -> dict:
         if (
             not isinstance(prepared, dict)
-            or set(prepared)
+            or set(prepared) - {"selected_device"}
             != {
                 "environment_id",
                 "environment_revision",
@@ -3040,12 +3233,15 @@ class ManagedEnvironmentStore:
                     or data["active_id"] != prepared["active_id"]
                 ):
                     raise ManagedEnvironmentError("environment switch is stale")
-                probe = self._probe(record)
+                selected = self._with_device(record, prepared.get("selected_device"))
+                probe = self._probe_device(selected)
                 if not probe["healthy"] or probe["python"] != prepared["python"]:
                     raise ManagedEnvironmentError(
                         "target environment changed before switch"
                     )
-                if prepared["launch"] != self._launch(record, probe["python"]):
+                if prepared["launch"] != self._switch_launch(
+                    selected, probe["python"], data
+                ):
                     raise ManagedEnvironmentError("target launch changed before switch")
                 if record["status"] == "installed" and not self._verified_health(
                     started_health
@@ -3055,7 +3251,10 @@ class ManagedEnvironmentStore:
                     raise ManagedEnvironmentError(
                         "empty environment must not launch Supervisor"
                     )
-                if data["active_id"] != env_id:
+                if data["active_id"] != env_id or self._selected_device(
+                    record
+                ) != self._selected_device(selected):
+                    data["environments"][env_id] = selected
                     data["active_id"] = env_id
                     data["active_revision"] += 1
                     _atomic_json(self._registry, data)

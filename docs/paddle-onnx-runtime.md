@@ -28,6 +28,18 @@ CUDA 对所有启用模型统一设置官方 [`prefer_nhwc=1`](https://onnxrunti
 
 DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁直到 predict generator 消费完毕。worker 的 stdio 请求继续串行。PaddleX 3.7.2 的 ONNX runner `close()` 为空，因此本地 owner 在 TTL、切档和退出时显式清除其全部 session 引用；不调用 Paddle allocator。原生崩溃、OOM 或 EP 失效终止当前任务，不进入通用 batch 重试；普通坏输入仍走既有隔离语义。已确认取消会停止自有 worker，下一新任务才可重建，绝不重放原任务。
 
+## 同一 Paddle 环境的能力与维护
+
+CPU 与 CUDA 共享受管环境身份、固定目录及 CPU 基础闭包。`recipe` / `recipe_lock` 记录实际安装的完整闭包；可选 `selected_device` 独立记录下一次任务的默认设备，旧记录按原配方设备读取。CPU 查询可以复用 CUDA 闭包，但必须同时验证已安装闭包锁与所请求 CPU 子集的版本。DirectML 和 MinerU 仍使用独立环境。
+
+普通切换 CPU 不卸载 CUDA；同一 id 切换 CPU/CUDA 也要启动新 Supervisor、验证并提交设备选择。选择提交推进 `active_revision`；新任务冻结实际 device/provider，旧 host 不能再准入新任务，原任务不重放。CUDA 插件、驱动或会话失败不改变 CPU 基础依赖的健康状态，显式 CUDA 请求仍失败，不假装 CPU 成功。
+
+增装、修复和明确移除 CUDA 均先预览并确认。增装计划只列新增/替换依赖；移除计划列移除的 NVIDIA 包。安装仍构造完整目标候选，再按既有 journal 换入/回滚，移除不在运行中的 venv 内执行 pip uninstall。普通切换不安装依赖；旧环境、来源偏好、下载缓存和共享模型缓存保留。退役槽位与缓存的物理释放量不能由逻辑文件大小推断。
+
+活动环境维护按顺序执行：桌面产品维护 lease → Runtime stdin `prepare_maintenance` 冻结任务准入并验证零任务 → 停止服务 → 安装进程持 service-start/maintenance 门，确认无服务 lease，构建及验证候选 → 提交或回滚 → 释放 stdin reservation → 恢复选中设备的服务。嵌套锁顺序为任务准入、服务启动/维护、registry；服务 lease 与 job lease 复用 references 下的 OS 文件锁，不用 PID 判断崩溃存活。stdin 断开/取消自动释放 reservation，服务退出自动释放 lease；待恢复 journal 阻止新 host 启动。候选导入探针不启动 host，因此不会自锁。
+
+停服失败不进入安装；候选失败保留旧 revision、旧设备选择与健康 CPU，同时把本次操作记录为失败。恢复服务也失败时保留两项错误，不把旧失败任务重放。目录交换失败继续沿既有 journal 收敛；缓存命中、网络下载与模型复用采用现有事件，未知物理占用/峰值保持未知。
+
 ## 模型、来源和完整性
 
 | preset | det | rec |

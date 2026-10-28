@@ -480,7 +480,7 @@ test("normal preparation keeps confirmation brief and rejects late plans after a
   const confirmation = page.locator(".runtime-install-plan");
   await expect(
     confirmation.getByText(
-      /主要组件：paddleocr==3\.2\.0、onnxruntime==1\.23\.0；\s*共 3 项依赖/,
+      /本次新增或替换组件：paddleocr==3\.2\.0、onnxruntime==1\.23\.0；\s*共 3 项依赖/,
     ),
   ).toBeVisible();
   await expect(confirmation.getByText(/hidden-transitive/)).not.toBeVisible();
@@ -552,4 +552,83 @@ test("catalog rejects duplicate combinations without silent merging", async ({
   await expect(
     page.getByRole("button", { name: "准备此后端", exact: true }),
   ).toHaveCount(0);
+});
+
+test("same Paddle environment switches selected device without another install", async ({
+  page,
+}) => {
+  const settings = {
+    environmentRecipes: recipes,
+    environmentSources: sources,
+    activeEnvironmentId: "shared",
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    environmentCompatibility: {
+      recipe: "paddleocr-ort-cpu",
+      selectedEnvironmentId: "shared",
+    },
+    environments: [
+      {
+        id: "shared",
+        name: "Paddle",
+        revision: 2,
+        kind: "venv",
+        status: "installed",
+        recipe: "paddleocr-ort-cuda",
+        targetDevice: "cuda",
+        pythonState: "ready",
+        dependencyState: "installed",
+        engineState: "ready",
+        modelState: "ready",
+        serviceState: "ready",
+        configuredRecognitionTypes: ["text", "table", "structure"],
+      },
+    ],
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings },
+  });
+  const section = page.locator(".engine-backend-section");
+  await expect(
+    section.getByText("该兼容环境已是当前环境并通过启动验证，无需重装。"),
+  ).toHaveCount(0);
+  await section.getByRole("button", { name: "启动并验证当前环境" }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "switchEnvironment",
+    arguments: { environmentId: "shared", device: "cpu" },
+  });
+  await page
+    .locator("details.environment-advanced-maintenance > summary")
+    .click();
+  await page.getByRole("button", { name: "预览移除 CUDA（保留 CPU）" }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "previewEnvironmentInstall",
+    arguments: { environmentId: "shared", recipe: "paddleocr-ort-cpu" },
+  });
+  await sendState(page, "settings", {
+    ...settings,
+    environmentPlan: {
+      planId: "a".repeat(32),
+      environmentId: "shared",
+      environmentRevision: 2,
+      recipe: "paddleocr-ort-cpu",
+      requestedRecipe: "paddleocr-ort-cpu",
+      sourceIds: ["tuna-pypi"],
+      dependencies: [],
+      removedDependencies: ["nvidia-cudnn-cu13"],
+      cudaPluginAction: "remove",
+      requiresServiceStop: true,
+    },
+  });
+  await expect(
+    page.getByText(/同时移除 ONNX Runtime CUDA 13 执行插件/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "确认移除 CUDA", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/确认后暂停当前识别服务/)).toBeVisible();
 });

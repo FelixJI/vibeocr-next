@@ -628,7 +628,7 @@ public sealed record SetEnvironmentSourcesCommand(
   bool IndependentModelSources = false) : WorkbenchCommand;
 public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
 public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
-public sealed record SwitchEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
+public sealed record SwitchEnvironmentCommand(string EnvironmentId, string? Device = null) : WorkbenchCommand;
 public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record SetEnvironmentCleanupPageCommand(int Page) : WorkbenchCommand;
 public sealed record PreviewEnvironmentCleanupCommand : WorkbenchCommand;
@@ -1135,7 +1135,8 @@ public sealed record SettingsEnvironmentState(
   IReadOnlyList<string>? UnknownSourceIds = null,
   IReadOnlyList<SettingsEnvironmentResolvedSourceState>? ResolvedSources = null,
   SettingsEnvironmentInstallFailureState? LastInstallFailure = null,
-  IReadOnlyDictionary<string, string?>? OperationBlocks = null);
+  IReadOnlyDictionary<string, string?>? OperationBlocks = null,
+  string? Recipe = null);
 
 /// <summary>目录内下载源投影：展示名 + 脱敏端点。</summary>
 public sealed record SettingsEnvironmentSourceState(
@@ -1231,7 +1232,10 @@ public sealed record SettingsEnvironmentPlanState(
   IReadOnlyList<SettingsEnvironmentPlanSourceState>? Sources = null,
   string? DependencyOrigin = null,
   string? PythonOrigin = null,
-  string? RuntimeWheelOrigin = null);
+  string? RuntimeWheelOrigin = null,
+  IReadOnlyList<string>? RemovedDependencies = null,
+  bool RequiresServiceStop = false,
+  string? CudaPluginAction = null);
 
 /// <summary>计划内单来源：请求/继承标记、用途分类与脱敏端点。</summary>
 public sealed record SettingsEnvironmentPlanSourceState(

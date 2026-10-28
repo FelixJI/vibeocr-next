@@ -354,7 +354,8 @@ public sealed partial class App : Application
                 ? (session.EnvironmentId, session.Revision) : null,
               _productMaintenance,
               () => _managedSession,
-              () => Interlocked.Increment(ref _managedEnvironmentInstallAttempts))),
+              () => Interlocked.Increment(ref _managedEnvironmentInstallAttempts),
+              SwitchManagedEnvironmentDeviceAsync, StopForMaintenanceAsync, RestoreAfterMaintenanceAsync)),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -1025,7 +1026,10 @@ public sealed partial class App : Application
             }
             // The attempt token breaks a settings-switch gate dependency: a
             // new switch cancels this attempt before draining its connection.
-            await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
+            // Managed installation restores while holding the settings gate;
+            // its owner reloads the snapshot after restoration completes.
+            if (_environmentSettings?.IsRestoringService != true)
+                await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
         }
         return connected;
     }
@@ -1112,9 +1116,12 @@ public sealed partial class App : Application
     }
 
     private Task SwitchManagedEnvironmentAsync(string environmentId, CancellationToken cancellationToken) =>
+        SwitchManagedEnvironmentDeviceAsync(environmentId, null, cancellationToken);
+
+    private Task SwitchManagedEnvironmentDeviceAsync(string environmentId, string? device, CancellationToken cancellationToken) =>
         SwitchManagedEnvironmentAndRefreshAsync(
             _runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."),
-            (token, committed) => _runtimeDemand.Connection!.SwitchAsync(environmentId, token, committed),
+            (token, committed) => _runtimeDemand.Connection!.SwitchAsync(environmentId, token, committed, device),
             async token =>
             {
                 if (_managedSession is { } session)

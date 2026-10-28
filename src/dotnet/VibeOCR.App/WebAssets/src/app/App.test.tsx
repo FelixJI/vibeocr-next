@@ -2895,7 +2895,7 @@ describe("AppShell", () => {
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
       "请求源：跟随配置；生效源：TUNA PyPI 镜像",
     );
-    await user.click(screen.getByText("完整依赖与来源明细（只读）"));
+    await user.click(screen.getByText("本次依赖与来源明细（只读）"));
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     expect(
       screen.getByText(
@@ -3070,6 +3070,7 @@ describe("AppShell", () => {
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.switchEnvironment",
       environmentId: "env-1",
+      device: "cpu",
     });
     // active 且已验证时不伪重装：只说明现状，不再提供切换/准备按钮。
     await rerender(
@@ -3086,6 +3087,7 @@ describe("AppShell", () => {
                 {
                   ...settingsBase.environments[0],
                   serviceState: "ready",
+                  targetDevice: "cpu",
                 },
               ],
               environmentCompatibility: {
@@ -3318,9 +3320,7 @@ describe("AppShell", () => {
       ),
     ).toBeVisible();
     // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
-    expect(
-      screen.getByText(/依赖安装只写入此目标环境，不会停止当前识别服务/),
-    ).toBeVisible();
+    expect(screen.getByText(/依赖安装只写入此目标环境/)).toBeVisible();
     // 同一待准备未确认前不再提供重复准备：计划卡接管确认入口。
     expect(
       screen.queryByRole("button", { name: "准备此后端" }),
@@ -4007,12 +4007,14 @@ describe("AppShell", () => {
         />,
       );
       expect(
-        screen.getByText(/主要组件：paddleocr==3.2.0、torch、torchvision；/),
+        screen.getByText(
+          /本次新增或替换组件：paddleocr==3.2.0、torch、torchvision；/,
+        ),
       ).toBeVisible();
       expect(
         screen.getByText(`${"paddleocr==3.2.0"}、${torch}、${torchvision}`),
       ).not.toBeVisible();
-      await user.click(screen.getByText("完整依赖与来源明细（只读）"));
+      await user.click(screen.getByText("本次依赖与来源明细（只读）"));
       expect(
         screen.getByText(`${"paddleocr==3.2.0"}、${torch}、${torchvision}`),
       ).toBeVisible();
@@ -4546,7 +4548,7 @@ describe("AppShell", () => {
         /计划：paddleocr-ort-cpu · 目标空白（空环境准备）· 下载来源：TUNA PyPI 镜像/,
       ),
     ).toBeVisible();
-    await user.click(screen.getByText("完整依赖与来源明细（只读）"));
+    await user.click(screen.getByText("本次依赖与来源明细（只读）"));
     expect(screen.getByText(/TUNA PyPI 镜像（依赖包来源/)).toBeVisible();
     expect(screen.getByText(/已缓存模型直接复用/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));

@@ -31,7 +31,7 @@
         "runtime_manifest": { "type": "string", "minLength": 1 },
         "layout_manifest": { "type": "string", "minLength": 1 },
         "product_id": { "type": "string", "minLength": 1 },
-        "action": { "type": "string", "enum": ["list", "initialize_default", "create", "set_sources", "preview_install", "install", "prepare_switch", "commit_switch", "repair_empty", "delete", "find_compatible", "prepare_target", "preview_cleanup", "run_cleanup"] },
+        "action": { "type": "string", "enum": ["list", "initialize_default", "create", "set_sources", "preview_install", "install", "prepare_switch", "prepare_maintenance", "commit_switch", "repair_empty", "delete", "find_compatible", "prepare_target", "preview_cleanup", "run_cleanup"] },
         "name": { "type": "string", "minLength": 1 },
         "environment_id": {
           "anyOf": [
@@ -45,6 +45,7 @@
           "minLength": 1,
           "description": "Locked engine recipe id (authoritative Runtime catalog) for preview_install/install/find_compatible/prepare_target. prepare_target reserves an owned reusable target and creates only an empty interpreter; it never installs business dependencies."
         },
+        "device": { "type": "string", "enum": ["cpu", "cuda", "directml"], "description": "prepare_switch only: desired execution device, independent of the installed closure." },
         "source_ids": {
           "anyOf": [
             {

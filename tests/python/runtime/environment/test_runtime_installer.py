@@ -5903,14 +5903,10 @@ def test_manual_same_name_recreate_rejects_deleted_environment_plan(
         )
 
 
-def test_preparation_reassigns_when_owned_target_is_stale_active_environment(
+def test_preparation_repairs_owned_stale_active_paddle_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F292-02 回归：准备目标成为 find_compatible 未选中的活动环境时，
-
-    保留该环境并另分配可维护的受控准备目标；重复准备与跨重启都复用
-    新归属，不重复创建，不再永远命中 active environment cannot be modified。
-    """
+    """过期 Paddle 锁仍不可直接复用；确认修复沿同 id 停服事务。"""
     _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(tmp_path / "release")
 
@@ -5938,20 +5934,21 @@ def test_preparation_reassigns_when_owned_target_is_stale_active_environment(
     # scope 锁过期：探针健康的活动环境也无法按当前配方复用。
     assert manager.find_compatible("paddleocr-ort-cpu")["selected"] is None
     replacement = manager.prepare_target("paddleocr-ort-cpu")
-    assert replacement["id"] != previous["id"]
-    assert replacement["status"] == "empty"
+    assert replacement["id"] == previous["id"]
+    assert replacement["status"] == "installed"
     # 原活动环境完整保留且仍为活动环境。
     data = manager._read()
     assert data["active_id"] == previous["id"]
     assert data["environments"][previous["id"]]["status"] == "installed"
-    # 新受控目标可预览确认：不再命中 active environment cannot be modified。
+    # 明确确认后使用维护屏障重建，预览不改变旧记录。
     plan = manager.preview_install(
         replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
     )
     assert plan["environment_id"] == replacement["id"]
+    assert plan["requires_service_stop"]
     assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
     reopened = open_store()
     assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
     listed = reopened.list()
-    assert len(listed["environments"]) == 2
+    assert len(listed["environments"]) == 1
     assert listed["active_id"] == previous["id"]

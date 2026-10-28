@@ -94,7 +94,10 @@ public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("sources")] IReadOnlyList<ManagedEnvironmentPlanSource>? Sources = null,
     [property: JsonPropertyName("dependency_origin")] string? DependencyOrigin = null,
     [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
-    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null);
+    [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null,
+    [property: JsonPropertyName("removed_dependencies")] IReadOnlyList<string>? RemovedDependencies = null,
+    [property: JsonPropertyName("requires_service_stop")] bool RequiresServiceStop = false,
+    [property: JsonPropertyName("cuda_plugin_action")] string? CudaPluginAction = null);
 
 /// <summary>计划内单来源：请求/继承标记、用途与脱敏端点。</summary>
 public sealed record ManagedEnvironmentPlanSource(
@@ -114,7 +117,8 @@ public sealed record PreparedEnvironmentSwitch(
     [property: JsonPropertyName("active_revision")] int ActiveRevision,
     [property: JsonPropertyName("python")] string Python,
     [property: JsonPropertyName("requires_supervisor")] bool RequiresSupervisor,
-    [property: JsonPropertyName("launch")] RuntimeLaunch? Launch);
+    [property: JsonPropertyName("launch")] RuntimeLaunch? Launch,
+    [property: JsonPropertyName("selected_device")] string? SelectedDevice = null);
 
 public sealed record CommittedEnvironmentSwitch(
     [property: JsonPropertyName("active_id")] string ActiveId,
@@ -233,6 +237,11 @@ public interface IManagedEnvironmentClient
         throw new NotSupportedException("当前 Runtime 不支持空间清理，请更新运行组件。");
     Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("当前 Runtime 不支持受保护的环境切换，请更新运行组件。");
+    Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, string? device, CancellationToken cancellationToken = default) =>
+        device is null ? BeginEnvironmentSwitchAsync(environmentId, cancellationToken)
+            : throw new NotSupportedException("当前 Runtime 不支持独立设备选择。");
+    Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前 Runtime 不支持环境维护租约。");
     Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
         ListEnvironmentsAsync(cancellationToken);
@@ -280,17 +289,35 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
     public Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedCleanupResult>("run_cleanup", new() { ["plan_id"] = planId, ["item_ids"] = itemIds }, cancellationToken);
 
-    public async Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default)
+    public Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, CancellationToken cancellationToken = default) =>
+        BeginEnvironmentSwitchAsync(environmentId, null, cancellationToken);
+
+    public async Task<IManagedEnvironmentSwitchReservation> BeginEnvironmentSwitchAsync(string environmentId, string? device, CancellationToken cancellationToken = default)
     {
         var request = BindingRequest();
         request.Remove("accelerator");
         request["request_kind"] = "environment";
         request["action"] = "prepare_switch";
+        if (device is not null) request["device"] = device;
         request["environment_id"] = environmentId;
         ProcessStartInfo startInfo = StartInfo(request);
         startInfo.RedirectStandardInput = true;
         startInfo.ArgumentList.Add("--environment-switch-control");
         return await EnvironmentSwitchReservation.StartAsync(startInfo, environmentId, cancellationToken,
+            _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
+    }
+
+    public async Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default)
+    {
+        var request = BindingRequest();
+        request.Remove("accelerator");
+        request["request_kind"] = "environment";
+        request["action"] = "prepare_maintenance";
+        request["environment_id"] = environmentId;
+        ProcessStartInfo startInfo = StartInfo(request);
+        startInfo.RedirectStandardInput = true;
+        startInfo.ArgumentList.Add("--environment-switch-control");
+        return await EnvironmentSwitchReservation.StartMaintenanceAsync(startInfo, environmentId, cancellationToken,
             _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
     }
 

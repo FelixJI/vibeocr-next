@@ -21,6 +21,75 @@ namespace VibeOCR.App.Tests;
 public sealed class ManagedEnvironmentSettingsTests
 {
   [Theory]
+  [InlineData("success")]
+  [InlineData("stop")]
+  [InlineData("install")]
+  [InlineData("release")]
+  public async Task ActiveInstallationFreezesAdmissionStopsThenRestores(string failure)
+  {
+    List<string> events = [];
+    var manager = new MutableManager { RequiresServiceStop = true, MaintenanceEvents = events, FailMaintenanceDisposal = failure == "release" };
+    manager.BeforeInstall = () =>
+    {
+      events.Add("install");
+      return failure == "install" ? Task.FromException(new InvalidOperationException("install failed")) : Task.CompletedTask;
+    };
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator(), stopService: _ =>
+      {
+        events.Add("stop");
+        return failure == "stop" ? Task.FromException(new InvalidOperationException("stop failed")) : Task.CompletedTask;
+      }, restoreService: () => { events.Add("restore"); return Task.CompletedTask; });
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", null, TestContext.Current.CancellationToken);
+    if (failure == "success")
+      await settings.InstallAsync("plan", null, TestContext.Current.CancellationToken);
+    else
+    {
+      var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        settings.InstallAsync("plan", null, TestContext.Current.CancellationToken));
+      Assert.Equal($"{failure} failed", error.Message);
+    }
+    Assert.Equal(failure == "stop" ? new[] { "reserve", "stop", "release", "restore" }
+      : new[] { "reserve", "stop", "install", "release", "restore" }, events);
+    Assert.Equal(failure == "stop" ? 0 : 1, manager.InstallCalls);
+    Assert.False(settings.IsBusy);
+  }
+
+  [Fact]
+  public async Task CommittedInstallCannotBeCancelledWhileServiceRestorationIsPending()
+  {
+    var restoring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var manager = new MutableManager { RequiresServiceStop = true };
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator(), stopService: _ => Task.CompletedTask,
+      restoreService: async () => { restoring.SetResult(); await release.Task; });
+    await settings.PreviewAsync("environment", "paddleocr-ort-cpu", null, TestContext.Current.CancellationToken);
+    Task install = settings.InstallAsync("plan", null, TestContext.Current.CancellationToken);
+    await restoring.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.True(settings.IsRestoringService);
+    Assert.False(settings.CanCancelInstall);
+    settings.CancelInstall();
+    release.SetResult();
+    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Equal(1, manager.InstallCalls);
+    Assert.False(settings.IsRestoringService);
+    Assert.Contains("已恢复识别服务", settings.Status, StringComparison.Ordinal);
+  }
+
+  [Fact]
+  public async Task SameEnvironmentDeviceSelectionReachesLifecycleOwner()
+  {
+    string? selected = null;
+    var settings = new ManagedEnvironmentSettings(new MutableManager(),
+      (_, _) => throw new Xunit.Sdk.XunitException("device selection must reach lifecycle"),
+      () => ("environment", 1), new ProductMaintenanceCoordinator(),
+      activateDevice: (id, device, _) => { Assert.Equal("environment", id); selected = device; return Task.CompletedTask; });
+    await settings.SwitchAsync("environment", TestContext.Current.CancellationToken, "cpu");
+    Assert.Equal("cpu", selected);
+  }
+
+  [Theory]
   [InlineData(false)]
   [InlineData(true)]
   public async Task CommittedSwitchSurvivesPostCommitListRefreshFailure(bool cancelRefresh)
@@ -58,7 +127,8 @@ public sealed class ManagedEnvironmentSettingsTests
   public async Task ReadOnlyEnvironmentListUsesExistingRefreshWithoutPreparingRuntime()
   {
     int lists = 0;
-    var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
+    var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; },
+      RequiresServiceStop = true, RemovedDependencies = ["nvidia-cudnn-cu13"], CudaPluginAction = "remove" };
     var environments = new ManagedEnvironmentSettings(manager,
       (_, _) => throw new Xunit.Sdk.XunitException("list must not switch"), () => null,
       new ProductMaintenanceCoordinator());
@@ -85,6 +155,15 @@ public sealed class ManagedEnvironmentSettingsTests
       Assert.False(inference.IsAttached);
       Assert.Equal(0, manager.CreateCalls);
       Assert.Equal(0, manager.InstallCalls);
+      WorkbenchCommandOutcome preview = await handler.ExecuteAsync(
+        new PreviewEnvironmentInstallCommand("environment", "paddleocr-ort-cpu", null),
+        TestContext.Current.CancellationToken);
+      Assert.Null(preview.Error);
+      SettingsWorkbenchState projected = Assert.Single(preview.States.OfType<SettingsWorkbenchState>());
+      Assert.Equal("paddleocr-ort-cpu", Assert.Single(projected.Environments!).Recipe);
+      Assert.True(projected.EnvironmentPlan!.RequiresServiceStop);
+      Assert.Equal("remove", projected.EnvironmentPlan.CudaPluginAction);
+      Assert.Equal(["nvidia-cudnn-cu13"], projected.EnvironmentPlan.RemovedDependencies);
     }
     finally { Directory.Delete(root, recursive: true); }
   }
@@ -1008,7 +1087,8 @@ public sealed class ManagedEnvironmentSettingsTests
         ReadyStatus());
       ManagedEnvironmentSession? current = null;
       int lists = 0;
-      var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
+      var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; },
+      RequiresServiceStop = true, RemovedDependencies = ["nvidia-cudnn-cu13"], CudaPluginAction = "remove" };
       var settings = new ManagedEnvironmentSettings(manager,
         (_, _) => Task.CompletedTask, () => ("environment", 1),
         new ProductMaintenanceCoordinator(), () => current);
@@ -1225,6 +1305,24 @@ public sealed class ManagedEnvironmentSettingsTests
     public int CreateCalls { get; private set; }
     public int PreviewCalls { get; private set; }
     public int InstallCalls { get; private set; }
+    public bool RequiresServiceStop { get; set; }
+    public List<string>? MaintenanceEvents { get; set; }
+    public bool FailMaintenanceDisposal { get; set; }
+    public IReadOnlyList<string>? RemovedDependencies { get; set; }
+    public string? CudaPluginAction { get; set; }
+    public Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default)
+    {
+      MaintenanceEvents?.Add("reserve");
+      return Task.FromResult<IAsyncDisposable>(new MaintenanceReservation(MaintenanceEvents, FailMaintenanceDisposal));
+    }
+    private sealed class MaintenanceReservation(List<string>? events, bool fail) : IAsyncDisposable
+    {
+      public ValueTask DisposeAsync()
+      {
+        events?.Add("release");
+        return fail ? ValueTask.FromException(new InvalidOperationException("release failed")) : ValueTask.CompletedTask;
+      }
+    }
     public bool SupportsEnvironmentInstallProgress => true;
     public bool SupportsEnvironmentCleanup => true;
     public int CleanupCalls { get; private set; }
@@ -1327,7 +1425,7 @@ public sealed class ManagedEnvironmentSettingsTests
             "online_index"),
         ],
         DependencyOrigin: "online_index", PythonOrigin: "product_bundle",
-        RuntimeWheelOrigin: "product_bundle");
+        RuntimeWheelOrigin: "product_bundle", RequiresServiceStop: RequiresServiceStop, RemovedDependencies: RemovedDependencies, CudaPluginAction: CudaPluginAction);
     }
 
     public async Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(

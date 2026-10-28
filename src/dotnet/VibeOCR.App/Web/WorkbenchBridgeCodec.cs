@@ -1110,8 +1110,17 @@ public static class WorkbenchBridgeCodec
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new InvalidateEnvironmentPlanCommand();
       case ("settings", "switchEnvironment"):
-        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
-        return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments));
+        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "environmentId", "device" }, "command arguments");
+        string? requestedDevice = null;
+        if (arguments.TryGetProperty("device", out JsonElement selectedDevice))
+        {
+          if (selectedDevice.ValueKind != JsonValueKind.String)
+            throw new WorkbenchBridgeProtocolException("运行设备无效。");
+          requestedDevice = selectedDevice.GetString();
+        }
+        if (requestedDevice is not (null or "cpu" or "cuda" or "directml"))
+          throw new WorkbenchBridgeProtocolException("运行设备无效。");
+        return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments), requestedDevice);
       case ("settings", "setEnvironmentCleanupPage"):
         EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "page" }, "command arguments");
         JsonElement cleanupPage = arguments.GetProperty("page");

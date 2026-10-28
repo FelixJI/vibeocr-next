@@ -10,6 +10,22 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Theory]
+  [InlineData("cpu")]
+  [InlineData("cuda")]
+  [InlineData("directml")]
+  public void EnvironmentSwitchCarriesAnIndependentExplicitDevice(string device)
+  {
+    Guid session = Guid.NewGuid();
+    var command = Assert.IsType<SwitchEnvironmentCommand>(ParseForTest(CommandJson(session,
+      "settings", "switchEnvironment", JsonSerializer.Serialize(new { environmentId = "shared", device })), session).Command);
+    Assert.Equal("shared", command.EnvironmentId);
+    Assert.Equal(device, command.Device);
+    foreach (object invalid in new object[] { "auto", 1, new[] { "cpu" } })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session,
+        "settings", "switchEnvironment", JsonSerializer.Serialize(new { environmentId = "shared", device = invalid })), session));
+  }
+
   [Fact]
   public void TrayCommandRequiresOnlyBooleanEnabled()
   {
