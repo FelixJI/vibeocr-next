@@ -321,11 +321,77 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
             _runner is RuntimeInstallerCommandRunner runner ? runner.ObserveCommand : null).ConfigureAwait(false);
     }
 
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
-        InvokeEnvironmentAsync<ManagedEnvironmentList>("list", [], cancellationToken);
+  // Startup already returns a fully probed list. Share only that in-flight
+  // result, and order an earlier refresh before initialization, so this
+  // client does not compete with itself for Runtime's registry lock.
+  private readonly object environmentReadSync = new();
+  private readonly SemaphoreSlim environmentReadGate = new(1, 1);
+  private Task<ManagedEnvironmentList>? environmentInitialization;
 
-    public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
-        InvokeEnvironmentAsync<ManagedEnvironmentList>("initialize_default", [], cancellationToken);
+  public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default)
+  {
+    Task admission;
+    lock (environmentReadSync)
+    {
+      if (environmentInitialization is { } initialization)
+        return initialization.WaitAsync(cancellationToken);
+      admission = environmentReadGate.WaitAsync(cancellationToken);
+    }
+    return ReadEnvironmentListAsync("list", admission, cancellationToken);
+  }
+
+  public Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default)
+  {
+    Task admission;
+    TaskCompletionSource<ManagedEnvironmentList> completion;
+    lock (environmentReadSync)
+    {
+      if (environmentInitialization is { } initialization)
+        return initialization.WaitAsync(cancellationToken);
+      completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      environmentInitialization = completion.Task;
+      admission = environmentReadGate.WaitAsync(cancellationToken);
+    }
+    _ = CompleteEnvironmentInitializationAsync(completion, admission, cancellationToken);
+    return completion.Task;
+  }
+
+  private async Task<ManagedEnvironmentList> ReadEnvironmentListAsync(
+    string action, Task admission, CancellationToken cancellationToken)
+  {
+    await admission.ConfigureAwait(false);
+    try
+    {
+      return await InvokeEnvironmentAsync<ManagedEnvironmentList>(action, [], cancellationToken).ConfigureAwait(false);
+    }
+    finally { environmentReadGate.Release(); }
+  }
+
+  private async Task CompleteEnvironmentInitializationAsync(
+    TaskCompletionSource<ManagedEnvironmentList> completion, Task admission, CancellationToken cancellationToken)
+  {
+    try
+    {
+      ManagedEnvironmentList result;
+      try
+      {
+        result = await ReadEnvironmentListAsync("initialize_default", admission, cancellationToken).ConfigureAwait(false);
+      }
+      finally
+      {
+        // Clear before publishing completion, including synchronous
+        // failures and cancellation while queued. Never cache health.
+        lock (environmentReadSync)
+        {
+          if (ReferenceEquals(environmentInitialization, completion.Task))
+            environmentInitialization = null;
+        }
+      }
+      completion.TrySetResult(result);
+    }
+    catch (OperationCanceledException error) { completion.TrySetCanceled(error.CancellationToken); }
+    catch (Exception error) { completion.TrySetException(error); }
+  }
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,

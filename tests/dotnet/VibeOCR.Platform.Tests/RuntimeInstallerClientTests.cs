@@ -2149,6 +2149,158 @@ public sealed class RuntimeInstallerClientTests
         }
     }
 
+  [Fact]
+  public async Task EnvironmentReadsSharePendingInitializationAndRefreshAfterCompletion()
+  {
+    var runner = new EnvironmentReadRunner();
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Task<ManagedEnvironmentList> owner = client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall initialization = await runner.NextAsync();
+    Task<ManagedEnvironmentList> refresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(1, runner.Count);
+    initialization.Complete(7);
+    Assert.Same(await owner, await refresh);
+    Task<ManagedEnvironmentList> fresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall read = await runner.NextAsync();
+    Assert.Equal("list", read.Action);
+    read.Complete(8);
+    Assert.Equal(8, (await fresh).ActiveRevision);
+    Assert.Equal(2, runner.Count);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsPropagateInitializationFailureWithoutCachingIt()
+  {
+    var runner = new EnvironmentReadRunner();
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Task<ManagedEnvironmentList> owner = client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall initialization = await runner.NextAsync();
+    Task<ManagedEnvironmentList> refresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(1, runner.Count);
+    initialization.Result.SetException(new IOException("fixture initialization failed"));
+    Assert.Equal("fixture initialization failed", (await Assert.ThrowsAsync<IOException>(() => owner)).Message);
+    await Assert.ThrowsAsync<IOException>(() => refresh);
+    Task<ManagedEnvironmentList> fresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall read = await runner.NextAsync();
+    read.Complete(8);
+    Assert.Equal(8, (await fresh).ActiveRevision);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsWaiterCancellationDoesNotCancelInitializationOwner()
+  {
+    var runner = new EnvironmentReadRunner();
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Task<ManagedEnvironmentList> owner = client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall initialization = await runner.NextAsync();
+    using var waiter = new CancellationTokenSource();
+    Task<ManagedEnvironmentList> refresh = client.ListEnvironmentsAsync(waiter.Token);
+    Task<ManagedEnvironmentList> secondOwner = client.InitializeDefaultEnvironmentAsync(waiter.Token);
+    waiter.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => refresh);
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => secondOwner);
+    Assert.False(initialization.Token.IsCancellationRequested);
+    Assert.Equal(1, runner.Count);
+    initialization.Complete(7);
+    Assert.Equal(7, (await owner).ActiveRevision);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsListBeforeInitializationFinishesBeforeRealInitializationStarts()
+  {
+    var runner = new EnvironmentReadRunner();
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Task<ManagedEnvironmentList> first = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall read = await runner.NextAsync();
+    Task<ManagedEnvironmentList> owner = client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken);
+    Task<ManagedEnvironmentList> refresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(1, runner.Count);
+    read.Complete(6);
+    Assert.Equal(6, (await first).ActiveRevision);
+    EnvironmentReadCall initialization = await runner.NextAsync();
+    Assert.Equal("initialize_default", initialization.Action);
+    initialization.Complete(7);
+    Assert.Same(await owner, await refresh);
+    Assert.Equal(7, (await owner).ActiveRevision);
+    Assert.Equal(2, runner.Count);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsCancelledQueuedInitializationDoesNotPoisonNextOwner()
+  {
+    var runner = new EnvironmentReadRunner();
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Task<ManagedEnvironmentList> first = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    EnvironmentReadCall read = await runner.NextAsync();
+    using var cancellation = new CancellationTokenSource();
+    Task<ManagedEnvironmentList> cancelled = client.InitializeDefaultEnvironmentAsync(cancellation.Token);
+    Task<ManagedEnvironmentList> waiter = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    cancellation.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+    Task<ManagedEnvironmentList> next = client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken);
+    Task<ManagedEnvironmentList> refresh = client.ListEnvironmentsAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(1, runner.Count);
+    read.Complete(6);
+    await first;
+    EnvironmentReadCall initialization = await runner.NextAsync();
+    Assert.Equal("initialize_default", initialization.Action);
+    initialization.Complete(7);
+    Assert.Same(await next, await refresh);
+    Assert.Equal(2, runner.Count);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsSynchronousCompletionDoesNotKeepInitializationSnapshot()
+  {
+    var runner = new QueueRunner(EnvironmentReadResult("initialize_default", 7), EnvironmentReadResult("list", 8));
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Assert.Equal(7, (await client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken)).ActiveRevision);
+    Assert.Equal(8, (await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken)).ActiveRevision);
+    Assert.Equal(2, runner.StartInfos.Count);
+  }
+
+  [Fact]
+  public async Task EnvironmentReadsSynchronousFailureDoesNotKeepInitializationTask()
+  {
+    var runner = new QueueRunner(new RuntimeInstallerProcessResult(1,
+      """{"protocol_version":2,"ok":false,"error":{"code":"lock_timeout","canonical_code":"RUNTIME_BUSY","category":"transient","message":"fixture busy","retryable":true}}""", ""),
+      EnvironmentReadResult("list", 8));
+    var client = new RuntimeInstallerClient(Configuration(), runner);
+    Assert.Equal("fixture busy", (await Assert.ThrowsAsync<RuntimeInstallerException>(() =>
+      client.InitializeDefaultEnvironmentAsync(TestContext.Current.CancellationToken))).Message);
+    Assert.Equal(8, (await client.ListEnvironmentsAsync(TestContext.Current.CancellationToken)).ActiveRevision);
+    Assert.Equal(2, runner.StartInfos.Count);
+  }
+
+  private static RuntimeInstallerProcessResult EnvironmentReadResult(string action, int revision) => new(0,
+    $$$"""{"protocol_version":2,"response_kind":"environment","action":"{{{action}}}","result":{"active_id":null,"active_revision":{{{revision}}},"environments":[],"recipes":[]}}""", "");
+
+  private sealed class EnvironmentReadCall(string action, CancellationToken token)
+  {
+    public string Action { get; } = action;
+    public CancellationToken Token { get; } = token;
+    public TaskCompletionSource<RuntimeInstallerProcessResult> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public void Complete(int revision) => Result.SetResult(EnvironmentReadResult(Action, revision));
+  }
+
+  private sealed class EnvironmentReadRunner : IRuntimeInstallerCommandRunner
+  {
+    private readonly System.Threading.Channels.Channel<EnvironmentReadCall> calls =
+      System.Threading.Channels.Channel.CreateUnbounded<EnvironmentReadCall>();
+    private int count;
+    public int Count => Volatile.Read(ref count);
+    public Task<EnvironmentReadCall> NextAsync() => calls.Reader.ReadAsync(TestContext.Current.CancellationToken)
+      .AsTask().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    public Task<RuntimeInstallerProcessResult> RunAsync(ProcessStartInfo startInfo, CancellationToken cancellationToken)
+    {
+      var call = new EnvironmentReadCall(Request(startInfo).GetProperty("action").GetString()!, cancellationToken);
+      Interlocked.Increment(ref count);
+      Assert.True(calls.Writer.TryWrite(call));
+      return call.Result.Task.WaitAsync(cancellationToken);
+    }
+  }
+
     private static RuntimeInstallerConfiguration Configuration() =>
         new(
             @"C:\Next\runtime-installer\vibeocr-runtime-installer.exe",
