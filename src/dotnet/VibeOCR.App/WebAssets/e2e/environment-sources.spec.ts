@@ -686,3 +686,87 @@ test("CUDA upgrade confirmation exposes all seven added NVIDIA pins", async ({
     arguments: { planId: "cuda-delta" },
   });
 });
+
+test("healthy CPU upgrades through the public CUDA prepare action", async ({
+  page,
+}) => {
+  const settings = {
+    environmentRecipes: recipes,
+    environmentSources: sources,
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    activeEnvironmentId: "shared-cpu",
+    environmentCompatibility: {
+      recipe: "paddleocr-ort-cuda",
+      selectedEnvironmentId: null,
+    },
+    environments: [
+      {
+        id: "shared-cpu",
+        name: "existing CPU",
+        revision: 3,
+        kind: "venv",
+        status: "installed",
+        recipe: "paddleocr-ort-cpu",
+        targetDevice: "cpu",
+        pythonState: "ready",
+        dependencyState: "installed",
+        engineState: "ready",
+        serviceState: "ready",
+      },
+    ],
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings },
+  });
+  await page
+    .getByLabel("Paddle 推理后端", { exact: true })
+    .selectOption("nvidia_cuda");
+  await sendState(page, "settings", settings);
+  await page
+    .locator("details.environment-advanced-maintenance > summary")
+    .click();
+  const row = page.locator(
+    '.managed-environment-item[data-environment-id="shared-cpu"]',
+  );
+  await expect(row).toBeVisible();
+  // Reproduces why the previous native smoke could never click its repair path.
+  await expect(
+    row.getByRole("button", { name: "重新准备依赖", exact: true }),
+  ).toHaveCount(0);
+  const prepare = page
+    .locator(".engine-backend-section")
+    .getByRole("button", { name: "准备此后端", exact: true });
+  await expect(prepare).toBeEnabled();
+  await prepare.click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "prepareEnvironment",
+    arguments: { recipe: "paddleocr-ort-cuda" },
+  });
+  await sendState(page, "settings", {
+    ...settings,
+    environmentPlan: {
+      planId: "upgrade-existing",
+      environmentId: "shared-cpu",
+      environmentRevision: 3,
+      recipe: "paddleocr-ort-cuda",
+      requestedRecipe: "paddleocr-ort-cuda",
+      sourceIds: ["tuna-pypi"],
+      dependencies: ["nvidia-cudnn-cu13==9.27.0.42"],
+      requiresServiceStop: true,
+      cudaPluginAction: "prepare",
+    },
+  });
+  await expect(page.locator(".runtime-install-plan")).toContainText(
+    "existing CPU",
+  );
+  await page.getByRole("button", { name: "确认安装依赖", exact: true }).click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "confirmEnvironmentInstall",
+    arguments: { planId: "upgrade-existing" },
+  });
+});

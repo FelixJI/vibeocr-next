@@ -39,11 +39,11 @@ public sealed partial class MainWindow
       PaddleSmokeRecipe == "paddleocr-ort-cpu" && environment.Recipe == "paddleocr-ort-cuda");
 
   private static ManagedEnvironment? FindPaddleSmokeEnvironment(ManagedEnvironmentList list) =>
-    list.Environments.FirstOrDefault(item => item.Id == list.ActiveId &&
-      (PaddleSmokeInstalledRecipeMatches(item) ||
-       PaddleSmokeRecipe == "paddleocr-ort-cuda" && item.Recipe == "paddleocr-ort-cpu"))
-    ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName)
-    ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches);
+    list.Environments.FirstOrDefault(item => item.Id == list.ActiveId && PaddleSmokeInstalledRecipeMatches(item))
+    ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches)
+    ?? list.Environments.FirstOrDefault(item => item.Id == list.ActiveId &&
+      PaddleSmokeRecipe == "paddleocr-ort-cuda" && item.Recipe == "paddleocr-ort-cpu")
+    ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName);
 
   private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
     ? "directml" : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
@@ -230,12 +230,27 @@ public sealed partial class MainWindow
     RecordPaddleSmokeStage("preview install plan");
     await SelectSmokeEnvironmentAsync(environment.Id);
     await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
-    await ClickManagedSmokeButtonAsync(environment.Status == "empty" ? "继续准备依赖" : "重新准备依赖");
+    if (environment.Status == "empty")
+      await ClickManagedSmokeButtonAsync("继续准备依赖");
+    else
+    {
+      // A healthy CPU row has no repair button. The public backend preparation
+      // action asks Runtime to reuse the active CPU target for the CUDA upgrade.
+      await WaitForSmokeDomAsync(
+        "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
+        "const b=Array.from(root?.querySelectorAll('button') ?? []).find(b => " +
+        "b.textContent?.trim() === '准备此后端' && !b.disabled); " +
+        "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
+    }
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
       "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
       TimeSpan.FromMinutes(2));
+    SettingsEnvironmentPlanState? preparedPlan =
+      (await PaddleSmokeSettingsStateAsync(timeout.Token)).EnvironmentPlan;
+    if (preparedPlan?.EnvironmentId != environment.Id || preparedPlan.Recipe != PaddleSmokeRecipe)
+      throw new InvalidOperationException("Paddle preparation did not reuse the expected environment and recipe.");
     string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
 
     RecordPaddleSmokeStage("confirm install");
