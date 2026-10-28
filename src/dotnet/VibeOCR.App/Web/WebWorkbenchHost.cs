@@ -49,6 +49,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   // 生产由 InitializeAsync 与 core 同点绑定、DisposeAsync 同点清空；换绑/清空后旧文档在途消息被抑制。
   private (object Sender, Action<string> Post, Func<Action, bool> Enqueue)? bridge;
   private Windows.Foundation.TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs>? webMessageReceived;
+  private Windows.Foundation.TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>? webResourceRequested;
   private DispatcherQueue? dispatcher;
   private CancellationTokenSource? subscriptionCancellation;
   private Task? subscription;
@@ -267,6 +268,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   // Only a successful native apply whose document cannot receive its receipt may bypass the web acknowledgement.
   internal event Action<Guid>? PinSnapshotReceiptLost;
   internal Func<Task>? SmokeBeforePinSnapshotReceipt { get; set; }
+  internal Func<Uri, IRandomAccessStream, Task>? SmokeBeforeResourceResponse { get; set; }
+  internal Action<string, Task>? SmokeResourceRequestStarted { get; set; }
 
   internal Task<bool> FlushPinSnapshotAsync(Guid sourceSession)
   {
@@ -517,7 +520,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     next.AddWebResourceRequestedFilter(
       $"https://{VirtualHost}/*",
       CoreWebView2WebResourceContext.All);
-    next.WebResourceRequested += OnWebResourceRequested;
+    webResourceRequested = (_, args) => OnWebResourceRequested(next, args);
+    next.WebResourceRequested += webResourceRequested;
     RegisterBridge(next, next.PostWebMessageAsJson);
     // 公式窗口延迟初始导航，让 RenderFormulaAsync 的目标成为唯一首次导航，
     // 避免与普通初始导航交错触发 ERR_ABORTED→恢复 Reload 的契约内竞态。
@@ -934,14 +938,28 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     CoreWebView2 sender,
     CoreWebView2WebResourceRequestedEventArgs args)
   {
-    if (disposed) return;
+    Task request = HandleWebResourceRequestedAsync(sender, args);
+    SmokeResourceRequestStarted?.Invoke(args.Request.Uri, request);
+    await request;
+  }
+
+  private async Task HandleWebResourceRequestedAsync(
+    CoreWebView2 sender,
+    CoreWebView2WebResourceRequestedEventArgs args)
+  {
+    long document = Volatile.Read(ref documentGeneration);
+    bool Current() => !disposed && ReferenceEquals(core, sender) &&
+      document == Volatile.Read(ref documentGeneration);
+    if (!Current()) return;
     var deferral = args.GetDeferral();
     IRandomAccessStream? buffered = null;
+    CoreWebView2Environment? environment = null;
     try
     {
+      environment = sender.Environment;
       if (!Uri.TryCreate(args.Request.Uri, UriKind.Absolute, out Uri? uri))
       {
-        args.Response = Forbidden(sender);
+        args.Response = Forbidden(environment);
         return;
       }
       string contentType = string.Equals(
@@ -956,17 +974,17 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         // 才消费（会话字节仍由宿主持有，不经此端点）。
         if (projectStore is null)
         {
-          args.Response = Forbidden(sender);
+          args.Response = Forbidden(environment);
           return;
         }
         using Stream upload = args.Request.Content.AsStreamForRead();
         WorkbenchProjectContributionLease lease = await projectStore.UploadAsync(
           upload, this, lifetime.Token);
-        if (disposed)
+        if (!Current())
         {
           // 与 /__annotation 对称的销毁竞态守卫：不向已分离 core 构造响应；
           // 本槽代际已使在途贡献不可提交，此处再撤销本槽兜底。
-          projectStore.RevokeAll(this);
+          if (disposed) projectStore.RevokeAll(this);
           return;
         }
         byte[] payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
@@ -974,7 +992,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           contributeId = lease.ContributeId.ToString("N"),
         }));
         buffered = await BufferBytesAsync(payload, CancellationToken.None);
-        args.Response = sender.Environment.CreateWebResourceResponse(
+        if (!Current()) return;
+        args.Response = environment.CreateWebResourceResponse(
           buffered,
           201,
           "Created",
@@ -991,7 +1010,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
         WorkbenchAnnotationLease lease = await annotationStore.UploadImageAsync(
           upload, contentType.ToLowerInvariant().Trim(),
           lifetime.Token);
-        if (disposed)
+        if (!Current())
         {
           annotationStore.Revoke(lease.ResourceUri);
           return;
@@ -1002,7 +1021,13 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
           resourceUri = lease.ResourceUri.AbsoluteUri,
         }));
         buffered = await BufferBytesAsync(payload, CancellationToken.None);
-        args.Response = sender.Environment.CreateWebResourceResponse(
+        if (!Current())
+        {
+          uploadedAnnotations.Remove(lease.ResourceUri);
+          annotationStore.Revoke(lease.ResourceUri);
+          return;
+        }
+        args.Response = environment.CreateWebResourceResponse(
           buffered,
           201,
           "Created",
@@ -1016,12 +1041,12 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       if (string.Equals(args.Request.Method, "DELETE", StringComparison.Ordinal) &&
         RevokeUploadedAnnotation(uri))
       {
-        args.Response = sender.Environment.CreateWebResourceResponse(null, 204, "No Content", "Cache-Control: no-store");
+        args.Response = environment.CreateWebResourceResponse(null, 204, "No Content", "Cache-Control: no-store");
         return;
       }
       if (!string.Equals(args.Request.Method, "GET", StringComparison.Ordinal))
       {
-        args.Response = Forbidden(sender);
+        args.Response = Forbidden(environment);
         return;
       }
       WorkbenchResourceResponse response = CaptureBackground is { } background &&
@@ -1035,7 +1060,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       contentType = response.ContentType;
       long contentLength = response.ContentLength;
       buffered = await BufferResourceAsync(response, CancellationToken.None);
-      args.Response = sender.Environment.CreateWebResourceResponse(
+      if (SmokeBeforeResourceResponse is { } beforeResponse) await beforeResponse(uri, buffered);
+      if (!Current()) return;
+      args.Response = environment.CreateWebResourceResponse(
         buffered,
         200,
         "OK",
@@ -1047,12 +1074,16 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
     catch (Exception)
     {
-      buffered?.Dispose();
-      args.Response = Forbidden(sender);
+      if (Current())
+      {
+        if (environment is null) throw;
+        args.Response = Forbidden(environment);
+      }
     }
     finally
     {
-      deferral.Complete();
+      try { buffered?.Dispose(); }
+      finally { deferral.Complete(); }
     }
   }
 
@@ -1099,8 +1130,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
   }
 
-  private static CoreWebView2WebResourceResponse Forbidden(CoreWebView2 sender) =>
-    sender.Environment.CreateWebResourceResponse(
+  private static CoreWebView2WebResourceResponse Forbidden(CoreWebView2Environment environment) =>
+    environment.CreateWebResourceResponse(
       new InMemoryRandomAccessStream(),
       403,
       "Forbidden",
@@ -1148,7 +1179,8 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       current.WebMessageReceived -= webMessageReceived;
       webMessageReceived = null;
       current.ProcessFailed -= OnProcessFailed;
-      current.WebResourceRequested -= OnWebResourceRequested;
+      current.WebResourceRequested -= webResourceRequested;
+      webResourceRequested = null;
     }
     foreach (Uri uri in uploadedAnnotations) annotationStore.Revoke(uri);
     uploadedAnnotations.Clear();

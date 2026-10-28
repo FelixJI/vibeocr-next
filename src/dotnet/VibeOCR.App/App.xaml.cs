@@ -126,6 +126,7 @@ public sealed partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        DispatcherShutdownMode = Microsoft.UI.Xaml.DispatcherShutdownMode.OnExplicitShutdown;
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-ui")
         {
             CaptureUiSmokeTrace.Stage("on-launched");
@@ -1498,22 +1499,21 @@ public sealed partial class App : Application
 
     private async void OnWindowClosedFallback(object sender, WindowEventArgs args)
     {
-        if (!_shutdownStarted)
-        {
-            _shutdownStarted = true;
-            _applicationShutdown.Cancel();
-        }
-
         try
         {
+            if (!_shutdownStarted)
+            {
+                _shutdownStarted = true;
+                _applicationShutdown.Cancel();
+            }
             if (sender is MainWindow window) await window.ShutdownCompletion;
-            Environment.Exit(0);
         }
         catch (Exception error)
         {
             AppLog.Error("Window shutdown failed", error);
-            Environment.Exit(1);
+            Environment.ExitCode = 1;
         }
+        finally { Exit(); }
     }
 }
 

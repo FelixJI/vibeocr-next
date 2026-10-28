@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const { stopOwned, assertCaptureCanvasLayout } = await import(
+const { stopOwned, closeAppNormally, assertCaptureCanvasLayout } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_native_actions.mjs')).href);
 
 setTimeout(() => {
@@ -47,10 +47,19 @@ function assertListenersRestored(child, before) {
   assert.equal(child.exitCode, 0);
   try {
     await stopOwned(child, 'close', { AppPid: child.pid });
+    await closeAppNormally(child, { AppPid: child.pid });
   } finally {
     await dispose(child);
   }
   console.log('case1 normally-exited: ok');
+}
+
+// A completed app with a nonzero exit must fail acceptance even though cleanup is done.
+{
+  const child = spawn(process.execPath, ['-e', 'process.exit(5)'], { stdio: 'ignore', windowsHide: true });
+  await once(child, 'exit');
+  await assert.rejects(closeAppNormally(child, { AppPid: child.pid }), /Normal app close exited 5/);
+  console.log('normal-close-nonzero-fails: ok');
 }
 
 // 2. An already SIGTERM-exited child (exit event already fired, exitCode null,
@@ -64,6 +73,7 @@ function assertListenersRestored(child, before) {
   assert.equal(child.signalCode, 'SIGTERM');
   try {
     await stopOwned(child, 'close', { AppPid: child.pid });
+    await assert.rejects(closeAppNormally(child, { AppPid: child.pid }), /received signal SIGTERM/);
   } finally {
     await dispose(child);
   }

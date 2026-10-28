@@ -263,6 +263,15 @@ async function stopOwned(child, closeAction, options) {
   await forceStop(child);
 }
 
+async function closeAppNormally(child, options) {
+  assert(Number.isSafeInteger(child?.pid) && child.pid > 0,
+    'Normal app close requires a spawned ChildProcess with a positive pid.');
+  if (!exited(child)) await native('close', options);
+  assert(await waitExit(child, 30000), 'Normal app close timed out after 30 seconds.');
+  assert.equal(child.signalCode, null, `Normal app close received signal ${child.signalCode}.`);
+  assert.equal(child.exitCode, 0, `Normal app close exited ${child.exitCode}.`);
+}
+
 async function connectPage(child, port) {
   const until = Date.now() + 25000;
   let lastError;
@@ -1132,7 +1141,7 @@ async function main() {
     evidence.appPids.push(app.child.pid);
     await configure(app, evidence);
     const firstMain = app.main.Handle;
-    await stopOwned(app.child, 'close', { AppPid: app.child.pid, Handle: firstMain });
+    await closeAppNormally(app.child, { AppPid: app.child.pid, Handle: firstMain });
     await app.browser.close().catch(() => {});
     app = await launchApp(candidate, webviewData, instanceId);
     evidence.appPids.push(app.child.pid);
@@ -1149,6 +1158,7 @@ async function main() {
     evidence.taskbarStateAfter = await taskbarState();
     assert.equal(evidence.taskbarStateAfter, evidence.taskbarStateBefore,
       'Screenshot completion or cancellation changed the Windows taskbar preference.');
+    await closeAppNormally(app.child, { AppPid: app.child.pid, Handle: app.main.Handle });
     evidence.state = 'passed';
     console.log(`Native actions E2E passed; synthetic evidence: ${smokeRoot}`);
   } catch (error) {
@@ -1192,7 +1202,7 @@ async function main() {
 }
 
 export { native, windows, waitForWindows, area, inside, delay, startFixture,
-  launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
+  launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
   assertCaptureCanvasLayout };
 

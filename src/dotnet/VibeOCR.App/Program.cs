@@ -18,6 +18,15 @@ public static class Program
             Environment.ExitCode = VelopackUpdateSelfTest.Run();
             return;
         }
+        // 先自然结束 UI 线程的 WebView/TSF 线程局部释放，再让入口线程退出进程。
+        var uiThread = new Thread(RunApplication);
+        uiThread.SetApartmentState(ApartmentState.STA);
+        uiThread.Start();
+        uiThread.Join();
+    }
+
+    private static void RunApplication()
+    {
         WinRT.ComWrappersSupport.InitializeComWrappers();
         CaptureUiSmokeTrace.Stage("com-wrappers-ready");
         Application.Start(_ =>

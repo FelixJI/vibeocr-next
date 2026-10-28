@@ -18,6 +18,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(PinsSaveSwitchRecoverAndRenderFormula));
 
   [Fact]
+  public Task WebResourceResponseStopsAfterWebViewCloses() =>
+      RunUiSmokeAsync(nameof(WebResourceResponseStopsAfterWebViewCloses));
+
+  [Fact]
   public Task OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion() =>
       RunUiSmokeAsync(nameof(OptionsDialogSavesMergedOptionsAndKeepsFreshLastRegion));
 
