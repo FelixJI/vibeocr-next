@@ -432,8 +432,8 @@ internal static class ScrollCaptureSession
       }
       int physicalWidth = (int)Math.Ceiling((Math.Max(_previewImage.Width, pending ? _pendingImage.Width : 0) + 6) * dpiScale);
       int physicalHeight = (int)Math.Ceiling((_previewImage.Height + (pending ? _pendingImage.Height + 4 : 0) + 6) * dpiScale);
-      foreach (RectInt32 candidate in PlacementCandidates(work, physicalWidth, physicalHeight).OrderBy(rect =>
-          rect.X >= _bounds.Right ? 0 : rect.X + rect.Width <= _bounds.X ? 1 : 2))
+      foreach (RectInt32 candidate in PreviewPlacementCandidates(
+          work, _bounds, ControlRectangle(), physicalWidth, physicalHeight))
       {
         var rect = new PhysicalRectangle(candidate.X, candidate.Y, candidate.Width, candidate.Height);
         if (!ContainsRect(work, rect) || SmartScreenCandidates.Intersect(rect, _bounds) is not null ||
@@ -503,7 +503,7 @@ internal static class ScrollCaptureSession
       PhysicalRectangle work = GetWorkArea(_bounds);
       width = Math.Min(width, work.Width);
       height = Math.Min(height, work.Height);
-      foreach (RectInt32 candidate in PlacementCandidates(work, width, height))
+      foreach (RectInt32 candidate in PlacementCandidates(work, _bounds, width, height))
       {
         _window.AppWindow.MoveAndResize(candidate);
         if (GetWindowRect(_controlHandle, out RectL actual))
@@ -532,19 +532,42 @@ internal static class ScrollCaptureSession
       if (_acceptedPreviewWidth > 0 && _failure is null && !_lifecycle.IsCancellationRequested) EnsurePreviewVisible();
     }
 
-    private RectInt32[] PlacementCandidates(PhysicalRectangle work, int width, int height)
+    /// <summary>围绕 anchor 四边（下/右/左/上，居中对齐）的候选；仅居中轴被
+    /// clamp 到工作区，候选仍可能越界或与其它窗相交，合法性由调用方逐个验证。</summary>
+    private static RectInt32[] PlacementCandidates(PhysicalRectangle work, PhysicalRectangle anchor, int width, int height)
     {
       int centeredX = Math.Clamp(
-          _bounds.X + _bounds.Width / 2 - width / 2, work.X, Math.Max(work.X, work.Right - width));
+          anchor.X + anchor.Width / 2 - width / 2, work.X, Math.Max(work.X, work.Right - width));
       int centeredY = Math.Clamp(
-          _bounds.Y + _bounds.Height / 2 - height / 2, work.Y, Math.Max(work.Y, work.Bottom - height));
+          anchor.Y + anchor.Height / 2 - height / 2, work.Y, Math.Max(work.Y, work.Bottom - height));
       return
       [
-          new RectInt32(centeredX, _bounds.Bottom + PlacementGapPx, width, height),
-          new RectInt32(_bounds.Right + PlacementGapPx, centeredY, width, height),
-          new RectInt32(_bounds.X - PlacementGapPx - width, centeredY, width, height),
-          new RectInt32(centeredX, _bounds.Y - PlacementGapPx - height, width, height),
+          new RectInt32(centeredX, anchor.Bottom + PlacementGapPx, width, height),
+          new RectInt32(anchor.Right + PlacementGapPx, centeredY, width, height),
+          new RectInt32(anchor.X - PlacementGapPx - width, centeredY, width, height),
+          new RectInt32(centeredX, anchor.Y - PlacementGapPx - height, width, height),
       ];
+    }
+
+    /// <summary>
+    /// 预览最终尝试顺序：选区四候选按右/左/其它优先级稳定排序在前，
+    /// 再追加围绕选区∪工具栏的同算法 fallback（同样优先级排序），
+    /// 避免长预览增高后四居中候选全部被工具栏/工作区阻挡。合法性仍由
+    /// 调用方的工作区包含、不相交及真实 HWND 复核决定，不把无空间当成功。
+    /// </summary>
+    internal static RectInt32[] PreviewPlacementCandidates(
+        PhysicalRectangle work, PhysicalRectangle bounds, PhysicalRectangle control, int width, int height)
+    {
+      int Priority(RectInt32 rect) =>
+          rect.X >= bounds.Right ? 0 : rect.X + rect.Width <= bounds.X ? 1 : 2;
+      RectInt32[] primary = [.. PlacementCandidates(work, bounds, width, height).OrderBy(Priority)];
+      PhysicalRectangle union = new(
+          Math.Min(bounds.X, control.X),
+          Math.Min(bounds.Y, control.Y),
+          Math.Max(bounds.Right, control.Right) - Math.Min(bounds.X, control.X),
+          Math.Max(bounds.Bottom, control.Bottom) - Math.Min(bounds.Y, control.Y));
+      return union == bounds ? primary
+          : [.. primary, .. PlacementCandidates(work, union, width, height).OrderBy(Priority)];
     }
 
     private static PhysicalRectangle GetWorkArea(PhysicalRectangle bounds)
@@ -2632,7 +2655,7 @@ internal static class ScrollCaptureSession
       }
     }
 
-    private static bool ContainsRect(PhysicalRectangle outer, PhysicalRectangle inner) =>
+    internal static bool ContainsRect(PhysicalRectangle outer, PhysicalRectangle inner) =>
         outer.X <= inner.X && outer.Y <= inner.Y &&
         outer.Right >= inner.Right && outer.Bottom >= inner.Bottom;
 
