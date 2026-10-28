@@ -1713,6 +1713,17 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Unexpected picker dialog after file selection.");
   }
 
+  private async Task ClickPaddleExportMenuAsync(string triggerLabel, string itemLabel)
+  {
+    await ClickManagedSmokeButtonAsync(triggerLabel);
+    // Fluent MenuItem renders a menuitem, not a button; use the public open menu.
+    await WaitForSmokeDomAsync("(() => { const item = Array.from(" +
+      "document.querySelectorAll('[role=menu] [role=menuitem]')).find(item => " +
+      "item.textContent?.trim() === " + JsonSerializer.Serialize(itemLabel) +
+      " && item.getAttribute('aria-disabled') !== 'true' && item.getClientRects().length > 0); " +
+      "if (!item) return false; item.click(); return true; })()", TimeSpan.FromSeconds(30));
+  }
+
   private async Task<object> RunPaddleBatchExportAsync(string buttonLabel)
   {
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
@@ -1735,7 +1746,7 @@ public sealed partial class MainWindow
     };
     string[] before = Directory.GetFiles(exportDir);
     RecordPaddleSmokeStage($"batch export {publicLabel}");
-    await ClickManagedSmokeButtonAsync(publicLabel);
+    await ClickPaddleExportMenuAsync("导出全部", publicLabel["导出全部 ".Length..]);
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
@@ -1802,7 +1813,7 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 真实公共 UI 导出：点击导出按钮后只操作“被本实例主窗口直接 owned”
+  /// 真实公共 UI 导出：打开导出菜单并点击格式项后，只操作“被本实例主窗口直接 owned”
   /// 的 FileSavePicker（#32770，WinRT broker 独立进程承载）；归属不明立
   /// 即停止。定向设置原生文件名控件并点击确认；确认后再出现意外
   /// 弹窗定向取消并记失败。不新增生产任意路径入口。
@@ -1828,7 +1839,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException($"Export target must be a fresh file: {target}");
 
     RecordPaddleSmokeStage($"ui export {buttonLabel}");
-    await ClickManagedSmokeButtonAsync(buttonLabel);
+    await ClickPaddleExportMenuAsync("导出", buttonLabel["导出 ".Length..]);
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     Exception? dialogError = null;
     try
