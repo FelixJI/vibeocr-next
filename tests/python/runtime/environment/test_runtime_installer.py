@@ -41,6 +41,7 @@ from vibeocr.runtime.environments.runtime_lock import (
 from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeInstallFailure,
     RuntimeMaintenanceReporter,
+    _atomic_json,
     probe_runtime_components,
     profile_descriptor,
     runtime_profile_status,
@@ -5831,3 +5832,126 @@ def test_preparation_reassigns_ownership_after_user_installs_another_recipe(
     assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
     assert manager._read()["environments"][previous["id"]]["recipe"] == "mineru-cpu"
     assert Path(previous["python"]).is_file()
+
+
+def test_deleted_preparation_target_ends_plan_lifecycle_and_rejects_stale_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-01 回归：删除终结准备归属与落盘计划，旧 plan 不得越过 CAS。
+
+    旧实现在删除完成后保留 prepare_targets 归属与 environment-plans 计划，
+    同 id 重建（revision 回到 1）后旧 plan 通过 revision/CAS 进入安装器。
+    """
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda *_args: pytest.fail(
+            "stale plan must not reach the installer"
+        ),
+    )
+    prepared = manager.prepare_target("paddleocr-ort-cpu")
+    plan = manager.preview_install(prepared["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    manager.delete(prepared["id"])
+    # 删除即终结该对象的准备归属与落盘安装计划。
+    data = manager._read()
+    assert not data.get("prepare_targets", {}).get("paddleocr-ort-cpu")
+    assert not (
+        manager.paths.state_root / "environment-plans" / f"{prepared['id']}.json"
+    ).is_file()
+    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert replacement["status"] == "empty"
+    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
+        manager.install(
+            plan["plan_id"], replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
+    # 拒绝发生在写入之前：新对象记录不被改写。
+    record = manager._read()["environments"][replacement["id"]]
+    assert record["status"] == "empty"
+    assert "last_install_operation" not in record
+
+
+def test_manual_same_name_recreate_rejects_deleted_environment_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-01 回归：手工删除后同名同 slug 重建，旧 plan 同样必须失效。"""
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda *_args: pytest.fail(
+            "stale plan must not reach the installer"
+        ),
+    )
+    first = manager.create("手工环境")
+    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    manager.delete(first["id"])
+    second = manager.create("手工环境")
+    assert second["id"] == first["id"]
+    assert not (
+        manager.paths.state_root / "environment-plans" / f"{second['id']}.json"
+    ).is_file()
+    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
+        manager.install(
+            plan["plan_id"], second["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
+
+
+def test_preparation_reassigns_when_owned_target_is_stale_active_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-02 回归：准备目标成为 find_compatible 未选中的活动环境时，
+
+    保留该环境并另分配可维护的受控准备目标；重复准备与跨重启都复用
+    新归属，不重复创建，不再永远命中 active environment cannot be modified。
+    """
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+
+    def open_store() -> ManagedEnvironmentStore:
+        return ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+            base_python=sys._base_executable,
+            install_runner=lambda *_args: None,
+        )
+
+    manager = open_store()
+    previous = manager.prepare_target("paddleocr-ort-cpu")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][previous["id"]].update(
+            status="installed",
+            recipe="paddleocr-ort-cpu",
+            recipe_lock="0" * 64,
+        )
+        data["active_id"] = previous["id"]
+        data["active_revision"] += 1
+        _atomic_json(manager._registry, data)
+    # scope 锁过期：探针健康的活动环境也无法按当前配方复用。
+    assert manager.find_compatible("paddleocr-ort-cpu")["selected"] is None
+    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert replacement["id"] != previous["id"]
+    assert replacement["status"] == "empty"
+    # 原活动环境完整保留且仍为活动环境。
+    data = manager._read()
+    assert data["active_id"] == previous["id"]
+    assert data["environments"][previous["id"]]["status"] == "installed"
+    # 新受控目标可预览确认：不再命中 active environment cannot be modified。
+    plan = manager.preview_install(
+        replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+    )
+    assert plan["environment_id"] == replacement["id"]
+    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    reopened = open_store()
+    assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    listed = reopened.list()
+    assert len(listed["environments"]) == 2
+    assert listed["active_id"] == previous["id"]

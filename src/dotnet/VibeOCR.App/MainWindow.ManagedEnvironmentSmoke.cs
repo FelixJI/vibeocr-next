@@ -108,6 +108,7 @@ public sealed partial class MainWindow
     if (list.ActiveId is not null || smokeInferenceAttached!() || smokeInstallAttempts!() != 0)
       throw new InvalidOperationException("Empty environment creation started a service or installer.");
     ManagedEnvironment[] environments = SmokePair(list);
+    await VerifyPreparedTargetReuseAsync(environments[0]);
     if (environments.Any(item => item.Status != "empty" || item.PythonState != "ready"))
       throw new InvalidOperationException("Named environments are not executable empty environments.");
     // 空闲（无服务/无维护）不得渲染滚动维护进度；目标设备未读取真实
@@ -151,6 +152,7 @@ public sealed partial class MainWindow
     ManagedEnvironment[] initial = SmokePair(empty);
     if (initial.Any(item => item.Status != "empty") || empty.ActiveId is not null)
       throw new InvalidOperationException("Empty environment state changed across restart.");
+    await VerifyPreparedTargetReuseAsync(initial[0]);
     WorkbenchCommandReceipt sources = await application.ExecuteAsync(
       new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
       CancellationToken.None);
@@ -466,6 +468,23 @@ public sealed partial class MainWindow
       python_evidence = "manager_path_pending_read_only_prefix_probe",
       ocr_visible = true,
     };
+  }
+
+  private async Task VerifyPreparedTargetReuseAsync(ManagedEnvironment expected)
+  {
+    WorkbenchCommandReceipt prepared = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new PrepareEnvironmentCommand("paddleocr-ort-cpu")),
+      CancellationToken.None);
+    SettingsWorkbenchState settings = (await application.BootstrapAsync(CancellationToken.None))
+      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
+    ManagedEnvironmentList? list = smokeEnvironmentSnapshot!();
+    if (!prepared.Ok || settings.EnvironmentPlan?.EnvironmentId != expected.Id ||
+        settings.EnvironmentPlan.EnvironmentRevision != expected.Revision ||
+        list?.Environments.Count != 2 || smokeInstallAttempts!() != 0)
+      throw new InvalidOperationException("Repeated preparation changed the target or installed dependencies.");
+    WorkbenchCommandReceipt cancelled = await application.ExecuteAsync(
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new InvalidateEnvironmentPlanCommand()), CancellationToken.None);
+    if (!cancelled.Ok) throw new InvalidOperationException("Repeated preparation could not be cancelled.");
   }
 
   private static ManagedEnvironment[] SmokePair(ManagedEnvironmentList list)

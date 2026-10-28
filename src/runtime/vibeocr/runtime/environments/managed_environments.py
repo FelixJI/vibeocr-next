@@ -1722,13 +1722,20 @@ class ManagedEnvironmentStore:
                 if target is not None:
                     record = data["environments"].get(target["environment_id"])
                     if record is not None:
-                        if record.get("recipe") in {None, recipe}:
+                        # 与 preview_install 门禁同源：另一能力的闭包，或
+                        # 已成为 find_compatible 未选中的活动已安装环境
+                        # （锁过期/闭包损坏，重试永远命中 active environment
+                        # cannot be modified），都不能作为受控准备目标。
+                        if record.get("recipe") in {None, recipe} and not (
+                            record["id"] == data["active_id"]
+                            and record["status"] != "empty"
+                        ):
                             return self._public_record(
                                 record, self._probe(record), data
                             )
-                        # 用户已把准备目标用于另一能力：保留该环境，另分配归属。
+                        # 保留该环境（活动环境原样保留），另分配归属。
                         target = None
-                    if target is not None and (
+                    elif (
                         target["environment_id"]
                         in managed_cleanup.read_ledger(self)["pending"]
                     ):
@@ -1889,6 +1896,13 @@ class ManagedEnvironmentStore:
 
     def _journal_path(self, env_id: str) -> Path:
         return self._swap_journal_root / f"{env_id}.json"
+
+    def _plan_path(self, env_id: str) -> Path:
+        return self.paths.state_root / "environment-plans" / f"{env_id}.json"
+
+    def _forget_install_plan(self, env_id: str) -> None:
+        """终结已删除对象的落盘安装计划；失败交由删除事务整体重试。"""
+        self._plan_path(env_id).unlink(missing_ok=True)
 
     def _load_swap_journal(self, env_id: str) -> dict:
         """读取并结构校验换入 journal；损坏时 fail closed，不做推断。"""
@@ -2400,10 +2414,7 @@ class ManagedEnvironmentStore:
             dependencies = [
                 display for _name, display, _version in self._scope_pins(scope)
             ]
-            _atomic_json(
-                self.paths.state_root / "environment-plans" / f"{env_id}.json",
-                plan,
-            )
+            _atomic_json(self._plan_path(env_id), plan)
             return {
                 **plan,
                 "dependencies": dependencies,
@@ -2575,7 +2586,7 @@ class ManagedEnvironmentStore:
         requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
         with self._target_operation(env_id):
             self._recover_pending_swap(env_id)
-            plan_path = self.paths.state_root / "environment-plans" / f"{env_id}.json"
+            plan_path = self._plan_path(env_id)
             with RuntimeStoreLock(self._lock):
                 self._check_install_cancelled()
                 self._install_terminal = False

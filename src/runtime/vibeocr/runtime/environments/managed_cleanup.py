@@ -871,6 +871,18 @@ def _unregister(
             "detail": "",
         }
         _atomic_json(_ledger_path(store), ledger)
+        # 删除即终结该对象的旧计划生命周期：随注册表记录一并撤销落盘
+        # 安装计划与准备归属，同 id 同名重建的新对象不会被旧 plan 的
+        # revision/CAS 冒认；失败时记录仍在注册表，删除重试会重做。
+        store._forget_install_plan(env_id)
+        targets = data.get("prepare_targets")
+        if targets is not None:
+            for recipe in [
+                recipe
+                for recipe, target in targets.items()
+                if target["environment_id"] == env_id
+            ]:
+                del targets[recipe]
         del data["environments"][env_id]
         _atomic_json(store._registry, data)
     pending = ledger["pending"].get(env_id)
