@@ -2324,12 +2324,15 @@ function EngineEnvironmentSection({
       preparing.current = false;
     }
   };
-  const environmentsFingerprint = environments
+  // Installed revisions stay unchanged on device switches and service attach.
+  // Include the running selection used by activeReady so clearing the host's
+  // compatibility result schedules one fresh query through the existing gate.
+  const environmentsFingerprint = `${activeId ?? ""}|${environments
     .map(
       (environment) =>
-        `${environment.id}:${environment.revision}:${environment.status}`,
+        `${environment.id}:${environment.revision}:${environment.status}:${environment.targetDevice ?? ""}:${environment.serviceState ?? ""}`,
     )
-    .join("|");
+    .join("|")}`;
   const [dispatchedQuery, setDispatchedQuery] = useState<{
     recipe: string;
     fingerprint: string;

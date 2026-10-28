@@ -731,3 +731,88 @@ it("CUDA 七包增量在确认摘要中显示实际新增组件", () => {
     screen.getByText(/同时准备锁定的 ONNX Runtime CUDA 13 执行插件/),
   ).toBeVisible();
 });
+
+it.each(["device", "service", "active"] as const)(
+  "兼容结果失效后随运行选择变化补发一次查询：%s",
+  async (change) => {
+    const actions = buildActions();
+    const environment = {
+      id: "shared",
+      name: "Paddle",
+      revision: 3,
+      kind: "venv",
+      status: "installed",
+      recipe: "paddleocr-ort-cuda",
+      targetDevice: change === "device" ? "cuda" : "cpu",
+      serviceState: change === "service" ? "not_started" : "ready",
+    };
+    const settings = {
+      environmentRecipes: recipes,
+      environmentSources: sources,
+      environmentHardware: { nvidiaDriverStatus: "ok" },
+      environmentBusy: false,
+      activeEnvironmentId: change === "active" ? "other" : "shared",
+      environments: [environment],
+    };
+    const query = {
+      type: "settings.findCompatibleEnvironment",
+      recipe: "paddleocr-ort-cpu",
+    };
+    const view = render(
+      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
+    );
+    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
+    const compatibility = {
+      recipe: "paddleocr-ort-cpu",
+      selectedEnvironmentId: "shared",
+    };
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...settings,
+          environmentCompatibility: compatibility,
+        })}
+        actions={actions}
+      />,
+    );
+    actions.run.mockClear();
+    // A real same-id switch or background attach clears compatibility while
+    // preserving the installed environment revision. Busy must defer dispatch.
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({ ...settings, environmentBusy: true })}
+        actions={actions}
+      />,
+    );
+    expect(actions.run).not.toHaveBeenCalledWith(query);
+    const complete = {
+      ...settings,
+      activeEnvironmentId: "shared",
+      environments: [
+        { ...environment, targetDevice: "cpu", serviceState: "ready" },
+      ],
+    };
+    view.rerender(
+      <SettingsPage viewState={buildViewState(complete)} actions={actions} />,
+    );
+    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
+    expect(
+      actions.run.mock.calls.filter(([command]) => command.type === query.type),
+    ).toHaveLength(1);
+    view.rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...complete,
+          environmentCompatibility: compatibility,
+        })}
+        actions={actions}
+      />,
+    );
+    expect(
+      screen.getByText("该兼容环境已是当前环境并通过启动验证，无需重装。"),
+    ).toBeVisible();
+    expect(
+      actions.run.mock.calls.filter(([command]) => command.type === query.type),
+    ).toHaveLength(1);
+  },
+);

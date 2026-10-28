@@ -770,3 +770,95 @@ test("healthy CPU upgrades through the public CUDA prepare action", async ({
     arguments: { planId: "upgrade-existing" },
   });
 });
+
+test("same-id device commit automatically refreshes compatibility without manual retry", async ({
+  page,
+}) => {
+  const environment = {
+    id: "shared",
+    name: "Paddle",
+    revision: 3,
+    kind: "venv",
+    status: "installed",
+    recipe: "paddleocr-ort-cuda",
+    targetDevice: "cuda",
+    serviceState: "ready",
+  };
+  const settings = {
+    environmentRecipes: recipes,
+    environmentSources: sources,
+    activeEnvironmentId: "shared",
+    environmentHardware: { nvidiaDriverStatus: "ok" },
+    environmentBusy: false,
+    environments: [environment],
+  };
+  await mountHost(page, {
+    ...snapshot,
+    route: "settings",
+    capabilities: ["runtime.environments"],
+    features: { settings },
+  });
+  await expectCommand(page, {
+    scope: "settings",
+    action: "findCompatibleEnvironment",
+    arguments: { recipe: "paddleocr-ort-cpu" },
+  });
+  const compatibility = {
+    recipe: "paddleocr-ort-cpu",
+    selectedEnvironmentId: "shared",
+  };
+  await sendState(page, "settings", {
+    ...settings,
+    environmentCompatibility: compatibility,
+  });
+  await page
+    .locator(".engine-backend-section")
+    .getByRole("button", { name: "启动并验证当前环境", exact: true })
+    .click();
+  await expectCommand(page, {
+    scope: "settings",
+    action: "switchEnvironment",
+    arguments: { environmentId: "shared", device: "cpu" },
+  });
+  await sendState(page, "settings", { ...settings, environmentBusy: true });
+  const complete = {
+    ...settings,
+    environments: [{ ...environment, targetDevice: "cpu" }],
+  };
+  await sendState(page, "settings", complete);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __testHost: {
+                commands: {
+                  scope: string;
+                  action: string;
+                  arguments?: { recipe?: string };
+                }[];
+              };
+            }
+          ).__testHost.commands.filter(
+            (c) =>
+              c.scope === "settings" &&
+              c.action === "findCompatibleEnvironment" &&
+              c.arguments?.recipe === "paddleocr-ort-cpu",
+          ).length,
+      ),
+    )
+    .toBe(2);
+  await sendState(page, "settings", {
+    ...complete,
+    environmentCompatibility: compatibility,
+  });
+  await expect(
+    page.getByText("该兼容环境已是当前环境并通过启动验证，无需重装。", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "重新查询兼容环境", exact: true }),
+  ).toHaveCount(0);
+});

@@ -373,6 +373,37 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   [Fact]
+  public async Task LateCompatibilityAfterSelectionInvalidationCannotPublishOverCurrentQuery()
+  {
+    var manager = new MutableManager();
+    var settings = NewSettings(manager);
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    var oldEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var oldRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var currentEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var currentRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    int calls = 0;
+    manager.BeforeFind = () =>
+    {
+      if (++calls == 1) { oldEntered.SetResult(); return oldRelease.Task; }
+      currentEntered.SetResult();
+      return currentRelease.Task;
+    };
+    Task previous = settings.FindCompatibleAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
+    await oldEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    settings.InvalidatePlan();
+    Task current = settings.FindCompatibleAsync("paddleocr-ort-cpu", TestContext.Current.CancellationToken);
+    oldRelease.SetResult();
+    await currentEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Null(settings.Compatibility);
+    currentRelease.SetResult();
+    await Task.WhenAll(previous, current);
+    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
+    Assert.Equal(2, calls);
+    Assert.Equal(0, manager.InstallCalls);
+  }
+
+  [Fact]
   public async Task PrepareUsesCompatibilityWithoutCreatingOrInstalling()
   {
     var manager = new MutableManager();
