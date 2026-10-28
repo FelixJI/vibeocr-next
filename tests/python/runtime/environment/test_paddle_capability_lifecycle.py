@@ -420,3 +420,135 @@ def test_cuda_preview_only_folds_verified_installed_cpu_pins(
         if condition == "current":
             assert plan["dependencies"]
             assert all(pin.startswith("nvidia-") for pin in plan["dependencies"])
+
+
+def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
+    tmp_path, monkeypatch
+):
+    import os
+
+    from test_environment_store_layout import _manager
+    from vibeocr.runtime.environments.managed_environments import (
+        ManagedEnvironmentInstallCancelled,
+    )
+    from vibeocr.runtime.environments.runtime_installer import (
+        _failure_envelope,
+        _run_install_command,
+    )
+
+    manager, _ = _manager(tmp_path, monkeypatch)
+    item = manager.create("paddle")
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu")
+    manager.install(plan["plan_id"], item["id"], plan["recipe"])
+    before = manager._read()
+    before["active_id"] = item["id"]
+    before["active_revision"] = 5
+    before["environments"][item["id"]]["selected_device"] = "cpu"
+    _atomic_json(manager._registry, before)
+    old = dict(before["environments"][item["id"]])
+    monkeypatch.setattr(
+        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
+        lambda **_: {"status": "ok", "driver_version": "630.20"},
+    )
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cuda")
+    events, receipts = [], []
+
+    def observe(event):
+        events.append(event)
+        if "cancel-ready" in event.get("log", {}).get("text", "") and not receipts:
+            manager.cancel_install(receipts.append)
+
+    manager._event_sink = observe
+
+    def install(python, _scope, _endpoint):
+        _run_install_command(
+            [
+                sys._base_executable,
+                "-c",
+                "import time; print('cancel-ready', flush=True); time.sleep(30)",
+            ],
+            timeout=15,
+            env=dict(os.environ),
+            reporter=manager._install_observer,
+            heartbeat_code="runtime.install_profile",
+            gate_python=python,
+        )
+
+    monkeypatch.setattr(manager, "_install_runner", install)
+    with pytest.raises(ManagedEnvironmentInstallCancelled) as cancelled:
+        manager.install(plan["plan_id"], item["id"], plan["recipe"])
+    assert receipts == [True]
+    failure = _failure_envelope(cancelled.value, operation=None, maintenance=None)
+    assert failure["error"]["canonical_code"] == "CANCELLED"
+    assert failure["error"]["category"] == "cancelled"
+    after = manager._read()
+    current = after["environments"][item["id"]]
+    assert after["active_id"] == before["active_id"]
+    assert after["active_revision"] == before["active_revision"]
+    for key in (
+        "recipe",
+        "recipe_lock",
+        "revision",
+        "selected_device",
+        "status",
+        "source_ids",
+    ):
+        assert current[key] == old[key]
+    assert manager._probe(current)["healthy"]
+    operation = current["last_install_operation"]
+    assert operation["phase"] == "failed"
+    assert operation["reason_code"] == "install_interrupted"
+    assert operation["next_action"] == "preview_again"
+    assert operation["plan_id"] == plan["plan_id"]
+    assert events[-1]["state"] == "cancelled"
+    assert not any(event["state"] in ("failed", "succeeded") for event in events)
+    manager.cancel_install(receipts.append)
+    assert receipts == [True, False]
+
+
+def test_cancelled_install_keeps_recoverable_marker_when_terminal_write_is_full(
+    tmp_path, monkeypatch
+):
+    import errno
+
+    from test_environment_store_layout import _manager
+    from vibeocr.runtime.environments import managed_environments
+
+    manager, _ = _manager(tmp_path, monkeypatch)
+    item = manager.create("paddle")
+    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu")
+    receipts, events, failed_writes = [], [], []
+    manager._event_sink = events.append
+    original_write = managed_environments._atomic_json
+
+    def write(path, data):
+        operation = (
+            data.get("environments", {})
+            .get(item["id"], {})
+            .get("last_install_operation", {})
+        )
+        if path == manager._registry and operation.get("phase") == "failed":
+            failed_writes.append(operation)
+            raise OSError(errno.ENOSPC, "synthetic full disk")
+        original_write(path, data)
+
+    def install(*_args):
+        manager.cancel_install(receipts.append)
+        manager._check_install_cancelled()
+
+    monkeypatch.setattr(managed_environments, "_atomic_json", write)
+    monkeypatch.setattr(manager, "_install_runner", install)
+    with pytest.raises(managed_environments.ManagedEnvironmentInstallCancelled):
+        manager.install(plan["plan_id"], item["id"], plan["recipe"])
+    assert failed_writes[0]["reason_code"] == "install_interrupted"
+    assert (
+        manager._read()["environments"][item["id"]]["last_install_operation"]["phase"]
+        == "installing"
+    )
+    assert (
+        manager.list()["environments"][0]["last_install_failure"]["reason_code"]
+        == "install_interrupted"
+    )
+    assert events[-1]["state"] == "cancelled"
+    manager.cancel_install(receipts.append)
+    assert receipts == [True, False]

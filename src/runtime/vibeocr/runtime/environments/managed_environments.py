@@ -59,6 +59,7 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeStoreLock,
 )
 from vibeocr.runtime.environments.runtime_maintenance import (
+    RuntimeOperationCancelled,
     _atomic_json,
     failure_guidance,
     safe_runtime_detail,
@@ -277,7 +278,9 @@ class ManagedEnvironmentError(RuntimeInstallError):
     """A named-environment operation cannot safely complete."""
 
 
-class ManagedEnvironmentInstallCancelled(ManagedEnvironmentError):
+class ManagedEnvironmentInstallCancelled(
+    ManagedEnvironmentError, RuntimeOperationCancelled
+):
     """Cancellation was accepted before the installation's terminal commit."""
 
 
@@ -339,9 +342,9 @@ class ManagedEnvironmentStore:
     def cancel_install(self, acknowledge: Callable[[bool], None]) -> None:
         """Acknowledge before kill, serialized with both terminal registry writes.
 
-        This manager belongs to one CLI process. The in-memory flag prevents its
-        worker from replacing the durable installing journal after cancellation;
-        no new registry field is needed by older versions after rollback.
+        This manager belongs to one CLI process. Accepted cancellation wins until
+        the terminal commit under the same registry lock. The worker records its
+        interrupted failure before returning, while preserving the old environment.
         """
         with RuntimeStoreLock(self._lock):
             accepted = not self._install_terminal
@@ -2932,34 +2935,39 @@ class ManagedEnvironmentStore:
                     )
                     self._install_terminal = True
             except Exception as error:
-                observer.finish(
-                    "cancelled"
-                    if isinstance(error, ManagedEnvironmentInstallCancelled)
-                    else "failed",
-                    str(error),
-                )
-                guidance = failure_guidance(error)
-                if isinstance(error, RuntimeInstallPlanStale):
-                    guidance = {
-                        "reason_code": "plan_stale",
-                        "next_action": "preview_again",
-                    }
-                reason_code = guidance["reason_code"]
-                next_action = guidance["next_action"]
-                failed = {
-                    **operation,
-                    "phase": "failed",
-                    "reason_code": reason_code
-                    if re.fullmatch(r"[a-z0-9_.-]{1,80}", reason_code)
-                    else "unknown",
-                    "next_action": next_action
-                    if re.fullmatch(r"[a-z0-9_.-]{1,80}", next_action)
-                    else "inspect_diagnostics",
-                    "detail": safe_runtime_detail(str(error)),
-                }
+                original_error = error
                 try:
                     with RuntimeStoreLock(self._lock):
-                        self._check_install_cancelled()
+                        # Subprocess supervision may wrap the cancellation type,
+                        # or a child may fail after cancellation was accepted.
+                        # Decide the terminal outcome under the acknowledgement
+                        # lock before publishing its event or accepting more input.
+                        if self._install_cancelled:
+                            error = ManagedEnvironmentInstallCancelled(
+                                "environment installation was cancelled",
+                                reason_code="install_interrupted",
+                                next_action="preview_again",
+                            )
+                        self._install_terminal = True
+                        guidance = failure_guidance(error)
+                        if isinstance(error, RuntimeInstallPlanStale):
+                            guidance = {
+                                "reason_code": "plan_stale",
+                                "next_action": "preview_again",
+                            }
+                        reason_code = guidance["reason_code"]
+                        next_action = guidance["next_action"]
+                        failed = {
+                            **operation,
+                            "phase": "failed",
+                            "reason_code": reason_code
+                            if re.fullmatch(r"[a-z0-9_.-]{1,80}", reason_code)
+                            else "unknown",
+                            "next_action": next_action
+                            if re.fullmatch(r"[a-z0-9_.-]{1,80}", next_action)
+                            else "inspect_diagnostics",
+                            "detail": safe_runtime_detail(str(error)),
+                        }
                         latest = self._read()
                         if latest["environments"].get(env_id) == record:
                             latest["environments"][env_id] = {
@@ -2967,11 +2975,18 @@ class ManagedEnvironmentStore:
                                 "last_install_operation": failed,
                             }
                             _atomic_json(self._registry, latest)
-                        self._install_terminal = True
                 except OSError:
-                    # The accepted marker remains durable if a full disk blocks
-                    # recording the more specific failure detail.
+                    # A full disk can leave the durable installing marker; the
+                    # existing recovery path reports it as interrupted on reopen.
                     pass
+                observer.finish(
+                    "cancelled"
+                    if isinstance(error, ManagedEnvironmentInstallCancelled)
+                    else "failed",
+                    str(error),
+                )
+                if error is not original_error:
+                    raise error from original_error
                 raise
             observer.finish("succeeded", "依赖已验证并提交；模型与服务尚未启动")
             return self._public_record(candidate, relocated, latest)
