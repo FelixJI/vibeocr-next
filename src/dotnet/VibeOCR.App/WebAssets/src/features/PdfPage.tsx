@@ -112,8 +112,7 @@ function PdfParameters({
     ["minFontSize", "最小字号（pt）", 4, 1, 72, 0.5],
   ] as const;
   return (
-    <details>
-      <summary>PDF 参数</summary>
+    <section className="pdf-parameters" aria-label="PDF 参数">
       <form
         key={JSON.stringify(settings)}
         onSubmit={(event) => {
@@ -170,7 +169,7 @@ function PdfParameters({
           <Button type="submit">保存 PDF 参数</Button>
         </fieldset>
       </form>
-    </details>
+    </section>
   );
 }
 
@@ -367,9 +366,8 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const activeStructuredText = useResourceText(activeStructured);
   return (
     <Workspace
-      eyebrow="DOCUMENT / 03"
+      className="pdf-page"
       title="PDF 工作台"
-      description="提取/解析结果，或为扫描页添加可搜索文字层后保存。"
       actions={
         <>
           <CapabilityGate
@@ -382,450 +380,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
           >
             {documents.length > 0 ? "添加 PDF" : "打开 PDF"}
           </CapabilityGate>
-          <CapabilityGate
-            capability="pdf.open"
-            capabilities={viewState.capabilities}
-            action={{ type: "pdf.close" }}
-            actions={actions}
-            disabled={
-              pageCount === 0 && !busy && activeDocument?.closeFailed !== true
-            }
-            icon={<X aria-hidden="true" size={16} />}
-          >
-            关闭文档
-          </CapabilityGate>
-        </>
-      }
-    >
-      <div className="pdf-documents" aria-label="PDF 文档列表">
-        {documents.map((document) => (
-          <Button
-            key={stringValue(document.documentId)}
-            appearance={
-              document.documentId === documentId ? "primary" : "secondary"
-            }
-            aria-pressed={document.documentId === documentId}
-            onClick={() =>
-              void actions.run({
-                type: "pdf.activateDocument",
-                documentId: document.documentId,
-              })
-            }
-          >
-            {stringValue(document.name) ?? "PDF"}
-            {document.isModified === true ? " · 未保存" : ""}
-            {document.isBusy === true ? " · 处理中" : ""}
-            {document.closeFailed === true ? " · 关闭失败，可重试" : ""}
-          </Button>
-        ))}
-      </div>
-      {documents.length > 0 && (
-        <details className="pdf-export">
-          <summary>批量导出副本</summary>
-          <p>
-            导出副本保留原文档修改状态和保存目标。默认避让同名文件；目标竞争导致的失败可重试。
-          </p>
-          <label>
-            <input
-              type="checkbox"
-              checked={modifiedOnly}
-              onChange={(event) => setModifiedOnly(event.target.checked)}
-            />
-            仅已修改文档
-          </label>
-          <Button
-            disabled={state.canCopyExport !== true || state.exporting === true}
-            onClick={() =>
-              void actions.run({
-                type: "pdf.exportDocuments",
-                modifiedOnly,
-                retry: false,
-              })
-            }
-          >
-            选择目录并导出
-          </Button>
-          <Button
-            disabled={state.exporting !== true}
-            onClick={() => void actions.run({ type: "pdf.cancelExport" })}
-          >
-            停止后续导出
-          </Button>
-          <Button
-            disabled={
-              state.exporting === true ||
-              // 与宿主 CreateExportPlan(retry) 一致：仅真正失败/取消/未开始项
-              // 可重试；saved 与 unconfirmed（结果未确认，不自动重试）不重发。
-              !exports.some(
-                (item) =>
-                  item.status === "failed" ||
-                  item.status === "cancelled" ||
-                  item.status === "not_started",
-              )
-            }
-            onClick={() =>
-              void actions.run({
-                type: "pdf.exportDocuments",
-                modifiedOnly,
-                retry: true,
-              })
-            }
-          >
-            重试未完成项
-          </Button>
-          <ul>
-            {exports.map((item) => (
-              <li key={stringValue(item.documentId)}>
-                {stringValue(item.name)} ·{" "}
-                {item.status === "saved"
-                  ? "成功"
-                  : item.status === "saving"
-                    ? "提交中"
-                    : item.status === "unconfirmed"
-                      ? "结果未确认"
-                      : item.status === "failed"
-                        ? "失败"
-                        : item.status === "cancelled"
-                          ? "取消"
-                          : "未开始"}
-                {stringValue(item.output)
-                  ? ` · ${stringValue(item.output)}`
-                  : ""}
-                {stringValue(item.error) ? ` · ${stringValue(item.error)}` : ""}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-      <TaskEngineSelector
-        engines={engines}
-        taskEngine={stringValue(state.taskEngine)}
-        enabled={
-          viewState.capabilities.includes("recognition.engine") &&
-          !booleanValue(state.isBusy)
-        }
-        actions={actions}
-        scope="pdf"
-      />
-      <div className="pdf-workspace">
-        <Panel label="PAGES" title="页面">
-          {pages.length === 0 ? (
-            <EmptyStage
-              title="尚未打开文档"
-              detail="打开 PDF 后显示页面状态与多选项。"
-            />
-          ) : (
-            <>
-              <div className="pdf-selection-actions">
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    actions.run({
-                      type: "pdf.selectAll",
-                      selected: true,
-                    })
-                  }
-                >
-                  全选页面
-                </Button>
-                <Button
-                  disabled={busy || selectedPages.length === 0}
-                  onClick={() =>
-                    actions.run({ type: "pdf.selectAll", selected: false })
-                  }
-                >
-                  取消选择
-                </Button>
-                <span>
-                  已选 {selectedPages.length} / {pageCount} 页
-                </span>
-              </div>
-              <ol className="pdf-page-list" aria-label="PDF 页面缩略图">
-                {pages.map((page) => {
-                  const thumbnail = resource(page.thumbnail);
-                  return (
-                    <li
-                      className={selected.has(page.index) ? "is-selected" : ""}
-                      key={page.index}
-                      data-page-index={page.index}
-                      draggable={!busy}
-                      onDragStart={() => {
-                        draggingPage.current = page.index;
-                      }}
-                      onDragEnd={() => {
-                        draggingPage.current = null;
-                      }}
-                      onDragOver={(event) => {
-                        if (!busy) event.preventDefault();
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        if (
-                          !busy &&
-                          draggingPage.current !== null &&
-                          draggingPage.current !== page.index
-                        )
-                          void movePage(draggingPage.current, page.index);
-                        draggingPage.current = null;
-                      }}
-                    >
-                      <Checkbox
-                        aria-label={`选择第 ${page.index + 1} 页`}
-                        checked={selected.has(page.index)}
-                        onChange={(_, data) => {
-                          actions.run({
-                            type: "pdf.selectPage",
-                            page: page.index,
-                            selected: data.checked === true,
-                          });
-                        }}
-                      />
-                      {thumbnail ? (
-                        <button
-                          type="button"
-                          className="pdf-thumbnail-button"
-                          aria-label={`检查第 ${page.index + 1} 页`}
-                          onClick={() =>
-                            actions.run({
-                              type: "pdf.setCurrentPage",
-                              page: page.index,
-                            })
-                          }
-                        >
-                          <img
-                            alt={`第 ${page.index + 1} 页缩略图`}
-                            src={thumbnail.url}
-                          />
-                        </button>
-                      ) : (
-                        <span className="pdf-thumbnail-placeholder">PDF</span>
-                      )}
-                      <span>第 {page.index + 1} 页</span>
-                      <div className="pdf-page-move">
-                        <Button
-                          size="small"
-                          aria-label={`第 ${page.index + 1} 页向前移动`}
-                          disabled={busy || page.index === 0}
-                          onClick={() => movePage(page.index, page.index - 1)}
-                          icon={<ArrowUp size={14} />}
-                        />
-                        <Button
-                          size="small"
-                          aria-label={`第 ${page.index + 1} 页向后移动`}
-                          disabled={busy || page.index === pageCount - 1}
-                          onClick={() => movePage(page.index, page.index + 1)}
-                          icon={<ArrowDown size={14} />}
-                        />
-                      </div>
-                      <span>
-                        {page.detected
-                          ? page.hasTextLayer
-                            ? page.addedThisSession
-                              ? "本次 OCR 文字层"
-                              : "已有文字层 / 来源未知"
-                            : "无文字层"
-                          : "检测中"}
-                      </span>
-                      <span>{statusLabel(page.statusCode, "待处理")}</span>
-                      {(page.width ?? 0) > 0 && (
-                        <span>
-                          {Math.round(page.width ?? 0)} ×{" "}
-                          {Math.round(page.height ?? 0)} pt · {page.rotation}°
-                        </span>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-              {pageCount > pages.length && (
-                <div
-                  className="collection-pagination"
-                  aria-label="PDF 页面分页"
-                >
-                  <Button
-                    disabled={windowStart === 0}
-                    onClick={() =>
-                      actions.run({
-                        type: "pdf.setWindow",
-                        start: Math.max(0, windowStart - 64),
-                      })
-                    }
-                  >
-                    上一组
-                  </Button>
-                  <span>
-                    {windowStart + 1}–
-                    {Math.min(pageCount, windowStart + pages.length)} /{" "}
-                    {pageCount}
-                  </span>
-                  <Button
-                    disabled={windowStart + pages.length >= pageCount}
-                    onClick={() =>
-                      actions.run({
-                        type: "pdf.setWindow",
-                        start: windowStart + 64,
-                      })
-                    }
-                  >
-                    下一组
-                  </Button>
-                </div>
-              )}
-            </>
-          )}
-        </Panel>
-        <div className="pdf-main">
-          <div className="pdf-selection-actions">
-            <label htmlFor="pdf-operation-range">页面处理范围</label>
-            <Select
-              id="pdf-operation-range"
-              value={operationRange}
-              disabled={busy}
-              onChange={(_, data) => setOperationRange(data.value)}
-            >
-              <option value="selected">选中页</option>
-              <option value="all">全文件</option>
-            </Select>
-            <span>旋转、横纵放置和文字朝向仅处理此范围</span>
-          </div>
-          <Toolbar aria-label="PDF 页面命令">
-            <CapabilityGate
-              capability="pdf.rotate"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.rotate",
-                degrees: 90,
-                range: operationRange,
-              }}
-              actions={actions}
-              icon={<RotateCw aria-hidden="true" size={16} />}
-              disabled={operationDisabled}
-            >
-              顺时针 90°
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.rotate"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.rotate",
-                degrees: -90,
-                range: operationRange,
-              }}
-              actions={actions}
-              disabled={operationDisabled}
-              icon={<RotateCcw size={16} aria-hidden="true" />}
-            >
-              逆时针 90°
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.rotate"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.orient",
-                landscape: true,
-                range: operationRange,
-              }}
-              actions={actions}
-              disabled={operationDisabled}
-            >
-              横放
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.rotate"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.orient",
-                landscape: false,
-                range: operationRange,
-              }}
-              actions={actions}
-              disabled={operationDisabled}
-            >
-              纵放
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.rotate"
-              capabilities={viewState.capabilities}
-              action={{ type: "pdf.correctOrientation", range: operationRange }}
-              actions={actions}
-              disabled={operationDisabled}
-            >
-              自动文字朝向
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              action={{ type: "pdf.deletePages" }}
-              actions={actions}
-              disabled={selectedPages.length === 0 || busy}
-              icon={<Trash2 aria-hidden="true" size={16} />}
-            >
-              删除选中页
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              action={{ type: "pdf.ocrPages" }}
-              actions={actions}
-              disabled={selectedPages.length === 0 || busy}
-              icon={<ScanText aria-hidden="true" size={16} />}
-            >
-              提取/解析选中页
-            </CapabilityGate>
-            <ToolbarDivider />
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.addTextLayers",
-                range: "selected",
-                overwrite: replaceLayers,
-              }}
-              actions={actions}
-              disabled={busy || !canAdd || selectedPages.length === 0}
-            >
-              添加选中页文字层
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.addTextLayers",
-                range: "unlayered",
-                overwrite: false,
-              }}
-              actions={actions}
-              disabled={
-                busy || !canAdd || layers === pageCount || pageCount === 0
-              }
-            >
-              为全部无层页添加
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              action={{
-                type: "pdf.addTextLayers",
-                range: "all",
-                overwrite: replaceLayers,
-              }}
-              actions={actions}
-              disabled={busy || !canAdd || pageCount === 0}
-            >
-              添加整本文字层
-            </CapabilityGate>
-            <Button
-              disabled={
-                busy || selectedPages.length === 0 || detected !== pageCount
-              }
-              onClick={() => {
-                setConfirmDelete([...selectedPages]);
-                setConfirmRevision(numberValue(state.revision));
-              }}
-            >
-              删除选中文字层
-            </Button>
-            <ToolbarDivider />
+          {pageCount > 0 && (
             <CapabilityGate
               capability="pdf.save"
               capabilities={viewState.capabilities}
@@ -836,104 +391,679 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
             >
               保存
             </CapabilityGate>
-            {state.canCopyExport === true && (
-              <Button
-                disabled={busy || pageCount === 0}
-                onClick={() => void actions.run({ type: "pdf.saveAs" })}
-              >
-                另存为并切换保存目标
-              </Button>
-            )}
-          </Toolbar>
-          <div className="pdf-insertion" aria-label="插入页面">
-            <label htmlFor="pdf-insert-after">插入到第几页后（0 为开头）</label>
-            <Input
-              id="pdf-insert-after"
-              type="number"
-              min={0}
-              max={pageCount}
-              value={String(insertAfter)}
-              disabled={busy}
-              onChange={(_, data) => setInsertAfter(Number(data.value))}
-            />
-            <label htmlFor="pdf-blank-width">空白页宽度 pt</label>
-            <Input
-              id="pdf-blank-width"
-              type="number"
-              min={1}
-              value={String(pageWidth)}
-              disabled={busy}
-              onChange={(_, data) => setPageWidth(Number(data.value))}
-            />
-            <label htmlFor="pdf-blank-height">空白页高度 pt</label>
-            <Input
-              id="pdf-blank-height"
-              type="number"
-              min={1}
-              value={String(pageHeight)}
-              disabled={busy}
-              onChange={(_, data) => setPageHeight(Number(data.value))}
-            />
+          )}
+          {(pageCount > 0 || busy || activeDocument?.closeFailed === true) && (
             <CapabilityGate
-              capability="pdf.edit"
+              capability="pdf.open"
               capabilities={viewState.capabilities}
+              action={{ type: "pdf.close" }}
               actions={actions}
-              action={{
-                type: "pdf.insertBlank",
-                afterIndex: insertAfter - 1,
-                width: pageWidth,
-                height: pageHeight,
-                revision: numberValue(state.revision),
-              }}
-              disabled={insertionDisabled}
-            >
-              插入空白页
-            </CapabilityGate>
-            <CapabilityGate
-              capability="pdf.edit"
-              capabilities={viewState.capabilities}
-              actions={actions}
-              action={{
-                type: "pdf.insertFrom",
-                afterIndex: insertAfter - 1,
-                revision: numberValue(state.revision),
-              }}
               disabled={
-                busy ||
-                pageCount === 0 ||
-                !Number.isInteger(insertAfter) ||
-                insertAfter < 0 ||
-                insertAfter > pageCount
+                pageCount === 0 && !busy && activeDocument?.closeFailed !== true
+              }
+              icon={<X aria-hidden="true" size={16} />}
+            >
+              关闭文档
+            </CapabilityGate>
+          )}
+        </>
+      }
+    >
+      {documents.length > 0 && (
+        <div className="pdf-documents" aria-label="PDF 文档列表">
+          {documents.map((document) => (
+            <Button
+              key={stringValue(document.documentId)}
+              appearance={
+                document.documentId === documentId ? "primary" : "secondary"
+              }
+              aria-pressed={document.documentId === documentId}
+              onClick={() =>
+                void actions.run({
+                  type: "pdf.activateDocument",
+                  documentId: document.documentId,
+                })
               }
             >
-              插入其他 PDF
-            </CapabilityGate>
-          </div>
-          <p>
-            自动文字朝向需要已就绪的 Paddle 通用文字
-            OCR；缺少能力或模型时请在组件设置中检查。
-          </p>
-          <Button onClick={() => actions.navigate("settings")}>
-            打开组件设置
-          </Button>
-          <p aria-live="polite">
-            已检测 {detected}/{pageCount} 页 · 有文字层 {layers} 页 · 无文字层{" "}
-            {Math.max(0, detected - layers)} 页 ·{" "}
-            {state.isModified === true ? "当前修订尚未保存" : "当前修订已保存"}
-          </p>
-          <Checkbox
-            checked={replaceLayers}
-            disabled={busy}
-            label="显式覆盖已有文字层（默认跳过）"
-            onChange={(_, data) => setReplaceLayers(data.checked === true)}
-          />
-          {!canAdd && pageCount > 0 && (
-            <p>
-              添加文字层需要全部页检测完成，并使用具有可逆页坐标的文字 OCR
-              模式，关闭文档去扭曲。提取/解析仍可使用。
-            </p>
+              {stringValue(document.name) ?? "PDF"}
+              {document.isModified === true ? " · 未保存" : ""}
+              {document.isBusy === true ? " · 处理中" : ""}
+              {document.closeFailed === true ? " · 关闭失败，可重试" : ""}
+            </Button>
+          ))}
+        </div>
+      )}
+      {pageCount > 0 && (
+        <TaskEngineSelector
+          engines={engines}
+          taskEngine={stringValue(state.taskEngine)}
+          enabled={
+            viewState.capabilities.includes("recognition.engine") &&
+            !booleanValue(state.isBusy)
+          }
+          actions={actions}
+          scope="pdf"
+        />
+      )}
+      <div className={`pdf-workspace${pageCount === 0 ? " is-empty" : ""}`}>
+        {pageCount > 0 && (
+          <Panel title="页面">
+            {pages.length === 0 ? (
+              <EmptyStage
+                title="尚未打开文档"
+                detail="打开 PDF 后显示页面状态与多选项。"
+              />
+            ) : (
+              <>
+                <div className="pdf-selection-actions">
+                  <Button
+                    disabled={busy}
+                    onClick={() =>
+                      actions.run({
+                        type: "pdf.selectAll",
+                        selected: true,
+                      })
+                    }
+                  >
+                    全选页面
+                  </Button>
+                  <Button
+                    disabled={busy || selectedPages.length === 0}
+                    onClick={() =>
+                      actions.run({ type: "pdf.selectAll", selected: false })
+                    }
+                  >
+                    取消选择
+                  </Button>
+                  <span>
+                    已选 {selectedPages.length} / {pageCount} 页
+                  </span>
+                </div>
+                <ol className="pdf-page-list" aria-label="PDF 页面缩略图">
+                  {pages.map((page) => {
+                    const thumbnail = resource(page.thumbnail);
+                    return (
+                      <li
+                        className={
+                          selected.has(page.index) ? "is-selected" : ""
+                        }
+                        key={page.index}
+                        data-page-index={page.index}
+                        draggable={!busy}
+                        onDragStart={() => {
+                          draggingPage.current = page.index;
+                        }}
+                        onDragEnd={() => {
+                          draggingPage.current = null;
+                        }}
+                        onDragOver={(event) => {
+                          if (!busy) event.preventDefault();
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          if (
+                            !busy &&
+                            draggingPage.current !== null &&
+                            draggingPage.current !== page.index
+                          )
+                            void movePage(draggingPage.current, page.index);
+                          draggingPage.current = null;
+                        }}
+                      >
+                        <Checkbox
+                          aria-label={`选择第 ${page.index + 1} 页`}
+                          checked={selected.has(page.index)}
+                          onChange={(_, data) => {
+                            actions.run({
+                              type: "pdf.selectPage",
+                              page: page.index,
+                              selected: data.checked === true,
+                            });
+                          }}
+                        />
+                        {thumbnail ? (
+                          <button
+                            type="button"
+                            className="pdf-thumbnail-button"
+                            aria-label={`检查第 ${page.index + 1} 页`}
+                            onClick={() =>
+                              actions.run({
+                                type: "pdf.setCurrentPage",
+                                page: page.index,
+                              })
+                            }
+                          >
+                            <img
+                              alt={`第 ${page.index + 1} 页缩略图`}
+                              src={thumbnail.url}
+                            />
+                          </button>
+                        ) : (
+                          <span className="pdf-thumbnail-placeholder">PDF</span>
+                        )}
+                        <span>第 {page.index + 1} 页</span>
+                        <div className="pdf-page-move">
+                          <Button
+                            size="small"
+                            aria-label={`第 ${page.index + 1} 页向前移动`}
+                            disabled={busy || page.index === 0}
+                            onClick={() => movePage(page.index, page.index - 1)}
+                            icon={<ArrowUp size={14} />}
+                          />
+                          <Button
+                            size="small"
+                            aria-label={`第 ${page.index + 1} 页向后移动`}
+                            disabled={busy || page.index === pageCount - 1}
+                            onClick={() => movePage(page.index, page.index + 1)}
+                            icon={<ArrowDown size={14} />}
+                          />
+                        </div>
+                        <span>
+                          {page.detected
+                            ? page.hasTextLayer
+                              ? page.addedThisSession
+                                ? "本次 OCR 文字层"
+                                : "已有文字层 / 来源未知"
+                              : "无文字层"
+                            : "检测中"}
+                        </span>
+                        <span>{statusLabel(page.statusCode, "待处理")}</span>
+                        {(page.width ?? 0) > 0 && (
+                          <span>
+                            {Math.round(page.width ?? 0)} ×{" "}
+                            {Math.round(page.height ?? 0)} pt · {page.rotation}°
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+                {pageCount > pages.length && (
+                  <div
+                    className="collection-pagination"
+                    aria-label="PDF 页面分页"
+                  >
+                    <Button
+                      disabled={windowStart === 0}
+                      onClick={() =>
+                        actions.run({
+                          type: "pdf.setWindow",
+                          start: Math.max(0, windowStart - 64),
+                        })
+                      }
+                    >
+                      上一组
+                    </Button>
+                    <span>
+                      {windowStart + 1}–
+                      {Math.min(pageCount, windowStart + pages.length)} /{" "}
+                      {pageCount}
+                    </span>
+                    <Button
+                      disabled={windowStart + pages.length >= pageCount}
+                      onClick={() =>
+                        actions.run({
+                          type: "pdf.setWindow",
+                          start: windowStart + 64,
+                        })
+                      }
+                    >
+                      下一组
+                    </Button>
+                  </div>
+                )}
+              </>
+            )}
+          </Panel>
+        )}
+        <div className="pdf-main">
+          {pageCount === 0 ? (
+            <EmptyStage
+              title="尚未打开文档"
+              detail="打开 PDF 后在此检查页面、提取结果并添加文字层。"
+            />
+          ) : (
+            <>
+              <div className="pdf-selection-actions">
+                <label htmlFor="pdf-operation-range">方向操作范围</label>
+                <Select
+                  id="pdf-operation-range"
+                  value={operationRange}
+                  disabled={busy}
+                  onChange={(_, data) => setOperationRange(data.value)}
+                >
+                  <option value="selected">选中页</option>
+                  <option value="all">全文件</option>
+                </Select>
+              </div>
+              <Toolbar aria-label="PDF 页面命令">
+                <CapabilityGate
+                  capability="pdf.rotate"
+                  capabilities={viewState.capabilities}
+                  action={{
+                    type: "pdf.rotate",
+                    degrees: 90,
+                    range: operationRange,
+                  }}
+                  actions={actions}
+                  icon={<RotateCw aria-hidden="true" size={16} />}
+                  disabled={operationDisabled}
+                >
+                  顺时针 90°
+                </CapabilityGate>
+                <CapabilityGate
+                  capability="pdf.rotate"
+                  capabilities={viewState.capabilities}
+                  action={{
+                    type: "pdf.rotate",
+                    degrees: -90,
+                    range: operationRange,
+                  }}
+                  actions={actions}
+                  disabled={operationDisabled}
+                  icon={<RotateCcw size={16} aria-hidden="true" />}
+                >
+                  逆时针 90°
+                </CapabilityGate>
+                <CapabilityGate
+                  capability="pdf.edit"
+                  capabilities={viewState.capabilities}
+                  action={{ type: "pdf.deletePages" }}
+                  actions={actions}
+                  disabled={selectedPages.length === 0 || busy}
+                  icon={<Trash2 aria-hidden="true" size={16} />}
+                >
+                  删除选中页
+                </CapabilityGate>
+                <CapabilityGate
+                  capability="pdf.edit"
+                  capabilities={viewState.capabilities}
+                  action={{ type: "pdf.ocrPages" }}
+                  actions={actions}
+                  disabled={selectedPages.length === 0 || busy}
+                  icon={<ScanText aria-hidden="true" size={16} />}
+                >
+                  提取/解析选中页
+                </CapabilityGate>
+                <ToolbarDivider />
+                <CapabilityGate
+                  capability="pdf.edit"
+                  capabilities={viewState.capabilities}
+                  action={{
+                    type: "pdf.addTextLayers",
+                    range: "selected",
+                    overwrite: replaceLayers,
+                  }}
+                  actions={actions}
+                  disabled={busy || !canAdd || selectedPages.length === 0}
+                >
+                  添加选中页文字层
+                </CapabilityGate>
+                {state.canCopyExport === true && (
+                  <Button
+                    disabled={busy || pageCount === 0}
+                    onClick={() => void actions.run({ type: "pdf.saveAs" })}
+                  >
+                    另存为并切换保存目标
+                  </Button>
+                )}
+              </Toolbar>
+              {/* 主预览优先：页面检查紧跟常用命令；导出进行中/有问题时状态与
+               * 停止、重试入口直接可见，不藏在高级区。 */}
+              {(state.exporting === true || exports.length > 0) && (
+                <div className="pdf-export-status" aria-live="polite">
+                  {state.exporting === true ? (
+                    <>
+                      <span>正在批量导出副本…</span>
+                      <Button
+                        onClick={() =>
+                          void actions.run({ type: "pdf.cancelExport" })
+                        }
+                      >
+                        停止后续导出
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <span>
+                        批量导出：
+                        {
+                          exports.filter((i) => i.status === "saved").length
+                        }{" "}
+                        项成功，
+                        {exports.filter((i) => i.status !== "saved").length}
+                        项未完成或未确认
+                      </span>
+                      <Button
+                        disabled={
+                          // 与宿主 CreateExportPlan(retry) 一致：仅真正失败/取消/未开始项
+                          // 可重试；saved 与 unconfirmed（结果未确认，不自动重试）不重发。
+                          !exports.some(
+                            (item) =>
+                              item.status === "failed" ||
+                              item.status === "cancelled" ||
+                              item.status === "not_started",
+                          )
+                        }
+                        onClick={() =>
+                          void actions.run({
+                            type: "pdf.exportDocuments",
+                            modifiedOnly,
+                            retry: true,
+                          })
+                        }
+                      >
+                        重试未完成项
+                      </Button>
+                    </>
+                  )}
+                </div>
+              )}
+              <Panel title="页面检查">
+                {hasCurrentPage && state.canInspectPage === true ? (
+                  <PdfInspection
+                    key={`${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                    position={
+                      state.previewPosition &&
+                      typeof state.previewPosition === "object"
+                        ? (state.previewPosition as Record<string, unknown>)
+                        : undefined
+                    }
+                    page={selectedPage}
+                    count={pageCount}
+                    revision={numberValue(state.revision)}
+                    sessionId={stringValue(state.sessionId) ?? ""}
+                    preview={resource(state.pagePreview)}
+                    inspect={resource(state.pageInspect)}
+                    status={stringValue(state.pageInspectStatusCode) ?? ""}
+                    busy={busy}
+                    canEdit={state.canCorrectText === true}
+                    actions={actions}
+                    registerPositionFlush={registerPositionFlush}
+                    documentId={documentId}
+                    registerNativePositionFlush={registerNativePreviewFlush}
+                  />
+                ) : hasCurrentPage && activePage?.thumbnail ? (
+                  <img
+                    className="pdf-resource-preview"
+                    src={activePage.thumbnail.url}
+                    alt={`第 ${selectedPage + 1} 页预览`}
+                  />
+                ) : (
+                  <p>选择页面后查看预览。</p>
+                )}
+                {activeStructured && (
+                  <>
+                    <p>
+                      原始识别结果
+                      {typeof activePage?.recognitionRevision === "number"
+                        ? `（修订 ${activePage.recognitionRevision}）`
+                        : ""}
+                      {activePage?.correctedAfterRecognition === true
+                        ? " · 校正前，复制内容保留原始识别文本"
+                        : " · 复制内容保留原始识别文本"}
+                    </p>
+                    <StructuredResult
+                      key={activeStructured.url}
+                      source={activeStructuredText}
+                      onCopy={(blockIndex, format) =>
+                        actions.run({
+                          type: "recognition.copyStructured",
+                          resourceUri: activeStructured.url,
+                          blockIndex,
+                          format,
+                        })
+                      }
+                    />
+                  </>
+                )}
+              </Panel>
+              <details
+                className="pdf-advanced"
+                open={state.exporting === true || undefined}
+              >
+                <summary>高级与导出</summary>
+                <div className="pdf-advanced-content">
+                  {/* 低频页操作：方向三件套、整本文字层、删除文字层与覆盖开关。 */}
+                  <div
+                    className="pdf-selection-actions"
+                    aria-label="方向与整本文字层操作"
+                  >
+                    <CapabilityGate
+                      capability="pdf.rotate"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "pdf.orient",
+                        landscape: true,
+                        range: operationRange,
+                      }}
+                      actions={actions}
+                      disabled={operationDisabled}
+                    >
+                      横放
+                    </CapabilityGate>
+                    <CapabilityGate
+                      capability="pdf.rotate"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "pdf.orient",
+                        landscape: false,
+                        range: operationRange,
+                      }}
+                      actions={actions}
+                      disabled={operationDisabled}
+                    >
+                      纵放
+                    </CapabilityGate>
+                    <CapabilityGate
+                      capability="pdf.rotate"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "pdf.correctOrientation",
+                        range: operationRange,
+                      }}
+                      actions={actions}
+                      disabled={operationDisabled}
+                    >
+                      自动文字朝向
+                    </CapabilityGate>
+                    <CapabilityGate
+                      capability="pdf.edit"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "pdf.addTextLayers",
+                        range: "unlayered",
+                        overwrite: false,
+                      }}
+                      actions={actions}
+                      disabled={
+                        busy ||
+                        !canAdd ||
+                        layers === pageCount ||
+                        pageCount === 0
+                      }
+                    >
+                      为全部无层页添加
+                    </CapabilityGate>
+                    <CapabilityGate
+                      capability="pdf.edit"
+                      capabilities={viewState.capabilities}
+                      action={{
+                        type: "pdf.addTextLayers",
+                        range: "all",
+                        overwrite: replaceLayers,
+                      }}
+                      actions={actions}
+                      disabled={busy || !canAdd || pageCount === 0}
+                    >
+                      添加整本文字层
+                    </CapabilityGate>
+                    <Button
+                      disabled={
+                        busy ||
+                        selectedPages.length === 0 ||
+                        detected !== pageCount
+                      }
+                      onClick={() => {
+                        setConfirmDelete([...selectedPages]);
+                        setConfirmRevision(numberValue(state.revision));
+                      }}
+                    >
+                      删除选中文字层
+                    </Button>
+                    <Checkbox
+                      checked={replaceLayers}
+                      disabled={busy}
+                      label="显式覆盖已有文字层（默认跳过）"
+                      onChange={(_, data) =>
+                        setReplaceLayers(data.checked === true)
+                      }
+                    />
+                  </div>
+                  <div className="pdf-insertion" aria-label="插入页面">
+                    <label htmlFor="pdf-insert-after">
+                      插入到第几页后（0 为开头）
+                    </label>
+                    <Input
+                      id="pdf-insert-after"
+                      type="number"
+                      min={0}
+                      max={pageCount}
+                      value={String(insertAfter)}
+                      disabled={busy}
+                      onChange={(_, data) => setInsertAfter(Number(data.value))}
+                    />
+                    <label htmlFor="pdf-blank-width">空白页宽度 pt</label>
+                    <Input
+                      id="pdf-blank-width"
+                      type="number"
+                      min={1}
+                      value={String(pageWidth)}
+                      disabled={busy}
+                      onChange={(_, data) => setPageWidth(Number(data.value))}
+                    />
+                    <label htmlFor="pdf-blank-height">空白页高度 pt</label>
+                    <Input
+                      id="pdf-blank-height"
+                      type="number"
+                      min={1}
+                      value={String(pageHeight)}
+                      disabled={busy}
+                      onChange={(_, data) => setPageHeight(Number(data.value))}
+                    />
+                    <CapabilityGate
+                      capability="pdf.edit"
+                      capabilities={viewState.capabilities}
+                      actions={actions}
+                      action={{
+                        type: "pdf.insertBlank",
+                        afterIndex: insertAfter - 1,
+                        width: pageWidth,
+                        height: pageHeight,
+                        revision: numberValue(state.revision),
+                      }}
+                      disabled={insertionDisabled}
+                    >
+                      插入空白页
+                    </CapabilityGate>
+                    <CapabilityGate
+                      capability="pdf.edit"
+                      capabilities={viewState.capabilities}
+                      actions={actions}
+                      action={{
+                        type: "pdf.insertFrom",
+                        afterIndex: insertAfter - 1,
+                        revision: numberValue(state.revision),
+                      }}
+                      disabled={
+                        busy ||
+                        pageCount === 0 ||
+                        !Number.isInteger(insertAfter) ||
+                        insertAfter < 0 ||
+                        insertAfter > pageCount
+                      }
+                    >
+                      插入其他 PDF
+                    </CapabilityGate>
+                  </div>
+                  <div className="pdf-export">
+                    <p>
+                      导出副本保留原文档修改状态和保存目标。默认避让同名文件；目标竞争导致的失败可重试。
+                    </p>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={modifiedOnly}
+                        onChange={(event) =>
+                          setModifiedOnly(event.target.checked)
+                        }
+                      />
+                      仅已修改文档
+                    </label>
+                    <Button
+                      disabled={
+                        state.canCopyExport !== true || state.exporting === true
+                      }
+                      onClick={() =>
+                        void actions.run({
+                          type: "pdf.exportDocuments",
+                          modifiedOnly,
+                          retry: false,
+                        })
+                      }
+                    >
+                      选择目录并导出
+                    </Button>
+                    <ul>
+                      {exports.map((item) => (
+                        <li key={stringValue(item.documentId)}>
+                          {stringValue(item.name)} ·{" "}
+                          {item.status === "saved"
+                            ? "成功"
+                            : item.status === "saving"
+                              ? "提交中"
+                              : item.status === "unconfirmed"
+                                ? "结果未确认"
+                                : item.status === "failed"
+                                  ? "失败"
+                                  : item.status === "cancelled"
+                                    ? "取消"
+                                    : "未开始"}
+                          {stringValue(item.output)
+                            ? ` · ${stringValue(item.output)}`
+                            : ""}
+                          {stringValue(item.error)
+                            ? ` · ${stringValue(item.error)}`
+                            : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <p aria-live="polite">
+                    已检测 {detected}/{pageCount} 页 · 有文字层 {layers} 页 ·
+                    无文字层 {Math.max(0, detected - layers)} 页 ·{" "}
+                    {state.isModified === true
+                      ? "当前修订尚未保存"
+                      : "当前修订已保存"}
+                  </p>
+                  <p className="form-note">
+                    自动文字朝向需要已就绪的 Paddle 通用文字
+                    OCR；缺少能力或模型时请在组件设置中检查。
+                  </p>
+                  {!canAdd && pageCount > 0 && (
+                    <p>
+                      添加文字层需要全部页检测完成，并使用具有可逆页坐标的文字
+                      OCR 模式，关闭文档去扭曲。提取/解析仍可使用。
+                    </p>
+                  )}
+                  <Button onClick={() => actions.navigate("settings")}>
+                    打开组件设置
+                  </Button>
+                  <PdfParameters state={state} actions={actions} busy={busy} />
+                </div>
+              </details>
+            </>
           )}
-          <PdfParameters state={state} actions={actions} busy={busy} />
           {confirmDelete && (
             <div role="alertdialog" aria-label="确认删除文字层">
               <p>
@@ -989,65 +1119,6 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
               <p>取消不会撤销已完成写入；后台实际收尾后才可继续操作。</p>
             </div>
           )}
-          <Panel label="REVIEW" title="页面检查">
-            {hasCurrentPage && state.canInspectPage === true ? (
-              <PdfInspection
-                key={`${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
-                position={
-                  state.previewPosition &&
-                  typeof state.previewPosition === "object"
-                    ? (state.previewPosition as Record<string, unknown>)
-                    : undefined
-                }
-                page={selectedPage}
-                count={pageCount}
-                revision={numberValue(state.revision)}
-                sessionId={stringValue(state.sessionId) ?? ""}
-                preview={resource(state.pagePreview)}
-                inspect={resource(state.pageInspect)}
-                status={stringValue(state.pageInspectStatusCode) ?? ""}
-                busy={busy}
-                canEdit={state.canCorrectText === true}
-                actions={actions}
-                registerPositionFlush={registerPositionFlush}
-                documentId={documentId}
-                registerNativePositionFlush={registerNativePreviewFlush}
-              />
-            ) : hasCurrentPage && activePage?.thumbnail ? (
-              <img
-                className="pdf-resource-preview"
-                src={activePage.thumbnail.url}
-                alt={`第 ${selectedPage + 1} 页预览`}
-              />
-            ) : (
-              <p>选择页面后查看预览。</p>
-            )}
-            {activeStructured && (
-              <>
-                <p>
-                  原始识别结果
-                  {typeof activePage?.recognitionRevision === "number"
-                    ? `（修订 ${activePage.recognitionRevision}）`
-                    : ""}
-                  {activePage?.correctedAfterRecognition === true
-                    ? " · 校正前，复制内容保留原始识别文本"
-                    : " · 复制内容保留原始识别文本"}
-                </p>
-                <StructuredResult
-                  key={activeStructured.url}
-                  source={activeStructuredText}
-                  onCopy={(blockIndex, format) =>
-                    actions.run({
-                      type: "recognition.copyStructured",
-                      resourceUri: activeStructured.url,
-                      blockIndex,
-                      format,
-                    })
-                  }
-                />
-              </>
-            )}
-          </Panel>
           <StatusLine>
             {statusLabel(state.statusCode, "尚未建立 PDF 会话。")}{" "}
             {stringValue(state.summary)}

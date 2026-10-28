@@ -1,13 +1,15 @@
+import type { ReactNode } from "react";
+
 export function Panel({
-  label,
   title,
   className,
+  actions,
   children,
 }: {
-  readonly label?: string;
   readonly title: string;
   readonly className?: string;
-  readonly children: React.ReactNode;
+  readonly actions?: ReactNode;
+  readonly children: ReactNode;
 }) {
   return (
     <section
@@ -15,19 +17,15 @@ export function Panel({
       aria-label={title}
     >
       <header className="panel-heading">
-        {label ? <span>{label}</span> : null}
         <h2>{title}</h2>
+        {actions ? <div className="panel-actions">{actions}</div> : null}
       </header>
       <div className="panel-content">{children}</div>
     </section>
   );
 }
 
-export function StatusLine({
-  children,
-}: {
-  readonly children: React.ReactNode;
-}) {
+export function StatusLine({ children }: { readonly children: ReactNode }) {
   return (
     <output className="status-line" aria-live="polite">
       {children}

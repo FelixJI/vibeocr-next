@@ -199,7 +199,7 @@ test("imageEdit: 保存工程经 /__project 契约上传完整贡献并发出窄
       },
     },
   });
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
 
   // 画一个矩形对象：提交入历史即推进会话修订（权威信号）。
   await action(page, "矩形");
@@ -261,7 +261,7 @@ test("imageEdit: 已应用修补作为 PNG 补丁上传且 state.patches 保持�
       },
     },
   });
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   // 真实修补链路：框选→本地 worker 预览→应用（与 inpaint.spec 同流程）。
   await action(page, "去水印");
   await dragOnCanvas(page, { x: 300, y: 200 }, { x: 600, y: 380 });
@@ -324,7 +324,7 @@ test("imageEdit: 保存→打开→导出像素一致（非默认逻辑帧）", 
     capabilities: ["recognition.annotation"],
     features: { imageEdit: state },
   });
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
 
   // 阶段一：恢复一个真实的非默认逻辑帧（1280×720）工程。mark 坐标在
   // 1280×720 空间内手工学定，与 canvas 声明一致（宿主组装总是同源）。
@@ -587,7 +587,7 @@ test("recognition: 截图会话通道保存工程可见文字并发 recognition.
     },
     "https://app.vibeocr/#/imageEdit?scene=1",
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   // 所有场景显示可见文字“保存工程”（scene 不再是空占位）。
   const button = page.getByRole("button", { name: "保存工程", exact: true });
   await expect(button).toBeVisible();
@@ -1024,7 +1024,7 @@ test("imageEdit: 准备中离开页面不得 ack 切换宿主", async ({ page })
     capabilities: ["recognition.annotation"],
     features: { imageEdit: state },
   });
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   await sendState(page, "imageEdit", {
     ...state,
     projectOpen: {
@@ -1100,7 +1100,7 @@ test("imageEdit: 不支持的工程版本被拒收且旧画布保持", async ({ 
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   await action(page, "矩形");
   await dragOnCanvas(page, { x: 100, y: 100 }, { x: 300, y: 260 });
   await expectCommand(page, {
@@ -1143,7 +1143,7 @@ test("imageEdit: 不支持的工程版本被拒收且旧画布保持", async ({ 
     page.getByText("不支持的工程格式版本", { exact: false }),
   ).toBeVisible();
   // 旧画布保持：原会话/对象仍在（无新修订、无安装）。
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
 });
 
 for (const timeout of [false, true]) {
@@ -1183,7 +1183,7 @@ for (const timeout of [false, true]) {
       );
       await expect(
         page.getByText("原图 900×600", { exact: false }),
-      ).toBeVisible();
+      ).toBeAttached();
       await action(page, "矩形");
       await dragOnCanvas(page, { x: 150, y: 150 }, { x: 420, y: 320 });
       await expectCommand(page, {

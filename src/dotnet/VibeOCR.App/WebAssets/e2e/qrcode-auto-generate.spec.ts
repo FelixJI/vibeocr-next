@@ -20,6 +20,7 @@ test("QR content and caption settings generate through the host without clicking
       captionText: "",
     },
   });
+  await page.getByText("底部文字", { exact: true }).click();
   await page.getByLabel("底部文字", { exact: true }).selectOption("custom");
   await page.getByLabel("独立说明", { exact: true }).fill("最新说明");
   await expectCommand(page, {

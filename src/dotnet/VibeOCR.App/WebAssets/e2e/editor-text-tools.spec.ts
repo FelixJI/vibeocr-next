@@ -50,7 +50,7 @@ async function setupTextHost(
   await expect(canvas).toBeVisible();
   await expect(
     page.getByText(new RegExp(`原图 ${sourceSize.width}×${sourceSize.height}`)),
-  ).toBeVisible();
+  ).toBeAttached();
   return { uploads };
 }
 

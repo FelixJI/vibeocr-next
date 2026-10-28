@@ -159,7 +159,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await mountWithUploadCapture(page, uploads, "inpaint-source.svg");
   const canvas = page.locator('canvas[aria-label="图片检查画布"]');
   await expect(canvas).toBeVisible();
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
 
   // 基线：未修补导出的真实 PNG。
   await page.getByRole("button", { name: "保存标注图" }).click();
@@ -172,7 +172,9 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   // 去水印工具 + 明确框选：选区完全覆盖水印并压在绿背景上（自然约
   // (29,9)-(67,31)，外扩取整后 (29,9,38,22)），边界才能扩散出背景色。
   await page.getByRole("button", { name: "去水印" }).click();
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/复杂纹理或大面积覆盖效果有限/)).toBeVisible();
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByRole("button", { name: "预览修补" })).toBeDisabled();
   await dragOnCanvas(page, { x: 281, y: 168 }, { x: 619, y: 357 });
   await expect(page.getByText(/已框选修补区域/)).toBeVisible();
@@ -358,7 +360,7 @@ test("measures real browser processing wall time and responsiveness on a 4MP ima
   await mountWithUploadCapture(page, uploads, "inpaint-perf.svg");
   await page.getByRole("button", { name: "编辑图片", exact: true }).click();
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
-  await expect(page.getByText(/原图 2000×2000/)).toBeVisible();
+  await expect(page.getByText(/原图 2000×2000/)).toBeAttached();
 
   await page.getByRole("button", { name: "去水印" }).click();
   // 显示 (303,153)-(597,447) → 自然约 (510,510)-(1490,1490)：4MP 图 / 约 0.96MP 选区
@@ -525,7 +527,9 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   await page.getByLabel("输出宽度").fill("48");
   await page.getByLabel("输出高度").fill("24");
   await page.getByRole("button", { name: "应用尺寸" }).click();
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/输出 48×24/)).toBeVisible();
+  await page.getByText("使用帮助与图像信息").click();
   await page.getByRole("button", { name: "保存标注图" }).click();
   await expect.poll(() => uploads.length).toBe(6);
   const resized = await decodeUpload(page, uploads[5]!.body, "image/png");

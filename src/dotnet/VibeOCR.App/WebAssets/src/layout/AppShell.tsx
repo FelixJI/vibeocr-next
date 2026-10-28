@@ -7,7 +7,6 @@ import {
   MenuTrigger,
   Toolbar,
   ToolbarButton,
-  ToolbarDivider,
   Tooltip,
 } from "@fluentui/react-components";
 import {
@@ -151,8 +150,6 @@ export function AppShell({
           >
             {viewState.runtimeLabel}
           </Badge>
-          <ToolbarDivider />
-          <span className="toolbar-context">本地处理 · 不上传至网页服务</span>
           <div className="toolbar-spacer" />
           <Menu
             checkedValues={{ theme: [theme] }}

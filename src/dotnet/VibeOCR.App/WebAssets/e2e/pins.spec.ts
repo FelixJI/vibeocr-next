@@ -307,7 +307,7 @@ test("pin cannot edit or commit before its inherited exclusions are ready", asyn
   } finally {
     releaseImage();
   }
-  await expect(page.getByText("原图 1×1", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 1×1", { exact: false })).toBeAttached();
   await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
   await requestPinSnapshot(page, sourceSession);
   await expect.poll(() => projects.length).toBe(1);
@@ -362,7 +362,7 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
   const { projects, uploads } = await pinEditor(page, base, [
     { x: 0, y: 0, width: 250, height: 1000 },
   ]);
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   async function draw(
     tool: string,
     x: number,
@@ -562,7 +562,7 @@ test("composition pin snapshot save and reopen keep pixels, geometry, and sessio
       imageOutputDirectory: "C:/authorized-output",
     },
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   // 真实排版进入 pinEdit：边距+纯色背景改变最终几何（920×620）。
   await page.getByRole("button", { name: "画布排版", exact: true }).click();
   await page.getByLabel("排版边距", { exact: true }).fill("10");

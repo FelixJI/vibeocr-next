@@ -1,15 +1,23 @@
-import { Button, Toolbar } from "@fluentui/react-components";
+import {
+  Button,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
+  Toolbar,
+  Tooltip,
+} from "@fluentui/react-components";
 
 import {
   ClipboardPaste,
   Copy,
   Download,
-  FileSpreadsheet,
   ImagePlus,
-  FileText,
   Square,
   PanelLeftClose,
   PanelLeftOpen,
+  PenLine,
 } from "lucide-react";
 
 import { type CSSProperties, useEffect, useState } from "react";
@@ -251,25 +259,9 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   return (
     <Workspace
       className="recognition-workspace"
-      eyebrow="WORKBENCH / 01"
       title="单次识别"
-      description="截图、粘贴或拖入图片；在同一工作台检查与复制结果。"
       actions={
         <>
-          <Button
-            onClick={() => setPreviewCollapsed(!previewCollapsed)}
-            aria-expanded={!previewCollapsed}
-            aria-controls="recognition-preview"
-            icon={
-              previewCollapsed ? (
-                <PanelLeftOpen size={16} />
-              ) : (
-                <PanelLeftClose size={16} />
-              )
-            }
-          >
-            {previewCollapsed ? "展开图片预览" : "收起图片预览"}
-          </Button>
           <CapabilityGate
             appearance="secondary"
             capability="recognition.file"
@@ -281,7 +273,6 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             选择图片
           </CapabilityGate>
           <CapabilityGate
-            appearance="secondary"
             capability="recognition.clipboard"
             capabilities={viewState.capabilities}
             action={{ type: "recognition.readClipboard" }}
@@ -294,39 +285,27 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             capabilities={viewState.capabilities}
             actions={actions}
           />
-          {/* 先编辑后识别：宿主在 recognition scope 创建同一截图会话与修订，
-           * 载入后在共享画布中标注/屏蔽，再用“识别当前图”显式提交掩膜输入。
-           * 编辑入口不再借用 imageEdit scope 命令（命令约定已分离）。 */}
-          <CapabilityGate
-            appearance="secondary"
-            capability="recognition.file"
-            capabilities={viewState.capabilities}
-            action={{ type: "recognition.openImageForEdit" }}
-            actions={editActions}
-            icon={<ImagePlus aria-hidden="true" size={16} />}
-          >
-            选图编辑
-          </CapabilityGate>
-          <CapabilityGate
-            appearance="secondary"
-            capability="recognition.clipboard"
-            capabilities={viewState.capabilities}
-            action={{ type: "recognition.pasteImageForEdit" }}
-            actions={editActions}
-            icon={<ClipboardPaste aria-hidden="true" size={16} />}
-          >
-            粘贴编辑
-          </CapabilityGate>
-          <CapabilityGate
-            capability="recognition.capture"
-            capabilities={viewState.capabilities}
-            action={{ type: "recognition.cancel" }}
-            actions={actions}
-            disabled={!booleanValue(state.isBusy)}
-            icon={<Square aria-hidden="true" size={16} />}
-          >
-            取消
-          </CapabilityGate>
+          {previewCollapsed && (
+            <Button
+              onClick={() => setPreviewCollapsed(false)}
+              aria-expanded="false"
+              aria-controls="recognition-preview"
+              icon={<PanelLeftOpen size={16} />}
+            >
+              展开图片预览
+            </Button>
+          )}
+          {booleanValue(state.isBusy) && (
+            <CapabilityGate
+              capability="recognition.capture"
+              capabilities={viewState.capabilities}
+              action={{ type: "recognition.cancel" }}
+              actions={actions}
+              icon={<Square aria-hidden="true" size={16} />}
+            >
+              取消
+            </CapabilityGate>
+          )}
         </>
       }
     >
@@ -364,7 +343,86 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
         }}
       >
         <div id="recognition-preview" hidden={previewCollapsed}>
-          <Panel label="INPUT / 01" title="输入图像">
+          <Panel
+            title="输入图像"
+            actions={
+              <>
+                {/* 先编辑后识别：编辑导入入口就近放在图片面板，宿主在
+                 * recognition scope 创建同一截图会话与修订，载入后在共享
+                 * 画布中标注/屏蔽，再用“识别当前图”显式提交掩膜输入。
+                 * 编辑入口不再借用 imageEdit scope 命令（命令约定已分离）。 */}
+                <Menu>
+                  <MenuTrigger disableButtonEnhancement>
+                    <Button
+                      appearance="subtle"
+                      size="small"
+                      disabled={
+                        !viewState.capabilities.includes("recognition.file") &&
+                        !viewState.capabilities.includes(
+                          "recognition.clipboard",
+                        )
+                      }
+                      icon={<PenLine aria-hidden="true" size={14} />}
+                    >
+                      编辑导入
+                    </Button>
+                  </MenuTrigger>
+                  <MenuPopover>
+                    <MenuList>
+                      {(
+                        [
+                          [
+                            "选图编辑",
+                            "recognition.file",
+                            { type: "recognition.openImageForEdit" },
+                          ],
+                          [
+                            "粘贴编辑",
+                            "recognition.clipboard",
+                            { type: "recognition.pasteImageForEdit" },
+                          ],
+                        ] as const
+                      ).map(([label, capability, action]) => {
+                        const available =
+                          viewState.capabilities.includes(capability);
+                        const item = (
+                          <MenuItem
+                            disabled={!available}
+                            key={label}
+                            onClick={() => void editActions.run(action)}
+                          >
+                            {label}
+                          </MenuItem>
+                        );
+                        return available ? (
+                          item
+                        ) : (
+                          <Tooltip
+                            content={`此功能需要宿主能力：${capability}`}
+                            key={label}
+                            relationship="description"
+                          >
+                            {item}
+                          </Tooltip>
+                        );
+                      })}
+                    </MenuList>
+                  </MenuPopover>
+                </Menu>
+                <Tooltip content="收起图片预览" relationship="label">
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    onClick={() => setPreviewCollapsed(true)}
+                    aria-expanded="true"
+                    aria-controls="recognition-preview"
+                    aria-label="收起图片预览"
+                    icon={<PanelLeftClose size={14} />}
+                  />
+                </Tooltip>
+              </>
+            }
+          >
             {session?.sceneEditing ? (
               <EmptyStage
                 title="正在截图现场编辑"
@@ -374,34 +432,30 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               <>
                 {/* 单一左侧图片区的编辑/校对模式切换：明确当前视图；编辑器
                  * 始终挂载，切回编辑时未提交标注/历史原样恢复。 */}
-                {input ? (
-                  <div
-                    aria-label="左侧视图模式"
-                    className="left-view-switch"
-                    role="group"
+                <div
+                  aria-label="左侧视图模式"
+                  className="left-view-switch"
+                  role="group"
+                >
+                  <Button
+                    appearance={
+                      leftImageMode === "proofread" ? "primary" : "subtle"
+                    }
+                    aria-pressed={leftImageMode === "proofread"}
+                    onClick={() => setLeftImageMode("proofread")}
+                    size="small"
                   >
-                    <Button
-                      appearance={
-                        leftImageMode === "proofread" ? "primary" : "subtle"
-                      }
-                      aria-pressed={leftImageMode === "proofread"}
-                      onClick={() => setLeftImageMode("proofread")}
-                      size="small"
-                    >
-                      {proofread ? "图像校对" : "图片预览"}
-                    </Button>
-                    <Button
-                      appearance={
-                        leftImageMode === "edit" ? "primary" : "subtle"
-                      }
-                      aria-pressed={leftImageMode === "edit"}
-                      onClick={() => setLeftImageMode("edit")}
-                      size="small"
-                    >
-                      编辑图片
-                    </Button>
-                  </div>
-                ) : null}
+                    {proofread ? "图像校对" : "图片预览"}
+                  </Button>
+                  <Button
+                    appearance={leftImageMode === "edit" ? "primary" : "subtle"}
+                    aria-pressed={leftImageMode === "edit"}
+                    onClick={() => setLeftImageMode("edit")}
+                    size="small"
+                  >
+                    编辑图片
+                  </Button>
+                </div>
                 <ImageCanvasEditor
                   editorSettings={feature(viewState, "settings")}
                   key={session ? `session-${session.sessionId}` : undefined}
@@ -433,7 +487,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
             )}
           </Panel>
         </div>
-        <Panel label="OUTPUT / 02" title="识别结果">
+        <Panel title="识别结果">
           {result || structured ? (
             <>
               <Toolbar
@@ -485,39 +539,50 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   >
                     复制文本
                   </CapabilityGate>
-                </div>
-                <div className="result-action-row">
-                  {(["markdown", "docx", "xlsx"] as const).map((format) => (
-                    <CapabilityGate
-                      key={format}
-                      capability="recognition.results"
-                      capabilities={viewState.capabilities}
-                      action={{
-                        type: "recognition.export",
-                        format,
-                        ...(linesInfo?.hasLines && effectiveMode !== "raw"
-                          ? { textMode: effectiveMode }
-                          : {}),
-                      }}
-                      actions={actions}
-                      icon={
-                        format === "xlsx" ? (
-                          <FileSpreadsheet aria-hidden="true" size={16} />
-                        ) : format === "docx" ? (
-                          <FileText aria-hidden="true" size={16} />
-                        ) : (
-                          <Download aria-hidden="true" size={16} />
-                        )
-                      }
-                    >
-                      导出{" "}
-                      {format === "markdown"
-                        ? "Markdown"
-                        : format === "docx"
-                          ? "Word"
-                          : "Excel"}
-                    </CapabilityGate>
-                  ))}
+                  {/* 多个导出格式收纳进菜单：复制仍是最高频的直接按钮，
+                   * 导出按当前排版模式提交，与原按钮同一命令与禁用边界。 */}
+                  <Menu>
+                    <MenuTrigger disableButtonEnhancement>
+                      <Button
+                        appearance="secondary"
+                        disabled={
+                          !viewState.capabilities.includes(
+                            "recognition.results",
+                          )
+                        }
+                        icon={<Download aria-hidden="true" size={16} />}
+                      >
+                        导出
+                      </Button>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        {(
+                          [
+                            ["markdown", "Markdown"],
+                            ["docx", "Word"],
+                            ["xlsx", "Excel"],
+                          ] as const
+                        ).map(([format, label]) => (
+                          <MenuItem
+                            key={format}
+                            onClick={() =>
+                              void actions.run({
+                                type: "recognition.export",
+                                format,
+                                ...(linesInfo?.hasLines &&
+                                effectiveMode !== "raw"
+                                  ? { textMode: effectiveMode }
+                                  : {}),
+                              })
+                            }
+                          >
+                            {label}
+                          </MenuItem>
+                        ))}
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
                 </div>
               </Toolbar>
               {structured && (

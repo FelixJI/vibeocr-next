@@ -251,7 +251,8 @@ for (const size of [
         await page
           .locator(".workspace")
           .evaluate((element) => element.getBoundingClientRect().width),
-      ).toBeLessThanOrEqual(1920);
+        name,
+      ).toBeLessThanOrEqual(size.width);
       if (name === "设置") {
         for (const label of ["收起时间（毫秒）", "工具栏主题"]) {
           const control = page.getByLabel(label, { exact: true });
@@ -313,7 +314,8 @@ test("recognition survives navigation and resize, then exposes result actions", 
     action: "copy",
     arguments: { format: "plain" },
   });
-  await page.getByRole("button", { name: "导出 Word", exact: true }).click();
+  await page.getByRole("button", { name: "导出", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Word", exact: true }).click();
   await expectCommand(page, {
     scope: "recognition",
     action: "export",
@@ -349,9 +351,10 @@ test("failed command can be retried and running recognition can be cancelled", a
     isBusy: false,
     statusCode: "recognition.ready",
   });
+  // 取消按任务状态呈现：无进行中任务时不常驻占位。
   await expect(
     page.getByRole("button", { name: "取消", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "选择图片", exact: true }),
   ).toBeEnabled();

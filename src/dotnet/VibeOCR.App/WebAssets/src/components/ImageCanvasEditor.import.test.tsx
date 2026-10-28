@@ -118,6 +118,8 @@ describe("image canvas editor system import", () => {
       session: SESSION_A,
     };
     const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    // 图像信息收进“使用帮助与图像信息”：展开后断言尺寸就绪。
+    fireEvent.click(screen.getByText("使用帮助与图像信息"));
     await waitFor(() =>
       expect(screen.getByText(/原图 16000×4000/)).toBeVisible(),
     );
@@ -213,6 +215,7 @@ describe("image canvas editor system import", () => {
         session: SESSION_A,
       };
       const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+      fireEvent.click(screen.getByText("使用帮助与图像信息"));
       await waitFor(() =>
         expect(screen.getByText(/原图 900×600/)).toBeVisible(),
       );
@@ -800,6 +803,7 @@ it.each(["finished-duplicate", "finish-during-decode"] as const)(
       session: SESSION_A,
     };
     const { rerender, unmount } = render(<ImageCanvasEditor {...props} />);
+    fireEvent.click(screen.getByText("使用帮助与图像信息"));
     await waitFor(() => expect(screen.getByText(/原图 900×600/)).toBeVisible());
     const canvas = screen.getByLabelText("图片检查画布");
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({

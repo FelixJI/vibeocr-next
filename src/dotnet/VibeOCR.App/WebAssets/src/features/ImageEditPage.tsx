@@ -337,9 +337,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   }, [openImage, viewState.connected, busy, scene, pin]);
   return (
     <Workspace
-      eyebrow={scene ? "CAPTURE" : "IMAGE"}
       title={scene ? "截图现场编辑" : pin ? "贴图编辑" : "图片编辑"}
-      description="本地编辑与格式转换；自动准备可选文字，识别结果由你主动生成。"
       actions={
         <>
           {!scene && !pin && (

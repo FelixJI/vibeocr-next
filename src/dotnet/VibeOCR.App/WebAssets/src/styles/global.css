@@ -37,7 +37,7 @@ input {
    且页面无法滚动；page-region 负责内部滚动。 */
 .app-shell {
   display: grid;
-  grid-template-columns: 216px minmax(0, 1fr);
+  grid-template-columns: 184px minmax(0, 1fr);
   height: 100%;
 }
 .navigation-rail {
@@ -123,13 +123,6 @@ input {
   border-bottom: 1px solid var(--colorNeutralStroke1);
   background: var(--colorNeutralBackground1);
 }
-.toolbar-context {
-  overflow: hidden;
-  color: var(--colorNeutralForeground3);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .toolbar-spacer {
   flex: 1;
 }
@@ -146,14 +139,22 @@ input {
   gap: 8px;
   padding: 8px 16px 12px;
   width: 100%;
-  max-width: 1920px;
   margin-inline: auto;
+}
+/* 阅读/表单型页面保持受限行宽；预览型页面不再被全局 max-width 截窄，
+   超宽窗口的面积直接给到图片与结果。 */
+.workspace.reading-limited {
+  max-width: 1680px;
 }
 .workspace-header {
   display: flex;
-  align-items: flex-start;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
+}
+.workspace-header > :first-child {
+  flex-shrink: 0;
 }
 .workspace-header h1 {
   margin: 0;
@@ -163,31 +164,17 @@ input {
   letter-spacing: -0.025em;
   line-height: 28px;
 }
-.eyebrow {
-  margin: 0 0 2px;
-  color: var(--colorBrandForeground1);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-}
-.workspace-description {
-  max-width: 660px;
-  margin: 2px 0 0;
-  color: var(--colorNeutralForeground2);
-  font-size: 13px;
-  line-height: 19px;
-}
 .workspace-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  padding-top: 4px;
+  min-width: 0;
+  flex: 1;
 }
 .status-line {
   display: block;
-  padding: 9px 12px;
+  padding: 4px 8px;
   border: 1px solid
     color-mix(in srgb, var(--colorBrandStroke1) 28%, transparent);
   border-left: 3px solid var(--colorBrandStroke1);
@@ -229,22 +216,27 @@ input {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 42px;
-  padding: 8px 12px;
+  min-height: 34px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--colorNeutralStroke1);
-}
-.panel-heading span {
-  color: var(--colorBrandForeground1);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
 }
 .panel-heading h2 {
   margin: 0;
   color: var(--colorNeutralForeground1);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
+  /* 窄窗口动作区挤压时不折行断字：标题完整，次要动作收进图标+Tooltip。 */
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.panel-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 .panel-content {
   display: flex;
@@ -306,12 +298,35 @@ input {
 }
 .collection-workspace {
   display: grid;
-  min-height: 430px;
-  grid-template-columns: minmax(220px, 0.75fr) minmax(300px, 1fr) minmax(
-      280px,
-      0.9fr
-    );
+  min-height: 0;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(0, 1.2fr);
   gap: 14px;
+}
+.batch-workspace,
+.qr-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.batch-workspace > :not(.collection-workspace),
+.qr-page > :not(.qr-workspace) {
+  flex-shrink: 0;
+}
+.batch-workspace > .collection-workspace,
+.qr-page > .qr-workspace {
+  flex: 1;
+  min-height: 0;
+}
+.batch-workspace .panel-content {
+  overflow: auto;
+}
+.batch-workspace .panel-content > :not(.batch-queue) {
+  flex-shrink: 0;
+}
+.batch-workspace .batch-queue {
+  flex: 1;
+  min-height: 0;
 }
 .queue-summary,
 .health-row {
@@ -425,6 +440,10 @@ input {
   grid-template-columns: minmax(210px, 0.4fr) minmax(0, 1fr);
   gap: 14px;
 }
+.pdf-workspace.is-empty {
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
 .pdf-main {
   display: flex;
   flex-direction: column;
@@ -495,9 +514,28 @@ input {
 }
 .qr-workspace {
   display: grid;
-  min-height: 430px;
-  grid-template-columns: minmax(420px, 1fr) minmax(280px, 0.55fr);
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.75fr);
   gap: 14px;
+}
+.qr-workspace > .side-form {
+  overflow: auto;
+}
+.qr-workspace .form-stack {
+  gap: 6px;
+}
+.qr-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 6px;
+}
+.qr-caption > summary,
+.qr-help > summary {
+  cursor: pointer;
+}
+.qr-caption > .form-stack {
+  margin-top: 6px;
 }
 .side-form {
   display: flex;
@@ -793,17 +831,13 @@ input {
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
 }
-.capability-gate {
-  display: inline-flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-}
 .capability-note {
-  flex-basis: 100%;
-  color: var(--colorNeutralForeground3);
-  font-size: 11px;
-  line-height: 14px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .demo-notice {
   position: fixed;
@@ -822,6 +856,12 @@ input {
   object-fit: contain;
   background: var(--colorNeutralBackground2);
   border-radius: 8px;
+}
+.qr-workspace .qr-resource-preview {
+  flex: 1;
+  height: 0;
+  min-height: 0;
+  max-height: none;
 }
 .canvas-editor {
   display: grid;
@@ -847,6 +887,21 @@ input {
   color: var(--colorNeutralForeground3);
   font-size: 12px;
   line-height: 1.55;
+}
+/* 主窗静态用法/图像信息折叠入口：不占画布前的常驻空间；截图现场
+   隐藏入口本身（现场本就不渲染这些说明段）。 */
+.editor-help > summary {
+  cursor: pointer;
+  user-select: none;
+  width: fit-content;
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+}
+.editor-help[open] > summary {
+  margin-bottom: 4px;
+}
+.capture-scene-editor .editor-help {
+  display: none;
 }
 .editor-footer {
   display: flex;
@@ -982,10 +1037,6 @@ html[data-capture-scene="true"] .workspace > .work-panel {
     10px "Cascadia Mono",
     monospace;
 }
-.qr-resource-preview {
-  min-height: 320px;
-  padding: 24px;
-}
 .result-document {
   min-height: 300px;
   max-height: 52vh;
@@ -1040,11 +1091,10 @@ select {
   justify-content: center;
   padding: 0;
 }
+/* 预览型工作台两栏保持到更窄的窗口：1024 级别中队列与结果同屏，
+   不因中等窗口提前退化为长单列。 */
 @media (max-width: 1160px) {
   .inspection-grid,
-  .collection-workspace,
-  .image-conversion-workspace,
-  .qr-workspace,
   .settings-grid,
   .diagnostics-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -1060,28 +1110,30 @@ select {
   .diagnostics-health-panel {
     grid-column: auto;
   }
-  .collection-workspace .work-panel:nth-child(2),
-  .collection-workspace .work-panel:nth-child(3) {
-    min-height: 240px;
-  }
   .workspace {
-    padding: 12px 16px;
+    padding: 8px 12px 12px;
+  }
+}
+@media (max-width: 880px) {
+  .image-conversion-workspace {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 900px) {
-  .workspace-header {
-    flex-direction: column;
-    gap: 8px;
-  }
-  .workspace-actions {
-    justify-content: flex-start;
-  }
   .pdf-workspace {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* 窄窗口主预览优先：命令与页面检查先于缩略图列表，不再让长缩略图
+     区把预览压到视口下方。 */
+  .pdf-workspace > .pdf-main {
+    order: 1;
+  }
+  .pdf-workspace > .work-panel {
+    order: 2;
+  }
   .pdf-page-list {
     grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    max-height: 260px;
+    max-height: 220px;
   }
   .panel-content [role="toolbar"] {
     flex-wrap: wrap;
@@ -1103,9 +1155,64 @@ select {
     grid-column: 1 / -1;
     margin-left: 0;
   }
-  .app-toolbar .toolbar-context,
-  .app-toolbar > [role="separator"] {
-    display: none;
+}
+@media (min-width: 901px) and (min-height: 560px) {
+  .pdf-page {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .pdf-page > :not(.pdf-workspace),
+  .pdf-page .pdf-main > :not(.work-panel) {
+    flex-shrink: 0;
+  }
+  .pdf-page .pdf-workspace {
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: clamp(150px, 16vw, 210px) minmax(0, 1fr);
+  }
+  .pdf-page .pdf-workspace.is-empty {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pdf-page .pdf-main,
+  .pdf-page .panel-content {
+    overflow: auto;
+  }
+  .pdf-page .pdf-main > .work-panel {
+    flex: 1;
+  }
+  .pdf-page .pdf-page-list {
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pdf-page .pdf-inspection {
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 100%;
+    min-height: 0;
+  }
+  .pdf-page .pdf-inspection > :not(.pdf-inspection-viewport) {
+    flex-shrink: 0;
+  }
+  .pdf-page .pdf-inspection-viewport {
+    flex: 1;
+    min-height: 0;
+    height: 0;
+  }
+  .pdf-page .pdf-advanced[open] {
+    max-height: 35vh;
+    overflow: auto;
+    flex-shrink: 1;
+  }
+}
+@media (max-height: 559px) {
+  .pdf-page .workspace-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--colorNeutralBackground2);
   }
 }
 @media (forced-colors: active) {
@@ -1135,7 +1242,73 @@ select {
 }
 
 .recognition-mode-settings {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.recognition-mode-row {
+  flex: 1;
+  min-width: min(280px, 100%);
+  justify-content: flex-start;
+}
+.recognition-mode-row > label {
+  flex-shrink: 0;
+}
+.recognition-mode-row > .fui-Select {
+  flex: 1;
+  min-width: 0;
+  max-width: 340px;
+}
+.recognition-mode-settings > details:not([open]) {
+  flex-basis: auto;
+}
+.recognition-mode-settings > details[open] {
+  flex-basis: 100%;
+}
+/* 本次模式行保持紧凑；低频项只在“高级选项”折叠区展开。 */
+.task-engine-advanced {
+  min-width: 0;
+}
+.task-engine-advanced > summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--colorNeutralForeground2);
+  font-size: 12px;
+}
+.task-engine-advanced-content {
+  display: grid;
+  gap: 8px;
+  padding: 6px 0 2px 14px;
+}
+.pdf-advanced > summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--colorNeutralForeground2);
+  font-size: 12px;
+}
+.pdf-advanced-content {
+  display: grid;
+  gap: 12px;
+  padding-top: 4px;
+}
+/* 导出活动状态：进行中/失败/未确认直接可见，与高级区解耦。 */
+.pdf-export-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-left: 3px solid var(--colorBrandStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+  font-size: 12px;
+  color: var(--colorNeutralForeground2);
+}
+.pdf-parameters {
+  display: block;
+  min-width: 0;
 }
 .recognition-options {
   flex-basis: 100%;
@@ -1423,7 +1596,11 @@ select {
   align-items: center;
   gap: 6px;
 }
+.pdf-inspection-tools > button {
+  min-width: 32px;
+}
 .pdf-inspection-hint {
+  margin: 4px 0;
   font-size: 12px;
   color: var(--colorNeutralForeground3);
 }

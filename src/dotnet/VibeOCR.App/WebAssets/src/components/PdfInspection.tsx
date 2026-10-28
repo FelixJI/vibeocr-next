@@ -1,4 +1,9 @@
-import { Button, Checkbox, Textarea } from "@fluentui/react-components";
+import {
+  Button,
+  Checkbox,
+  Textarea,
+  Tooltip,
+} from "@fluentui/react-components";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppActions } from "../app/types";
 
@@ -428,11 +433,16 @@ export function PdfInspection({
           checked={showBoxes}
           onChange={(_, data) => setShowBoxes(data.checked === true)}
         />
+        <Tooltip
+          content="拖动空白区域平移；方向键平移，PageUp / PageDown 翻页，+ / − 缩放，0 适页，Esc 取消草稿。"
+          relationship="description"
+        >
+          <Button appearance="subtle" aria-label="页面操作帮助">
+            ?
+          </Button>
+        </Tooltip>
       </div>
-      <p className="pdf-inspection-hint">
-        拖动空白区域平移；方向键平移，PageUp / PageDown 翻页，+ / − 缩放，0
-        适页，Esc 取消草稿。切页或修订变化会丢弃未提交草稿。
-      </p>
+      <p className="pdf-inspection-hint">切页或修订变化会丢弃未提交草稿。</p>
       {(status === "pdf.inspect.failed" || error || imageFailed) && (
         <div role="alert">
           <p>{error || "高清页面读取失败，请重试当前页。"}</p>

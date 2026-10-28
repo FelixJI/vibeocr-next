@@ -46,6 +46,7 @@ describe("automatic QR generation", () => {
     fireEvent.change(screen.getByLabelText("生成格式"), {
       target: { value: "code128" },
     });
+    fireEvent.click(screen.getByText("底部文字", { selector: "summary" }));
     fireEvent.change(screen.getByLabelText("底部文字"), {
       target: { value: "custom" },
     });

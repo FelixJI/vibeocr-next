@@ -256,7 +256,7 @@ test("brush mosaic/blur cover the trail only, keep transparency, support continu
   );
   await mountWithUploadCapture(page, uploads, "masks-brush-source.svg");
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
-  await expect(page.getByText(/原图 240×120/)).toBeVisible();
+  await expect(page.getByText(/原图 240×120/)).toBeAttached();
   const map = makeCanvasMapper(240, 120);
   const toDisplay = (x: number, y: number) => map({ x, y });
 
@@ -358,7 +358,7 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
     "masks-solid-source.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-solid-source.svg");
-  await expect(page.getByText(/原图 240×120/)).toBeVisible();
+  await expect(page.getByText(/原图 240×120/)).toBeAttached();
   const map = makeCanvasMapper(240, 120);
   const toDisplay = (x: number, y: number) => map({ x, y });
   const baseline = await saveAndDecode(page, uploads);
@@ -426,7 +426,7 @@ test("mask add/remove with a hole inpaints real worker pixels and preserves hole
     "masks-hole-source.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-hole-source.svg");
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const map = makeCanvasMapper(96, 48);
   const toDisplay = (x: number, y: number) => map({ x, y });
   const baseline = await saveAndDecode(page, uploads);
@@ -543,7 +543,7 @@ test("duplicate match previews candidates, applies once, follows rotation, and u
     "masks-duplicate-source.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-duplicate-source.svg");
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const map = makeCanvasMapper(96, 48);
   const toDisplay = (x: number, y: number) => map({ x, y });
   const baseline = await saveAndDecode(page, uploads);
@@ -660,7 +660,7 @@ test("R2 non-1:1 rectangle mosaic preserves the legacy 1/2/3 cell anchors in rea
     "masks-scale-anchors.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-scale-anchors.svg");
-  await expect(page.getByText(/原图 1800×1200/)).toBeVisible();
+  await expect(page.getByText(/原图 1800×1200/)).toBeAttached();
   const map = makeCanvasMapper(1800, 1200);
   for (const [intensity, cell] of [
     [1, 16],
@@ -721,6 +721,8 @@ test("R7 a full-image mask with a known hole previews and applies real worker pi
     "masks-full-roi-hole.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-full-roi-hole.svg");
+  // 图像信息收进“使用帮助与图像信息”折叠区：先展开再断言。
+  await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/原图 64×48/)).toBeVisible();
   const baseline = await saveAndDecode(page, uploads);
   const map = makeCanvasMapper(64, 48);
@@ -767,7 +769,7 @@ test("R9 the first remove stroke keeps export bytes and history unchanged", asyn
     "masks-remove-first.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-remove-first.svg");
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   await page.getByRole("button", { name: "去水印", exact: true }).click();
   await page.getByLabel("修补掩膜绘制方式").selectOption("rect-remove");
@@ -803,7 +805,7 @@ test("tiled blur matches a whole-image filter across the 512px seam and click st
     "tile-seam.svg",
   );
   await mountWithUploadCapture(page, uploads, "tile-seam.svg");
-  await expect(page.getByText(/原图 1024×128/)).toBeVisible();
+  await expect(page.getByText(/原图 1024×128/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   const map = makeCanvasMapper(1024, 128);
   await page.getByRole("button", { name: "模糊", exact: true }).click();
@@ -863,7 +865,7 @@ test("sparse diagonal effects bound scratch canvases in natural output", async (
     "tile-large.svg",
   );
   await mountWithUploadCapture(page, uploads, "tile-large.svg");
-  await expect(page.getByText(/原图 4096×4096/)).toBeVisible();
+  await expect(page.getByText(/原图 4096×4096/)).toBeAttached();
   await page.evaluate(() => {
     const old = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (
@@ -983,7 +985,7 @@ for (const tool of ["马赛克", "模糊"]) {
           "fractional-sliver.svg",
         );
         await mountWithUploadCapture(page, uploads, "fractional-sliver.svg");
-        await expect(page.getByText(/原图 900×600/)).toBeVisible();
+        await expect(page.getByText(/原图 900×600/)).toBeAttached();
         const baseline = await saveAndDecode(page, uploads);
         await page.getByRole("button", { name: tool, exact: true }).click();
         await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
@@ -1022,7 +1024,7 @@ test("fractional mosaic uses one unfragmented grid across the 512px black-white 
     "fractional-mosaic-grid.svg",
   );
   await mountWithUploadCapture(page, uploads, "fractional-mosaic-grid.svg");
-  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  await expect(page.getByText(/原图 900×600/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   await page.getByRole("button", { name: "马赛克", exact: true }).click();
   await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
@@ -1094,7 +1096,7 @@ test("R15 restarting preview with a dense brush keeps every point and discards t
     "masks-r15-restart.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-r15-restart.svg");
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   const map = makeCanvasMapper(96, 48);
   await page.getByRole("button", { name: "去水印" }).click();
@@ -1172,7 +1174,7 @@ test("R15 alpha-only duplicate texture finds the real RGBA copy", async ({
     "masks-r15-alpha.svg",
   );
   await mountWithUploadCapture(page, uploads, "masks-r15-alpha.svg");
-  await expect(page.getByText(/原图 96×48/)).toBeVisible();
+  await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   expect(pixelAt(baseline, 10, 6)[3]).toBe(255);
   expect(pixelAt(baseline, 11, 6)[3]).toBeLessThan(255);

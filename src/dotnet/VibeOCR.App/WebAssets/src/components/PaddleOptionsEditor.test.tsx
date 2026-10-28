@@ -225,6 +225,8 @@ it.each(["recognition", "batch", "pdf"] as const)(
         actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
       />,
     );
+    // 本次模型档位收纳在“高级选项”折叠区：展开后仍可键盘/指针操作。
+    await user.click(screen.getByText("高级选项"));
     expect(
       screen.getByRole("option", { name: "跟随默认（medium）" }),
     ).toBeVisible();

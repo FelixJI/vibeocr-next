@@ -8,16 +8,12 @@ for (const height of [800, 1440]) {
     await page.setViewportSize({ width: 1280, height });
     await mountHost(page, snapshot);
     const header = page.locator(".workspace-header");
-    const description = header.locator(".workspace-description");
+    // 冗余说明与英文 eyebrow 已删：头部只剩标题与动作，不占预览高度。
+    await expect(header.locator(".workspace-description")).toHaveCount(0);
+    await expect(header.locator(".eyebrow")).toHaveCount(0);
     const headerBox = await header.boundingBox();
-    const descriptionBox = await description.boundingBox();
     expect(headerBox).not.toBeNull();
-    expect(descriptionBox).not.toBeNull();
-    expect(
-      headerBox!.y +
-        headerBox!.height -
-        (descriptionBox!.y + descriptionBox!.height),
-    ).toBeLessThanOrEqual(16);
+    expect(headerBox!.height).toBeLessThanOrEqual(64);
     await page.screenshot({
       path: testInfo.outputPath("compact-workspace.png"),
     });
@@ -32,7 +28,7 @@ test("sidebar collapses, keeps navigation usable and expands on narrow screens",
   const rail = page.getByRole("complementary", { name: "主导航" });
   const toggle = page.getByRole("button", { name: "收起侧边栏" });
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
-  await expect(rail).toHaveCSS("width", "216px");
+  await expect(rail).toHaveCSS("width", "184px");
   await toggle.click();
   const expand = page.getByRole("button", { name: "展开侧边栏" });
   await expect(expand).toHaveAttribute("aria-expanded", "false");
@@ -49,13 +45,13 @@ test("sidebar collapses, keeps navigation usable and expands on narrow screens",
   await expand.focus();
   await page.keyboard.press("Enter");
   await expect(toggle).toBeVisible();
-  await expect(rail).toHaveCSS("width", "216px");
+  await expect(rail).toHaveCSS("width", "184px");
   await page.setViewportSize({ width: 640, height: 480 });
   await expect(expand).toBeVisible();
   await expand.click();
   await expect(toggle).toBeVisible();
   await expect(pdf.locator("span")).toBeVisible();
-  await expect(rail).toHaveCSS("width", "216px");
+  await expect(rail).toHaveCSS("width", "184px");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
     640,
   );

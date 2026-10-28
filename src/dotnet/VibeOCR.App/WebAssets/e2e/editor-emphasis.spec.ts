@@ -73,7 +73,7 @@ async function setup(
   });
   await expect(
     page.getByText(new RegExp(`原图 ${natural.width}×${natural.height}`)),
-  ).toBeVisible();
+  ).toBeAttached();
   return { uploads, projects, canvas: page.getByLabel("图片检查画布") };
 }
 
@@ -468,7 +468,7 @@ test("watermark: text and imported image opacity edit, undo, and project payload
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   // 授权导入图片对象（#232 宿主导入路径，无外部 URL/新权限）。
   await action(page, "粘贴系统内容");
   await page.evaluate(() => {
@@ -860,7 +860,7 @@ test("F5b image watermark: real semi-transparent pixels blend with opacity", asy
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   await action(page, "粘贴系统内容");
   const descriptor = {
     requestId: "wm2-image",
@@ -994,7 +994,7 @@ test("F5c emphasis save-restore keeps spotlight/magnifier/watermark pixels", asy
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText("原图 900×600", { exact: false })).toBeVisible();
+  await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
   // 授权导入图片资产。
   await action(page, "粘贴系统内容");
   const descriptor = {
@@ -1648,7 +1648,7 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
       },
     },
   });
-  await expect(page.getByText("原图 900×600")).toBeVisible();
+  await expect(page.getByText("原图 900×600")).toBeAttached();
   await action(page, "屏蔽");
   await drag(page, 445, 245, 555, 355);
   await action(page, "放大镜");
@@ -1891,7 +1891,7 @@ test("H3d leak boxes derive from snapped natural exclusion source (fractional dr
       },
     },
   });
-  await expect(page.getByText("原图 900×600")).toBeVisible();
+  await expect(page.getByText("原图 900×600")).toBeAttached();
   // 分数坐标屏蔽块 raw (619.6..644.3, 210.4..239.7)：权威烘焙区域是外扩
   // 取整后的自然矩形 (619..645, 210..240)；底图洋红 (619..650) 满覆盖
   // snap 带 644.3..645，该带映射到镜内 688.6..690——raw 投影的排除框盖
@@ -2102,7 +2102,7 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
     },
     "https://app.vibeocr/",
   );
-  await expect(page.getByText("原图 900×600")).toBeVisible();
+  await expect(page.getByText("原图 900×600")).toBeAttached();
   const initialText = await uploads.forRevision(
     "prepareScreenshotTextLayer",
     0,
@@ -2236,7 +2236,7 @@ test("J2 source/session reset clears emphasis gesture drafts", async ({
     },
     screenshotSession: { sessionId: SESSION, revision: 0 },
   });
-  await expect(page.getByText(/原图 900×600/)).toBeVisible();
+  await expect(page.getByText(/原图 900×600/)).toBeAttached();
   // 不切工具（切工具会合法取消加区模式）：加区 target 保持待命时换源，
   // 新画布的第一个选择手势不得被旧分支吞掉（旧实现：按下即报“目标
   // 聚光灯对象已不可用”、拖拽无框选效果）。
