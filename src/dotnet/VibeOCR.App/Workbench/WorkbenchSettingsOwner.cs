@@ -212,42 +212,12 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     return SettingsState(settings);
   }
 
-  /// <summary>远程模式专用环境的基础名；重复创建时追加序号，绝不复用
-  /// 同名用户环境。</summary>
-  private const string RemoteHostEnvironmentName = "远程基础服务";
-
-  /// <summary>本次应用会话内远程模式专用环境 id：重试时验证仍存在且为空
-  /// 才复用（改名不影响同 id 复用）；不跨会话持久化。</summary>
-  private string? remoteHostEnvironmentId;
-
   /// <summary>远程模式入口跨步骤禁重入：各步之间 RunAsync 会释放
   /// IsBusy，此标志覆盖整段链路，SettingsState 的环境忙碌投影含它，
   /// finally 里滑零；重复点击直接拒绝，不进入第二套编排。</summary>
   private int remoteHostPreparing;
 
-  private static string NextRemoteHostEnvironmentName(ManagedEnvironmentList? snapshot)
-  {
-    var taken = new HashSet<string>(
-      (snapshot?.Environments ?? []).Select(item => item.Name),
-      StringComparer.OrdinalIgnoreCase);
-    string candidate = RemoteHostEnvironmentName;
-    int suffix = 2;
-    while (!taken.Add(candidate))
-    {
-      candidate = $"{RemoteHostEnvironmentName} {suffix++}";
-    }
-    return candidate;
-  }
-
-  /// <summary>
-  /// 远程模式宿主入口编排：随包离线基础配方一键就绪并启动承载识别
-  /// 服务。基础配方只取 Runtime 目录内 dependency_origin=bundled_pack
-  /// 的目录项，宿主不自行推导依赖。已安装可复用环境只切换启动；无可
-  /// 复用环境时仅复用本次会话创建的专用环境 id（仍为空时重试续装），
-  /// 全链路走 Runtime 权威离线安装事务（取消/CAS/回滚保留），安装
-  /// 取消或失败不切换，不触碰用户既有环境。整段链路在后台追踪闭包内
-  /// 执行，IsBusy 立即覆盖长操作，入口回执不等待安装完成。
-  /// </summary>
+  /// <summary>按 Runtime 推荐的宿主配方复用或持久准备目标，事务失败不切换。</summary>
   private SettingsWorkbenchState? PrepareRemoteHost(
     CancellationToken cancellationToken)
   {
@@ -265,8 +235,8 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
           await environment.RefreshAsync(cancellationToken);
           // 目录缺失/安装未完成等失败经 ReportFailure 状态 seam 用户可见，
           // 不被后台追踪仅记录日志。
-          string? baseRecipe = environment.Snapshot?.Recipes?.FirstOrDefault(recipe =>
-              string.Equals(recipe.DependencyOrigin, "bundled_pack", StringComparison.Ordinal))?.Id;
+          string? baseRecipe = environment.Snapshot?.Recipes?.SingleOrDefault(recipe =>
+              recipe.DefaultRemoteHost && recipe.SupportsRemoteHost)?.Id;
           if (baseRecipe is null)
           {
             environment.ReportFailure("Runtime 目录未提供随包离线基础配方，请更新产品。");
@@ -280,26 +250,14 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
             await environment.SwitchAsync(reusable.EnvironmentId, cancellationToken);
             return;
           }
-          // 本次会话专用环境：仍存在且为空则同 id 续装，否则新建；
-          // 绝不按名称复用用户环境。
-          ManagedEnvironmentList snapshot = environment.Snapshot
-            ?? throw new InvalidOperationException("运行环境状态不可用，请重试。");
-          ManagedEnvironment? session = remoteHostEnvironmentId is { } id
-            ? snapshot.Environments.FirstOrDefault(item => item.Id == id)
-            : null;
-          string targetId;
-          if (session is { Status: "empty" })
+          await environment.PrepareAsync(baseRecipe, cancellationToken);
+          if (environment.Compatibility?.Selected is { } preparedReusable)
           {
-            targetId = session.Id;
+            await environment.SwitchAsync(preparedReusable.EnvironmentId, cancellationToken);
+            return;
           }
-          else
-          {
-            ManagedEnvironment created = await environment.CreateAsync(
-              NextRemoteHostEnvironmentName(snapshot), cancellationToken);
-            targetId = created.Id;
-            remoteHostEnvironmentId = targetId;
-          }
-          await environment.PreviewAsync(targetId, baseRecipe, null, cancellationToken);
+          string targetId = environment.Plan?.EnvironmentId
+            ?? throw new InvalidOperationException("基础服务目标准备失败，请重试。");
           string planId = environment.Plan?.PlanId
             ?? throw new InvalidOperationException("基础服务安装预览失败，请重试。");
           await environment.InstallAsync(planId, null, cancellationToken);
@@ -847,7 +805,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
             failure.Phase, failure.EnvironmentRevision, failure.Recipe,
             failure.ReasonCode, failure.NextAction, failure.Detail,
             failure.RequestedSourceIds, failure.EffectiveSourceIds)
-          : null)).ToArray(),
+          : null, item.OperationBlocks)).ToArray(),
     ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
     EnvironmentPlan: viewModel.Environments?.Plan is { } environmentPlan
       ? new SettingsEnvironmentPlanState(
@@ -870,7 +828,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       Volatile.Read(ref environmentSwitching) != 0 || Volatile.Read(ref remoteHostPreparing) != 0,
     EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
       new SettingsEnvironmentSourceState(
-        source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault)).ToArray(),
+        source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault, Provider: source.Provider)).ToArray(),
     EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
     EnvironmentResolvedDefaultSources: viewModel.Environments?.Snapshot?.ResolvedDefaultSources?.Select(source =>
       new SettingsEnvironmentResolvedSourceState(source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
@@ -886,7 +844,8 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
         recipe.Accelerator, recipe.TargetDevice, recipe.PythonVersion, recipe.Abi,
         recipe.Platform, recipe.ScopeId, recipe.ComponentIds, recipe.RecipeLock,
         recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
-        recipe.RuntimeWheelOrigin)).ToArray(),
+        recipe.RuntimeWheelOrigin, recipe.Engine, recipe.Family, recipe.FamilyDisplayName,
+        recipe.Provider, recipe.SupportsRemoteHost, recipe.DefaultRemoteHost)).ToArray(),
     EnvironmentHardware: viewModel.Environments?.Snapshot?.Hardware is { } hardware
       ? new SettingsEnvironmentHardwareState(
         hardware.NvidiaDriver?.Status ?? "unknown",

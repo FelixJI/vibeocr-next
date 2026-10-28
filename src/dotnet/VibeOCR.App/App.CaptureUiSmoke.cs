@@ -6,6 +6,8 @@ using Microsoft.UI.Xaml.Automation.Provider;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Windows;
+using VibeOCR.App.Web;
+using VibeOCR.App.Workbench;
 
 namespace VibeOCR.App;
 
@@ -30,6 +32,10 @@ public sealed partial class App
       {
         case "PinsSaveSwitchRecoverAndRenderFormula":
           await VerifyPinsUiAsync(layout);
+          break;
+        case "WebResourceResponseStopsAfterWebViewCloses":
+          await VerifyClosedWebResourceResponseAsync(layout, disposeBeforeResponse: true);
+          await VerifyClosedWebResourceResponseAsync(layout, disposeBeforeResponse: false);
           break;
         case "ScrollCaptureCorrectionAuthorizationStaysWithItsPendingFrame":
           await ScrollCaptureSession.Session.VerifyCorrectionAuthorizationSelfCheckAsync();
@@ -99,14 +105,93 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("scenario.passed");
       File.WriteAllText(result, "passed");
       CaptureUiSmokeTrace.Stage("result-written.exit-0");
-      Environment.Exit(0);
+      Exit();
     }
     catch (Exception error)
     {
       CaptureUiSmokeTrace.Stage("scenario.failed");
       File.WriteAllText(result, error.ToString());
       CaptureUiSmokeTrace.Stage("result-written.exit-1");
-      Environment.Exit(1);
+      Environment.ExitCode = 1;
+      Exit();
+    }
+  }
+
+  private static async Task VerifyClosedWebResourceResponseAsync(PortableLayout layout, bool disposeBeforeResponse)
+  {
+    using var broker = new WorkbenchResourceBroker(layout.DataRoot);
+    using var annotations = new WorkbenchAnnotationStore(layout.DataRoot);
+    await using var application = new WorkbenchApplication([], WorkbenchRoute.Recognition);
+    await using var host = new WebWorkbenchHost(application, broker, annotations, applicationOwner: false);
+    string resource = Path.Combine(layout.DataRoot, "held-response.txt");
+    File.WriteAllText(resource, "held-resource");
+    WorkbenchResourceLease lease = broker.Lease("held-response.txt", "text/plain", TimeSpan.FromMinutes(1));
+    var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var requestStarted = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+    Windows.Storage.Streams.IRandomAccessStream? responseBuffer = null;
+    host.SmokeResourceRequestStarted = (uri, task) => { if (uri == lease.Uri.AbsoluteUri) requestStarted.TrySetResult(task); };
+    host.SmokeBeforeResourceResponse = (uri, buffer) =>
+    {
+      if (uri != lease.Uri) return Task.CompletedTask;
+      responseBuffer = buffer;
+      held.TrySetResult();
+      return release.Task;
+    };
+    var view = new Microsoft.UI.Xaml.Controls.WebView2();
+    var window = new Window { Content = view };
+    var queue = view.DispatcherQueue;
+    Task NextTurnAsync()
+    {
+      var turn = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      Check(queue.TryEnqueue(() => turn.TrySetResult()), "Resource smoke dispatcher rejected continuation.");
+      return turn.Task;
+    }
+    window.Activate();
+    try
+    {
+      await view.EnsureCoreWebView2Async();
+      var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      view.CoreWebView2.NavigationCompleted += (_, _) => navigation.TrySetResult();
+      await host.InitializeAsync(view, Path.Combine(AppContext.BaseDirectory, "WebAssets"));
+      await navigation.Task.WaitAsync(TimeSpan.FromSeconds(10));
+      var forbidden = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+      view.CoreWebView2.WebResourceResponseReceived += (_, args) =>
+      {
+        if (args.Request.Uri == "https://app.vibeocr/denied-resource") forbidden.TrySetResult(args.Response.StatusCode);
+      };
+      await view.CoreWebView2.ExecuteScriptAsync("void fetch('/denied-resource').catch(() => {});");
+      Check(await forbidden.Task.WaitAsync(TimeSpan.FromSeconds(5)) == 403, "Active unauthorized resource was not forbidden.");
+      await view.CoreWebView2.ExecuteScriptAsync($"void fetch('{lease.Uri.AbsoluteUri}').catch(() => {{}});");
+      await held.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      Task request = await requestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+      CaptureUiSmokeTrace.Stage("resource-response-held");
+      window.Close();
+      if (disposeBeforeResponse)
+      {
+        await host.DisposeAsync();
+        view.Close();
+      }
+      await NextTurnAsync();
+      release.TrySetResult();
+      await request.WaitAsync(TimeSpan.FromSeconds(5));
+      if (disposeBeforeResponse)
+      {
+        if (responseBuffer is null) throw new InvalidOperationException("Held response buffer was not observed.");
+        Exception? bufferError = null;
+        try { _ = responseBuffer.Size; }
+        catch (Exception error) { bufferError = error; }
+        Check(bufferError is ObjectDisposedException || bufferError?.HResult == unchecked((int)0x80000013),
+          "Closed resource response buffer was not released.");
+      }
+      CaptureUiSmokeTrace.Stage(disposeBeforeResponse ? "resource-response-disposed" : "resource-response-host-cleanup-pending");
+    }
+    finally
+    {
+      release.TrySetResult();
+      await host.DisposeAsync();
+      view.Close();
+      window.Close();
     }
   }
 

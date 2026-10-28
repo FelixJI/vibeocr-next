@@ -420,7 +420,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
   private static IReadOnlyList<ManagedEnvironmentRecipe> Catalog() =>
   [
     new ManagedEnvironmentRecipe("paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
-      DependencyOrigin: "bundled_pack"),
+      DependencyOrigin: "bundled_pack", SupportsRemoteHost: true, DefaultRemoteHost: true),
     new ManagedEnvironmentRecipe("mineru-cpu", "MinerU · CPU",
       DependencyOrigin: "online_index"),
   ];
@@ -456,6 +456,13 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
         return await FindGate.Task.WaitAsync(cancellationToken);
       }
       return Compatibility ?? new ManagedEnvironmentQueryResult(recipe);
+    }
+
+    public Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(
+      string recipe, CancellationToken cancellationToken = default)
+    {
+      ManagedEnvironment? target = List.Environments.FirstOrDefault(item => item.Id == CreatedTargetId);
+      return target is not null ? Task.FromResult(target) : CreateEnvironmentAsync("远程基础服务", cancellationToken);
     }
 
     public Task<ManagedEnvironment> CreateEnvironmentAsync(

@@ -21,6 +21,8 @@ public sealed class RuntimeInstallerClientTests
               "recipe":"paddleocr-ort-cpu","recipe_lock":"bound-lock",
               "recipes":[{"id":"paddleocr-ort-cpu","display_name":"PaddleOCR ONNX · CPU",
                 "configured_recognition_types":["text"],"accelerator":"cpu","target_device":"cpu",
+                "engine":"paddle","family":"paddle-onnx","family_display_name":"PaddleOCR ONNX",
+                "provider":"CPUExecutionProvider","supports_remote_host":true,"default_remote_host":true,
                 "python_version":"3.13.15","abi":"cp313","platform":"win_amd64","scope_id":"base",
                 "component_ids":["runtime_host","paddleocr-ort-base"],"recipe_lock":"bound-lock",
                 "dependencies":["paddleocr==3.1.0"],"dependency_origin":"bundled_pack",
@@ -58,6 +60,11 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal(["paddleocr==3.1.0"], recipe.Dependencies);
         Assert.Equal("win_amd64", recipe.Platform);
         Assert.Equal("cpu", recipe.TargetDevice);
+        Assert.Equal("paddle", recipe.Engine);
+        Assert.Equal("paddle-onnx", recipe.Family);
+        Assert.Equal("CPUExecutionProvider", recipe.Provider);
+        Assert.True(recipe.SupportsRemoteHost);
+        Assert.True(recipe.DefaultRemoteHost);
         Assert.Equal("bundled_pack", recipe.DependencyOrigin);
         ManagedEnvironmentQueryMatch match = Assert.Single(result.Environments!);
         Assert.Equal("用户名称", match.Name);
@@ -72,6 +79,21 @@ public sealed class RuntimeInstallerClientTests
         Assert.Equal("nvidia_driver_incompatible", list.Hardware?.NvidiaDriver?.ReasonCode);
         Assert.Equal("527.00", list.Hardware?.NvidiaDriver?.DriverVersion);
         Assert.Equal("list", Request(runner.StartInfos[1]).GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task PrepareTargetDelegatesOwnershipToRuntimeWithoutCreatingByName()
+    {
+        var runner = new QueueRunner(new RuntimeInstallerProcessResult(0,
+            """{"protocol_version":2,"response_kind":"environment","action":"prepare_target","result":{"id":"owned-target","name":"Runtime 目标","revision":1,"kind":"venv","status":"empty","python":"python","python_state":"ready","dependency_state":"empty","engine_state":"unavailable","model_state":"not_applicable","service_state":"not_started","reason":null}}""", ""));
+        var client = new RuntimeInstallerClient(Configuration(), runner);
+        ManagedEnvironment target = await client.PrepareEnvironmentTargetAsync(
+            "opaque.recipe_v2", TestContext.Current.CancellationToken);
+        JsonElement request = Request(Assert.Single(runner.StartInfos));
+        Assert.Equal("prepare_target", request.GetProperty("action").GetString());
+        Assert.Equal("opaque.recipe_v2", request.GetProperty("recipe").GetString());
+        Assert.False(request.TryGetProperty("name", out _));
+        Assert.Equal("owned-target", target.Id);
     }
 
     [Fact]

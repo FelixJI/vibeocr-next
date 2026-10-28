@@ -116,7 +116,8 @@ def test_legacy_rapid_records_stay_listed_but_are_retired_and_uninstallable(
     listed = manager.list()["environments"][0]
     assert listed["recipe"] == recipe
     assert listed["configured_recognition_types"] == []
-    assert listed["dependency_state"] == "unavailable"
+    assert listed["dependency_state"] == "unknown"
+    assert listed["engine_state"] == "unavailable"
     assert listed["reason"] == "engine_recipe_retired"
     with pytest.raises(Exception, match="retired"):
         manager.preview_install(record["id"], recipe)

@@ -73,6 +73,7 @@ from vibeocr.runtime.environments.runtime_selection import (
     default_download_sources,
     download_source_catalog_payload,
     download_source_display_name,
+    download_source_provider,
     expand_legacy_model_sources,
     sanitize_download_endpoint,
 )
@@ -89,6 +90,7 @@ _UNSET_SOURCE = object()
 _REGISTRY_OPTIONAL_KEYS = {
     "default_source_ids",
     "source_config_revision",
+    "prepare_targets",
 }
 _OPERATION_OPTIONAL_KEYS = {"requested_source_ids", "effective_source_ids"}
 _FORBIDDEN_EMPTY = (
@@ -118,6 +120,50 @@ _RECIPE_IDS = (
     "rapidocr+mineru-cpu",
     "rapidocr+mineru-cuda",
 )
+# 显式产品能力；旧 profile/配方标识的兼容仅在 Runtime 内解析。
+_RECIPE_METADATA = {
+    "paddleocr-ort-cpu": (
+        "paddle",
+        "paddle-onnx",
+        "PaddleOCR ONNX",
+        "cpu",
+        "CPUExecutionProvider",
+    ),
+    "paddleocr-ort-cuda": (
+        "paddle",
+        "paddle-onnx",
+        "PaddleOCR ONNX",
+        "cuda",
+        "CUDAExecutionProvider",
+    ),
+    "paddleocr-ort-directml": (
+        "paddle",
+        "paddle-onnx",
+        "PaddleOCR ONNX",
+        "directml",
+        "DmlExecutionProvider",
+    ),
+    "mineru-cpu": ("mineru", "mineru", "MinerU", "cpu", "torch_cpu"),
+    "mineru-cuda": ("mineru", "mineru", "MinerU", "cuda", "torch_cuda"),
+}
+
+
+def _recipe_metadata(recipe: str) -> dict:
+    metadata = _RECIPE_METADATA.get(recipe)
+    if metadata is None:
+        return {}
+    engine, family, title, device, provider = metadata
+    return {
+        "engine": engine,
+        "family": family,
+        "family_display_name": title,
+        "target_device": device,
+        "provider": provider,
+        "supports_remote_host": True,
+        "default_remote_host": recipe == "paddleocr-ort-cpu",
+    }
+
+
 _RECIPE_DISPLAY_NAMES = {
     "rapidocr-cpu": "RapidOCR + RapidTable · CPU（已退役）",
     "rapidocr-cuda": "RapidOCR + RapidTable · NVIDIA CUDA（已退役）",
@@ -845,6 +891,20 @@ class ManagedEnvironmentStore:
             or data["source_config_revision"] < 0
         ):
             raise ManagedEnvironmentError("environment registry is invalid")
+        targets = data.get("prepare_targets", {})
+        if not isinstance(targets, dict) or any(
+            recipe not in _RECIPE_METADATA
+            or not isinstance(target, dict)
+            or set(target) != {"environment_id", "name"}
+            or not isinstance(target["environment_id"], str)
+            or not _is_valid_environment_id(target["environment_id"])
+            or not isinstance(target["name"], str)
+            or not _NAME.fullmatch(target["name"])
+            for recipe, target in targets.items()
+        ):
+            raise ManagedEnvironmentError(
+                "environment preparation ownership is invalid"
+            )
         environments = data["environments"]
         active = data["active_id"]
         if active is not None and (
@@ -1323,13 +1383,10 @@ class ManagedEnvironmentStore:
             if probe["reason"]
             in {
                 "engine_packages_missing",
-                "engine_model_missing",
                 "empty_environment_contaminated",
             }
-            else "unavailable"
-            if probe["reason"] in {"engine_import_failed", "engine_recipe_retired"}
             else record["status"]
-            if python_ok
+            if python_ok and probe["reason"] != "engine_recipe_retired"
             else "unknown"
         )
         recipe = record.get("recipe", "")
@@ -1343,20 +1400,22 @@ class ManagedEnvironmentStore:
             "disk_bytes": self._disk_usage(self._safe_path(record)),
             "python_state": "ready" if python_ok else "unavailable",
             "dependency_state": dependency_state,
-            "engine_state": "unverified"
+            "engine_state": "unavailable"
+            if probe["reason"] in {"engine_import_failed", "engine_recipe_retired"}
+            else "unverified"
             if installed and dependency_state == "installed"
             else "unavailable",
-            "model_state": "not_checked" if installed else "not_applicable",
+            "model_state": "missing"
+            if probe["reason"] == "engine_model_missing"
+            else "not_checked"
+            if installed
+            else "not_applicable",
             "service_state": "not_started",
             "configured_recognition_types": modes,
-            "target_device": "directml"
-            if recipe.endswith("directml")
-            else "cuda"
-            if recipe.endswith("cuda")
-            else "cpu"
-            if recipe
-            else None,
+            **_recipe_metadata(recipe),
+            "target_device": _recipe_metadata(recipe).get("target_device"),
             "actual_device": None,
+            "operation_blocks": self._operation_blocks(record, probe, data),
             "reason": (
                 "engine_import_failed: Native OCR modules could not load; "
                 "use a shorter Portable location or reinstall this environment"
@@ -1366,6 +1425,48 @@ class ManagedEnvironmentStore:
             "last_install_failure": self._last_install_failure(record),
             "packages": probe.get("packages", []),
             **self._source_projection(data, record),
+        }
+
+    def _operation_blocks(self, record: dict, probe: dict, data: dict | None) -> dict:
+        """只读动作快照；真正执行仍由既有锁、引用和 CAS 再核验。"""
+        referenced = environment_has_references(self._references, record["id"])
+        busy = data is not None and any(
+            environment_has_references(self._references, env_id)
+            for env_id in data["environments"]
+        )
+        active = data is None or record["id"] == data["active_id"]
+        owned = record["kind"] == "venv"
+        mutation = (
+            "environment_has_active_jobs"
+            if referenced
+            else (
+                "legacy_environment"
+                if not owned
+                else "active_environment"
+                if active and record["status"] != "empty"
+                else None
+            )
+        )
+        return {
+            "preview_install": mutation,
+            "switch": "environment_has_active_jobs"
+            if busy
+            else (
+                probe["reason"] or "environment_unhealthy"
+                if not probe["healthy"]
+                else None
+            ),
+            "repair_empty": mutation
+            or (None if record["status"] == "empty" else "environment_installed"),
+            "delete": "legacy_environment"
+            if not owned
+            else (
+                "active_environment"
+                if active
+                else "environment_has_active_jobs"
+                if referenced
+                else None
+            ),
         }
 
     def _source_projection(self, data: dict | None, record: dict) -> dict:
@@ -1434,6 +1535,7 @@ class ManagedEnvironmentStore:
                     {
                         "id": source["id"],
                         "kind": source["kind"],
+                        "provider": download_source_provider(source["id"]),
                         "display_name": download_source_display_name(source["id"]),
                         "endpoint": sanitize_download_endpoint(source["endpoint"]),
                         "is_default": source
@@ -1602,6 +1704,66 @@ class ManagedEnvironmentStore:
         assert created is not None
         return created
 
+    def prepare_target(self, recipe: str) -> dict:
+        """显式准备才创建解释器；持久预留归属支持失败/进程重启后续用。"""
+        self._recipe(recipe)
+        with RuntimeStoreLock(self.paths.locks_root / "environment-preparation.lock"):
+            compatible = self.find_compatible(recipe)
+            if compatible["selected"] is not None:
+                env_id = compatible["selected"]["environment_id"]
+                with RuntimeStoreLock(self._lock):
+                    data = self._read()
+                    record = data["environments"][env_id]
+                    return self._public_record(record, self._probe(record), data)
+            with RuntimeStoreLock(self._lock):
+                data = self._read()
+                targets = data.setdefault("prepare_targets", {})
+                target = targets.get(recipe)
+                if target is not None:
+                    record = data["environments"].get(target["environment_id"])
+                    if record is not None:
+                        # 与 preview_install 门禁同源：另一能力的闭包，或
+                        # 已成为 find_compatible 未选中的活动已安装环境
+                        # （锁过期/闭包损坏，重试永远命中 active environment
+                        # cannot be modified），都不能作为受控准备目标。
+                        if record.get("recipe") in {None, recipe} and not (
+                            record["id"] == data["active_id"]
+                            and record["status"] != "empty"
+                        ):
+                            return self._public_record(
+                                record, self._probe(record), data
+                            )
+                        # 保留该环境（活动环境原样保留），另分配归属。
+                        target = None
+                    elif (
+                        target["environment_id"]
+                        in managed_cleanup.read_ledger(self)["pending"]
+                    ):
+                        target = None
+                if target is None:
+                    base = _RECIPE_DISPLAY_NAMES[recipe]
+                    names = {
+                        item["name"].casefold()
+                        for item in data["environments"].values()
+                    }
+                    names.update(item["name"].casefold() for item in targets.values())
+                    name = base
+                    ordinal = 1
+                    while name.casefold() in names:
+                        ordinal += 1
+                        name = f"{base} {ordinal}"
+                    target = {
+                        "environment_id": self._new_environment_id(name, data),
+                        "name": name,
+                    }
+                    targets[recipe] = target
+                    _atomic_json(self._registry, data)
+            created = self._create(
+                target["name"], environment_id=target["environment_id"]
+            )
+            assert created is not None
+            return created
+
     def _new_environment_id(self, name: str, data: dict) -> str:
         """为新环境选择可读目录 id；永不回退 uuid。
 
@@ -1614,6 +1776,10 @@ class ManagedEnvironmentStore:
             base = f"environment-{base}"
         base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
         taken = {record_id.casefold() for record_id in data["environments"]}
+        taken.update(
+            target["environment_id"].casefold()
+            for target in data.get("prepare_targets", {}).values()
+        )
         # 默认初始化在创建前持久预留 id，普通 create 不能抢占该恢复槽位。
         marker = self.paths.state_root / "default-environment.json"
         if marker.is_file():
@@ -1657,6 +1823,14 @@ class ManagedEnvironmentStore:
             data = self._read()
             if as_default and data["environments"]:
                 return None
+            if any(
+                target["name"].casefold() == name.casefold()
+                and target["environment_id"] != environment_id
+                for target in data.get("prepare_targets", {}).values()
+            ):
+                raise ManagedEnvironmentError(
+                    "environment name is reserved for preparation"
+                )
             if any(
                 item["name"].casefold() == name.casefold()
                 for item in data["environments"].values()
@@ -1722,6 +1896,13 @@ class ManagedEnvironmentStore:
 
     def _journal_path(self, env_id: str) -> Path:
         return self._swap_journal_root / f"{env_id}.json"
+
+    def _plan_path(self, env_id: str) -> Path:
+        return self.paths.state_root / "environment-plans" / f"{env_id}.json"
+
+    def _forget_install_plan(self, env_id: str) -> None:
+        """终结已删除对象的落盘安装计划；失败交由删除事务整体重试。"""
+        self._plan_path(env_id).unlink(missing_ok=True)
 
     def _load_swap_journal(self, env_id: str) -> dict:
         """读取并结构校验换入 journal；损坏时 fail closed，不做推断。"""
@@ -2062,13 +2243,15 @@ class ManagedEnvironmentStore:
                 return self._public_record(replacement, relocated, data)
 
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
-        if recipe.startswith("paddleocr-ort-"):
+        if _recipe_metadata(recipe).get("family") == "paddle-onnx":
             scope = self.manifest.paddle_onnx_environments.get(recipe)
             if scope is None:
                 raise ManagedEnvironmentError(
                     "Paddle ONNX recipe is absent from manifest"
                 )
-            return scope, "nvidia_cuda" if recipe.endswith("cuda") else "cpu"
+            return scope, "nvidia_cuda" if _recipe_metadata(recipe)[
+                "target_device"
+            ] == "cuda" else "cpu"
         if recipe == "mineru-cpu":
             # base 闭包退役 RapidOCR 后，独立 MinerU 环境与 full-cpu 闭包
             # 内容一致（host + MinerU，无 Paddle/无 CUDA）；直接使用 cpu
@@ -2231,10 +2414,7 @@ class ManagedEnvironmentStore:
             dependencies = [
                 display for _name, display, _version in self._scope_pins(scope)
             ]
-            _atomic_json(
-                self.paths.state_root / "environment-plans" / f"{env_id}.json",
-                plan,
-            )
+            _atomic_json(self._plan_path(env_id), plan)
             return {
                 **plan,
                 "dependencies": dependencies,
@@ -2269,13 +2449,7 @@ class ManagedEnvironmentStore:
                     "display_name": _RECIPE_DISPLAY_NAMES[recipe],
                     "configured_recognition_types": self._recipe_modes(recipe),
                     "accelerator": accelerator,
-                    "target_device": (
-                        "directml"
-                        if recipe.endswith("directml")
-                        else "cuda"
-                        if accelerator == "nvidia_cuda"
-                        else "cpu"
-                    ),
+                    **_recipe_metadata(recipe),
                     "python_version": self.manifest.python.version,
                     "abi": self.manifest.python.abi,
                     "platform": self.manifest.python.platform,
@@ -2294,7 +2468,7 @@ class ManagedEnvironmentStore:
             )
         return entries
 
-    def find_compatible(self, recipe: str) -> dict:
+    def find_compatible(self, recipe: str, environment_id: str | None = None) -> dict:
         """按配方寻找可直接复用的已安装健康环境；只读，不安装/不切换。
 
         身份只认真实 scope 锁（manifest scope.sha256 字节契约 + 安装时
@@ -2305,12 +2479,18 @@ class ManagedEnvironmentStore:
         with RuntimeStoreLock(self._lock):
             data = self._read()
             scope, _accelerator = self._recipe(recipe)
+            if (
+                environment_id is not None
+                and environment_id not in data["environments"]
+            ):
+                raise ManagedEnvironmentError("unknown explicit environment")
             pins = {
                 name: version for name, _display, version in self._scope_pins(scope)
             }
             ordered = sorted(
                 data["environments"].values(),
                 key=lambda record: (
+                    record["id"] != environment_id if environment_id else False,
                     record["id"] != data["active_id"],
                     record["id"],
                 ),
@@ -2331,7 +2511,9 @@ class ManagedEnvironmentStore:
                     "reason_code": None,
                 }
                 reason: str | None
-                if record["kind"] == "legacy":
+                if environment_id is not None and record["id"] != environment_id:
+                    reason = "explicit_target_not_selected"
+                elif record["kind"] == "legacy":
                     reason = "legacy_environment"
                 elif record["status"] != "installed":
                     reason = "environment_empty"
@@ -2364,7 +2546,9 @@ class ManagedEnvironmentStore:
                 if reason is None:
                     evaluation["selected"] = True
                     selection_reason = (
-                        "active_environment"
+                        "explicit_environment"
+                        if record["id"] == environment_id
+                        else "active_environment"
                         if record["id"] == data["active_id"]
                         else "deterministic_id_order"
                     )
@@ -2402,7 +2586,7 @@ class ManagedEnvironmentStore:
         requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
         with self._target_operation(env_id):
             self._recover_pending_swap(env_id)
-            plan_path = self.paths.state_root / "environment-plans" / f"{env_id}.json"
+            plan_path = self._plan_path(env_id)
             with RuntimeStoreLock(self._lock):
                 self._check_install_cancelled()
                 self._install_terminal = False

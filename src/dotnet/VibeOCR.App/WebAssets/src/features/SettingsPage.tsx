@@ -61,6 +61,7 @@ interface FeatureOptionState {
 }
 
 interface ManagedEnvironmentState {
+  readonly operationBlocks?: Readonly<Record<string, string | null>>;
   readonly id: string;
   readonly name: string;
   readonly revision: number;
@@ -97,6 +98,7 @@ interface ManagedEnvironmentState {
 }
 
 interface ManagedSourceOptionState {
+  readonly provider?: string | null;
   readonly isDefault?: boolean;
   readonly id: string;
   readonly kind: string;
@@ -152,6 +154,11 @@ function sourceKindLabel(kind: string): string {
 interface ManagedEnvironmentRecipeState {
   readonly id: string;
   readonly displayName: string;
+  readonly engine?: string | null;
+  readonly family?: string | null;
+  readonly familyDisplayName?: string | null;
+  readonly provider?: string | null;
+  readonly defaultRemoteHost?: boolean;
   readonly configuredRecognitionTypes?: readonly string[] | null;
   readonly accelerator?: string | null;
   readonly targetDevice?: string | null;
@@ -236,11 +243,10 @@ function recipePurposeKey(recipe: ManagedEnvironmentRecipeState): string {
   return [...(recipe.configuredRecognitionTypes ?? [])].sort().join("|");
 }
 
-// 目录组件分组（#195）：以配方 id 的 -cpu/-cuda 后缀分组，并与 accelerator
-// 字段双向校验；后缀缺失、加速器不一致、同组件同设备重复、成员用途或
-// 展示名不一致都明确拒绝，不用集合首个匹配静默合并不同引擎。
+// 分组和设备只消费 Runtime 显式元数据；标识和显示名不参与行为解析。
 interface RecipeComponentGroup {
   readonly key: string;
+  readonly engine: "paddle" | "mineru";
   readonly title: string;
   readonly purposeLabel: string;
   readonly purposeKey: string;
@@ -252,32 +258,23 @@ interface RecipeComponentCatalog {
   readonly problems: readonly string[];
 }
 
-function recipeDeviceFromId(
-  id: string,
-): { base: string; device: string } | null {
-  if (id.endsWith("-directml"))
-    return { base: id.slice(0, -"-directml".length), device: "directml" };
-  if (id.endsWith("-cpu"))
-    return { base: id.slice(0, -"-cpu".length), device: "cpu" };
-  if (id.endsWith("-cuda"))
-    return { base: id.slice(0, -"-cuda".length), device: "nvidia_cuda" };
-  return null;
-}
-
-// 引擎分区（#283 用户确认方向）：Paddle 的文字/表格/结构识别共用同一套
-// 依赖，仅模型与管线不同，因此只按推理后端选择；MinerU 是独立本地引擎，
-// 单独安装/查看状态/移除。分区只消费目录配方 id 的既有后缀分组，不在
-// 前端重算依赖或设备推导。
-function engineFamilyFromRecipeId(
-  id: string,
-): { engine: "paddle" | "mineru"; device: string } | null {
-  const parsed = recipeDeviceFromId(id);
-  if (!parsed) return null;
-  if (parsed.base.startsWith("paddleocr"))
-    return { engine: "paddle", device: parsed.device };
-  if (parsed.base.startsWith("mineru"))
-    return { engine: "mineru", device: parsed.device };
-  return null;
+function recipeChoice(
+  recipe: ManagedEnvironmentRecipeState | undefined,
+): { engine: "paddle" | "mineru"; device: string; base: string } | null {
+  if (
+    !recipe?.family ||
+    !recipe.familyDisplayName ||
+    !recipe.provider ||
+    (recipe.engine !== "paddle" && recipe.engine !== "mineru") ||
+    !["cpu", "cuda", "directml"].includes(recipe.targetDevice ?? "")
+  )
+    return null;
+  return {
+    engine: recipe.engine,
+    base: recipe.family,
+    device:
+      recipe.targetDevice === "cuda" ? "nvidia_cuda" : recipe.targetDevice!,
+  };
 }
 
 // 依赖来源分类只消费目录 dependency_origin（随包离线包 / 在线索引）；
@@ -289,26 +286,15 @@ function dependencyOriginNote(origin: string | null | undefined): string {
   return "依赖来源待目录同步";
 }
 
-// 目录展示名以“ · CPU”/“ · NVIDIA CUDA”结尾承载设备；组件标题仅做展示层去尾。
-function recipeTitleWithoutDevice(displayName: string): string {
-  if (displayName.endsWith(" · Windows DirectML"))
-    return displayName.slice(0, -" · Windows DirectML".length);
-  if (displayName.endsWith(" · NVIDIA CUDA"))
-    return displayName.slice(0, -" · NVIDIA CUDA".length);
-  if (displayName.endsWith(" · CPU"))
-    return displayName.slice(0, -" · CPU".length);
-  return displayName;
-}
-
 function recipeComponentGroups(
   recipes: readonly ManagedEnvironmentRecipeState[],
 ): RecipeComponentCatalog {
   const problems: string[] = [];
   const candidates = new Map<string, ManagedEnvironmentRecipeState[]>();
   for (const recipe of recipes) {
-    const device = recipeDeviceFromId(recipe.id);
+    const device = recipeChoice(recipe);
     if (!device) {
-      problems.push(`配方 ${recipe.id} 缺少可识别的设备后缀，已拒绝该组合。`);
+      problems.push(`配方 ${recipe.id} 缺少引擎或设备元数据，已拒绝该组合。`);
       continue;
     }
     const key = `${device.base}|${device.device}`;
@@ -319,7 +305,7 @@ function recipeComponentGroups(
   for (const [key, entries] of candidates) {
     const recipe = entries[0];
     if (!recipe) continue;
-    const device = recipeDeviceFromId(recipe.id);
+    const device = recipeChoice(recipe);
     if (!device) continue;
     if (
       entries.length !== 1 ||
@@ -331,16 +317,20 @@ function recipeComponentGroups(
       problems.push(`配方 ${key} 重复或设备信息冲突，已拒绝该组合。`);
       continue;
     }
-    const title = recipeTitleWithoutDevice(recipe.displayName);
+    const title = recipe.familyDisplayName!;
     const purposeKey = recipePurposeKey(recipe);
     const group = groups.get(device.base);
-    if (group && (group.title !== title || group.purposeKey !== purposeKey)) {
+    if (
+      group &&
+      (group.engine !== device.engine || group.purposeKey !== purposeKey)
+    ) {
       rejectedGroups.add(device.base);
       problems.push(`组件 ${device.base} 的目录信息冲突，已拒绝该组件。`);
       continue;
     }
     groups.set(device.base, {
       key: device.base,
+      engine: device.engine,
       title,
       purposeKey,
       purposeLabel: recognitionPurposeLabel(
@@ -924,15 +914,13 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   );
   const rawPlan = managedEnvironmentPlan(state.environmentPlan);
   const catalog = recipeComponentGroups(recipes);
-  const paddleGroup = catalog.groups.find((group) =>
-    group.key.startsWith("paddleocr"),
-  );
-  const mineruGroup = catalog.groups.find((group) =>
-    group.key.startsWith("mineru"),
-  );
+  const paddleGroup = catalog.groups.find((group) => group.engine === "paddle");
+  const mineruGroup = catalog.groups.find((group) => group.engine === "mineru");
   const restoredChoice =
     !hasExplicitChoice && rawPlan?.requestedRecipe
-      ? engineFamilyFromRecipeId(rawPlan.requestedRecipe)
+      ? recipeChoice(
+          recipes.find((recipe) => recipe.id === rawPlan.requestedRecipe),
+        )
       : null;
   const restoredRecipeId =
     !hasExplicitChoice && rawPlan?.requestedRecipe
@@ -986,7 +974,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     environments.length > 0 ||
     (environmentStatusLine ?? "") !== "";
   const defaultRuntimeRecipe =
-    recipes.find((recipe) => recipe.id === "paddleocr-ort-cpu")?.displayName ??
+    recipes.find((recipe) => recipe.defaultRemoteHost)?.displayName ??
     "PaddleOCR ONNX · CPU";
   // 远程 MinerU 面板门禁：目录未加载时区分“正在启动”与“无已安装环境
   // 承载识别服务”。后者刷新永远无效，如实指路（随包离线基础配置即可），
@@ -1046,7 +1034,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       ? planFor(mineruRecipe.id)
       : undefined;
   const previewEnvironment = (environmentId: string, recipe: string) => {
-    const family = engineFamilyFromRecipeId(recipe);
+    const family = recipeChoice(recipes.find((entry) => entry.id === recipe));
     if (family) onEngineDeviceChange(family.engine, family.device);
     setRequestedEnvironmentId(environmentId);
     void actions.run({
@@ -2028,14 +2016,12 @@ function EnvironmentSourceSettings({
     (source) => source.kind === "model_registry",
   );
   const independent = paddleSources.length > 0 || mineruSources.length > 0;
-  const modelProviderOf = (id: string | null | undefined): string =>
-    id == null
-      ? ""
-      : id.startsWith("paddleocr-")
-        ? id.slice("paddleocr-".length)
-        : id.startsWith("mineru-")
-          ? id.slice("mineru-".length)
-          : id;
+  const modelProviderOf = (id: string | null | undefined): string => {
+    const source = catalog.find((entry) => entry.id === id);
+    return (
+      source?.provider ?? (source?.kind === "model_registry" ? source.id : "")
+    );
+  };
   const defaultIds = stringValues(state.environmentDefaultSourceIds);
   const resolvedDefaults = managedResolvedSources(
     state.environmentResolvedDefaultSources,
@@ -2075,10 +2061,13 @@ function EnvironmentSourceSettings({
   // 统一选项 = 两类引擎都声明的提供方；旧宿主只有共享 model_registry 时
   // 直接列目录 id。
   const providerOptions = independent
-    ? paddleSources.filter((source) =>
-        mineruSources.some(
-          (mineru) => modelProviderOf(mineru.id) === modelProviderOf(source.id),
-        ),
+    ? paddleSources.filter(
+        (source) =>
+          source.provider &&
+          mineruSources.some(
+            (mineru) =>
+              modelProviderOf(mineru.id) === modelProviderOf(source.id),
+          ),
       )
     : sharedModelSources;
   const providerLabel = (id: string, displayName: string): string =>
@@ -2092,16 +2081,18 @@ function EnvironmentSourceSettings({
         ? {
             type: "settings.setEnvironmentSources",
             packageSourceId: packageValue || null,
-            paddleocrModelSourceId: paddleSources.some(
-              (source) => source.id === `paddleocr-${modelValue}`,
-            )
-              ? `paddleocr-${modelValue}`
-              : null,
-            mineruModelSourceId: mineruSources.some(
-              (source) => source.id === `mineru-${modelValue}`,
-            )
-              ? `mineru-${modelValue}`
-              : null,
+            paddleocrModelSourceId:
+              paddleSources.find((source) => source.provider === modelValue)
+                ?.id ??
+              (modelValue === ""
+                ? resolvedId("paddleocr_model_registry") || null
+                : null),
+            mineruModelSourceId:
+              mineruSources.find((source) => source.provider === modelValue)
+                ?.id ??
+              (modelValue === ""
+                ? resolvedId("mineru_model_registry") || null
+                : null),
           }
         : {
             type: "settings.setEnvironmentSources",
@@ -2530,7 +2521,10 @@ function EngineEnvironmentSection({
               ) : compatibleEnvironment ? (
                 <>
                   <Button
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      Boolean(compatibleEnvironment.operationBlocks?.switch)
+                    }
                     onClick={() =>
                       void actions.run({
                         type: "settings.switchEnvironment",
@@ -2700,12 +2694,19 @@ function EnvironmentRow({
             : ""}
         </p>
       ) : null}
+      {Object.values(environment.operationBlocks ?? {}).includes(
+        "environment_has_active_jobs",
+      ) ? (
+        <p className="form-note">
+          该环境有运行中或排队任务，维护操作需等待任务结束。
+        </p>
+      ) : null}
       <div className="setting-row">
         {environment.id !== activeId ||
         (environment.status === "installed" &&
           environment.serviceState !== "ready") ? (
           <Button
-            disabled={busy}
+            disabled={busy || Boolean(environment.operationBlocks?.switch)}
             onClick={() =>
               void actions.run({
                 type: "settings.switchEnvironment",
@@ -2720,7 +2721,9 @@ function EnvironmentRow({
         ) : null}
         {continueRecipe && onPreview ? (
           <Button
-            disabled={busy}
+            disabled={
+              busy || Boolean(environment.operationBlocks?.preview_install)
+            }
             onClick={() => onPreview(environment.id, continueRecipe)}
           >
             {environment.status === "empty" ? "继续准备依赖" : "重新准备依赖"}
@@ -2729,7 +2732,9 @@ function EnvironmentRow({
         {environment.status === "empty" &&
         environment.pythonState !== "ready" ? (
           <Button
-            disabled={busy}
+            disabled={
+              busy || Boolean(environment.operationBlocks?.repair_empty)
+            }
             onClick={() =>
               void actions.run({
                 type: "settings.repairEmptyEnvironment",
@@ -2744,7 +2749,7 @@ function EnvironmentRow({
           confirmingRemove ? (
             <>
               <Button
-                disabled={busy}
+                disabled={busy || Boolean(environment.operationBlocks?.delete)}
                 onClick={() => {
                   setConfirmingRemove(false);
                   void actions.run({
@@ -2765,7 +2770,7 @@ function EnvironmentRow({
           ) : (
             <Button
               icon={<Trash2 aria-hidden="true" size={16} />}
-              disabled={busy}
+              disabled={busy || Boolean(environment.operationBlocks?.delete)}
               onClick={() => setConfirmingRemove(true)}
             >
               移除环境

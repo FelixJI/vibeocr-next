@@ -41,6 +41,7 @@ from vibeocr.runtime.environments.runtime_lock import (
 from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeInstallFailure,
     RuntimeMaintenanceReporter,
+    _atomic_json,
     probe_runtime_components,
     profile_descriptor,
     runtime_profile_status,
@@ -778,6 +779,12 @@ def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
     assert first["python_state"] == second["python_state"] == "ready"
     assert first["dependency_state"] == "empty"
     assert first["engine_state"] == "unavailable"
+    assert first["operation_blocks"] == {
+        "preview_install": None,
+        "switch": None,
+        "repair_empty": None,
+        "delete": None,
+    }
     assert first["id"] != second["id"]
     assert not set(first["packages"]).intersection(
         {"fastapi", "rapidocr", "paddleocr", "mineru", "torch", "onnxruntime"}
@@ -1583,6 +1590,17 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
         "mineru-cuda",
     ]
     entry = {item["id"]: item for item in catalog}
+    assert entry["paddleocr-ort-cpu"]["engine"] == "paddle"
+    assert entry["paddleocr-ort-cpu"]["family"] == "paddle-onnx"
+    assert entry["paddleocr-ort-cpu"]["provider"] == "CPUExecutionProvider"
+    assert entry["paddleocr-ort-cuda"]["provider"] == "CUDAExecutionProvider"
+    assert entry["paddleocr-ort-directml"]["provider"] == "DmlExecutionProvider"
+    assert entry["mineru-cpu"]["engine"] == "mineru"
+    assert entry["mineru-cuda"]["provider"] == "torch_cuda"
+    assert [item["id"] for item in catalog if item["default_remote_host"]] == [
+        "paddleocr-ort-cpu"
+    ]
+    assert all(item["supports_remote_host"] for item in catalog)
     assert entry["paddleocr-ort-cpu"]["display_name"] == "PaddleOCR ONNX · CPU"
     assert entry["paddleocr-ort-cpu"]["configured_recognition_types"] == [
         "text",
@@ -1795,6 +1813,13 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         "e" * 32: "recipe_mismatch",
         "legacy": "legacy_environment",
     }
+
+    explicit = manager.find_compatible("paddleocr-ort-cpu", b["id"])
+    assert explicit["selected"]["environment_id"] == b["id"]
+    assert explicit["selected"]["selection_reason"] == "explicit_environment"
+    assert manager.find_compatible("paddleocr-ort-cpu", empty["id"])["selected"] is None
+    with pytest.raises(ManagedEnvironmentError, match="unknown explicit"):
+        manager.find_compatible("paddleocr-ort-cpu", "missing-target")
 
     # 活动环境优先；同配方低优先级环境如实标记。
     with RuntimeStoreLock(manager._lock):
@@ -2193,7 +2218,7 @@ def test_named_install_rejects_native_import_failure_without_committing(
     manager._registry.write_text(json.dumps(registry), encoding="utf-8")
     unavailable = manager.list()["environments"][0]
     assert unavailable["python_state"] == "ready"
-    assert unavailable["dependency_state"] == "unavailable"
+    assert unavailable["dependency_state"] == "installed"
     assert unavailable["engine_state"] == "unavailable"
     assert "engine_import_failed" in unavailable["reason"]
     assert "shorter Portable location" in unavailable["reason"]
@@ -2303,7 +2328,7 @@ def test_named_install_paddleocr_probe_imports_real_transitive_closure(
     manager._registry.write_text(json.dumps(registry), encoding="utf-8")
     unavailable = manager.list()["environments"][0]
     assert unavailable["python_state"] == "ready"
-    assert unavailable["dependency_state"] == "unavailable"
+    assert unavailable["dependency_state"] == "installed"
     assert "engine_import_failed" in unavailable["reason"]
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
         manager.prepare_switch(item["id"])
@@ -2458,6 +2483,15 @@ def test_frozen_manager_exposes_named_environment_list(
                 "display_name": display_name,
                 "endpoint": endpoint,
                 "is_default": is_default,
+                "provider": {
+                    "huggingface": "huggingface",
+                    "modelscope": "modelscope",
+                    "paddleocr-huggingface": "huggingface",
+                    "paddleocr-modelscope": "modelscope",
+                    "paddleocr-bos": "bos",
+                    "mineru-huggingface": "huggingface",
+                    "mineru-modelscope": "modelscope",
+                }.get(source_id),
             }
             for source_id, kind, display_name, endpoint, is_default in (
                 (
@@ -5702,3 +5736,222 @@ def test_mineru_cpu_probe_uses_mineru4_llama_binding(
         probe_runtime_components(tmp_path, ("mineru-cpu",))["mineru-cpu"]
         is llama_available
     )
+
+
+def test_prepare_target_survives_restart_and_never_claims_named_empty_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+
+    def open_store():
+        return ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+            base_python=sys._base_executable,
+            install_runner=lambda *_args: pytest.fail("preparation must not install"),
+        )
+
+    manager = open_store()
+    user = manager.create("PaddleOCR ONNX · CPU")
+    prepared = manager.prepare_target("paddleocr-ort-cpu")
+    assert prepared["id"] != user["id"]
+    assert prepared["status"] == "empty" and prepared["packages"] == []
+    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == prepared["id"]
+    reopened = open_store()
+    assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == prepared["id"]
+    assert len(reopened.list()["environments"]) == 2
+    assert reopened._read()["environments"][user["id"]]["status"] == "empty"
+
+
+def test_prepare_target_reservation_recovers_interrupted_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    create = manager._create
+    monkeypatch.setattr(
+        manager,
+        "_create",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
+    )
+    with pytest.raises(OSError, match="interrupted"):
+        manager.prepare_target("paddleocr-ort-cpu")
+    reservation = manager._read()["prepare_targets"]["paddleocr-ort-cpu"]
+    monkeypatch.setattr(manager, "_create", create)
+    with pytest.raises(ManagedEnvironmentError, match="reserved for preparation"):
+        manager.create(reservation["name"])
+    target = manager.prepare_target("paddleocr-ort-cpu")
+    assert target["id"] == reservation["environment_id"]
+    assert len(manager.list()["environments"]) == 1
+
+
+def test_missing_model_does_not_erase_installed_dependencies(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    record = _write_record(
+        manager, "model-missing", status="installed", recipe="paddleocr-ort-cuda"
+    )
+    result = manager._public_record(
+        record, {"healthy": False, "reason": "engine_model_missing", "python": "python"}
+    )
+    assert result["dependency_state"] == "installed"
+    assert result["model_state"] == "missing"
+    assert result["engine_state"] == "unverified"
+    assert result["service_state"] == "not_started"
+    assert result["target_device"] == "cuda" and result["actual_device"] is None
+
+
+def test_preparation_reassigns_ownership_after_user_installs_another_recipe(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    previous = manager.prepare_target("paddleocr-ort-cpu")
+    data = manager._read()
+    data["environments"][previous["id"]].update(status="installed", recipe="mineru-cpu")
+    manager._registry.write_text(json.dumps(data), encoding="utf-8")
+    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert replacement["id"] != previous["id"]
+    assert replacement["status"] == "empty"
+    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    assert manager._read()["environments"][previous["id"]]["recipe"] == "mineru-cpu"
+    assert Path(previous["python"]).is_file()
+
+
+def test_deleted_preparation_target_ends_plan_lifecycle_and_rejects_stale_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-01 回归：删除终结准备归属与落盘计划，旧 plan 不得越过 CAS。
+
+    旧实现在删除完成后保留 prepare_targets 归属与 environment-plans 计划，
+    同 id 重建（revision 回到 1）后旧 plan 通过 revision/CAS 进入安装器。
+    """
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda *_args: pytest.fail(
+            "stale plan must not reach the installer"
+        ),
+    )
+    prepared = manager.prepare_target("paddleocr-ort-cpu")
+    plan = manager.preview_install(prepared["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    manager.delete(prepared["id"])
+    # 删除即终结该对象的准备归属与落盘安装计划。
+    data = manager._read()
+    assert not data.get("prepare_targets", {}).get("paddleocr-ort-cpu")
+    assert not (
+        manager.paths.state_root / "environment-plans" / f"{prepared['id']}.json"
+    ).is_file()
+    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert replacement["status"] == "empty"
+    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
+        manager.install(
+            plan["plan_id"], replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
+    # 拒绝发生在写入之前：新对象记录不被改写。
+    record = manager._read()["environments"][replacement["id"]]
+    assert record["status"] == "empty"
+    assert "last_install_operation" not in record
+
+
+def test_manual_same_name_recreate_rejects_deleted_environment_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-01 回归：手工删除后同名同 slug 重建，旧 plan 同样必须失效。"""
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+        install_runner=lambda *_args: pytest.fail(
+            "stale plan must not reach the installer"
+        ),
+    )
+    first = manager.create("手工环境")
+    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    manager.delete(first["id"])
+    second = manager.create("手工环境")
+    assert second["id"] == first["id"]
+    assert not (
+        manager.paths.state_root / "environment-plans" / f"{second['id']}.json"
+    ).is_file()
+    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
+        manager.install(
+            plan["plan_id"], second["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        )
+
+
+def test_preparation_reassigns_when_owned_target_is_stale_active_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F292-02 回归：准备目标成为 find_compatible 未选中的活动环境时，
+
+    保留该环境并另分配可维护的受控准备目标；重复准备与跨重启都复用
+    新归属，不重复创建，不再永远命中 active environment cannot be modified。
+    """
+    _omit_unused_pip_bootstrap(monkeypatch)
+    manifest, component = _release(tmp_path / "release")
+
+    def open_store() -> ManagedEnvironmentStore:
+        return ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+            base_python=sys._base_executable,
+            install_runner=lambda *_args: None,
+        )
+
+    manager = open_store()
+    previous = manager.prepare_target("paddleocr-ort-cpu")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"][previous["id"]].update(
+            status="installed",
+            recipe="paddleocr-ort-cpu",
+            recipe_lock="0" * 64,
+        )
+        data["active_id"] = previous["id"]
+        data["active_revision"] += 1
+        _atomic_json(manager._registry, data)
+    # scope 锁过期：探针健康的活动环境也无法按当前配方复用。
+    assert manager.find_compatible("paddleocr-ort-cpu")["selected"] is None
+    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert replacement["id"] != previous["id"]
+    assert replacement["status"] == "empty"
+    # 原活动环境完整保留且仍为活动环境。
+    data = manager._read()
+    assert data["active_id"] == previous["id"]
+    assert data["environments"][previous["id"]]["status"] == "installed"
+    # 新受控目标可预览确认：不再命中 active environment cannot be modified。
+    plan = manager.preview_install(
+        replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+    )
+    assert plan["environment_id"] == replacement["id"]
+    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    reopened = open_store()
+    assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    listed = reopened.list()
+    assert len(listed["environments"]) == 2
+    assert listed["active_id"] == previous["id"]

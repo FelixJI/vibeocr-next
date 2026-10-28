@@ -67,6 +67,13 @@ public sealed partial class App
       await main.SmokeHistoryInitialization;
       await main.VerifyPinsSelfCheckAsync();
     }
-    finally { decodeReleased.TrySetResult(true); main.Close(); await main.ShutdownCompletion; }
+    finally
+    {
+      CaptureUiSmokeTrace.Stage("pins.main-shutdown.begin");
+      decodeReleased.TrySetResult(true);
+      main.Close();
+      await main.ShutdownCompletion;
+      CaptureUiSmokeTrace.Stage("pins.main-shutdown.end");
+    }
   }
 }

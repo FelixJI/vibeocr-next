@@ -1059,8 +1059,8 @@ public static class WorkbenchBridgeCodec
           "command arguments");
         string recipeEnvironmentId = ParseEnvironmentId(arguments);
         string? recipe = arguments.GetProperty("recipe").GetString();
-        if (recipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "mineru-cuda"))
+        if (string.IsNullOrWhiteSpace(recipe) || recipe.Length > 80 ||
+            recipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         // sourceId 省略 → 本次显式“跟随环境/全局配置”；目录 id 由管理器校验，
         // 桥只校验形状，不硬编码目录成员。
@@ -1144,23 +1144,21 @@ public static class WorkbenchBridgeCodec
         return new RepairEmptyEnvironmentCommand(ParseEnvironmentId(arguments));
       case ("settings", "findCompatibleEnvironment"):
       {
-        // 桥只做协议 id 类型守卫（与 preview 同一锁定 id 集）；目录真值由
-        // 宿主按 Runtime 目录核验，未知输入拒绝，不降 input validation。
+        // 桥只校验有界标识形状；目录成员由宿主按 Runtime 目录核验。
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? compatibleRecipe = arguments.GetProperty("recipe").GetString();
-        if (compatibleRecipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "mineru-cuda"))
+        if (string.IsNullOrWhiteSpace(compatibleRecipe) || compatibleRecipe.Length > 80 ||
+            compatibleRecipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new FindCompatibleEnvironmentCommand(compatibleRecipe);
       }
       case ("settings", "prepareEnvironment"):
       {
-        // 与 preview/findCompatible 同一 5-id 协议白名单；目录真值仍由宿主
-        // 按 Runtime 目录核验。
+        // 目录成员由宿主按 Runtime 目录核验，不复制配方白名单。
         EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
         string? prepareRecipe = arguments.GetProperty("recipe").GetString();
-        if (prepareRecipe is not ("paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" or
-            "mineru-cpu" or "mineru-cuda"))
+        if (string.IsNullOrWhiteSpace(prepareRecipe) || prepareRecipe.Length > 80 ||
+            prepareRecipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
           throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
         return new PrepareEnvironmentCommand(prepareRecipe);
       }

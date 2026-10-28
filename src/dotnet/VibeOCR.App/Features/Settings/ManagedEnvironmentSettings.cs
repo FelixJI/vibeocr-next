@@ -151,8 +151,7 @@ public sealed class ManagedEnvironmentSettings(
         StateChanged?.Invoke();
     }
 
-    // 精确 ID 归属留在宿主会话中；选择代阻止排队/迟到结果覆盖当前计划。
-    private readonly Dictionary<string, string> prepareEnvironmentIds = new(StringComparer.Ordinal);
+    // 准备目标归属由 Runtime 持久保存；选择代阻止迟到结果覆盖当前计划。
     private int selectionGeneration;
 
     private const string RunningEvidenceUnavailableMessage =
@@ -233,7 +232,7 @@ public sealed class ManagedEnvironmentSettings(
     }
 
     /// <summary>
-    /// 兼容时只返回切换目标；否则按会话精确 ID 复用或创建并预览。
+    /// 兼容时只返回切换目标；否则由 Runtime 持久复用或创建准备目标并预览。
     /// 失败、双击与导航重挂载都复用同一目标，不按名称猜归属。
     /// </summary>
     public Task PrepareAsync(string recipe, CancellationToken cancellationToken)
@@ -255,8 +254,21 @@ public sealed class ManagedEnvironmentSettings(
                     "切换即可使用，本次准备未创建或安装任何内容。";
                 return;
             }
-            string environmentId = await EnsurePrepareEnvironmentAsync(recipe, generation, cancellationToken);
-            if (IsSelectionStale(generation)) return;
+            ManagedEnvironment? target = await EnsurePrepareEnvironmentAsync(recipe, generation, cancellationToken);
+            if (IsSelectionStale(generation) || target is null) return;
+            string environmentId = target.Id;
+            if (target.Status == "installed")
+            {
+                ManagedEnvironmentQueryResult refreshed = await manager.FindCompatibleEnvironmentAsync(recipe, cancellationToken);
+                if (IsSelectionStale(generation)) return;
+                Compatibility = refreshed;
+                if (refreshed.Selected is not null)
+                {
+                    Plan = null;
+                    Status = "已找到可直接复用的环境；本次准备未安装任何内容。";
+                    return;
+                }
+            }
             Plan = null;
             ManagedEnvironmentPlan plan = await manager.PreviewEnvironmentInstallAsync(
                 environmentId, recipe, null, cancellationToken);
@@ -272,51 +284,14 @@ public sealed class ManagedEnvironmentSettings(
     /// <summary>
     /// 创建后刷新失败时，旧快照可能缺少已创建 ID；先权威读取再判缺失。
     /// </summary>
-    private async Task<string> EnsurePrepareEnvironmentAsync(
+    private async Task<ManagedEnvironment?> EnsurePrepareEnvironmentAsync(
         string recipe, int generation, CancellationToken cancellationToken)
     {
-        if (prepareEnvironmentIds.TryGetValue(recipe, out string? mapped))
-        {
-            ManagedEnvironment? existing = Snapshot?.Environments
-                .FirstOrDefault(item => item.Id == mapped);
-            if (existing is null)
-            {
-                await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-                existing = Snapshot?.Environments.FirstOrDefault(item => item.Id == mapped);
-            }
-            if (existing is { Status: "empty" })
-                return existing.Id;
-            if (existing is not null)
-            {
-                prepareEnvironmentIds.Remove(recipe);
-            }
-        }
-        string displayName = Snapshot?.Recipes?.FirstOrDefault(item => item.Id == recipe)
-            ?.DisplayName ?? recipe;
-        string? name = NextPrepareEnvironmentName(displayName);
-        if (name is null)
-            throw new InvalidOperationException(
-                "自动命名的环境名称已用尽；请先移除不再使用的空环境。");
-        if (IsSelectionStale(generation)) return string.Empty;
-        ManagedEnvironment created = await manager.CreateEnvironmentAsync(name, cancellationToken);
-        // 刷新/预览可能失败；先记录 ID，重试不会重复创建。
-        prepareEnvironmentIds[recipe] = created.Id;
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        return created.Id;
-    }
-
-    /// <summary>有界自动命名：与已列名字 ordinal-ignore-case 比较，2..99 用尽即失败。</summary>
-    private string? NextPrepareEnvironmentName(string baseName)
-    {
-        bool Taken(string candidate) => Snapshot?.Environments.Any(item =>
-            string.Equals(item.Name, candidate, StringComparison.OrdinalIgnoreCase)) == true;
-        if (!Taken(baseName)) return baseName;
-        for (int ordinal = 2; ordinal <= 99; ordinal++)
-        {
-            string candidate = $"{baseName} {ordinal}";
-            if (!Taken(candidate)) return candidate;
-        }
-        return null;
+        if (IsSelectionStale(generation)) return null;
+        ManagedEnvironment target = await manager.PrepareEnvironmentTargetAsync(recipe, cancellationToken);
+        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
+        return target;
     }
 
     private bool IsSelectionStale(int generation) =>
@@ -725,24 +700,22 @@ public sealed class ManagedEnvironmentSettings(
         ResidencyStatus residency, RuntimeStatusSnapshot status)
     {
         var catalog = new RuntimeSelectionService(health);
-        bool retired = environment.Recipe is "rapidocr-cpu" or "rapidocr-cuda" or
-            "rapidocr+mineru-cpu" or "rapidocr+mineru-cuda" or "paddleocr-cpu" or "paddleocr-cuda";
-        string[] modeIds = environment.Recipe switch
+        bool supportedEngine = environment.Engine is "paddle" or "mineru";
+        string[] modeIds = environment.Engine switch
         {
-            "paddleocr-ort-cpu" or "paddleocr-ort-cuda" or "paddleocr-ort-directml" =>
-                ["paddle_text", "paddle_table", "paddle_structure"],
-            "mineru-cpu" or "mineru-cuda" => ["mineru_document"],
+            "paddle" => ["paddle_text", "paddle_table", "paddle_structure"],
+            "mineru" => ["mineru_document"],
             _ => [],
         };
-        RecognitionModeOption[] modes = retired ? [] : [.. catalog.RecognitionModes.Where(mode =>
-            modeIds.Length == 0 || modeIds.Contains(mode.Id, StringComparer.Ordinal))];
-        string engineState = retired ? "unavailable"
+        RecognitionModeOption[] modes = !supportedEngine ? [] : [.. catalog.RecognitionModes.Where(mode =>
+            modeIds.Contains(mode.Id, StringComparer.Ordinal))];
+        string engineState = !supportedEngine ? environment.EngineState
             : modes.Any(mode => mode.Availability == "ready") ? "ready"
             : modes.Any(mode => mode.Availability == "preparation_required") ? "preparation_required"
             : modes.Length > 0 ? "unavailable" : "unverified";
-        if (!retired && modes.Length == 0 && !catalog.SupportsRecognitionModes)
+        if (supportedEngine && modes.Length == 0 && !catalog.SupportsRecognitionModes)
         {
-            OcrEngine? engine = environment.Recipe?.StartsWith("paddleocr", StringComparison.Ordinal) == true
+            OcrEngine? engine = environment.Engine == "paddle"
                 ? OcrEngine.PaddleOcr : null;
             RuntimeEngineOption? option = catalog.EngineOptions.FirstOrDefault(item => item.Engine == engine);
             if (option is not null)
@@ -753,8 +726,8 @@ public sealed class ManagedEnvironmentSettings(
                     _ => "unavailable",
                 };
         }
-        bool hasPaddle = environment.Recipe?.StartsWith("paddleocr", StringComparison.Ordinal) == true;
-        bool hasMineru = environment.Recipe?.Contains("mineru", StringComparison.Ordinal) == true;
+        bool hasPaddle = environment.Engine == "paddle";
+        bool hasMineru = environment.Engine == "mineru";
         Wire.MineruConfigCatalog? mineru = health.CapabilityDescriptors?
             .Select(descriptor => descriptor.MineruConfigCatalog)
             .FirstOrDefault(catalog => catalog is not null);
@@ -764,9 +737,8 @@ public sealed class ManagedEnvironmentSettings(
             entry.ResourceKind == RecognitionResourceKind.Model &&
             entry.RecognitionMode == RecognitionMode.PaddleText &&
             entry.Kind != ResidencyKind.Evicted);
-        string modelState = engineState == "unavailable" ? "unavailable"
-            : hasMineru && mineruReady || paddleModelReady ? "ready"
-            : hasMineru || hasPaddle ? "pending" : "not_applicable";
+        string modelState = hasMineru && mineruReady || paddleModelReady ? "ready"
+            : environment.ModelState;
         return environment with
         {
             EngineState = engineState,
@@ -782,12 +754,6 @@ public sealed class ManagedEnvironmentSettings(
     {
         await manager.DeleteEnvironmentAsync(environmentId, cancellationToken);
         InvalidateSelectionPlans();
-        if (prepareEnvironmentIds.ContainsValue(environmentId))
-        {
-            foreach (string key in prepareEnvironmentIds
-                .Where(item => item.Value == environmentId).Select(item => item.Key).ToArray())
-                prepareEnvironmentIds.Remove(key);
-        }
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "环境已删除。";
     }, cancellationToken);

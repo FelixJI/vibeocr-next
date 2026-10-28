@@ -120,6 +120,12 @@ for _source in _DOWNLOAD_SOURCES:
         }[_provider]
 
 
+def download_source_provider(source_id: str) -> str | None:
+    """模型提供方来自 Runtime 适配表，消费者不解析来源标识。"""
+    values = set(_MODEL_SOURCE_ENVIRONMENT.get(source_id, {}).values())
+    return next(iter(values)) if len(values) == 1 else None
+
+
 def expand_legacy_model_sources(source_ids: Sequence[str]) -> tuple[str, ...]:
     """Expand historical shared preferences; explicit engine preferences take precedence."""
     result = [
