@@ -17,6 +17,7 @@ public sealed partial class App
   }
   private sealed class PinSmokeStartup : IStartupRegistrar
   {
+    public bool IsEnabled => false;
     public bool SetEnabled(bool enabled) => true;
   }
 

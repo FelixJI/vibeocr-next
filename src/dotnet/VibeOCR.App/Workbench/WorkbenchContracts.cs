@@ -652,6 +652,7 @@ public sealed record PrepareRemoteHostCommand : WorkbenchCommand;
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
 public sealed record SetStartupCommand(bool Enabled) : WorkbenchCommand;
+public sealed record SetMinimizeToTrayCommand(bool Enabled) : WorkbenchCommand;
 
 /// <summary>
 /// Set the global hotkey for one action in the shell action catalog. A null
@@ -1103,7 +1104,8 @@ public sealed record SettingsWorkbenchState(
   bool EnvironmentCanCancelCleanup = false,
   int EnvironmentCleanupPage = 0,
   int EnvironmentCleanupPageCount = 1,
-  EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null) : WorkbenchState
+  EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
+  bool MinimizeToTray = false, string ShellSettingsError = "") : WorkbenchState
 {
   public override string Scope => "settings";
 }

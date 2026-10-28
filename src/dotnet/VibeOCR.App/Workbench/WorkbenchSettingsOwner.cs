@@ -15,7 +15,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, RecoverableLazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, Action invalidateImageRecognition, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -63,6 +63,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     PrepareRemoteHostCommand => PrepareRemoteHost(cancellationToken),
     SetThemeCommand setTheme => SetTheme(setTheme),
     SetStartupCommand startup => SetStartup(startup),
+    SetMinimizeToTrayCommand tray => SetMinimizeToTray(tray),
     BeginHotkeyRecordingCommand recording => BeginHotkeyRecording(recording),
     EndHotkeyRecordingCommand recording => EndHotkeyRecording(recording),
     SetActionHotkeyCommand setActionHotkey => SetActionHotkey(setActionHotkey),
@@ -344,9 +345,14 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
 
   private SettingsWorkbenchState SetStartup(SetStartupCommand command)
   {
-    settings ??= CreateSettings();
     shell.Value.SetStartWithSystem(command.Enabled);
-    return SettingsState(settings);
+    return settings is null ? SettingsShellState() : SettingsState(settings);
+  }
+
+  private SettingsWorkbenchState SetMinimizeToTray(SetMinimizeToTrayCommand command)
+  {
+    shell.Value.SetMinimizeToTray(command.Enabled);
+    return settings is null ? SettingsShellState() : SettingsState(settings);
   }
 
   private SettingsWorkbenchState BeginHotkeyRecording(BeginHotkeyRecordingCommand command)
@@ -672,6 +678,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     "unknown",
     shell.Value.StartWithSystem,
     Sources: [],
+    MinimizeToTray: shell.Value.MinimizeToTray, ShellSettingsError: shell.Value.SettingsError,
     HotkeyActions: HotkeyActionStates(),
     FloatingToolbar: ToolbarProjection(), EditorPreferences: EditorSettings.Preferences, ImageOutputDirectory: ValidOutputDirectory(), EditorPreferencesError: editorPreferencesError);
 
@@ -774,6 +781,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       feature.DisplayName,
       feature.Accelerator,
       feature.Selected))],
+    MinimizeToTray: shell.Value.MinimizeToTray, ShellSettingsError: shell.Value.SettingsError,
     HotkeyActions: HotkeyActionStates(),
     FloatingToolbar: ToolbarProjection(toolbarError),
     EditorPreferences: EditorSettings.Preferences, ImageOutputDirectory: ValidOutputDirectory(), EditorPreferencesError: editorPreferencesError,

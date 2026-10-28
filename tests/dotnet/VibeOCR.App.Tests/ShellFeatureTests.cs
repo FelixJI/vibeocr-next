@@ -77,6 +77,58 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
+    public void TrayPreferencePersistsAndOnlyHidesWhenEnabled()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-tray-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+        layout.EnsurePortableState();
+        try
+        {
+            File.WriteAllText(layout.ConfigFile, "{\"untouched\":42}");
+            var store = new ShellPreferencesStore(layout);
+            int hidden = 0;
+            var shell = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
+                hideWindow: () => hidden++, preferences: store);
+            shell.OnMinimized();
+            Assert.Equal(0, hidden);
+            shell.SetMinimizeToTray(true);
+            var reopened = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
+                hideWindow: () => hidden++, preferences: store);
+            Assert.True(reopened.MinimizeToTray);
+            reopened.OnMinimized();
+            Assert.Equal(1, hidden);
+            Assert.Contains("\"untouched\": 42", File.ReadAllText(layout.ConfigFile));
+            File.WriteAllText(layout.ConfigFile, "{invalid");
+            reopened.SetMinimizeToTray(false);
+            Assert.True(reopened.MinimizeToTray);
+            Assert.NotEmpty(reopened.SettingsError);
+            Assert.Equal("{invalid", File.ReadAllText(layout.ConfigFile));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void StartupSelectionSurvivesShellRecreation()
+    {
+        var registrar = new FakeStartupRegistrar();
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), registrar);
+        shell.SetStartWithSystem(true);
+        Assert.True(new ShellViewModel(new FakeHotkeyRegistrar(), registrar).StartWithSystem);
+    }
+
+    [Fact]
+    public void FailedStartupDisableKeepsActualSelection()
+    {
+        var registrar = new FakeStartupRegistrar();
+        var shell = new ShellViewModel(new FakeHotkeyRegistrar(), registrar);
+        shell.SetStartWithSystem(true);
+        registrar.Ok = false;
+        shell.SetStartWithSystem(false);
+        Assert.True(shell.StartWithSystem);
+    }
+
+    [Fact]
     public void SetStartWithSystemPersistsAndReflectsFailure()
     {
         var startup = new FakeStartupRegistrar { Ok = false };
@@ -323,7 +375,12 @@ public sealed class ShellFeatureTests
     private sealed class FakeStartupRegistrar : IStartupRegistrar
     {
         public bool Ok { get; set; } = true;
-        public bool SetEnabled(bool enabled) => Ok;
+        public bool IsEnabled { get; private set; }
+        public bool SetEnabled(bool enabled)
+        {
+            if (Ok) IsEnabled = enabled;
+            return Ok;
+        }
     }
 
     private sealed class FailingUpdateCoordinator : IUpdateCoordinator

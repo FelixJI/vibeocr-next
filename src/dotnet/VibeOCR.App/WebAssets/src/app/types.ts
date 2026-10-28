@@ -185,6 +185,7 @@ export type AppActionType =
   | "settings.findCompatibleEnvironment"
   | "settings.prepareEnvironment"
   | "settings.setStartup"
+  | "settings.setMinimizeToTray"
   | "settings.beginHotkeyRecording"
   | "settings.endHotkeyRecording"
   | "settings.setActionHotkey"

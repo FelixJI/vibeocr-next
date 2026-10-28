@@ -59,7 +59,13 @@ async function main() {
   const candidate = path.join(smokeRoot, 'candidate');
   fs.mkdirSync(smokeRoot);
   fs.cpSync(source, candidate, { recursive: true, errorOnExist: true, force: false });
-  const evidence = { schema_version: 1, state: 'failed', smokeRoot, nodeVersion: process.version, sessions: [],
+  const minimizeToTray = process.argv.includes('--minimize-to-tray');
+  if (minimizeToTray) {
+    const configDirectory = path.join(candidate, 'state/config');
+    fs.mkdirSync(configDirectory, { recursive: true });
+    fs.writeFileSync(path.join(configDirectory, 'app_settings.json'), JSON.stringify({ shell: { minimize_to_tray: true } }));
+  }
+  const evidence = { schema_version: 1, state: 'failed', smokeRoot, nodeVersion: process.version, minimizeToTray, sessions: [],
     sourceIdentity,
     unsupported: ['100/125/150/200% DPI', 'mixed-monitor DPI', 'actual Explorer restart', 'menu screenshot: existing owned-point capture guard refused the menu corners'] };
   let app, fixture, mainHandle, helper;
@@ -110,7 +116,8 @@ async function main() {
     evidence.openGestures = [];
     const icon = { AppPid: app.pid, FixturePid: helper.pid, Handle: initial.Owner.Handle, IconGuid: instanceId };
     for (const action of ['tray-left-click', 'tray-double-click']) {
-      await native('hide', { AppPid: app.pid, Handle: mainHandle });
+      await native(minimizeToTray ? 'minimize' : 'hide', { AppPid: app.pid, Handle: mainHandle });
+      if (minimizeToTray) await waitFor(async () => !(await state()).Main.Visible, 'Minimize did not hide to tray');
       await focusHelper();
       await native('tray-expose', icon);
       const input = JSON.parse(await native(action, icon));
@@ -127,9 +134,10 @@ async function main() {
       await native('restore', { AppPid: app.pid, Handle: mainHandle });
       if (mode === 'hidden') await native('hide', { AppPid: app.pid, Handle: mainHandle });
       if (mode === 'minimized') await native('minimize', { AppPid: app.pid, Handle: mainHandle });
+      if (minimizeToTray && mode === 'minimized') await waitFor(async () => !(await state()).Main.Visible, 'Minimize did not hide to tray');
       await focusHelper();
       const before = await state();
-      assert.equal(before.Main.Visible, mode !== 'hidden');
+      assert.equal(before.Main.Visible, mode !== 'hidden' && !(minimizeToTray && mode === 'minimized'));
       assert.equal(before.Main.Iconic, mode === 'minimized');
       assert.equal(before.ForegroundHandle, helper.handle);
       const record = { mode, before, cancellations: [] };

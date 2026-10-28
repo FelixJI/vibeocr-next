@@ -1171,6 +1171,9 @@ public static class WorkbenchBridgeCodec
       case ("settings", "setStartup"):
         EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
         return new SetStartupCommand(arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "setMinimizeToTray"):
+        EnsureObjectWithFields(arguments, EnabledArgumentFields, "command arguments");
+        return new SetMinimizeToTrayCommand(arguments.GetProperty("enabled").GetBoolean());
       case ("settings", "beginHotkeyRecording"):
         EnsureObjectWithFields(arguments, RecordingArgumentFields, "command arguments");
         return new BeginHotkeyRecordingCommand(ParseGuidArgument(arguments, "recordingId"));
@@ -1982,6 +1985,8 @@ public static class WorkbenchBridgeCodec
       settings.StatusCode,
       settings.Backend,
       settings.StartupEnabled,
+      settings.MinimizeToTray,
+      settings.ShellSettingsError,
       sources = settings.Sources ?? [],
       settings.PendingBackend,
       settings.CanSwitchBackend,

@@ -76,9 +76,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   };
   return (
     <Workspace
-      eyebrow="SUPPORT / 06"
       title="关于与诊断"
-      description="产品信息、更新与服务健康检查集中在一个入口；内部协议与排错证据折叠在技术详情里，可复制或导出脱敏内容。"
       actions={
         <>
           <CapabilityGate
@@ -104,18 +102,13 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
       }
     >
       <div className="diagnostics-grid">
-        <Panel label="PRODUCT" title="VibeOCR Next">
-          <p>
-            本地优先的 Windows 文字识别工作台：截图/贴图/图片识别、PDF
-            解析与文字层、表格与公式导出、二维码与批量处理。
-          </p>
+        <Panel title="VibeOCR Next">
+          <p>Windows 本地文字识别工作台</p>
           <dl className="detail-list">
             <dt>版本</dt>
             <dd>{version}</dd>
             <dt>许可</dt>
             <dd>{license}</dd>
-            <dt>技术栈</dt>
-            <dd>.NET · WinUI · WebView2 · React</dd>
             <dt>项目</dt>
             <dd>{projectUrl || "由宿主提供"}</dd>
           </dl>
@@ -129,7 +122,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
             打开项目主页
           </CapabilityGate>
         </Panel>
-        <Panel label="UPDATE" title="更新">
+        <Panel title="更新">
           <p className="form-note">
             {statusLabel(update.statusCode, "更新状态尚未同步。")}
             {typeof update.latestVersion === "string"
@@ -145,54 +138,52 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
             busy={updateBusy}
             actions={actions}
           />
-          <CapabilityGate
-            capability="update.check"
-            capabilities={viewState.capabilities}
-            action={{ type: "update.check" }}
-            actions={actions}
-            disabled={updateBusy}
-            icon={<RefreshCw aria-hidden="true" size={16} />}
-          >
-            检查更新
-          </CapabilityGate>
-          <CapabilityGate
-            appearance="primary"
-            capability="update.install"
-            capabilities={viewState.capabilities}
-            action={{ type: "update.download" }}
-            actions={actions}
-            disabled={!booleanValue(update.updateAvailable) || updateBusy}
-            icon={<Download aria-hidden="true" size={16} />}
-          >
-            下载并安装
-          </CapabilityGate>
-          <CapabilityGate
-            capability="update.install"
-            capabilities={viewState.capabilities}
-            action={{ type: "update.cancel" }}
-            actions={actions}
-            disabled={!updateBusy}
-            icon={<Square aria-hidden="true" size={16} />}
-          >
-            取消
-          </CapabilityGate>
-          {booleanValue(update.canCancelRuntimeMaintenance) ? (
+          <div className="workspace-actions">
+            <CapabilityGate
+              capability="update.check"
+              capabilities={viewState.capabilities}
+              action={{ type: "update.check" }}
+              actions={actions}
+              disabled={updateBusy}
+              icon={<RefreshCw aria-hidden="true" size={16} />}
+            >
+              检查更新
+            </CapabilityGate>
+            <CapabilityGate
+              appearance="primary"
+              capability="update.install"
+              capabilities={viewState.capabilities}
+              action={{ type: "update.download" }}
+              actions={actions}
+              disabled={!booleanValue(update.updateAvailable) || updateBusy}
+              icon={<Download aria-hidden="true" size={16} />}
+            >
+              下载并安装
+            </CapabilityGate>
             <CapabilityGate
               capability="update.install"
               capabilities={viewState.capabilities}
-              action={{ type: "update.cancelRuntimeMaintenance" }}
+              action={{ type: "update.cancel" }}
               actions={actions}
+              disabled={!updateBusy}
               icon={<Square aria-hidden="true" size={16} />}
             >
-              取消运行时维护后更新
+              取消
             </CapabilityGate>
-          ) : null}
+            {booleanValue(update.canCancelRuntimeMaintenance) ? (
+              <CapabilityGate
+                capability="update.install"
+                capabilities={viewState.capabilities}
+                action={{ type: "update.cancelRuntimeMaintenance" }}
+                actions={actions}
+                icon={<Square aria-hidden="true" size={16} />}
+              >
+                取消运行时维护后更新
+              </CapabilityGate>
+            ) : null}
+          </div>
         </Panel>
-        <Panel
-          label="HEALTH"
-          title="服务健康"
-          className="diagnostics-health-panel"
-        >
+        <Panel title="服务健康" className="diagnostics-health-panel">
           <div className="health-row">
             <span>识别服务</span>
             <Badge appearance="tint">
@@ -344,7 +335,6 @@ function UpdateSourceControl({
             : selectedSource.endpoint
               ? `（${selectedSource.endpoint}）`
               : ""}
-          ；检查与下载始终使用同一来源。
         </p>
       ) : null}
       {editorOpen && !busy ? (
@@ -387,8 +377,7 @@ function UpdateSourceControl({
             />
           </div>
           <p className="form-note">
-            保存后检查与下载都使用该来源；切换来源后需重新检查更新。地址需为
-            http/https，不能包含用户名、查询串或片段。
+            地址使用 HTTP/HTTPS，不含用户名、查询串或片段。
           </p>
           <div className="setting-row">
             <Button

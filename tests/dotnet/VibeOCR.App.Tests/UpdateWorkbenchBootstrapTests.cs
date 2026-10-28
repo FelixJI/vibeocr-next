@@ -22,6 +22,29 @@ namespace VibeOCR.App.Tests;
 public sealed class UpdateWorkbenchBootstrapTests
 {
   [Fact]
+  public async Task ShellSwitchesWorkWithoutCreatingRuntimeSettings()
+  {
+    string root = NewRoot();
+    try
+    {
+      var inference = new UnattachedInferenceClient();
+      await using HandlerFixture fixture = Create(root, inference, new SettingsViewModel(inference),
+        attached: false, settingsFactory: () => throw new InvalidOperationException("Runtime unavailable"));
+      WorkbenchCommandOutcome startup = await fixture.Handler.ExecuteAsync(
+        new SetStartupCommand(true), TestContext.Current.CancellationToken);
+      Assert.Null(startup.Error);
+      Assert.True(Assert.IsType<SettingsWorkbenchState>(Assert.Single(startup.States)).StartupEnabled);
+      WorkbenchCommandOutcome tray = await fixture.Handler.ExecuteAsync(
+        new SetMinimizeToTrayCommand(true), TestContext.Current.CancellationToken);
+      Assert.Null(tray.Error);
+      var state = Assert.IsType<SettingsWorkbenchState>(Assert.Single(tray.States));
+      Assert.True(state.StartupEnabled);
+      Assert.True(state.MinimizeToTray);
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
   public async Task BootstrapCompletesWhenAttachedCatalogRequestHangs()
   {
     string root = NewRoot();
@@ -480,7 +503,8 @@ public sealed class UpdateWorkbenchBootstrapTests
     SettingsViewModel settings,
     bool attached,
     IUpdateCoordinator? coordinator = null,
-    Func<UpdateViewModel>? updateFactory = null)
+    Func<UpdateViewModel>? updateFactory = null,
+    Func<SettingsViewModel>? settingsFactory = null)
   {
     var broker = new WorkbenchResourceBroker(root);
     var annotations = new WorkbenchAnnotationStore(root);
@@ -489,7 +513,7 @@ public sealed class UpdateWorkbenchBootstrapTests
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
       static () => throw new InvalidOperationException(),
-      () => settings,
+      settingsFactory ?? (() => settings),
       static () => new ShellViewModel(
         new NoopHotkeyRegistrar(), new NoopStartupRegistrar()),
       updateFactory ?? (() => new UpdateViewModel(coordinator ?? new StaticUpdateCoordinator(
@@ -675,6 +699,7 @@ public sealed class UpdateWorkbenchBootstrapTests
 
   private sealed class NoopStartupRegistrar : IStartupRegistrar
   {
+    public bool IsEnabled => false;
     public bool SetEnabled(bool enabled) => true;
   }
 }

@@ -10,6 +10,17 @@ namespace VibeOCR.App.Tests;
 
 public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
+  [Fact]
+  public void TrayCommandRequiresOnlyBooleanEnabled()
+  {
+    Guid session = Guid.NewGuid();
+    Assert.True(Assert.IsType<SetMinimizeToTrayCommand>(ParseForTest(
+      CommandJson(session, "settings", "setMinimizeToTray", "{\"enabled\":true}"), session).Command).Enabled);
+    foreach (string arguments in new[] { "{}", "{\"enabled\":\"true\"}", "{\"enabled\":true,\"path\":\"private\"}" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
+        CommandJson(session, "settings", "setMinimizeToTray", arguments), session));
+  }
+
   [Theory]
   [InlineData("recognition", typeof(SetTaskModelPresetCommand))]
   [InlineData("batch", typeof(SetBatchTaskModelPresetCommand))]

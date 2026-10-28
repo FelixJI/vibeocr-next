@@ -56,6 +56,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "runtime.refresh",
       "runtime.environments",
       "settings.shell",
+      "settings.tray",
       "settings.hotkeys",
       "settings.floatingToolbar",
       "settings.selection",

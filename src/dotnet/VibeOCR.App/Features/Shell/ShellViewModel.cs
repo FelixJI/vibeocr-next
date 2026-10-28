@@ -13,6 +13,9 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 {
     private bool _trayVisible = true;
     private bool _startWithSystem;
+    private bool _minimizeToTray;
+    private string _settingsError = string.Empty;
+    private readonly ShellPreferencesStore? _preferences;
     private string _registeredHotkey = "Ctrl+Alt+Q";
     private string _pendingHotkey = "Ctrl+Alt+Q";
     private string _hotkeyStatus = string.Empty;
@@ -24,6 +27,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
 
     /// <summary>Boot-at-login toggle backed by a startWithSystem persistence hook.</summary>
     public bool StartWithSystem { get => _startWithSystem; set => SetField(ref _startWithSystem, value); }
+    public bool MinimizeToTray { get => _minimizeToTray; private set => SetField(ref _minimizeToTray, value); }
+    public string SettingsError { get => _settingsError; private set => SetField(ref _settingsError, value); }
 
     public string RegisteredHotkey { get => _registeredHotkey; private set => SetField(ref _registeredHotkey, value); }
     public string PendingHotkey { get => _pendingHotkey; set => SetField(ref _pendingHotkey, value); }
@@ -43,7 +48,8 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         IStartupRegistrar startupRegistrar,
         Action? hideWindow = null,
         Action? quitApplication = null,
-        string initialHotkey = "Ctrl+Alt+Q")
+        string initialHotkey = "Ctrl+Alt+Q",
+        ShellPreferencesStore? preferences = null)
     {
         _hotkeyRegistrar = hotkeyRegistrar ?? throw new ArgumentNullException(nameof(hotkeyRegistrar));
         _startupRegistrar = startupRegistrar ?? throw new ArgumentNullException(nameof(startupRegistrar));
@@ -51,6 +57,13 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         _quitApplication = quitApplication ?? (() => { });
         _registeredHotkey = initialHotkey;
         _pendingHotkey = initialHotkey;
+        _preferences = preferences;
+        try { StartWithSystem = _startupRegistrar.IsEnabled; }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+        { SettingsError = "无法读取开机自启动状态。"; }
+        try { MinimizeToTray = preferences?.Load() ?? false; }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException or System.Text.Json.JsonException or InvalidOperationException)
+        { SettingsError = "无法读取托盘设置，原配置已保留。"; }
     }
 
     /// <summary>Register the configured shortcut without claiming a failed binding is active.</summary>
@@ -92,8 +105,25 @@ public sealed class ShellViewModel : INotifyPropertyChanged
     public void SetStartWithSystem(bool enabled)
     {
         bool ok = _startupRegistrar.SetEnabled(enabled);
-        StartWithSystem = enabled && ok;
-        if (!ok) HotkeyStatus = "开机启动设置失败";
+        if (ok) StartWithSystem = enabled;
+        SettingsError = ok ? string.Empty : "开机自启动设置失败，请检查 Windows 启动项权限。";
+    }
+
+    public void SetMinimizeToTray(bool enabled)
+    {
+        try
+        {
+            _preferences?.Save(enabled);
+            MinimizeToTray = enabled;
+            SettingsError = string.Empty;
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException or System.Text.Json.JsonException or InvalidOperationException)
+        { SettingsError = "托盘设置保存失败，原配置已保留。"; }
+    }
+
+    public void OnMinimized()
+    {
+        if (MinimizeToTray) HideToTray();
     }
 
     public void HideToTray()
@@ -124,6 +154,7 @@ public interface IHotkeyRegistrar
 
 public interface IStartupRegistrar
 {
+    bool IsEnabled { get; }
     bool SetEnabled(bool enabled);
 }
 

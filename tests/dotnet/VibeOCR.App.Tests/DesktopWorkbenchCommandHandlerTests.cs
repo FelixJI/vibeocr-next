@@ -2455,6 +2455,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
   private sealed class NoopStartupRegistrar : IStartupRegistrar
   {
+    public bool IsEnabled => false;
     public bool SetEnabled(bool enabled) => true;
   }
 
