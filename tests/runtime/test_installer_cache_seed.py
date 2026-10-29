@@ -38,12 +38,12 @@ def test_seed_rebases_only_owned_copied_file_urls(tmp_path, monkeypatch, kind):
         ]
     }
     if kind == "uv":
-        document["executor"] = "uv-0.13.4"
+        document["executor"] = "uv-0.13.6"
     report.write_text(json.dumps(document), encoding="utf-8")
     inputs = {"lock": "fixture lock", "endpoint": "https://trusted.invalid/simple/"}
     if kind == "uv":
         inputs.update(
-            ignore_installed=True, executor="uv-0.13.4", target={"version": "3.13.16"}
+            ignore_installed=True, executor="uv-0.13.6", target={"version": "3.13.16"}
         )
     input_path = report.with_suffix(".inputs.json")
     input_path.write_text(json.dumps(inputs), encoding="utf-8")

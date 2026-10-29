@@ -392,7 +392,7 @@ def test_resolve_cache_evolution_refreshes_report_but_keeps_verified_artifacts(
         == report
     )
     assert sum("compile" in command for command in commands) == 1
-    assert json.loads(report.read_text())["executor"] == "uv-0.13.4"
+    assert json.loads(report.read_text())["executor"] == "uv-0.13.6"
     installer._resolve_online_report(
         Path(sys._base_executable), lock, endpoint, tmp_path, None, dict(os.environ)
     )

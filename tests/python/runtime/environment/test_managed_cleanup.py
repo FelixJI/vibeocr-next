@@ -223,7 +223,7 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
             inputs_path = report.with_suffix(".inputs.json")
             inputs = json.loads(inputs_path.read_text())
             inputs.update(
-                executor="uv-0.13.4",
+                executor="uv-0.13.6",
                 target={
                     "version": "3.13.16",
                     "platform": "win-amd64",
