@@ -66,6 +66,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "update.check",
       "update.install",
       "update.selectSource",
+      "diagnostics.refresh",
       "diagnostics.export",
       "diagnostics.copy",
     ],
@@ -145,7 +146,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     Batch = new WorkbenchBatchOwner(batchFactory, windowHandle, Settings, Resources, Selection, operations);
     Pdf = new WorkbenchPdfOwner(confirmPdfClose, flushPdfPreview, optionsLayout, pdfFactory, pickPdfFolder, pickPdfSavePath, windowHandle, Settings, Resources, Selection, operations);
     QrCode = new WorkbenchQrCodeOwner(annotatedImagePlatform, qrCodeFactory, windowHandle, Resources, operations);
-    System = new WorkbenchSystemOwner(diagnostics, resourceRoot, shell, structuredClipboard, updateFactory, operations);
+    System = new WorkbenchSystemOwner(diagnostics, resourceRoot, shell, structuredClipboard, updateFactory, operations, ct => Settings.EnsureModel().ReadWorkerResidencyAsync(ct));
     diagnostics.PropertyChanged += System.OnDiagnosticsPropertyChanged;
     if (shellActions is not null) shellActions.ToolbarStateChanged += Settings.OnToolbarStateChanged;
 

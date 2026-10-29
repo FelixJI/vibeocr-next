@@ -4386,6 +4386,10 @@
           "worker": {
             "type": "object",
             "additionalProperties": true
+          },
+          "models_prepared": {
+            "type": "boolean",
+            "description": "Independent local model-cache observation; remains true after the worker exits. Omission means not checked."
           }
         },
         "additionalProperties": false

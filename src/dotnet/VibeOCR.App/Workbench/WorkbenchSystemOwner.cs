@@ -7,7 +7,7 @@ using Windows.System;
 
 namespace VibeOCR.App.Workbench;
 
-internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics, string resourceRoot, RecoverableLazy<ShellViewModel> shell, IStructuredClipboardPlatform structuredClipboard, Func<UpdateViewModel> updateFactory, WorkbenchOperations operations)
+internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsViewModel diagnostics, string resourceRoot, RecoverableLazy<ShellViewModel> shell, IStructuredClipboardPlatform structuredClipboard, Func<UpdateViewModel> updateFactory, WorkbenchOperations operations, Func<CancellationToken, Task<VibeOCR.Contracts.HttpV2.ResidencyStatus>> readWorkers)
 {
   private readonly object updateGate = new();
   private UpdateViewModel? updateModel;
@@ -31,7 +31,7 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
       }
     }
   }
-  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or CancelRuntimeForUpdateCommand or SetUpdateSourceCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand;
+  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or CancelRuntimeForUpdateCommand or SetUpdateSourceCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand or RefreshDiagnosticsCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -41,6 +41,7 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
     CancelUpdateCommand => CancelUpdate(),
     CancelRuntimeForUpdateCommand => await CancelRuntimeForUpdateAsync(cancellationToken),
     SetUpdateSourceCommand setSource => SetUpdateSource(setSource),
+    RefreshDiagnosticsCommand => await RefreshDiagnosticsAsync(cancellationToken),
     ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
     CopyDiagnosticsCommand => await CopyDiagnosticsAsync(cancellationToken),
     _ => throw new InvalidOperationException("Unsupported System workbench command."),
@@ -51,7 +52,8 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
   {
     if (!operations.IsDisposed &&
       args.PropertyName is nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.SupervisorStatus)
-        or nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.DeviceEvidence))
+        or nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.DeviceEvidence)
+        or nameof(VibeOCR.App.ViewModels.DiagnosticsViewModel.Workers))
     {
       operations.Publish(DiagnosticsState());
     }
@@ -193,6 +195,7 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
   private async Task<DiagnosticsWorkbenchState> ExportDiagnosticsAsync(
     CancellationToken cancellationToken)
   {
+    await diagnostics.RefreshWorkersAsync(readWorkers, cancellationToken);
     string destination = Path.Combine(
       Path.GetDirectoryName(resourceRoot) ?? resourceRoot,
       $"vibeocr-diagnostics-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.json");
@@ -207,9 +210,16 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
   private async Task<DiagnosticsWorkbenchState> CopyDiagnosticsAsync(
     CancellationToken cancellationToken)
   {
+    await diagnostics.RefreshWorkersAsync(readWorkers, cancellationToken);
     await structuredClipboard.WriteTextAsync(
       diagnostics.BuildRedactedExportJson(),
       cancellationToken);
+    return DiagnosticsState();
+  }
+
+  private async Task<DiagnosticsWorkbenchState> RefreshDiagnosticsAsync(CancellationToken cancellationToken)
+  {
+    await diagnostics.RefreshWorkersAsync(readWorkers, cancellationToken);
     return DiagnosticsState();
   }
 
@@ -264,7 +274,7 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
       .OrderBy(milestone => milestone.Name)
       .Select(milestone => milestone.Name)
       .ToArray(),
-    diagnostics.DeviceEvidence);
+    diagnostics.DeviceEvidence, diagnostics.Workers);
 
   internal void Stop()
   {

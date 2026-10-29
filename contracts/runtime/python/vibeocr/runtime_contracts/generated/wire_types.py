@@ -529,6 +529,7 @@ class ResidencyEntry(TypedDict, total=False):
     estimated_vram_mb: Required[int | None]
     eviction_reason: Required[Literal['none', 'ttl_expired', 'vram_pressure', 'explicit_release', 'supervisor_shutdown']]
     worker: NotRequired[dict[str, Any]]
+    models_prepared: NotRequired[bool]
 
 
 class ResidencyStatus(TypedDict, total=False):

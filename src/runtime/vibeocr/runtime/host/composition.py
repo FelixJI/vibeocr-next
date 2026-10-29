@@ -279,7 +279,7 @@ class _MinerUServiceLifecycle:
             if self._closed:
                 raise RuntimeError("MinerU owner is closed")
             cancel = self._startup_cancel
-        MinerUService._startup_cancel = cancel
+        MinerUService.bind_owner(cancel)
         service = MinerUService()
         service._ensure_api_running()  # Singleton reuse must also restart after idle exit.
 
@@ -292,7 +292,7 @@ class _MinerUServiceLifecycle:
         from vibeocr.runtime.recognition.mineru_service import MinerUService
 
         # Bypass lazy construction: stopping owned resources cannot start a server.
-        MinerUService.shutdown_owned()
+        MinerUService.shutdown_owned(owner=self._startup_cancel)
 
 
 def _build_mineru_executor(*, scheduler: Any = None) -> Executor:

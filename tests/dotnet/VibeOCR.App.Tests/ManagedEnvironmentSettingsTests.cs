@@ -234,12 +234,20 @@ public sealed class ManagedEnvironmentSettingsTests
       }] }, status);
     Assert.Equal("not_checked", evicted.ModelState);
 
+    ManagedEnvironment runningWithoutDiskFact = ManagedEnvironmentSettings.ProjectRunning(environment, health,
+      new ResidencyStatus { Entries = [new ResidencyEntry
+      {
+        Pipeline = "PaddleOCR", Kind = ResidencyKind.Idle,
+        ResourceId = "paddle", ResourceKind = RecognitionResourceKind.Process,
+      }] }, status);
+    Assert.Equal("not_checked", runningWithoutDiskFact.ModelState);
+
     ManagedEnvironment ready = ManagedEnvironmentSettings.ProjectRunning(environment, health,
       new ResidencyStatus { Entries = [new ResidencyEntry
       {
-        Pipeline = "OCR", Kind = ResidencyKind.SoftTtl,
-        RecognitionMode = RecognitionMode.PaddleText,
-        ResourceKind = RecognitionResourceKind.Model,
+        Pipeline = "PaddleOCR", Kind = ResidencyKind.Evicted,
+        ResourceId = "paddle", ModelsPrepared = true,
+        ResourceKind = RecognitionResourceKind.Process,
       }] },
       status);
     Assert.Equal("ready", ready.ModelState);

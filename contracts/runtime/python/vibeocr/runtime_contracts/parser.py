@@ -933,6 +933,8 @@ def parse_residency_entry(payload: dict[str, Any]) -> ResidencyEntry:
             raw_resource_kind,
             "recognition resource kind",
         )
+    if "models_prepared" in payload and type(payload["models_prepared"]) is not bool:
+        raise ContractError("models_prepared must be a boolean when present")
     return ResidencyEntry(
         pipeline=payload["pipeline"],
         kind=kind,
@@ -944,6 +946,7 @@ def parse_residency_entry(payload: dict[str, Any]) -> ResidencyEntry:
         estimated_vram_mb=payload.get("estimated_vram_mb"),
         eviction_reason=reason,
         worker=payload.get("worker"),
+        models_prepared=payload.get("models_prepared"),
     )
 
 

@@ -152,6 +152,17 @@ class CompositeExecutor:
             child.executor.preload(pipelines)
         return self.residency_status()
 
+    def configure_recovered_settings(
+        self, snapshot: SettingsSnapshot, *, connection_valid: bool
+    ) -> ResidencyStatus:
+        for child in self._children:
+            recover = getattr(child.executor, "configure_recovered_settings", None)
+            if callable(recover):
+                recover(snapshot, connection_valid=connection_valid)
+            else:
+                child.executor.configure_settings(snapshot)
+        return self.residency_status()
+
     def configure_settings(self, snapshot: SettingsSnapshot) -> ResidencyStatus:
         for child in self._children:
             child.executor.configure_settings(snapshot)

@@ -4014,6 +4014,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                'pinned',
                                                                                                'idle',
                                                                                                'evicted']},
+                                                                             'models_prepared': {'description': 'Independent '
+                                                                                                                'local '
+                                                                                                                'model-cache '
+                                                                                                                'observation; '
+                                                                                                                'remains '
+                                                                                                                'true '
+                                                                                                                'after '
+                                                                                                                'the '
+                                                                                                                'worker '
+                                                                                                                'exits. '
+                                                                                                                'Omission '
+                                                                                                                'means '
+                                                                                                                'not '
+                                                                                                                'checked.',
+                                                                                                 'type': 'boolean'},
                                                                              'pipeline': {'type': 'string'},
                                                                              'recognition_mode': {'description': 'Stable '
                                                                                                                  'user-semantic '
@@ -7234,6 +7249,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                           'pinned',
                                                                                           'idle',
                                                                                           'evicted']},
+                                                                        'models_prepared': {'description': 'Independent '
+                                                                                                           'local '
+                                                                                                           'model-cache '
+                                                                                                           'observation; '
+                                                                                                           'remains '
+                                                                                                           'true '
+                                                                                                           'after '
+                                                                                                           'the '
+                                                                                                           'worker '
+                                                                                                           'exits. '
+                                                                                                           'Omission '
+                                                                                                           'means '
+                                                                                                           'not '
+                                                                                                           'checked.',
+                                                                                            'type': 'boolean'},
                                                                         'pipeline': {'type': 'string'},
                                                                         'recognition_mode': {'description': 'Stable '
                                                                                                             'user-semantic '
@@ -7987,6 +8017,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                           'pinned',
                                                                                           'idle',
                                                                                           'evicted']},
+                                                                        'models_prepared': {'description': 'Independent '
+                                                                                                           'local '
+                                                                                                           'model-cache '
+                                                                                                           'observation; '
+                                                                                                           'remains '
+                                                                                                           'true '
+                                                                                                           'after '
+                                                                                                           'the '
+                                                                                                           'worker '
+                                                                                                           'exits. '
+                                                                                                           'Omission '
+                                                                                                           'means '
+                                                                                                           'not '
+                                                                                                           'checked.',
+                                                                                            'type': 'boolean'},
                                                                         'pipeline': {'type': 'string'},
                                                                         'recognition_mode': {'description': 'Stable '
                                                                                                             'user-semantic '

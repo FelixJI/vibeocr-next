@@ -1,5 +1,6 @@
 using System.Text.Json;
 using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Features.Settings;
 using VibeOCR.App.ViewModels;
 using VibeOCR.App.Web;
 using VibeOCR.App.Workbench;
@@ -10,6 +11,55 @@ namespace VibeOCR.App.Tests;
 
 public sealed class DiagnosticsViewModelTests
 {
+  private sealed class WorkerDiagnosticsClient : InferenceClientStub
+  {
+    public override Task<VibeOCR.Contracts.HttpV2.ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
+      Task.FromResult(new VibeOCR.Contracts.HttpV2.ResidencyStatus
+      {
+        Entries = [new VibeOCR.Contracts.HttpV2.ResidencyEntry
+        {
+          Pipeline = "PaddleOCR", Kind = VibeOCR.Contracts.HttpV2.ResidencyKind.Evicted,
+          Worker = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""
+            {"owner":"PaddleOCR","generation":2,"state":"idle_stopped","idle_seconds":600,"active_leases":0}
+            """),
+        }],
+      });
+  }
+
+  [Fact]
+  public async Task WorkerSnapshotFeedsDiagnosticStateCopyAndExportWithWhitelistAndRedaction()
+  {
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-1", 2, null));
+    var worker = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""
+      {"owner":"PaddleOCR","generation":7,"state":"stop_failed","reason":"idle_timeout",
+       "idle_seconds":600,"remaining_seconds":0,"active_leases":0,"elapsed_seconds":1.25,
+       "error":"api_key=synthetic-secret","api_key":"must-not-export","url":"https://secret.invalid"}
+      """)!;
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(new VibeOCR.Contracts.HttpV2.ResidencyStatus
+    {
+      Entries = [new VibeOCR.Contracts.HttpV2.ResidencyEntry { Pipeline = "PaddleOCR",
+        Kind = VibeOCR.Contracts.HttpV2.ResidencyKind.Evicted, Worker = worker }],
+    }), TestContext.Current.CancellationToken);
+    Assert.Equal("stop_failed", Assert.Single(viewModel.Workers).State);
+    Assert.Equal(7, viewModel.Workers[0].Generation);
+    string copied = viewModel.BuildRedactedExportJson();
+    Assert.Contains("PaddleOCR", copied);
+    Assert.Contains("<redacted>", copied);
+    Assert.DoesNotContain("synthetic-secret", copied);
+    Assert.DoesNotContain("must-not-export", copied);
+    Assert.DoesNotContain("secret.invalid", copied);
+    string path = Path.Combine(Path.GetTempPath(), $"worker-diagnostics-{Guid.NewGuid():N}.json");
+    try
+    {
+      await viewModel.ExportAsync(path, TestContext.Current.CancellationToken);
+      Assert.Equal(copied, await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken));
+    }
+    finally { File.Delete(path); }
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-2", 2, null));
+    Assert.Empty(viewModel.Workers);
+  }
+
   [Fact]
   public void MilestoneRecordingAndSnapshotReadsAreThreadSafe()
   {
@@ -379,7 +429,7 @@ public sealed class DiagnosticsViewModelTests
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
+        () => new SettingsViewModel(new WorkerDiagnosticsClient()),
         static () => throw new InvalidOperationException(),
         static () => throw new InvalidOperationException(),
         diagnostics,
@@ -396,6 +446,8 @@ public sealed class DiagnosticsViewModelTests
       // 复制复用导出的同一脱敏文档：剪贴板文本与导出文件一致，且不泄漏密钥或本地路径。
       Assert.Null(outcome.Error);
       Assert.NotNull(clipboard.Text);
+      Assert.Contains("PaddleOCR", clipboard.Text);
+      Assert.Equal("idle_stopped", Assert.Single(diagnostics.Workers).State);
       string destination = Path.Combine(root, "diagnostics.json");
       await diagnostics.ExportAsync(destination, TestContext.Current.CancellationToken);
       Assert.Equal(

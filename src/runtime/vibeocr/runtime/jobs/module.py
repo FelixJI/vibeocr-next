@@ -197,22 +197,27 @@ class SupervisorModule:
         self._shutdown = False
         self._settings_store = settings_store
         default_settings = SettingsSnapshot(default_ttl_seconds=300, pipelines=())
+        recovery_connection_valid: bool | None = None
         try:
             self._settings = (
                 settings_store.load(default_settings)
                 if settings_store is not None
                 else default_settings
             )
-        except RuntimeSettingsStoreError:
+        except RuntimeSettingsStoreError as settings_error:
             # Invalid lifecycle preferences must not block unrelated basic tools.
             # The store preserves and refuses to overwrite the original file.
             logging.getLogger(__name__).warning(
                 "Worker settings could not be loaded; original file preserved"
             )
+            recovery_connection_valid = settings_error.connection_valid
+            recovered = settings_error.recovered or default_settings
             self._settings = replace(
-                default_settings,
+                recovered,
                 extra={
-                    "worker_settings_error": "旧资源设置无法迁移；原文件已保留，请修复配置后重启。"
+                    **recovered.extra,
+                    "worker_mineru_connection_unavailable": not settings_error.connection_valid,
+                    "worker_settings_error": "旧资源设置无法迁移；原文件已保留，请修复配置后重启。",
                 },
             )
         if self._settings.download_source_ids:
@@ -227,7 +232,12 @@ class SupervisorModule:
         )
         self._preload_count = 0
         configure = getattr(self._executor, "configure_settings", None)
-        if callable(configure):
+        recover = getattr(self._executor, "configure_recovered_settings", None)
+        if recovery_connection_valid is not None and callable(recover):
+            status = recover(self._settings, connection_valid=recovery_connection_valid)
+            if isinstance(status, ResidencyStatus):
+                self._residency_snapshot = status
+        elif callable(configure):
             status = configure(self._settings)
             if isinstance(status, ResidencyStatus):
                 self._residency_snapshot = status

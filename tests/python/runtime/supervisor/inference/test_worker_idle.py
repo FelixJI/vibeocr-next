@@ -652,6 +652,10 @@ def test_mineru_startup_close_cancels_its_generation_and_reaps_owned_process(
         process = None
         guard = None
 
+        @classmethod
+        def bind_owner(cls, owner):
+            cls._startup_cancel = owner
+
         def _ensure_api_running(self):
             cls = type(self)
             cls.process = subprocess.Popen(
@@ -667,7 +671,7 @@ def test_mineru_startup_close_cancels_its_generation_and_reaps_owned_process(
             raise MineruCancelled("MinerU startup canceled")
 
         @classmethod
-        def shutdown_owned(cls):
+        def shutdown_owned(cls, **_kwargs):
             if cls.process is None:
                 return
             cls.guard.terminate_and_wait(timeout=2)
@@ -715,3 +719,135 @@ def test_migration_keeps_an_earlier_backup_and_backs_up_a_changed_legacy_file(tm
     assert backup.read_text(encoding="utf-8") == "earlier backup remains untouched"
     newer = list(tmp_path.glob("settings.json.worker-idle.*.bak"))
     assert len(newer) == 1 and newer[0].read_bytes() == original
+
+
+def test_mineru_close_reaps_owned_tree_while_parse_holds_request_lock(monkeypatch):
+    from types import SimpleNamespace
+
+    from vibeocr.runtime.host.composition import _MinerUServiceLifecycle
+    from vibeocr.runtime.processes.utils.job_object import (
+        CREATE_SUSPENDED,
+        JobObjectGuard,
+    )
+    from vibeocr.runtime.recognition import mineru_service as module
+    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
+    from vibeocr.runtime.recognition.mineru_api import MineruCancelled
+
+    cls = module.MinerUService
+    owner = threading.Event()
+    for key, value in {
+        "_startup_cancel": owner,
+        "_api_owner": owner,
+        "_prepare_process": None,
+        "_prepare_guard": None,
+        "_prepare_owner": None,
+        "_api_url": "http://127.0.0.1:1",
+        "_server_tier": "basic",
+        "_log_reader": None,
+    }.items():
+        monkeypatch.setattr(cls, key, value)
+    root = subprocess.Popen(
+        [
+            sys._base_executable,
+            "-c",
+            "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);print('ready',flush=True);time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        creationflags=CREATE_SUSPENDED if os.name == "nt" else 0,
+    )
+    guard = JobObjectGuard(allow_breakaway=False)
+    if os.name == "nt":
+        assert guard.assign_from_popen(root, suspended=True)
+    assert root.stdout.readline().strip() == b"ready"
+    monkeypatch.setattr(cls, "_api_process", root)
+    monkeypatch.setattr(cls, "_job_guard", guard)
+    monkeypatch.setattr(
+        module, "current_connection", lambda: SimpleNamespace(mode="local")
+    )
+    entered, release, errors = threading.Event(), threading.Event(), []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parse(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return {}
+
+    monkeypatch.setattr(module, "MineruApiClient", Client)
+    service = object.__new__(cls)
+    monkeypatch.setattr(service, "_prepare_cached_models", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_ensure_api_running", lambda **kwargs: None)
+    lifecycle = _MinerUServiceLifecycle()
+    lifecycle._startup_cancel = owner
+    adapter = MinerUProcessAdapter(client_factory=lambda: service, lifecycle=lifecycle)
+    adapter._process_started = True
+    adapter._idle.starting()
+    adapter._idle.started()
+
+    def parse():
+        try:
+            service._call_api(b"synthetic", "input.pdf")
+        except Exception as exc:
+            errors.append(exc)
+
+    parser = threading.Thread(target=parse)
+    closer = threading.Thread(target=adapter.close)
+    try:
+        parser.start()
+        assert entered.wait(2)
+        closer.start()
+        closer.join(3)
+        assert not closer.is_alive(), "close waited for the long parse lock"
+        assert root.poll() is not None and owner.is_set()
+        assert parser.is_alive(), "barrier must still hold the native request"
+        release.set()
+        parser.join(2)
+        assert len(errors) == 1 and isinstance(errors[0], MineruCancelled)
+        # A late cleanup from the closed lifecycle cannot touch the next lifecycle.
+        newer = threading.Event()
+        cls.bind_owner(newer)
+        replacement = subprocess.Popen(
+            [sys._base_executable, "-c", "import time;time.sleep(60)"]
+        )
+        cls._api_process, cls._api_owner = replacement, newer
+        try:
+            cls.shutdown_owned(owner=owner)
+            assert cls._api_process is replacement and replacement.poll() is None
+            cls._stop_preparation(process=root)
+            assert cls._api_process is replacement
+        finally:
+            cls.shutdown_owned(owner=newer)
+    finally:
+        release.set()
+        parser.join(3)
+        if closer.ident:
+            closer.join(3)
+        if root.poll() is None:
+            guard.terminate_and_wait(timeout=2)
+            root.terminate()
+        root.wait(timeout=3)
+        root.stdout.close()
+
+
+def test_remote_service_constructor_ignores_closed_local_generation(monkeypatch):
+    from types import SimpleNamespace
+
+    from vibeocr.runtime.recognition import mineru_service as module
+
+    owner = threading.Event()
+    owner.set()
+    monkeypatch.setattr(module.MinerUService, "_startup_cancel", owner)
+    monkeypatch.setattr(module.MinerUService, "_initialized", False)
+    monkeypatch.setattr(
+        module, "current_connection", lambda: SimpleNamespace(mode="remote")
+    )
+    service = object.__new__(module.MinerUService)
+    monkeypatch.setattr(
+        service,
+        "_ensure_api_running",
+        lambda: pytest.fail("remote spawned local worker"),
+    )
+    service.__init__()
+    assert owner.is_set() and not module.MinerUService._initialized

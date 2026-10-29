@@ -229,6 +229,8 @@ public sealed record ResidencyEntry
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IDictionary<string, JsonElement>? Worker { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ModelsPrepared { get; init; }
     public required string Pipeline { get; init; }
     public required ResidencyKind Kind { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

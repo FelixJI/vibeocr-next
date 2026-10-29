@@ -693,6 +693,7 @@ def test_mineru_lifecycle_start_invokes_singleton(
         calls.append("constructor")
         or types.SimpleNamespace(_ensure_api_running=lambda: calls.append("ensure"))
     )
+    fake_module.MinerUService.bind_owner = lambda owner: None
     monkeypatch.setitem(
         sys.modules, "vibeocr.runtime.recognition.mineru_service", fake_module
     )
@@ -708,7 +709,7 @@ def test_mineru_lifecycle_stop_invokes_shutdown(
 
     class _Svc:
         @classmethod
-        def shutdown_owned(cls):  # type: ignore[no-untyped-def]
+        def shutdown_owned(cls, **_kwargs):  # type: ignore[no-untyped-def]
             calls.append("shutdown")
 
     fake_module = types.ModuleType("vibeocr.runtime.recognition.mineru_service")
@@ -726,7 +727,7 @@ def test_mineru_lifecycle_stop_swallows_shutdown_error(
 ) -> None:
     class _BrokenSvc:
         @classmethod
-        def shutdown_owned(cls):  # type: ignore[no-untyped-def]
+        def shutdown_owned(cls, **_kwargs):  # type: ignore[no-untyped-def]
             raise RuntimeError("wedged")
 
     fake_module = types.ModuleType("vibeocr.runtime.recognition.mineru_service")

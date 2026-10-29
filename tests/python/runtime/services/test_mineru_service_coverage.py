@@ -72,18 +72,19 @@ class TestResetAndInit:
         MinerUService._api_url = ""
         MinerUService._job_guard = None
 
-    def test_reset_kills_terminated_process(self):
-        """_reset 对未在超时内退出的进程调用 kill（lines 76-85）。"""
+    def test_reset_retains_unconfirmed_process_on_stop_failure(self):
+        """Windows terminate is kill; failure must retain ownership for diagnosis."""
         mock_proc = MagicMock()
-        # terminate 后 wait 超时
+        mock_proc.poll.return_value = None
         mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=10)
         MinerUService._api_process = mock_proc
 
-        MinerUService._reset()
+        with pytest.raises(subprocess.TimeoutExpired):
+            MinerUService._reset()
 
         mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
-        assert MinerUService._api_process is None
+        mock_proc.kill.assert_not_called()
+        assert MinerUService._api_process is mock_proc
         assert MinerUService._initialized is False
 
     def test_reset_no_process_noop(self):

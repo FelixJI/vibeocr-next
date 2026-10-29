@@ -13,7 +13,18 @@ from vibeocr.runtime_contracts import SettingsSnapshot, parse_pipeline_spec
 
 
 class RuntimeSettingsStoreError(RuntimeError):
-    """Raised when persisted supervisor settings cannot be read or replaced."""
+    """Failure retains independently validated non-lifecycle preferences for startup."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        recovered: SettingsSnapshot | None = None,
+        connection_valid: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.recovered = recovered
+        self.connection_valid = connection_valid
 
 
 class RuntimeSettings(Protocol):
@@ -189,7 +200,45 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             download_source_ids=tuple(source_ids),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeSettingsStoreError("invalid supervisor settings payload") from exc
+        recovered, connection_valid = _recover_non_lifecycle(payload)
+        raise RuntimeSettingsStoreError(
+            "invalid supervisor settings payload",
+            recovered=recovered,
+            connection_valid=connection_valid,
+        ) from exc
+
+
+def _recover_non_lifecycle(
+    payload: dict[str, Any],
+) -> tuple[SettingsSnapshot | None, bool]:
+    if payload.get("schema_version") not in (1, 2):
+        return None, False
+    extra = payload.get("extra")
+    if not isinstance(extra, dict):
+        return None, False
+    from vibeocr.runtime.environments.runtime_selection import (
+        RuntimeSelectionError,
+        normalize_download_source_ids,
+    )
+    from vibeocr.runtime.recognition.mineru_config import MineruConfigError
+    from vibeocr.runtime.recognition.mineru_readiness import connection_from_extra
+
+    try:
+        connection_from_extra(extra)
+        connection_valid = True
+    except MineruConfigError:
+        connection_valid = False
+    try:
+        sources = (
+            normalize_download_source_ids(payload.get("download_source_ids"))
+            if payload.get("download_source_ids")
+            else ()
+        )
+    except (RuntimeSelectionError, TypeError, ValueError):
+        sources = ()
+    return SettingsSnapshot(
+        extra=dict(extra), download_source_ids=tuple(sources)
+    ), connection_valid
 
 
 def _worker_timeout(residency: dict[str, Any], owner: str) -> int:

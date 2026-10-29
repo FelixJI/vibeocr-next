@@ -815,6 +815,8 @@ public sealed record ExportDiagnosticsCommand : WorkbenchCommand;
 /// </summary>
 public sealed record CopyDiagnosticsCommand : WorkbenchCommand;
 
+public sealed record RefreshDiagnosticsCommand : WorkbenchCommand;
+
 public enum WorkbenchTheme
 {
   System,
@@ -1404,7 +1406,8 @@ public sealed record DiagnosticsWorkbenchState(
   string ProtocolStatus,
   bool IsReady,
   IReadOnlyList<string> Milestones,
-  IReadOnlyList<string>? DeviceEvidence = null) : WorkbenchState
+  IReadOnlyList<string>? DeviceEvidence = null,
+  IReadOnlyList<VibeOCR.App.ViewModels.WorkerDiagnosticState>? Workers = null) : WorkbenchState
 {
   public override string Scope => "diagnostics";
 }

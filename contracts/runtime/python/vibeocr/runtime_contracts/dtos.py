@@ -703,6 +703,7 @@ class ResidencyEntry:
     estimated_vram_mb: int | None = None
     eviction_reason: EvictionReason = EvictionReason.NONE
     worker: dict[str, Any] | None = None
+    models_prepared: bool | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -713,6 +714,8 @@ class ResidencyEntry:
             "estimated_vram_mb": self.estimated_vram_mb,
             "eviction_reason": self.eviction_reason.value,
         }
+        if self.models_prepared is not None:
+            payload["models_prepared"] = self.models_prepared
         if self.worker is not None:
             payload["worker"] = self.worker
         if self.recognition_mode is not None:

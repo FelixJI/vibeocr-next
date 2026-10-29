@@ -346,7 +346,7 @@ def test_recognize_many_forwards_pipeline_selection_options() -> None:
     assert results[0]["markdown"] == "md"
     assert len(fake.calls) == 1
     assert fake.calls[0]["options"] is config
-    assert fake.calls[0]["cancelled"] is cancelled
+    assert fake.calls[0]["cancelled"]() is False
     adapter.close()
 
 

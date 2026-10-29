@@ -123,6 +123,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 productMaintenance, stopService, restoreService, operationStorePath);
     }
 
+    public Task<ResidencyStatus> ReadWorkerResidencyAsync(CancellationToken cancellationToken) =>
+        _inference.GetResidencyAsync(cancellationToken);
+
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<string> PreloadPipelines { get; } = [];
     public ObservableCollection<ResidencyEntry> ResidencyEntries { get; } = [];

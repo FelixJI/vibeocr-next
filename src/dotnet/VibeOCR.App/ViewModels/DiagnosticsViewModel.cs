@@ -4,6 +4,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.Contracts.HttpV2;
 
 namespace VibeOCR.App.ViewModels;
 
@@ -21,6 +22,11 @@ public sealed record SupervisorHealth(
     string? InstanceId,
     int? ProtocolVersion,
     string? Detail);
+
+public sealed record WorkerDiagnosticState(
+    string Owner, long Generation, string State, string? Reason,
+    int IdleSeconds, double? RemainingSeconds, int ActiveLeases,
+    string? Error, double? ElapsedSeconds);
 
 public sealed record StartupMilestone(string Name, double ElapsedMilliseconds);
 
@@ -96,6 +102,52 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     /// </summary>
     public IReadOnlyList<string> DeviceEvidence =>
         SelectDeviceEvidence(_supervisor, _deviceEvidence);
+
+    private IReadOnlyList<WorkerDiagnosticState> _workers = [];
+    private string? _workersInstance;
+    public IReadOnlyList<WorkerDiagnosticState> Workers =>
+        !string.IsNullOrEmpty(_workersInstance) && _workersInstance == _supervisor.InstanceId ? _workers : [];
+
+    public async Task RefreshWorkersAsync(
+        Func<CancellationToken, Task<ResidencyStatus>> read,
+        CancellationToken cancellationToken)
+    {
+        string? instance = _supervisor.InstanceId;
+        IReadOnlyList<WorkerDiagnosticState> workers = [];
+        try
+        {
+            ResidencyStatus snapshot = await read(cancellationToken);
+            workers = snapshot.Entries.Select(entry => entry.Worker)
+                .Where(worker => worker is not null)
+                .Select(worker => SelectWorker(worker!))
+                .OfType<WorkerDiagnosticState>().DistinctBy(worker => worker.Owner)
+                .Take(2).ToArray();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { /* Read-only diagnostics remain available when Runtime is disconnected. */ }
+        if (instance != _supervisor.InstanceId) return;
+        _workers = workers;
+        _workersInstance = instance;
+        OnPropertyChanged(nameof(Workers));
+    }
+
+    private static WorkerDiagnosticState? SelectWorker(IDictionary<string, JsonElement> worker)
+    {
+        string? Text(string key) => worker.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
+        double? Number(string key) => worker.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double number)
+            && double.IsFinite(number) && number >= 0 ? number : null;
+        long Whole(string key) => worker.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt64(out long number) && number >= 0 ? number : 0;
+        string? owner = Text("owner");
+        string? state = Text("state");
+        if (owner is not ("PaddleOCR" or "MinerU") || state is not
+            ("not_started" or "starting" or "busy" or "idle" or "stopping" or "idle_stopped" or "stop_failed" or "remote")) return null;
+        string? Safe(string key) { string? value = Redact(Text(key)); return value?.Length > 400 ? value[..400] : value; }
+        return new(owner, Whole("generation"), state, Safe("reason"),
+            (int)Math.Min(Whole("idle_seconds"), int.MaxValue), Number("remaining_seconds"),
+            (int)Math.Min(Whole("active_leases"), int.MaxValue), Safe("error"), Number("elapsed_seconds"));
+    }
 
     public string ProtocolStatus => _supervisor.ProtocolVersion is int supervisorVersion
         ? $"客户端 v{ProtocolConstants.Version} / Supervisor v{supervisorVersion}"
@@ -208,6 +260,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
                 protocol_version = health.ProtocolVersion,
                 detail = Redact(health.Detail),
             },
+            workers = Workers,
             device_evidence = new
             {
                 note = "Paddle 当前实例的设备决策日志（[Paddle worker] 设备相关行，已脱敏）；不等于作业成功的实测设备。",

@@ -802,7 +802,9 @@ class TestMinerUEnsureApiRunningNoModelProbe:
         start_called = []
         with patch.object(service, "_check_api_running", return_value=False):
             with patch.object(
-                service, "_start_api", side_effect=lambda: start_called.append(True)
+                service,
+                "_start_api",
+                side_effect=lambda **_kwargs: start_called.append(True),
             ):
                 service._ensure_api_running()
 

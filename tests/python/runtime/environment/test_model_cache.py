@@ -411,7 +411,7 @@ def test_mineru_failed_prepare_does_not_stop_previous_service(monkeypatch):
     shutdowns = []
     monkeypatch.setattr(service, "shutdown", lambda: shutdowns.append(True))
 
-    def fail(*_args):
+    def fail(*_args, **_kwargs):
         raise PermissionError("synthetic prepare denied")
 
     monkeypatch.setattr(service, "_prepare_cached_models", fail)
@@ -496,7 +496,7 @@ def test_mineru_prepare_uses_product_code_and_service_configuration(
     assert "engine: llama-cpp" in Path(env["MINERU_CONFIG"]).read_text()
     assert env.get("MINERU_MODEL_BASE_DIR") != "old-generation"
     assert module.MinerUService._model_root == str(prepared)
-    assert shutdowns == [True]
+    assert shutdowns == []
 
 
 _NATIVE_ADAPTER_CHECK = """
@@ -791,3 +791,63 @@ def test_frozen_onnx_cache_fault_preserves_previous_view_and_recovers(
         == repaired.root
     )
     assert len(attempts) == offline_attempts
+
+
+def test_paddle_disk_prepared_fact_survives_worker_exit_and_rejects_incomplete_views(
+    tmp_path, monkeypatch
+):
+    from dataclasses import asdict
+
+    source = "modelscope"
+    generation = "a" * 32
+    private = tmp_path / "onnx" / "small" / source
+    candidate = private / "revisions" / generation
+    assets = []
+    catalog = {}
+    for name in ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"):
+        listing = {
+            "revision": "fixture-revision",
+            "files": [
+                asdict(
+                    cache.ModelFile(
+                        path="model.onnx",
+                        size=4,
+                        algorithm="sha256",
+                        checksum="fixture",
+                    )
+                )
+            ],
+        }
+        catalog[name] = {"repo_id": "fixture/" + name, "sources": {source: listing}}
+        assets.append(
+            cache._asset_request(
+                cache.ModelAsset(
+                    "paddlex-onnx-3.7.2",
+                    source,
+                    "fixture/" + name,
+                    name,
+                    ("model.onnx",),
+                    listing["revision"],
+                    tuple(cache.ModelFile(**entry) for entry in listing["files"]),
+                )
+            )
+        )
+        destination = candidate / name / "model.onnx"
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"test")
+    monkeypatch.setattr(cache, "_paddle_onnx_catalog", lambda: catalog)
+    (private / "current.json").write_text(
+        json.dumps({"generation": generation, "request": {"assets": assets}})
+    )
+    assert cache.paddle_text_models_prepared(tmp_path)
+    from vibeocr.runtime.recognition.paddle_process_adapter import PaddleProcessAdapter
+
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
+    adapter = PaddleProcessAdapter(python=Path(sys.executable))
+    try:
+        entry = adapter.residency_status().entries[0]
+        assert entry.models_prepared is True and entry.worker["state"] == "not_started"
+        (candidate / "PP-OCRv6_small_rec" / "model.onnx").unlink()
+        assert adapter.residency_status().entries[0].models_prepared is False
+    finally:
+        adapter.close()

@@ -218,6 +218,7 @@ export type AppActionType =
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
   | "update.setSource"
+  | "diagnostics.refresh"
   | "diagnostics.export"
   | "diagnostics.copy";
 

@@ -1372,6 +1372,9 @@ public static class WorkbenchBridgeCodec
         return new CancelRuntimeForUpdateCommand();
       case ("update", "setSource"):
         return ParseSetUpdateSource(arguments);
+      case ("diagnostics", "refresh"):
+        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
+        return new RefreshDiagnosticsCommand();
       case ("diagnostics", "export"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new ExportDiagnosticsCommand();

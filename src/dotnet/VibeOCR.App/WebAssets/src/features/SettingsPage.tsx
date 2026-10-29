@@ -1482,6 +1482,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           </p>
         </Panel>
         <Panel title="MinerU 连接" className="settings-mineru-panel">
+          {mineru?.mode === "unavailable" ? (
+            <p role="alert">
+              连接配置无法安全恢复，MinerU
+              识别已禁用。请修复保留的设置文件后重启。
+            </p>
+          ) : null}
           <MineruConnectionEditor
             key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
             connection={mineru}

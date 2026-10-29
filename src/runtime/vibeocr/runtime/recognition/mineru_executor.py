@@ -81,6 +81,19 @@ class MinerUExecutor(AdapterExecutor):
         connection_from_extra(getattr(snapshot, "extra", None))
         super().validate_settings(snapshot)
 
+    def configure_recovered_settings(self, snapshot: Any, *, connection_valid: bool):
+        if connection_valid:
+            return self.configure_settings(snapshot)
+        from vibeocr.runtime.recognition.mineru_readiness import (
+            CONNECTION_UNAVAILABLE,
+            MineruConnection,
+            configure_connection,
+        )
+
+        configure_connection(MineruConnection(mode=CONNECTION_UNAVAILABLE))
+        self._settings = snapshot
+        return self.residency_status()
+
     def configure_settings(self, snapshot: Any):
         """连接配置在共同位置生效，即使惰性 adapter 尚未构建。
 

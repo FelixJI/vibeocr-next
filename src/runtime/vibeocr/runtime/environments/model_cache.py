@@ -568,6 +568,64 @@ def prepare_models(
         return PreparedModels(candidate, reused, None if downloaded else 0)
 
 
+def paddle_text_models_prepared(cache_home: Path) -> bool:
+    """Inspect committed local views without downloading, loading sessions or rehashing.
+
+    Preparation already validates the frozen provider checksums before publishing
+    current.json. Observation checks that exact asset metadata and file sizes remain.
+    """
+    catalog = _paddle_onnx_catalog()
+    for preset in ("tiny", "small", "medium"):
+        for source in ("huggingface", "modelscope"):
+            private = cache_home / "onnx" / preset / source
+            try:
+                current = json.loads(
+                    (private / "current.json").read_text(encoding="utf-8")
+                )
+                generation = current["generation"]
+                if not isinstance(generation, str) or not re.fullmatch(
+                    r"[0-9a-f]{32}", generation
+                ):
+                    continue
+                assets = current["request"]["assets"]
+                names = {asset["local_name"] for asset in assets}
+                if not any(
+                    name.startswith("PP-OCRv6_") and name.endswith("_det")
+                    for name in names
+                ) or not any(
+                    name.startswith("PP-OCRv6_") and name.endswith("_rec")
+                    for name in names
+                ):
+                    continue
+                candidate = private / "revisions" / generation
+                valid = True
+                for asset in assets:
+                    name = asset["local_name"]
+                    listing = catalog[name]["sources"][source]
+                    expected = [
+                        asdict(ModelFile(**entry)) for entry in listing["files"]
+                    ]
+                    if (
+                        asset["namespace"] != "paddlex-onnx-3.7.2"
+                        or asset["source"] != source
+                        or asset["repo_id"] != catalog[name]["repo_id"]
+                        or asset["revision"] != listing["revision"]
+                        or asset["files"] != expected
+                    ):
+                        valid = False
+                        break
+                    for entry in expected:
+                        path = candidate / _relative(name) / _relative(entry["path"])
+                        if not path.is_file() or path.stat().st_size != entry["size"]:
+                            valid = False
+                            break
+                if valid:
+                    return True
+            except (OSError, ValueError, KeyError, TypeError, ModelCacheError):
+                continue
+    return False
+
+
 def prepare_mineru(tier: str) -> Path:
     """Executed in the target MinerU interpreter, never in a health probe."""
     from mineru.config import config

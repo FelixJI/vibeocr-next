@@ -1482,6 +1482,9 @@ public sealed record ResidencyEntry
 
     [JsonPropertyName("worker")]
     public IReadOnlyDictionary<string, JsonElement>? Worker { get; init; }
+
+    [JsonPropertyName("models_prepared")]
+    public bool? ModelsPrepared { get; init; }
 }
 
 public sealed record ResidencyStatus

@@ -51,6 +51,12 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   const update = feature(viewState, "update");
   const milestones = stringValues(state.milestones);
   const deviceEvidence = stringValues(state.deviceEvidence);
+  const workers = Array.isArray(state.workers)
+    ? state.workers.filter(
+        (value): value is Record<string, unknown> =>
+          typeof value === "object" && value !== null,
+      )
+    : [];
   const version =
     typeof about.version === "string" ? about.version : "等待宿主同步";
   const license =
@@ -81,6 +87,15 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
       actions={
         <>
           <CapabilityGate
+            capability="diagnostics.refresh"
+            capabilities={viewState.capabilities}
+            action={{ type: "diagnostics.refresh" }}
+            actions={actions}
+            icon={<RefreshCw aria-hidden="true" size={16} />}
+          >
+            刷新工作进程
+          </CapabilityGate>
+          <CapabilityGate
             capability="diagnostics.export"
             capabilities={viewState.capabilities}
             action={{ type: "diagnostics.export" }}
@@ -103,6 +118,15 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
       }
     >
       <div className="diagnostics-grid">
+        <Panel title="工作进程空闲策略">
+          {workers.length === 0 ? (
+            <p>尚无工作进程快照，请刷新。</p>
+          ) : (
+            workers.map((worker, index) => (
+              <pre key={index}>{JSON.stringify(worker, null, 2)}</pre>
+            ))
+          )}
+        </Panel>
         <Panel title="VibeOCR Next">
           <p>Windows 本地文字识别工作台</p>
           <dl className="detail-list">

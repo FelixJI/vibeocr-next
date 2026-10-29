@@ -44,6 +44,8 @@ public static class MineruConnectionSettings
         {
             return new MineruConnectionState(false, "local", "", false);
         }
+        if (snapshot.Extra.TryGetValue("worker_mineru_connection_unavailable", out JsonElement blocked) && blocked.ValueKind == JsonValueKind.True)
+            return new MineruConnectionState(true, "unavailable", "", false);
         string mode = "local";
         string apiUrl = "";
         bool hasApiKey = false;

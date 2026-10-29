@@ -333,10 +333,15 @@ class PaddleProcessAdapter:
 
     def residency_status(self) -> ResidencyStatus:
         worker = self._idle.snapshot()
+        from vibeocr.runtime.environments.model_cache import paddle_text_models_prepared
+
+        cache_home = os.environ.get("PADDLE_PDX_CACHE_HOME")
+        prepared = paddle_text_models_prepared(Path(cache_home)) if cache_home else None
         return ResidencyStatus(
             entries=(
                 ResidencyEntry(
                     pipeline="PaddleOCR",
+                    models_prepared=prepared,
                     resource_kind=RecognitionResourceKind.PROCESS,
                     resource_id="paddle",
                     kind=ResidencyKind.IDLE

@@ -173,7 +173,14 @@ class MinerUProcessAdapter:
             current_connection,
         )
 
-        return current_connection().mode == CONNECTION_REMOTE
+        connection = current_connection()
+        if connection.mode == "unavailable":
+            from vibeocr.runtime.recognition.mineru_config import MineruConfigError
+
+            raise MineruConfigError(
+                ErrorCode.MINERU_CONFIG_UNAVAILABLE, "mineru_connection_invalid"
+            )
+        return connection.mode == CONNECTION_REMOTE
 
     def _stop_process(self) -> None:
         if self.lifecycle is not None and self._process_started:
@@ -244,7 +251,7 @@ class MinerUProcessAdapter:
                 files,
                 options=service_options,
                 backend=backend_override,
-                cancelled=cancelled,
+                cancelled=lambda: cancelled() or self._idle.closed,
             )
             payloads = self._map_results_back(raw_results, stem_to_index, len(items))
         except MineruCancelled:
@@ -315,7 +322,7 @@ class MinerUProcessAdapter:
             self.ensure_started()
             prepare = getattr(self.client_factory(), "prepare", None)
             if prepare is not None:
-                prepare()
+                prepare(cancelled=lambda: self._idle.closed)
         except Exception:
             logger.error(
                 "[Supervisor][Preload] pipeline=MinerU result=failed elapsed_ms=%.1f",
