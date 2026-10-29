@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.6
+
+### Features
+
+- **settings:** 显示环境维护与安装诊断并修复高缩放预览 (#300) (c4bbfd2)
+- **runtime:** 支持同一环境按需增减 CUDA 并独立选择设备 (#299) (36a7be8)
+
+### Bug Fixes
+
+- **app:** 统一环境准备合同并修复窗口退出崩溃 (#298) (a033be3)
+- **desktop:** 修复更新与自启动状态并补齐托盘设置 (#295) (0cfddb6)
+
+### Dependencies
+
+- **toolchain:** 更新兼容依赖并对齐安装执行器 (#302) (4683776)
+
 ## 0.8.5
 
 ### Bug Fixes
