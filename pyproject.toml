@@ -4,7 +4,7 @@ dynamic = ["version"]
 requires-python = ">=3.13,<3.14"
 # MinerU 4.0.10 requires Gradio, whose Pillow constraint is <13.
 dependencies = [
-    "pillow>=12.3.0,<13", "numpy>=2.3.5", "httpx>=0.28.1",
+    "pillow>=13.0.0,<14", "numpy>=2.3.5", "httpx>=0.28.1",
     "jsonschema>=4.25.0", "pymupdf>=1.28.0", "pydantic>=2.14.1",
     "fastapi>=0.139.0", "uvicorn>=0.51.0", "fonttools>=4.67.0",
     "markdown>=3.11.2", "python-docx>=1.2.0", "openpyxl>=3.1.5",
