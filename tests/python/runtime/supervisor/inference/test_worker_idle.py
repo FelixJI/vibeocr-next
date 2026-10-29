@@ -682,6 +682,11 @@ def test_mineru_startup_close_cancels_its_generation_and_reaps_owned_process(
 
     monkeypatch.setattr(module, "MinerUService", Service)
     lifecycle = _MinerUServiceLifecycle()
+    monkeypatch.setattr(
+        lifecycle,
+        "owns_resources",
+        lambda: Service.process is not None and Service.process.poll() is None,
+    )
     adapter = MinerUProcessAdapter(client_factory=Service, lifecycle=lifecycle)
 
     def start():
@@ -851,3 +856,114 @@ def test_remote_service_constructor_ignores_closed_local_generation(monkeypatch)
     )
     service.__init__()
     assert owner.is_set() and not module.MinerUService._initialized
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended root and Job ownership")
+@pytest.mark.parametrize("failure", ["OpenThread", "ResumeThread"])
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_mineru_resume_failure_reaps_owned_root_or_retains_retryable_ownership(
+    tmp_path, monkeypatch, failure, stop_fails
+):
+    import ctypes
+
+    from vibeocr.runtime.host.composition import _MinerUServiceLifecycle
+    from vibeocr.runtime.processes.utils import job_object
+    from vibeocr.runtime.recognition import mineru_service as module
+    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
+
+    cls = module.MinerUService
+    for name in (
+        "_api_process",
+        "_job_guard",
+        "_api_owner",
+        "_startup_cancel",
+        "_log_reader",
+        "_prepare_process",
+        "_prepare_guard",
+        "_prepare_owner",
+    ):
+        monkeypatch.setattr(cls, name, None)
+    monkeypatch.setattr(cls, "_api_url", "")
+    monkeypatch.setattr(cls, "_model_root", None)
+    service = object.__new__(cls)
+    monkeypatch.setattr(
+        service, "_resolve_python_executable", lambda: Path(sys._base_executable)
+    )
+    monkeypatch.setattr(
+        service,
+        "_local_environment",
+        lambda: {**os.environ, "MINERU_HOME": str(tmp_path)},
+    )
+    kernel = job_object._get_kernel32()
+
+    class FaultFunction:
+        def __call__(self, *_arguments):
+            ctypes.set_last_error(5)
+            return 0 if failure == "OpenThread" else 0xFFFFFFFF
+
+    fault = FaultFunction()
+
+    class KernelProxy:
+        def __getattr__(self, name):
+            return fault if name == failure else getattr(kernel, name)
+
+    monkeypatch.setattr(job_object, "_get_kernel32", lambda: KernelProxy())
+    original_popen = subprocess.Popen
+    processes = []
+
+    def spawn(_arguments, **kwargs):
+        process = original_popen(
+            [sys._base_executable, "-c", "import time;time.sleep(60)"], **kwargs
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", spawn)
+    guard = job_object.JobObjectGuard(allow_breakaway=False)
+    monkeypatch.setattr(module, "JobObjectGuard", lambda **kwargs: guard)
+    terminate = guard.terminate_and_wait
+    fail_stop = [stop_fails]
+
+    def stop_tree(timeout):
+        if fail_stop[0]:
+            raise OSError("synthetic tree termination failed")
+        terminate(timeout)
+
+    monkeypatch.setattr(guard, "terminate_and_wait", stop_tree)
+    lifecycle = _MinerUServiceLifecycle()
+
+    def start():
+        cls.bind_owner(lifecycle._startup_cancel)
+        service._start_api(owner=lifecycle._startup_cancel)
+
+    monkeypatch.setattr(lifecycle, "start", start)
+    adapter = MinerUProcessAdapter(client_factory=lambda: service, lifecycle=lifecycle)
+    try:
+        with pytest.raises(OSError):
+            adapter.ensure_started()
+        process = processes[0]
+        if stop_fails:
+            assert adapter._idle.state == "stop_failed"
+            assert adapter._process_started and cls._api_process is process
+            assert (
+                cls._api_owner is lifecycle._startup_cancel and cls._job_guard is guard
+            )
+            assert process.poll() is None
+            with pytest.raises(RuntimeError, match="ownership retained"):
+                adapter.reserve()
+            fail_stop[0] = False
+            # Resource ownership, rather than a cached started flag, controls retry.
+            adapter._process_started = False
+        else:
+            assert process.poll() is not None
+            assert cls._api_process is None and cls._job_guard is None
+        adapter.close()
+        assert process.poll() is not None and cls._api_process is None
+    finally:
+        fail_stop[0] = False
+        if processes and processes[0].poll() is None:
+            terminate(timeout=2)
+            processes[0].wait(timeout=2)
+        guard.close()
+        if processes and processes[0].stderr is not None:
+            processes[0].stderr.close()

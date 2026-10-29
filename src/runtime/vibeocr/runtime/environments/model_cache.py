@@ -588,6 +588,12 @@ def paddle_text_models_prepared(cache_home: Path) -> bool:
                 ):
                     continue
                 assets = current["request"]["assets"]
+                if not isinstance(assets, list) or any(
+                    not isinstance(asset, dict)
+                    or not isinstance(asset.get("local_name"), str)
+                    for asset in assets
+                ):
+                    continue
                 names = {asset["local_name"] for asset in assets}
                 if not any(
                     name.startswith("PP-OCRv6_") and name.endswith("_det")

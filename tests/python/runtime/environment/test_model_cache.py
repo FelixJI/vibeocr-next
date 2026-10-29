@@ -851,3 +851,19 @@ def test_paddle_disk_prepared_fact_survives_worker_exit_and_rejects_incomplete_v
         assert adapter.residency_status().entries[0].models_prepared is False
     finally:
         adapter.close()
+
+
+@pytest.mark.parametrize("invalid_name", [1, None])
+def test_paddle_disk_observation_rejects_non_string_model_names(tmp_path, invalid_name):
+    binding = tmp_path / "onnx" / "small" / "modelscope" / "current.json"
+    binding.parent.mkdir(parents=True)
+    binding.write_text(
+        json.dumps(
+            {
+                "generation": "a" * 32,
+                "request": {"assets": [{"local_name": invalid_name}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cache.paddle_text_models_prepared(tmp_path) is False

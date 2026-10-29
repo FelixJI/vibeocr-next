@@ -288,6 +288,25 @@ class _MinerUServiceLifecycle:
 
         return MinerUService._process_generation
 
+    def owns_resources(self) -> bool:
+        from vibeocr.runtime.recognition.mineru_service import MinerUService
+
+        owner = self._startup_cancel
+        with MinerUService._ownership_lock:
+            return (
+                MinerUService._api_owner is owner
+                and (
+                    MinerUService._api_process is not None
+                    or MinerUService._job_guard is not None
+                )
+            ) or (
+                MinerUService._prepare_owner is owner
+                and (
+                    MinerUService._prepare_process is not None
+                    or MinerUService._prepare_guard is not None
+                )
+            )
+
     def stop(self) -> None:
         from vibeocr.runtime.recognition.mineru_service import MinerUService
 

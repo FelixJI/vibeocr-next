@@ -85,9 +85,15 @@ class RuntimeSettingsStore:
                 if not backup.exists():
                     shutil.copy2(self.path, backup)
                 self.replace(snapshot)
-            except OSError as exc:
+            except (OSError, RuntimeSettingsStoreError) as exc:
+                # Parsing succeeded: migration I/O must not discard valid runtime preferences.
+                _, connection_valid = _recover_non_lifecycle(payload)
                 raise RuntimeSettingsStoreError(
-                    "could not back up worker settings"
+                    str(exc)
+                    if isinstance(exc, RuntimeSettingsStoreError)
+                    else "could not back up worker settings",
+                    recovered=snapshot,
+                    connection_valid=connection_valid,
                 ) from exc
         return snapshot
 

@@ -103,17 +103,30 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     public IReadOnlyList<string> DeviceEvidence =>
         SelectDeviceEvidence(_supervisor, _deviceEvidence);
 
+    private readonly object _workersGate = new();
+    private long _workerRefreshSequence;
     private IReadOnlyList<WorkerDiagnosticState> _workers = [];
     private string? _workersInstance;
-    public IReadOnlyList<WorkerDiagnosticState> Workers =>
-        !string.IsNullOrEmpty(_workersInstance) && _workersInstance == _supervisor.InstanceId ? _workers : [];
+    public IReadOnlyList<WorkerDiagnosticState> Workers => SelectWorkers(_supervisor);
+
+    private IReadOnlyList<WorkerDiagnosticState> SelectWorkers(SupervisorHealth health)
+    {
+        lock (_workersGate)
+            return !string.IsNullOrEmpty(_workersInstance) && _workersInstance == health.InstanceId ? _workers : [];
+    }
 
     public async Task RefreshWorkersAsync(
         Func<CancellationToken, Task<ResidencyStatus>> read,
         CancellationToken cancellationToken)
     {
-        string? instance = _supervisor.InstanceId;
-        IReadOnlyList<WorkerDiagnosticState> workers = [];
+        string? instance;
+        long sequence;
+        lock (_workersGate)
+        {
+            instance = _supervisor.InstanceId;
+            sequence = ++_workerRefreshSequence;
+        }
+        IReadOnlyList<WorkerDiagnosticState> workers;
         try
         {
             ResidencyStatus snapshot = await read(cancellationToken);
@@ -124,10 +137,17 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
                 .Take(2).ToArray();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception) { /* Read-only diagnostics remain available when Runtime is disconnected. */ }
-        if (instance != _supervisor.InstanceId) return;
-        _workers = workers;
-        _workersInstance = instance;
+        catch (Exception) { return; } // Keep the last known snapshot when Runtime cannot be read.
+        lock (_workersGate)
+        {
+            if (sequence != _workerRefreshSequence || instance != _supervisor.InstanceId) return;
+            IReadOnlyList<WorkerDiagnosticState> previous = _workersInstance == instance ? _workers : [];
+            // A later request can still receive an older cache; generations never regress within an instance.
+            _workers = workers.Concat(previous).GroupBy(worker => worker.Owner)
+                .Select(group => group.OrderByDescending(worker => worker.Generation).First())
+                .Take(2).ToArray();
+            _workersInstance = instance;
+        }
         OnPropertyChanged(nameof(Workers));
     }
 
@@ -160,7 +180,17 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
 
     public void UpdateSupervisor(SupervisorHealth health)
     {
-        _supervisor = health ?? throw new ArgumentNullException(nameof(health));
+        ArgumentNullException.ThrowIfNull(health);
+        lock (_workersGate)
+        {
+            if (_supervisor.InstanceId != health.InstanceId)
+            {
+                ++_workerRefreshSequence;
+                _workers = [];
+                _workersInstance = null;
+            }
+            _supervisor = health;
+        }
         OnPropertyChanged(nameof(SupervisorStatus));
         OnPropertyChanged(nameof(SupervisorInstanceId));
         OnPropertyChanged(nameof(ProtocolStatus));
@@ -260,7 +290,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
                 protocol_version = health.ProtocolVersion,
                 detail = Redact(health.Detail),
             },
-            workers = Workers,
+            workers = SelectWorkers(health),
             device_evidence = new
             {
                 note = "Paddle 当前实例的设备决策日志（[Paddle worker] 设备相关行，已脱敏）；不等于作业成功的实测设备。",

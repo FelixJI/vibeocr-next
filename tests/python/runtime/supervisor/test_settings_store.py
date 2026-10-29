@@ -239,3 +239,68 @@ def test_invalid_idle_policy_preserves_independent_remote_preferences(
     with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
         store.replace(SettingsSnapshot())
     assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("failure", ["backup", "replace"])
+def test_migration_io_failure_keeps_valid_runtime_preferences_and_original(
+    tmp_path, monkeypatch, failure
+):
+    from vibeocr.runtime.environments import settings_store as module
+    from vibeocr.runtime.recognition import mineru_readiness as readiness
+    from vibeocr.runtime.recognition.composite_executor import CompositeExecutor
+    from vibeocr.runtime.recognition.mineru_executor import MinerUExecutor
+    from vibeocr.runtime_contracts import JobKind
+
+    monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
+    extra = {
+        "theme": "dark",
+        "model_preference": {"preset": "tiny"},
+        "mineru_connection": {
+            "mode": "remote",
+            "api_url": "https://example.invalid",
+            "api_key": "synthetic-key",
+        },
+    }
+    payload = {
+        "schema_version": 1,
+        "settings": {
+            "schema_version": 2,
+            "residency": {"default_ttl_seconds": 300, "pipelines": []},
+            "extra": extra,
+            "download_source_ids": ["pypi"],
+        },
+    }
+    path = tmp_path / "settings.json"
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+
+    def fail(*args):
+        raise OSError("synthetic migration IO failure")
+
+    monkeypatch.setattr(
+        module.shutil if failure == "backup" else module.os,
+        "copy2" if failure == "backup" else "replace",
+        fail,
+    )
+    store = RuntimeSettingsStore(path)
+    executor = MinerUExecutor(
+        adapter_factory=lambda: pytest.fail("migration must not create adapter")
+    )
+    supervisor = _module(
+        tmp_path,
+        CompositeExecutor([(executor, frozenset({JobKind.MINERU_PARSE}))]),
+        store,
+    )
+    assert supervisor.settings().extra["theme"] == "dark"
+    assert supervisor.settings().extra["model_preference"] == {"preset": "tiny"}
+    assert (
+        supervisor.settings().extra["mineru_connection"] == extra["mineru_connection"]
+    )
+    assert supervisor.settings().download_source_ids == ("pypi",)
+    assert supervisor.settings().paddle_idle_seconds == 300
+    assert readiness.current_connection().mode == "remote"
+    assert readiness.current_connection().api_key == "synthetic-key"
+    with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
+        store.replace(SettingsSnapshot())
+    assert path.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.tmp"))

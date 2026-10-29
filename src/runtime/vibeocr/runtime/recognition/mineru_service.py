@@ -306,6 +306,8 @@ class MinerUService(metaclass=SingletonMeta):
                 else 0,
             )
 
+            # Publish ownership before Job assignment/resume can fail.
+            self.__class__._api_owner = cancel
             # 绑定 Windows Job Object：主进程崩溃时内核连带终止 mineru-api
             self.__class__._job_guard = JobObjectGuard(allow_breakaway=False)
             if os.name == "nt" and not self.__class__._job_guard.assign_from_popen(
@@ -316,7 +318,6 @@ class MinerUService(metaclass=SingletonMeta):
                 self.shutdown_owned()
                 raise RuntimeError("MinerU worker ownership could not be established")
 
-            self.__class__._api_owner = cancel
             self.__class__._process_generation += 1
             # 读取 mineru-api 子进程的 stderr 并转发到项目日志系统
             self._start_log_reader(self.__class__._api_process)

@@ -183,7 +183,11 @@ class MinerUProcessAdapter:
         return connection.mode == CONNECTION_REMOTE
 
     def _stop_process(self) -> None:
-        if self.lifecycle is not None and self._process_started:
+        owned = getattr(self.lifecycle, "owns_resources", None)
+        if self.lifecycle is not None and (
+            self._process_started or (callable(owned) and owned())
+        ):
+            # A lifecycle token also finds resources from an unfinished start.
             self.lifecycle.stop()
         self._process_started = False
 

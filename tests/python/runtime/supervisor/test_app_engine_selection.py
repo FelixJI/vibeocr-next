@@ -704,7 +704,9 @@ async def test_mineru_only_composition_preloads_real_service_interface(
         "vibeocr.runtime.host.composition._mineru_available", lambda: True
     )
     monkeypatch.setattr(MinerUService, "_ensure_api_running", lambda self: None)
-    monkeypatch.setattr(MinerUService, "prepare", lambda self: calls.append("prepare"))
+    monkeypatch.setattr(
+        MinerUService, "prepare", lambda self, *, cancelled: calls.append("prepare")
+    )
     monkeypatch.setattr(MinerUService, "shutdown", lambda self: None)
     module, handle = build_supervisor(
         stager_root=tmp_path / "staging",

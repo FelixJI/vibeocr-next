@@ -26,6 +26,77 @@ public sealed class DiagnosticsViewModelTests
       });
   }
 
+  private static VibeOCR.Contracts.HttpV2.ResidencyStatus WorkerStatus(long generation, string state) => new()
+  {
+    Entries = [new VibeOCR.Contracts.HttpV2.ResidencyEntry
+    {
+      Pipeline = "PaddleOCR", Kind = VibeOCR.Contracts.HttpV2.ResidencyKind.Evicted,
+      Worker = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+        JsonSerializer.Serialize(new { owner = "PaddleOCR", generation, state, idle_seconds = 600, active_leases = 0 })),
+    }],
+  };
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task OlderRefreshCompletionCannotReplaceNewWorkerOrClearItOnFailure(bool oldFails)
+  {
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-1", 2, null));
+    var older = new TaskCompletionSource<VibeOCR.Contracts.HttpV2.ResidencyStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var newer = new TaskCompletionSource<VibeOCR.Contracts.HttpV2.ResidencyStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task first = viewModel.RefreshWorkersAsync(_ => older.Task, TestContext.Current.CancellationToken);
+    Task second = viewModel.RefreshWorkersAsync(_ => newer.Task, TestContext.Current.CancellationToken);
+    newer.SetResult(WorkerStatus(2, "busy"));
+    await second;
+    if (oldFails) older.SetException(new IOException("synthetic delayed failure"));
+    else older.SetResult(WorkerStatus(1, "idle_stopped"));
+    await first;
+    Assert.Equal(2, Assert.Single(viewModel.Workers).Generation);
+    Assert.Equal("busy", viewModel.Workers[0].State);
+    Assert.Contains("busy", viewModel.BuildRedactedExportJson());
+  }
+
+  [Fact]
+  public async Task ExportWorkerSnapshotBelongsToTheCapturedSupervisorInstance()
+  {
+    DiagnosticsViewModel? current = null;
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]), deviceEvidence: () =>
+    {
+      Assert.NotNull(current);
+      current.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-2", 2, null));
+      current.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(1, "idle")),
+        TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+      return ("sup-1", (IReadOnlyList<string>)[]);
+    });
+    current = viewModel;
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-1", 2, null));
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(2, "busy")), TestContext.Current.CancellationToken);
+    using JsonDocument document = JsonDocument.Parse(viewModel.BuildRedactedExportJson());
+    Assert.Equal("sup-1", document.RootElement.GetProperty("supervisor").GetProperty("instance_id").GetString());
+    Assert.Empty(document.RootElement.GetProperty("workers").EnumerateArray());
+  }
+
+  [Fact]
+  public async Task NewerRequestWithOlderCachedGenerationCannotRegressWorkerButInstanceSwitchResetsIt()
+  {
+    var viewModel = new DiagnosticsViewModel("test", new PrerequisiteReport([]));
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-1", 2, null));
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(2, "busy")), TestContext.Current.CancellationToken);
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(1, "idle_stopped")), TestContext.Current.CancellationToken);
+    Assert.Equal(2, Assert.Single(viewModel.Workers).Generation);
+    Assert.Equal("busy", viewModel.Workers[0].State);
+    await viewModel.RefreshWorkersAsync(_ => Task.FromException<VibeOCR.Contracts.HttpV2.ResidencyStatus>(
+      new IOException("synthetic unavailable snapshot")), TestContext.Current.CancellationToken);
+    Assert.Equal(2, Assert.Single(viewModel.Workers).Generation);
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(2, "idle")), TestContext.Current.CancellationToken);
+    Assert.Equal("idle", Assert.Single(viewModel.Workers).State);
+    viewModel.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, "sup-2", 2, null));
+    Assert.Empty(viewModel.Workers);
+    await viewModel.RefreshWorkersAsync(_ => Task.FromResult(WorkerStatus(1, "idle")), TestContext.Current.CancellationToken);
+    Assert.Equal(1, Assert.Single(viewModel.Workers).Generation);
+  }
+
   [Fact]
   public async Task WorkerSnapshotFeedsDiagnosticStateCopyAndExportWithWhitelistAndRedaction()
   {
