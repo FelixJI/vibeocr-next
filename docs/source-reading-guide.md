@@ -50,14 +50,14 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 
 ## 用户环境安装执行器
 
-首启与受管理环境安装统一调用固定 **uv 0.13.4** 的 `uv pip` 接口，目标为 manifest 绑定的
+首启与受管理环境安装统一调用固定 **uv 0.13.6** 的 `uv pip` 接口，目标为 manifest 绑定的
 Windows x64 CPython 3.13；具名候选由标准 `venv --without-pip` 创建。用户无需 PATH 中的 uv、pip 或系统 Python。
 `bundled_uv.py` 在冻结 Installer 中仅定位 `_MEIPASS/uv/uv.exe` 并核实版本；源码开发入口仅使用根
 `pyproject.toml` / `uv.lock` 安装的 uv distribution，缺失或版本不符明确失败。运行时不下载/bootstrap 工具。
 
-工具来自 [Astral 官方 PyPI uv 0.13.4](https://pypi.org/project/uv/0.13.4/)，Windows wheel 来源与既有摘要
+工具来自 [Astral 官方 PyPI uv 0.13.6](https://pypi.org/project/uv/0.13.6/)，Windows wheel 来源与既有摘要
 由 `uv.lock` 记录。`build_runtime_installer.py` 将其 uv.exe 和 wheel 中的 `LICENSE-MIT` / `LICENSE-APACHE`
-一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.13.4)。
+一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.13.6)。
 Installer 以单一可执行文件随产品 `runtime/installer/` 分发一次；manifest 直接绑定其字节摘要
 （历史单成员 zip 绑定仍可读），沿用产品现有 installer / manifest 完整性链。
 
