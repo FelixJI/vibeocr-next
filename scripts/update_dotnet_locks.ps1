@@ -11,15 +11,40 @@ With -Upgrade, central package versions in Directory.Packages.props are first
 moved to the latest stable release published on nuget.org (the only configured
 source; prerelease versions are never selected), so the committed central
 versions and package locks stay updated through this single entrypoint.
+-Upgrade optionally accepts -UpgradePackages <id>[,<id>...] to restrict that
+move to the listed centrally pinned package ids; every listed id must already
+be pinned, and unlisted packages are left untouched (including their nuget.org
+metadata lookup).
 #>
 [CmdletBinding()]
 param(
     [switch]$InternalOnly,
     [switch]$Upgrade,
-    [string[]]$Add
+    [string[]]$Add,
+    [string[]]$UpgradePackages
 )
 
 $ErrorActionPreference = 'Stop'
+# Validate scoped upgrade arguments before any central write or restore.
+if ($null -ne $UpgradePackages) {
+    if ($InternalOnly) {
+        throw '-UpgradePackages cannot be combined with -InternalOnly'
+    }
+    if ($Add) {
+        throw '-UpgradePackages cannot be combined with -Add'
+    }
+    if (-not $Upgrade) {
+        throw '-UpgradePackages requires -Upgrade'
+    }
+    # -File invocation flattens arrays; accept ';' or ',' separated ids too.
+    $UpgradePackages = @($UpgradePackages |
+        ForEach-Object { $_ -split '[;,]' } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ })
+    if ($UpgradePackages.Count -eq 0) {
+        throw '-UpgradePackages was provided but contained no package id'
+    }
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $dotnet = if ($env:DOTNET_ROOT) {
     Join-Path $env:DOTNET_ROOT 'dotnet.exe'
@@ -51,13 +76,30 @@ if ($InternalOnly) {
 }
 
 function Update-CentralPackageVersions {
+    # -SelectedPackages: $null upgrades every centrally pinned package (the
+    # historical full mode); an array restricts the move to those ids only.
+    param([string[]]$SelectedPackages)
+
     $centralProps = Join-Path $repo 'Directory.Packages.props'
     $content = Get-Content -LiteralPath $centralProps -Raw
+    if ($null -ne $SelectedPackages) {
+        $knownIds = @([regex]::Matches($content,
+            '<PackageVersion Include="(?<id>[^"]+)"') |
+            ForEach-Object { $_.Groups['id'].Value })
+        $unknown = @($SelectedPackages | Where-Object { $knownIds -notcontains $_ })
+        if ($unknown.Count -gt 0) {
+            throw ("unknown -UpgradePackages entries (not pinned centrally): {0}" -f `
+                ($unknown -join ', '))
+        }
+    }
     $changes = [System.Collections.Generic.List[string]]::new()
     $pattern = '(?s)<PackageVersion Include="(?<id>[^"]+)" Version="(?<version>[^"]+)" />'
     $content = [regex]::Replace($content, $pattern, {
         param($match)
         $packageId = $match.Groups['id'].Value
+        if ($null -ne $SelectedPackages -and $SelectedPackages -notcontains $packageId) {
+            return $match.Value
+        }
         $currentVersion = $match.Groups['version'].Value
         $versionsUri = "https://api.nuget.org/v3-flatcontainer/$($packageId.ToLowerInvariant())/index.json"
         $stableVersions = @((Invoke-RestMethod -Uri $versionsUri).versions |
@@ -111,7 +153,7 @@ if ($Add) {
 }
 
 if ($Upgrade) {
-    Update-CentralPackageVersions
+    Update-CentralPackageVersions $UpgradePackages
 }
 
 $tempRoot = [System.IO.Path]::GetFullPath(
