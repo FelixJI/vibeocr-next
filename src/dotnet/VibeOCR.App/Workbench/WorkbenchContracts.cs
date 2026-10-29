@@ -1105,7 +1105,8 @@ public sealed record SettingsWorkbenchState(
   int EnvironmentCleanupPage = 0,
   int EnvironmentCleanupPageCount = 1,
   EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
-  bool MinimizeToTray = false, string ShellSettingsError = "") : WorkbenchState
+  bool MinimizeToTray = false, string ShellSettingsError = "",
+  bool EnvironmentSnapshotLoaded = false, bool EnvironmentListFetchAttempted = false) : WorkbenchState
 {
   public override string Scope => "settings";
 }

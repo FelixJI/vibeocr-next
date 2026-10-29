@@ -150,6 +150,7 @@ def test_real_command_output_arrives_before_exit_and_is_redacted(
             "import pathlib,sys,time; "
             'print("Collecting sample", flush=True); '
             'print("https://user:password@example.invalid/a?token=secret", file=sys.stderr, flush=True); '
+            'print("Authorization: Basic c3ludGhldGljLXVzZXI6cGFzc3dvcmQ=", file=sys.stderr, flush=True); '
             'print("x"*5000, flush=True); '
             "release=pathlib.Path(sys.argv[1]); deadline=time.monotonic()+10; "
             "exec('while not release.exists():\\n"
@@ -171,6 +172,8 @@ def test_real_command_output_arrives_before_exit_and_is_redacted(
     assert "password" not in json.dumps(observed) and "secret" not in json.dumps(
         observed
     )
+    # Basic 完整负载（scheme+base64 凭据）不得残留在任何事件文本里。
+    assert "c3ludGhldGljLXVzZXI6cGFzc3dvcmQ" not in json.dumps(observed)
     assert observer.state == "running"
 
 

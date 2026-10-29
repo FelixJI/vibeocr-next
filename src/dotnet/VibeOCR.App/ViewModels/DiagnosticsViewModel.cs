@@ -28,6 +28,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
 {
     private readonly Func<PrerequisiteStatus, CancellationToken, Task> _repair;
     private readonly Func<(string? InstanceId, IReadOnlyList<string> Lines)>? _deviceEvidence;
+    private readonly Func<IReadOnlyList<string>?>? _environmentInstallLog;
     private readonly object _milestoneLock = new();
     private readonly List<StartupMilestone> _milestones = [];
     private SupervisorHealth _supervisor = new(SupervisorHealthState.NotReady, null, null, null);
@@ -38,7 +39,8 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         PrerequisiteReport prerequisites,
         Func<PrerequisiteStatus, CancellationToken, Task>? repair = null,
         RuntimeStatusViewModel? runtimeStatus = null,
-        Func<(string? InstanceId, IReadOnlyList<string> Lines)>? deviceEvidence = null)
+        Func<(string? InstanceId, IReadOnlyList<string> Lines)>? deviceEvidence = null,
+        Func<IReadOnlyList<string>?>? environmentInstallLog = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profile);
         Profile = profile;
@@ -46,6 +48,8 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         _repair = repair ?? (static (_, _) => Task.CompletedTask);
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
         _deviceEvidence = deviceEvidence;
+        // 单一只读快照 provider：日志行自带时间戳/阶段，无需另造 DTO。
+        _environmentInstallLog = environmentInstallLog;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -147,6 +151,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         // 健康与 provider 各读取一次，保证 supervisor 段与 device_evidence 段对应同一次快照。
         SupervisorHealth health = _supervisor;
         IReadOnlyList<string> deviceEvidence = SelectDeviceEvidence(health, _deviceEvidence);
+        IReadOnlyList<string> installLog = ReadEnvironmentInstallLog();
         string? directory = Path.GetDirectoryName(Path.GetFullPath(destination));
         if (directory is not null)
         {
@@ -156,7 +161,7 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
         await using FileStream stream = File.Create(destination);
         await JsonSerializer.SerializeAsync(
             stream,
-            BuildDocument(health, deviceEvidence),
+            BuildDocument(health, deviceEvidence, installLog),
             ExportJsonOptions,
             cancellationToken);
     }
@@ -169,8 +174,15 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     {
         SupervisorHealth health = _supervisor;
         IReadOnlyList<string> deviceEvidence = SelectDeviceEvidence(health, _deviceEvidence);
-        return JsonSerializer.Serialize(BuildDocument(health, deviceEvidence), ExportJsonOptions);
+        IReadOnlyList<string> installLog = ReadEnvironmentInstallLog();
+        return JsonSerializer.Serialize(
+            BuildDocument(health, deviceEvidence, installLog), ExportJsonOptions);
     }
+
+    /// <summary>安装日志只经单一 getter 读取一次：导出的是同一次有界快照，
+    /// 不把进度与日志两个独立读取拼成伪原子组合。</summary>
+    private IReadOnlyList<string> ReadEnvironmentInstallLog() =>
+        _environmentInstallLog?.Invoke() ?? [];
 
     private static readonly JsonSerializerOptions ExportJsonOptions = new()
     {
@@ -180,7 +192,8 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
 
     private object BuildDocument(
         SupervisorHealth health,
-        IReadOnlyList<string> deviceEvidence)
+        IReadOnlyList<string> deviceEvidence,
+        IReadOnlyList<string> installLog)
     {
         var document = new
         {
@@ -199,6 +212,11 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
             {
                 note = "Paddle 当前实例的设备决策日志（[Paddle worker] 设备相关行，已脱敏）；不等于作业成功的实测设备。",
                 lines = deviceEvidence,
+            },
+            environment_install = new
+            {
+                note = "依赖安装命令输出（当前会话，有界保留，已脱敏）。应用退出后安装不会在后台继续；中断在下次启动按环境记录呈现并允许重新准备。",
+                lines = installLog.Select(Redact).ToArray(),
             },
             prerequisites = Prerequisites.Select(item => new
             {
@@ -257,7 +275,13 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
             return null;
         }
 
-        string sanitized = Secret().Replace(value, "$1<redacted>");
+        // 最小凭据脱敏：token/password/secret/authorization/api key 赋值
+        // （含 Basic/Bearer 完整负载与旧版半脱敏残值）、独立 Bearer、URL
+        // 内嵌认证；MinerU 明文 Key 不过桥，不进入诊断文档。
+        string sanitized = Credential().Replace(value, "$1$2<redacted>");
+        sanitized = AuthorizationResidue().Replace(sanitized, "$1$2<redacted>");
+        sanitized = BearerToken().Replace(sanitized, "Bearer <redacted>");
+        sanitized = UrlCredential().Replace(sanitized, "$1<redacted>@");
         return WindowsPath().Replace(sanitized, "<redacted>");
     }
 
@@ -267,8 +291,17 @@ public sealed partial class DiagnosticsViewModel : INotifyPropertyChanged
     [GeneratedRegex("^T[0-6]$", RegexOptions.CultureInvariant)]
     private static partial Regex StartupName();
 
-    [GeneratedRegex("(?i)(token\\s*[=:]\\s*)[^;\\s,\\\"]+")]
-    private static partial Regex Secret();
+    [GeneratedRegex("(?i)\\b([\\w-]*(?:token|password|secret|authorization|api[_-]?key))([\"']?\\s*[:=]\\s*)(?:\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|(?:Bearer\\s+|Basic\\s+)?[^\\s,;\"]+)")]
+    private static partial Regex Credential();
+
+    [GeneratedRegex("(?i)\\b(authorization)([\"']?\\s*[:=]\\s*)(?:<redacted>|\\[redacted\\])\\s*[^\\s,;\"]+")]
+    private static partial Regex AuthorizationResidue();
+
+    [GeneratedRegex("(?i)\\bBearer\\s+\\S+")]
+    private static partial Regex BearerToken();
+
+    [GeneratedRegex("(?i)\\b([a-z][a-z0-9+.-]*://)[^\\s/@:\"']+:[^\\s/@\"']+@")]
+    private static partial Regex UrlCredential();
 
     [GeneratedRegex("[A-Za-z]:\\\\[^;\\r\\n]+")]
     private static partial Regex WindowsPath();

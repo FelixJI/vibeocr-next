@@ -1396,6 +1396,28 @@ public sealed class ManagedEnvironmentSettingsTests
     }
   }
 
+  [Fact]
+  public async Task InitialListLoadFactsFollowAttemptAndSnapshotNotStatusText()
+  {
+    // 启动期首次读取可能失败：typed 事实与 Status 文案无关——已尝试但
+    // 无快照，界面不得自动循环重试；显式重试成功后快照就位。
+    var manager = new MutableManager { BeforeList = () => Task.FromException(new HttpRequestException("startup busy")) };
+    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
+      () => null, new ProductMaintenanceCoordinator());
+    Assert.False(settings.SnapshotLoaded);
+    Assert.False(settings.ListFetchAttempted);
+    var error = await Assert.ThrowsAsync<HttpRequestException>(
+      () => settings.RefreshAsync(TestContext.Current.CancellationToken));
+    Assert.Contains("startup busy", error.Message, StringComparison.Ordinal);
+    Assert.True(settings.ListFetchAttempted);
+    Assert.False(settings.SnapshotLoaded);
+
+    manager.BeforeList = null;
+    await settings.RefreshAsync(TestContext.Current.CancellationToken);
+    Assert.True(settings.ListFetchAttempted);
+    Assert.True(settings.SnapshotLoaded);
+  }
+
   /// <summary>
   /// 回应 /v2/health、/v2/runtime/residency、/v2/runtime/status 的真实探针
   /// 路由，返回与就绪包一致的 sup-test 实例证据。

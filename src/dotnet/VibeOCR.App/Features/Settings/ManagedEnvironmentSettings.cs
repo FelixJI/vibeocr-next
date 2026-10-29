@@ -164,6 +164,13 @@ public sealed class ManagedEnvironmentSettings(
 
     public event Action? StateChanged;
     public ManagedEnvironmentList? Snapshot { get; private set; }
+    /// <summary>清单快照是否已成功读取过（含启动初始化中的中间快照）；
+    /// 是界面加载判定的权威事实，与 Status 显示文案无关。</summary>
+    public bool SnapshotLoaded => Snapshot is not null;
+    /// <summary>清单读取是否已尝试（无论成败）：界面据此只在首次进入时自动
+    /// 读一次；失败后交还显式重试，不自动循环，也不随文案变化失效。</summary>
+    public bool ListFetchAttempted => Volatile.Read(ref listFetchAttempted) != 0;
+    private int listFetchAttempted;
     public ManagedEnvironmentPlan? Plan { get; private set; }
     /// <summary>当前选择配方的兼容查询结果；仅由 FindCompatibleAsync 写入，
     /// 任何环境变更/失效都清空，防止旧结果覆盖新选择。</summary>
@@ -181,6 +188,7 @@ public sealed class ManagedEnvironmentSettings(
 
     public Task RefreshAsync(CancellationToken cancellationToken) => RunAsync(async () =>
     {
+        Volatile.Write(ref listFetchAttempted, 1);
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
         Status = Snapshot?.ActiveId is null
             ? "尚未启动运行环境；请选择识别组件并准备配置。"

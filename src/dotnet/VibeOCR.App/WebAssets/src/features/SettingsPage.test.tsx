@@ -570,7 +570,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
   });
 
-  it("技术环境清单、依赖版本与来源收进默认折叠的高级区", () => {
+  it("环境清单与来源直接呈现在常规页面，不再有折叠高级区", () => {
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
@@ -579,6 +579,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentSupportsCleanup: false,
       environmentBusy: false,
+      maintenanceStatus: "旧运行时维护投影不得混入 managed 页面",
     };
     render(
       <SettingsPage
@@ -586,23 +587,195 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         actions={buildActions()}
       />,
     );
-    const advanced = document.querySelector(
-      "details.environment-advanced-maintenance",
-    );
-    expect(advanced).not.toBeNull();
-    expect(advanced).not.toHaveAttribute("open", "");
+    // #294：环境清单/来源/清理不再藏进折叠高级区，无需任何展开即可见。
     expect(
-      within(advanced as HTMLDetailsElement).getByText("已安装环境"),
-    ).toBeInTheDocument();
+      document.querySelector("details.environment-advanced-maintenance"),
+    ).toBeNull();
+    expect(screen.getByLabelText("已安装环境")).toBeVisible();
+    expect(screen.getByLabelText("下载来源")).toBeVisible();
     expect(
-      within(advanced as HTMLDetailsElement).getByText(
-        "下载来源（依赖与模型）",
-      ),
-    ).toBeInTheDocument();
-    // 安装进度不属于高级设置：空闲时自身不渲染，不需要展开即可见。
-    expect(
-      within(advanced as HTMLDetailsElement).queryByLabelText("依赖安装进度"),
+      screen.queryByText("高级：环境清单、依赖版本、下载来源与空间清理"),
     ).not.toBeInTheDocument();
+    // managed 分支不渲染旧 RuntimeStatus 维护投影，避免旧健康/idle 被当成
+    // 环境维护结果（legacy capability 分支保留）。
+    expect(
+      screen.queryByText("本次维护：旧运行时维护投影不得混入 managed 页面"),
+    ).not.toBeInTheDocument();
+    // 安装进度不属于设置项：空闲时自身不渲染。
+    expect(screen.queryByLabelText("依赖安装进度")).not.toBeInTheDocument();
+  });
+  it("首次进入 managed 空投影自动只读加载清单且只发一次", async () => {
+    const actions = buildActions();
+    const initial = {
+      environmentStatus: "【文案改版】宿主状态行可以是任何文本",
+      environmentSnapshotLoaded: false,
+      environmentListFetchAttempted: false,
+      environments: [],
+      environmentRecipes: [],
+      environmentBusy: false,
+    };
+    const { rerender } = render(
+      <SettingsPage viewState={buildViewState(initial)} actions={actions} />,
+    );
+    // 实机初始态：快照/目录未到，不误报“已同步但未启动”。
+    expect(screen.getByText("运行环境状态尚未读取")).toBeInTheDocument();
+    // 普通路径无需手动“查看环境清单”：自动发一次只读刷新。
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.refreshEnvironmentList",
+      }),
+    );
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type: string }).type ===
+          "settings.refreshEnvironmentList",
+      ),
+    ).toHaveLength(1);
+    // 真实快照到达：不再重复刷新，目录可用后聚焦分区自动查询。
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...initial,
+          environmentStatus: "运行环境状态已更新",
+          environmentSnapshotLoaded: true,
+          environmentRecipes: recipes,
+          environmentHardware: { nvidiaDriverStatus: "ok" },
+        })}
+        actions={actions}
+      />,
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "paddleocr-ort-cpu",
+      }),
+    );
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...initial,
+          environmentStatus: "运行环境状态已更新",
+          environmentSnapshotLoaded: true,
+          environmentRecipes: recipes,
+        })}
+        actions={actions}
+      />,
+    );
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type: string }).type ===
+          "settings.refreshEnvironmentList",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("初始 busy 等待解除后只发一次且失败不自动重试", async () => {
+    const actions = buildActions();
+    const initial = {
+      environmentStatus: "启动初始化进行中（任意文案）",
+      environmentSnapshotLoaded: false,
+      environmentListFetchAttempted: false,
+      environments: [],
+      environmentRecipes: [],
+      environmentBusy: true,
+    };
+    const { rerender } = render(
+      <SettingsPage viewState={buildViewState(initial)} actions={actions} />,
+    );
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type: string }).type ===
+          "settings.refreshEnvironmentList",
+      ),
+    ).toHaveLength(0);
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({ ...initial, environmentBusy: false })}
+        actions={actions}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        actions.run.mock.calls.filter(
+          ([command]) =>
+            (command as { type: string }).type ===
+            "settings.refreshEnvironmentList",
+        ),
+      ).toHaveLength(1),
+    );
+    // 失败终态：错误保留，不再自动重试刷掉它。
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          ...initial,
+          environmentBusy: false,
+          environmentListFetchAttempted: true,
+          environmentStatus: "读取运行环境失败：连接超时",
+        })}
+        actions={actions}
+      />,
+    );
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type: string }).type ===
+          "settings.refreshEnvironmentList",
+      ),
+    ).toHaveLength(1);
+    expect(screen.getByText(/读取运行环境失败：连接超时/)).toBeInTheDocument();
+  });
+
+  it("legacy 主机与已有快照都不自动刷新且不清在途计划", () => {
+    const legacyActions = buildActions();
+    render(
+      <SettingsPage
+        viewState={{
+          ...buildViewState({
+            environmentStatus: "启动初始化进行中（任意文案）",
+            environmentSnapshotLoaded: false,
+            environmentListFetchAttempted: false,
+            environments: [],
+          }),
+          capabilities: ["settings.shell"],
+        }}
+        actions={legacyActions}
+      />,
+    );
+    expect(legacyActions.run).not.toHaveBeenCalledWith({
+      type: "settings.refreshEnvironmentList",
+    });
+
+    const actions = buildActions();
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          environmentStatus: "已预览锁定配方。",
+          environmentSnapshotLoaded: true,
+          environmentRecipes: recipes,
+          environments: [
+            { id: "env-1", name: "文档", revision: 1, status: "empty" },
+          ],
+          environmentPlan: {
+            planId: "plan-a",
+            environmentId: "env-1",
+            environmentRevision: 1,
+            requestedRecipe: "paddleocr-ort-cpu",
+            recipe: "paddleocr-ort-cpu",
+            sourceIds: [],
+            dependencies: ["paddleocr==3.2.0"],
+          },
+        })}
+        actions={actions}
+      />,
+    );
+    expect(actions.run).not.toHaveBeenCalledWith({
+      type: "settings.refreshEnvironmentList",
+    });
+    // 已有快照与待确认计划不被自动加载触碰。
+    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
   });
 });
 
@@ -653,9 +826,7 @@ it("saves model source identifiers from provider metadata", async () => {
       actions={actions}
     />,
   );
-  await userEvent.click(
-    screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-  );
+  // #294：来源设置在常规页面直接可见，无需先展开折叠区。
   expect(screen.getByLabelText("模型来源")).toHaveValue("modelscope");
   await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
   expect(actions.run).toHaveBeenCalledWith({

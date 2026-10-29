@@ -1272,6 +1272,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, terminal == "running", "settings.ready", "cpu", false,
       StatusMessage: new string('字', 1000), EnvironmentInstallProgress: progress,
       EnvironmentInstallLog: logs, EnvironmentSupportsInstallProgress: true,
+      EnvironmentSnapshotLoaded: true, EnvironmentListFetchAttempted: true,
       EnvironmentPlan: new SettingsEnvironmentPlanState(new string('b', 32), "容量验收", "cu126", ["tuna-pypi"], pins, "cu126"),
       EnvironmentRecipes: [new SettingsEnvironmentRecipeState("cu126", "完整 CUDA 配方", Dependencies: pins)],
       HotkeyActions: [new SettingsHotkeyActionState("screenshot_recognize", "快捷截图识别", "Ctrl+Alt+Q", "Ctrl+Alt+Q", null, "Ctrl+Alt+Q")]);
@@ -1316,6 +1317,9 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       using JsonDocument document = JsonDocument.Parse(json);
       JsonElement payload = document.RootElement.GetProperty("payload");
       JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
+      // 首次加载契约字段必须过桥（typed 事实，非文案）。
+      Assert.True(projected.GetProperty("environmentSnapshotLoaded").GetBoolean());
+      Assert.True(projected.GetProperty("environmentListFetchAttempted").GetBoolean());
       JsonElement observed = projected.GetProperty("environmentInstallProgress");
       Assert.Equal(terminal, observed.GetProperty("state").GetString());
       Assert.Equal(progress.AttemptId, observed.GetProperty("attempt_id").GetString());

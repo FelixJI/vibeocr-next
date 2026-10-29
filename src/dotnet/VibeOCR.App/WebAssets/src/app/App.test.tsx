@@ -2575,6 +2575,8 @@ describe("AppShell", () => {
             dependency_total_known: true,
             download_files_total: 1,
             download_files_completed: 1,
+            bytes_current: 2048,
+            bytes_total: null,
             dependencies: [
               {
                 name: "a",
@@ -2603,7 +2605,7 @@ describe("AppShell", () => {
     expect(
       screen.getByRole("region", { name: "依赖安装进度" }),
     ).toHaveTextContent(
-      "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项",
+      "共 2 项依赖｜已复用 1 项｜新增下载文件 1/1 个｜批次已安装 1/2 项｜当前依赖下载批次累计 2 KiB（总量未知）",
     );
     await userEvent.click(
       screen.getByText("实时命令输出（只读，最多保留 200 行，超限截断）"),
@@ -2628,6 +2630,8 @@ describe("AppShell", () => {
             phase: "complete",
             state: "succeeded",
             seq: 12,
+            bytes_current: 4096,
+            bytes_total: 4096,
             dependencies: [
               {
                 name: "a",
@@ -2654,9 +2658,134 @@ describe("AppShell", () => {
     expect(panel).toHaveAttribute("data-install-phase", "complete");
     expect(panel).toHaveAttribute("data-install-installed", "2");
     expect(panel).toHaveAttribute("data-install-total", "2");
+    // 已知分母显示真实测量值；不造百分比，不把工件字节标成总下载量。
+    expect(panel).toHaveAttribute("data-install-bytes-current", "4096");
+    expect(panel).toHaveAttribute("data-install-bytes-total", "4096");
     expect(panel).toHaveTextContent("批次已安装 2/2 项");
+    expect(panel).toHaveTextContent("当前依赖下载批次累计 4 KiB / 4 KiB");
     expect(actions.run).not.toHaveBeenCalled();
     second.unmount();
+  });
+
+  it("managed settings hide the legacy maintenance projection from the runtime panel", async () => {
+    window.location.hash = "#/settings";
+    const actions: AppActions = {
+      run: vi.fn(),
+      navigate: vi.fn(),
+      setTheme: vi.fn(),
+    };
+    const { unmount } = await renderLoaded(
+      <App
+        actions={actions}
+        viewState={
+          {
+            connected: true,
+            revision: 1,
+            route: "settings",
+            theme: "light",
+            capabilities: ["runtime.environments"],
+            runtimeLabel: "已连接",
+            features: {
+              settings: {
+                environments: [],
+                maintenanceStatus: "旧运行时维护投影不得混入 managed 页面",
+                maintenancePhase: "idle",
+                progressActive: false,
+                progressText: "旧运行时进度文本",
+              },
+            },
+          } satisfies AppViewState
+        }
+      />,
+    );
+    // #294：managed 分支不渲染旧 RuntimeStatus 维护投影（legacy 分支另行覆盖），
+    // 避免把旧健康/idle 当成本环境维护结果。
+    expect(
+      screen.queryByText(/本次维护：旧运行时维护投影/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("旧运行时进度文本")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("运行环境维护进度")).not.toBeInTheDocument();
+    unmount();
+  });
+
+  it("creates a named empty environment through the explicit management entry", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    const run = vi.fn().mockResolvedValue(true);
+    const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
+    const settings = { environments: [], environmentBusy: false };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "已连接",
+      features: { settings },
+    };
+    const { rerender } = await renderLoaded(
+      <App actions={actions} viewState={viewState} />,
+    );
+    // 可选管理入口：空名禁用，输入后仅发送显式命令，不插入普通准备路径。
+    const create = screen.getByRole("button", { name: "创建空环境" });
+    expect(create).toBeDisabled();
+    await user.type(screen.getByLabelText("环境名称"), "  手动隔离  ");
+    expect(create).toBeEnabled();
+    await user.click(create);
+    expect(run).toHaveBeenCalledWith({
+      type: "settings.createEnvironment",
+      name: "手动隔离",
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("环境名称")).toHaveValue(""),
+    );
+    await rerender(
+      <App
+        actions={actions}
+        viewState={{
+          ...viewState,
+          revision: 2,
+          features: { settings: { ...settings, environmentBusy: true } },
+        }}
+      />,
+    );
+    expect(screen.getByLabelText("环境名称")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建空环境" })).toBeDisabled();
+  });
+
+  it("keeps the empty-environment entry single-shot and preserves input on failure", async () => {
+    window.location.hash = "#/settings";
+    const user = userEvent.setup();
+    let release: ((value: boolean) => void) | undefined;
+    const run = vi.fn().mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
+    const viewState: AppViewState = {
+      connected: true,
+      revision: 1,
+      route: "settings",
+      theme: "light",
+      capabilities: ["runtime.environments"],
+      runtimeLabel: "已连接",
+      features: { settings: { environments: [], environmentBusy: false } },
+    };
+    await renderLoaded(<App actions={actions} viewState={viewState} />);
+    await user.type(screen.getByLabelText("环境名称"), "手动隔离");
+    // 回执未到时重复点击：只发出一次创建命令。
+    const create = screen.getByRole("button", { name: "创建空环境" });
+    fireEvent.click(create);
+    fireEvent.click(create);
+    expect(run).toHaveBeenCalledTimes(1);
+    act(() => release!(false));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "创建空环境" })).toBeEnabled(),
+    );
+    // 失败保留输入，便于修正后重试。
+    expect(screen.getByLabelText("环境名称")).toHaveValue("手动隔离");
   });
 
   it("requires explicit cleanup selection and confirmation while protecting shared resources", async () => {
@@ -2725,10 +2854,7 @@ describe("AppShell", () => {
     const { unmount, rerender } = await renderLoaded(
       <App viewState={viewState} actions={actions} />,
     );
-    // 高级区（环境清单/来源/清理）默认折叠：先展开再操作原全部路径。
-    await user.click(
-      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-    );
+    // #294：清理在常规页面直接可见，无需先展开折叠区。
     expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "检查可清理项" }));
     expect(actions.run).toHaveBeenCalledWith({
@@ -2874,11 +3000,11 @@ describe("AppShell", () => {
     const { unmount } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
-    // 高级区默认折叠：环境行/移除/取消安装在折叠区内，先展开再操作。
+    // #294：环境行/移除/取消安装直接在常规页面可见，无需展开。
     expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
-    await user.click(
-      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-    );
+    expect(
+      screen.queryByText("高级：环境清单、依赖版本、下载来源与空间清理"),
+    ).not.toBeInTheDocument();
     // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
     // 也不伪造就绪。
     expect(
@@ -4335,10 +4461,7 @@ describe("AppShell", () => {
     const { unmount, rerender } = await renderLoaded(
       <App actions={actions} viewState={viewState} />,
     );
-    // 来源设置收进高级区：先展开再验证目录/默认值与保存路径。
-    await user.click(
-      screen.getByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-    );
+    // #294：来源设置在常规页面直接可见，验证目录/默认值与保存路径。
     // 来源收敛为一个简单设置：目录展示名直出，默认值跟随 Runtime 解析；
     // 不再提供“来源配置/全局默认来源”两处重复入口与 override 三层。
     const packages = screen.getByLabelText("依赖包来源");
