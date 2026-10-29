@@ -424,6 +424,7 @@ class TestEnsureApiRunning:
         s._lock = threading.Lock()
         mock_old_proc = MagicMock()
         mock_old_proc.wait.return_value = 0
+        mock_old_proc.poll.return_value = None
         MinerUService._api_process = mock_old_proc
 
         with (
@@ -442,15 +443,18 @@ class TestEnsureApiRunning:
         s._lock = threading.Lock()
         mock_old_proc = MagicMock()
         mock_old_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=5)
+        mock_old_proc.poll.return_value = None
         MinerUService._api_process = mock_old_proc
 
         with (
             patch.object(s, "_check_api_running", return_value=False),
             patch.object(s, "_start_api"),
         ):
-            s._ensure_api_running()
+            with pytest.raises(subprocess.TimeoutExpired):
+                s._ensure_api_running()
 
-        mock_old_proc.kill.assert_called_once()
+        mock_old_proc.kill.assert_not_called()
+        assert MinerUService._api_process is mock_old_proc
 
     def test_url_set_and_running_returns_early(self):
         """已有 URL 且运行中 → 直接返回（line 246）。"""
@@ -648,11 +652,14 @@ class TestShutdownKill:
         MinerUService._api_process = mock_proc
         MinerUService._api_url = "http://127.0.0.1:9999"
 
-        s.shutdown()
+        MinerUService._job_guard = None
+        mock_proc.poll.return_value = None
+        with pytest.raises(subprocess.TimeoutExpired):
+            s.shutdown()
         mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
-        assert MinerUService._api_process is None
-        assert MinerUService._api_url == ""
+        mock_proc.kill.assert_not_called()
+        assert MinerUService._api_process is mock_proc
+        assert MinerUService._api_url == "http://127.0.0.1:9999"
 
 
 class TestRemainingBranches:

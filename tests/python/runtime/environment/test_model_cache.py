@@ -381,8 +381,9 @@ def test_mineru_cancels_prepare_child_without_replacing_previous_models(
     monkeypatch.setattr(
         module,
         "JobObjectGuard",
-        lambda: types.SimpleNamespace(
-            assign_from_popen=lambda _process: None,
+        lambda **_kwargs: types.SimpleNamespace(
+            assign_from_popen=lambda _process, **_options: True,
+            terminate_and_wait=lambda **_options: None,
             close=lambda: None,
         ),
     )
@@ -461,8 +462,10 @@ def test_mineru_prepare_uses_product_code_and_service_configuration(
     monkeypatch.setattr(
         module,
         "JobObjectGuard",
-        lambda: types.SimpleNamespace(
-            assign_from_popen=lambda _process: None, close=lambda: None
+        lambda **_kwargs: types.SimpleNamespace(
+            assign_from_popen=lambda _process, **_options: True,
+            terminate_and_wait=lambda **_options: None,
+            close=lambda: None,
         ),
     )
     service = object.__new__(module.MinerUService)

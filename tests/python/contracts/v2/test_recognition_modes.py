@@ -39,14 +39,14 @@ EXPECTED_MODES = {
         "OCR",
         "paddleocr",
         "base_runtime",
-        "model_residency",
+        "process_keep_alive",
     ),
     "paddle_structure": (
         "document",
         "PP-StructureV3",
         None,
         "advanced_component",
-        "model_residency",
+        "process_keep_alive",
     ),
     "mineru_document": (
         "document",
@@ -60,7 +60,7 @@ EXPECTED_MODES = {
         "TABLE_RECOGNITION",
         None,
         "advanced_component",
-        "model_residency",
+        "process_keep_alive",
     ),
 }
 
@@ -85,10 +85,10 @@ RETIRED_RAPID_MODES = ("rapid_text", "rapid_table")
 
 EXPECTED_LIFECYCLE = {
     "windows_text": ("unmanaged", False, False, False, False),
-    "paddle_text": ("model_residency", True, True, True, True),
-    "paddle_structure": ("model_residency", True, True, True, True),
-    "mineru_document": ("process_keep_alive", True, True, False, True),
-    "paddle_table": ("model_residency", True, True, True, True),
+    "paddle_text": ("process_keep_alive", True, False, False, True),
+    "paddle_structure": ("process_keep_alive", True, False, False, True),
+    "mineru_document": ("process_keep_alive", True, False, False, True),
+    "paddle_table": ("process_keep_alive", True, False, False, True),
 }
 
 
@@ -266,7 +266,7 @@ def test_recognition_modes_project_to_legacy_execution_without_lifecycle_ambigui
     assert not get_recognition_mode_definition(
         RecognitionMode.RAPID_TEXT
     ).lifecycle.supports_preload
-    assert get_recognition_mode_definition(
+    assert not get_recognition_mode_definition(
         RecognitionMode.PADDLE_TEXT
     ).lifecycle.supports_pinning
     # mineru_document reuses the shared preload endpoint for explicit

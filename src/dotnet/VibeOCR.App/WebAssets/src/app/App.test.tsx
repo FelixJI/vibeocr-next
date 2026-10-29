@@ -2408,7 +2408,7 @@ describe("AppShell", () => {
                   isTaskOverride: true,
                   availability: "ready",
                   requiresDownload: false,
-                  lifecycleKind: "model_residency",
+                  lifecycleKind: "process_keep_alive",
                   supportsPreload: true,
                   supportsTtl: true,
                   supportsPinning: true,
@@ -2424,7 +2424,7 @@ describe("AppShell", () => {
     fireEvent.click(screen.getByText("高级选项"));
     expect(
       screen.getByText(
-        "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
+        "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。",
       ),
     ).toBeVisible();
     await rerender(
@@ -2460,7 +2460,7 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        "本地 MinerU 使用进程保活；仅支持：TTL、释放。远程模型生命周期由服务端管理。",
+        "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。",
       ),
     ).toBeVisible();
     unmount();
@@ -2490,7 +2490,7 @@ describe("AppShell", () => {
         isTaskOverride: true,
         availability: "ready",
         requiresDownload: false,
-        lifecycleKind: "model_residency",
+        lifecycleKind: "process_keep_alive",
         supportsPreload: true,
         supportsTtl: true,
         supportsPinning: true,
@@ -2531,7 +2531,7 @@ describe("AppShell", () => {
     fireEvent.click(screen.getByText("高级选项"));
     expect(
       screen.getByText(
-        "该 Paddle 模式使用模型驻留；支持：预热、TTL、固定驻留、释放。",
+        "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。",
       ),
     ).toBeVisible();
     // 识别参数编辑器承载 device 选项；保存走 recognition.setOptions。

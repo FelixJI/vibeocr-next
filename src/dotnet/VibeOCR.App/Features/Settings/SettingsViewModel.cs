@@ -129,6 +129,31 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public ObservableCollection<PipelineSpec> ResidencyPipelines { get; } = [];
     public RuntimeStatusViewModel RuntimeStatus { get; }
     public ManagedEnvironmentSettings? Environments { get; }
+    public string WorkerSettingsWarning { get; private set; } = "";
+    public int PaddleIdleSeconds { get; private set; } = 600;
+    public int MineruIdleSeconds { get; private set; } = 600;
+
+    public async Task SetWorkerIdleAsync(int paddleSeconds, int mineruSeconds, CancellationToken cancellationToken)
+    {
+        if (paddleSeconds < 0 || mineruSeconds < 0) throw new ArgumentOutOfRangeException(nameof(paddleSeconds));
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        await _settingsGate.WaitAsync(cancellationToken);
+        try
+        {
+            SettingsSnapshot current = await _inference.GetSettingsAsync(cancellationToken);
+            SettingsSnapshot updated = await _inference.UpdateSettingsAsync(current with
+            {
+                PaddleIdleSeconds = paddleSeconds,
+                MineruIdleSeconds = mineruSeconds,
+            }, cancellationToken);
+            PaddleIdleSeconds = updated.PaddleIdleSeconds;
+            MineruIdleSeconds = updated.MineruIdleSeconds;
+            Status = "已保存空闲后释放资源设置。0 秒表示持久运行。";
+        }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
+        finally { _settingsGate.Release(); }
+    }
+
     public int DefaultTtlSeconds { get; private set; } = 300;
     public int? VramTotalMb { get; private set; }
     public int? VramUsedMb { get; private set; }
@@ -236,7 +261,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 PropertyChanged?.Invoke(this, new(nameof(DefaultTtlSeconds)));
                 PropertyChanged?.Invoke(this, new(nameof(VramTotalMb)));
                 PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
-                Status = $"默认 TTL {status.DefaultTtlSeconds}s；已驻留管线 {status.Entries.Count} 个";
+                Status = "Worker 状态已刷新；磁盘模型与已安装环境保持不变。";
             }
             catch (NotSupportedException)
             {
@@ -895,6 +920,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // Commit one complete catalog snapshot only after every remote read
             // succeeds. Concurrent bootstrap/execution callers then observe the
             // same selection instead of a partially projected catalog.
+            WorkerSettingsWarning = settings.Extra.TryGetValue("worker_settings_error", out JsonElement workerError) && workerError.ValueKind == JsonValueKind.String ? workerError.GetString() ?? "" : "";
+            PaddleIdleSeconds = settings.PaddleIdleSeconds;
+            MineruIdleSeconds = settings.MineruIdleSeconds;
             _selectedSourceIds = selectedSourceIds;
             MineruConnection = MineruConnectionSettings.Read(
                 settings, selection.SupportsMineruRemoteApi);

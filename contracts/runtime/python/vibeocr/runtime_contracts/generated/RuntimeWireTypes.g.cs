@@ -1479,6 +1479,9 @@ public sealed record ResidencyEntry
 
     [JsonPropertyName("eviction_reason")]
     public required string EvictionReason { get; init; }
+
+    [JsonPropertyName("worker")]
+    public IReadOnlyDictionary<string, JsonElement>? Worker { get; init; }
 }
 
 public sealed record ResidencyStatus
@@ -1962,6 +1965,12 @@ public sealed record SettingsSnapshot
 
     [JsonPropertyName("download_source_ids")]
     public IReadOnlyList<string>? DownloadSourceIds { get; init; }
+
+    [JsonPropertyName("paddle_idle_seconds")]
+    public int? PaddleIdleSeconds { get; init; }
+
+    [JsonPropertyName("mineru_idle_seconds")]
+    public int? MineruIdleSeconds { get; init; }
 }
 
 public sealed record StageEvent

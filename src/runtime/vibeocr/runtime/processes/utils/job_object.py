@@ -10,6 +10,7 @@ import ctypes
 import logging
 import subprocess
 import sys
+import time
 from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JobObjectExtendedLimitInformation = 9
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_TERMINATE = 0x0001
+CREATE_SUSPENDED = 0x00000004
 
 
 class _IO_COUNTERS(ctypes.Structure):
@@ -83,6 +85,16 @@ def _get_kernel32():
     kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    kernel32.QueryInformationJobObject.restype = wintypes.BOOL
     return kernel32
 
 
@@ -143,7 +155,9 @@ class JobObjectGuard:
         except Exception as e:
             logger.warning(f"[JobObject] 创建 Job Object 异常: {e}，降级")
 
-    def assign_from_popen(self, popen: subprocess.Popen) -> bool:
+    def assign_from_popen(
+        self, popen: subprocess.Popen, *, suspended: bool = False
+    ) -> bool:
         """把 popen 启动的子进程加入本 Job。
 
         Returns:
@@ -151,7 +165,57 @@ class JobObjectGuard:
         """
         if not _IS_WINDOWS or self._handle is None:
             return False
-        return self._assign_pid(popen.pid)
+        assigned = self._assign_pid(popen.pid)
+        if assigned and suspended:
+            self._resume(popen.pid)
+        return assigned
+
+    @staticmethod
+    def _resume(pid: int) -> None:
+        """Resume only a root we created suspended, after Job inheritance is fixed."""
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("size", wintypes.DWORD),
+                ("usage", wintypes.DWORD),
+                ("thread_id", wintypes.DWORD),
+                ("owner_pid", wintypes.DWORD),
+                ("base_priority", wintypes.LONG),
+                ("delta_priority", wintypes.LONG),
+                ("flags", wintypes.DWORD),
+            ]
+
+        kernel32 = _get_kernel32()
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        snapshot = kernel32.CreateToolhelp32Snapshot(4, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            present = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while present:
+                if entry.owner_pid == pid:
+                    thread = kernel32.OpenThread(2, False, entry.thread_id)
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if kernel32.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise ctypes.WinError(ctypes.get_last_error())
+                    finally:
+                        kernel32.CloseHandle(thread)
+                    return
+                present = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            raise RuntimeError("owned suspended worker thread is unavailable")
+        finally:
+            kernel32.CloseHandle(snapshot)
 
     def _assign_pid(self, pid: int) -> bool:
         """通过 pid 绑定进程（Windows）。
@@ -185,21 +249,82 @@ class JobObjectGuard:
             logger.warning(f"[JobObject] 绑定进程异常: {e}，降级")
             return False
 
-    def close(self) -> None:
-        """关闭 Job 句柄。最后一个句柄关闭时内核终止 Job 内所有进程。
-
-        幂等：多次调用安全。
-        """
+    def terminate_and_wait(self, timeout: float = 5) -> None:
+        """Confirm root/descendant termination signals and an empty owned Job."""
         if not _IS_WINDOWS or self._handle is None:
             return
+        kernel32 = _get_kernel32()
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        # Capture waitable handles before termination: Job active count can reach
+        # zero before a terminating process object is signalled.
+        capacity = 64
+        while True:
+
+            class ProcessIds(ctypes.Structure):
+                _fields_ = [
+                    ("assigned", wintypes.DWORD),
+                    ("count", wintypes.DWORD),
+                    ("ids", ctypes.c_size_t * capacity),
+                ]
+
+            ids = ProcessIds()
+            if kernel32.QueryInformationJobObject(
+                self._handle, 3, ctypes.byref(ids), ctypes.sizeof(ids), None
+            ):
+                break
+            if ctypes.get_last_error() != 234 or capacity >= 65536:
+                raise ctypes.WinError(ctypes.get_last_error())
+            capacity *= 2
+        handles = []
         try:
-            kernel32 = _get_kernel32()
-            kernel32.CloseHandle(self._handle)
-            logger.debug(f"[JobObject] 已关闭 Job 句柄 (name={self._name})")
-        except Exception as e:
-            logger.warning(f"[JobObject] 关闭 Job 句柄异常: {e}")
+            for pid in ids.ids[: ids.count]:
+                handle = kernel32.OpenProcess(0x00100000, False, pid)
+                if handle:
+                    handles.append(handle)
+                elif (
+                    ctypes.get_last_error() != 87
+                ):  # Already exited before OpenProcess.
+                    raise ctypes.WinError(ctypes.get_last_error())
+            if not kernel32.TerminateJobObject(self._handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            deadline = time.monotonic() + timeout
+            for handle in handles:
+                remaining = max(0, int((deadline - time.monotonic()) * 1000))
+                if kernel32.WaitForSingleObject(handle, remaining) != 0:
+                    raise TimeoutError("owned worker descendants did not exit")
+
+            class Accounting(ctypes.Structure):
+                _fields_ = [
+                    ("times", ctypes.c_longlong * 4),
+                    ("faults", wintypes.DWORD),
+                    ("total", wintypes.DWORD),
+                    ("active", wintypes.DWORD),
+                    ("terminated", wintypes.DWORD),
+                ]
+
+            while True:
+                info = Accounting()
+                if not kernel32.QueryInformationJobObject(
+                    self._handle, 1, ctypes.byref(info), ctypes.sizeof(info), None
+                ):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if info.active == 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("owned worker descendants did not exit")
+                time.sleep(0.02)
         finally:
-            self._handle = None
+            for handle in handles:
+                kernel32.CloseHandle(handle)
+
+    def close(self) -> None:
+        """Close only after callers have confirmed the owned process tree exited."""
+        if not _IS_WINDOWS or self._handle is None:
+            return
+        if not _get_kernel32().CloseHandle(self._handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._handle = None
 
     def __enter__(self) -> "JobObjectGuard":
         return self

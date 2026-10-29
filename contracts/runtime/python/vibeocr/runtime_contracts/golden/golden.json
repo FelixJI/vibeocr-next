@@ -152,6 +152,8 @@
   },
   "settings_snapshot": {
     "schema_version": 2,
+    "paddle_idle_seconds": 600,
+    "mineru_idle_seconds": 600,
     "residency": {
       "default_ttl_seconds": 300,
       "pipelines": [
@@ -163,6 +165,8 @@
   },
   "settings_snapshot_empty_selection": {
     "schema_version": 2,
+    "paddle_idle_seconds": 600,
+    "mineru_idle_seconds": 600,
     "residency": {
       "default_ttl_seconds": 300,
       "pipelines": []

@@ -943,6 +943,7 @@ def parse_residency_entry(payload: dict[str, Any]) -> ResidencyEntry:
         remaining_ttl_seconds=payload.get("remaining_ttl_seconds"),
         estimated_vram_mb=payload.get("estimated_vram_mb"),
         eviction_reason=reason,
+        worker=payload.get("worker"),
     )
 
 

@@ -13,15 +13,20 @@ adapters behind the same interface.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
 from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_selection import normalize_download_source_ids
-from vibeocr.runtime.environments.settings_store import RuntimeSettings
+from vibeocr.runtime.environments.settings_store import (
+    RuntimeSettings,
+    RuntimeSettingsStoreError,
+)
 from vibeocr.runtime.jobs.registry import JobRecord, JobRegistry
 from vibeocr.runtime.jobs.retention import RetentionPolicy
 from vibeocr.runtime.jobs.staging import (
@@ -192,11 +197,24 @@ class SupervisorModule:
         self._shutdown = False
         self._settings_store = settings_store
         default_settings = SettingsSnapshot(default_ttl_seconds=300, pipelines=())
-        self._settings = (
-            settings_store.load(default_settings)
-            if settings_store is not None
-            else default_settings
-        )
+        try:
+            self._settings = (
+                settings_store.load(default_settings)
+                if settings_store is not None
+                else default_settings
+            )
+        except RuntimeSettingsStoreError:
+            # Invalid lifecycle preferences must not block unrelated basic tools.
+            # The store preserves and refuses to overwrite the original file.
+            logging.getLogger(__name__).warning(
+                "Worker settings could not be loaded; original file preserved"
+            )
+            self._settings = replace(
+                default_settings,
+                extra={
+                    "worker_settings_error": "旧资源设置无法迁移；原文件已保留，请修复配置后重启。"
+                },
+            )
         if self._settings.download_source_ids:
             normalize_download_source_ids(self._settings.download_source_ids)
         # Runtime status is observational and must remain available while a
@@ -472,6 +490,9 @@ class SupervisorModule:
         HTTP handler is not blocked.
         """
 
+        reserve = getattr(self._executor, "reserve", None)
+        release = reserve(record) if callable(reserve) else lambda: None
+
         def _run() -> None:
             try:
                 self._executor.execute(record, list(staged))
@@ -486,10 +507,17 @@ class SupervisorModule:
                     except Exception:  # pragma: no cover
                         pass
 
+            finally:
+                release()
+
         thread = threading.Thread(
             target=_run, name=f"sup-job-{record.job_id[:8]}", daemon=True
         )
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            release()
+            raise
 
     # ------------------------------------------------------------------
     # Status / events / result
@@ -764,12 +792,6 @@ class SupervisorModule:
             return self._settings
 
     def update_settings(self, snapshot: SettingsSnapshot) -> SettingsSnapshot:
-        from vibeocr.runtime.recognition.pipeline_contracts import (
-            RETIRED_RECOGNITION_MODES,
-            get_all_recognition_modes,
-            get_recognition_mode_definition,
-            is_recognition_mode_retired,
-        )
         from vibeocr.runtime.recognition.recognition_modes import (
             DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
             LEGACY_RECOGNITION_MODE_ALIASES,
@@ -781,41 +803,13 @@ class SupervisorModule:
             normalize_download_source_ids(snapshot.download_source_ids)
         with self._lock:
             previous = self._settings
-            unchanged = list(previous.pipelines)
-            retired_by_pipeline = {
-                get_recognition_mode_definition(mode).pipeline.value: mode.value
-                for mode in RETIRED_RECOGNITION_MODES
-                # 仅当该管道再无活跃模式时才按管道名映射历史退役项；
-                # OCR 管道仍有 windows_text/paddle_text，rapid_text 不能
-                # 仅凭管道名被当作历史退役项。
-                if get_recognition_mode_definition(mode).pipeline.value
-                not in {
-                    get_recognition_mode_definition(active).pipeline.value
-                    for active in get_all_recognition_modes()
-                    if active not in RETIRED_RECOGNITION_MODES
-                }
-            }
-            for pipeline in snapshot.pipelines:
-                mode_id = (
-                    pipeline.recognition_mode
-                    if pipeline.recognition_mode is not None
-                    else retired_by_pipeline.get(pipeline.name)
+            if (
+                snapshot.default_ttl_seconds != previous.default_ttl_seconds
+                or snapshot.pipelines != previous.pipelines
+            ):
+                raise ValueError(
+                    "model residency writes are retired; use worker idle settings"
                 )
-                if mode_id is not None:
-                    definition = self.recognition_mode_registry.definition(mode_id)
-                    # 历史退役项可原样保留；逐项消耗匹配，不能借兼容新增重复项。
-                    if (
-                        is_recognition_mode_retired(definition.mode_id)
-                        and pipeline.name == definition.pipeline_id
-                        and pipeline in unchanged
-                    ):
-                        unchanged.remove(pipeline)
-                        continue
-                    self.recognition_mode_registry.validate_pipeline_spec(
-                        mode_id,
-                        pipeline_id=pipeline.name,
-                        pinned=pipeline.pinned,
-                    )
 
             # 未变默认不阻断其他设置；新默认仍须通过类型、known id 与可用性校验。
             # “是否变更”的判定：
@@ -861,25 +855,23 @@ class SupervisorModule:
                         DEFAULT_RECOGNITION_MODE_EXTRA_KEY: legacy_alias.value,
                     },
                 )
-            configure = getattr(self._executor, "configure_settings", None)
-            status: ResidencyStatus | None = None
-            if callable(configure):
-                configured = configure(snapshot)
-                if isinstance(configured, ResidencyStatus):
-                    status = configured
-            try:
+            guard = getattr(self._executor, "settings_guard", nullcontext)
+            with guard():
+                validate = getattr(self._executor, "validate_settings", None)
+                if callable(validate):
+                    validate(snapshot)
+                # Persist first: applying a shorter policy cannot precede durable commit.
                 if self._settings_store is not None:
                     self._settings_store.replace(snapshot)
-            except Exception:
+                configure = getattr(self._executor, "configure_settings", None)
+                status: ResidencyStatus | None = None
                 if callable(configure):
-                    try:
-                        configure(previous)
-                    except Exception:
-                        pass
-                raise
-            self._settings = snapshot
-            if status is not None:
-                self._residency_snapshot = status
+                    configured = configure(snapshot)
+                    if isinstance(configured, ResidencyStatus):
+                        status = configured
+                self._settings = snapshot
+                if status is not None:
+                    self._residency_snapshot = status
         return self._settings
 
     def _remember_residency(self, status: ResidencyStatus) -> ResidencyStatus:

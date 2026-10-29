@@ -34,7 +34,8 @@ from vibeocr.runtime.documents.utils.mime_types import (
 )
 from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
 from vibeocr.runtime.recognition.mineru_api import MineruCancelled
-from vibeocr.runtime_contracts import ErrorCode, EvictionReason, PipelineSelection
+from vibeocr.runtime.recognition.worker_idle import WorkerIdleOwner
+from vibeocr.runtime_contracts import ErrorCode, PipelineSelection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -113,12 +114,19 @@ class MinerUProcessAdapter:
     _process_started: bool = False
     _process_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _settings: Any = None
-    _active_leases: int = 0
-    _last_used: float = field(default_factory=time.monotonic)
-    _eviction_reason: EvictionReason = EvictionReason.NONE
-    _watch_stop: threading.Event = field(default_factory=threading.Event, repr=False)
-    _watch_wakeup: threading.Event = field(default_factory=threading.Event, repr=False)
-    _watch_thread: threading.Thread | None = field(default=None, repr=False)
+    _idle: WorkerIdleOwner = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._idle = WorkerIdleOwner(
+            "MinerU", self._stop_process, lock=self._process_lock
+        )
+
+    @property
+    def _active_leases(self) -> int:
+        return self._idle.active
+
+    def reserve(self):
+        return self._idle.reserve(allow_stop_failed=self._remote_locked())
 
     def capabilities(self, options: Any | None = None) -> AdapterCapability:
         del options
@@ -128,26 +136,38 @@ class MinerUProcessAdapter:
     # Process lifecycle (ownership seam)
     # ------------------------------------------------------------------
 
+    def _sync_generation(self) -> None:
+        generation = getattr(self.lifecycle, "generation", None)
+        if callable(generation):
+            self._idle.update_generation(generation())
+
     def ensure_started(self) -> None:
         with self._process_lock:
+            if self._idle.closed:
+                raise RuntimeError("MinerU owner is closed")
             if self._remote_locked():
-                # 远程连接由自部署服务器承担解析：本地不 spawn/拥有
-                # mineru-api 子进程，也不承担进程驻留/TTL 生命周期。
                 return
             if self._process_started:
                 return
-            # When a real lifecycle is injected, drive the mineru-api subprocess
-            # through it; otherwise this is a no-op flag for test fakes.
-            if self.lifecycle is not None:
-                self.lifecycle.start()
+            prepare_start = getattr(self.lifecycle, "prepare_start", None)
+            if callable(prepare_start):
+                prepare_start()
+            self._idle.starting()
+            try:
+                if self.lifecycle is not None:
+                    self.lifecycle.start()
+            except Exception as exc:
+                # A failed start can still own a partially created local process.
+                self._process_started = True
+                self._idle.stop("start_failed", force=True)
+                self._idle.record_error(exc, "start_failed")
+                raise
             self._process_started = True
-            self._last_used = time.monotonic()
-            self._eviction_reason = EvictionReason.NONE
-            self._ensure_watcher_locked()
+            self._idle.started()
+            self._sync_generation()
 
     @staticmethod
     def _remote_locked() -> bool:
-        """当前连接是否为远程（调用方必须已持有 ``_process_lock``）."""
         from vibeocr.runtime.recognition.mineru_readiness import (
             CONNECTION_REMOTE,
             current_connection,
@@ -155,60 +175,13 @@ class MinerUProcessAdapter:
 
         return current_connection().mode == CONNECTION_REMOTE
 
-    def stop(self, *, reason: Any = None) -> None:
-        """Stop the MinerU API subprocess; disk models are NOT deleted."""
-        with self._process_lock:
-            self._stop_locked(reason=reason)
-
-    def _stop_locked(self, *, reason: Any = None) -> None:
+    def _stop_process(self) -> None:
         if self.lifecycle is not None and self._process_started:
-            try:
-                self.lifecycle.stop()
-            except Exception:  # pragma: no cover - defensive
-                pass
-        if self._process_started and reason is not None:
-            self._eviction_reason = reason
+            self.lifecycle.stop()
         self._process_started = False
 
-    def _ensure_watcher_locked(self) -> None:
-        thread = self._watch_thread
-        if thread is not None and thread.is_alive():
-            return
-        self._watch_stop.clear()
-        self._watch_thread = threading.Thread(
-            target=self._watch_residency,
-            name="vibeocr-mineru-residency",
-            daemon=True,
-        )
-        self._watch_thread.start()
-
-    def _policy_locked(self) -> tuple[bool, int]:
-        default_ttl = int(getattr(self._settings, "default_ttl_seconds", 300))
-        # MinerU 是 child-process keep-alive，不是可 pin 的模型驻留资源。
-        pinned = False
-        ttl = default_ttl
-        for spec in getattr(self._settings, "pipelines", ()):
-            if spec.name != "MinerU":
-                continue
-            if spec.ttl_seconds is not None:
-                ttl = int(spec.ttl_seconds)
-            break
-        return pinned, max(0, ttl)
-
-    def _watch_residency(self) -> None:
-        while not self._watch_stop.is_set():
-            self._watch_wakeup.wait(timeout=0.25)
-            self._watch_wakeup.clear()
-            with self._process_lock:
-                pinned, ttl = self._policy_locked()
-                if (
-                    self._process_started
-                    and self._active_leases == 0
-                    and not pinned
-                    and ttl > 0
-                    and time.monotonic() - self._last_used >= ttl
-                ):
-                    self._stop_locked(reason=EvictionReason.TTL_EXPIRED)
+    def stop(self, *, reason: Any = None) -> None:
+        self._idle.stop(str(reason or "explicit_release"))
 
     # ------------------------------------------------------------------
     # recognize_many — budgeted multi-file request
@@ -238,13 +211,12 @@ class MinerUProcessAdapter:
         if not items:
             return []
         started = time.perf_counter()
-        lease_acquired = False
+        release = self.reserve()
         try:
             service_options = self._service_options(options)
+            if not self._remote_locked():
+                self._idle.working()
             self.ensure_started()
-            with self._process_lock:
-                self._active_leases += 1
-                lease_acquired = True
             client = self.client_factory()
             # Build unique-stem file list preserving input order.
             files: list[tuple[str, bytes]] = []
@@ -301,11 +273,8 @@ class MinerUProcessAdapter:
             )
             return payloads
         finally:
-            if lease_acquired:
-                with self._process_lock:
-                    self._active_leases = max(0, self._active_leases - 1)
-                    self._last_used = time.monotonic()
-                self._watch_wakeup.set()
+            self._sync_generation()
+            release()
 
     @staticmethod
     def _map_results_back(
@@ -339,87 +308,83 @@ class MinerUProcessAdapter:
         if "MinerU" not in pipelines:
             return self.residency_status()
         started = time.perf_counter()
+        release = self.reserve()
         try:
+            if not self._remote_locked():
+                self._idle.working()
             self.ensure_started()
-            with self._process_lock:
-                self._active_leases += 1
-            try:
-                prepare = getattr(self.client_factory(), "prepare", None)
-                if prepare is not None:
-                    prepare()
-            finally:
-                with self._process_lock:
-                    self._active_leases -= 1
-                    self._last_used = time.monotonic()
-            status = self.residency_status()
+            prepare = getattr(self.client_factory(), "prepare", None)
+            if prepare is not None:
+                prepare()
         except Exception:
-            logger.exception(
-                "[Supervisor][Preload] action=preload pipeline=MinerU "
-                "result=failed elapsed_ms=%.1f",
+            logger.error(
+                "[Supervisor][Preload] pipeline=MinerU result=failed elapsed_ms=%.1f",
                 (time.perf_counter() - started) * 1000,
             )
             raise
+        finally:
+            self._sync_generation()
+            release()
         logger.info(
-            "[Supervisor][Preload] action=preload pipeline=MinerU "
-            "result=success elapsed_ms=%.1f",
+            "[Supervisor][Preload] pipeline=MinerU result=success elapsed_ms=%.1f",
             (time.perf_counter() - started) * 1000,
         )
-        return status
+        return self.residency_status()
 
     def residency_status(self) -> ResidencyStatus:
-        from vibeocr.runtime_contracts import ResidencyEntry, ResidencyKind
-        from vibeocr.runtime_contracts import ResidencyStatus as _RS
+        from vibeocr.runtime_contracts import (
+            RecognitionResourceKind,
+            ResidencyEntry,
+            ResidencyKind,
+            ResidencyStatus,
+        )
 
-        # ``lifecycle.start()`` may spend a long time booting MinerU while it
-        # owns this lock. Status is observational and must remain bounded, so
-        # fall back to a best-effort snapshot instead of waiting indefinitely.
-        acquired = self._process_lock.acquire(timeout=0.05)
-        try:
-            default_ttl = int(getattr(self._settings, "default_ttl_seconds", 300))
-            pinned, ttl = self._policy_locked()
-            # 远程连接不宣称本地进程驻留：local 会话遗留的子进程（等待 TTL
-            # 回收）不得显示为当前 MinerU 资源的本地/远程驻留；本地清理路径
-            # （TTL/release/close）照常回收它，远程服务器永不受影响。
-            started = self._process_started and not self._remote_locked()
-            kind = (
-                ResidencyKind.PINNED
-                if started and pinned
-                else (ResidencyKind.SOFT_TTL if started else ResidencyKind.EVICTED)
-            )
-            remaining = (
-                max(0, int(ttl - (time.monotonic() - self._last_used)))
-                if started and not pinned and ttl > 0
-                else None
-            )
-            active_leases = self._active_leases
-            eviction_reason = self._eviction_reason
-        finally:
-            if acquired:
-                self._process_lock.release()
-        return _RS(
-            default_ttl_seconds=default_ttl,
+        worker = self._idle.snapshot()
+        if self._remote_locked():
+            worker = {
+                **worker,
+                "local_owner_state": worker["state"],
+                "state": "remote",
+                "remaining_seconds": None,
+            }
+        return ResidencyStatus(
             entries=(
                 ResidencyEntry(
                     pipeline="MinerU",
-                    kind=kind,
-                    active_leases=active_leases,
-                    remaining_ttl_seconds=remaining,
-                    eviction_reason=eviction_reason,
+                    resource_kind=RecognitionResourceKind.PROCESS,
+                    resource_id="mineru",
+                    kind=ResidencyKind.IDLE
+                    if self._idle.running and not self._remote_locked()
+                    else ResidencyKind.EVICTED,
+                    active_leases=worker["active_leases"],
+                    remaining_ttl_seconds=worker["remaining_seconds"],
+                    worker=worker,
                 ),
-            ),
-            pipelines=tuple(getattr(self._settings, "pipelines", ())),
+            )
         )
 
     def release_idle(self, pipeline: str | None = None) -> ResidencyStatus:
-        with self._process_lock:
-            pinned, _ttl = self._policy_locked()
-            if (
-                not pinned
-                and self._active_leases == 0
-                and (pipeline is None or pipeline == "MinerU")
-            ):
-                self._stop_locked(reason=EvictionReason.EXPLICIT_RELEASE)
+        if pipeline in (None, "MinerU"):
+            self._idle.stop("explicit_release")
         return self.residency_status()
+
+    def settings_guard(self):
+        return self._process_lock
+
+    def validate_settings(self, snapshot: Any) -> None:
+        from vibeocr.runtime.recognition.mineru_config import MineruConfigError
+        from vibeocr.runtime.recognition.mineru_readiness import (
+            connection_from_extra,
+            current_connection,
+        )
+
+        connection = connection_from_extra(getattr(snapshot, "extra", None))
+        with self._process_lock:
+            if connection != current_connection() and self._active_leases > 0:
+                raise MineruConfigError(
+                    ErrorCode.VALIDATION_ERROR,
+                    "mineru_connection_change_blocked_by_active_tasks",
+                )
 
     def configure_settings(self, snapshot: Any) -> None:
         from vibeocr.runtime.recognition.mineru_config import MineruConfigError
@@ -429,6 +394,7 @@ class MinerUProcessAdapter:
             current_connection,
         )
 
+        self.validate_settings(snapshot)
         # 非法连接配置 fail closed；合法变更在无活动 MinerU 任务时原子应用。
         connection = connection_from_extra(getattr(snapshot, "extra", None))
         with self._process_lock:
@@ -440,17 +406,17 @@ class MinerUProcessAdapter:
                     "mineru_connection_change_blocked_by_active_tasks",
                 )
             configure_connection(connection)
+            self._idle.retire_when_idle(
+                connection.mode == "remote" and self._process_started
+            )
             self._settings = snapshot
-            self._ensure_watcher_locked()
-        self._watch_wakeup.set()
+            self._idle.configure(snapshot.mineru_idle_seconds)
 
     def close(self) -> None:
-        self._watch_stop.set()
-        self._watch_wakeup.set()
-        thread = self._watch_thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
-        self.stop(reason=EvictionReason.SUPERVISOR_SHUTDOWN)
+        cancel_start = getattr(self.lifecycle, "cancel_start", None)
+        if callable(cancel_start):
+            cancel_start()  # Signal before waiting for the owner lock held by startup.
+        self._idle.close()
 
 
 __all__ = ["MinerUProcessAdapter", "unique_stem"]

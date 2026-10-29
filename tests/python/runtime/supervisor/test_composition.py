@@ -12,9 +12,7 @@ import sys
 import types
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    import pytest
-
+import pytest
 from vibeocr.runtime.host import composition
 from vibeocr.runtime.host.composition import (
     _mineru_available,
@@ -691,13 +689,16 @@ def test_mineru_lifecycle_start_invokes_singleton(
     calls: list[str] = []
 
     fake_module = types.ModuleType("vibeocr.runtime.recognition.mineru_service")
-    fake_module.MinerUService = lambda: calls.append("constructor") or object()
+    fake_module.MinerUService = lambda: (
+        calls.append("constructor")
+        or types.SimpleNamespace(_ensure_api_running=lambda: calls.append("ensure"))
+    )
     monkeypatch.setitem(
         sys.modules, "vibeocr.runtime.recognition.mineru_service", fake_module
     )
 
     _MinerUServiceLifecycle().start()
-    assert calls == ["constructor"]
+    assert calls == ["constructor", "ensure"]
 
 
 def test_mineru_lifecycle_stop_invokes_shutdown(
@@ -706,7 +707,8 @@ def test_mineru_lifecycle_stop_invokes_shutdown(
     calls: list[str] = []
 
     class _Svc:
-        def shutdown(self):  # type: ignore[no-untyped-def]
+        @classmethod
+        def shutdown_owned(cls):  # type: ignore[no-untyped-def]
             calls.append("shutdown")
 
     fake_module = types.ModuleType("vibeocr.runtime.recognition.mineru_service")
@@ -723,7 +725,8 @@ def test_mineru_lifecycle_stop_swallows_shutdown_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BrokenSvc:
-        def shutdown(self):  # type: ignore[no-untyped-def]
+        @classmethod
+        def shutdown_owned(cls):  # type: ignore[no-untyped-def]
             raise RuntimeError("wedged")
 
     fake_module = types.ModuleType("vibeocr.runtime.recognition.mineru_service")
@@ -732,8 +735,8 @@ def test_mineru_lifecycle_stop_swallows_shutdown_error(
         sys.modules, "vibeocr.runtime.recognition.mineru_service", fake_module
     )
 
-    # Must not raise.
-    _MinerUServiceLifecycle().stop()
+    with pytest.raises(RuntimeError, match="wedged"):
+        _MinerUServiceLifecycle().stop()
 
 
 # ---------------------------------------------------------------------------

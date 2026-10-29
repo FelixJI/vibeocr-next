@@ -528,6 +528,7 @@ class ResidencyEntry(TypedDict, total=False):
     remaining_ttl_seconds: Required[int | None]
     estimated_vram_mb: Required[int | None]
     eviction_reason: Required[Literal['none', 'ttl_expired', 'vram_pressure', 'explicit_release', 'supervisor_shutdown']]
+    worker: NotRequired[dict[str, Any]]
 
 
 class ResidencyStatus(TypedDict, total=False):
@@ -739,6 +740,8 @@ class SettingsSnapshot(TypedDict, total=False):
     residency: Required[SettingsResidency]
     extra: Required[dict[str, Any]]
     download_source_ids: NotRequired[list[str]]
+    paddle_idle_seconds: NotRequired[int]
+    mineru_idle_seconds: NotRequired[int]
 
 
 class StageEvent(TypedDict, total=False):

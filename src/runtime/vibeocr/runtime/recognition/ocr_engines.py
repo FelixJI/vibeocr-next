@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -369,8 +370,9 @@ class LazyEngineHandle:
     descriptor_probe: Callable[[], EngineDescriptor]
     factory: Callable[[], Any]
     _instance: Any = field(default=None, init=False, repr=False)
-    _instance_lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
+    _settings: Any = field(default=None, init=False, repr=False)
+    _instance_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
     )
 
     def descriptor(self) -> EngineDescriptor:
@@ -382,7 +384,13 @@ class LazyEngineHandle:
         with self._instance_lock:
             if self._instance is None:
                 self._instance = self.factory()
+                if self._settings is not None:
+                    self._instance.configure_settings(self._settings)
         return self._instance
+
+    def reserve(self):
+        reserve = getattr(self.instance(), "reserve", None)
+        return reserve() if callable(reserve) else lambda: None
 
     def capabilities(self, options: Any | None = None) -> Any:
         return self.instance().capabilities(options)
@@ -415,9 +423,18 @@ class LazyEngineHandle:
             return ResidencyStatus()
         return self._instance.release_idle(pipeline)
 
+    @contextmanager
+    def settings_guard(self):
+        with self._instance_lock:
+            guard = getattr(self._instance, "settings_guard", nullcontext)
+            with guard():
+                yield
+
     def configure_settings(self, snapshot: Any) -> None:
-        if self._instance is not None:
-            self._instance.configure_settings(snapshot)
+        with self._instance_lock:
+            self._settings = snapshot
+            if self._instance is not None:
+                self._instance.configure_settings(snapshot)
 
     def close(self) -> None:
         if self._instance is not None:

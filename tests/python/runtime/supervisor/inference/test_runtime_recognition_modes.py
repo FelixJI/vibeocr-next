@@ -44,10 +44,10 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
             "paddleocr",
             "base_runtime",
             {
-                "kind": "model_residency",
+                "kind": "process_keep_alive",
                 "supports_preload": True,
-                "supports_ttl": True,
-                "supports_pinning": True,
+                "supports_ttl": False,
+                "supports_pinning": False,
                 "supports_release": True,
             },
         ),
@@ -57,10 +57,10 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
             None,
             "advanced_component",
             {
-                "kind": "model_residency",
+                "kind": "process_keep_alive",
                 "supports_preload": True,
-                "supports_ttl": True,
-                "supports_pinning": True,
+                "supports_ttl": False,
+                "supports_pinning": False,
                 "supports_release": True,
             },
         ),
@@ -72,7 +72,7 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
             {
                 "kind": "process_keep_alive",
                 "supports_preload": True,
-                "supports_ttl": True,
+                "supports_ttl": False,
                 "supports_pinning": False,
                 "supports_release": True,
             },
@@ -83,10 +83,10 @@ def test_catalog_exposes_stable_semantics_without_runtime_state_ambiguity() -> N
             None,
             "advanced_component",
             {
-                "kind": "model_residency",
+                "kind": "process_keep_alive",
                 "supports_preload": True,
-                "supports_ttl": True,
-                "supports_pinning": True,
+                "supports_ttl": False,
+                "supports_pinning": False,
                 "supports_release": True,
             },
         ),
@@ -213,12 +213,11 @@ def test_lifecycle_validation_distinguishes_models_processes_and_unmanaged() -> 
             registry.validate_lifecycle(mode, operation)
         assert unsupported.value.code_name == "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED"
 
-    assert (
+    with pytest.raises(RecognitionModeError) as retired_write:
         registry.validate_pipeline_spec(
             "mineru_document", pipeline_id="MinerU", pinned=False
-        ).mode_id.value
-        == "mineru_document"
-    )
+        )
+    assert retired_write.value.code_name == "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED"
     with pytest.raises(RecognitionModeError) as mismatch:
         registry.validate_pipeline_spec(
             "paddle_text", pipeline_id="MinerU", pinned=False
@@ -280,8 +279,8 @@ def test_residency_payload_labels_model_and_process_resources_separately() -> No
             "pipeline": "OCR",
             "kind": "soft_ttl",
             "recognition_mode": "paddle_text",
-            "resource_kind": "model",
-            "resource_id": "paddle_text",
+            "resource_kind": "process",
+            "resource_id": "paddle",
         },
         {
             "pipeline": "MinerU",

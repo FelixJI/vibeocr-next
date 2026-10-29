@@ -453,7 +453,7 @@ class RecognitionModeRegistry:
         for raw_entry in payload.get("entries", []):
             entry = dict(raw_entry)
             definition = managed_by_pipeline.get(entry.get("pipeline"))
-            if definition is not None:
+            if definition is not None and "worker" not in entry:
                 is_process = (
                     definition.lifecycle.kind is LifecycleKind.PROCESS_KEEP_ALIVE
                 )
@@ -462,7 +462,13 @@ class RecognitionModeRegistry:
                         "recognition_mode": definition.mode_id.value,
                         "resource_kind": "process" if is_process else "model",
                         "resource_id": (
-                            "mineru-api" if is_process else definition.mode_id.value
+                            (
+                                "mineru-api"
+                                if definition.pipeline_id == "MinerU"
+                                else "paddle"
+                            )
+                            if is_process
+                            else definition.mode_id.value
                         ),
                     }
                 )

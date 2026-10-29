@@ -109,7 +109,9 @@ def _raw_item(item_id: str, data: bytes = b"%PDF-a") -> InputItem:
 
 
 def _snapshot(extra: dict[str, Any] | None = None, ttl: int = 300) -> SettingsSnapshot:
-    return SettingsSnapshot(default_ttl_seconds=ttl, extra=extra or {})
+    return SettingsSnapshot(
+        default_ttl_seconds=300, mineru_idle_seconds=ttl, extra=extra or {}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ class TestRemoteNeverSpawnsOrKillsLocal:
         lifecycle = _RecordingLifecycle()
         adapter = _adapter(lifecycle)
         adapter.ensure_started()  # local 会话启动（fake lifecycle，无真实进程）
-        assert adapter.residency_status().entries[0].kind is ResidencyKind.SOFT_TTL
+        assert adapter.residency_status().entries[0].kind is ResidencyKind.IDLE
 
         isolated_connection.configure_connection(
             isolated_connection.connection_from_extra(REMOTE_EXTRA)
@@ -268,7 +270,7 @@ class TestSettingsChain:
         executor = _executor()
         module = _module(tmp_path, executor)
         adapter = executor.adapter
-        adapter._active_leases = 1  # 模拟在途 MinerU 解析
+        release = adapter.reserve()  # 模拟在途 MinerU 解析
         try:
             with pytest.raises(MineruConfigError) as caught:
                 module.update_settings(_snapshot(REMOTE_EXTRA))
@@ -280,7 +282,7 @@ class TestSettingsChain:
             assert module.settings().extra == {}
             assert isolated_connection.current_connection().mode == "local"
         finally:
-            adapter._active_leases = 0
+            release()
         # 任务结束后同一变更可以生效。
         module.update_settings(_snapshot(REMOTE_EXTRA))
         assert isolated_connection.current_connection().mode == "remote"
@@ -293,14 +295,14 @@ class TestSettingsChain:
         module = _module(tmp_path, executor)
         module.update_settings(_snapshot(REMOTE_EXTRA))
         adapter = executor.adapter
-        adapter._active_leases = 1
+        release = adapter.reserve()
         try:
             # 连接不变，仅 TTL 调整：允许。
             module.update_settings(_snapshot(REMOTE_EXTRA, ttl=600))
-            assert module.settings().default_ttl_seconds == 600
+            assert module.settings().mineru_idle_seconds == 600
             assert isolated_connection.current_connection().mode == "remote"
         finally:
-            adapter._active_leases = 0
+            release()
         module.shutdown_now()
 
 
@@ -730,3 +732,19 @@ class TestUserCancelDuringParseMarksItemsCancelled:
             if entry.levelno >= logging.ERROR and "result=failed" in entry.getMessage()
         ]
         assert any("result=cancelled" in entry.getMessage() for entry in caplog.records)
+
+
+def test_switch_to_remote_retires_only_owned_local_resource_even_when_persistent(
+    isolated_connection,
+):
+    lifecycle = _RecordingLifecycle()
+    adapter = _adapter(lifecycle)
+    adapter.configure_settings(SettingsSnapshot(mineru_idle_seconds=0))
+    adapter.preload(("MinerU",))
+    finished = adapter._idle.last_finished
+    adapter.configure_settings(_snapshot(REMOTE_EXTRA))
+    adapter._idle.check_idle()
+    assert lifecycle.stopped == 1 and not adapter._process_started
+    assert adapter._idle.last_finished == finished
+    assert adapter.residency_status().entries[0].worker["state"] == "remote"
+    adapter.close()

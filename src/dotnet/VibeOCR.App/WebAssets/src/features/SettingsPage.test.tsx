@@ -987,3 +987,67 @@ it.each(["device", "service", "active"] as const)(
     ).toHaveLength(1);
   },
 );
+
+describe("Worker 空闲资源设置", () => {
+  it("提交整数秒、持久与恢复十分钟默认值", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 600,
+          mineruIdleSeconds: 600,
+        })}
+        actions={actions}
+      />,
+    );
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    await user.clear(paddle);
+    await user.type(paddle, "0");
+    await user.click(screen.getByRole("button", { name: "保存空闲设置" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 0,
+      mineruSeconds: 600,
+    });
+    await user.click(screen.getByRole("button", { name: "恢复十分钟默认值" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 600,
+      mineruSeconds: 600,
+    });
+  });
+  it("拒绝负数和小数，远程 MinerU 不展示本地超时控件", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 120,
+          mineruIdleSeconds: 0,
+          mineruConnection: {
+            supported: true,
+            mode: "remote",
+            apiUrl: "https://example.test",
+            hasApiKey: false,
+          },
+        })}
+        actions={actions}
+      />,
+    );
+    expect(
+      screen.queryByRole("spinbutton", { name: "本地 MinerU 空闲秒数" }),
+    ).not.toBeInTheDocument();
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    await user.clear(paddle);
+    await user.type(paddle, "-1");
+    expect(screen.getByRole("button", { name: "保存空闲设置" })).toBeDisabled();
+    await user.clear(paddle);
+    await user.type(paddle, "1.5");
+    expect(screen.getByRole("button", { name: "保存空闲设置" })).toBeDisabled();
+  });
+});

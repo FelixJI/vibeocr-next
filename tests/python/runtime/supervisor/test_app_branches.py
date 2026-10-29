@@ -628,9 +628,11 @@ async def test_put_settings_accepts_valid_snapshot(
             json={
                 "schema_version": 2,
                 "residency": {
-                    "default_ttl_seconds": 600,
+                    "default_ttl_seconds": 300,
                     "pipelines": [],
                 },
+                "paddle_idle_seconds": 600,
+                "mineru_idle_seconds": 600,
                 "extra": {},
             },
         )
@@ -644,7 +646,7 @@ async def test_put_settings_uses_recognition_mode_lifecycle_registry(
         return {
             "schema_version": 2,
             "residency": {
-                "default_ttl_seconds": 600,
+                "default_ttl_seconds": 300,
                 "pipelines": [
                     {
                         "name": name,
@@ -664,11 +666,10 @@ async def test_put_settings_uses_recognition_mode_lifecycle_registry(
         mismatch = await http.put("/v2/settings", json=payload("MinerU", "paddle_text"))
         unmanaged = await http.put("/v2/settings", json=payload("OCR", "windows_text"))
 
-    assert mineru.status_code == 200, mineru.text
-    pipeline = mineru.json()["residency"]["pipelines"][0]
-    assert pipeline["recognition_mode"] == "mineru_document"
-    assert mismatch.json()["code"] == "RECOGNITION_MODE_PIPELINE_MISMATCH"
-    assert unmanaged.json()["code"] == "RECOGNITION_MODE_LIFECYCLE_UNSUPPORTED"
+    for response in (mineru, mismatch, unmanaged):
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+        assert "retired" in response.json()["detail"]["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -1633,3 +1634,48 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
         )
     assert response.status_code == 400
     assert "matching managed ONNX environment" in response.text
+
+
+async def test_worker_settings_round_trip_and_old_client_omission_preserve_values(
+    pdf_app, supervisor_token
+):
+    async with _http(supervisor_token, pdf_app) as http:
+        initial = (await http.get("/v2/settings")).json()
+        assert initial["paddle_idle_seconds"] == initial["mineru_idle_seconds"] == 600
+        changed = {
+            **initial,
+            "paddle_idle_seconds": 0,
+            "mineru_idle_seconds": 2147483647,
+        }
+        saved = await http.put("/v2/settings", json=changed)
+        assert saved.status_code == 200
+        legacy = {
+            key: value
+            for key, value in changed.items()
+            if not key.endswith("idle_seconds")
+        }
+        old_client = await http.put("/v2/settings", json=legacy)
+        assert old_client.status_code == 200
+        assert old_client.json()["paddle_idle_seconds"] == 0
+        assert old_client.json()["mineru_idle_seconds"] == 2147483647
+        for value in [-1, True, 1.5, "600", 2147483648]:
+            rejected = await http.put(
+                "/v2/settings", json={**changed, "paddle_idle_seconds": value}
+            )
+            assert rejected.status_code == 400
+        assert (await http.get("/v2/settings")).json() == saved.json()
+
+
+async def test_release_busy_reports_accepted_work_protection(
+    pdf_app, pdf_module, supervisor_token, monkeypatch
+):
+    from vibeocr.runtime.recognition.worker_idle import WorkerBusyError
+
+    def protected(*_args, **_kwargs):
+        raise WorkerBusyError("accepted work")
+
+    monkeypatch.setattr(pdf_module, "release_idle", protected)
+    async with _http(supervisor_token, pdf_app) as http:
+        response = await http.post("/v2/runtime/release", json={})
+    assert response.status_code == 423
+    assert response.json()["detail"]["reason"] == "worker_protected_by_accepted_work"

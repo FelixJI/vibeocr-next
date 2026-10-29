@@ -346,15 +346,15 @@ def test_update_settings_caches_residency_when_returned(tmp_path: Path) -> None:
         stager_root=tmp_path / "s",
         executor=_ConfigCache(),
     )
-    snap = SettingsSnapshot(default_ttl_seconds=900)
+    snap = SettingsSnapshot(paddle_idle_seconds=900)
     out = mod.update_settings(snap)
-    assert out.default_ttl_seconds == 900
+    assert out.paddle_idle_seconds == 900
     # configure_settings was called and returned a ResidencyStatus that was cached.
-    assert cached[-1].default_ttl_seconds == 900
+    assert cached[-1].default_ttl_seconds == 300
     # The cached snapshot is observable while a preload owns the executor lock.
     with mod._lock:  # type: ignore[attr-defined]
         mod._preload_count = 1  # type: ignore[attr-defined]
-    assert mod.residency().default_ttl_seconds == 900
+    assert mod.residency().default_ttl_seconds == 300
 
 
 def test_update_settings_tolerates_non_residency_return(tmp_path: Path) -> None:
@@ -370,8 +370,8 @@ def test_update_settings_tolerates_non_residency_return(tmp_path: Path) -> None:
         stager_root=tmp_path / "s",
         executor=_NoneConfig(),
     )
-    out = mod.update_settings(SettingsSnapshot(default_ttl_seconds=42))
-    assert out.default_ttl_seconds == 42
+    out = mod.update_settings(SettingsSnapshot(paddle_idle_seconds=42))
+    assert out.paddle_idle_seconds == 42
 
 
 def test_update_settings_tolerates_missing_configure(tmp_path: Path) -> None:
@@ -392,6 +392,6 @@ def test_update_settings_tolerates_missing_configure(tmp_path: Path) -> None:
         stager_root=tmp_path / "s",
         executor=_NoConfig(),  # type: ignore[arg-type]
     )
-    snap = SettingsSnapshot(default_ttl_seconds=123)
+    snap = SettingsSnapshot(paddle_idle_seconds=123)
     out = mod.update_settings(snap)
-    assert out.default_ttl_seconds == 123
+    assert out.paddle_idle_seconds == 123

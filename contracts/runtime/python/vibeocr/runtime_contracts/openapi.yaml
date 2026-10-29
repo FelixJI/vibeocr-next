@@ -4382,6 +4382,10 @@
               "explicit_release",
               "supervisor_shutdown"
             ]
+          },
+          "worker": {
+            "type": "object",
+            "additionalProperties": true
           }
         },
         "additionalProperties": false
@@ -5760,6 +5764,18 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "paddle_idle_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "default": 600
+          },
+          "mineru_idle_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647,
+            "default": 600
           }
         },
         "additionalProperties": false

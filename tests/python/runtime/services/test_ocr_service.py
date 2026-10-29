@@ -351,5 +351,5 @@ class TestCacheManagerIntegration:
         OCRService._reset()
         svc = OCRService()
         ttls = {"OCR": 0, "PP-StructureV3": 600}
-        assert OCRService.set_pipeline_ttls(ttls) is True
-        assert svc.cache_manager.ttls["PP-StructureV3"] == 600
+        assert OCRService.set_pipeline_ttls(ttls) is False
+        assert svc.cache_manager.ttls == {}

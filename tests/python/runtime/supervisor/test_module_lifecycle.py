@@ -519,10 +519,10 @@ def test_shutdown_releases_all_staging(module: SupervisorModule) -> None:
 
 
 def test_settings_roundtrip(module: SupervisorModule) -> None:
-    snap = SettingsSnapshot(default_ttl_seconds=600)
+    snap = SettingsSnapshot(paddle_idle_seconds=600)
     out = module.update_settings(snap)
-    assert out.default_ttl_seconds == 600
-    assert module.settings().default_ttl_seconds == 600
+    assert out.paddle_idle_seconds == 600
+    assert module.settings().paddle_idle_seconds == 600
 
 
 def test_maintenance_excludes_submit_retry_and_other_maintenance(module):

@@ -558,15 +558,15 @@ public sealed class DefaultRecognitionModeWorkbenchTests
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
         Wire.RecognitionModeProvisioning.BaseRuntime,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent,
-        Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

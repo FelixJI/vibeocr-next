@@ -15,7 +15,6 @@ from vibeocr.runtime.recognition.core.pipelines.pipeline_table import (
 from vibeocr.runtime.recognition.core.pipelines.registry import PipelineRegistry
 from vibeocr.runtime.recognition.pipeline_contracts import (
     OCRPipeline,
-    RecognitionModeLifecycleKind,
     get_all_pipelines,
     get_all_recognition_modes,
     get_heavy_pipelines,
@@ -46,7 +45,7 @@ def get_registry() -> PipelineRegistry:
 
 
 def get_paddle_residency_pipelines() -> list[OCRPipeline]:
-    """Return execution pipelines owned by Paddle model residency.
+    """Return execution pipelines sharing the Paddle worker cache.
 
     Protocol 2.8 correctly classifies the shared ``OCR`` pipeline as routed,
     so the generic pipeline cache helpers no longer identify its physical
@@ -57,8 +56,8 @@ def get_paddle_residency_pipelines() -> list[OCRPipeline]:
         dict.fromkeys(
             definition.pipeline
             for mode_id in get_all_recognition_modes()
-            if (definition := get_recognition_mode_definition(mode_id)).lifecycle.kind
-            is RecognitionModeLifecycleKind.MODEL_RESIDENCY
+            if (definition := get_recognition_mode_definition(mode_id)).mode.value
+            in {"paddle_text", "paddle_structure", "paddle_table"}
         )
     )
 

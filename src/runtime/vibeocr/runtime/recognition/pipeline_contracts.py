@@ -144,11 +144,11 @@ def is_recognition_mode_retired(mode: RecognitionMode) -> bool:
     return mode in RETIRED_RECOGNITION_MODES
 
 
-_MODEL_RESIDENCY_LIFECYCLE = RecognitionModeLifecycle(
-    kind=RecognitionModeLifecycleKind.MODEL_RESIDENCY,
+_PADDLE_WORKER_LIFECYCLE = RecognitionModeLifecycle(
+    kind=RecognitionModeLifecycleKind.PROCESS_KEEP_ALIVE,
     supports_preload=True,
-    supports_ttl=True,
-    supports_pinning=True,
+    supports_ttl=False,
+    supports_pinning=False,
     supports_release=True,
 )
 # mineru_document reuses the preload endpoint for explicit first-time
@@ -157,7 +157,7 @@ _MODEL_RESIDENCY_LIFECYCLE = RecognitionModeLifecycle(
 _MINERU_PROCESS_KEEP_ALIVE_LIFECYCLE = RecognitionModeLifecycle(
     kind=RecognitionModeLifecycleKind.PROCESS_KEEP_ALIVE,
     supports_preload=True,
-    supports_ttl=True,
+    supports_ttl=False,
     supports_pinning=False,
     supports_release=True,
 )
@@ -443,7 +443,7 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         pipeline=OCRPipeline.OCR,
         engine="paddleocr",
         provisioning=RecognitionModeProvisioning.BASE_RUNTIME,
-        lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
+        lifecycle=_PADDLE_WORKER_LIFECYCLE,
         display_name="通用 OCR（PaddleOCR）",
         short_name="通用文字",
         description=(
@@ -465,7 +465,7 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         pipeline=OCRPipeline.PP_STRUCTURE_V3,
         engine=None,
         provisioning=RecognitionModeProvisioning.ADVANCED_COMPONENT,
-        lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
+        lifecycle=_PADDLE_WORKER_LIFECYCLE,
         display_name="文档结构识别（PP-StructureV3）",
         short_name="文档结构",
         description="识别版面、表格、公式、印章和图表等文档结构。",
@@ -505,7 +505,7 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         pipeline=OCRPipeline.TABLE_RECOGNITION,
         engine=None,
         provisioning=RecognitionModeProvisioning.ADVANCED_COMPONENT,
-        lifecycle=_MODEL_RESIDENCY_LIFECYCLE,
+        lifecycle=_PADDLE_WORKER_LIFECYCLE,
         display_name="表格结构识别（PaddleOCR）",
         short_name="表格结构",
         description="识别有线或无线表格的结构，需要高级组件。",

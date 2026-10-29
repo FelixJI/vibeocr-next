@@ -66,24 +66,21 @@ def test_policy_skips_non_mineru_pipeline_specs() -> None:
     adapter.configure_settings(
         SettingsSnapshot(
             default_ttl_seconds=200,
+            mineru_idle_seconds=123,
             pipelines=(
                 PipelineSpec(name="OCR", ttl_seconds=999),  # not MinerU → skipped
                 PipelineSpec(name="MinerU", ttl_seconds=400),  # used
             ),
         )
     )
-    pinned, ttl = adapter._policy_locked()
-    assert pinned is False
-    assert ttl == 400
+    assert adapter._idle.timeout == 123
 
 
 def test_policy_uses_default_ttl_when_no_mineru_spec() -> None:
     """When no MinerU spec exists, the default_ttl_seconds is used."""
     adapter = MinerUProcessAdapter(client_factory=lambda: _FakeMinerUClient())
     adapter.configure_settings(SettingsSnapshot(default_ttl_seconds=350))
-    pinned, ttl = adapter._policy_locked()
-    assert pinned is False
-    assert ttl == 350
+    assert adapter._idle.timeout == 600
 
 
 # ---------------------------------------------------------------------------

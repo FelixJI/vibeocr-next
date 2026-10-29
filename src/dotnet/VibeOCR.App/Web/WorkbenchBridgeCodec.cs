@@ -1305,6 +1305,14 @@ public static class WorkbenchBridgeCodec
         return new SetRuntimeFeatureCommand(
           featureId,
           arguments.GetProperty("enabled").GetBoolean());
+      case ("settings", "setWorkerIdle"):
+        EnsureObjectWithFields(arguments, new HashSet<string> { "paddleSeconds", "mineruSeconds" }, "command arguments");
+        JsonElement paddleIdleElement = arguments.GetProperty("paddleSeconds");
+        JsonElement mineruIdleElement = arguments.GetProperty("mineruSeconds");
+        if (paddleIdleElement.ValueKind != JsonValueKind.Number || !paddleIdleElement.TryGetInt32(out int paddleSeconds) || paddleSeconds < 0 ||
+            mineruIdleElement.ValueKind != JsonValueKind.Number || !mineruIdleElement.TryGetInt32(out int mineruSeconds) || mineruSeconds < 0)
+          throw new WorkbenchBridgeProtocolException("空闲时间须为 0 到 2147483647 的整数秒。");
+        return new SetWorkerIdleCommand(paddleSeconds, mineruSeconds);
       case ("settings", "setMineruConnection"):
         return ParseMineruConnection(arguments);
       case ("settings", "setMineruRecognition"):
@@ -2020,6 +2028,10 @@ public static class WorkbenchBridgeCodec
       },
       settings.EditorPreferences, settings.ImageOutputDirectory, settings.EditorPreferencesError,
       settings.StatusMessage,
+      settings.PaddleIdleSeconds,
+      settings.MineruIdleSeconds,
+      workers = settings.Workers ?? [],
+      settings.WorkerSettingsWarning,
       settings.ServiceStatus,
       settings.MaintenanceStatus,
       settings.MaintenancePhase,

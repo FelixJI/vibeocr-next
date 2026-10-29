@@ -226,7 +226,7 @@ def test_release_idle_stops_subprocess() -> None:
     entry = next(e for e in status.entries if e.pipeline == "MinerU")
     from vibeocr.runtime_contracts import ResidencyKind
 
-    assert entry.kind is ResidencyKind.SOFT_TTL
+    assert entry.kind is ResidencyKind.IDLE
     adapter.release_idle()
     status2 = adapter.residency_status()
     entry2 = next(e for e in status2.entries if e.pipeline == "MinerU")
@@ -266,31 +266,18 @@ def test_residency_status_is_bounded_while_mineru_process_starts() -> None:
         adapter.close()
 
 
-def test_finite_ttl_stops_idle_mineru_process() -> None:
-    from vibeocr.runtime_contracts import (
-        EvictionReason,
-        PipelineSpec,
-        ResidencyKind,
-        SettingsSnapshot,
-    )
+def test_worker_policy_stops_after_real_work_with_a_monotonic_clock() -> None:
+    from vibeocr.runtime_contracts import SettingsSnapshot
 
+    now = [10.0]
     adapter = MinerUProcessAdapter(client_factory=lambda: _FakeMinerUClient())
-    adapter.configure_settings(
-        SettingsSnapshot(
-            default_ttl_seconds=1,
-            pipelines=(PipelineSpec(name="MinerU", ttl_seconds=1),),
-        )
-    )
-    adapter.ensure_started()
-    deadline = time.monotonic() + 2.5
+    adapter._idle.clock = lambda: now[0]
+    adapter.configure_settings(SettingsSnapshot(mineru_idle_seconds=1))
+    adapter.preload(("MinerU",))
+    now[0] += 1
+    adapter._idle.check_idle()
     entry = adapter.residency_status().entries[0]
-    while time.monotonic() < deadline:
-        entry = adapter.residency_status().entries[0]
-        if entry.kind is ResidencyKind.EVICTED:
-            break
-        time.sleep(0.05)
-    assert entry.kind is ResidencyKind.EVICTED
-    assert entry.eviction_reason is EvictionReason.TTL_EXPIRED
+    assert entry.worker["state"] == "idle_stopped"
     adapter.close()
 
 

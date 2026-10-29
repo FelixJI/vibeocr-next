@@ -194,6 +194,49 @@ public sealed class MineruConnectionWorkbenchTests
   }
 
   [Fact]
+  public async Task WorkerIdleSavePreservesOtherSettingsAndKeepsProjectionOnFailure()
+  {
+    var initial = RemoteConnectionSnapshot() with { PaddleIdleSeconds = 120, MineruIdleSeconds = 0 };
+    var fake = new MineruInferenceClient { Health = MineruHealth(remoteCapability: true), Settings = initial };
+    var viewModel = new SettingsViewModel(fake);
+    await viewModel.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+    Assert.Equal(120, viewModel.PaddleIdleSeconds);
+    Assert.Equal(0, viewModel.MineruIdleSeconds);
+    await viewModel.SetWorkerIdleAsync(0, 600, TestContext.Current.CancellationToken);
+    Assert.Equal(0, viewModel.PaddleIdleSeconds);
+    Assert.Equal(600, viewModel.MineruIdleSeconds);
+    Assert.Same(initial.Extra, fake.LastUpdate!.Extra);
+
+    var failing = new MineruInferenceClient { Health = MineruHealth(remoteCapability: true), Settings = initial,
+      UpdateThrows = new InferenceClientException(HttpV2ErrorCode.BackendUnavailable, "write failed", false) };
+    var unchanged = new SettingsViewModel(failing);
+    await unchanged.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+    await unchanged.SetWorkerIdleAsync(600, 600, TestContext.Current.CancellationToken);
+    Assert.Equal(120, unchanged.PaddleIdleSeconds);
+    Assert.Equal(0, unchanged.MineruIdleSeconds);
+    Assert.Same(initial, failing.Settings);
+  }
+
+  [Fact]
+  public void WorkerIdleBridgeAcceptsBoundedSecondsAndRejectsInvalidTypes()
+  {
+    Guid sessionId = Guid.NewGuid();
+    string Command(string arguments) => JsonSerializer.Serialize(new
+    {
+      version = 2, kind = "request", id = Guid.NewGuid(), type = "app.command",
+      payload = new { sessionId, command = new { scope = "settings", action = "setWorkerIdle",
+        arguments = JsonDocument.Parse(arguments).RootElement } },
+    });
+    SetWorkerIdleCommand command = Assert.IsType<SetWorkerIdleCommand>(
+      WorkbenchBridgeCodec.ParseCommand(Command("{\"paddleSeconds\":0,\"mineruSeconds\":2147483647}"), sessionId).Command);
+    Assert.Equal(0, command.PaddleSeconds);
+    Assert.Equal(int.MaxValue, command.MineruSeconds);
+    foreach (string value in new[] { "-1", "true", "\"600\"", "1.5", "2147483648" })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.ParseCommand(
+        Command("{\"paddleSeconds\":" + value + ",\"mineruSeconds\":600}"), sessionId));
+  }
+
+  [Fact]
   public void BridgeParsesMineruConnectionCommands()
   {
     Guid sessionId = Guid.NewGuid();
@@ -758,16 +801,16 @@ public sealed class MineruConnectionWorkbenchTests
         Wire.RecognitionModeProvisioning.OperatingSystem, Wire.RecognitionModeLifecycleKind.Unmanaged),
       Wire.RecognitionModeId.PaddleText => (Wire.RecognitionModeFamily.Text,
         Wire.ExecutionPipelineId.OCR, (Wire.OcrEngineId?)Wire.OcrEngineId.Paddleocr,
-        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeProvisioning.BaseRuntime, Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleStructure => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.PPStructureV3, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.MineruDocument => (Wire.RecognitionModeFamily.Document,
         Wire.ExecutionPipelineId.MinerU, (Wire.OcrEngineId?)null,
         Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       Wire.RecognitionModeId.PaddleTable => (Wire.RecognitionModeFamily.Specialized,
         Wire.ExecutionPipelineId.TABLERECOGNITION, (Wire.OcrEngineId?)null,
-        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ModelResidency),
+        Wire.RecognitionModeProvisioning.AdvancedComponent, Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
       _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
     bool mineru = id == Wire.RecognitionModeId.MineruDocument;

@@ -17,7 +17,8 @@ from vibeocr.runtime_contracts import ResidencyStatus, SettingsSnapshot
 
 def _snapshot(*, ttl: int = 300, sources: tuple[str, ...] = ()) -> SettingsSnapshot:
     return SettingsSnapshot(
-        default_ttl_seconds=ttl,
+        default_ttl_seconds=300,
+        paddle_idle_seconds=ttl,
         pipelines=(),
         extra={},
         download_source_ids=sources,
@@ -153,7 +154,7 @@ def test_failed_persist_keeps_module_memory_and_restores_executor(tmp_path) -> N
         module.update_settings(requested)
 
     assert module.settings() == previous
-    assert executor.configured[-2:] == [requested, previous]
+    assert executor.configured == [previous]
 
 
 def test_supervisor_settings_path_prefers_explicit_environment(

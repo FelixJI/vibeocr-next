@@ -198,6 +198,7 @@ export type AppActionType =
   | "settings.setSource"
   | "settings.setAccelerator"
   | "settings.setFeature"
+  | "settings.setWorkerIdle"
   | "settings.setMineruConnection"
   | "settings.setMineruRecognition"
   | "settings.setDefaultRecognitionMode"
