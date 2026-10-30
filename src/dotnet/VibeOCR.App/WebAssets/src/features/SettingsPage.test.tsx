@@ -1,5 +1,7 @@
 import {
+  act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -989,6 +991,72 @@ it.each(["device", "service", "active"] as const)(
 );
 
 describe("Worker 空闲资源设置", () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "等待空闲设置回执时禁止编辑与重复提交（restore=%s, saved=%s）",
+    async (restore, saved) => {
+      const user = userEvent.setup();
+      const actions = buildActions();
+      let complete!: (saved: boolean) => void;
+      const receipt = new Promise<boolean>((resolve) => {
+        complete = resolve;
+      });
+      actions.run.mockImplementation((command) =>
+        command.type === "settings.setWorkerIdle"
+          ? receipt
+          : Promise.resolve(true),
+      );
+      render(
+        <SettingsPage
+          viewState={buildViewState({
+            paddleIdleSeconds: 600,
+            mineruIdleSeconds: 600,
+          })}
+          actions={actions}
+        />,
+      );
+      const paddle = screen.getByRole("spinbutton", {
+        name: "PaddleOCR 空闲秒数",
+      });
+      const mineru = screen.getByRole("spinbutton", {
+        name: "本地 MinerU 空闲秒数",
+      });
+      const save = screen.getByRole("button", { name: "保存空闲设置" });
+      const reset = screen.getByRole("button", { name: "恢复十分钟默认值" });
+      await user.clear(paddle);
+      await user.type(paddle, "0");
+      await user.clear(mineru);
+      await user.type(mineru, "123");
+      act(() => {
+        fireEvent.click(restore ? reset : save);
+        fireEvent.click(restore ? save : reset);
+      });
+      expect(
+        actions.run.mock.calls.filter(
+          ([command]) => command.type === "settings.setWorkerIdle",
+        ),
+      ).toHaveLength(1);
+      for (const control of [paddle, mineru, save, reset])
+        expect(control).toBeDisabled();
+      await user.type(paddle, "42");
+      await user.type(mineru, "84");
+      expect(paddle).toHaveValue(0);
+      expect(mineru).toHaveValue(123);
+      await act(async () => {
+        complete(saved);
+        await receipt;
+      });
+      for (const control of [paddle, mineru, save, reset])
+        expect(control).toBeEnabled();
+      expect(paddle).toHaveValue(restore && saved ? 600 : 0);
+      expect(mineru).toHaveValue(restore && saved ? 600 : 123);
+    },
+  );
+
   it("同值恢复默认后重置两项草稿，再保存仍为十分钟", async () => {
     const user = userEvent.setup();
     const actions = buildActions();

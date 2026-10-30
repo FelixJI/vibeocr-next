@@ -915,6 +915,28 @@ function WorkerIdleEditor({
 }) {
   const [paddle, setPaddle] = useState(String(paddleSeconds));
   const [mineru, setMineru] = useState(String(mineruSeconds));
+  const inFlight = useRef(false);
+  const [pending, setPending] = useState(false);
+  const disabled = busy || pending;
+  const submit = async (restore: boolean) => {
+    if (busy || inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    try {
+      const saved = await actions.run({
+        type: "settings.setWorkerIdle",
+        paddleSeconds: restore ? 600 : Number(paddle),
+        mineruSeconds: remote ? mineruSeconds : restore ? 600 : Number(mineru),
+      });
+      if (saved && restore) {
+        setPaddle("600");
+        if (!remote) setMineru("600");
+      }
+    } finally {
+      inFlight.current = false;
+      setPending(false);
+    }
+  };
   const valid = (value: string) =>
     /^\d+$/.test(value) && Number(value) <= 2147483647;
   const states = Array.isArray(workers) ? workers : [];
@@ -950,7 +972,7 @@ function WorkerIdleEditor({
           step={1}
           value={paddle}
           onChange={(_, data) => setPaddle(data.value)}
-          disabled={busy}
+          disabled={disabled}
         />
       </label>
       <p className="form-note">{status("PaddleOCR")}</p>
@@ -968,7 +990,7 @@ function WorkerIdleEditor({
               step={1}
               value={mineru}
               onChange={(_, data) => setMineru(data.value)}
-              disabled={busy}
+              disabled={disabled}
             />
           </label>
           <p className="form-note">{status("MinerU")}</p>
@@ -976,31 +998,12 @@ function WorkerIdleEditor({
       )}
       <div className="button-row">
         <Button
-          disabled={busy || !valid(paddle) || !valid(mineru)}
-          onClick={() =>
-            actions.run({
-              type: "settings.setWorkerIdle",
-              paddleSeconds: Number(paddle),
-              mineruSeconds: remote ? mineruSeconds : Number(mineru),
-            })
-          }
+          disabled={disabled || !valid(paddle) || !valid(mineru)}
+          onClick={() => submit(false)}
         >
           保存空闲设置
         </Button>
-        <Button
-          disabled={busy}
-          onClick={async () => {
-            const saved = await actions.run({
-              type: "settings.setWorkerIdle",
-              paddleSeconds: 600,
-              mineruSeconds: remote ? mineruSeconds : 600,
-            });
-            if (saved) {
-              setPaddle("600");
-              if (!remote) setMineru("600");
-            }
-          }}
-        >
+        <Button disabled={disabled} onClick={() => submit(true)}>
           恢复十分钟默认值
         </Button>
       </div>

@@ -136,10 +136,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public int PaddleIdleSeconds { get; private set; } = 600;
     public int MineruIdleSeconds { get; private set; } = 600;
 
-    public async Task SetWorkerIdleAsync(int paddleSeconds, int mineruSeconds, CancellationToken cancellationToken)
+    public async Task<bool> SetWorkerIdleAsync(int paddleSeconds, int mineruSeconds, CancellationToken cancellationToken)
     {
         if (paddleSeconds < 0 || mineruSeconds < 0) throw new ArgumentOutOfRangeException(nameof(paddleSeconds));
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
+        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return false; }
         await _settingsGate.WaitAsync(cancellationToken);
         try
         {
@@ -152,8 +152,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             PaddleIdleSeconds = updated.PaddleIdleSeconds;
             MineruIdleSeconds = updated.MineruIdleSeconds;
             Status = "已保存空闲后释放资源设置。0 秒表示持久运行。";
+            return true;
         }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return false; }
         finally { _settingsGate.Release(); }
     }
 

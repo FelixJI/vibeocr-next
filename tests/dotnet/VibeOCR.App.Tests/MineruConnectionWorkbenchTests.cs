@@ -218,6 +218,60 @@ public sealed class MineruConnectionWorkbenchTests
   }
 
   [Fact]
+  public async Task WorkerIdleBackendFailureProducesFailedBridgeReceiptAndPreservesAuthority()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      SettingsSnapshot initial = RemoteConnectionSnapshot() with { PaddleIdleSeconds = 120, MineruIdleSeconds = 0 };
+      var fake = new MineruInferenceClient
+      {
+        Health = MineruHealth(remoteCapability: true), Settings = initial,
+        UpdateThrows = new InferenceClientException(HttpV2ErrorCode.BackendUnavailable, "write failed", false),
+      };
+      var settings = new SettingsViewModel(fake);
+      await settings.LoadSnapshotAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = CreateWorkerIdleHandler(settings, broker, resourceRoot, annotationStore);
+      await using var application = new WorkbenchApplication([], WorkbenchRoute.Settings, handler);
+      var published = new List<SettingsWorkbenchState>();
+      handler.StateChanged += state => { if (state is SettingsWorkbenchState update) published.Add(update); };
+      Guid sessionId = Guid.NewGuid();
+      string request = JsonSerializer.Serialize(new
+      {
+        version = 2, kind = "request", id = Guid.NewGuid(), type = "app.command",
+        payload = new { sessionId, command = new { scope = "settings", action = "setWorkerIdle",
+          arguments = new { paddleSeconds = 600, mineruSeconds = 600 } } },
+      });
+      WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
+        WorkbenchBridgeCodec.ParseCommand(request, sessionId), TestContext.Current.CancellationToken);
+
+      Assert.False(receipt.Ok);
+      using JsonDocument serialized = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeReceipt(receipt));
+      Assert.False(serialized.RootElement.GetProperty("payload").GetProperty("ok").GetBoolean());
+      Assert.Equal("desktop_command_failed", receipt.Error!.Code);
+      Assert.Equal(120, settings.PaddleIdleSeconds);
+      Assert.Equal(0, settings.MineruIdleSeconds);
+      Assert.Same(initial, fake.Settings);
+      Assert.Equal(1, fake.UpdateCalls);
+      SettingsWorkbenchState last = published.Last();
+      Assert.Equal(settings.Status, last.StatusMessage);
+      Assert.DoesNotContain("write failed", last.StatusMessage);
+      Assert.Equal(120, last.PaddleIdleSeconds);
+      Assert.Equal(0, last.MineruIdleSeconds);
+      fake.UpdateThrows = null;
+      WorkbenchCommandReceipt retry = await application.ExecuteAsync(
+        WorkbenchBridgeCodec.ParseCommand(request, sessionId), TestContext.Current.CancellationToken);
+      Assert.True(retry.Ok);
+      Assert.Equal(600, settings.PaddleIdleSeconds);
+      Assert.Equal(600, settings.MineruIdleSeconds);
+      Assert.Same(initial.Extra, fake.LastUpdate!.Extra);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+  [Fact]
   public void WorkerIdleBridgeAcceptsBoundedSecondsAndRejectsInvalidTypes()
   {
     Guid sessionId = Guid.NewGuid();
@@ -885,7 +939,7 @@ public sealed class MineruConnectionWorkbenchTests
 
     public Wire.Health? HealthAfterPreload { get; init; }
 
-    public InferenceClientException? UpdateThrows { get; init; }
+    public InferenceClientException? UpdateThrows { get; set; }
 
     public int UpdateCalls { get; private set; }
 
@@ -982,6 +1036,18 @@ public sealed class MineruConnectionWorkbenchTests
     }
   }
 
+  internal static DesktopWorkbenchCommandHandler CreateWorkerIdleHandler(
+    SettingsViewModel settings, WorkbenchResourceBroker broker,
+    string resourceRoot, WorkbenchAnnotationStore annotationStore) => new(
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    static () => throw new InvalidOperationException(),
+    () => settings,
+    () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
+    static () => throw new InvalidOperationException(),
+    new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+    broker, resourceRoot, static () => 0, annotationStore);
   private sealed class StubHotkeyRegistrar : IHotkeyRegistrar
   {
     public bool Register(string hotkey, out string? conflict)

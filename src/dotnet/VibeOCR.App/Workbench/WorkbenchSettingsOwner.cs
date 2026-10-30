@@ -459,7 +459,11 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetWorkerIdleCommand command, CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
-    await settings.SetWorkerIdleAsync(command.PaddleSeconds, command.MineruSeconds, cancellationToken);
+    if (!await settings.SetWorkerIdleAsync(command.PaddleSeconds, command.MineruSeconds, cancellationToken))
+    {
+      operations.Publish(SettingsState(settings));
+      throw new InvalidOperationException(settings.Status);
+    }
     return SettingsState(settings);
   }
 
