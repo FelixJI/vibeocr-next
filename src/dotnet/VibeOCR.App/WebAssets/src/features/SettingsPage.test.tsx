@@ -989,6 +989,114 @@ it.each(["device", "service", "active"] as const)(
 );
 
 describe("Worker 空闲资源设置", () => {
+  it("同值恢复默认后重置两项草稿，再保存仍为十分钟", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 600,
+          mineruIdleSeconds: 600,
+        })}
+        actions={actions}
+      />,
+    );
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    const mineru = screen.getByRole("spinbutton", {
+      name: "本地 MinerU 空闲秒数",
+    });
+    for (const input of [paddle, mineru]) {
+      await user.clear(input);
+      await user.type(input, "0");
+    }
+    await user.click(screen.getByRole("button", { name: "恢复十分钟默认值" }));
+    await waitFor(() => {
+      expect(paddle).toHaveValue(600);
+      expect(mineru).toHaveValue(600);
+    });
+    actions.run.mockClear();
+    await user.click(screen.getByRole("button", { name: "保存空闲设置" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 600,
+      mineruSeconds: 600,
+    });
+  });
+
+  it("恢复默认失败时保留两项未保存草稿", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    actions.run.mockResolvedValue(false);
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 600,
+          mineruIdleSeconds: 600,
+        })}
+        actions={actions}
+      />,
+    );
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    const mineru = screen.getByRole("spinbutton", {
+      name: "本地 MinerU 空闲秒数",
+    });
+    await user.clear(paddle);
+    await user.type(paddle, "0");
+    await user.clear(mineru);
+    await user.type(mineru, "123");
+    await user.click(screen.getByRole("button", { name: "恢复十分钟默认值" }));
+    expect(paddle).toHaveValue(0);
+    expect(mineru).toHaveValue(123);
+    await user.click(screen.getByRole("button", { name: "保存空闲设置" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 0,
+      mineruSeconds: 123,
+    });
+  });
+
+  it("远程模式恢复仅重置 Paddle 草稿并保留本地 MinerU 策略", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    render(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 600,
+          mineruIdleSeconds: 0,
+          mineruConnection: {
+            supported: true,
+            mode: "remote",
+            apiUrl: "https://example.test",
+            hasApiKey: false,
+          },
+        })}
+        actions={actions}
+      />,
+    );
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    await user.clear(paddle);
+    await user.type(paddle, "0");
+    await user.click(screen.getByRole("button", { name: "恢复十分钟默认值" }));
+    await waitFor(() => expect(paddle).toHaveValue(600));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 600,
+      mineruSeconds: 0,
+    });
+    actions.run.mockClear();
+    await user.click(screen.getByRole("button", { name: "保存空闲设置" }));
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 600,
+      mineruSeconds: 0,
+    });
+  });
   it("提交整数秒、持久与恢复十分钟默认值", async () => {
     const user = userEvent.setup();
     const actions = buildActions();

@@ -989,13 +989,17 @@ function WorkerIdleEditor({
         </Button>
         <Button
           disabled={busy}
-          onClick={() =>
-            actions.run({
+          onClick={async () => {
+            const saved = await actions.run({
               type: "settings.setWorkerIdle",
               paddleSeconds: 600,
               mineruSeconds: remote ? mineruSeconds : 600,
-            })
-          }
+            });
+            if (saved) {
+              setPaddle("600");
+              if (!remote) setMineru("600");
+            }
+          }}
         >
           恢复十分钟默认值
         </Button>
