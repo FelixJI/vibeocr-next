@@ -114,12 +114,19 @@ class PaddleProcessAdapter:
         return self.probe_descriptor()
 
     def _start(self) -> None:
+        with self._idle.operation_lock:
+            if self._idle.state == "stop_failed":
+                raise RuntimeError("Paddle worker stop failed; ownership retained")
+            self._start_serial()
+
+    def _start_serial(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
         self._stop()
         self._idle.starting()
         responses = queue.Queue()
-        self._responses = responses
+        with self._lock:
+            self._responses = responses
         env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONUTF8="1")
         env.pop("PYTHONPATH", None)
         product_code = env.get("VIBEOCR_PRODUCT_CODE_ROOT")
@@ -146,8 +153,11 @@ class PaddleProcessAdapter:
             if os.name == "nt"
             else 0,
         )
-        self._process = process
-        self._guard = JobObjectGuard(allow_breakaway=False)
+        with self._lock:
+            self._process = process
+        guard = JobObjectGuard(allow_breakaway=False)
+        with self._lock:
+            self._guard = guard
         if os.name == "nt" and not self._guard.assign_from_popen(
             process, suspended=True
         ):
@@ -261,21 +271,23 @@ class PaddleProcessAdapter:
         try:
             with self._request_lock:
                 try:
-                    with self._lock:
+                    with self._idle.operation_lock:
                         self._idle.working()
                         self._start()
-                        settings = self._settings if self._settings_pending else None
-                        self._settings_pending = False
+                        with self._lock:
+                            settings = (
+                                self._settings if self._settings_pending else None
+                            )
+                            self._settings_pending = False
                     if settings is not None:
                         self._exchange(
                             {"operation": "settings", "settings": settings.to_payload()}
                         )
                     return self._exchange({"operation": operation, **payload})
                 except Exception as exc:
-                    with self._lock:
-                        if self._idle.state == "starting":
-                            self._idle.stop("start_failed", force=True)
-                        self._idle.record_error(exc, "request_failed")
+                    if self._idle.state == "starting":
+                        self._idle.stop("start_failed", force=True)
+                    self._idle.record_error(exc, "request_failed")
                     raise
         finally:
             release()
@@ -422,10 +434,11 @@ class PaddleProcessAdapter:
                         pass  # A forced stop intentionally discards the broken input frame.
         if self._guard is not None:
             self._guard.close()
+        with self._lock:
             self._guard = None
-        self._process = None
-        self._responses = queue.Queue()
-        self._status = ResidencyStatus()
+            self._process = None
+            self._responses = queue.Queue()
+            self._status = ResidencyStatus()
 
     def close(self) -> None:
         self._idle.close()

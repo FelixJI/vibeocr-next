@@ -22,6 +22,7 @@ class WorkerIdleOwner:
     ) -> None:
         self.name = name
         self.lock = lock
+        self.operation_lock = threading.RLock()
         self.clock = clock
         self._stop = stop
         self.timeout = 600
@@ -62,7 +63,11 @@ class WorkerIdleOwner:
                 if self.active == 0 and self._worked:
                     self.last_finished = self.clock()
                     self._worked = False
-                    if self.running and self.state != "stop_failed":
+                    if self.running and self.state not in (
+                        "starting",
+                        "stopping",
+                        "stop_failed",
+                    ):
                         self.state = "idle"
                 self._publish()
                 self._wakeup.set()
@@ -106,8 +111,16 @@ class WorkerIdleOwner:
         with self.lock:
             if self._closed:
                 raise RuntimeError(f"{self.name} owner is closed")
+            if self.state == "stop_failed":
+                raise RuntimeError(
+                    f"{self.name} worker stop failed; ownership retained"
+                )
             self._worked = True
-            if self.running and self.state != "stop_failed":
+            if self.running and self.state not in (
+                "starting",
+                "stopping",
+                "stop_failed",
+            ):
                 self.state = "busy"
             self._publish()
 
@@ -133,47 +146,68 @@ class WorkerIdleOwner:
             self._publish()
             self._wakeup.set()
 
-    def stop(self, reason: str, *, force: bool = False) -> None:
+    def stop(
+        self, reason: str, *, force: bool = False, _idle_check: bool = False
+    ) -> None:
+        # Busy rejection never waits for a long startup/stop; recheck after serialization.
         with self.lock:
             if self.active and not force:
                 raise WorkerBusyError(
                     f"{self.name} worker is protected by accepted work"
                 )
-            started = self.clock()
-            self.state = "stopping"
-            self.reason = reason
-            self._publish()
+        # Long operations serialize before taking the short reservation/settings lock.
+        with self.operation_lock:
+            with self.lock:
+                if _idle_check and self._idle_reason() != reason:
+                    return
+                if self.active and not force:
+                    raise WorkerBusyError(
+                        f"{self.name} worker is protected by accepted work"
+                    )
+                started = self.clock()
+                self.state = "stopping"
+                self.reason = reason
+                self._publish()
             try:
                 self._stop()
             except Exception as exc:
-                self.state = "stop_failed"
-                # Exception messages may include URLs/credentials; retain only type.
-                self.error = type(exc).__name__
+                with self.lock:
+                    self.state = "stop_failed"
+                    self.error = type(exc).__name__
                 raise
             else:
-                self.running = False
-                self.state = "idle_stopped" if reason == "idle" else "not_started"
-                self.error = None
+                with self.lock:
+                    self.running = False
+                    self.state = "idle_stopped" if reason == "idle" else "not_started"
+                    self.error = None
             finally:
-                self.elapsed_seconds = max(0, self.clock() - started)
-                self._publish()
+                with self.lock:
+                    self.elapsed_seconds = max(0, self.clock() - started)
+                    self._publish()
 
     def retire_when_idle(self, retire: bool) -> None:
         with self.lock:
             self._retire = retire
             self._wakeup.set()
 
+    def _idle_reason(self) -> str | None:
+        if self.running and self.state != "stop_failed" and self.active == 0:
+            if self._retire:
+                return "connection_changed"
+            if (
+                self.timeout > 0
+                and self.last_finished is not None
+                and self.clock() - self.last_finished >= self.timeout
+            ):
+                return "idle"
+        return None
+
     def check_idle(self) -> None:
-        with self.lock:
-            if self.running and self.state != "stop_failed" and self.active == 0:
-                if self._retire:
-                    self.stop("connection_changed")
-                elif (
-                    self.timeout > 0
-                    and self.last_finished is not None
-                    and self.clock() - self.last_finished >= self.timeout
-                ):
-                    self.stop("idle")
+        with self.operation_lock:
+            with self.lock:
+                reason = self._idle_reason()
+            if reason is not None:
+                self.stop(reason, _idle_check=True)
 
     def _publish(self) -> None:
         self._published = dict(

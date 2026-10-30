@@ -142,11 +142,13 @@ class MinerUProcessAdapter:
             self._idle.update_generation(generation())
 
     def ensure_started(self) -> None:
-        with self._process_lock:
+        with self._idle.operation_lock:
             if self._idle.closed:
                 raise RuntimeError("MinerU owner is closed")
             if self._remote_locked():
                 return
+            if self._idle.state == "stop_failed":
+                raise RuntimeError("MinerU worker stop failed; ownership retained")
             if self._process_started:
                 return
             prepare_start = getattr(self.lifecycle, "prepare_start", None)

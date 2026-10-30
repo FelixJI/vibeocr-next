@@ -15,7 +15,7 @@ from vibeocr.runtime.environments.settings_store import (
     RuntimeSettingsStoreError,
 )
 from vibeocr.runtime.recognition.paddle_process_adapter import PaddleProcessAdapter
-from vibeocr.runtime.recognition.worker_idle import WorkerIdleOwner
+from vibeocr.runtime.recognition.worker_idle import WorkerBusyError, WorkerIdleOwner
 from vibeocr.runtime_contracts import SettingsSnapshot
 
 
@@ -311,12 +311,8 @@ def test_paddle_stop_confirms_owned_descendant_exit_without_killing_external_pro
         external.wait(timeout=5)
 
 
-def test_expiry_and_new_reservation_are_serialized_until_stop_confirmation():
-    stopping, confirm, reserved = (
-        threading.Event(),
-        threading.Event(),
-        threading.Event(),
-    )
+def test_reservation_is_prompt_but_next_generation_waits_for_stop_confirmation():
+    stopping, confirm, started = threading.Event(), threading.Event(), threading.Event()
 
     def stop():
         stopping.set()
@@ -328,21 +324,29 @@ def test_expiry_and_new_reservation_are_serialized_until_stop_confirmation():
     expiry = threading.Thread(target=owner.check_idle)
     expiry.start()
     assert stopping.wait(1)
-    releases = []
+    release = owner.reserve()
 
-    def accept():
-        releases.append(owner.reserve())
-        reserved.set()
+    def next_generation():
+        with owner.operation_lock:
+            owner.starting()
+            owner.started()
+            started.set()
 
-    acceptance = threading.Thread(target=accept)
-    acceptance.start()
-    assert not reserved.wait(0.05)
-    confirm.set()
-    expiry.join(1)
-    acceptance.join(1)
-    assert reserved.is_set() and owner.generation == 1 and not owner.running
-    releases[0]()
-    owner.close()
+    next_start = threading.Thread(target=next_generation)
+    next_start.start()
+    try:
+        assert owner.active == 1 and owner.snapshot()["state"] == "stopping"
+        assert not started.wait(0.05)
+        confirm.set()
+        expiry.join(1)
+        next_start.join(1)
+        assert started.is_set() and owner.generation == 2 and owner.running
+    finally:
+        confirm.set()
+        expiry.join(1)
+        next_start.join(1)
+        release()
+        owner.close()
 
 
 def test_job_reservation_is_taken_before_dispatch_and_covers_queue_gap(tmp_path):
@@ -1093,3 +1097,80 @@ def test_empty_job_does_not_hide_owned_root_from_termination_retry(
             root.terminate()
         adapter._idle.active = 0
         adapter.close()
+
+
+def test_paddle_startup_does_not_hold_reservation_lock(monkeypatch):
+    entered, finish, accepted = threading.Event(), threading.Event(), threading.Event()
+    adapter = PaddleProcessAdapter(Path(sys.executable))
+    errors, leases = [], []
+
+    def start():
+        adapter._idle.starting()
+        entered.set()
+        assert finish.wait(2)
+        adapter._idle.started()
+
+    monkeypatch.setattr(adapter, "_start", start)
+    monkeypatch.setattr(adapter, "_exchange", lambda request: [])
+
+    def request():
+        try:
+            adapter._request("recognize")
+        except Exception as exc:
+            errors.append(exc)
+
+    def reserve():
+        leases.append(adapter.reserve())
+        accepted.set()
+
+    worker = threading.Thread(target=request)
+    acceptor = threading.Thread(target=reserve)
+    worker.start()
+    assert entered.wait(1)
+    acceptor.start()
+    try:
+        assert accepted.wait(0.3), "Paddle startup blocked accepted-work reservation"
+        assert not finish.is_set() and adapter._idle.active == 2
+        with pytest.raises(WorkerBusyError):
+            adapter.release_idle()
+        assert not finish.is_set()
+    finally:
+        finish.set()
+        worker.join(2)
+        acceptor.join(2)
+        for release in leases:
+            release()
+        adapter.close()
+    assert not errors
+
+
+def test_reservation_during_failed_stop_cannot_reuse_the_failed_worker():
+    entered, finish = threading.Event(), threading.Event()
+    errors = []
+
+    def stop():
+        entered.set()
+        assert finish.wait(2)
+        raise OSError("synthetic owned stop failure")
+
+    owner, _ = owner_fixture(stop)
+    worked(owner)
+
+    def stopping():
+        try:
+            owner.stop("explicit")
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=stopping)
+    worker.start()
+    assert entered.wait(1)
+    release = owner.reserve()
+    finish.set()
+    worker.join(1)
+    assert len(errors) == 1 and owner.state == "stop_failed"
+    with pytest.raises(RuntimeError, match="ownership retained"):
+        owner.working()
+    release()
+    owner._stop = lambda: None
+    owner.close()
