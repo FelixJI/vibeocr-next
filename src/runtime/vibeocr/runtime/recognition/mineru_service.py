@@ -983,7 +983,7 @@ class MinerUService(metaclass=SingletonMeta):
         process, guard, reader = cls._api_process, cls._job_guard, cls._log_reader
         if guard is not None:
             guard.terminate_and_wait(timeout=10)
-        elif process is not None and process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
         if process is not None:
             process.wait(timeout=10)

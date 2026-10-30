@@ -398,13 +398,13 @@ class PaddleProcessAdapter:
                     except subprocess.TimeoutExpired:
                         if self._guard is not None:
                             self._guard.terminate_and_wait(timeout=5)
-                        else:
+                        if process.poll() is None:
                             process.terminate()
                         process.wait(timeout=5)
                 else:
                     if self._guard is not None:
                         self._guard.terminate_and_wait(timeout=5)
-                    else:
+                    if process.poll() is None:
                         process.terminate()
                     process.wait(timeout=5)
             if self._guard is not None:

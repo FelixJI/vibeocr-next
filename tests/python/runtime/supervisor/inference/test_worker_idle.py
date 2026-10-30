@@ -967,3 +967,129 @@ def test_mineru_resume_failure_reaps_owned_root_or_retains_retryable_ownership(
         guard.close()
         if processes and processes[0].stderr is not None:
             processes[0].stderr.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended-root assignment failure")
+@pytest.mark.parametrize("engine", ["paddle_idle", "paddle_active", "mineru"])
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_empty_job_does_not_hide_owned_root_from_termination_retry(
+    tmp_path, monkeypatch, engine, stop_fails
+):
+    import io
+
+    from vibeocr.runtime.host.composition import _MinerUServiceLifecycle
+    from vibeocr.runtime.recognition import mineru_service, paddle_process_adapter
+    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
+
+    class Root:
+        pid = 12345
+        returncode = None
+        terminate_calls = 0
+        failures = 2 if stop_fails else 1
+        stdin, stdout, stderr = io.StringIO(), io.StringIO(), io.StringIO()
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminate_calls += 1
+            if self.terminate_calls <= self.failures:
+                raise OSError("synthetic owned-root terminate failure")
+            self.returncode = 1
+
+        def wait(self, timeout):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("owned suspended root", timeout)
+            return self.returncode
+
+    class EmptyJob:
+        closed = False
+
+        def assign_from_popen(self, process, *, suspended):
+            assert process is root and suspended
+            return False
+
+        def terminate_and_wait(self, timeout):
+            # A failed assignment leaves a valid but empty Job; it cannot stop root.
+            pass
+
+        def close(self):
+            self.closed = True
+
+    root, guard = Root(), EmptyJob()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: root)
+    if engine.startswith("paddle"):
+        monkeypatch.setattr(
+            paddle_process_adapter, "JobObjectGuard", lambda **kwargs: guard
+        )
+        adapter = PaddleProcessAdapter(Path(sys.executable))
+        start = adapter._start
+
+        def owned_root():
+            return adapter._process
+
+        def owned_guard():
+            return adapter._guard
+    else:
+        cls = mineru_service.MinerUService
+        for name in (
+            "_api_process",
+            "_job_guard",
+            "_api_owner",
+            "_log_reader",
+            "_prepare_process",
+            "_prepare_guard",
+            "_prepare_owner",
+            "_model_root",
+        ):
+            monkeypatch.setattr(cls, name, None)
+        owner = threading.Event()
+        monkeypatch.setattr(cls, "_startup_cancel", owner)
+        monkeypatch.setattr(cls, "_api_url", "")
+        monkeypatch.setattr(mineru_service, "JobObjectGuard", lambda **kwargs: guard)
+        service = object.__new__(cls)
+        monkeypatch.setattr(
+            service, "_resolve_python_executable", lambda: Path(sys.executable)
+        )
+        monkeypatch.setattr(
+            service,
+            "_local_environment",
+            lambda: {**os.environ, "MINERU_HOME": str(tmp_path)},
+        )
+        lifecycle = _MinerUServiceLifecycle()
+        lifecycle._startup_cancel = owner
+        adapter = MinerUProcessAdapter(
+            client_factory=lambda: service, lifecycle=lifecycle
+        )
+
+        def start():
+            service._start_api(owner=owner)
+
+        def owned_root():
+            return cls._api_process
+
+        def owned_guard():
+            return cls._job_guard
+
+    try:
+        with pytest.raises(OSError):
+            start()
+        assert root.terminate_calls == 1 and owned_root() is root
+        adapter._idle.active = int(engine == "paddle_active")
+        if stop_fails:
+            with pytest.raises(OSError):
+                adapter._idle.stop("explicit_retry", force=True)
+            assert adapter._idle.state == "stop_failed"
+            assert owned_root() is root and owned_guard() is guard and not guard.closed
+        adapter._idle.stop("explicit_retry", force=True)
+        assert root.terminate_calls == (3 if stop_fails else 2)
+        assert (
+            root.poll() is not None and owned_root() is None and owned_guard() is None
+        )
+        assert guard.closed
+    finally:
+        root.failures = 0
+        if root.poll() is None:
+            root.terminate()
+        adapter._idle.active = 0
+        adapter.close()
