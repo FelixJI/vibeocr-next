@@ -157,6 +157,8 @@ class TestMinerUService:
         """关闭服务时应终止子进程"""
         mock_process = MagicMock()
         mock_process.wait.return_value = 0
+        mock_process.poll.return_value = None
+        MinerUService._job_guard = None
 
         MinerUService._api_process = mock_process
         MinerUService._api_url = "http://127.0.0.1:9999"
@@ -800,7 +802,9 @@ class TestMinerUEnsureApiRunningNoModelProbe:
         start_called = []
         with patch.object(service, "_check_api_running", return_value=False):
             with patch.object(
-                service, "_start_api", side_effect=lambda: start_called.append(True)
+                service,
+                "_start_api",
+                side_effect=lambda **_kwargs: start_called.append(True),
             ):
                 service._ensure_api_running()
 

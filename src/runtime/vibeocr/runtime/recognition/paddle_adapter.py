@@ -379,12 +379,6 @@ class PaddlePipelineAdapter:
 
     def configure_settings(self, snapshot: SettingsSnapshot) -> None:
         self._settings = snapshot
-        manager = self._physical_cache_manager()
-        if manager is not None and hasattr(manager, "configure_residency"):
-            manager.configure_residency(
-                default_ttl_seconds=snapshot.default_ttl_seconds,
-                pipelines=list(snapshot.pipelines),
-            )
 
     def close(self) -> None:
         manager = self._physical_cache_manager()

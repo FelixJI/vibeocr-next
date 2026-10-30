@@ -50,7 +50,7 @@ public sealed class SettingsViewModelSupervisorTests
         Assert.Equal(ResidencyKind.Pinned, viewModel.ResidencyEntries[1].Kind);
         Assert.Equal(2, viewModel.ResidencyPipelines.Count);
         Assert.False(viewModel.IsBusy);
-        Assert.Contains("600", viewModel.Status);
+        Assert.Contains("Worker", viewModel.Status);
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public sealed class SettingsViewModelSupervisorTests
         Assert.Null(viewModel.VramUsedMb);
         Assert.Empty(viewModel.ResidencyEntries);
         Assert.Empty(viewModel.ResidencyPipelines);
-        Assert.Contains("0", viewModel.Status); // "已驻留管线 0 个"
+        Assert.Contains("Worker", viewModel.Status);
     }
 
     // ------------------------------------------------------------------

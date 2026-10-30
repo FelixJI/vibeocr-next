@@ -101,7 +101,7 @@
               "reason_code": "runtime_component_missing",
               "required_component": "paddleocr-ort-cpu",
               "supported_options": ["model_preset", "device", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation"],
-              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": false, "supports_pinning": false, "supports_release": true}
             },
             {
               "id": "paddle_structure",
@@ -113,7 +113,7 @@
               "reason_code": "runtime_component_missing",
               "required_component": "paddleocr-ort-cpu",
               "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_textline_orientation", "use_table_recognition"],
-              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": false, "supports_pinning": false, "supports_release": true}
             },
             {
               "id": "mineru_document",
@@ -125,7 +125,7 @@
               "reason_code": "runtime_component_missing",
               "required_component": "mineru-cpu",
               "supported_options": ["parse_method", "backend", "effort", "enable_formula", "enable_table", "lang_list", "start_page_id", "end_page_id"],
-              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": true, "supports_pinning": false, "supports_release": true}
+              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": false, "supports_pinning": false, "supports_release": true}
             },
             {
               "id": "paddle_table",
@@ -137,7 +137,7 @@
               "reason_code": "runtime_component_missing",
               "required_component": "paddleocr-ort-cpu",
               "supported_options": ["device", "model_preset", "local_models_only", "use_doc_orientation_classify", "use_doc_unwarping", "use_table_orientation_classify", "use_ocr_results_with_table_cells"],
-              "lifecycle": {"kind": "model_residency", "supports_preload": true, "supports_ttl": true, "supports_pinning": true, "supports_release": true}
+              "lifecycle": {"kind": "process_keep_alive", "supports_preload": true, "supports_ttl": false, "supports_pinning": false, "supports_release": true}
             }
           ]
         }

@@ -198,6 +198,7 @@ export type AppActionType =
   | "settings.setSource"
   | "settings.setAccelerator"
   | "settings.setFeature"
+  | "settings.setWorkerIdle"
   | "settings.setMineruConnection"
   | "settings.setMineruRecognition"
   | "settings.setDefaultRecognitionMode"
@@ -217,6 +218,7 @@ export type AppActionType =
   | "update.cancel"
   | "update.cancelRuntimeMaintenance"
   | "update.setSource"
+  | "diagnostics.refresh"
   | "diagnostics.export"
   | "diagnostics.copy";
 

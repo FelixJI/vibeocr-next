@@ -858,6 +858,8 @@ def create_app(
 
     @app.post("/v2/runtime/release", response_model=wire.ResidencyStatus)
     async def release_runtime(request: Request) -> JsonResult:
+        from vibeocr.runtime.recognition.worker_idle import WorkerBusyError
+
         try:
             body = _strict_wire_payload(
                 await request.json(),
@@ -868,9 +870,16 @@ def create_app(
         pipeline = body.get("pipeline")
         recognition_mode = body.get("recognition_mode")
         try:
-            status = module.release_idle(
+            status = await asyncio.to_thread(
+                module.release_idle,
                 pipeline,
                 recognition_mode=recognition_mode,
+            )
+        except WorkerBusyError:
+            return _error_response(
+                ErrorCode.RUNTIME_BUSY,
+                instance_id,
+                detail={"reason": "worker_protected_by_accepted_work"},
             )
         except RecognitionModeError as exc:
             return _recognition_mode_error_response(exc, instance_id)
@@ -993,6 +1002,12 @@ def create_app(
             )
             snapshot = SettingsSnapshot(
                 default_ttl_seconds=default_ttl,
+                paddle_idle_seconds=body.get(
+                    "paddle_idle_seconds", module.settings().paddle_idle_seconds
+                ),
+                mineru_idle_seconds=body.get(
+                    "mineru_idle_seconds", module.settings().mineru_idle_seconds
+                ),
                 pipelines=pipelines,
                 extra=extra,
                 download_source_ids=source_ids,

@@ -19,7 +19,7 @@ def test_worker_timeout_terminates_process_and_discards_late_reply():
     adapter._process = process
     with pytest.raises(TimeoutError, match="deadline"):
         adapter._exchange({"operation": "status"}, timeout=0.001)
-    process.terminate.assert_called_once()
+    process.stdin.close.assert_called_once()
     assert adapter._process is None
 
 
@@ -66,7 +66,8 @@ def test_shutdown_escalates_only_when_worker_does_not_exit():
     process.wait.side_effect = [subprocess.TimeoutExpired("worker", 5), 0]
     adapter._process = process
     adapter.close()
-    process.kill.assert_called_once()
+    process.terminate.assert_called_once()
+    process.kill.assert_not_called()
     assert adapter._process is None
 
 

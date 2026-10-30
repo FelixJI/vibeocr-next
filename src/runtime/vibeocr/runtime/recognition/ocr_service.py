@@ -574,16 +574,9 @@ class OCRService(metaclass=SingletonMeta):
 
     @classmethod
     def set_pipeline_ttls(cls, pipeline_ttls: dict[str, int]) -> bool:
-        """设置每管道 TTL 闲置回收时间（直连模式）。
-
-        Args:
-            pipeline_ttls: 每管道 TTL 字典，0=持久。
-
-        Returns:
-            是否设置成功。
-        """
-        cls().cache_manager.ttls = pipeline_ttls
-        return True
+        """Retired compatibility entry; owner policies are configured via settings."""
+        del pipeline_ttls
+        return False
 
     @property
     def pipeline(self) -> Any:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any
 
 from vibeocr.runtime.recognition.ocr_engines import OCR_PIPELINE_ID, OcrEngineResolver
@@ -38,6 +39,8 @@ class OcrEngineRoutingAdapter:
         self._fallback: Any = None
         self._fallback_lock = threading.Lock()
         self.resolver = resolver
+        self._settings = None
+        self.reservation_uses_options = True
 
     @property
     def fallback(self) -> Any:
@@ -48,6 +51,8 @@ class OcrEngineRoutingAdapter:
         with self._fallback_lock:
             if self._fallback is None:
                 self._fallback = self._fallback_factory()
+                if self._settings is not None:
+                    self._fallback.configure_settings(self._settings)
         return self._fallback
 
     # ------------------------------------------------------------------
@@ -70,6 +75,16 @@ class OcrEngineRoutingAdapter:
     # ------------------------------------------------------------------
     # Adapter seam
     # ------------------------------------------------------------------
+
+    def reserve(self, options: Any | None = None):
+        pipeline_id, _ = self._selection_parts(options)
+        target = (
+            self._engine_for(options)
+            if pipeline_id == OCR_PIPELINE_ID
+            else self.fallback
+        )
+        reserve = getattr(target, "reserve", None)
+        return reserve() if callable(reserve) else lambda: None
 
     def capabilities(self, options: Any | None = None) -> Any:
         pipeline_id, _ = self._selection_parts(options)
@@ -118,9 +133,14 @@ class OcrEngineRoutingAdapter:
         return self.residency_status()
 
     def residency_status(self) -> ResidencyStatus:
+        entries = {}
+        for engine in self.resolver.registry.engines():
+            for entry in engine.residency_status().entries:
+                entries[entry.resource_id or entry.pipeline] = entry
         if self._fallback is not None:
-            return self._fallback.residency_status()
-        return ResidencyStatus()
+            for entry in self._fallback.residency_status().entries:
+                entries[entry.resource_id or entry.pipeline] = entry
+        return ResidencyStatus(entries=tuple(entries.values()))
 
     def release_idle(self, pipeline: str | None = None) -> ResidencyStatus:
         for engine in self.resolver.registry.engines():
@@ -131,7 +151,20 @@ class OcrEngineRoutingAdapter:
             self._fallback.release_idle(pipeline)
         return self.residency_status()
 
+    @contextmanager
+    def settings_guard(self):
+        # Fallback construction takes this lock before the lazy engine lock too.
+        with self._fallback_lock, ExitStack() as stack:
+            for engine in self.resolver.registry.engines():
+                guard = getattr(engine, "settings_guard", nullcontext)
+                stack.enter_context(guard())
+            if self._fallback is not None:
+                guard = getattr(self._fallback, "settings_guard", nullcontext)
+                stack.enter_context(guard())
+            yield
+
     def configure_settings(self, snapshot: Any) -> None:
+        self._settings = snapshot
         for engine in self.resolver.registry.engines():
             engine.configure_settings(snapshot)
         if self._fallback is not None and self._fallback not in (

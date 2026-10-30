@@ -795,9 +795,8 @@ public sealed class ManagedEnvironmentSettings(
         bool mineruReady = mineru?.Tiers.Any(tier =>
             tier.Id == mineru.DefaultTier && tier.Availability == Wire.MineruTierAvailability.Ready) == true;
         bool paddleModelReady = hasPaddle && residency.Entries.Any(entry =>
-            entry.ResourceKind == RecognitionResourceKind.Model &&
-            entry.RecognitionMode == RecognitionMode.PaddleText &&
-            entry.Kind != ResidencyKind.Evicted);
+            entry.ResourceKind == RecognitionResourceKind.Process &&
+            entry.ResourceId == "paddle" && entry.ModelsPrepared == true);
         string modelState = hasMineru && mineruReady || paddleModelReady ? "ready"
             : environment.ModelState;
         return environment with

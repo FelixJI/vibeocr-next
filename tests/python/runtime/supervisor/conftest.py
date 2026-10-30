@@ -25,10 +25,9 @@ from vibeocr.runtime.host.bootstrap import generate_session_token, new_instance_
 from vibeocr.runtime.jobs.module import SupervisorModule, SupervisorOptions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
-    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
     from vibeocr.runtime_contracts import CancelMode, ResidencyStatus, SettingsSnapshot
 
 
@@ -321,40 +320,21 @@ def pdf_app(pdf_module: SupervisorModule, supervisor_token: str):
 
 
 @pytest.fixture(autouse=True)
-def _stop_mineru_watchers_after_test(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
-    """Close leaked MinerU residency-watcher threads after each test.
+def _stop_worker_watchers_after_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Neither owned worker's idle watcher may outlive the test that created it."""
+    from vibeocr.runtime.recognition.worker_idle import WorkerIdleOwner
 
-    Several inference tests construct ``MinerUProcessAdapter`` instances (which
-    spawn a resident ``_watch_residency`` daemon when ``_ensure_watcher_locked``
-    runs) without calling ``.close()`` afterwards. Those daemon threads
-    accumulate across the full pytest session and, combined with the
-    pdf-supervisor-loop singleton and Qt widget creation in later view tests,
-    have triggered ``Windows fatal exception: access violation`` crashes in the
-    restricted CI session (run 30357452209, coverage job).
+    created: list[WorkerIdleOwner] = []
+    original = WorkerIdleOwner.__init__
 
-    This wraps ``_ensure_watcher_locked`` to track every adapter that starts a
-    watcher and closes them after each test, so no watcher daemon outlives the
-    test that created it. The lazy import keeps the backend module out of the
-    client-side test path until a test actually touches MinerU.
-    """
-    from vibeocr.runtime.recognition import mineru_adapter as _ma
+    def tracking(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        created.append(self)
 
-    created: list = []
-    original: Callable[..., None] = _ma.MinerUProcessAdapter._ensure_watcher_locked
-
-    def _tracking(self: MinerUProcessAdapter) -> None:
-        original(self)
-        if self not in created:
-            created.append(self)
-
-    monkeypatch.setattr(_ma.MinerUProcessAdapter, "_ensure_watcher_locked", _tracking)
+    monkeypatch.setattr(WorkerIdleOwner, "__init__", tracking)
     yield
-    for adapter in created:
+    for owner in created:
         try:
-            adapter.close()
+            owner.close()
         except Exception:
-            # A test may have already torn the adapter down; never let cleanup
-            # mask the real failure or break teardown.
             pass

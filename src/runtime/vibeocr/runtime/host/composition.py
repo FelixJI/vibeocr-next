@@ -167,6 +167,7 @@ def _build_paddle_executor(
     from vibeocr.runtime.recognition.ocr_engine_router import OcrEngineRoutingAdapter
     from vibeocr.runtime.recognition.ocr_engines import OcrEngineResolver
     from vibeocr.runtime.recognition.paddle_executor import PaddleExecutor
+    from vibeocr.runtime_contracts import OcrEngine
 
     # #270：原生 Paddle allocator（paddle.device.cuda.empty_cache）已随原生
     # 后端退役；PaddleExecutor 的 clear_cache 默认无操作，隔离 worker 自行
@@ -178,7 +179,11 @@ def _build_paddle_executor(
 
         def routing_factory() -> Any:
             return OcrEngineRoutingAdapter(
-                fallback_factory=(_paddle_adapter_factory if paddle_fallback else None),
+                fallback_factory=(
+                    lambda: engine_registry.get(OcrEngine.PADDLEOCR).instance()
+                )
+                if paddle_fallback
+                else None,
                 resolver=resolver,
             )
 
@@ -246,18 +251,67 @@ class _MinerUServiceLifecycle:
     subprocess exactly like it owns the Paddle model residency.
     """
 
+    def __init__(self) -> None:
+        import threading
+
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._startup_cancel = threading.Event()
+
+    def prepare_start(self) -> None:
+        import threading
+
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("MinerU owner is closed")
+            # A fresh Event binds cancellation to this generation; never clear an old close.
+            self._startup_cancel = threading.Event()
+
+    def cancel_start(self) -> None:
+        with self._state_lock:
+            self._closed = True
+            self._startup_cancel.set()
+
     def start(self) -> None:
         from vibeocr.runtime.recognition.mineru_service import MinerUService
 
-        MinerUService()  # blocks until API up
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("MinerU owner is closed")
+            cancel = self._startup_cancel
+        MinerUService.bind_owner(cancel)
+        service = MinerUService()
+        service._ensure_api_running()  # Singleton reuse must also restart after idle exit.
+
+    def generation(self) -> int:
+        from vibeocr.runtime.recognition.mineru_service import MinerUService
+
+        return MinerUService._process_generation
+
+    def owns_resources(self) -> bool:
+        from vibeocr.runtime.recognition.mineru_service import MinerUService
+
+        owner = self._startup_cancel
+        with MinerUService._ownership_lock:
+            return (
+                MinerUService._api_owner is owner
+                and (
+                    MinerUService._api_process is not None
+                    or MinerUService._job_guard is not None
+                )
+            ) or (
+                MinerUService._prepare_owner is owner
+                and (
+                    MinerUService._prepare_process is not None
+                    or MinerUService._prepare_guard is not None
+                )
+            )
 
     def stop(self) -> None:
         from vibeocr.runtime.recognition.mineru_service import MinerUService
 
-        try:
-            MinerUService().shutdown()
-        except Exception:  # pragma: no cover - defensive
-            pass
+        # Bypass lazy construction: stopping owned resources cannot start a server.
+        MinerUService.shutdown_owned(owner=self._startup_cancel)
 
 
 def _build_mineru_executor(*, scheduler: Any = None) -> Executor:

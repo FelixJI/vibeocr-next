@@ -358,68 +358,6 @@ class TestReleaseOnePinned:
         assert "OCR" not in mgr._service._pipelines
 
 
-# ---- _seconds_until_next_check ----------------------------------------
-
-
-class TestSecondsUntilNextCheck:
-    def test_no_pipelines_returns_60(self):
-        """无管道 → 60s（line 461）。"""
-        mgr = _make_legacy_manager()
-        mgr._service._pipelines = {}
-        assert mgr._seconds_until_next_check() == 60.0
-
-    def test_all_ttl_zero_returns_60(self):
-        """所有管道 TTL<=0 → 60s（line 477）。"""
-        mgr = _make_legacy_manager(ttls={"OCR": 0})
-        mgr._service._pipelines = {"OCR": object()}
-        mgr._last_used = {"OCR": time.time()}
-        assert mgr._seconds_until_next_check() == 60.0
-
-    def test_missing_timestamp_set_to_now(self):
-        """缺失时间戳 → 设为 now（lines 472-474）。"""
-        mgr = _make_legacy_manager(ttls={"OCR": 300})
-        mgr._service._pipelines = {"OCR": object()}
-        # 不设 _last_used
-        result = mgr._seconds_until_next_check()
-        # OCR 有了时间戳，remaining ≈ 300（受 tick_interval=30 夹紧）
-        assert result <= 30.0
-        assert "OCR" in mgr._last_used
-
-    def test_returns_min_remaining(self):
-        """返回最近截止点的等待时间（line 478）。"""
-        mgr = _make_legacy_manager(ttls={"PP-StructureV3": 100})
-        mgr._service._pipelines = {"PP-StructureV3": object()}
-        now = time.time()
-        mgr._last_used = {"PP-StructureV3": now - 90}  # 还剩 10s
-        result = mgr._seconds_until_next_check()
-        assert result <= 10.0
-
-
-# ---- _tick_loop 异常 ---------------------------------------------------
-
-
-class TestTickLoopException:
-    def test_tick_loop_runs_and_handles_exception(self):
-        """启动 _tick_loop 线程，evict_idle 抛异常后被吞（lines 506-507）。"""
-        mgr = _make_legacy_manager(ttls={"PP-StructureV3": 1})
-        mgr._service._pipelines = {"PP-StructureV3": object()}
-        mgr._last_used = {"PP-StructureV3": 0.0}
-        mgr._stop_event.clear()
-
-        # 让 evict_idle 抛异常
-        def _boom(now=None):
-            raise RuntimeError("boom")
-
-        mgr.evict_idle = _boom
-        # 启动 tick loop 线程
-        mgr._thread = threading.Thread(target=mgr._tick_loop, daemon=True)
-        mgr._thread.start()
-        time.sleep(0.3)
-        mgr.shutdown()
-        # 线程应正常退出（异常被吞）
-        assert not mgr._thread.is_alive()
-
-
 # ---- _empty_cache -----------------------------------------------------
 
 

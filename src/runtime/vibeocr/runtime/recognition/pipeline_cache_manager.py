@@ -3,7 +3,6 @@
 接管 OCRService._pipelines 的生命周期：
 - 记录每个管道完成使用后的 last_used 时间戳
 - FIFO 淘汰（超并存上限时淘汰最久未用的 paddle 重管道；MinerU 不计入）
-- TTL 闲置回收（后台线程按最近到期时间唤醒）
 - 显式释放（release）
 - 按 cache_kind 分流回收：Paddle 释放所持 ORT session，MinerU 保持独立进程语义
 """
@@ -52,8 +51,8 @@ class PipelineCacheManager:
     """管道缓存生命周期管理器。
 
     在 worker 子进程内实例化，由 OCRService 持有。``lease`` 用活动计数保护
-    一次模型加载/推理；TTL 线程据此跳过正在使用的管道，而状态锁只保护短暂的
-    快照更新。有限 TTL 从任务完成时重新计时，而不是从任务开始时计时。
+    一次模型加载/推理；容量回收跳过正在使用的管道。进程空闲退出由父进程
+    Worker 所有者统一管理，此缓存不创建计时器。
     """
 
     def __init__(
@@ -76,18 +75,7 @@ class PipelineCacheManager:
         self._tick_interval = max(0.01, float(tick_interval))
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
-        self._thread = threading.Thread(
-            target=self._tick_loop,
-            name="PipelineTTLWatcher",
-            daemon=True,
-        )
-        self._thread.start()
-        logger.info(
-            "[CacheManager] PipelineTTLWatcher 启动 (ttls=%s, max_heavy=%d, max_tick=%ss)",
-            dict(self._ttls),
-            self._max_heavy,
-            self._tick_interval,
-        )
+        self._thread = None
 
     def _ensure_runtime_fields(self) -> None:
         """兼容通过 ``__new__`` 构造的历史单元测试替身。"""
@@ -463,63 +451,6 @@ class PipelineCacheManager:
         thread = self._thread if hasattr(self, "_thread") else None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
-
-    # ------------------------------------------------------------------
-    # 后台 watcher
-    # ------------------------------------------------------------------
-    def _seconds_until_next_check(self) -> float:
-        """按最近有限 TTL 截止点计算等待时间。"""
-        self._ensure_runtime_fields()
-        now = time.time()
-        with self._state_lock:
-            if not self._service._pipelines:
-                return 60.0
-            remaining: list[float] = []
-            for name in self._service._pipelines:
-                ttl = self._ttls.get(name, 0)
-                if (
-                    ttl <= 0
-                    or self._active_counts.get(name, 0) > 0
-                    or name in self._pinned
-                ):
-                    continue
-                last = self._last_used.get(name)
-                if last is None:
-                    self._last_used[name] = now
-                    last = now
-                remaining.append(max(0.0, last + ttl - now))
-            if not remaining:
-                return 60.0
-            return max(0.0, min(self._tick_interval, min(remaining)))
-
-    def _tick_loop(self) -> None:
-        """按最近截止点等待；touch/TTL 变更会立即唤醒并重算。"""
-        while not self._stop_event.is_set():
-            timeout = self._seconds_until_next_check()
-            self._wakeup_event.wait(timeout=timeout)
-            self._wakeup_event.clear()
-            if self._stop_event.is_set():
-                break
-            try:
-                with self._state_lock:
-                    loaded = sorted(self._service._pipelines)
-                    now = time.time()
-                    due = [
-                        name
-                        for name in loaded
-                        if self._active_counts.get(name, 0) <= 0
-                        and name not in self._pinned
-                        and self._ttls.get(name, 0) > 0
-                        and self._last_used.get(name, now) + self._ttls[name] <= now
-                    ]
-                logger.debug(
-                    "[CacheManager] tick: loaded=%s due_for_evict=%s",
-                    loaded,
-                    due,
-                )
-                self.evict_idle()
-            except Exception as e:
-                logger.warning("[CacheManager] tick evict_idle 失败: %s", e)
 
     # ------------------------------------------------------------------
     # 内部

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
 from vibeocr.runtime.recognition.composite_executor import CompositeExecutor
 from vibeocr.runtime_contracts import (
     CancelMode,
@@ -261,5 +262,6 @@ def test_release_idle_tolerates_child_error() -> None:
             (ok, frozenset({JobKind.MINERU_PARSE})),
         ]
     )
-    comp.release_idle("OCR")  # must not raise
-    assert ok.release_calls == ["OCR"]
+    with pytest.raises(RuntimeError, match="release boom"):
+        comp.release_idle("OCR")
+    assert ok.release_calls == []

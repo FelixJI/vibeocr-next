@@ -77,7 +77,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
                 Wire.ExecutionPipelineId.OCR,
                 Wire.OcrEngineId.Paddleocr,
                 Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.ModelResidency),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive),
             [Wire.RecognitionModeId.PaddleStructure] = Paddle(
                 Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.PPStructureV3),
@@ -159,7 +159,7 @@ public sealed record RecognitionModeCatalog(IReadOnlyList<RecognitionModeOption>
             pipeline,
             engine,
             Wire.RecognitionModeProvisioning.AdvancedComponent,
-            Wire.RecognitionModeLifecycleKind.ModelResidency);
+            Wire.RecognitionModeLifecycleKind.ProcessKeepAlive);
 
     private static ExpectedMode Mode(
         Wire.RecognitionModeFamily family,

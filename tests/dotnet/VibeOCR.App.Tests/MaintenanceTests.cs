@@ -135,6 +135,40 @@ public sealed class MaintenanceTests
     }
 
     [Fact]
+    public async Task WorkerIdleSaveDuringMaintenanceProducesFailedReceipt()
+    {
+        string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-maintenance-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(resourceRoot);
+        var restoreStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var restoreDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var settings = new SettingsViewModel(new SelectionHealthClient(null),
+            installerFactory: () => new FakeRuntimeInstallerClient(),
+            restoreService: async () => { restoreStarted.SetResult(); await restoreDone.Task; });
+        await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+        Task install = PreviewAndConfirmAsync(settings);
+        try
+        {
+            await restoreStarted.Task.WaitAsync(TestContext.Current.CancellationToken);
+            using var broker = new VibeOCR.App.Web.WorkbenchResourceBroker(resourceRoot);
+            using var annotations = new VibeOCR.App.Web.WorkbenchAnnotationStore(resourceRoot);
+            await using var handler = MineruConnectionWorkbenchTests.CreateWorkerIdleHandler(settings, broker, resourceRoot, annotations);
+            await using var application = new WorkbenchApplication([], WorkbenchRoute.Settings, handler);
+            WorkbenchCommandReceipt receipt = await application.ExecuteAsync(
+                new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetWorkerIdleCommand(0, 123)),
+                TestContext.Current.CancellationToken);
+            Assert.False(receipt.Ok);
+            Assert.Equal("运行环境维护尚未结束。", settings.Status);
+            Assert.Equal(600, settings.PaddleIdleSeconds);
+            Assert.Equal(600, settings.MineruIdleSeconds);
+        }
+        finally
+        {
+            restoreDone.TrySetResult();
+            await install;
+            Directory.Delete(resourceRoot, recursive: true);
+        }
+    }
+    [Fact]
     public async Task InstallSendsExplicitIntentAndEchoesRequestedEffective()
     {
         var fake = new FakeRuntimeInstallerClient();

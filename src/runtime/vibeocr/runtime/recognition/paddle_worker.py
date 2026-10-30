@@ -63,6 +63,8 @@ def main() -> None:
                         SettingsSnapshot(
                             schema_version=raw["schema_version"],
                             default_ttl_seconds=residency["default_ttl_seconds"],
+                            paddle_idle_seconds=raw.get("paddle_idle_seconds", 600),
+                            mineru_idle_seconds=raw.get("mineru_idle_seconds", 600),
                             pipelines=tuple(
                                 parse_pipeline_spec(p) for p in residency["pipelines"]
                             ),

@@ -17,7 +17,8 @@ from vibeocr.runtime_contracts import ResidencyStatus, SettingsSnapshot
 
 def _snapshot(*, ttl: int = 300, sources: tuple[str, ...] = ()) -> SettingsSnapshot:
     return SettingsSnapshot(
-        default_ttl_seconds=ttl,
+        default_ttl_seconds=300,
+        paddle_idle_seconds=ttl,
         pipelines=(),
         extra={},
         download_source_ids=sources,
@@ -153,7 +154,7 @@ def test_failed_persist_keeps_module_memory_and_restores_executor(tmp_path) -> N
         module.update_settings(requested)
 
     assert module.settings() == previous
-    assert executor.configured[-2:] == [requested, previous]
+    assert executor.configured == [previous]
 
 
 def test_supervisor_settings_path_prefers_explicit_environment(
@@ -176,3 +177,130 @@ def test_supervisor_settings_path_falls_back_to_supervisor_root(
     assert supervisor_main._settings_store_from_environment().path == (
         root / "supervisor-settings.json"
     )
+
+
+@pytest.mark.parametrize("valid_connection", [True, False])
+def test_invalid_idle_policy_preserves_independent_remote_preferences(
+    tmp_path, monkeypatch, valid_connection
+):
+    from vibeocr.runtime.recognition import mineru_readiness as readiness
+    from vibeocr.runtime.recognition.composite_executor import CompositeExecutor
+    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
+    from vibeocr.runtime.recognition.mineru_config import MineruConfigError
+    from vibeocr.runtime.recognition.mineru_executor import MinerUExecutor
+    from vibeocr.runtime_contracts import JobKind
+
+    monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
+    extra = {
+        "theme": "dark",
+        "model_preference": {"preset": "tiny"},
+        "mineru_connection": {
+            "mode": "remote",
+            "api_url": "https://example.invalid"
+            if valid_connection
+            else "file:///invalid",
+            "api_key": "synthetic-key",
+        },
+    }
+    payload = {
+        "schema_version": 1,
+        "settings": {
+            "schema_version": 2,
+            "paddle_idle_seconds": -1,
+            "mineru_idle_seconds": 600,
+            "extra": extra,
+            "download_source_ids": ["pypi"],
+        },
+    }
+    path = tmp_path / "settings.json"
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+    store = RuntimeSettingsStore(path)
+    executor = MinerUExecutor(
+        adapter_factory=lambda: pytest.fail("recovery must not create adapter")
+    )
+    module = _module(
+        tmp_path,
+        CompositeExecutor([(executor, frozenset({JobKind.MINERU_PARSE}))]),
+        store,
+    )
+    assert module.settings().extra["theme"] == "dark"
+    assert module.settings().extra["model_preference"] == {"preset": "tiny"}
+    assert module.settings().extra["mineru_connection"] == extra["mineru_connection"]
+    assert module.settings().download_source_ids == ("pypi",)
+    assert module.settings().paddle_idle_seconds == 600
+    if valid_connection:
+        assert readiness.current_connection().mode == "remote"
+        assert readiness.current_connection().api_key == "synthetic-key"
+    else:
+        assert readiness.current_connection().mode == "unavailable"
+        with pytest.raises(MineruConfigError, match="mineru_connection_invalid"):
+            MinerUProcessAdapter._remote_locked()
+    with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
+        store.replace(SettingsSnapshot())
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("failure", ["backup", "replace"])
+def test_migration_io_failure_keeps_valid_runtime_preferences_and_original(
+    tmp_path, monkeypatch, failure
+):
+    from vibeocr.runtime.environments import settings_store as module
+    from vibeocr.runtime.recognition import mineru_readiness as readiness
+    from vibeocr.runtime.recognition.composite_executor import CompositeExecutor
+    from vibeocr.runtime.recognition.mineru_executor import MinerUExecutor
+    from vibeocr.runtime_contracts import JobKind
+
+    monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
+    extra = {
+        "theme": "dark",
+        "model_preference": {"preset": "tiny"},
+        "mineru_connection": {
+            "mode": "remote",
+            "api_url": "https://example.invalid",
+            "api_key": "synthetic-key",
+        },
+    }
+    payload = {
+        "schema_version": 1,
+        "settings": {
+            "schema_version": 2,
+            "residency": {"default_ttl_seconds": 300, "pipelines": []},
+            "extra": extra,
+            "download_source_ids": ["pypi"],
+        },
+    }
+    path = tmp_path / "settings.json"
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+
+    def fail(*args):
+        raise OSError("synthetic migration IO failure")
+
+    monkeypatch.setattr(
+        module.shutil if failure == "backup" else module.os,
+        "copy2" if failure == "backup" else "replace",
+        fail,
+    )
+    store = RuntimeSettingsStore(path)
+    executor = MinerUExecutor(
+        adapter_factory=lambda: pytest.fail("migration must not create adapter")
+    )
+    supervisor = _module(
+        tmp_path,
+        CompositeExecutor([(executor, frozenset({JobKind.MINERU_PARSE}))]),
+        store,
+    )
+    assert supervisor.settings().extra["theme"] == "dark"
+    assert supervisor.settings().extra["model_preference"] == {"preset": "tiny"}
+    assert (
+        supervisor.settings().extra["mineru_connection"] == extra["mineru_connection"]
+    )
+    assert supervisor.settings().download_source_ids == ("pypi",)
+    assert supervisor.settings().paddle_idle_seconds == 300
+    assert readiness.current_connection().mode == "remote"
+    assert readiness.current_connection().api_key == "synthetic-key"
+    with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
+        store.replace(SettingsSnapshot())
+    assert path.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("*.tmp"))

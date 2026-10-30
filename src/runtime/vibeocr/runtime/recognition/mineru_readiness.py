@@ -20,6 +20,7 @@ _observations: dict[MineruTier, MineruConnection] = {}
 # remote 使用自部署 MinerU 4 服务器的 V1 HTTP 接口。
 CONNECTION_LOCAL = "local"
 CONNECTION_REMOTE = "remote"
+CONNECTION_UNAVAILABLE = "unavailable"
 _CONNECTION_FIELDS = frozenset({"mode", "api_url", "api_key"})
 
 
@@ -158,6 +159,7 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
     with _lock:
         connection = _connection
         remote = connection.mode == CONNECTION_REMOTE
+        unavailable = connection.mode == CONNECTION_UNAVAILABLE
         ready = (
             {tier for tier, observed in _observations.items() if observed == connection}
             if observe_runtime
@@ -174,10 +176,14 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
         "tiers": [
             {
                 "id": tier.value,
-                "availability": "ready"
+                "availability": "unavailable"
+                if unavailable
+                else "ready"
                 if installed and tier in ready
                 else "preparation_required",
-                "reason_code": None
+                "reason_code": "mineru_connection_invalid"
+                if unavailable
+                else None
                 if installed and tier in ready
                 else (
                     "mineru_execution_preparation_required"
@@ -193,6 +199,10 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
 
 
 def require_ready(tier: MineruTier) -> None:
+    if current_connection().mode == CONNECTION_UNAVAILABLE:
+        raise MineruConfigError(
+            ErrorCode.MINERU_CONFIG_UNAVAILABLE, "mineru_connection_invalid"
+        )
     descriptor = next(
         item for item in catalog_payload()["tiers"] if item["id"] == tier.value
     )

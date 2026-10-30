@@ -185,21 +185,21 @@ public sealed class RuntimeSelectionServiceTests
         // paddle_text provisioning 已迁移 base_runtime（#paddle-offline-default）：
         // 真实 Runtime pipeline_contracts.py 声明即此，目录合同必须如实投影。
         Assert.Equal("base_runtime", paddleText.Provisioning);
-        Assert.Equal("model_residency", paddleText.LifecycleKind);
+        Assert.Equal("process_keep_alive", paddleText.LifecycleKind);
         Assert.True(paddleText.SupportsPreload);
 
         RecognitionModeOption paddle = service.SelectRecognitionMode("paddle_structure");
         Assert.Equal("PP-StructureV3", paddle.PipelineId);
         Assert.Null(paddle.Engine);
-        Assert.Equal("model_residency", paddle.LifecycleKind);
+        Assert.Equal("process_keep_alive", paddle.LifecycleKind);
         Assert.True(paddle.SupportsPreload);
-        Assert.True(paddle.SupportsPinning);
+        Assert.False(paddle.SupportsPinning);
 
         RecognitionModeOption mineru = service.SelectRecognitionMode("mineru_document");
         Assert.Equal("MinerU", mineru.PipelineId);
         Assert.Equal("process_keep_alive", mineru.LifecycleKind);
         Assert.False(mineru.SupportsPreload);
-        Assert.True(mineru.SupportsTtl);
+        Assert.False(mineru.SupportsTtl);
         Assert.False(mineru.SupportsPinning);
         Assert.True(mineru.SupportsRelease);
     }
@@ -626,22 +626,22 @@ public sealed class RuntimeSelectionServiceTests
             Mode(Wire.RecognitionModeId.PaddleText, Wire.RecognitionModeFamily.Text,
                 Wire.ExecutionPipelineId.OCR, Wire.OcrEngineId.Paddleocr,
                 Wire.RecognitionModeProvisioning.BaseRuntime,
-                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, true, false, false, true),
             Mode(Wire.RecognitionModeId.PaddleStructure, Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.PPStructureV3, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, true, false, false, true),
             // #270：paddle_document_vl / paddle_formula 已退役，不再进入
             // 目录 fixture（真实目录同样不再声明它们）；rapid_text / rapid_table
             // 同样已退役，不再出现在目录。
             Mode(Wire.RecognitionModeId.MineruDocument, Wire.RecognitionModeFamily.Document,
                 Wire.ExecutionPipelineId.MinerU, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, false, true, false, true),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, false, false, false, true),
             Mode(Wire.RecognitionModeId.PaddleTable, Wire.RecognitionModeFamily.Specialized,
                 Wire.ExecutionPipelineId.TABLERECOGNITION, null,
                 Wire.RecognitionModeProvisioning.AdvancedComponent,
-                Wire.RecognitionModeLifecycleKind.ModelResidency, true, true, true, true),
+                Wire.RecognitionModeLifecycleKind.ProcessKeepAlive, true, false, false, true),
         ],
     };
 

@@ -59,7 +59,7 @@ public sealed class RecognitionModeContractTests
             "process_keep_alive",
             lifecycle.GetProperty("kind").GetString());
         Assert.True(lifecycle.GetProperty("supports_preload").GetBoolean());
-        Assert.True(lifecycle.GetProperty("supports_ttl").GetBoolean());
+        Assert.False(lifecycle.GetProperty("supports_ttl").GetBoolean());
         Assert.False(lifecycle.GetProperty("supports_pinning").GetBoolean());
         Assert.True(lifecycle.GetProperty("supports_release").GetBoolean());
     }

@@ -15,10 +15,11 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, RecoverableLazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, Action invalidateImageRecognition, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or CreateEnvironmentCommand or SetEnvironmentSourcesCommand or PreviewEnvironmentInstallCommand or ConfirmEnvironmentInstallCommand or CancelEnvironmentInstallCommand or InvalidateEnvironmentPlanCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or RepairEmptyEnvironmentCommand or FindCompatibleEnvironmentCommand or PrepareEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand or InstallRuntimeCommand or ConfirmRuntimeInstallCommand or CancelRuntimeMaintenanceCommand or RetryRuntimeMaintenanceCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
+    SetWorkerIdleCommand idle => await SetWorkerIdleAsync(idle, cancellationToken),
     SetEditorPreferencesCommand editor => SetEditorPreferences(editor.Preferences),
     PickImageOutputDirectoryCommand => await PickImageOutputDirectoryAsync(),
     RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
@@ -454,6 +455,18 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     return SettingsState(settings);
   }
 
+  private async Task<SettingsWorkbenchState> SetWorkerIdleAsync(
+    SetWorkerIdleCommand command, CancellationToken cancellationToken)
+  {
+    settings ??= CreateSettings();
+    if (!await settings.SetWorkerIdleAsync(command.PaddleSeconds, command.MineruSeconds, cancellationToken))
+    {
+      operations.Publish(SettingsState(settings));
+      throw new InvalidOperationException(settings.Status);
+    }
+    return SettingsState(settings);
+  }
+
   private async Task<SettingsWorkbenchState> SetMineruConnectionAsync(
     SetMineruConnectionCommand command,
     CancellationToken cancellationToken)
@@ -755,6 +768,10 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       viewModel.Maintenance.State.CanRetry,
       viewModel.Maintenance.State.FailureReason,
       viewModel.Maintenance.State.FailureCode),
+    PaddleIdleSeconds: viewModel.PaddleIdleSeconds,
+    MineruIdleSeconds: viewModel.MineruIdleSeconds,
+    Workers: [.. viewModel.ResidencyEntries],
+    WorkerSettingsWarning: viewModel.WorkerSettingsWarning,
     StatusMessage: viewModel.Status,
     ServiceStatus: viewModel.RuntimeStatus.ServiceStatus,
     MaintenanceStatus: viewModel.RuntimeStatus.Status,

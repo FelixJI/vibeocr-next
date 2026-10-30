@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -96,6 +97,26 @@ class AdapterExecutor:
     # ------------------------------------------------------------------
     # Executor protocol
     # ------------------------------------------------------------------
+
+    def reserve(self, record: Any):
+        reserve = getattr(self.adapter, "reserve", None)
+        if callable(reserve):
+            if getattr(self.adapter, "reservation_uses_options", False):
+                return reserve(getattr(record, "pipeline", None))
+            return reserve()
+        return lambda: None
+
+    @contextmanager
+    def settings_guard(self):
+        with self._adapter_lock:
+            guard = getattr(self._adapter, "settings_guard", nullcontext)
+            with guard():
+                yield
+
+    def validate_settings(self, snapshot: SettingsSnapshot) -> None:
+        validate = getattr(self._adapter, "validate_settings", None)
+        if callable(validate):
+            validate(snapshot)
 
     def execute(self, record: Any, staged: Any) -> None:
         """Run the job to terminal.

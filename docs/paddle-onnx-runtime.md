@@ -26,7 +26,7 @@ CUDA 对所有启用模型统一设置官方 [`prefer_nhwc=1`](https://onnxrunti
 
 布局等价不表示浮点逐元素一致：同一六行张量与独立 CPU 比较，最大概率绝对差约 0.002355，原诊断 `rtol=1e-3, atol=1e-4` 的 allclose 未通过，CTC argmax 则全部一致。完整 PDF 两侧均为 17 行、方向 0；16 行文本一致，一行出现额外空格，最大归一化坐标差约 0.403（原图约 1px）、行置信度差约 0.0256。保留原 token、有效几何及 score 口径，不宣称输出完全相同或全文无误。
 
-DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁直到 predict generator 消费完毕。worker 的 stdio 请求继续串行。PaddleX 3.7.2 的 ONNX runner `close()` 为空，因此本地 owner 在 TTL、切档和退出时显式清除其全部 session 引用；不调用 Paddle allocator。原生崩溃、OOM 或 EP 失效终止当前任务，不进入通用 batch 重试；普通坏输入仍走既有隔离语义。已确认取消会停止自有 worker，下一新任务才可重建，绝不重放原任务。
+DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁直到 predict generator 消费完毕。worker 的 stdio 请求继续串行。PaddleX 3.7.2 的 ONNX runner `close()` 为空，因此本地 owner 在 Worker 空闲退出、切档和程序退出时显式清除其全部 session 引用；不调用 Paddle allocator。原生崩溃、OOM 或 EP 失效终止当前任务，不进入通用 batch 重试；普通坏输入仍走既有隔离语义。已确认取消会停止自有 worker，下一新任务才可重建，绝不重放原任务。
 
 ## 同一 Paddle 环境的能力与维护
 

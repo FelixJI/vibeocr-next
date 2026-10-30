@@ -18,7 +18,7 @@ public sealed partial class MainWindow
 
     await CreateSmokeEnvironmentsAsync();
     await NavigateSmokeAsync("设置", ".managed-environment-list");
-    await OpenManagedSmokeAdvancedAsync();
+    await WaitForManagedSmokeEnvironmentListAsync();
     ManagedEnvironmentList created = await WaitForSmokeEnvironmentsAsync(
       [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
     ManagedEnvironment[] pair = SmokePair(created);

@@ -70,7 +70,8 @@ def _settings_body(
 ) -> dict[str, Any]:
     return {
         "schema_version": 2,
-        "residency": {"default_ttl_seconds": ttl, "pipelines": []},
+        "residency": {"default_ttl_seconds": 300, "pipelines": []},
+        "paddle_idle_seconds": ttl,
         "extra": extra if extra is not None else {},
     }
 
@@ -391,7 +392,8 @@ class TestSettingsRoutes:
                 "/v2/settings",
                 json={
                     "schema_version": 2,
-                    "residency": {"default_ttl_seconds": 120, "pipelines": []},
+                    "residency": {"default_ttl_seconds": 300, "pipelines": []},
+                    "paddle_idle_seconds": 120,
                     "extra": got.json()["extra"],
                 },
             )
@@ -440,7 +442,7 @@ class TestSettingsRoutes:
                 ),
             )
             assert same_value.status_code == 200, same_value.text
-            assert same_value.json()["residency"]["default_ttl_seconds"] == 120
+            assert same_value.json()["paddle_idle_seconds"] == 120
             assert same_value.json()["extra"]["topic"] == 2
             changed = await http.put(
                 "/v2/settings",
@@ -500,7 +502,13 @@ class TestPersistenceAndModuleSeam:
             assert response.status_code == 200
             assert response.json()["extra"]["default_recognition_mode"] == mode_id
             assert response.json()["residency"]["pipelines"][0]["pinned"] is True
-            assert path.read_text(encoding="utf-8") == original
+            assert (
+                path.with_name(path.name + ".worker-idle.bak").read_text(
+                    encoding="utf-8"
+                )
+                == original
+            )
+            assert response.json()["paddle_idle_seconds"] == 300
             with pytest.raises(RecognitionModeError) as error:
                 module.preload((), recognition_modes=(mode_id,))
             assert error.value.code_name == "RECOGNITION_MODE_RETIRED"
@@ -534,9 +542,7 @@ class TestPersistenceAndModuleSeam:
                 item["recognition_mode"] = "unknown"
             async with _client(module, generate_session_token()) as http:
                 refused = await http.put("/v2/settings", json=modified)
-            assert refused.status_code == (400 if change == "unknown" else 426), (
-                refused.text
-            )
+            assert refused.status_code == 400, refused.text
             assert path.read_text(encoding="utf-8") == accepted
             assert executor._adapter is None
 
@@ -551,8 +557,8 @@ class TestPersistenceAndModuleSeam:
         ]
         async with _client(module, generate_session_token()) as http:
             refused = await http.put("/v2/settings", json=settings)
-        assert refused.status_code == 426
-        assert refused.json()["code"] == "RECOGNITION_MODE_RETIRED"
+        assert refused.status_code == 400
+        assert refused.json()["code"] == "VALIDATION_ERROR"
         assert not (tmp_path / "state" / "supervisor-settings.json").exists()
 
     async def test_saved_default_survives_supervisor_restart(
@@ -592,11 +598,11 @@ class TestPersistenceAndModuleSeam:
         # 同值重写（其他字段变化）不触发可用性校验；未知 id 仍恒定拒绝。
         pdf_module.update_settings(
             SettingsSnapshot(
-                default_ttl_seconds=120,
+                paddle_idle_seconds=120,
                 extra={"default_recognition_mode": "windows_text"},
             )
         )
-        assert pdf_module.settings().default_ttl_seconds == 120
+        assert pdf_module.settings().paddle_idle_seconds == 120
         with pytest.raises(RecognitionModeError):
             pdf_module.update_settings(
                 SettingsSnapshot(extra={"default_recognition_mode": "not_a_mode"})

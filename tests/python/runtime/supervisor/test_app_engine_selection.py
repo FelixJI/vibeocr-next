@@ -704,7 +704,9 @@ async def test_mineru_only_composition_preloads_real_service_interface(
         "vibeocr.runtime.host.composition._mineru_available", lambda: True
     )
     monkeypatch.setattr(MinerUService, "_ensure_api_running", lambda self: None)
-    monkeypatch.setattr(MinerUService, "prepare", lambda self: calls.append("prepare"))
+    monkeypatch.setattr(
+        MinerUService, "prepare", lambda self, *, cancelled: calls.append("prepare")
+    )
     monkeypatch.setattr(MinerUService, "shutdown", lambda self: None)
     module, handle = build_supervisor(
         stager_root=tmp_path / "staging",
@@ -847,3 +849,86 @@ async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_optio
             rejected = await _submit(http, json.dumps(manifest))
             assert rejected.status_code == 426, rejected.text
             assert rejected.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
+
+
+async def test_cold_mineru_second_http_submit_does_not_block_health_or_cancel(
+    tmp_path, monkeypatch
+):
+    import asyncio
+    import threading
+
+    from vibeocr.runtime.recognition import mineru_readiness as readiness
+    from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
+    from vibeocr.runtime.recognition.mineru_executor import MinerUExecutor
+    from vibeocr.runtime.recognition.recognition_modes import (
+        ModeAvailability,
+        RecognitionModeRegistry,
+    )
+    from vibeocr.runtime_contracts import MineruTier
+
+    entered, finish = threading.Event(), threading.Event()
+
+    class Lifecycle:
+        def start(self):
+            entered.set()
+            assert finish.wait(4)
+
+        def stop(self):
+            pass
+
+    class Client:
+        def file_parse(self, files, **kwargs):
+            return {}
+
+    monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
+    monkeypatch.setattr(readiness, "_observations", {})
+    monkeypatch.setattr(readiness.metadata, "version", lambda _: "4.0.2")
+    readiness.mark_executed(MineruTier.BASIC)
+    adapter = MinerUProcessAdapter(client_factory=Client, lifecycle=Lifecycle())
+    module = SupervisorModule(
+        options=SupervisorOptions(instance_id="cold-http"),
+        stager_root=tmp_path / "stage",
+        executor=MinerUExecutor(lambda: adapter),
+    )
+    module.recognition_mode_registry = RecognitionModeRegistry(
+        availability_probe=lambda definition: ModeAvailability("ready")
+    )
+    manifest = json.loads(_manifest(pipeline="MinerU"))
+    manifest["kind"] = "mineru_parse"
+    manifest["pipeline"]["mineru"] = {"tier": "basic"}
+    token = generate_session_token()
+    watchdog = threading.Timer(1.0, finish.set)
+    try:
+        async with _client(create_app(module, token), token) as http:
+            first = await _submit(http, json.dumps(manifest))
+            assert first.status_code == 200, first.text
+            assert await asyncio.to_thread(entered.wait, 1)
+            manifest["request_id"] = "second"
+            watchdog.start()
+            began = asyncio.get_running_loop().time()
+            second, health, cancelled = await asyncio.gather(
+                _submit(http, json.dumps(manifest)),
+                http.get("/v2/health"),
+                http.post(
+                    "/v2/jobs/command",
+                    json={
+                        "command_id": "cancel-first",
+                        "kind": "cancel",
+                        "job_id": first.json()["job_id"],
+                    },
+                ),
+            )
+            assert (
+                second.status_code == health.status_code == cancelled.status_code == 200
+            )
+            assert second.json()["job_id"] != first.json()["job_id"]
+            assert asyncio.get_running_loop().time() - began < 0.5
+            assert not finish.is_set(), (
+                "HTTP must complete while native startup is still blocked"
+            )
+            assert adapter._active_leases >= 2
+    finally:
+        watchdog.cancel()
+        finish.set()
+        # Stop waits for the deterministic startup barrier, never a real model.
+        adapter.close()

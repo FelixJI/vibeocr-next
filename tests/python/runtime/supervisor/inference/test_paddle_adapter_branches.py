@@ -254,7 +254,8 @@ def test_configure_settings_propagates_to_manager_when_present() -> None:
         pipelines=(spec,),
     )
     adapter.configure_settings(snap)
-    assert configured == [{"ttl": 600, "pipelines": [spec]}]
+    assert configured == []
+    assert adapter._settings is snap
 
 
 def test_close_releases_and_shuts_down_manager_when_present() -> None:

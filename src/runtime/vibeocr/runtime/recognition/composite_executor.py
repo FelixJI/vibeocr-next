@@ -14,6 +14,7 @@ still be cancelled cooperatively if another child handles the kind).
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 from vibeocr.runtime_contracts import CancelMode, ResidencyStatus, SettingsSnapshot
@@ -54,6 +55,25 @@ class CompositeExecutor:
     # ------------------------------------------------------------------
     # Executor protocol
     # ------------------------------------------------------------------
+
+    def reserve(self, record: Any):
+        routed = self._routed_for(record)
+        reserve = getattr(routed.executor, "reserve", None) if routed else None
+        return reserve(record) if callable(reserve) else lambda: None
+
+    @contextmanager
+    def settings_guard(self):
+        with ExitStack() as stack:
+            for child in self._children:
+                guard = getattr(child.executor, "settings_guard", nullcontext)
+                stack.enter_context(guard())
+            yield
+
+    def validate_settings(self, snapshot: SettingsSnapshot) -> None:
+        for child in self._children:
+            validate = getattr(child.executor, "validate_settings", None)
+            if callable(validate):
+                validate(snapshot)
 
     def execute(self, record: Any, staged: Any) -> None:
         routed = self._routed_for(record)
@@ -124,15 +144,23 @@ class CompositeExecutor:
 
     def release_idle(self, pipeline: str | None = None) -> ResidencyStatus:
         for child in self._children:
-            try:
-                child.executor.release_idle(pipeline)
-            except Exception:  # pragma: no cover - defensive
-                pass
+            child.executor.release_idle(pipeline)
         return self.residency_status()
 
     def preload(self, pipelines: tuple[str, ...]) -> ResidencyStatus:
         for child in self._children:
             child.executor.preload(pipelines)
+        return self.residency_status()
+
+    def configure_recovered_settings(
+        self, snapshot: SettingsSnapshot, *, connection_valid: bool
+    ) -> ResidencyStatus:
+        for child in self._children:
+            recover = getattr(child.executor, "configure_recovered_settings", None)
+            if callable(recover):
+                recover(snapshot, connection_valid=connection_valid)
+            else:
+                child.executor.configure_settings(snapshot)
         return self.residency_status()
 
     def configure_settings(self, snapshot: SettingsSnapshot) -> ResidencyStatus:

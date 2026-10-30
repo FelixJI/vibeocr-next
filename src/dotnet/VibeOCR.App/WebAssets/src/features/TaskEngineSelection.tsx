@@ -15,25 +15,9 @@ function lifecycleHint(
   engine: RecognitionEngineState | undefined,
 ): string | null {
   if (!engine) return null;
-  const controls = [
-    engine.supportsPreload === true ? "预热" : null,
-    engine.supportsTtl === true ? "TTL" : null,
-    engine.supportsPinning === true ? "固定驻留" : null,
-    engine.supportsRelease === true ? "释放" : null,
-  ].filter((value): value is string => value !== null);
-  if (engine.lifecycleKind === "unmanaged") {
-    return "该模式不提供模型预热、TTL、固定驻留或释放控制。";
-  }
-  if (engine.lifecycleKind === "process_keep_alive") {
-    return controls.length === 0
-      ? "本地 MinerU 使用进程保活；当前目录未声明可用控制。远程模型生命周期由服务端管理。"
-      : `本地 MinerU 使用进程保活；仅支持：${controls.join("、")}。远程模型生命周期由服务端管理。`;
-  }
-  if (engine.lifecycleKind === "model_residency") {
-    return controls.length === 0
-      ? "该 Paddle 模式使用模型驻留；当前目录未声明可用控制。"
-      : `该 Paddle 模式使用模型驻留；支持：${controls.join("、")}。`;
-  }
+  if (engine.lifecycleKind === "unmanaged") return "该模式由操作系统管理。";
+  if (engine.lifecycleKind === "process_keep_alive")
+    return "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。";
   return null;
 }
 

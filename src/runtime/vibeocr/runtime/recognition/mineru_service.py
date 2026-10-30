@@ -31,7 +31,7 @@ from vibeocr.runtime.documents.tables.projections import table_model_to_plain_te
 from vibeocr.runtime.documents.tables.reducer import rebuild_result_projections
 from vibeocr.runtime.documents.utils.mime_types import mime_to_extension
 from vibeocr.runtime.environments.runtime_maintenance import safe_runtime_detail
-from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
+from vibeocr.runtime.processes.utils.job_object import CREATE_SUSPENDED, JobObjectGuard
 from vibeocr.runtime.processes.utils.subprocess_log import strip_ansi
 from vibeocr.runtime.recognition.core.constants import Constants
 from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
@@ -84,12 +84,22 @@ class MinerUService(metaclass=SingletonMeta):
     _api_process: subprocess.Popen | None = None
     _api_url: str = ""
     _lock = threading.RLock()
+    _ownership_lock = threading.RLock()
     _initialized = False
     _server_tier = "basic"
+    _process_generation = 0
+    _prepare_process: subprocess.Popen | None = None
+    _prepare_guard: JobObjectGuard | None = None
+    _log_reader: threading.Thread | None = None
+    _startup_cancel: threading.Event | None = None
+    _api_owner: threading.Event | None = None
+    _prepare_owner: threading.Event | None = None
     _job_guard: JobObjectGuard | None = None
     _model_root: str | None = None
 
     def __init__(self):
+        if current_connection().mode == CONNECTION_REMOTE:
+            return
         if not self._initialized:
             with self._lock:
                 if (
@@ -99,22 +109,18 @@ class MinerUService(metaclass=SingletonMeta):
                     # 由 _call_api 直接访问自部署服务器。
                     if current_connection().mode != CONNECTION_REMOTE:
                         self._ensure_api_running()
-                    self._initialized = True
+                    with self.__class__._ownership_lock:
+                        self._require_owner(self.__class__._startup_cancel)
+                        self.__class__._initialized = True
 
     @classmethod
     def _reset(cls) -> None:
         """重置服务状态（供测试使用）"""
-        with cls._lock:
-            if cls._api_process is not None:
-                cls._api_process.terminate()
-                try:
-                    cls._api_process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    cls._api_process.kill()
-                cls._api_process = None
-            cls._api_url = ""
-            cls._initialized = False
+        with cls._lock, cls._ownership_lock:
+            cls._stop_preparation()
+            cls._stop_api_locked()
             cls._model_root = None
+            cls._startup_cancel = None
 
     @staticmethod
     def _parse_api_log_level(text: str) -> int:
@@ -156,6 +162,7 @@ class MinerUService(metaclass=SingletonMeta):
                 pass
 
         t = threading.Thread(target=_read, daemon=True, name="MinerUApiLogReader")
+        self.__class__._log_reader = t
         t.start()
 
     def _check_api_running(self, url: str) -> bool:
@@ -249,8 +256,11 @@ class MinerUService(metaclass=SingletonMeta):
 
         return env
 
-    def _start_api(self) -> None:
-        """启动 mineru-api 进程"""
+    def _start_api(self, *, owner: threading.Event | None = None) -> None:
+        """启动 mineru-api 进程。"""
+        cancel = owner if owner is not None else self.__class__._startup_cancel
+        if cancel is not None and cancel.is_set():
+            raise MineruCancelled("MinerU startup canceled")
         python_exe = self._resolve_python_executable()
         if python_exe is None:
             raise RuntimeError("找不到 Python 解释器。请确保已安装 Python 和 MinerU 4")
@@ -278,41 +288,93 @@ class MinerUService(metaclass=SingletonMeta):
             env["MINERU_MODEL_BASE_DIR"] = self.__class__._model_root
             env["MINERU_MODEL_SOURCE"] = "local"
 
-        self.__class__._api_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd=Path(env["MINERU_HOME"]),
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
+        with self.__class__._ownership_lock:
+            self._require_owner(cancel)
+            if (
+                self.__class__._api_process is not None
+                or self.__class__._job_guard is not None
+            ):
+                raise RuntimeError("MinerU still owns an unconfirmed process")
+            self.__class__._api_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=Path(env["MINERU_HOME"]),
+                creationflags=(subprocess.CREATE_NO_WINDOW | CREATE_SUSPENDED)
+                if os.name == "nt"
+                else 0,
+            )
 
-        # 绑定 Windows Job Object：主进程崩溃时内核连带终止 mineru-api
-        self.__class__._job_guard = JobObjectGuard(name="vibeocr_mineru_api")
-        self.__class__._job_guard.assign_from_popen(self.__class__._api_process)
+            # Publish ownership before Job assignment/resume can fail.
+            self.__class__._api_owner = cancel
+            # 绑定 Windows Job Object：主进程崩溃时内核连带终止 mineru-api
+            self.__class__._job_guard = JobObjectGuard(allow_breakaway=False)
+            if os.name == "nt" and not self.__class__._job_guard.assign_from_popen(
+                self.__class__._api_process, suspended=True
+            ):
+                self.__class__._api_process.terminate()
+                self.__class__._api_process.wait(timeout=5)
+                self.shutdown_owned()
+                raise RuntimeError("MinerU worker ownership could not be established")
 
-        # 读取 mineru-api 子进程的 stderr 并转发到项目日志系统
-        self._start_log_reader(self.__class__._api_process)
+            self.__class__._process_generation += 1
+            # 读取 mineru-api 子进程的 stderr 并转发到项目日志系统
+            self._start_log_reader(self.__class__._api_process)
 
+            process = self.__class__._api_process
         _logger.debug("[MinerU] 日志输出到项目日志系统")
 
         # 等待 API 就绪
         for _ in range(int(Constants.Timeout.MINERU_API_START)):
-            if self.__class__._api_process.poll() is not None:
-                raise RuntimeError(
-                    f"mineru-api 启动失败，退出码: {self.__class__._api_process.returncode}"
-                )
+            if cancel is not None and cancel.is_set():
+                raise MineruCancelled("MinerU startup canceled")
+            if process.poll() is not None:
+                raise RuntimeError(f"mineru-api 启动失败，退出码: {process.returncode}")
             if self._check_api_running(url):
-                self.__class__._api_url = url
+                with self.__class__._ownership_lock:
+                    self._require_owner(cancel)
+                    if self.__class__._api_process is not process:
+                        raise MineruCancelled("MinerU process generation changed")
+                    self.__class__._api_url = url
                 _logger.info(f"[MinerU] mineru-api 服务已就绪 @ {url}")
                 return
-            time.sleep(1)
+            if cancel is None:
+                time.sleep(1)
+            elif cancel.wait(1):
+                raise MineruCancelled("MinerU startup canceled")
 
         raise RuntimeError(
             f"mineru-api 启动超时（{int(Constants.Timeout.MINERU_API_START)}秒）"
         )
 
-    def _prepare_cached_models(self, tier: str, cancelled: Callable[[], bool]) -> None:
+    @classmethod
+    def bind_owner(cls, owner: threading.Event) -> None:
+        with cls._ownership_lock:
+            if owner.is_set():
+                raise MineruCancelled("MinerU owner canceled")
+            if (
+                (cls._api_process is not None or cls._job_guard is not None)
+                and cls._api_owner is not owner
+            ) or (
+                (cls._prepare_process is not None or cls._prepare_guard is not None)
+                and cls._prepare_owner is not owner
+            ):
+                raise RuntimeError("MinerU still owns another generation")
+            cls._startup_cancel = owner
+
+    @classmethod
+    def _require_owner(cls, owner: threading.Event | None) -> None:
+        if owner is not None and (owner.is_set() or cls._startup_cancel is not owner):
+            raise MineruCancelled("MinerU owner canceled or replaced")
+
+    def _prepare_cached_models(
+        self,
+        tier: str,
+        cancelled: Callable[[], bool],
+        *,
+        owner: threading.Event | None = None,
+    ) -> None:
         if not os.environ.get("VIBEOCR_SHARED_MODEL_CACHE"):
             return
         if cancelled():
@@ -331,17 +393,31 @@ class MinerUService(metaclass=SingletonMeta):
             if env.get("VIBEOCR_PRODUCT_CODE_ROOT")
             else ["-m", "vibeocr.runtime.environments.model_cache"]
         )
-        process = subprocess.Popen(
-            [str(python), *arguments, tier],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        guard = JobObjectGuard()
+        with self.__class__._ownership_lock:
+            self._require_owner(owner)
+            self._stop_preparation()
+            process = subprocess.Popen(
+                [str(python), *arguments, tier],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                creationflags=(subprocess.CREATE_NO_WINDOW | CREATE_SUSPENDED)
+                if os.name == "nt"
+                else 0,
+            )
+            guard = JobObjectGuard(allow_breakaway=False)
+            self.__class__._prepare_process, self.__class__._prepare_guard = (
+                process,
+                guard,
+            )
+            self.__class__._prepare_owner = owner
+            if os.name == "nt" and not guard.assign_from_popen(process, suspended=True):
+                self._stop_preparation(process=process)
+                raise RuntimeError(
+                    "MinerU preparation ownership could not be established"
+                )
         started = time.monotonic()
         try:
-            guard.assign_from_popen(process)
             while True:
                 if cancelled():
                     raise MineruCancelled(
@@ -364,50 +440,70 @@ class MinerUService(metaclass=SingletonMeta):
             if cancelled():
                 raise MineruCancelled("MinerU job canceled after model preparation")
             try:
-                result = json.loads(stdout.decode("utf-8").strip().splitlines()[-1])
-                root = result["model_root"]
+                root = json.loads(stdout.decode("utf-8").strip().splitlines()[-1])[
+                    "model_root"
+                ]
                 if not isinstance(root, str) or not Path(root).is_dir():
                     raise ValueError("Model directory is unavailable")
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise MineruApiError(
                     "MinerU model preparation returned an invalid result"
                 ) from exc
-            if root != self.__class__._model_root:
-                self.shutdown()
-                self.__class__._model_root = root
+            with self.__class__._ownership_lock:
+                self._require_owner(owner)
+                if root != self.__class__._model_root:
+                    self._stop_api_locked(owner=owner)
+                    self.__class__._model_root = root
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.communicate()
-            guard.close()
+            self._stop_preparation(process=process)
 
-    def _ensure_api_running(self) -> None:
-        """确保 mineru-api 正在运行"""
-        if self.__class__._api_url and self._check_api_running(self.__class__._api_url):
-            return
-        with self._lock:
-            if self.__class__._api_url and self._check_api_running(
-                self.__class__._api_url
-            ):
+    @classmethod
+    def _stop_preparation(
+        cls,
+        *,
+        process: subprocess.Popen | None = None,
+        owner: threading.Event | None = None,
+    ) -> None:
+        with cls._ownership_lock:
+            if process is not None and cls._prepare_process is not process:
                 return
-            # 清理旧进程
-            if self.__class__._api_process is not None:
-                self.__class__._api_process.terminate()
-                try:
-                    self.__class__._api_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.__class__._api_process.kill()
-                self.__class__._api_process = None
-            # 不预探测/预下载模型：mineru-api 不依赖模型即可启动，模型在首次
-            # job 解析时由 mineru 自己按需下载（auto_download_and_get_
-            # model_root_path）。旧的预探测用 mineru.cli.models_download 当探测
-            # 命令、30s 超时，反而会杀掉 mineru 自己正在进行的下载，导致"永远
-            # 下不完"。模型下载是 mineru 内部事务，我们只管发请求 + 给足超时。
-            self._start_api()
+            if owner is not None and cls._prepare_owner is not owner:
+                return
+            current, guard = cls._prepare_process, cls._prepare_guard
+            if current is None:
+                return
+            if guard is not None:
+                guard.terminate_and_wait(timeout=5)
+            if current.poll() is None:
+                current.terminate()
+            current.communicate(timeout=5)
+            if guard is not None:
+                guard.close()
+            cls._prepare_process = cls._prepare_guard = cls._prepare_owner = None
+
+    def _ensure_api_running(self, *, owner: threading.Event | None = None) -> None:
+        cancel = owner if owner is not None else self.__class__._startup_cancel
+        with self.__class__._ownership_lock:
+            self._require_owner(cancel)
+            url, process = self.__class__._api_url, self.__class__._api_process
+        if url and self._check_api_running(url):
+            with self.__class__._ownership_lock:
+                self._require_owner(cancel)
+                if process is self.__class__._api_process:
+                    return
+        with self._lock:
+            with self.__class__._ownership_lock:
+                self._require_owner(cancel)
+                url, process = self.__class__._api_url, self.__class__._api_process
+            if url and self._check_api_running(url):
+                with self.__class__._ownership_lock:
+                    self._require_owner(cancel)
+                    if process is self.__class__._api_process:
+                        return
+            with self.__class__._ownership_lock:
+                self._require_owner(cancel)
+                self._stop_api_locked(owner=cancel)
+            self._start_api(owner=cancel)
 
     @staticmethod
     def _config(options: OCROptions | MineruConfig | None) -> MineruConfig:
@@ -455,12 +551,24 @@ class MinerUService(metaclass=SingletonMeta):
             raise MineruConfigError(
                 ErrorCode.MINERU_CONFIG_UNAVAILABLE, "unsupported_language"
             )
+        owner = (
+            self.__class__._startup_cancel
+            if connection.mode != CONNECTION_REMOTE
+            else None
+        )
+        user_cancelled = cancelled
+
+        def cancelled() -> bool:
+            return user_cancelled() or (owner is not None and owner.is_set())
+
         # Serialize jobs through shutdown/start and result download; never
         # mutate a live service used by another job.
         with self._lock:
+            if cancelled():
+                raise MineruCancelled("MinerU request canceled")
             if connection.mode == CONNECTION_REMOTE:
                 # 远程自部署服务器：绝不回退本地，失败原样上抛。
-                return MineruApiClient(
+                result = MineruApiClient(
                     connection.api_url,
                     timeout=Constants.Timeout.MINERU_HTTP_TOTAL,
                     api_key=connection.api_key or None,
@@ -469,26 +577,36 @@ class MinerUService(metaclass=SingletonMeta):
                     config,
                     cancelled=cancelled,
                 )
+                if cancelled():
+                    raise MineruCancelled(
+                        "MinerU remote request canceled after response"
+                    )
+                return result
             tier = (
                 "standard"
                 if config.tier in (MineruTier.STANDARD, MineruTier.ADVANCED)
                 else "basic"
             )
             if config.tier != MineruTier.FLASH:
-                self._prepare_cached_models(tier, cancelled)
-            if self.__class__._server_tier != tier:
-                self.shutdown()
-                self.__class__._server_tier = tier
-            self._ensure_api_running()
-            return MineruApiClient(
+                self._prepare_cached_models(tier, cancelled, owner=owner)
+            with self.__class__._ownership_lock:
+                self._require_owner(owner)
+                if self.__class__._server_tier != tier:
+                    self._stop_api_locked(owner=owner)
+                    self.__class__._server_tier = tier
+            self._ensure_api_running(owner=owner)
+            result = MineruApiClient(
                 self.__class__._api_url, timeout=Constants.Timeout.MINERU_HTTP_TOTAL
             ).parse(
                 files if files is not None else [(filename, data)],
                 config,
                 cancelled=cancelled,
             )
+            if cancelled():
+                raise MineruCancelled("MinerU request canceled after response")
+            return result
 
-    def prepare(self) -> None:
+    def prepare(self, *, cancelled: Callable[[], bool] = lambda: False) -> None:
         """Explicit preload verifies actual parsing instead of claiming health is ready."""
         import pymupdf as fitz
         from vibeocr.runtime.recognition.mineru_readiness import (
@@ -520,6 +638,7 @@ class MinerUService(metaclass=SingletonMeta):
                         if tier == MineruTier.FLASH
                         else MineruOcrMode.OCR,
                     ),
+                    cancelled=cancelled,
                 )["readiness.pdf"]
                 if isinstance(document, MineruApiError):
                     raise document
@@ -857,19 +976,42 @@ class MinerUService(metaclass=SingletonMeta):
             return block.get("code_body", "")[:200]
         return block.get("text", "")
 
+    @classmethod
+    def _stop_api_locked(cls, *, owner: threading.Event | None = None) -> None:
+        if owner is not None and cls._api_owner is not owner:
+            return
+        process, guard, reader = cls._api_process, cls._job_guard, cls._log_reader
+        if guard is not None:
+            guard.terminate_and_wait(timeout=10)
+        if process is not None and process.poll() is None:
+            process.terminate()
+        if process is not None:
+            process.wait(timeout=10)
+        if reader is not None:
+            reader.join(timeout=1)
+            if reader.is_alive():
+                raise TimeoutError("MinerU worker logs did not drain")
+        if (
+            process is not None
+            and process.stderr is not None
+            and not process.stderr.closed
+        ):
+            process.stderr.close()
+        if guard is not None:
+            guard.close()
+        cls._api_process = cls._job_guard = cls._log_reader = cls._api_owner = None
+        cls._api_url = ""
+        cls._initialized = False
+
+    @classmethod
+    def shutdown_owned(cls, *, owner: threading.Event | None = None) -> None:
+        """Termination owns only a short OS-resource lock, never the long parse lock."""
+        cancel = owner if owner is not None else cls._startup_cancel
+        if cancel is not None:
+            cancel.set()
+        with cls._ownership_lock:
+            cls._stop_preparation(owner=owner)
+            cls._stop_api_locked(owner=owner)
+
     def shutdown(self) -> None:
-        """停止 mineru-api 进程"""
-        # 先关闭 Job 守卫：触发内核 kill mineru-api，使后续 terminate 对已死进程为 no-op
-        if self.__class__._job_guard is not None:
-            self.__class__._job_guard.close()
-            self.__class__._job_guard = None
-        if self.__class__._api_process is not None:
-            _logger.debug("[MinerU] 停止 mineru-api 服务...")
-            self.__class__._api_process.terminate()
-            try:
-                self.__class__._api_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.__class__._api_process.kill()
-            self.__class__._api_process = None
-            self.__class__._api_url = ""
-            _logger.debug("[MinerU] mineru-api 服务已停止")
+        self.shutdown_owned()

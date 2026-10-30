@@ -16,7 +16,7 @@ from pathlib import Path
 
 from vibeocr.runtime.environments.model_cache import LocalModelsNotPrepared
 from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
-from vibeocr.runtime.processes.utils.job_object import JobObjectGuard
+from vibeocr.runtime.processes.utils.job_object import CREATE_SUSPENDED, JobObjectGuard
 from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
 from vibeocr.runtime.recognition.ocr_engines import (
     REASON_ENGINE_NOT_INSTALLED,
@@ -31,8 +31,12 @@ from vibeocr.runtime.recognition.paddle_onnx import (
     current_snapshot,
     is_ort_environment,
 )
+from vibeocr.runtime.recognition.worker_idle import WorkerIdleOwner
 from vibeocr.runtime_contracts import (
     PipelineSelection,
+    RecognitionResourceKind,
+    ResidencyEntry,
+    ResidencyKind,
     ResidencyStatus,
     SettingsSnapshot,
     parse_pipeline_spec,
@@ -65,10 +69,14 @@ class PaddleProcessAdapter:
         self.python = python
         self._process: subprocess.Popen | None = None
         self._lock = threading.RLock()
+        self._request_lock = threading.RLock()
         self._responses: queue.Queue = queue.Queue()
         self._guard: JobObjectGuard | None = None
         self._status = ResidencyStatus()
         self._settings = SettingsSnapshot()
+        self._settings_pending = False
+        self._readers: list[threading.Thread] = []
+        self._idle = WorkerIdleOwner("PaddleOCR", self._stop_process, lock=self._lock)
 
     @staticmethod
     def probe_descriptor() -> EngineDescriptor:
@@ -106,11 +114,19 @@ class PaddleProcessAdapter:
         return self.probe_descriptor()
 
     def _start(self) -> None:
+        with self._idle.operation_lock:
+            if self._idle.state == "stop_failed":
+                raise RuntimeError("Paddle worker stop failed; ownership retained")
+            self._start_serial()
+
+    def _start_serial(self) -> None:
         if self._process is not None and self._process.poll() is None:
             return
         self._stop()
+        self._idle.starting()
         responses = queue.Queue()
-        self._responses = responses
+        with self._lock:
+            self._responses = responses
         env = dict(os.environ, PYTHONNOUSERSITE="1", PYTHONUTF8="1")
         env.pop("PYTHONPATH", None)
         product_code = env.get("VIBEOCR_PRODUCT_CODE_ROOT")
@@ -133,11 +149,22 @@ class PaddleProcessAdapter:
             encoding="utf-8",
             errors="replace",
             env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=(subprocess.CREATE_NO_WINDOW | CREATE_SUSPENDED)
+            if os.name == "nt"
+            else 0,
         )
-        self._process = process
-        self._guard = JobObjectGuard(name="vibeocr_paddle")
-        self._guard.assign_from_popen(process)
+        with self._lock:
+            self._process = process
+        guard = JobObjectGuard(allow_breakaway=False)
+        with self._lock:
+            self._guard = guard
+        if os.name == "nt" and not self._guard.assign_from_popen(
+            process, suspended=True
+        ):
+            process.terminate()
+            process.wait(timeout=5)
+            self._stop()
+            raise RuntimeError("Paddle worker ownership could not be established")
 
         def read_replies() -> None:
             try:
@@ -165,15 +192,20 @@ class PaddleProcessAdapter:
             finally:
                 forwarder.flush()
 
-        threading.Thread(target=read_replies, daemon=True).start()
-        threading.Thread(target=read_logs, daemon=True).start()
-        # Restore settings after a native crash, without replaying the failed job.
-        self._exchange(
-            {"operation": "settings", "settings": self._settings.to_payload()}
-        )
+        self._readers = [
+            threading.Thread(target=read_replies, daemon=True),
+            threading.Thread(target=read_logs, daemon=True),
+        ]
+        for reader in self._readers:
+            reader.start()
+        # Settings IPC belongs to the serial request path, outside the owner lock.
+        self._settings_pending = True
+        self._idle.started()
 
     def _exchange(self, request: dict, *, timeout: float = 3600) -> object:
-        process = self._process
+        with self._lock:
+            process = self._process
+            responses = self._responses
         if process is None or process.stdin is None:
             raise RuntimeError("Paddle worker is not running")
         try:
@@ -188,7 +220,7 @@ class PaddleProcessAdapter:
         try:
             while True:
                 if not is_ort_environment():
-                    line = self._responses.get(timeout=timeout)
+                    line = responses.get(timeout=timeout)
                     break
                 if cancelled():
                     self._stop()
@@ -197,7 +229,7 @@ class PaddleProcessAdapter:
                 if remaining <= 0:
                     raise queue.Empty
                 try:
-                    line = self._responses.get(timeout=min(0.1, remaining))
+                    line = responses.get(timeout=min(0.1, remaining))
                     break
                 except queue.Empty:
                     continue
@@ -231,18 +263,49 @@ class PaddleProcessAdapter:
             raise RuntimeError(response["error"])
         return response["result"]
 
+    def reserve(self):
+        return self._idle.reserve()
+
     def _request(self, operation: str, **payload: object) -> object:
-        with self._lock:
-            self._start()
-            return self._exchange({"operation": operation, **payload})
+        release = self.reserve()
+        try:
+            with self._request_lock:
+                try:
+                    with self._idle.operation_lock:
+                        self._idle.working()
+                        self._start()
+                        with self._lock:
+                            settings = (
+                                self._settings if self._settings_pending else None
+                            )
+                            self._settings_pending = False
+                    if settings is not None:
+                        self._exchange(
+                            {"operation": "settings", "settings": settings.to_payload()}
+                        )
+                    return self._exchange({"operation": operation, **payload})
+                except Exception as exc:
+                    if self._idle.state == "starting":
+                        self._idle.stop("start_failed", force=True)
+                    self._idle.record_error(exc, "request_failed")
+                    raise
+        finally:
+            release()
 
     def capabilities(
         self, options: PipelineSelection | None = None
     ) -> AdapterCapability:
-        result = self._request(
-            "capabilities", options=(options or PipelineSelection("OCR")).to_payload()
+        from vibeocr.runtime.recognition.core.pipelines import get_registry
+
+        name = (options or PipelineSelection("OCR")).pipeline_id
+        registry = get_registry()
+        spec = registry.get(name) if registry.has(name) else None
+        real_batch = bool(
+            spec is not None and getattr(spec, "recognize_batch", None) is not None
         )
-        return AdapterCapability(**result)
+        return AdapterCapability(
+            name=name, real_batch=real_batch, max_compute_batch=8 if real_batch else 1
+        )
 
     def recognize_many(
         self,
@@ -281,66 +344,101 @@ class PaddleProcessAdapter:
         return self._status
 
     def residency_status(self) -> ResidencyStatus:
-        # Observing status must not queue behind inference/model downloads.
-        if not self._lock.acquire(timeout=0.05):
-            return self._status
-        try:
-            if self._process is None:
-                return self._status
-            return self._record_status(
-                self._exchange({"operation": "status"}, timeout=1)
+        worker = self._idle.snapshot()
+        from vibeocr.runtime.environments.model_cache import paddle_text_models_prepared
+
+        cache_home = os.environ.get("PADDLE_PDX_CACHE_HOME")
+        prepared = paddle_text_models_prepared(Path(cache_home)) if cache_home else None
+        return ResidencyStatus(
+            entries=(
+                ResidencyEntry(
+                    pipeline="PaddleOCR",
+                    models_prepared=prepared,
+                    resource_kind=RecognitionResourceKind.PROCESS,
+                    resource_id="paddle",
+                    kind=ResidencyKind.IDLE
+                    if self._idle.running
+                    else ResidencyKind.EVICTED,
+                    active_leases=worker["active_leases"],
+                    remaining_ttl_seconds=worker["remaining_seconds"],
+                    worker=worker,
+                ),
             )
-        finally:
-            self._lock.release()
+        )
 
     def preload(self, pipelines: tuple[str, ...]) -> ResidencyStatus:
-        return self._record_status(self._request("preload", pipelines=pipelines))
+        self._request("preload", pipelines=pipelines)
+        return self.residency_status()
 
     def release_idle(self, pipeline: str | None = None) -> ResidencyStatus:
-        if not self._lock.acquire(blocking=False):
-            return self._status
-        try:
-            if self._process is None:
-                return self._status
-            return self._record_status(
-                self._exchange({"operation": "release", "pipeline": pipeline})
-            )
-        finally:
-            self._lock.release()
+        if pipeline not in (
+            None,
+            "PaddleOCR",
+            "OCR",
+            "TABLE_RECOGNITION",
+            "PP-StructureV3",
+        ):
+            return self.residency_status()
+        self._idle.stop("explicit_release")
+        return self.residency_status()
+
+    def settings_guard(self):
+        return self._lock
 
     def configure_settings(self, snapshot: SettingsSnapshot) -> None:
         with self._lock:
             self._settings = snapshot
-            if self._process is not None:
-                self._record_status(
-                    self._exchange(
-                        {"operation": "settings", "settings": snapshot.to_payload()}
-                    )
-                )
+            self._settings_pending = True
+            self._idle.configure(snapshot.paddle_idle_seconds)
 
     def _stop(self) -> None:
-        process, self._process = self._process, None
-        # Reader threads retain their own old queue; late replies cannot cross generations.
-        self._responses = queue.Queue()
+        self._idle.stop("failure_recovery", force=True)
+
+    def _stop_process(self) -> None:
+        process = self._process
         if process is not None:
             if process.poll() is None:
-                process.terminate()
-                try:
+                # Only idle EOF is safe: an active writer may hold TextIO's buffer lock.
+                if self._idle.active == 0:
+                    if process.stdin is not None:
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        if self._guard is not None:
+                            self._guard.terminate_and_wait(timeout=5)
+                        if process.poll() is None:
+                            process.terminate()
+                        process.wait(timeout=5)
+                else:
+                    if self._guard is not None:
+                        self._guard.terminate_and_wait(timeout=5)
+                    if process.poll() is None:
+                        process.terminate()
                     process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            if self._guard is not None:
+                self._guard.terminate_and_wait(timeout=5)
+            for reader in self._readers:
+                reader.join(timeout=1)
+                if reader.is_alive():
+                    raise TimeoutError("Paddle worker pipes did not drain")
+            self._readers = []
             for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass  # A forced stop intentionally discards the broken input frame.
         if self._guard is not None:
             self._guard.close()
+        with self._lock:
             self._guard = None
-        self._status = ResidencyStatus(
-            default_ttl_seconds=self._settings.default_ttl_seconds,
-            pipelines=self._settings.pipelines,
-        )
+            self._process = None
+            self._responses = queue.Queue()
+            self._status = ResidencyStatus()
 
     def close(self) -> None:
-        with self._lock:
-            self._stop()
+        self._idle.close()

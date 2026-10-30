@@ -227,6 +227,10 @@ public sealed record PipelineSpec
 
 public sealed record ResidencyEntry
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, JsonElement>? Worker { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ModelsPrepared { get; init; }
     public required string Pipeline { get; init; }
     public required ResidencyKind Kind { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -588,6 +592,8 @@ public sealed record SettingsSnapshot
     private IReadOnlyList<string>? _downloadSourceIds;
 
     public int SchemaVersion { get; init; } = HttpV2Schema.Version;
+    public int PaddleIdleSeconds { get; init; } = 600;
+    public int MineruIdleSeconds { get; init; } = 600;
     public SettingsResidency Residency { get; init; } = new();
     /// <summary>Extra backend settings (transport-neutral key/value bag).</summary>
     public IDictionary<string, JsonElement> Extra { get; init; } = new Dictionary<string, JsonElement>();

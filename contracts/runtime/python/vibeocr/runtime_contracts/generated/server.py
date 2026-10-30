@@ -679,6 +679,14 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                               'environment. Other extra keys '
                                                               'retain their existing semantics.',
                                                'type': 'object'},
+                                     'mineru_idle_seconds': {'default': 600,
+                                                             'maximum': 2147483647,
+                                                             'minimum': 0,
+                                                             'type': 'integer'},
+                                     'paddle_idle_seconds': {'default': 600,
+                                                             'maximum': 2147483647,
+                                                             'minimum': 0,
+                                                             'type': 'integer'},
                                      'residency': {'additionalProperties': False,
                                                    'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                           'type': 'integer'},
@@ -4006,6 +4014,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                'pinned',
                                                                                                'idle',
                                                                                                'evicted']},
+                                                                             'models_prepared': {'description': 'Independent '
+                                                                                                                'local '
+                                                                                                                'model-cache '
+                                                                                                                'observation; '
+                                                                                                                'remains '
+                                                                                                                'true '
+                                                                                                                'after '
+                                                                                                                'the '
+                                                                                                                'worker '
+                                                                                                                'exits. '
+                                                                                                                'Omission '
+                                                                                                                'means '
+                                                                                                                'not '
+                                                                                                                'checked.',
+                                                                                                 'type': 'boolean'},
                                                                              'pipeline': {'type': 'string'},
                                                                              'recognition_mode': {'description': 'Stable '
                                                                                                                  'user-semantic '
@@ -4097,7 +4120,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                               'keep-alive.',
                                                                                                'enum': ['model',
                                                                                                         'process'],
-                                                                                               'type': 'string'}},
+                                                                                               'type': 'string'},
+                                                                             'worker': {'additionalProperties': True,
+                                                                                        'type': 'object'}},
                                                               'required': ['pipeline',
                                                                            'kind',
                                                                            'active_leases',
@@ -4440,6 +4465,14 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                          'environment. Other extra keys retain '
                                                          'their existing semantics.',
                                           'type': 'object'},
+                                'mineru_idle_seconds': {'default': 600,
+                                                        'maximum': 2147483647,
+                                                        'minimum': 0,
+                                                        'type': 'integer'},
+                                'paddle_idle_seconds': {'default': 600,
+                                                        'maximum': 2147483647,
+                                                        'minimum': 0,
+                                                        'type': 'integer'},
                                 'residency': {'additionalProperties': False,
                                               'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                      'type': 'integer'},
@@ -7216,6 +7249,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                           'pinned',
                                                                                           'idle',
                                                                                           'evicted']},
+                                                                        'models_prepared': {'description': 'Independent '
+                                                                                                           'local '
+                                                                                                           'model-cache '
+                                                                                                           'observation; '
+                                                                                                           'remains '
+                                                                                                           'true '
+                                                                                                           'after '
+                                                                                                           'the '
+                                                                                                           'worker '
+                                                                                                           'exits. '
+                                                                                                           'Omission '
+                                                                                                           'means '
+                                                                                                           'not '
+                                                                                                           'checked.',
+                                                                                            'type': 'boolean'},
                                                                         'pipeline': {'type': 'string'},
                                                                         'recognition_mode': {'description': 'Stable '
                                                                                                             'user-semantic '
@@ -7307,7 +7355,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                          'keep-alive.',
                                                                                           'enum': ['model',
                                                                                                    'process'],
-                                                                                          'type': 'string'}},
+                                                                                          'type': 'string'},
+                                                                        'worker': {'additionalProperties': True,
+                                                                                   'type': 'object'}},
                                                          'required': ['pipeline',
                                                                       'kind',
                                                                       'active_leases',
@@ -7855,6 +7905,14 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                          'environment. Other extra keys retain '
                                                          'their existing semantics.',
                                           'type': 'object'},
+                                'mineru_idle_seconds': {'default': 600,
+                                                        'maximum': 2147483647,
+                                                        'minimum': 0,
+                                                        'type': 'integer'},
+                                'paddle_idle_seconds': {'default': 600,
+                                                        'maximum': 2147483647,
+                                                        'minimum': 0,
+                                                        'type': 'integer'},
                                 'residency': {'additionalProperties': False,
                                               'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                      'type': 'integer'},
@@ -7959,6 +8017,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                           'pinned',
                                                                                           'idle',
                                                                                           'evicted']},
+                                                                        'models_prepared': {'description': 'Independent '
+                                                                                                           'local '
+                                                                                                           'model-cache '
+                                                                                                           'observation; '
+                                                                                                           'remains '
+                                                                                                           'true '
+                                                                                                           'after '
+                                                                                                           'the '
+                                                                                                           'worker '
+                                                                                                           'exits. '
+                                                                                                           'Omission '
+                                                                                                           'means '
+                                                                                                           'not '
+                                                                                                           'checked.',
+                                                                                            'type': 'boolean'},
                                                                         'pipeline': {'type': 'string'},
                                                                         'recognition_mode': {'description': 'Stable '
                                                                                                             'user-semantic '
@@ -8050,7 +8123,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                          'keep-alive.',
                                                                                           'enum': ['model',
                                                                                                    'process'],
-                                                                                          'type': 'string'}},
+                                                                                          'type': 'string'},
+                                                                        'worker': {'additionalProperties': True,
+                                                                                   'type': 'object'}},
                                                          'required': ['pipeline',
                                                                       'kind',
                                                                       'active_leases',

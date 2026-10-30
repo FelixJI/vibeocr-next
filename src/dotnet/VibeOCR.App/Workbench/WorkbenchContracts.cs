@@ -731,6 +731,8 @@ public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : 
 /// string replaces it. Saving never verifies remote reachability, and the
 /// API key never crosses back to the WebView beyond a has-key flag.
 /// </summary>
+public sealed record SetWorkerIdleCommand(int PaddleSeconds, int MineruSeconds) : WorkbenchCommand;
+
 public sealed record SetMineruConnectionCommand(
     string Mode,
     string? ApiUrl,
@@ -812,6 +814,8 @@ public sealed record ExportDiagnosticsCommand : WorkbenchCommand;
 /// navigator.clipboard.
 /// </summary>
 public sealed record CopyDiagnosticsCommand : WorkbenchCommand;
+
+public sealed record RefreshDiagnosticsCommand : WorkbenchCommand;
 
 public enum WorkbenchTheme
 {
@@ -1106,7 +1110,10 @@ public sealed record SettingsWorkbenchState(
   int EnvironmentCleanupPageCount = 1,
   EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
   bool MinimizeToTray = false, string ShellSettingsError = "",
-  bool EnvironmentSnapshotLoaded = false, bool EnvironmentListFetchAttempted = false) : WorkbenchState
+  bool EnvironmentSnapshotLoaded = false, bool EnvironmentListFetchAttempted = false,
+  int PaddleIdleSeconds = 600, int MineruIdleSeconds = 600,
+  IReadOnlyList<VibeOCR.Contracts.HttpV2.ResidencyEntry>? Workers = null,
+  string WorkerSettingsWarning = "") : WorkbenchState
 {
   public override string Scope => "settings";
 }
@@ -1399,7 +1406,8 @@ public sealed record DiagnosticsWorkbenchState(
   string ProtocolStatus,
   bool IsReady,
   IReadOnlyList<string> Milestones,
-  IReadOnlyList<string>? DeviceEvidence = null) : WorkbenchState
+  IReadOnlyList<string>? DeviceEvidence = null,
+  IReadOnlyList<VibeOCR.App.ViewModels.WorkerDiagnosticState>? Workers = null) : WorkbenchState
 {
   public override string Scope => "diagnostics";
 }

@@ -702,6 +702,8 @@ class ResidencyEntry:
     remaining_ttl_seconds: int | None = None
     estimated_vram_mb: int | None = None
     eviction_reason: EvictionReason = EvictionReason.NONE
+    worker: dict[str, Any] | None = None
+    models_prepared: bool | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -712,6 +714,10 @@ class ResidencyEntry:
             "estimated_vram_mb": self.estimated_vram_mb,
             "eviction_reason": self.eviction_reason.value,
         }
+        if self.models_prepared is not None:
+            payload["models_prepared"] = self.models_prepared
+        if self.worker is not None:
+            payload["worker"] = self.worker
         if self.recognition_mode is not None:
             payload["recognition_mode"] = self.recognition_mode
         if self.resource_kind is not None:
@@ -1286,10 +1292,21 @@ class SettingsSnapshot:
     pipelines: tuple[PipelineSpec, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
     download_source_ids: tuple[str, ...] = ()
+    paddle_idle_seconds: int = 600
+    mineru_idle_seconds: int = 600
+
+    def __post_init__(self) -> None:
+        for value in (self.paddle_idle_seconds, self.mineru_idle_seconds):
+            if type(value) is not int or not 0 <= value <= 2147483647:
+                raise ValueError(
+                    "worker idle seconds must be an integer in 0..2147483647"
+                )
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "schema_version": self.schema_version,
+            "paddle_idle_seconds": self.paddle_idle_seconds,
+            "mineru_idle_seconds": self.mineru_idle_seconds,
             "residency": {
                 "default_ttl_seconds": self.default_ttl_seconds,
                 "pipelines": [p.to_payload() for p in self.pipelines],

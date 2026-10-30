@@ -898,6 +898,122 @@ function acceleratorLabel(accelerator: string): string {
   return accelerator === "nvidia_cuda" ? "CUDA GPU" : "CPU";
 }
 
+function WorkerIdleEditor({
+  paddleSeconds,
+  mineruSeconds,
+  remote,
+  busy,
+  workers,
+  actions,
+}: {
+  readonly paddleSeconds: number;
+  readonly mineruSeconds: number;
+  readonly remote: boolean;
+  readonly busy: boolean;
+  readonly workers: unknown;
+  readonly actions: AppActions;
+}) {
+  const [paddle, setPaddle] = useState(String(paddleSeconds));
+  const [mineru, setMineru] = useState(String(mineruSeconds));
+  const inFlight = useRef(false);
+  const [pending, setPending] = useState(false);
+  const disabled = busy || pending;
+  const submit = async (restore: boolean) => {
+    if (busy || inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    try {
+      const saved = await actions.run({
+        type: "settings.setWorkerIdle",
+        paddleSeconds: restore ? 600 : Number(paddle),
+        mineruSeconds: remote ? mineruSeconds : restore ? 600 : Number(mineru),
+      });
+      if (saved && restore) {
+        setPaddle("600");
+        if (!remote) setMineru("600");
+      }
+    } finally {
+      inFlight.current = false;
+      setPending(false);
+    }
+  };
+  const valid = (value: string) =>
+    /^\d+$/.test(value) && Number(value) <= 2147483647;
+  const states = Array.isArray(workers) ? workers : [];
+  const status = (owner: string) => {
+    const value = states.find(
+      (entry: { worker?: { owner?: string } }) => entry.worker?.owner === owner,
+    )?.worker;
+    const labels: Record<string, string> = {
+      not_started: "未启动",
+      starting: "启动中",
+      busy: "使用中",
+      idle: "空闲保留",
+      stopping: "正在退出",
+      idle_stopped: "因空闲已退出",
+      stop_failed: "退出失败",
+      remote: "远程服务",
+    };
+    return labels[value?.state ?? "not_started"] ?? "未启动";
+  };
+  return (
+    <>
+      <p className="form-note">
+        按进程管理资源；默认 600 秒（10 分钟）。0
+        秒表示持久，不因空闲退出；下次识别会按需启动。
+      </p>
+      <label>
+        PaddleOCR 空闲秒数
+        <Input
+          aria-label="PaddleOCR 空闲秒数"
+          type="number"
+          min={0}
+          max={2147483647}
+          step={1}
+          value={paddle}
+          onChange={(_, data) => setPaddle(data.value)}
+          disabled={disabled}
+        />
+      </label>
+      <p className="form-note">{status("PaddleOCR")}</p>
+      {remote ? (
+        <p className="form-note">MinerU：不管理远端进程。</p>
+      ) : (
+        <>
+          <label>
+            本地 MinerU 空闲秒数
+            <Input
+              aria-label="本地 MinerU 空闲秒数"
+              type="number"
+              min={0}
+              max={2147483647}
+              step={1}
+              value={mineru}
+              onChange={(_, data) => setMineru(data.value)}
+              disabled={disabled}
+            />
+          </label>
+          <p className="form-note">{status("MinerU")}</p>
+        </>
+      )}
+      <div className="button-row">
+        <Button
+          disabled={disabled || !valid(paddle) || !valid(mineru)}
+          onClick={() => submit(false)}
+        >
+          保存空闲设置
+        </Button>
+        <Button disabled={disabled} onClick={() => submit(true)}>
+          恢复十分钟默认值
+        </Button>
+      </div>
+      <p className="form-note">
+        旧模型保留设置会迁为进程空闲退出；模型文件和运行环境继续保留。
+      </p>
+    </>
+  );
+}
+
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
   // #283：按引擎分区选择（Paddle 推理后端 / MinerU 本地引擎）→准备→确认；
@@ -1159,6 +1275,28 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             </p>
           ) : null}
         </Panel>
+        <Panel title="空闲后释放资源" className="settings-worker-panel">
+          {stringValue(state.workerSettingsWarning) ? (
+            <p role="alert">{stringValue(state.workerSettingsWarning)}</p>
+          ) : null}
+          <WorkerIdleEditor
+            key={`${state.paddleIdleSeconds}|${state.mineruIdleSeconds}|${mineru?.mode}`}
+            paddleSeconds={
+              typeof state.paddleIdleSeconds === "number"
+                ? state.paddleIdleSeconds
+                : 600
+            }
+            mineruSeconds={
+              typeof state.mineruIdleSeconds === "number"
+                ? state.mineruIdleSeconds
+                : 600
+            }
+            remote={mineru?.mode === "remote"}
+            busy={booleanValue(state.isBusy)}
+            workers={state.workers}
+            actions={actions}
+          />
+        </Panel>
         <Panel title="识别默认模式" className="settings-default-mode-panel">
           <DefaultRecognitionModeEditor
             key={defaultMode?.modeId ?? ""}
@@ -1351,6 +1489,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
           </p>
         </Panel>
         <Panel title="MinerU 连接" className="settings-mineru-panel">
+          {mineru?.mode === "unavailable" ? (
+            <p role="alert">
+              连接配置无法安全恢复，MinerU
+              识别已禁用。请修复保留的设置文件后重启。
+            </p>
+          ) : null}
           <MineruConnectionEditor
             key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
             connection={mineru}
@@ -3510,7 +3654,7 @@ function MineruConnectionEditor({
         首次调用远程服务完成准备并刷新可用性；不宣称未验证的连接可解析。
       </p>
       <p className="form-note">
-        本地模式下的模型预热、驻留 TTL 与释放只作用于本地模型，不控制远程服务。
+        本地模式下的预热与进程空闲退出只作用于自有本地资源，不控制远程服务。
       </p>
     </>
   );

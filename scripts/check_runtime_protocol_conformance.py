@@ -443,13 +443,13 @@ async def _selection_http_checks() -> None:
                 "OCR",
                 "paddleocr",
                 "base_runtime",
-                "model_residency",
+                "process_keep_alive",
             ),
             "paddle_structure": (
                 "PP-StructureV3",
                 None,
                 "advanced_component",
-                "model_residency",
+                "process_keep_alive",
             ),
             "mineru_document": (
                 "MinerU",
@@ -461,7 +461,7 @@ async def _selection_http_checks() -> None:
                 "TABLE_RECOGNITION",
                 None,
                 "advanced_component",
-                "model_residency",
+                "process_keep_alive",
             ),
         }:
             raise RuntimeError("recognition mode execution catalog differs")

@@ -16,6 +16,7 @@ function setup(
     "update.install",
     "update.selectSource",
     "about.openProject",
+    "diagnostics.refresh",
     "diagnostics.export",
     "diagnostics.copy",
   ],
@@ -318,4 +319,23 @@ describe("DiagnosticsPage 更新源选择", () => {
     expect(screen.getByRole("radio", { name: "官方直连" })).toBeDisabled();
     expect(screen.getByRole("radio", { name: "自定义源" })).toBeDisabled();
   });
+});
+
+it("显示宿主工作进程快照并通过既有桥刷新", async () => {
+  const { actions } = setup({
+    diagnostics: {
+      workers: [
+        {
+          owner: "MinerU",
+          generation: 4,
+          state: "idle_stopped",
+          idleSeconds: 600,
+          activeLeases: 0,
+        },
+      ],
+    },
+  });
+  expect(screen.getByText(/idle_stopped/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "刷新工作进程" }));
+  expect(actions.run).toHaveBeenCalledWith({ type: "diagnostics.refresh" });
 });
