@@ -50,7 +50,7 @@ def _create_ocr_pipeline(device: str, **kwargs: Any) -> Any:
     if "_onnx_request" not in kwargs:
         raise PaddleOnnxError(
             "Paddle pipelines require a Paddle ONNX environment "
-            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+            "(paddleocr-ort-directml); prepare it and switch to it"
         )
     request = kwargs.pop("_onnx_request")
     kwargs.pop("enable_mkldnn", None)

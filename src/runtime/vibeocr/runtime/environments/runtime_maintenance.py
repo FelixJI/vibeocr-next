@@ -34,6 +34,7 @@ from vibeocr.runtime.environments.runtime_manifest import (
     covering_profile_id,
     load_runtime_manifest,
     migrate_legacy_component_ids,
+    plan_profile_id,
     runtime_component_binding,
     scoped_component_version,
 )
@@ -1407,7 +1408,10 @@ def runtime_profile_status(
                 manifest, accelerator=accelerator, component_ids=closure
             )
             if closure is not None
-            else ACCELERATOR_TO_PLAN[accelerator]
+            # 无闭包证据（空 runtime root）时按 accelerator 档位投影；统一
+            # 闭包后新 manifest 只产 base 档，历史 accelerator 档位缺失时
+            # 回退 base，与 covering_profile_id 同一读取规则。
+            else plan_profile_id(manifest, accelerator)
         )
     descriptor = profile_descriptor(
         manifest.profiles[profile_id], accelerator=accelerator

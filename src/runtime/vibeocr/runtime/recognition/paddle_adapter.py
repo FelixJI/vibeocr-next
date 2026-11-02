@@ -19,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,12 +47,10 @@ if TYPE_CHECKING:
     from vibeocr.runtime.recognition.result_assets import ResultAssetSink
 
 # PaddleOCR ONNX 属于用户显式准备的重型闭包；#270 后组件 id 只指向
-# Paddle ONNX 环境（原生 paddleocr-cpu/cuda 已退役）。
-PADDLE_REQUIRED_COMPONENT = (
-    "paddleocr-ort-cuda"
-    if os.environ.get("VIBEOCR_RUNTIME_ACCELERATOR") == "nvidia_cuda"
-    else "paddleocr-ort-cpu"
-)
+# Paddle ONNX 环境（原生 paddleocr-cpu/cuda 已退役）。统一推理闭包后
+# paddleocr-ort-directml 是唯一可安装配方（分设备 cpu/cuda 已退役），
+# 待准备提示不再按 accelerator 区分设备。
+PADDLE_REQUIRED_COMPONENT = "paddleocr-ort-directml"
 
 
 class _OCRServiceLike(Protocol):

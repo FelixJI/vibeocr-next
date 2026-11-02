@@ -352,9 +352,6 @@ def _build_recognition_mode_registry(
         RecognitionModeRegistry,
     )
 
-    accelerator = os.environ.get("VIBEOCR_RUNTIME_ACCELERATOR", "cpu")
-    suffix = "cuda" if accelerator == "nvidia_cuda" else "cpu"
-
     def mineru_document_ready() -> bool:
         """MinerU 文档模式可用性在读取时动态判定。
 
@@ -402,7 +399,7 @@ def _build_recognition_mode_registry(
                 (
                     os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"]
                     if is_ort_environment()
-                    else f"paddleocr-ort-{suffix}"
+                    else "paddleocr-ort-directml"
                 )
                 if definition.mode_id is RecognitionModeId.PADDLE_TEXT
                 else None
@@ -432,11 +429,13 @@ def _build_recognition_mode_registry(
             return ModeAvailability(
                 RecognitionModeAvailability.PREPARATION_REQUIRED,
                 reason_code="mode_requires_legacy_environment",
-                required_component=f"paddleocr-{suffix}",
+                required_component="paddleocr-ort-directml",
             )
         is_mineru = definition.mode_id is RecognitionModeId.MINERU_DOCUMENT
         ready = mineru_document_ready() if is_mineru else use_paddle
-        component = f"mineru-{suffix}" if is_mineru else f"paddleocr-{suffix}"
+        # 组件档位（mineru-cpu/cuda、原生 paddleocr-*）已随统一推理闭包
+        # 退役：待准备提示统一指向唯一可安装配方。
+        component = "paddleocr-ort-directml"
         return ModeAvailability(
             RecognitionModeAvailability.READY
             if ready

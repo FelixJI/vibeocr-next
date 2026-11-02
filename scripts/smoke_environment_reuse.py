@@ -1,11 +1,13 @@
-"""Real CPU/CUDA environment reuse smoke; creates only a fresh TEMP product.
+"""Real unified-closure environment reuse smoke; creates only a fresh TEMP product.
 
-Optionally seeds the fresh product's installer cache from an explicit
-read-only synthetic ``InstallerCacheRoot``; only the new copy receives the
-#196 ``ignore_installed`` resolve-input field. After the reuse and
-failed-switch checks the larger CUDA configuration is really removed via
-the production cleanup plan/run path while the CPU environment stays
-active, healthy and guarded.
+统一推理闭包（paddleocr-ort-directml）是唯一可安装配方：本冒烟准备两个
+同配方环境验证 #299 复用语义（预览/切换零下载、活动引用保护、失败切换
+保持活动环境）。Optionally seeds the fresh product's installer cache from
+an explicit read-only synthetic ``InstallerCacheRoot``; only the new copy
+receives the #196 ``ignore_installed`` resolve-input field. After the reuse
+and failed-switch checks the second environment is really removed via the
+production cleanup plan/run path while the first stays active, healthy and
+guarded.
 """
 
 from __future__ import annotations
@@ -89,7 +91,7 @@ def main() -> int:
 
         manager._install_runner = install
         records = []
-        for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda"):
+        for recipe in ("paddleocr-ort-directml", "paddleocr-ort-directml"):
             print(f"Preparing real {recipe}", flush=True)
             created = manager.create(recipe)
             plan = manager.preview_install(created["id"], recipe, ("tuna-pypi",))
@@ -98,7 +100,9 @@ def main() -> int:
             )
             assert installed["status"] == "installed"
             assert (
-                manager.find_compatible(recipe)["selected"]["environment_id"]
+                manager.find_compatible(recipe, created["id"])["selected"][
+                    "environment_id"
+                ]
                 == created["id"]
             )
             record = manager._read()["environments"][created["id"]]
@@ -111,13 +115,13 @@ def main() -> int:
                     "-B",
                     "-c",
                     "import json,onnxruntime as ort; "
-                    "from vibeocr.runtime.recognition.onnx_devices import cuda_provider_ready; "
-                    + (
-                        "assert cuda_provider_ready(); "
-                        if recipe.endswith("cuda")
-                        else ""
-                    )
-                    + "print(json.dumps({'providers':ort.get_available_providers(),'version':ort.__version__}))",
+                    "from vibeocr.runtime.recognition.directml_devices "
+                    "import hardware_adapters; "
+                    "assert 'DmlExecutionProvider' in "
+                    "ort.get_available_providers(); "
+                    "print(json.dumps({'providers':ort.get_available_providers(),"
+                    "'version':ort.__version__,"
+                    "'adapters':len(hardware_adapters())}))",
                 ],
                 env={**os.environ, **launch["environment"]},
                 capture_output=True,
@@ -126,12 +130,8 @@ def main() -> int:
                 timeout=60,
             )
             device = json.loads(result.stdout)
-            expected = (
-                "CUDAExecutionProvider"
-                if recipe.endswith("cuda")
-                else "CPUExecutionProvider"
-            )
-            assert expected in device["providers"], device
+            assert "DmlExecutionProvider" in device["providers"], device
+            assert "CPUExecutionProvider" in device["providers"], device
             evidence["installed"].append(
                 {
                     "id": record["id"],
@@ -163,7 +163,7 @@ def main() -> int:
         )
         artifact_files = sorted(path.name for path in artifacts.iterdir())
         assert artifact_files, (
-            "real CPU/CUDA installs left no shared download artifacts"
+            "real unified-closure installs left no shared download artifacts"
         )
         preview = manager.preview_cleanup()
         retained_groups = [
@@ -334,12 +334,12 @@ def main() -> int:
                 "All dependency preparation/download paths closed; no path invoked."
             )
 
-            # Real cleanup: remove the larger CUDA configuration while the
-            # CPU environment stays active; shared caches/models stay guarded.
+            # Real cleanup: remove the second unified-closure environment
+            # while the first stays active; shared caches/models stay guarded.
             preview = manager.preview_cleanup()
             items = {item["id"]: item for item in preview["items"]}
-            cuda_item = items[f"environment:{records[1]['id']}"]
-            assert cuda_item["can_clean"] is True, cuda_item
+            second_item = items[f"environment:{records[1]['id']}"]
+            assert second_item["can_clean"] is True, second_item
             retained_groups = [
                 item
                 for item in preview["items"]
@@ -347,7 +347,7 @@ def main() -> int:
             ]
             assert retained_groups, preview["items"]
             assert all("仍引用此下载工件" in item["reason"] for item in retained_groups)
-            removed = manager.run_cleanup(preview["plan_id"], [cuda_item["id"]])
+            removed = manager.run_cleanup(preview["plan_id"], [second_item["id"]])
             assert removed["items"][0]["state"] == "deleted", removed
             data = manager._read()
             assert records[1]["id"] not in data["environments"]
@@ -392,7 +392,7 @@ def main() -> int:
                 finally:
                     stop(proc)
             assert blocked == dict.fromkeys(blocked, 0), blocked
-            evidence["retained_cpu_healthy_after_cleanup"] = True
+            evidence["retained_environment_healthy_after_cleanup"] = True
             evidence["state"] = "passed"
         finally:
             for proc in processes:

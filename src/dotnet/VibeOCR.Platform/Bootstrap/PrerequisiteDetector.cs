@@ -38,7 +38,7 @@ public sealed class PrerequisiteDetector
     public const string MinimumDotNetVersion = "10.0.0";
     // Framework-dependent Windows App SDK pin (Directory.Packages.props
     // Microsoft.WindowsAppSDK); the app cannot start on an older runtime.
-    public const string MinimumWindowsAppRuntimeVersion = "2.5.1";
+    public const string MinimumWindowsAppRuntimeVersion = "2.6.4";
     private readonly Func<PortableLayout, PrerequisiteSnapshot> _capture;
 
     public PrerequisiteDetector()

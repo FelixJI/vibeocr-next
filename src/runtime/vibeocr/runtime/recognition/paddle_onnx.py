@@ -193,7 +193,7 @@ def constructor_kwargs(options: Any) -> dict:
         # 必须明确准备对应 Paddle ONNX 环境，而不是退回原生构造。
         raise PaddleOnnxError(
             "Paddle pipelines require a Paddle ONNX environment "
-            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+            "(paddleocr-ort-directml); prepare it and switch to it"
         )
     values = {
         key: getattr(options, key, default)

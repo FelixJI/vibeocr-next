@@ -140,6 +140,7 @@ def _release(
     with_paddle_packs: bool = False,
     with_paddle_model_pack: bool = False,
     with_shared_pool: bool = False,
+    unified_only: bool = False,
 ) -> tuple[Path, Path]:
     root.mkdir()
     wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
@@ -263,6 +264,11 @@ def _release(
             "fastapi==1.0.0\nnumpy==2.3.5\npaddleocr==3.7.0\n"
             "onnxruntime-directml==1.24.4\n",
         )
+    if unified_only:
+        # 正式新产物的 manifest 形态：仅 base profile + 单 directml 绑定
+        # （历史三档位/三设备绑定只是 loader 的读取兼容面）。
+        profiles = {"win-x64-base": profiles["win-x64-base"]}
+        paddle_onnx = {"directml": paddle_onnx["directml"]}
     manifest = {
         "schema_version": 2,
         "paddle_onnx_environments": paddle_onnx,
@@ -1621,7 +1627,11 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
         "table",
         "structure",
     ]
-    assert [item["id"] for item in catalog if item["default_remote_host"]] == []
+    # 统一闭包是唯一可安装配方，也是远程 MinerU 模式的推荐宿主（桌面
+    # "启用远程模式"按 DefaultRemoteHost && SupportsRemoteHost 唯一命中）。
+    assert [item["id"] for item in catalog if item["default_remote_host"]] == [
+        "paddleocr-ort-directml"
+    ]
     assert all(item["supports_remote_host"] for item in catalog)
     assert directml["display_name"] == "PaddleOCR ONNX + MinerU · Windows DirectML"
     assert directml["accelerator"] == "cpu"
@@ -2424,6 +2434,74 @@ def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
     server.write_text("raise ImportError('server dependency missing')\n")
     assert manager._probe(record)["reason"] == "engine_import_failed"
     assert not private_home.exists()
+
+
+def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path):
+    """统一闭包选 CPU 设备时健康探针不得要求 DXGI 适配器。
+
+    无 D3D12 适配器的 Windows 虚拟机必须能以 CPU 设备使用闭包内的
+    CPUExecutionProvider；GPU 硬件检查只在选择 directml 设备时执行。"""
+    manifest, component = _release(tmp_path / "release")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        base_python=sys._base_executable,
+    )
+    item = manager.create("cpu-only")
+    record = manager._read()["environments"][item["id"]]
+    record.update(
+        status="installed", recipe="paddleocr-ort-directml", selected_device="cpu"
+    )
+    site = (
+        manager._venv_python(manager._safe_path(record)).parent.parent
+        / "Lib/site-packages"
+    )
+    for name in (
+        "fastapi",
+        "paddleocr",
+        "paddlex",
+        "onnxruntime-directml",
+        "mineru",
+    ):
+        metadata = site / f"{name}-1.0.dist-info"
+        metadata.mkdir(parents=True)
+        (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
+    (site / "paddleocr").mkdir()
+    (site / "paddleocr" / "__init__.py").write_text(
+        "class PaddleOCR: pass\n", encoding="utf-8"
+    )
+    (site / "onnxruntime").mkdir()
+    (site / "onnxruntime" / "__init__.py").write_text(
+        "def get_available_providers():\n"
+        "    return ['DmlExecutionProvider', 'CPUExecutionProvider']\n",
+        encoding="utf-8",
+    )
+    directml_devices = site / "vibeocr/runtime/recognition"
+    directml_devices.mkdir(parents=True)
+    for package in (site / "vibeocr", site / "vibeocr/runtime", directml_devices):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # 无 DXGI 适配器的机器（Windows 虚拟机等）。
+    (directml_devices / "directml_devices.py").write_text(
+        "def hardware_adapters():\n    return []\n", encoding="utf-8"
+    )
+    parser = site / "mineru/parser"
+    parser.mkdir(parents=True)
+    (parser.parent / "__init__.py").write_text("")
+    (parser / "__init__.py").write_text("")
+    (parser / "api_server.py").write_text(
+        "def create_app(*args, **kwargs):\n"
+        "    raise AssertionError('probe must not initialize a server')\n",
+        encoding="utf-8",
+    )
+
+    # 旧实现无条件断言 hardware_adapters() 非空：无适配器机器上 CPU 设备
+    # 也会被误判 engine_import_failed。
+    assert manager._probe(record)["healthy"] is True
+    # 同一闭包切回 directml 设备仍要求真实适配器，fail closed。
+    assert (
+        manager._probe_device(record, "directml")["reason"] == "engine_import_failed"
+    )
 
 
 def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:

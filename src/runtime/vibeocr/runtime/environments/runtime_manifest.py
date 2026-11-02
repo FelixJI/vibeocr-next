@@ -150,6 +150,21 @@ def runtime_component_binding(
     return binding
 
 
+def plan_profile_id(manifest: RuntimeManifest, accelerator: str) -> str:
+    """Resolve the accelerator's plan profile on this verified manifest.
+
+    统一推理闭包后新 manifest 只产 base 档：历史 accelerator（cpu/
+    nvidia_cuda，退役配方与 legacy 记录）的档位 profile 缺席时按 base
+    投影，保持旧记录可读；未知 accelerator 仍 fail closed。
+    """
+    plan = ACCELERATOR_TO_PLAN.get(accelerator)
+    if plan is not None and plan in manifest.profiles:
+        return plan
+    if "win-x64-base" in manifest.profiles:
+        return "win-x64-base"
+    raise ManifestError(f"unsupported accelerator: {accelerator}")
+
+
 def covering_profile_id(
     manifest: RuntimeManifest,
     *,
@@ -159,7 +174,9 @@ def covering_profile_id(
     """Return the profile that covers an installed component closure.
 
     A closure inside the base profile is covered by ``win-x64-base``; any
-    larger closure falls back to the accelerator's plan profile. Installers
+    larger closure falls back to the accelerator's plan profile — or to
+    ``win-x64-base`` when that plan profile is absent from the verified
+    manifest (统一推理闭包后的新 manifest 只产 base 档). Installers
     and display projections must agree on this rule so that drift, versions,
     and import bindings are evaluated against the same covering profile.
     """
@@ -169,10 +186,7 @@ def covering_profile_id(
     }
     if set(component_ids) <= base_ids:
         return "win-x64-base"
-    try:
-        return ACCELERATOR_TO_PLAN[accelerator]
-    except KeyError as exc:
-        raise ManifestError(f"unsupported accelerator: {accelerator}") from exc
+    return plan_profile_id(manifest, accelerator)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1084,6 +1098,7 @@ __all__ = [
     "RuntimeInstallScope",
     "RuntimeProfile",
     "covering_profile_id",
+    "plan_profile_id",
     "installer_executable_sha256",
     "load_runtime_manifest",
     "migrate_legacy_component_ids",

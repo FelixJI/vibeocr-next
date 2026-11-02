@@ -412,11 +412,12 @@ def test_stage_requires_declared_paddle_onnx_pack_and_lock(
     assert (tmp_path / "VibeOCR/runtime/backend" / pack.name).is_file()
 
 
-@pytest.mark.parametrize("device", ["cpu", "directml"])
+@pytest.mark.parametrize("device", ["directml"])
 def test_stage_requires_offline_paddle_onnx_pack_binding(
     tmp_path: Path, device: str
 ) -> None:
-    """CPU/DirectML 的离线 wheel 闭包必须随产品：缺失 pack 绑定 fail closed。"""
+    """统一推理闭包的 DirectML 离线 wheel 闭包必须随产品：缺失 pack 绑定
+    fail closed（分设备 cpu/cuda pack 已退役，历史条目仅按声明通用校验）。"""
     inputs = _release_inputs(tmp_path)
     backend = inputs["backend_release_dir"]
     manifest_path = backend / "runtime-manifest.json"
@@ -426,6 +427,26 @@ def test_stage_requires_offline_paddle_onnx_pack_binding(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ProductLayoutError, match="runtime_pack must contain"):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+def test_stage_accepts_unified_directml_only_binding(tmp_path: Path) -> None:
+    """正式新产物形态：paddle_onnx_environments 只绑定 directml 时 staging
+    成功，不再要求退役的 cpu 分设备 pack。"""
+    inputs = _release_inputs(tmp_path)
+    backend = inputs["backend_release_dir"]
+    manifest_path = backend / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ort = manifest["paddle_onnx_environments"]
+    for device in ("cpu", "cuda"):
+        for name in (ort[device]["lock"], *ort[device].get("runtime_pack", [])):
+            (backend / name).unlink()
+        ort.pop(device)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+    staged = tmp_path / "VibeOCR/runtime/backend"
+    assert (staged / ort["directml"]["lock"]).is_file()
+    assert (staged / ort["directml"]["runtime_pack"][0]).is_file()
+    assert not (staged / "requirements-win-x64-paddle-ort-cpu.lock").exists()
 
 
 def test_stage_requires_bundled_paddle_model_pack(tmp_path: Path) -> None:

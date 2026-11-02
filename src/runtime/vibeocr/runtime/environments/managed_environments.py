@@ -172,7 +172,10 @@ def _recipe_metadata(recipe: str) -> dict:
         "target_device": device,
         "provider": provider,
         "supports_remote_host": True,
-        "default_remote_host": False,
+        # 统一闭包是唯一可安装配方，也是远程 MinerU 模式的推荐宿主
+        # （桌面"启用远程模式"按 DefaultRemoteHost && SupportsRemoteHost
+        # 唯一命中选择宿主配方）。
+        "default_remote_host": recipe == "paddleocr-ort-directml",
     }
 
 
@@ -221,8 +224,22 @@ _RETIRED_ENGINE_RECIPES = (
 # 探针运行 Supervisor 实际执行的引擎导入：不实例化引擎、不下载模型。
 # 只为可安装配方保留引擎 import 探针；退役配方（Rapid 系 / 原生 Paddle）
 # 不再加载任何原生引擎库，读取时按 engine_recipe_retired 直接投影不可用。
+# GPU 硬件检查按所选设备门控：统一闭包选 CPU（无 DXGI 适配器的 Windows
+# 虚拟机等）时只验证 CPUExecutionProvider 闭包可导入，不要求存在 D3D12
+# 适配器；DmlExecutionProvider 是 onnxruntime-directml 包的静态能力，与
+# 硬件无关，保持无条件断言。
 _RECIPE_IMPORT_PROBES = {
-    "paddleocr-ort-directml": "from paddleocr import PaddleOCR; import onnxruntime; from mineru.parser.api_server import create_app; from vibeocr.runtime.recognition.directml_devices import hardware_adapters; assert 'DmlExecutionProvider' in onnxruntime.get_available_providers() and hardware_adapters()",
+    "paddleocr-ort-directml": (
+        "from paddleocr import PaddleOCR; import onnxruntime; "
+        "from mineru.parser.api_server import create_app; "
+        "from vibeocr.runtime.recognition.directml_devices import "
+        "hardware_adapters; "
+        "assert 'DmlExecutionProvider' in "
+        "onnxruntime.get_available_providers(); import os; "
+        "assert os.environ.get("
+        "'VIBEOCR_MANAGED_ENVIRONMENT_DEVICE', 'directml'"
+        ") == 'cpu' or hardware_adapters()"
+    ),
 }
 
 # 前后端同源一体发布后环境目录不需要 UUID：新环境目录用名称（用户创建）
@@ -580,6 +597,15 @@ class ManagedEnvironmentStore:
                 raise ManagedEnvironmentError(
                     "download_source_ids must not contain duplicates"
                 )
+            # 受管环境的计划只解析来源与 base 闭包：组件闭包由
+            # paddle_onnx_environments 的 scope 提供，不依赖 accelerator
+            # 档位 profile。统一闭包后新 manifest 只产 base 档，历史
+            # accelerator（cpu/nvidia_cuda，退役配方与 legacy 记录）在
+            # 档位 profile 缺席时按 base 规划；plan_start 对产品级组件
+            # 选择仍保持严格校验。
+            plan_profile = ACCELERATOR_TO_PLAN.get(accelerator)
+            if plan_profile is None or plan_profile not in self.manifest.profiles:
+                accelerator = "base"
             selection = self._policy_for(data, record).plan_start(
                 accelerator=accelerator,
                 install_component_ids=(),

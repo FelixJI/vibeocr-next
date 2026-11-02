@@ -2,7 +2,10 @@
 
 默认重生成把现有锁同时作为 ``--constraints``，锁内版本不会顺带漂移；
 显式收紧 ``requirements.in`` 下界时用 ``--refresh-pins`` 跳过该约束
-（uv 仍优先沿用输出文件中未受影响的 pin），生成依旧由 uv pip compile
+（uv 仍优先沿用输出文件中未受影响的 pin），``--upgrade`` 在跳过自约束
+的同时把 uv 的 ``--upgrade`` 一并传入（允许所有 pin 升到最新兼容版本，
+uv 的 ``--upgrade`` 只忽略输出文件里的既有 pin，不会覆盖显式
+constraints，因此升级必须同时解除自约束）。生成依旧由 uv pip compile
 完成，不手改锁。
 """
 
@@ -34,8 +37,9 @@ def main() -> int:
         "--upgrade",
         action="store_true",
         help=(
-            "allow upgrading every pin to its latest compatible version "
-            "(otherwise uv prefers the pins already present in the output)"
+            "allow upgrading every pin to its latest compatible version; this "
+            "also skips the existing lock as constraints, otherwise the "
+            "self-pins would keep every == version fixed"
         ),
     )
     args = parser.parse_args()
@@ -49,11 +53,12 @@ def main() -> int:
         # #270：旧原生 paddle-cpu 锁已随产品退役删除。约束改用各设备现有的
         # ORT 锁自身：已锁版本全部保留（不因重生成顺带升级），仅在新增
         # 依赖时重新解析；显式 --refresh-pins（配合收紧后的 requirements.in
-        # 下界）跳过旧 pin 约束做有界升级。生成仍由 uv pip compile 完成，
-        # 不手改锁。
+        # 下界）跳过旧 pin 约束做有界升级，--upgrade 同样解除自约束（uv 的
+        # --upgrade 不覆盖显式 constraints，不解除时升级是空操作）。生成仍
+        # 由 uv pip compile 完成，不手改锁。
         constraints = (
             []
-            if args.refresh_pins or not output.is_file()
+            if args.refresh_pins or args.upgrade or not output.is_file()
             else ["--constraints", str(output)]
         )
         subprocess.run(

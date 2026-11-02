@@ -445,9 +445,11 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
             model_pack_binding.get("archive"), "paddle_model_pack.archive"
         )
     )
-    # 断网可创建/重建 CPU 与 DirectML 两种 Paddle 环境：两者的离线 wheel
-    # 闭包必须随产品携带（CUDA 按需在线安装，不携带 pack）。
-    for device in ("cpu", "directml"):
+    # 统一推理闭包：DirectML 单档随产品携带离线 wheel 闭包（CPU 推理走
+    # 同闭包 CPUExecutionProvider 设备切换，不单独发货；分设备 CPU/CUDA
+    # pack 已退役）。历史 manifest 若仍绑定 cpu 条目，上面的通用循环按
+    # 既有规则校验。
+    for device in ("directml",):
         record = _require_mapping(ort.get(device), f"paddle_onnx_environments.{device}")
         if not _runtime_pack_file_names(
             record.get("runtime_pack"),

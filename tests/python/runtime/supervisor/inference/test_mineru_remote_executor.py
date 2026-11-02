@@ -360,7 +360,11 @@ class TestModeCatalogGating:
         isolated_connection.configure_connection(readiness.MineruConnection())
         modes = {mode["id"]: mode for mode in registry.catalog_payload()["modes"]}
         assert modes["mineru_document"]["availability"] == "preparation_required"
-        assert modes["mineru_document"]["required_component"] == "mineru-cpu"
+        # MinerU 随统一推理闭包（paddleocr-ort-directml）携带；独立
+        # mineru-cpu/cuda 组件档位已退役。
+        assert (
+            modes["mineru_document"]["required_component"] == "paddleocr-ort-directml"
+        )
 
     def test_explicit_optout_stays_blocked_even_remote(self, isolated_connection):
         isolated_connection.configure_connection(
