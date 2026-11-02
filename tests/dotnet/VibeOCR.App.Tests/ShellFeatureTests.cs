@@ -77,7 +77,7 @@ public sealed class ShellFeatureTests
     }
 
     [Fact]
-    public void TrayPreferencePersistsAndOnlyHidesWhenEnabled()
+    public void TrayPreferencePersistsAndHideToTrayAlwaysHides()
     {
         string root = Path.Combine(Path.GetTempPath(), $"vibeocr-tray-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -90,14 +90,16 @@ public sealed class ShellFeatureTests
             int hidden = 0;
             var shell = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
                 hideWindow: () => hidden++, preferences: store);
-            shell.OnMinimized();
-            Assert.Equal(0, hidden);
+            Assert.False(shell.MinimizeToTray);
+            // 关闭到托盘的开关分流在 App 的 Closing 处理器；HideToTray 本身总是隐藏。
+            shell.HideToTray();
+            Assert.Equal(1, hidden);
             shell.SetMinimizeToTray(true);
             var reopened = new ShellViewModel(new FakeHotkeyRegistrar(), new FakeStartupRegistrar(),
                 hideWindow: () => hidden++, preferences: store);
             Assert.True(reopened.MinimizeToTray);
-            reopened.OnMinimized();
-            Assert.Equal(1, hidden);
+            reopened.HideToTray();
+            Assert.Equal(2, hidden);
             Assert.Contains("\"untouched\": 42", File.ReadAllText(layout.ConfigFile));
             File.WriteAllText(layout.ConfigFile, "{invalid");
             reopened.SetMinimizeToTray(false);

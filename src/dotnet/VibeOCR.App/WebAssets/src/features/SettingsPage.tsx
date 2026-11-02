@@ -1258,7 +1258,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             <Switch
               className="application-switch"
               labelPosition="before"
-              label="最小化到托盘"
+              label="关闭时最小化到托盘"
               checked={booleanValue(state.minimizeToTray)}
               disabled={!viewState.capabilities.includes("settings.tray")}
               onChange={(_, data) =>

@@ -183,7 +183,9 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       <SettingsPage viewState={state} actions={actions} />,
     );
     expect(screen.getByRole("switch", { name: "开机自启动" })).toBeChecked();
-    await user.click(screen.getByRole("switch", { name: "最小化到托盘" }));
+    await user.click(
+      screen.getByRole("switch", { name: "关闭时最小化到托盘" }),
+    );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setMinimizeToTray",
       enabled: true,
@@ -203,7 +205,9 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         actions={actions}
       />,
     );
-    expect(screen.getByRole("switch", { name: "最小化到托盘" })).toBeChecked();
+    expect(
+      screen.getByRole("switch", { name: "关闭时最小化到托盘" }),
+    ).toBeChecked();
     expect(screen.getByRole("alert")).toHaveTextContent("保存失败");
     rerender(
       <SettingsPage
@@ -211,7 +215,9 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         actions={actions}
       />,
     );
-    expect(screen.getByRole("switch", { name: "最小化到托盘" })).toBeDisabled();
+    expect(
+      screen.getByRole("switch", { name: "关闭时最小化到托盘" }),
+    ).toBeDisabled();
   });
 
   it("Paddle 分区只按推理后端选择且只有聚焦分区自动查询", async () => {

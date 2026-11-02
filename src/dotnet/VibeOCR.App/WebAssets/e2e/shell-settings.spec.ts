@@ -55,7 +55,7 @@ for (const width of [640, 1280]) {
     await expect(
       page.getByRole("switch", { name: "开机自启动" }),
     ).toBeChecked();
-    const tray = page.getByRole("switch", { name: "最小化到托盘" });
+    const tray = page.getByRole("switch", { name: "关闭时最小化到托盘" });
     await tray.focus();
     await page.keyboard.press("Space");
     await expectCommand(page, {

@@ -460,7 +460,6 @@ public sealed partial class App : Application
             () => _window!.Close(),
             configuredHotkey ?? string.Empty,
             new ShellPreferencesStore(layout));
-        _window!.AppWindow.Changed += OnMainWindowChanged;
         // 旧单键路径兼容：同键为无操作成功；启动时被占用则重试并回显冲突。
         _shellViewModel.InitializeHotkey();
         _updateViewModel = new UpdateViewModel(
@@ -1406,18 +1405,19 @@ public sealed partial class App : Application
 
 
     private bool _pdfCloseReview;
-    private void OnMainWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
-    {
-        if (sender.IsVisible && !_shutdownStarted && _trayIcon is not null &&
-            sender.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized })
-            _shellViewModel?.OnMinimized();
-    }
 
     internal Func<Task>? SmokeBeforePinShutdown { get; set; }
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_shutdownStarted) return;
         args.Cancel = true;
+        // 关闭到托盘：开启后标题栏关闭只隐藏主窗（最小化按钮始终最小化到任务栏）。
+        // 真正的退出走 RequestAppExitAsync，它在 CloseAfterPreparation 前解绑本处理器。
+        if (_shellViewModel?.MinimizeToTray == true)
+        {
+            _shellViewModel.HideToTray();
+            return;
+        }
         await RequestAppExitAsync(sender);
     }
 
@@ -1469,7 +1469,6 @@ public sealed partial class App : Application
         {
             _applicationShutdown.Dispose();
             appWindow.Closing -= OnAppWindowClosing;
-            appWindow.Changed -= OnMainWindowChanged;
             _window?.CloseAfterPreparation();
             if (_window is not null) await _window.ShutdownCompletion;
             Exit();
