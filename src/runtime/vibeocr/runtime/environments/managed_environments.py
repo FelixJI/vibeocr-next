@@ -154,6 +154,24 @@ _RECIPE_METADATA = {
 }
 
 
+def _rename_with_transient_lock_retry(
+    source: Path, target: Path, attempts: int = 5
+) -> None:
+    """目录改名在 Windows 上可能被杀软/索引器瞬时锁定（WinError 5）。
+
+    环境目录树在写入后立刻交换槽位时该竞态呈间歇性；短退避重试消除
+    瞬时锁，持续失败仍抛出原异常，由调用方的回滚/恢复逻辑收敛。
+    """
+    for attempt in range(attempts):
+        try:
+            os.rename(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def _recipe_metadata(recipe: str) -> dict:
     metadata = _RECIPE_METADATA.get(recipe)
     if metadata is None:
@@ -2076,7 +2094,7 @@ class ManagedEnvironmentStore:
                     if retired.exists() or retired.is_symlink():
                         # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
                         operation = "restore_retired"
-                        os.rename(retired, live)
+                        _rename_with_transient_lock_retry(retired, live)
                     operation = "restore_ownership"
                     managed_cleanup.restore_owned_paths(
                         self, env_id, candidate_revision
@@ -2106,9 +2124,9 @@ class ManagedEnvironmentStore:
                     # 换入已完成但注册表未提交：候选退回 staging 作残留，
                     # 旧 venv 回到固定路径。
                     operation = "restore_staging"
-                    os.rename(live, staging)
+                    _rename_with_transient_lock_retry(live, staging)
                 operation = "restore_retired"
-                os.rename(retired, live)
+                _rename_with_transient_lock_retry(retired, live)
                 operation = "restore_ownership"
                 managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
             elif live.exists() or live.is_symlink():
@@ -2118,7 +2136,7 @@ class ManagedEnvironmentStore:
                 operation = "prepare_staging"
                 staging.parent.mkdir(parents=True, exist_ok=True)
                 operation = "restore_staging"
-                os.rename(live, staging)
+                _rename_with_transient_lock_retry(live, staging)
                 operation = "restore_ownership"
                 managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
             else:
@@ -2181,11 +2199,11 @@ class ManagedEnvironmentStore:
                     raise ManagedEnvironmentError(
                         "environment path contains reparse point"
                     )
-                os.rename(live, retired)
+                _rename_with_transient_lock_retry(live, retired)
                 # 只镜像既有归属：未知/未登记数据随目录移动但不获得
                 # 可删除归属（legacy 树可能含未知 siblings）。
                 managed_cleanup.retire_owned_paths(self, env_id, candidate["revision"])
-            os.rename(staging, live)
+            _rename_with_transient_lock_retry(staging, live)
             # 迁移环境首次获得固定路径归属；新布局环境刷新同路径归属。
             managed_cleanup.remember_path(self, env_id, candidate["revision"], live)
             # venv 随目录迁移后在最终固定路径复检：入口按 python -m 启动不
