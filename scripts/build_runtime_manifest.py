@@ -162,58 +162,19 @@ def _independent_scopes(
     gpu_lock: Path,
     base_packs: list[Path],
 ) -> list[dict[str, object]]:
-    """Compose existing verified host/MinerU domains without new lock resolution.
+    """历史 cpu/cu126 档位的独立安装域生成已随统一推理闭包退役。
 
-    #270 后原生 Paddle 闭包退役：不再生成 ``paddle`` / ``paddle-gpu-runtime``
-    scope，也不再把 MinerU scope 绑在隔离锁存在与否上；cpu/cu126 的
-    MinerU 复合闭包与独立 MinerU 锁始终是可选安装域（历史 manifest 里的
-    旧 scope 由 loader 按数据继续读取）。
+    MinerU 现随 managed paddleocr-ort-directml 环境携带，base 是唯一
+    profile 且没有独立安装域；函数保留空实现以维持既有调用形状。
     """
-    if profile == "win-x64-base":
-        return []
-    base_ids = [
-        item.component_id for item in default_profile_components("win-x64-base")
-    ]
-    scopes: list[dict[str, object]] = []
-
-    def add(scope_id: str, ids: list[str], lock: Path) -> None:
-        scopes.append(
-            {
-                "scope_id": scope_id,
-                "component_ids": ids,
-                "lock": lock.name,
-                "sha256": sha256_file(lock),
-                "runtime_pack": [pack.name for pack in base_packs]
-                if lock == locks["win-x64-base"] and base_packs
-                else None,
-                **(
-                    {"runtime_pack_sha256": [sha256_file(pack) for pack in base_packs]}
-                    if lock == locks["win-x64-base"] and base_packs
-                    else {}
-                ),
-            }
-        )
-
-    cuda = profile == "win-x64-cu126"
-    if cuda:
-        add("gpu-runtime", [*base_ids, "gpu_runtime"], gpu_lock)
-    suffix = "cuda" if cuda else "cpu"
-    # cpu 档位的 mineru 闭包与该 profile 缺省闭包相同（无独立锁），不重复
-    # 登记 scope；cu126 的 mineru 闭包不含 gpu_runtime，仍需独立安装域。
-    full_ids = [item.component_id for item in default_profile_components(profile)]
-    mineru_ids = [*base_ids, f"mineru-{suffix}", *(["gpu_runtime"] if cuda else [])]
-    if set(mineru_ids) != set(full_ids):
-        add("mineru", mineru_ids, locks[profile])
-    return scopes
+    del profile, locks, gpu_lock, base_packs
+    return []
 
 
 def build_runtime_manifest(
     *,
     runtime_wheel: Path,
     base_lock: Path,
-    cpu_lock: Path,
-    cu126_lock: Path,
-    cu126_gpu_lock: Path,
     python_archive: Path,
     python_version: str,
     python_source_url: str,
@@ -243,25 +204,23 @@ def build_runtime_manifest(
     if not runtime_wheel.name.startswith(f"vibeocr_next_runtime-{version}-"):
         raise ValueError("Runtime wheel filename does not match product version")
 
+    # 统一推理闭包后仅构建 base profile；推理栈（Paddle ONNX + MinerU）全部
+    # 由 paddle_onnx_environments 的 directml 绑定承载。
     profile_sources = {
         "win-x64-base": base_lock.resolve(strict=True),
-        "win-x64-cpu": cpu_lock.resolve(strict=True),
-        "win-x64-cu126": cu126_lock.resolve(strict=True),
     }
-    # #270：原生 Paddle 隔离锁不再随产品构建发布；当前 host 锁不因
-    # paddle_isolated 语义要求原生 Paddle（见 validate_requirements_lock）。
     for profile in PROFILE_NAMES:
         validate_requirements_lock(profile_sources[profile], profile=profile)
     paddle_onnx_locks = paddle_onnx_locks or {}
-    if paddle_onnx_locks and set(paddle_onnx_locks) != {"cpu", "cuda", "directml"}:
-        raise ValueError("Paddle ONNX locks must cover CPU/CUDA/DirectML")
+    if paddle_onnx_locks and set(paddle_onnx_locks) != {"directml"}:
+        raise ValueError(
+            "Paddle ONNX locks must bind only the unified directml closure"
+        )
     paddle_onnx_packs = paddle_onnx_packs or {}
-    if paddle_onnx_packs and set(paddle_onnx_packs) - {"cpu", "directml"}:
-        raise ValueError("only CPU and DirectML ship offline runtime packs")
+    if paddle_onnx_packs and set(paddle_onnx_packs) - {"directml"}:
+        raise ValueError("only DirectML ships offline runtime packs")
     for device, lock in paddle_onnx_locks.items():
         validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
-    cu126_gpu_lock = cu126_gpu_lock.resolve(strict=True)
-    validate_requirements_lock(cu126_gpu_lock, profile="win-x64-cu126")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     copied_runtime = _copy_exact(runtime_wheel, output_dir)
@@ -287,8 +246,6 @@ def build_runtime_manifest(
         profile: _copy_exact(profile_sources[profile], output_dir)
         for profile in PROFILE_NAMES
     }
-    copied_cu126_gpu_lock = _copy_exact(cu126_gpu_lock, output_dir)
-
     copied_paddle_onnx = {
         device: _copy_exact(lock, output_dir)
         for device, lock in paddle_onnx_locks.items()
@@ -370,7 +327,7 @@ def build_runtime_manifest(
                 "install_scopes": _independent_scopes(
                     profile,
                     copied_profiles,
-                    copied_cu126_gpu_lock,
+                    Path(),  # 历史 gpu 锁槽位已退役，仅为调用形状保留
                     copied_packs.get("win-x64-base", []),
                 ),
             }
@@ -400,12 +357,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-wheel", type=Path, required=True)
     parser.add_argument("--base-lock", type=Path, required=True)
-    parser.add_argument("--cpu-lock", type=Path, required=True)
-    parser.add_argument("--cu126-lock", type=Path, required=True)
-    parser.add_argument("--cu126-gpu-lock", type=Path, required=True)
-    for device in ("cpu", "cuda", "directml"):
-        parser.add_argument(f"--paddle-ort-{device}-lock", type=Path, required=True)
-    for device in ("cpu", "directml"):
+    parser.add_argument("--paddle-ort-directml-lock", type=Path, required=True)
+    for device in ("directml",):
         parser.add_argument(
             f"--paddle-ort-{device}-runtime-pack",
             type=Path,
@@ -461,17 +414,8 @@ def main(argv: list[str] | None = None) -> int:
     path = build_runtime_manifest(
         runtime_wheel=args.runtime_wheel,
         base_lock=args.base_lock,
-        cpu_lock=args.cpu_lock,
-        cu126_lock=args.cu126_lock,
-        cu126_gpu_lock=args.cu126_gpu_lock,
-        paddle_onnx_locks={
-            device: getattr(args, f"paddle_ort_{device}_lock")
-            for device in ("cpu", "cuda", "directml")
-        },
-        paddle_onnx_packs={
-            device: getattr(args, f"paddle_ort_{device}_runtime_pack") or []
-            for device in ("cpu", "directml")
-        },
+        paddle_onnx_locks={"directml": args.paddle_ort_directml_lock},
+        paddle_onnx_packs={"directml": args.paddle_ort_directml_runtime_pack or []},
         paddle_model_pack=args.paddle_model_pack,
         python_archive=args.python_archive,
         python_version=args.python_version,

@@ -9,7 +9,7 @@ import pytest
 
 from scripts import update_runtime_paddle_onnx_locks as generator
 
-DEVICES = ("cpu", "cuda", "directml")
+DEVICES = ("directml",)
 
 
 def _capture_uv_commands(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:

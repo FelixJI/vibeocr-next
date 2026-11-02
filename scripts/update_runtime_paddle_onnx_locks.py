@@ -1,4 +1,4 @@
-"""Generate the three minimal Paddle ONNX closures without changing legacy pins.
+"""Generate the unified Paddle ONNX + MinerU closure without changing legacy pins.
 
 默认重生成把现有锁同时作为 ``--constraints``，锁内版本不会顺带漂移；
 显式收紧 ``requirements.in`` 下界时用 ``--refresh-pins`` 跳过该约束
@@ -16,7 +16,7 @@ from pathlib import Path
 from vibeocr.runtime.environments.runtime_manifest import validate_requirements_lock
 
 ROOT = Path(__file__).resolve().parents[1]
-DEVICES = ("cpu", "cuda", "directml")
+DEVICES = ("directml",)
 
 
 def main() -> int:

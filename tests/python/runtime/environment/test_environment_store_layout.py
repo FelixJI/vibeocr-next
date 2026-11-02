@@ -94,13 +94,13 @@ def test_default_environment_reserves_readable_purpose_directory(
     listed = manager.initialize_default()
     environment = listed["environments"][0]
     assert environment["name"] == "默认环境"
-    assert environment["recipe"] == "paddleocr-ort-cpu"
-    assert environment["id"] == "paddleocr-ort-cpu"
+    assert environment["recipe"] == "paddleocr-ort-directml"
+    assert environment["id"] == "paddleocr-ort-directml"
     # 固定路径：venv 就是 environments/<id>，无 revisions 层级。
-    assert environment["path"] == str(manager.root / "paddleocr-ort-cpu")
-    assert listed["active_id"] == "paddleocr-ort-cpu"
-    assert (manager.root / "paddleocr-ort-cpu").is_dir()
-    assert not (manager.root / "paddleocr-ort-cpu" / "revisions").exists()
+    assert environment["path"] == str(manager.root / "paddleocr-ort-directml")
+    assert listed["active_id"] == "paddleocr-ort-directml"
+    assert (manager.root / "paddleocr-ort-directml").is_dir()
+    assert not (manager.root / "paddleocr-ort-directml" / "revisions").exists()
     marker = manager.paths.state_root / "default-environment.json"
     assert json.loads(marker.read_text(encoding="utf-8")) == {
         "environment_id": None,
@@ -297,7 +297,7 @@ def test_default_install_probe_failure_is_not_committed_as_ready(
     environment = listed["environments"][0]
     assert environment["status"] == "empty"
     assert environment["dependency_state"] == "empty"
-    assert environment["path"].endswith("paddleocr-ort-cpu")
+    assert environment["path"].endswith("paddleocr-ort-directml")
     failure = environment["last_install_failure"]
     assert failure["phase"] == "failed"
     assert failure["reason_code"] == "engine_packages_missing"
@@ -305,82 +305,41 @@ def test_default_install_probe_failure_is_not_committed_as_ready(
     assert registry["active_id"] is None
 
 
-def test_cuda_combined_upgrade_uses_bound_cu126_lock(
+def test_retired_split_device_recipes_rejected_and_directml_binds_unified_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 统一推理闭包：分设备 paddle-ort（CPU/CUDA）与独立 MinerU 配方全部
+    # 退役，preview/install 明确拒绝；唯一可安装配方 paddleocr-ort-directml
+    # 绑定统一闭包锁（paddleocr/paddlex + onnxruntime-directml + mineru/onnx），
+    # 不绑定 NVIDIA 专属加速器计划。
     manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
-    from test_runtime_installer import _all_recipes_release
+    created = manager.create("统一闭包")
+    for recipe in (
+        "paddleocr-ort-cpu",
+        "paddleocr-ort-cuda",
+        "mineru-cpu",
+        "mineru-cuda",
+    ):
+        with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
+            manager.preview_install(created["id"], recipe)
+        with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
+            manager._recipe(recipe)
 
-    standalone_manifest, standalone_component = _all_recipes_release(
-        tmp_path / "all-recipes"
-    )
-    full = ManagedEnvironmentStore(
-        product_root=tmp_path / "all-recipes-product",
-        component_lock=standalone_component,
-        runtime_manifest=standalone_manifest,
-        base_python=sys._base_executable,
-    )
-    # 配方兼容性测试显式提供满足各 CUDA 配方要求的驱动，避免依赖本机 GPU。
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_kwargs: {
-            "status": "ok",
-            "reason_code": None,
-            "driver_version": "580.88",
-        },
-    )
-
-    def write_installed(env_id: str, recipe: str) -> dict:
-        with RuntimeStoreLock(full._lock):
-            data = full._read()
-            record = {
-                "id": env_id,
-                "name": f"env-{env_id}",
-                "revision": 1,
-                "kind": "venv",
-                "path": str(Path(env_id) / "revisions" / "1"),
-                "status": "installed",
-                "recipe": recipe,
-                "python_version": full.manifest.python.version,
-                "abi": full.manifest.python.abi,
-            }
-            data["environments"][env_id] = record
-            full._registry.parent.mkdir(parents=True, exist_ok=True)
-            full._registry.write_text(json.dumps(data), encoding="utf-8")
-            return record
-
-    # Paddle CPU/CUDA 使用同一受管身份，但计划仍绑定完整目标锁；
-    # MinerU 和 DirectML 保留独立闭包。
-    rapid = write_installed("a" * 32, "paddleocr-ort-cpu")
-    paddle_plan = full.preview_install(rapid["id"], "paddleocr-ort-cuda")
-    assert paddle_plan["recipe_lock"] == full._recipe("paddleocr-ort-cuda")[0].sha256
-    assert paddle_plan["environment_id"] == rapid["id"]
-    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
-        full.preview_install(rapid["id"], "mineru-cuda")
-
-    # 无 Rapid 的 MinerU CUDA 配方承接 cu126 完整闭包：升级计划绑定
-    # manifest 的 cu126 缺省 scope 锁与 torch CUDA 直接 URL 闭包。
-    mineru = write_installed("b" * 32, "mineru-cpu")
-    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
-        full.preview_install(mineru["id"], "paddleocr-ort-cuda")
-    created = full.create("cuda-mineru")
-    plan = full.preview_install(created["id"], "mineru-cuda")
-    assert plan["requested_recipe"] == "mineru-cuda"
-    scope, accelerator = full._recipe("mineru-cuda")
-    assert accelerator == "nvidia_cuda"
+    plan = manager.preview_install(created["id"], "paddleocr-ort-directml")
+    scope, accelerator = manager._recipe("paddleocr-ort-directml")
+    assert plan["requested_recipe"] == "paddleocr-ort-directml"
+    assert plan["environment_id"] == created["id"]
+    assert accelerator == "cpu"
     assert plan["recipe_lock"] == scope.sha256
-    assert "torch @ https://example.invalid/cu126/torch.whl" in plan["dependencies"]
+    assert "paddleocr==3.7.0" in plan["dependencies"]
+    assert "onnxruntime-directml==1.24.4" in plan["dependencies"]
+    assert "mineru==4.1.3" in plan["dependencies"]
 
-    # #270 + Rapid 退役：旧原生 Paddle / Rapid 系配方预览安装直接以
-    # 退役错误拒绝（先于组合兼容性判定），不再提供安装/下载入口。
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        full.preview_install(rapid["id"], "paddleocr-cpu")
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        full.preview_install(rapid["id"], "paddleocr-cuda")
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        full.preview_install(rapid["id"], "rapidocr-cpu")
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        full.preview_install(rapid["id"], "rapidocr+mineru-cuda")
+    # #270 + Rapid 退役：旧原生 Paddle / Rapid 系配方同样拒绝，先于
+    # 组合兼容性判定，不再提供安装/下载入口。
+    for recipe in ("paddleocr-cpu", "paddleocr-cuda", "rapidocr-cpu"):
+        with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
+            manager.preview_install(created["id"], recipe)
 
 
 def test_global_source_save_clears_matching_environment_overrides(
@@ -427,7 +386,7 @@ def test_global_source_save_clears_matching_environment_overrides(
     assert model["id"] == "paddleocr-modelscope" and model["origin"] == "global_default"
 
     # 旧预览因 revision 递增而失效。
-    plan = manager.preview_install(a["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(a["id"], "paddleocr-ort-directml")
     assert plan["source_config_revision"] == 1
 
     # 只提交 package kind 时不清除模型 override。
@@ -493,9 +452,9 @@ def test_installs_keep_one_fixed_path_with_bounded_swap_slots(
     )
     item = manager.create("短目录")
     assert item["path"] == str(manager.root / item["id"])
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     installed = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["status"] == "installed"
     assert installed["revision"] == 2
@@ -505,9 +464,9 @@ def test_installs_keep_one_fixed_path_with_bounded_swap_slots(
     assert not (manager.root / ".staging" / item["id"]).exists()
 
     # 同一环境再次安装：固定路径不变，退役槽位被替换而不是累积。
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("pypi",))
     upgraded = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("pypi",)
     )
     assert upgraded["revision"] == 3
     assert upgraded["path"] == str(manager.root / item["id"])
@@ -536,10 +495,10 @@ def test_failed_install_retry_keeps_old_env_and_reuses_staging_slot(
     )
     item = manager.create("重试")
     staging = manager.root / ".staging" / item["id"]
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     surviving = manager.list()["environments"][0]
     assert surviving["revision"] == 1
@@ -548,7 +507,7 @@ def test_failed_install_retry_keeps_old_env_and_reuses_staging_slot(
     assert staging.is_dir(), "失败候选 venv 已落盘"
 
     installed = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["revision"] == 2
     assert installed["path"] == str(manager.root / item["id"])
@@ -616,9 +575,9 @@ def test_legacy_revision_suffix_paths_remain_readable_and_migrate_on_reinstall(
     unknown = revisions / "999-unknown"
     unknown.mkdir()
     (unknown / "private.txt").write_text("retain", encoding="utf-8")
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     installed = manager.install(
-        plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["revision"] == 2
     assert installed["path"] == str(manager.root / env_id)
@@ -633,9 +592,9 @@ def test_legacy_revision_suffix_paths_remain_readable_and_migrate_on_reinstall(
     assert not (manager.root / env_id / "revisions").exists()
     # 本测试手工写入记录、无 ledger 归属：退役槽位里全部是未登记数据，
     # 后续重装必须 fail closed 而不是删除未知内容。
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
     with pytest.raises(RuntimeInstallError, match="退役槽位包含未记录数据"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("pypi",))
+        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
     assert (retired / "999-unknown" / "private.txt").exists()
     # 清理预览继续保护未知目录：退役槽位内未登记内容作为 unknown 受保护。
     items = manager.preview_cleanup()["items"]
@@ -704,11 +663,13 @@ def test_legacy_migration_probe_failure_rollback_keeps_unknown_siblings(
     env_id = _legacy_environment_with_unknown_sibling(manager)
     unknown = manager.root / env_id / "revisions" / "999-unknown"
 
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(
         ManagedEnvironmentError, match="engine_import_failed"
     ) as excinfo:
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+        )
     assert diagnostic in str(excinfo.value)
     failed = next(
         item for item in manager.list()["environments"] if item["id"] == env_id
@@ -727,9 +688,11 @@ def test_legacy_migration_probe_failure_rollback_keeps_unknown_siblings(
     assert all("999-unknown" not in path for path in env_item["paths"])
 
     # 重装重试：换入→复检失败→回滚，不变量保持。
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+        manager.install(
+            plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+        )
     ledger = managed_cleanup.read_ledger(manager)
     assert str(Path(env_id)) not in ledger["paths"]
     assert (unknown / "private.txt").exists()
@@ -857,9 +820,9 @@ def test_rollback_ledger_restore_crash_reconverges(
     with RuntimeStoreLock(manager._lock):
         managed_cleanup.remember_path(manager, env_id, 1, staging)
         managed_cleanup.remember_path(manager, env_id, 1, retired / "revisions" / "1")
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
     with pytest.raises(RuntimeInstallError, match="退役槽位包含未记录数据"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("pypi",))
+        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
     assert (retired / "revisions" / "999-unknown" / "private.txt").exists()
 
 
@@ -1048,9 +1011,9 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
     assert str(Path(env_id)) not in ledger["paths"], "候选整树归属已撤销"
 
     # 无旧副本场景重试安装：槽位回收复用后正常成功。
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     installed = manager.install(
-        plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["status"] == "installed"
     assert installed["path"] == str(live)
@@ -1234,13 +1197,13 @@ def test_create_refuses_unowned_preexisting_fixed_directory(
     # 固定目录必须拒绝，remember_path 不得把未知数据变成可删除归属
     # （旧实现在此登记整树归属）。
     manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
-    pre = manager.root / "paddleocr-ort-cpu"
+    pre = manager.root / "paddleocr-ort-directml"
     pre.mkdir(parents=True)
     (pre / "keep.txt").write_text("retain", encoding="utf-8")
     with pytest.raises(ManagedEnvironmentError, match="already exists"):
         manager.initialize_default()
     assert (pre / "keep.txt").read_text(encoding="utf-8") == "retain"
-    assert "paddleocr-ort-cpu" not in managed_cleanup.read_ledger(manager)["paths"]
+    assert "paddleocr-ort-directml" not in managed_cleanup.read_ledger(manager)["paths"]
 
 
 def test_create_reuses_owned_creation_leftover(
@@ -1249,14 +1212,14 @@ def test_create_reuses_owned_creation_leftover(
     # 失败创建的遗留（ledger 已登记 revision 1）可续用，支持默认环境
     # 失败可续建。
     manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
-    pre = manager.root / "paddleocr-ort-cpu"
+    pre = manager.root / "paddleocr-ort-directml"
     pre.mkdir(parents=True)
     with RuntimeStoreLock(manager._lock):
-        managed_cleanup.remember_path(manager, "paddleocr-ort-cpu", 1, pre)
+        managed_cleanup.remember_path(manager, "paddleocr-ort-directml", 1, pre)
     record = manager._create(
-        "默认环境", as_default=True, environment_id="paddleocr-ort-cpu"
+        "默认环境", as_default=True, environment_id="paddleocr-ort-directml"
     )
-    assert record is not None and record["id"] == "paddleocr-ort-cpu"
+    assert record is not None and record["id"] == "paddleocr-ort-directml"
     assert (pre / "pyvenv.cfg").is_file()
 
 
@@ -1379,9 +1342,9 @@ def test_post_rename_crash_recovery_rolls_back_and_allows_reinstalls(
 
     # 无旧副本场景重试安装：槽位回收复用后正常成功，连续重装不卡。
     for index, source in enumerate(("tuna-pypi", "pypi"), start=2):
-        plan = manager.preview_install(env_id, "paddleocr-ort-cpu", (source,))
+        plan = manager.preview_install(env_id, "paddleocr-ort-directml", (source,))
         installed = manager.install(
-            plan["plan_id"], env_id, "paddleocr-ort-cpu", (source,)
+            plan["plan_id"], env_id, "paddleocr-ort-directml", (source,)
         )
         assert installed["revision"] == index
         assert installed["path"] == str(live)
@@ -1403,8 +1366,8 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
     )
     env_id = "回收占用"
     item = manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     retired = manager._retired_path(env_id)
     assert retired.is_dir(), "首轮安装已产生退役槽位"
 
@@ -1416,9 +1379,9 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
         return original_rmtree(path, *args, **kwargs)
 
     monkeypatch.setattr(_shutil, "rmtree", busy_rmtree)
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
     with pytest.raises(PermissionError, match="retired in use"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("pypi",))
+        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
     # 归属未被逆映射，journal 已随回滚清除。
     ledger = managed_cleanup.read_ledger(manager)
     assert str(Path(".retired") / env_id) in ledger["paths"]
@@ -1426,7 +1389,9 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
     assert (manager.root / env_id).is_dir()
 
     monkeypatch.setattr(_shutil, "rmtree", original_rmtree)
-    installed = manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("pypi",))
+    installed = manager.install(
+        plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",)
+    )
     assert installed["status"] == "installed"
     assert installed["path"] == str(manager.root / env_id)
     assert item["id"] == env_id
@@ -1633,7 +1598,7 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
     monkeypatch.setattr(manager, "_probe", probe)
     env_id = "回滚意图"
     item = manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     original_unlink = Path.unlink
 
     def busy_unlink(self: Path, missing_ok: bool = False) -> None:
@@ -1645,7 +1610,7 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
     try:
         with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
             manager.install(
-                plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",)
+                plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
             )
     finally:
         monkeypatch.setattr(Path, "unlink", original_unlink)
@@ -1680,8 +1645,8 @@ def test_pending_delete_occupies_id_for_recreate_and_slots(
     )
     env_id = "!id"
     manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     retired = manager._retired_path(env_id)
 
     original_rmtree = shutil.rmtree
@@ -1702,9 +1667,11 @@ def test_pending_delete_occupies_id_for_recreate_and_slots(
     # 重新创建同名环境：自动 id 入口必须跳过被 pending 删除占用的 id。
     recreated = manager.create(env_id)
     assert recreated["id"] != env_id, "待删除 id 不得被复用"
-    plan = manager.preview_install(recreated["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        recreated["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     manager.install(
-        plan["plan_id"], recreated["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], recreated["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert managed_cleanup.read_ledger(manager)["schema_version"] == 1
     assert manager.list()["environments"][0]["id"] == recreated["id"]
@@ -1944,16 +1911,18 @@ def test_delete_prune_keeps_shared_slot_containers(
         }
         _atomic_json(manager._registry, data)
         managed_cleanup.remember_path(manager, env_id, 1, legacy_root)
-    plan = manager.preview_install(env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
     manager.delete(env_id)
     assert not (manager.root / env_id).exists(), "环境目录完整回收"
     assert (manager.root / ".retired").is_dir(), "公共槽位容器不得被删除"
 
     fresh = manager.create("新环境")
-    plan = manager.preview_install(fresh["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        fresh["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     installed = manager.install(
-        plan["plan_id"], fresh["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], fresh["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["status"] == "installed"
     assert installed["path"] == str(manager.root / fresh["id"])
@@ -2114,7 +2083,7 @@ def test_interrupted_fixed_path_swap_rolls_back_uncommitted(
         install=lambda _python, _scope, _endpoint: None,
     )
     item = manager.create("恢复")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
 
     def crash_after_swap(env_id, expected, candidate, latest):
         from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
@@ -2143,7 +2112,7 @@ def test_interrupted_fixed_path_swap_rolls_back_uncommitted(
     original_swap = ManagedEnvironmentStore._swap_fixed_candidate
     with pytest.raises(KeyboardInterrupt):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     monkeypatch.setattr(manager, "_swap_fixed_candidate", original_swap)
     assert manager._journal_path(item["id"]).is_file()

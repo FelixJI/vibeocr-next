@@ -49,21 +49,20 @@ def _control(tmp_path):
 
 def test_preview_is_contract_valid_and_does_not_create_operation_or_runtime(tmp_path):
     control, _, calls, _, _ = _control(tmp_path)
-    response = control.preview_install_plan(
-        install_component_ids=("mineru-cpu",), required_capabilities=(CAPABILITY,)
-    )
+    # mineru-cpu 显式请求随统一推理闭包折叠为空；非 base 闭包经缺省选择
+    # （None = 目标档位完整闭包）预览。
+    response = control.preview_install_plan(required_capabilities=(CAPABILITY,))
     parsed = parse_runtime_install_plan_response(response)
-    assert set(parsed.plan.effective_component_ids) == {
-        "runtime_host",
-        "mineru-cpu",
-    }
+    assert set(parsed.plan.effective_component_ids) == {"runtime_host"}
     assert calls == []
     assert not (tmp_path / "product/runtime").exists()
     assert not (tmp_path / "product/state/operations").exists()
     assert parsed.plan.cost.download_bytes is None
-    assert (
-        "native_model_preparation_not_estimated"
-        in parsed.plan.cost.unknown_reason_codes
+    # base-only 闭包不含 MinerU 模型准备项；未估算项只剩产物解析与磁盘
+    # 占用两个来源。
+    assert parsed.plan.cost.unknown_reason_codes == (
+        "artifact_resolution_required",
+        "candidate_disk_usage_unknown",
     )
 
 
@@ -121,19 +120,20 @@ def test_marker_change_between_preview_and_confirmation_is_stale(tmp_path):
 
 def test_restart_and_device_switch_preserve_selected_engine(tmp_path):
     control, factory, calls, _, _ = _control(tmp_path)
+    # mineru-cpu 请求随统一推理闭包折叠为空：组件级引擎选择退役，
+    # 推理环境由 managed paddleocr-ort-directml 承载。
     control.execute(
         operation="ensure", operation_id="cpu", install_component_ids=("mineru-cpu",)
     )
     factory().ensure()
     assert len(calls) == 1
     cuda = factory(accelerator="nvidia_cuda")
-    # #270：缺省 CUDA 闭包 = base + MinerU + gpu_runtime，不再含 paddleocr-cuda。
-    assert set(cuda._desired_scope_ids()) == {
-        "runtime_host",
-        "mineru-cuda",
-        "gpu_runtime",
-    }
+    # 设备切换继承的 mineru 选择同样折叠：期望闭包保持 base-only，不再
+    # 重建 CUDA 组件闭包（mineru-cuda/gpu_runtime）；但设备档位身份变化
+    # 仍触发一次 base-only 重建。
+    assert set(cuda._desired_scope_ids()) == {"runtime_host"}
     cuda.ensure()
+    assert len(calls) == 2
     assert (tmp_path / "product" / "runtime.rollback").is_dir()
 
 
@@ -297,57 +297,6 @@ def test_read_only_preview_reports_blocker_and_confirmation_does_not_install(
             required_capabilities=(CAPABILITY,),
         )
     assert calls == []
-
-
-@pytest.mark.parametrize(
-    "version,blocked",
-    [("527.00", True), ("528.33", False), ("610.88", False), ("unknown", True)],
-)
-def test_cuda_preview_checks_driver_compatibility_floor(
-    tmp_path, monkeypatch, version, blocked
-):
-    from types import SimpleNamespace
-
-    control, factory, _, _, _ = _control(tmp_path)
-    installer = factory(
-        accelerator="nvidia_cuda", install_component_ids=("mineru-cuda",)
-    )
-    installer._runner_reports_phases = True
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.platform.machine",
-        lambda: "AMD64",
-    )
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
-    )
-    codes = [item["code"] for item in installer._installation_blockers()]
-    assert any(code.startswith("nvidia_driver_") for code in codes) is blocked
-
-
-def test_cuda_blockers_stay_fail_closed_when_probe_times_out(tmp_path, monkeypatch):
-    import subprocess
-
-    control, factory, _, _, _ = _control(tmp_path)
-    installer = factory(
-        accelerator="nvidia_cuda", install_component_ids=("mineru-cuda",)
-    )
-    installer._runner_reports_phases = True
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.platform.machine",
-        lambda: "AMD64",
-    )
-
-    def hang(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=10)
-
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.subprocess.run", hang
-    )
-    # 探测超时投影为 unknown，但安装预检不得降级：仍按
-    # nvidia_driver_unavailable fail closed（与抽出共享 helper 前一致）。
-    codes = [item["code"] for item in installer._installation_blockers()]
-    assert "nvidia_driver_unavailable" in codes
 
 
 def test_successful_noop_plan_cannot_be_confirmed_with_another_operation(tmp_path):
@@ -806,8 +755,10 @@ def test_preview_holds_writer_lock_while_resolving_inherited_selection(tmp_path)
         finally:
             release.set()
         plan = pending.result()["plan"]
-    assert "mineru-cpu" in plan["effective_component_ids"]
-    factory(install_component_ids=()).ensure()
+    # 继承的 mineru 选择按统一推理闭包折叠为 base-only 闭包。
+    assert plan["effective_component_ids"] == ["runtime_host"]
+    # 组件选择已折叠，marker 只能经设备档位切换重建（accelerator 身份变化）。
+    factory(accelerator="nvidia_cuda", install_component_ids=()).ensure()
     with pytest.raises(RuntimeInstallPlanStale):
         control.execute(
             operation="ensure",

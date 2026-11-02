@@ -162,7 +162,7 @@ def test_resolver_fail_closed_for_unknown_unavailable_and_mapping_mismatch() -> 
     assert unavailable.value.detail == {
         "recognition_mode": "paddle_text",
         "reason_code": "runtime_component_missing",
-        "required_component": "paddleocr-ort-cpu",
+        "required_component": "paddleocr-ort-directml",
     }
 
     with pytest.raises(RecognitionModeError) as mismatch:

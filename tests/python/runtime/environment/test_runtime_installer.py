@@ -96,6 +96,14 @@ def _lock_text(profile: str) -> str:
             if profile.endswith("cuda")
             else ""
         )
+        # directml 是统一推理闭包：随包携带 MinerU（ONNX 线）与其模型格式
+        # 依赖 onnx；cpu/cuda 锁保持历史闭包（无 MinerU/onnx）。
+        unified = (
+            "mineru==4.1.3 \\\n    --hash=sha256:" + "2" * 64 + "\n"
+            "onnx==1.23.2 \\\n    --hash=sha256:" + "2" * 64 + "\n"
+            if profile.endswith("directml")
+            else ""
+        )
         return base + (
             "paddleocr==3.7.0 \\\n    --hash=sha256:" + "7" * 64 + "\n"
             "paddlex==3.7.2 \\\n    --hash=sha256:" + "7" * 64 + "\n"
@@ -107,6 +115,7 @@ def _lock_text(profile: str) -> str:
             + "7" * 64
             + "\n"
             + extra
+            + unified
         )
     if profile == "win-x64-cpu":
         return base + ("mineru==4.0.10 \\\n    --hash=sha256:" + "2" * 64 + "\n")
@@ -804,7 +813,7 @@ def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
     prepared = manager.prepare_switch(first["id"])
     assert prepared["requires_supervisor"] is False
     manager.commit_switch(prepared)
-    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(first["id"], "paddleocr-ort-directml")
     assert plan["environment_id"] == first["id"]
     assert plan["source_ids"] == [
         "tuna-pypi",
@@ -862,7 +871,7 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         assert manager.list()["active_id"] == first["id"]
         with pytest.raises(ManagedEnvironmentError, match="active jobs"):
             manager.prepare_switch(second["id"])
-        assert manager.preview_install(second["id"], "paddleocr-ort-cpu")
+        assert manager.preview_install(second["id"], "paddleocr-ort-directml")
     finally:
         references.release(job_id)
     assert not (references.reference_root / f"{job_id}.lock").exists()
@@ -909,7 +918,9 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     active = manager.create("active")
     target = manager.create("target")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     original_probe = manager._probe
     monkeypatch.setattr(
         manager,
@@ -928,7 +939,7 @@ def test_inactive_install_does_not_block_active_job_admission_or_target_conflict
     worker = threading.Thread(
         target=lambda: installed.append(
             manager.install(
-                plan["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+                plan["plan_id"], target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
             )
         ),
         daemon=True,
@@ -1024,7 +1035,9 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     target = manager.create("target")
     replacement = manager.create("replacement")
     manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     # The deadline measures lock contention, not interpreter startup for replacement.
     original_probe = manager._probe
     monkeypatch.setattr(
@@ -1045,7 +1058,7 @@ def test_inactive_install_commit_rejects_active_pointer_drift(
     def run_install() -> None:
         try:
             manager.install(
-                plan["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+                plan["plan_id"], target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
             )
         except Exception as error:
             install_errors.append(error)
@@ -1153,10 +1166,10 @@ def test_repair_after_failed_install_clears_stale_revision_failure_only_on_succe
         install_runner=fail_install,
     )
     item = manager.create("failed then repaired")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     failure = manager.list()["environments"][0]["last_install_failure"]
     assert failure["environment_revision"] == 1
@@ -1240,16 +1253,18 @@ def test_failed_named_install_preserves_empty_revision(
     )
     item = manager.create("target")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
-        manager.install(plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("pypi",))
-    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("pypi",)
         )
     with pytest.raises(ManagedEnvironmentError, match="synthetic"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        )
+    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
+        manager.install(
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     surviving = manager.list()["environments"][0]
     assert surviving["revision"] == 1
@@ -1259,7 +1274,7 @@ def test_failed_named_install_preserves_empty_revision(
     failure = surviving["last_install_failure"]
     assert failure["reason_code"] == "unknown"
     assert failure["phase"] == "failed"
-    assert failure["recipe"] == "paddleocr-ort-cpu"
+    assert failure["recipe"] == "paddleocr-ort-directml"
     assert failure["environment_revision"] == 1
     stored = json.loads(manager._registry.read_text(encoding="utf-8"))
     assert (
@@ -1301,10 +1316,12 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     )
     first = manager.create("failed")
     other = manager.create("unaffected")
-    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        first["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     with pytest.raises(RuntimeInstallError):
         manager.install(
-            plan["plan_id"], first["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], first["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     registry_text = manager._registry.read_text(encoding="utf-8")
     assert "secretvalue" not in registry_text
@@ -1323,7 +1340,7 @@ def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
     manager._install_runner = interrupted
     with pytest.raises(SystemExit):
         manager.install(
-            plan["plan_id"], first["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], first["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     recovered = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -1360,14 +1377,16 @@ def test_new_environment_preview_supersedes_old_plan(
     current = manager.create("current")
     target = manager.create("target")
     manager.commit_switch(manager.prepare_switch(current["id"]))
-    old = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
-    fresh = manager.preview_install(target["id"], "paddleocr-ort-cpu", ("pypi",))
+    old = manager.preview_install(
+        target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
+    fresh = manager.preview_install(target["id"], "paddleocr-ort-directml", ("pypi",))
 
     with pytest.raises(
         runtime_maintenance.RuntimeInstallPlanStale, match="preview again"
     ):
         manager.install(
-            old["plan_id"], target["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            old["plan_id"], target["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     assert manager.list()["active_id"] == current["id"]
     assert manager.list()["environments"][1]["status"] == "empty"
@@ -1382,7 +1401,7 @@ def test_new_environment_preview_supersedes_old_plan(
         },
     )
     installed = manager.install(
-        fresh["plan_id"], target["id"], "paddleocr-ort-cpu", ("pypi",)
+        fresh["plan_id"], target["id"], "paddleocr-ort-directml", ("pypi",)
     )
     assert installed["revision"] == 2
     assert installed["status"] == "installed"
@@ -1402,20 +1421,27 @@ def test_named_recipe_addition_rejects_incompatible_engine(tmp_path: Path) -> No
     item = manager.create("engines")
     registry = manager.paths.state_root / "environments.json"
     value = json.loads(registry.read_text(encoding="utf-8"))
+    # 历史分设备 paddle-ort 记录：读取保留，但与统一闭包不同源，不能在
+    # 同一环境上叠加安装。
     value["environments"][item["id"]].update(
         {"status": "installed", "recipe": "paddleocr-ort-cpu"}
     )
     registry.write_text(json.dumps(value), encoding="utf-8")
     before = registry.read_bytes()
-    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
+    # 独立 MinerU 配方已并入统一闭包：分设备配方一律按退役拒绝。
+    with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
         manager.preview_install(item["id"], "mineru-cpu")
     assert registry.read_bytes() == before
-    explicit = manager.preview_install(item["id"], "paddleocr-ort-cpu")
-    assert explicit["requested_recipe"] == "paddleocr-ort-cpu"
-    assert explicit["recipe"] == "paddleocr-ort-cpu"
+    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
+        manager.preview_install(item["id"], "paddleocr-ort-directml")
+    assert registry.read_bytes() == before
+    fresh = manager.create("fresh")
+    explicit = manager.preview_install(fresh["id"], "paddleocr-ort-directml")
+    assert explicit["requested_recipe"] == "paddleocr-ort-directml"
+    assert explicit["recipe"] == "paddleocr-ort-directml"
     # #270：旧原生 Paddle 配方退役，预览安装以明确退役错误拒绝。
     with pytest.raises(ManagedEnvironmentError, match="retired"):
-        manager.preview_install(item["id"], "paddleocr-cpu")
+        manager.preview_install(fresh["id"], "paddleocr-cpu")
 
 
 def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> None:
@@ -1473,21 +1499,23 @@ def test_named_preview_includes_direct_url_dependencies(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    item = manager.create("cuda")
-    # 依赖投影测试显式提供满足 CUDA 配方要求的驱动，避免依赖本机 GPU。
+    item = manager.create("directml")
+    # 统一推理闭包不设 NVIDIA 驱动门槛；DirectML 覆盖全 D3D12 GPU，
+    # 依赖投影不应因无 NVIDIA 驱动而拒绝预览。
     monkeypatch.setattr(
         "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
         lambda **_kwargs: {
-            "status": "ok",
-            "reason_code": None,
-            "driver_version": "580.88",
+            "status": "unsupported",
+            "reason_code": "nvidia_driver_unavailable",
+            "driver_version": None,
         },
     )
-    dependencies = manager.preview_install(item["id"], "paddleocr-ort-cuda")[
+    dependencies = manager.preview_install(item["id"], "paddleocr-ort-directml")[
         "dependencies"
     ]
-    assert "onnxruntime==1.30.0" in dependencies
-    assert "nvidia-cudnn-cu13==9.27.0.42" in dependencies
+    assert "onnxruntime-directml==1.24.4" in dependencies
+    assert "mineru==4.1.3" in dependencies
+    assert "onnx==1.23.2" in dependencies
 
 
 def _all_recipes_release(root: Path) -> tuple[Path, Path]:
@@ -1552,7 +1580,7 @@ def _pinned_versions(manager: ManagedEnvironmentStore, recipe: str) -> dict[str,
 
 
 def test_recipe_catalog_projects_manifest_bound_scopes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     manifest, component = _release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
@@ -1561,13 +1589,10 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    # 未绑定 standalone scope/Paddle 隔离锁的 manifest 不提供对应配方（与 preview 同源）。
+    # 统一推理闭包：directml 是唯一可安装配方；历史 Paddle 隔离锁也不再
+    # 让原生/分设备配方回到目录（与 preview 同源）。
     assert [entry["id"] for entry in manager.recipe_catalog()] == [
-        "paddleocr-ort-cpu",
-        "paddleocr-ort-cuda",
         "paddleocr-ort-directml",
-        "mineru-cpu",
-        "mineru-cuda",
     ]
 
     standalone_manifest, standalone_component = _all_recipes_release(
@@ -1581,59 +1606,43 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
     )
     catalog = full.recipe_catalog()
     assert full.list()["recipes"] == catalog
-    # #270：旧原生 Paddle 配方已从可安装目录退役（记录/诊断保留）。
+    # #270 + 统一闭包：旧原生 Paddle 与分设备（CPU/CUDA/独立 MinerU）配方
+    # 均已从可安装目录退役（记录/诊断保留）。
     assert [entry["id"] for entry in catalog] == [
-        "paddleocr-ort-cpu",
-        "paddleocr-ort-cuda",
         "paddleocr-ort-directml",
-        "mineru-cpu",
-        "mineru-cuda",
     ]
     entry = {item["id"]: item for item in catalog}
-    assert entry["paddleocr-ort-cpu"]["engine"] == "paddle"
-    assert entry["paddleocr-ort-cpu"]["family"] == "paddle-onnx"
-    assert entry["paddleocr-ort-cpu"]["provider"] == "CPUExecutionProvider"
-    assert entry["paddleocr-ort-cuda"]["provider"] == "CUDAExecutionProvider"
-    assert entry["paddleocr-ort-directml"]["provider"] == "DmlExecutionProvider"
-    assert entry["mineru-cpu"]["engine"] == "mineru"
-    assert entry["mineru-cuda"]["provider"] == "torch_cuda"
-    assert [item["id"] for item in catalog if item["default_remote_host"]] == [
-        "paddleocr-ort-cpu"
-    ]
-    assert all(item["supports_remote_host"] for item in catalog)
-    assert entry["paddleocr-ort-cpu"]["display_name"] == "PaddleOCR ONNX · CPU"
-    assert entry["paddleocr-ort-cpu"]["configured_recognition_types"] == [
+    directml = entry["paddleocr-ort-directml"]
+    assert directml["engine"] == "paddle"
+    assert directml["family"] == "paddle-onnx"
+    assert directml["provider"] == "DmlExecutionProvider"
+    assert directml["configured_recognition_types"] == [
         "text",
         "table",
         "structure",
     ]
-    assert entry["paddleocr-ort-cpu"]["accelerator"] == "cpu"
-    assert entry["paddleocr-ort-cpu"]["target_device"] == "cpu"
-    assert entry["paddleocr-ort-cpu"]["python_version"] == "3.13.16"
-    assert entry["paddleocr-ort-cpu"]["abi"] == "cp313"
-    assert entry["paddleocr-ort-cpu"]["platform"] == "win_amd64"
-    # 旧原生 Paddle 配方退役：不再宣称任何识别类型，预览安装明确拒绝。
+    assert [item["id"] for item in catalog if item["default_remote_host"]] == []
+    assert all(item["supports_remote_host"] for item in catalog)
+    assert directml["display_name"] == "PaddleOCR ONNX + MinerU · Windows DirectML"
+    assert directml["accelerator"] == "cpu"
+    assert directml["target_device"] == "directml"
+    assert directml["python_version"] == "3.13.16"
+    assert directml["abi"] == "cp313"
+    assert directml["platform"] == "win_amd64"
+    assert directml["scope_id"] == "paddleocr-ort-directml"
+    assert "paddleocr==3.7.0" in directml["dependencies"]
+    assert "onnxruntime-directml==1.24.4" in directml["dependencies"]
+    assert "mineru==4.1.3" in directml["dependencies"]
+    # 退役配方不再宣称任何识别类型，预览安装明确拒绝。
     target_record = _write_record(full, "b" * 32)
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        full.preview_install(target_record["id"], "paddleocr-cuda")
-    assert full._recipe_modes("paddleocr-cuda") == []
-    assert entry["mineru-cpu"]["configured_recognition_types"] == ["document"]
-    assert entry["mineru-cpu"]["scope_id"] == "default"
-    assert "paddleocr==3.7.0" in entry["paddleocr-ort-cpu"]["dependencies"]
-    assert "nvidia-cudnn-cu13==9.27.0.42" in entry["paddleocr-ort-cuda"]["dependencies"]
+    for recipe in ("paddleocr-cuda", "paddleocr-ort-cpu", "mineru-cuda"):
+        with pytest.raises(ManagedEnvironmentError, match="retired"):
+            full.preview_install(target_record["id"], recipe)
+        assert full._recipe_modes(recipe) == []
 
     # 目录与 preview 同源：锁、pin 与来源分类完全一致，前台不得另算。
-    # 目录同源预览显式提供满足 CUDA 配方要求的驱动，避免依赖本机 GPU。
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_kwargs: {
-            "status": "ok",
-            "reason_code": None,
-            "driver_version": "580.88",
-        },
-    )
     target = _write_record(full, "a" * 32)
-    for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda", "mineru-cpu"):
+    for recipe in ("paddleocr-ort-directml",):
         plan = full.preview_install(target["id"], recipe)
         assert entry[recipe]["recipe_lock"] == plan["recipe_lock"]
         assert entry[recipe]["dependencies"] == plan["dependencies"]
@@ -1730,8 +1739,8 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    scope, _accelerator = manager._recipe("paddleocr-ort-cpu")
-    pinned = _pinned_versions(manager, "paddleocr-ort-cpu")
+    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
+    pinned = _pinned_versions(manager, "paddleocr-ort-directml")
 
     def healthy_probe(record: dict) -> dict:
         return {
@@ -1747,19 +1756,19 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         manager,
         "a" * 32,
         status="installed",
-        recipe="paddleocr-ort-cpu",
+        recipe="paddleocr-ort-directml",
         recipe_lock=scope.sha256,
     )
     b = _write_record(
         manager,
         "b" * 32,
         status="installed",
-        recipe="paddleocr-ort-cpu",
+        recipe="paddleocr-ort-directml",
         recipe_lock=scope.sha256,
     )
     empty = _write_record(manager, "c" * 32)
     legacy_no_evidence = _write_record(
-        manager, "d" * 32, status="installed", recipe="paddleocr-ort-cpu"
+        manager, "d" * 32, status="installed", recipe="paddleocr-ort-directml"
     )
     _write_record(
         manager,
@@ -1785,14 +1794,14 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         _atomic_json(manager._registry, data)
 
     before = manager._registry.read_bytes()
-    result = manager.find_compatible("paddleocr-ort-cpu")
+    result = manager.find_compatible("paddleocr-ort-directml")
     assert manager._registry.read_bytes() == before
-    assert result["recipe"] == "paddleocr-ort-cpu"
+    assert result["recipe"] == "paddleocr-ort-directml"
     assert result["recipe_lock"] == scope.sha256
     assert result["selected"] == {
         "environment_id": a["id"],
         "environment_revision": 1,
-        "recipe": "paddleocr-ort-cpu",
+        "recipe": "paddleocr-ort-directml",
         "selection_reason": "deterministic_id_order",
     }
     assert [item["environment_id"] for item in result["environments"]] == [
@@ -1814,12 +1823,15 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         "legacy": "legacy_environment",
     }
 
-    explicit = manager.find_compatible("paddleocr-ort-cpu", b["id"])
+    explicit = manager.find_compatible("paddleocr-ort-directml", b["id"])
     assert explicit["selected"]["environment_id"] == b["id"]
     assert explicit["selected"]["selection_reason"] == "explicit_environment"
-    assert manager.find_compatible("paddleocr-ort-cpu", empty["id"])["selected"] is None
+    assert (
+        manager.find_compatible("paddleocr-ort-directml", empty["id"])["selected"]
+        is None
+    )
     with pytest.raises(ManagedEnvironmentError, match="unknown explicit"):
-        manager.find_compatible("paddleocr-ort-cpu", "missing-target")
+        manager.find_compatible("paddleocr-ort-directml", "missing-target")
 
     # 活动环境优先；同配方低优先级环境如实标记。
     with RuntimeStoreLock(manager._lock):
@@ -1827,7 +1839,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         data["active_id"] = b["id"]
         data["active_revision"] += 1
         _atomic_json(manager._registry, data)
-    result = manager.find_compatible("paddleocr-ort-cpu")
+    result = manager.find_compatible("paddleocr-ort-directml")
     assert result["selected"]["environment_id"] == b["id"]
     assert result["selected"]["selection_reason"] == "active_environment"
     by_id = {item["environment_id"]: item for item in result["environments"]}
@@ -1841,7 +1853,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
         "_probe",
         lambda record: {**healthy_probe(record), "platform": "win_arm64"},
     )
-    wrong_platform = manager.find_compatible("paddleocr-ort-cpu")
+    wrong_platform = manager.find_compatible("paddleocr-ort-directml")
     assert wrong_platform["selected"] is None
     assert {
         item["reason_code"]
@@ -1858,7 +1870,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
             "versions": {**pinned, "fastapi": "2.0.0"},
         },
     )
-    drifted = manager.find_compatible("paddleocr-ort-cpu")
+    drifted = manager.find_compatible("paddleocr-ort-directml")
     assert drifted["selected"] is None
     assert {
         item["reason_code"]
@@ -1876,7 +1888,7 @@ def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
             "python": str(manager._venv_python(manager._safe_path(record))),
         },
     )
-    broken = manager.find_compatible("paddleocr-ort-cpu")
+    broken = manager.find_compatible("paddleocr-ort-directml")
     assert broken["selected"] is None
     assert {
         item["reason_code"]
@@ -1938,7 +1950,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    scope, accelerator = manager._recipe("paddleocr-ort-cpu")
+    scope, accelerator = manager._recipe("paddleocr-ort-directml")
     lock = tmp_path / "query.lock"
     lock.write_text(f"Paddle.GPU @ {url}\n", encoding="utf-8")
     scope = replace(scope, lock_path=lock, sha256=_sha(lock.read_bytes()))
@@ -1947,7 +1959,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
         manager,
         "a" * 32,
         status="installed",
-        recipe="paddleocr-ort-cpu",
+        recipe="paddleocr-ort-directml",
         recipe_lock=scope.sha256,
     )
     monkeypatch.setattr(
@@ -1963,7 +1975,7 @@ def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
     assert manager._scope_pins(scope) == [
         ("paddle-gpu", f"Paddle.GPU @ {url}", expected_version)
     ]
-    result = manager.find_compatible("paddleocr-ort-cpu")
+    result = manager.find_compatible("paddleocr-ort-directml")
     assert result["environments"][0]["reason_code"] == reason
     assert (result["selected"] is not None) == (
         reason == "selected_compatible_environment"
@@ -1984,7 +1996,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         base_python=sys._base_executable,
         install_runner=lambda _python, _scope, _endpoint: None,
     )
-    pinned = _pinned_versions(manager, "paddleocr-ort-cpu")
+    pinned = _pinned_versions(manager, "paddleocr-ort-directml")
     monkeypatch.setattr(
         manager,
         "_probe",
@@ -2001,9 +2013,9 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         ),
     )
     item = manager.create("reusable")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     installed = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert installed["status"] == "installed"
     record = manager._read()["environments"][item["id"]]
@@ -2028,7 +2040,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         },
     )
     assert (
-        reopened.find_compatible("paddleocr-ort-cpu")["selected"]["environment_id"]
+        reopened.find_compatible("paddleocr-ort-directml")["selected"]["environment_id"]
         == (item["id"])
     )
 
@@ -2041,7 +2053,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
         "protocol_version": 2,
         "request_kind": "environment",
         "action": "find_compatible",
-        "recipe": "paddleocr-ort-cpu",
+        "recipe": "paddleocr-ort-directml",
         **base,
     }
     # CLI 在新 store 实例上运行真实探针；本测试的合成 venv 无包，
@@ -2063,7 +2075,7 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
     assert envelope["action"] == "find_compatible"
     assert envelope["result"]["selected"]["environment_id"] == item["id"]
     assert [recipe["id"] for recipe in envelope["result"]["recipes"]][0] == (
-        "paddleocr-ort-cpu"
+        "paddleocr-ort-directml"
     )
 
     unknown = {**request, "recipe": "not-a-recipe"}
@@ -2076,9 +2088,8 @@ def test_install_freezes_recipe_lock_and_query_round_trips_cli(
 @pytest.mark.parametrize(
     "failure,recipe,timeout",
     [
-        ("CalledProcessError", "paddleocr-ort-cpu", 60),
-        ("TimeoutExpired", "paddleocr-ort-cpu", 60),
-        ("TimeoutExpired", "mineru-cpu", 20),
+        ("CalledProcessError", "paddleocr-ort-directml", 60),
+        ("TimeoutExpired", "paddleocr-ort-directml", 60),
     ],
 )
 def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
@@ -2133,11 +2144,13 @@ def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
                     "version": [
                         int(part) for part in manager.manifest.python.version.split(".")
                     ],
-                    "packages": (
-                        ["fastapi", "mineru"]
-                        if recipe == "mineru-cpu"
-                        else ["fastapi", "paddleocr", "paddlex", "onnxruntime"]
-                    ),
+                    "packages": [
+                        "fastapi",
+                        "paddleocr",
+                        "paddlex",
+                        "onnxruntime-directml",
+                        "mineru",
+                    ],
                 }
             ),
         )
@@ -2160,7 +2173,13 @@ def test_named_install_rejects_native_import_failure_without_committing(
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        for name in ("fastapi", "paddleocr", "paddlex", "onnxruntime"):
+        for name in (
+            "fastapi",
+            "paddleocr",
+            "paddlex",
+            "onnxruntime-directml",
+            "mineru",
+        ):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
@@ -2183,12 +2202,12 @@ def test_named_install_rejects_native_import_failure_without_committing(
         install_runner=install,
     )
     item = manager.create("native")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(
         ManagedEnvironmentError, match="engine_import_failed"
     ) as excinfo:
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     assert "CalledProcessError after " in str(excinfo.value)
     assert "native extension cannot load" in str(excinfo.value)
@@ -2211,7 +2230,7 @@ def test_named_install_rejects_native_import_failure_without_committing(
             "revision": 2,
             "path": item["id"],
             "status": "installed",
-            "recipe": "paddleocr-ort-cpu",
+            "recipe": "paddleocr-ort-directml",
             "source_ids": ["tuna-pypi"],
         }
     )
@@ -2234,7 +2253,14 @@ def test_named_install_paddleocr_probe_imports_real_transitive_closure(
 
     def install(python: Path, _scope, _source: str) -> None:
         site = python.parent.parent / "Lib" / "site-packages"
-        for name in ("fastapi", "paddleocr", "paddlex", "onnxruntime", "shapely"):
+        for name in (
+            "fastapi",
+            "paddleocr",
+            "paddlex",
+            "onnxruntime-directml",
+            "mineru",
+            "shapely",
+        ):
             metadata = site / f"{name}-1.0.dist-info"
             metadata.mkdir(parents=True)
             (metadata / "METADATA").write_text(
@@ -2293,10 +2319,10 @@ def test_named_install_paddleocr_probe_imports_real_transitive_closure(
     )
     item = manager.create("closure")
     manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     surviving = manager.list()["environments"][0]
     assert surviving["status"] == "empty"
@@ -2321,7 +2347,7 @@ def test_named_install_paddleocr_probe_imports_real_transitive_closure(
             "revision": 2,
             "path": item["id"],
             "status": "installed",
-            "recipe": "paddleocr-ort-cpu",
+            "recipe": "paddleocr-ort-directml",
             "source_ids": ["tuna-pypi"],
         }
     )
@@ -2337,6 +2363,7 @@ def test_named_install_paddleocr_probe_imports_real_transitive_closure(
 def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
     tmp_path, monkeypatch
 ):
+    """统一闭包探针覆盖随包 MinerU 的 server 绑定：不启动、不下载。"""
     manifest, component = _all_recipes_release(tmp_path / "release")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -2346,15 +2373,37 @@ def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
     )
     item = manager.create("mineru")
     record = manager._read()["environments"][item["id"]]
-    record.update(status="installed", recipe="mineru-cpu")
+    record.update(status="installed", recipe="paddleocr-ort-directml")
     site = (
         manager._venv_python(manager._safe_path(record)).parent.parent
         / "Lib/site-packages"
     )
-    for name in ("fastapi", "mineru"):
+    for name in (
+        "fastapi",
+        "paddleocr",
+        "paddlex",
+        "onnxruntime-directml",
+        "mineru",
+    ):
         metadata = site / f"{name}-1.0.dist-info"
         metadata.mkdir(parents=True)
         (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
+    (site / "paddleocr").mkdir()
+    (site / "paddleocr" / "__init__.py").write_text(
+        "class PaddleOCR: pass\n", encoding="utf-8"
+    )
+    (site / "onnxruntime").mkdir()
+    (site / "onnxruntime" / "__init__.py").write_text(
+        "def get_available_providers():\n    return ['DmlExecutionProvider']\n",
+        encoding="utf-8",
+    )
+    directml_devices = site / "vibeocr/runtime/recognition"
+    directml_devices.mkdir(parents=True)
+    for package in (site / "vibeocr", site / "vibeocr/runtime", directml_devices):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (directml_devices / "directml_devices.py").write_text(
+        "def hardware_adapters():\n    return True\n", encoding="utf-8"
+    )
     parser = site / "mineru/parser"
     parser.mkdir(parents=True)
     (parser.parent / "__init__.py").write_text("")
@@ -2396,6 +2445,7 @@ def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) ->
 
 
 def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
+    """独立 MinerU 配方退役：MinerU 随统一闭包携带且不含 RapidOCR。"""
     manifest, component = _release(tmp_path / "release")
     value = json.loads(manifest.read_text(encoding="utf-8"))
     manager = ManagedEnvironmentStore(
@@ -2405,13 +2455,15 @@ def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
         base_python=sys._base_executable,
     )
     item = manager.create("mineru")
-    assert manager.preview_install(item["id"], "mineru-cpu")["recipe"] == "mineru-cpu"
+    with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
+        manager.preview_install(item["id"], "mineru-cpu")
     generated = build_runtime_manifest(
         runtime_wheel=manifest.parent / value["runtime_wheel"],
         base_lock=manifest.parent / value["profiles"]["win-x64-base"]["lock"],
-        cpu_lock=manifest.parent / value["profiles"]["win-x64-cpu"]["lock"],
-        cu126_lock=manifest.parent / value["profiles"]["win-x64-cu126"]["lock"],
-        cu126_gpu_lock=manifest.parent / "requirements-win-x64-cu126-gpu.lock",
+        paddle_onnx_locks={
+            "directml": manifest.parent
+            / value["paddle_onnx_environments"]["directml"]["lock"]
+        },
         python_archive=manifest.parent / value["python"]["archive"],
         python_version=value["python"]["version"],
         python_source_url=value["python"]["source_url"],
@@ -2423,10 +2475,14 @@ def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
         capabilities=("ocr.recognition.v2",),
     )
     assert (generated.parent / "runtime-code/vibeocr/runtime/host/main.py").is_file()
-    scope = load_runtime_manifest(generated).profiles["win-x64-cpu"].scopes[0]
-    assert scope.scope_id == "default"
-    assert scope.component_ids == ("runtime_host", "mineru-cpu")
-    assert "rapidocr" not in scope.lock_path.read_text(encoding="utf-8")
+    loaded = load_runtime_manifest(generated)
+    # 新构建只产出 base profile；推理栈全部由 directml 统一闭包绑定承载。
+    assert set(loaded.profiles) == {"win-x64-base"}
+    assert set(loaded.paddle_onnx_environments) == {"paddleocr-ort-directml"}
+    closure_lock = loaded.paddle_onnx_environments["paddleocr-ort-directml"]
+    lock_text = closure_lock.lock_path.read_text(encoding="utf-8")
+    assert "mineru==4.1.3" in lock_text
+    assert "rapidocr" not in lock_text
 
 
 def test_frozen_manager_exposes_named_environment_list(
@@ -2454,11 +2510,7 @@ def test_frozen_manager_exposes_named_environment_list(
     response = json.loads(capsys.readouterr().out)
     assert response["response_kind"] == "environment"
     assert [entry["id"] for entry in response["result"].pop("recipes")] == [
-        "paddleocr-ort-cpu",
-        "paddleocr-ort-cuda",
         "paddleocr-ort-directml",
-        "mineru-cpu",
-        "mineru-cuda",
     ]
     # 硬件投影与安装预检同一真相源：只读探测，不安装、不缓存。
     assert response["result"].pop("hardware") == {
@@ -3182,39 +3234,6 @@ def test_inspect_and_ensure_report_covering_profile_after_base_only_install(
         )
 
 
-def test_component_desired_state_not_required_outside_installed_closure(
-    tmp_path: Path,
-) -> None:
-    # 回归：cu126 的 gpu_runtime 精确 scope 不含 Paddle/MinerU；覆盖
-    # profile（cu126 plan）投影它们时必须标记 desired not_required，
-    # 不得谎报 ready / failed / 可修复。
-    manifest, component = _release(tmp_path / "release")
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="nvidia_cuda",
-        install_component_ids=("gpu_runtime",),
-        install_runner=_fake_install,
-        component_probe=lambda _root, ids, _profile_id: dict.fromkeys(ids, True),
-    )
-    installer.ensure()
-
-    inspection = installer.inspect_snapshot(emit=False)
-
-    assert inspection.state.status == "ready"
-    assert inspection.profile["profile_id"] == "win-x64-cu126"
-    statuses = {item["component_id"]: item for item in inspection.profile["components"]}
-    for component_id in ("mineru-cuda",):
-        assert statuses[component_id]["desired_state"] == "not_required"
-        assert statuses[component_id]["state"] == "not_required"
-        assert statuses[component_id]["drift_reason"] == "none"
-        assert statuses[component_id]["repairable"] is False
-    for component_id in ("gpu_runtime", "runtime_host"):
-        assert statuses[component_id]["desired_state"] == "ready"
-        assert statuses[component_id]["actual_state"] == "ready"
-
-
 def test_runtime_status_ready_for_healthy_base_only_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3251,58 +3270,6 @@ def test_runtime_status_ready_for_healthy_base_only_runtime(
     assert statuses["runtime_host"]["actual_state"] == "ready"
     assert all(
         item["desired_state"] == "ready" for item in status["profile"]["components"]
-    )
-
-
-def test_repair_of_in_sync_component_succeeds_without_claiming_global_ready(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(tmp_path / "release")
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=("mineru-cpu",),
-    )
-    initial.ensure()
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=("mineru-cpu",),
-        component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "mineru-cpu" for component_id in component_ids
-        },
-        component_ids=("runtime_host",),
-        operation_id="repair-ready-component",
-    )
-
-    launch = repair.repair()
-
-    assert launch is None
-    assert len(calls) == 1
-    snapshot = repair.maintenance_snapshot()
-    assert snapshot is not None
-    assert snapshot["operation_state"] == "succeeded"
-    assert snapshot["requested_component_ids"] == ["runtime_host"]
-    assert "effective_component_ids" not in snapshot
-    assert (
-        next(
-            item
-            for item in repair.profile_payload()["components"]
-            if item["component_id"] == "mineru-cpu"
-        )["actual_state"]
-        == "drifted"
     )
 
 
@@ -3433,8 +3400,9 @@ def test_component_repair_reports_requested_and_effective_scope(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        accelerator="cpu",
+        accelerator="base",
         install_runner=install,
+        install_component_ids=(),
     )
     initial.ensure()
     Path(initial._launch().python_executable).unlink()
@@ -3443,7 +3411,7 @@ def test_component_repair_reports_requested_and_effective_scope(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        accelerator="cpu",
+        accelerator="base",
         install_runner=install,
         operation_id="repair-1",
         component_ids=("runtime_host",),
@@ -3454,11 +3422,8 @@ def test_component_repair_reports_requested_and_effective_scope(
     snapshot = repair.maintenance_snapshot()
     assert snapshot is not None
     assert snapshot["requested_component_ids"] == ["runtime_host"]
-    # #270：缺省闭包不再包含退役原生 Paddle 组件（base + MinerU）。
-    assert set(snapshot["effective_component_ids"]) == {
-        "runtime_host",
-        "mineru-cpu",
-    }
+    # 统一闭包后 base 是唯一有效修复范围（可选组件档位已退役）。
+    assert snapshot["effective_component_ids"] == ["runtime_host"]
     assert repair.paths.runtime_root.is_dir()
 
 
@@ -3467,14 +3432,15 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest, component_lock = _release(tmp_path / "release")
+    # 漂移探测只对声明了 version 的组件做版本比对：给 base 的 runtime_host
+    # 注入版本声明，并同步 component lock 的 manifest 摘要。
     manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
-    manifest_payload["profiles"]["win-x64-cpu"]["components"] = [
-        {"component_id": "runtime_host", "display_name": "Runtime HTTP host"},
+    manifest_payload["profiles"]["win-x64-base"]["components"] = [
         {
-            "component_id": "mineru-cpu",
-            "display_name": "MinerU CPU document parsing",
-            "version": "4.0.0",
-        },
+            "component_id": "runtime_host",
+            "display_name": "Runtime 服务环境",
+            "version": "1.0.0",
+        }
     ]
     manifest.write_text(json.dumps(manifest_payload) + "\n", encoding="utf-8")
     lock_payload = json.loads(component_lock.read_text(encoding="utf-8"))
@@ -3485,10 +3451,10 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     def install(partial: Path, runtime_manifest, profile: str) -> Path:
         calls.append(partial)
         python = _fake_install(partial, runtime_manifest, profile)
-        metadata = partial / "Lib" / "site-packages" / "mineru-4.0.0.dist-info"
+        metadata = partial / "Lib" / "site-packages" / "fastapi-1.0.0.dist-info"
         metadata.mkdir(parents=True)
         (metadata / "METADATA").write_text(
-            "Metadata-Version: 2.1\nName: mineru\nVersion: 4.0.0\n",
+            "Metadata-Version: 2.1\nName: fastapi\nVersion: 1.0.0\n",
             encoding="utf-8",
         )
         return python
@@ -3497,34 +3463,35 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
         product_root=tmp_path / "product",
         component_lock=component_lock,
         runtime_manifest=manifest,
-        accelerator="cpu",
+        accelerator="base",
         install_runner=install,
+        install_component_ids=(),
     )
     initial.ensure()
     metadata = (
         initial.paths.runtime_root
         / "Lib"
         / "site-packages"
-        / "mineru-4.0.0.dist-info"
+        / "fastapi-1.0.0.dist-info"
         / "METADATA"
     )
     metadata.write_text(
-        "Metadata-Version: 2.1\nName: mineru\nVersion: 3.9.0\n",
+        "Metadata-Version: 2.1\nName: fastapi\nVersion: 0.9.0\n",
         encoding="utf-8",
     )
     drifted = next(
         item
         for item in initial.profile_payload()["components"]
-        if item["component_id"] == "mineru-cpu"
+        if item["component_id"] == "runtime_host"
     )
     assert drifted["actual_state"] == "drifted"
-    assert drifted["actual_version"] == "3.9.0"
+    assert drifted["actual_version"] == "0.9.0"
     assert drifted["drift_reason"] == "version_mismatch"
     metadata.unlink()
     missing = next(
         item
         for item in initial.profile_payload()["components"]
-        if item["component_id"] == "mineru-cpu"
+        if item["component_id"] == "runtime_host"
     )
     assert missing["actual_state"] == "missing"
 
@@ -3532,10 +3499,10 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
         product_root=tmp_path / "product",
         component_lock=component_lock,
         runtime_manifest=manifest,
-        accelerator="cpu",
+        accelerator="base",
         install_runner=install,
         operation_id="repair-component",
-        component_ids=("mineru-cpu",),
+        component_ids=("runtime_host",),
     )
     repair.repair()
 
@@ -3543,7 +3510,7 @@ def test_component_drift_uses_installed_distribution_and_selected_repair(
     repaired = next(
         item
         for item in repair.profile_payload()["components"]
-        if item["component_id"] == "mineru-cpu"
+        if item["component_id"] == "runtime_host"
     )
     assert repaired["actual_state"] == "ready"
 
@@ -4162,60 +4129,6 @@ def test_online_install_uses_selected_source_and_isolates_parent_config(
     assert launch.environment["PIP_INDEX_URL"] == expected_endpoint
 
 
-def test_cuda_gpu_only_selection_uses_exact_install_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer_module
-
-    manifest, component = _release(tmp_path / "release")
-    captured: list[list[str]] = []
-
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
-        captured.append(list(command))
-
-    def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
-        (destination / "python.exe").write_bytes(b"python")
-
-    def fake_prepare(_python, _lock, _endpoint, _cache, _reporter, _env):  # type: ignore[no-untyped-def]
-        downloads = tmp_path / "downloads"
-        downloads.mkdir(exist_ok=True)
-        return downloads
-
-    monkeypatch.setattr(installer_module, "_run_install_command", fake_run)
-    monkeypatch.setattr(installer_module, "_prepare_online_artifacts", fake_prepare)
-    monkeypatch.setattr(
-        installer_module,
-        "_local_install_requirements",
-        lambda lock, *args: lock.with_suffix(".local.txt"),
-    )
-    monkeypatch.setattr(
-        installer_module,
-        "_extract_python_archive",
-        fake_extract_python,
-    )
-
-    runtime = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="nvidia_cuda",
-        component_probe=lambda _root, ids, _profile_id: dict.fromkeys(ids, True),
-        install_component_ids=("gpu_runtime",),
-    )
-    runtime.ensure()
-
-    assert captured[0][-1] == str(
-        tmp_path / "release" / "requirements-win-x64-cu126-gpu.local.txt"
-    )
-    marker = json.loads(
-        (runtime.paths.runtime_root / ".installed.json").read_text(encoding="utf-8")
-    )
-    assert marker["component_ids"] == [
-        "runtime_host",
-        "gpu_runtime",
-    ]
-
-
 def test_control_installer_store_composition_retries_durable_selection(
     tmp_path: Path,
 ) -> None:
@@ -4269,7 +4182,8 @@ def test_control_installer_store_composition_retries_durable_selection(
         for item in constructed
         if item.get("operation_id") == "composition-retried"
     )
-    assert retried["install_component_ids"] == ("mineru-cpu",)
+    # document_parsing 是退役组件档位：重试按折叠后的 base 闭包持久化。
+    assert retried["install_component_ids"] == ()
     assert retried["download_source_ids"] == ("huggingface",)
 
     store = runtime_maintenance.RuntimeOperationStore(restarted.state_root)
@@ -4277,7 +4191,7 @@ def test_control_installer_store_composition_retries_durable_selection(
     assert failed_intent["requested_download_source_ids"] == ["huggingface"]
     assert failed_intent["download_source_ids"] == ["huggingface", "tuna-pypi"]
     intent = store.intent("composition-retried")
-    assert intent["install_component_ids"] == ["mineru-cpu"]
+    assert intent["install_component_ids"] == []
     assert intent["requested_download_source_ids"] == ["huggingface"]
     assert intent["download_source_ids"] == ["huggingface", "tuna-pypi"]
     observation = restarted.observe("composition-retried")
@@ -4338,69 +4252,6 @@ def test_extract_runtime_pack_requires_pack_requirements(tmp_path: Path) -> None
         installer._extract_runtime_pack(
             [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
         )
-
-
-def test_full_profile_without_pack_falls_back_online(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """full 闭包绑定的 pack 未下载到位时回退在线安装,不 fail closed。"""
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    manifest_path, _ = _release(tmp_path / "release")
-    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    raw["profiles"]["win-x64-cpu"]["runtime_pack"] = ["not-yet-downloaded.zip"]
-    raw["profiles"]["win-x64-cpu"]["runtime_pack_sha256"] = ["0" * 64]
-    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
-    # 绑定的 pack 文件不存在:component lock 的 manifest 哈希已失配,直接
-    # 构造 manifest 对象驱动 runner(绕过 _validate_binding)。
-    manifest = load_runtime_manifest(manifest_path, verify_artifacts=False)
-    partial_root = tmp_path / "runtimes" / "runtime-0" / "partial"
-    partial_root.mkdir(parents=True)
-    commands: list[list[str]] = []
-
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
-        commands.append(list(command))
-
-    def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
-        (destination / "python.exe").write_bytes(b"python")
-
-    def fake_prepare(_python, _lock, _endpoint, _cache, _reporter, _env):  # type: ignore[no-untyped-def]
-        downloads = tmp_path / "downloads"
-        downloads.mkdir(exist_ok=True)
-        return downloads
-
-    original_run = installer._run_install_command
-    original_extract = installer._extract_python_archive
-    original_prepare = installer._prepare_online_artifacts
-    installer._run_install_command = fake_run  # type: ignore[assignment]
-    installer._extract_python_archive = fake_extract_python  # type: ignore[assignment]
-    installer._prepare_online_artifacts = fake_prepare  # type: ignore[assignment]
-    monkeypatch.setattr(
-        installer,
-        "_local_install_requirements",
-        lambda lock, *args: lock.with_suffix(".local.txt"),
-    )
-    try:
-        installer._default_install_runner(
-            partial_root,
-            manifest,
-            next(
-                scope
-                for scope in manifest.profiles["win-x64-cpu"].scopes
-                if scope.scope_id == "default"
-            ),
-            _pypi_source(),
-        )
-    finally:
-        installer._run_install_command = original_run  # type: ignore[assignment]
-        installer._extract_python_archive = original_extract  # type: ignore[assignment]
-        installer._prepare_online_artifacts = original_prepare  # type: ignore[assignment]
-    # 回退在线:require-hashes + lock + 已验证工件的 find-links,而非 --no-index。
-    assert "--require-hashes" in commands[0]
-    assert "--no-index" not in commands[0]
-    assert "--find-links" in commands[0]
-    assert commands[0][-1].endswith("requirements-win-x64-cpu.local.txt")
-    assert "--no-deps" in commands[0]
 
 
 def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
@@ -4677,7 +4528,9 @@ def test_ensure_with_explicit_base_only_scope_installs_base_lock(
     ("install_component_ids", "expected_profile"),
     [
         ((), "win-x64-base"),
-        (("document_parsing",), "win-x64-cpu"),
+        # 历史可选组件 id（document_parsing/mineru-*）请求折叠为 base 闭包：
+        # 探针按实际安装 scope（base）探测，不再升档到历史 cpu 档位。
+        (("document_parsing",), "win-x64-base"),
     ],
 )
 def test_install_probe_uses_actual_install_scope_profile(
@@ -4781,6 +4634,7 @@ def test_ensure_with_optional_components_reports_independent_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """历史可选组件请求（document_parsing → mineru）折叠为 base 唯一闭包。"""
     manifest, component = _release(tmp_path / "release")
     seen_profiles: list[str] = []
 
@@ -4798,52 +4652,11 @@ def test_ensure_with_optional_components_reports_independent_closure(
     )
     installer.ensure()
 
-    # 独立 MinerU scope 不再因为旧 full lock 强装 Paddle。
-    assert seen_profiles == ["win-x64-cpu"]
+    # 独立 MinerU 安装域已随统一闭包退役：可选组件请求不再升档 full 档位。
+    assert seen_profiles == ["win-x64-base"]
     snapshot = installer.maintenance_snapshot()
-    assert snapshot["requested_component_ids"] == ["mineru-cpu"]
-    assert snapshot["effective_component_ids"] == [
-        "runtime_host",
-        "mineru-cpu",
-    ]
-
-
-def test_ensure_reinstalls_when_scope_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(tmp_path / "release")
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    base_only = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    base_only.ensure()
-
-    # 范围从 base-only 扩到 MinerU 闭包：marker 闭包不同 → 重装一次。
-    # #270：显式退役组件不能作为请求；用仍可选的 mineru-cpu 扩闭包。
-    default_scope = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=("mineru-cpu",),
-    )
-    default_scope.ensure()
-    assert len(calls) == 2
-
-    # 幂等：同范围再次 ensure 不重装。
-    default_scope.ensure()
-    assert len(calls) == 2
+    assert snapshot["requested_component_ids"] == []
+    assert snapshot["effective_component_ids"] == ["runtime_host"]
 
 
 def test_startup_selection_is_base_only_without_an_installed_marker(
@@ -4996,16 +4809,17 @@ def test_unknown_install_component_fails_closed(tmp_path: Path) -> None:
         )
     assert excinfo.value.code is ErrorCode.RUNTIME_COMPONENT_UNKNOWN
 
-    # gpu_runtime 只属于 nvidia_cuda 档位：component selection 不得隐式换档。
-    with pytest.raises(RuntimeSelectionError):
-        RuntimeInstaller(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=_fake_install,
-            install_component_ids=("gpu_runtime",),
-        )
+    # gpu_runtime 是退役组件档位：请求折叠为 base 闭包，不再隐式换档安装
+    # 历史 cuda 档位。
+    folded = RuntimeInstaller(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+        accelerator="cpu",
+        install_runner=_fake_install,
+        install_component_ids=("gpu_runtime",),
+    )
+    assert folded._selection.effective_component_ids == ("runtime_host",)
 
 
 def test_maintenance_snapshot_echoes_download_source_intent(
@@ -5083,36 +4897,6 @@ def test_base_only_ensure_probes_with_base_binding_not_plan_binding(
     assert installer._drifted_component_ids() == ()
     # 幂等复跑：base 闭包 ready，不触发重装
     assert installer.ensure() is not None
-
-
-def test_full_scope_drift_still_probes_with_plan_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """full（含可选组件）安装的漂移探测仍使用 accelerator 的 plan 绑定。"""
-
-    manifest, component = _release(tmp_path / "release")
-    probe_profiles: list[str] = []
-
-    def probe(
-        _runtime_root: Path, component_ids: tuple[str, ...], profile_id: str
-    ) -> dict[str, bool]:
-        probe_profiles.append(profile_id)
-        return dict.fromkeys(component_ids, True)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_component_ids=("document_parsing",),
-        install_runner=_fake_install,
-        component_probe=probe,
-        operation_id="full-ensure",
-    )
-    installer.ensure()
-
-    assert installer._drifted_component_ids() == ()
-    assert "win-x64-cpu" in probe_profiles
 
 
 def test_drift_projection_uses_covering_profile_declared_versions(
@@ -5630,82 +5414,6 @@ def test_gpu_probe_fails_when_import_works_but_device_is_unavailable(
     ) == {component: False}
 
 
-def test_gpu_scope_status_projects_its_own_host_lock(tmp_path: Path) -> None:
-    """gpu-runtime scope 用自己的 gpu 锁投影 host 版本；换闭包后 drift 可修复。"""
-    manifest_path, component_lock = _release(tmp_path / "release")
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["capabilities"].append("runtime.install-plan.v1")
-    payload["profiles"]["win-x64-cu126"]["components"] = [
-        {
-            **item.to_payload(),
-            **({"version": "0.141.0"} if item.component_id == "runtime_host" else {}),
-        }
-        for item in load_runtime_manifest(manifest_path)
-        .profiles["win-x64-cu126"]
-        .components
-    ]
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    binding = json.loads(component_lock.read_text(encoding="utf-8"))
-    binding["product"]["runtime_manifest_sha256"] = _sha(manifest_path.read_bytes())
-    component_lock.write_text(json.dumps(binding), encoding="utf-8")
-
-    def install(partial, manifest, profile):
-        python = _fake_install(partial, manifest, profile)
-        metadata = partial / "Lib/site-packages/fastapi-1.0.0.dist-info"
-        metadata.mkdir(parents=True)
-        (metadata / "METADATA").write_text(
-            "Name: fastapi\nVersion: 1.0.0\n", encoding="utf-8"
-        )
-        return python
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component_lock,
-        runtime_manifest=manifest_path,
-        accelerator="nvidia_cuda",
-        install_component_ids=("gpu_runtime",),
-        install_runner=install,
-    )
-    installer.ensure()
-    host = next(
-        item
-        for item in installer.profile_payload()["components"]
-        if item["component_id"] == "runtime_host"
-    )
-    # gpu-runtime scope 锁与 profile 锁不同：host 版本从 scope 锁投影（1.0.0），
-    # 而不是 manifest components 里的 0.141.0。
-    assert host["desired_version"] == "1.0.0"
-    assert host["actual_state"] == "ready"
-    metadata = (
-        installer.paths.runtime_root
-        / "Lib/site-packages/fastapi-1.0.0.dist-info/METADATA"
-    )
-    marker = installer._marker().read_bytes()
-    replacement = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component_lock,
-        runtime_manifest=manifest_path,
-        accelerator="nvidia_cuda",
-        install_component_ids=("mineru-cuda",),
-        required_capabilities=("runtime.install-plan.v1",),
-        install_runner=install,
-    )
-    with RuntimeStoreLock(replacement.paths.locks_root / "runtime-store.lock"):
-        preview = replacement._preview_install_plan_locked()
-    host_change = next(
-        item for item in preview["components"] if item["component_id"] == "runtime_host"
-    )
-    # mineru scope 使用 profile 锁：host 目标版本回到 manifest 声明的 0.141.0。
-    assert host_change["action"] == "replace"
-    assert host_change["dependency_state"] == "pending"
-    with pytest.raises(RuntimeInstallError, match="candidate Runtime did not verify"):
-        replacement.ensure()
-    assert installer._marker().read_bytes() == marker
-    assert not (tmp_path / "product/runtime.rollback").exists()
-    metadata.write_text("Name: fastapi\nVersion: 0.141.0\n", encoding="utf-8")
-    assert installer._drifted_component_ids() == ("runtime_host",)
-
-
 @pytest.mark.parametrize("llama_available", [True, False])
 def test_mineru_cpu_probe_uses_mineru4_llama_binding(
     tmp_path, monkeypatch, llama_available
@@ -5754,12 +5462,12 @@ def test_prepare_target_survives_restart_and_never_claims_named_empty_environmen
 
     manager = open_store()
     user = manager.create("PaddleOCR ONNX · CPU")
-    prepared = manager.prepare_target("paddleocr-ort-cpu")
+    prepared = manager.prepare_target("paddleocr-ort-directml")
     assert prepared["id"] != user["id"]
     assert prepared["status"] == "empty" and prepared["packages"] == []
-    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == prepared["id"]
+    assert manager.prepare_target("paddleocr-ort-directml")["id"] == prepared["id"]
     reopened = open_store()
-    assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == prepared["id"]
+    assert reopened.prepare_target("paddleocr-ort-directml")["id"] == prepared["id"]
     assert len(reopened.list()["environments"]) == 2
     assert reopened._read()["environments"][user["id"]]["status"] == "empty"
 
@@ -5781,12 +5489,12 @@ def test_prepare_target_reservation_recovers_interrupted_creation(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
     )
     with pytest.raises(OSError, match="interrupted"):
-        manager.prepare_target("paddleocr-ort-cpu")
-    reservation = manager._read()["prepare_targets"]["paddleocr-ort-cpu"]
+        manager.prepare_target("paddleocr-ort-directml")
+    reservation = manager._read()["prepare_targets"]["paddleocr-ort-directml"]
     monkeypatch.setattr(manager, "_create", create)
     with pytest.raises(ManagedEnvironmentError, match="reserved for preparation"):
         manager.create(reservation["name"])
-    target = manager.prepare_target("paddleocr-ort-cpu")
+    target = manager.prepare_target("paddleocr-ort-directml")
     assert target["id"] == reservation["environment_id"]
     assert len(manager.list()["environments"]) == 1
 
@@ -5800,7 +5508,7 @@ def test_missing_model_does_not_erase_installed_dependencies(tmp_path: Path) -> 
         base_python=sys._base_executable,
     )
     record = _write_record(
-        manager, "model-missing", status="installed", recipe="paddleocr-ort-cuda"
+        manager, "model-missing", status="installed", recipe="paddleocr-ort-directml"
     )
     result = manager._public_record(
         record, {"healthy": False, "reason": "engine_model_missing", "python": "python"}
@@ -5809,7 +5517,7 @@ def test_missing_model_does_not_erase_installed_dependencies(tmp_path: Path) -> 
     assert result["model_state"] == "missing"
     assert result["engine_state"] == "unverified"
     assert result["service_state"] == "not_started"
-    assert result["target_device"] == "cuda" and result["actual_device"] is None
+    assert result["target_device"] == "directml" and result["actual_device"] is None
 
 
 def test_preparation_reassigns_ownership_after_user_installs_another_recipe(
@@ -5822,14 +5530,14 @@ def test_preparation_reassigns_ownership_after_user_installs_another_recipe(
         runtime_manifest=manifest,
         base_python=sys._base_executable,
     )
-    previous = manager.prepare_target("paddleocr-ort-cpu")
+    previous = manager.prepare_target("paddleocr-ort-directml")
     data = manager._read()
     data["environments"][previous["id"]].update(status="installed", recipe="mineru-cpu")
     manager._registry.write_text(json.dumps(data), encoding="utf-8")
-    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    replacement = manager.prepare_target("paddleocr-ort-directml")
     assert replacement["id"] != previous["id"]
     assert replacement["status"] == "empty"
-    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    assert manager.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
     assert manager._read()["environments"][previous["id"]]["recipe"] == "mineru-cpu"
     assert Path(previous["python"]).is_file()
 
@@ -5853,20 +5561,22 @@ def test_deleted_preparation_target_ends_plan_lifecycle_and_rejects_stale_plan(
             "stale plan must not reach the installer"
         ),
     )
-    prepared = manager.prepare_target("paddleocr-ort-cpu")
-    plan = manager.preview_install(prepared["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    prepared = manager.prepare_target("paddleocr-ort-directml")
+    plan = manager.preview_install(
+        prepared["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     manager.delete(prepared["id"])
     # 删除即终结该对象的准备归属与落盘安装计划。
     data = manager._read()
-    assert not data.get("prepare_targets", {}).get("paddleocr-ort-cpu")
+    assert not data.get("prepare_targets", {}).get("paddleocr-ort-directml")
     assert not (
         manager.paths.state_root / "environment-plans" / f"{prepared['id']}.json"
     ).is_file()
-    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    replacement = manager.prepare_target("paddleocr-ort-directml")
     assert replacement["status"] == "empty"
     with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
         manager.install(
-            plan["plan_id"], replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], replacement["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
     # 拒绝发生在写入之前：新对象记录不被改写。
     record = manager._read()["environments"][replacement["id"]]
@@ -5890,7 +5600,9 @@ def test_manual_same_name_recreate_rejects_deleted_environment_plan(
         ),
     )
     first = manager.create("手工环境")
-    plan = manager.preview_install(first["id"], "paddleocr-ort-cpu", ("tuna-pypi",))
+    plan = manager.preview_install(
+        first["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+    )
     manager.delete(first["id"])
     second = manager.create("手工环境")
     assert second["id"] == first["id"]
@@ -5899,7 +5611,7 @@ def test_manual_same_name_recreate_rejects_deleted_environment_plan(
     ).is_file()
     with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
         manager.install(
-            plan["plan_id"], second["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+            plan["plan_id"], second["id"], "paddleocr-ort-directml", ("tuna-pypi",)
         )
 
 
@@ -5920,20 +5632,20 @@ def test_preparation_repairs_owned_stale_active_paddle_environment(
         )
 
     manager = open_store()
-    previous = manager.prepare_target("paddleocr-ort-cpu")
+    previous = manager.prepare_target("paddleocr-ort-directml")
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         data["environments"][previous["id"]].update(
             status="installed",
-            recipe="paddleocr-ort-cpu",
+            recipe="paddleocr-ort-directml",
             recipe_lock="0" * 64,
         )
         data["active_id"] = previous["id"]
         data["active_revision"] += 1
         _atomic_json(manager._registry, data)
     # scope 锁过期：探针健康的活动环境也无法按当前配方复用。
-    assert manager.find_compatible("paddleocr-ort-cpu")["selected"] is None
-    replacement = manager.prepare_target("paddleocr-ort-cpu")
+    assert manager.find_compatible("paddleocr-ort-directml")["selected"] is None
+    replacement = manager.prepare_target("paddleocr-ort-directml")
     assert replacement["id"] == previous["id"]
     assert replacement["status"] == "installed"
     # 原活动环境完整保留且仍为活动环境。
@@ -5942,13 +5654,13 @@ def test_preparation_repairs_owned_stale_active_paddle_environment(
     assert data["environments"][previous["id"]]["status"] == "installed"
     # 明确确认后使用维护屏障重建，预览不改变旧记录。
     plan = manager.preview_install(
-        replacement["id"], "paddleocr-ort-cpu", ("tuna-pypi",)
+        replacement["id"], "paddleocr-ort-directml", ("tuna-pypi",)
     )
     assert plan["environment_id"] == replacement["id"]
     assert plan["requires_service_stop"]
-    assert manager.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    assert manager.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
     reopened = open_store()
-    assert reopened.prepare_target("paddleocr-ort-cpu")["id"] == replacement["id"]
+    assert reopened.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
     listed = reopened.list()
     assert len(listed["environments"]) == 1
     assert listed["active_id"] == previous["id"]

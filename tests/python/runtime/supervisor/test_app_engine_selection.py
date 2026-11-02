@@ -260,7 +260,7 @@ class TestSubmitEngineSelection:
             _FakeOcrEngine(
                 OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.PREPARATION_REQUIRED,
-                required_component="paddleocr-ort-cpu",
+                required_component="paddleocr-ort-directml",
             ),
         ]
         module, _ = _module(tmp_path, engines)
@@ -270,7 +270,7 @@ class TestSubmitEngineSelection:
         assert resp.status_code == 428
         body = resp.json()
         assert body["code"] == "OCR_ENGINE_PREPARATION_REQUIRED"
-        assert body["detail"]["required_component"] == "paddleocr-ort-cpu"
+        assert body["detail"]["required_component"] == "paddleocr-ort-directml"
 
     async def test_job_recognition_mode_extension_is_strictly_rejected(
         self, tmp_path: Any, engines: list[_FakeOcrEngine]
@@ -383,7 +383,9 @@ class TestOmittedEngineFreezeParity:
     ) -> None:
         from vibeocr.runtime_contracts import SettingsSnapshot
 
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+        monkeypatch.setenv(
+            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
+        )
         monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "managed-default")
         monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_REVISION", "3")
         module, _ = _module(
@@ -424,7 +426,7 @@ class TestOmittedEngineFreezeParity:
         assert snapshots[0] is not None and snapshots[1] is not None
         assert snapshots[0] == snapshots[1]
         assert snapshots[0]["source"] == "modelscope"
-        assert snapshots[0]["recipe"] == "paddleocr-ort-cpu"
+        assert snapshots[0]["recipe"] == "paddleocr-ort-directml"
         assert snapshots[0]["environment_id"] == "managed-default"
         assert snapshots[0]["environment_revision"] == "3"
 
@@ -433,7 +435,9 @@ class TestOmittedEngineFreezeParity:
     ) -> None:
         """缺省 engine（解析为 paddleocr）携带环境不匹配设备时，提交期即
         拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+        monkeypatch.setenv(
+            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
+        )
         module, executor = _module(
             tmp_path,
             [
@@ -729,14 +733,16 @@ async def test_mineru_only_composition_preloads_real_service_interface(
         module.shutdown_now()
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda", "directml"])
+@pytest.mark.parametrize("device", ["cpu", "directml"])
 @pytest.mark.parametrize("ready", [True, False])
 async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
     tmp_path, monkeypatch, device, ready
 ):
     from vibeocr.runtime.host.composition import _build_recognition_mode_registry
 
-    recipe = f"paddleocr-ort-{device}"
+    # 统一推理闭包：受管配方恒为 directml；device 只影响默认模式断言
+    # （cpu 是 directml 环境内的合法设备选择）。
+    recipe = "paddleocr-ort-directml"
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
     status = (
         EngineAvailability.READY if ready else EngineAvailability.PREPARATION_REQUIRED
@@ -833,7 +839,7 @@ async def test_legacy_retained_catalog_settings_and_submit_reject_ort_only_optio
             assert entries[mode]["reason_code"] == (
                 "mode_requires_paddle_onnx_environment"
             )
-            assert entries[mode]["required_component"] == "paddleocr-ort-cpu"
+            assert entries[mode]["required_component"] == "paddleocr-ort-directml"
             saved = await http.put(
                 "/v2/settings",
                 json={

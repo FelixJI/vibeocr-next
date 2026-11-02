@@ -88,13 +88,26 @@ CPU_PINS = [
     ("onnxruntime", "1.30.0"),
 ]
 DML_PINS = [
-    *[(name, version) for name, version in CPU_PINS if name.startswith("winrt-")],
+    *[
+        (name, "3.2.1")
+        for name in (
+            "winrt-runtime",
+            "winrt-windows-foundation",
+            "winrt-windows-foundation-collections",
+            "winrt-windows-globalization",
+            "winrt-windows-graphics-imaging",
+            "winrt-windows-media-ocr",
+            "winrt-windows-storage-streams",
+        )
+    ],
     ("fastapi", "1.0.0"),
     ("numpy", "2.3.5"),
     ("paddleocr", "3.7.0"),
     ("paddlex", "3.7.2"),
     ("opencv-contrib-python", "4.10.0.84"),
     ("onnxruntime-directml", "1.24.4"),
+    ("mineru", "4.1.3"),
+    ("onnx", "1.23.2"),
 ]
 
 
@@ -105,13 +118,6 @@ def _pool_locks(root: Path) -> list[tuple[str, Path]]:
             _write_lock(
                 root / "requirements-win-x64-base.lock",
                 BASE_PINS,
-            ),
-        ),
-        (
-            "win-x64-paddle-ort-cpu",
-            _write_lock(
-                root / "requirements-win-x64-paddle-ort-cpu.lock",
-                CPU_PINS,
             ),
         ),
         (
@@ -158,15 +164,12 @@ def test_pool_deduplicates_shared_wheels_and_keeps_conflicting_versions(
         work_dir=tmp_path / "work",
         output=output,
     )
-    # 三个成员 requirements zip + 一个 wheel-only pool 分片。
+    # 两个成员 requirements zip（base + 统一推理闭包）+ wheel-only pool 分片。
     requirements_archives = sorted(path for path in written if path != output)
     assert requirements_archives == [
         tmp_path
         / "out"
         / "vibeocr-runtime-pool-win-x64-0.7.0.requirements-win-x64-base.zip",
-        tmp_path
-        / "out"
-        / "vibeocr-runtime-pool-win-x64-0.7.0.requirements-win-x64-paddle-ort-cpu.zip",
         tmp_path
         / "out"
         / "vibeocr-runtime-pool-win-x64-0.7.0.requirements-win-x64-paddle-ort-directml.zip",
@@ -184,14 +187,15 @@ def test_pool_deduplicates_shared_wheels_and_keeps_conflicting_versions(
         assert text.splitlines() == [
             f"{name}=={version}" for name, version in expected
         ], profile
-    # pool 只含去重后的 wheel：15 个唯一 wheel（numpy 两个版本共存），无清单。
+    # pool 只含去重后的 wheel：16 个唯一 wheel（numpy 两个版本共存），无清单。
     pool_members = _archive_members(output)
     assert "pack-requirements.txt" not in pool_members
-    assert len(pool_members) == len(set(pool_members)) == 15
+    assert len(pool_members) == len(set(pool_members)) == 16
     assert "numpy-2.5.3-py3-none-any.whl" in pool_members
     assert "numpy-2.3.5-py3-none-any.whl" in pool_members
-    assert "onnxruntime-1.30.0-py3-none-any.whl" in pool_members
     assert "onnxruntime-directml-1.24.4-py3-none-any.whl" in pool_members
+    assert "mineru-4.1.3-py3-none-any.whl" in pool_members
+    assert "onnx-1.23.2-py3-none-any.whl" in pool_members
     assert "fastapi-1.0.0-py3-none-any.whl" in pool_members
 
 
@@ -315,6 +319,7 @@ def test_pool_main_prints_every_artifact(
         == 0
     )
     printed = [Path(line) for line in capsys.readouterr().out.splitlines()]
-    assert len(printed) == 4
+    # 两个成员 requirements zip + 一个 pool 分片。
+    assert len(printed) == 3
     assert output in printed
     assert all(path.is_file() for path in printed)

@@ -1524,7 +1524,7 @@ async def test_remote_mineru_preload_reports_actionable_configuration_error(
     [
         ("paddleocr", "tiny", "cpu", 200),
         ("paddleocr", "small", "directml", 200),
-        ("paddleocr", "medium", "cuda", 200),
+        ("paddleocr", "medium", "directml", 200),
         (None, "small", "cpu", 200),
         ("windows", "small", "cpu", 400),
         ("rapidocr", "small", "cpu", 400),
@@ -1549,7 +1549,9 @@ async def test_http_preserves_validated_engine_for_paddle_model_and_provider_opt
             RecognitionModeAvailability.READY
         )
     )
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", f"paddleocr-ort-{device}")
+    # 统一推理闭包：受管配方恒为 directml，device 只是请求内设备选择
+    # （cpu/directml 同闭包切换）。
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setattr(
         directml_devices,
         "hardware_adapters",

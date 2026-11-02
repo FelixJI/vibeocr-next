@@ -27,7 +27,7 @@ def runner_constructor_seam(monkeypatch):
 
 
 def test_admission_snapshot_keeps_source_models_environment_and_device(monkeypatch):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "first")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_REVISION", "4")
     snapshot = onnx.freeze_request(
@@ -42,7 +42,7 @@ def test_admission_snapshot_keeps_source_models_environment_and_device(monkeypat
         assert current["source"] == "modelscope"
         assert current["environment_revision"] == "4"
         assert set(current["models"]) == {"PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec"}
-        assert current["provider"] == "CPUExecutionProvider"
+        assert current["provider"] == "DmlExecutionProvider"
     assert onnx.current_snapshot()["environment_revision"] == "5"
 
 
@@ -68,7 +68,7 @@ def test_directml_uses_dxgi_hardware_ordinal_without_cuda(monkeypatch):
 def test_wrong_closure_or_source_fails_before_model_preparation(
     monkeypatch, options, sources
 ):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     with pytest.raises(onnx.PaddleOnnxError):
         onnx.freeze_request(options, sources)
 
@@ -76,7 +76,7 @@ def test_wrong_closure_or_source_fails_before_model_preparation(
 def test_constructor_signature_changes_with_real_model_and_auxiliary_selection(
     monkeypatch,
 ):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     tiny = onnx.constructor_kwargs(
         SimpleNamespace(model_preset="tiny", use_doc_orientation_classify=False)
     )
@@ -204,10 +204,10 @@ def test_dml_run_is_serialized_until_generator_is_consumed(monkeypatch):
 def test_changed_environment_rejects_before_preparing_models(
     monkeypatch, variable, value
 ):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "original")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_REVISION", "4")
-    snapshot = onnx.freeze_request({})
+    snapshot = onnx.freeze_request({"device": "cpu"})
     monkeypatch.setenv(variable, value)
     monkeypatch.setattr(
         onnx,
@@ -223,10 +223,12 @@ def test_local_only_onnx_missing_model_never_downloads_or_replaces_view(
 ):
     from vibeocr.runtime.environments import model_cache
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path / "private"))
     monkeypatch.setenv("VIBEOCR_SHARED_MODEL_CACHE", str(tmp_path / "shared"))
-    snapshot = onnx.freeze_request({"use_doc_orientation_classify": False})
+    snapshot = onnx.freeze_request(
+        {"device": "cpu", "use_doc_orientation_classify": False}
+    )
     current = tmp_path / "private/onnx/small" / snapshot["source"] / "current.json"
     current.parent.mkdir(parents=True)
     current.write_text('{"generation":"old-view"}', encoding="utf-8")
@@ -241,7 +243,7 @@ def test_local_only_onnx_missing_model_never_downloads_or_replaces_view(
 
 
 def test_auxiliary_constructor_settings_follow_admission_snapshot(monkeypatch):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     snapshot = onnx.freeze_request(
         {"use_doc_orientation_classify": False, "use_doc_unwarping": True}
     )
@@ -265,16 +267,24 @@ def test_auxiliary_constructor_settings_follow_admission_snapshot(monkeypatch):
 def test_factory_explicitly_disables_unselected_auxiliary_models(tmp_path, monkeypatch):
     import sys
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
-    snapshot = onnx.freeze_request({"use_doc_orientation_classify": False})
+    snapshot = onnx.freeze_request(
+        {"device": "cpu", "use_doc_orientation_classify": False}
+    )
     monkeypatch.setattr(
         onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
     )
     monkeypatch.setitem(
         sys.modules,
         "onnxruntime",
-        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        SimpleNamespace(
+            get_available_providers=lambda: [
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
     )
     native, _ = make_pipeline("CPUExecutionProvider", count=2)
     observed = {}
@@ -295,21 +305,20 @@ def test_factory_explicitly_disables_unselected_auxiliary_models(tmp_path, monke
 
 @pytest.mark.parametrize(
     "recipe,device",
-    [("cpu", "cpu"), ("cuda", "cuda"), ("cuda", "cpu"), ("directml", "directml")],
+    [("directml", "directml"), ("directml", "cpu")],
 )
-def test_factory_cuda_layout_is_shared_by_all_models_and_isolated_from_other_devices(
+def test_factory_layout_is_shared_by_all_models_and_isolated_from_other_devices(
     tmp_path, monkeypatch, recipe, device
 ):
     import sys
 
-    from vibeocr.runtime.recognition import directml_devices, onnx_devices
+    from vibeocr.runtime.recognition import directml_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", f"paddleocr-ort-{recipe}")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
     monkeypatch.setattr(
         directml_devices, "hardware_adapters", lambda: [{"device_id": 2}]
     )
-    monkeypatch.setattr(onnx_devices, "setup_cuda_plugin", lambda: device == "cuda")
     snapshot = onnx.freeze_request(
         {"device": device, "use_doc_unwarping": True, "use_textline_orientation": True}
     )
@@ -336,8 +345,6 @@ def test_factory_cuda_layout_is_shared_by_all_models_and_isolated_from_other_dev
     pipeline = onnx.create_pipeline(json.dumps(snapshot))
     config = observed["engine_config"]
     expected = {} if device == "cpu" else {"device_id": str(snapshot["device_id"])}
-    if device == "cuda":
-        expected["prefer_nhwc"] = "1"
     assert config["provider_options"] == [expected]
     assert len(pipeline.sessions) == 5
     assert all(runner.session.fallback_disabled for runner in runners)
@@ -364,11 +371,17 @@ def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
     from vibeocr.runtime.recognition.ocr_service import OCRService
     from vibeocr.runtime.recognition.pipeline_cache_manager import PipelineCacheManager
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setitem(
         __import__("sys").modules,
         "onnxruntime",
-        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        SimpleNamespace(
+            get_available_providers=lambda: [
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
     )
     service = object.__new__(OCRService)
     service._pipelines = {}
@@ -392,12 +405,12 @@ def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
         assert manager.status()["pinned_pipelines"] == (["OCR"] if pinned else [])
         assert manager._active_counts == {"OCR": 1}
         snapshot = json.loads(kwargs["_onnx_request"])
-        native, runners = make_pipeline("CPUExecutionProvider", count=2)
+        native, runners = make_pipeline("DmlExecutionProvider", count=2)
         # The current snapshots use 2/3/4 runners, so model exactly their selected owners.
         nodes = native.paddlex_pipeline._pipeline
         if "PP-LCNet_x1_0_doc_ori" in snapshot["models"]:
             runner = SimpleNamespace(
-                session=Session("CPUExecutionProvider"), model_dir="docori"
+                session=Session(snapshot["provider"]), model_dir="docori"
             )
             runners.append(runner)
             nodes.doc_preprocessor_pipeline = SimpleNamespace(
@@ -405,7 +418,7 @@ def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
             )
         if "PP-LCNet_x0_25_textline_ori" in snapshot["models"]:
             runner = SimpleNamespace(
-                session=Session("CPUExecutionProvider"), model_dir="lineori"
+                session=Session(snapshot["provider"]), model_dir="lineori"
             )
             runners.append(runner)
             nodes.textline_orientation_model = SimpleNamespace(runner=runner)
@@ -473,70 +486,6 @@ def test_real_cache_replacement_closes_old_sessions_and_preserves_current_lease(
         manager.release(heavy_only=False, force=True)
 
 
-@pytest.mark.parametrize("failure", ["missing", "rejected"])
-def test_cuda_plugin_failure_is_typed_before_any_factory_or_session(
-    tmp_path, monkeypatch, failure
-):
-    import sys
-
-    from vibeocr.runtime.recognition import onnx_devices
-
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cuda")
-    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
-    plugin = tmp_path / "incompatible.dll"
-    if failure == "rejected":
-        plugin.write_bytes(b"")
-    monkeypatch.setenv("VIBEOCR_ORT_CUDA_EP_DLL", str(plugin))
-    monkeypatch.delenv("VIBEOCR_RUNTIME_ROOT", raising=False)
-    monkeypatch.setattr(onnx_devices, "_state", {})
-    monkeypatch.setenv("PATH", onnx_devices.os.environ.get("PATH", ""))
-    # The native loader is exercised separately; this unit seam needs no CUDA DLLs.
-    monkeypatch.setattr(
-        onnx_devices,
-        "_nvidia_dll_dirs",
-        lambda: ({"unused.dll": tmp_path / "unused.dll"}, []),
-    )
-    monkeypatch.setattr(
-        onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
-    )
-    calls = {"register": 0, "factory": 0, "session": 0}
-
-    def register(_name, path):
-        calls["register"] += 1
-        assert path == str(plugin)
-        raise RuntimeError("incompatible binary fixture")
-
-    def factory(**_kwargs):
-        calls["factory"] += 1
-        pytest.fail("rejected CUDA must not construct a CPU or Paddle pipeline")
-
-    def session(*_args, **_kwargs):
-        calls["session"] += 1
-        pytest.fail("rejected CUDA must not construct any ORT session")
-
-    monkeypatch.setitem(
-        sys.modules,
-        "onnxruntime",
-        SimpleNamespace(
-            register_execution_provider_library=register,
-            get_available_providers=lambda: ["CPUExecutionProvider"],
-            InferenceSession=session,
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=factory))
-    snapshot = onnx.freeze_request(
-        {"device": "cuda", "use_doc_orientation_classify": False}
-    )
-    with pytest.raises(onnx.PaddleOnnxError, match="CUDA DLL/plugin unavailable"):
-        onnx.create_pipeline(json.dumps(snapshot), local_models_only=True)
-    assert calls == {
-        "register": int(failure == "rejected"),
-        "factory": 0,
-        "session": 0,
-    }
-    assert onnx_devices._state == {"failed": True}
-
-
 def test_directml_absent_hardware_rejects_admission_before_model_preparation(
     monkeypatch,
 ):
@@ -560,7 +509,7 @@ def test_directml_absent_hardware_rejects_admission_before_model_preparation(
 def test_retained_graph_prepares_every_role_without_retired_assets(
     monkeypatch, pipeline_id, wireless
 ):
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     snapshot = onnx.freeze_request(
         {
             "use_doc_orientation_classify": False,
@@ -596,7 +545,7 @@ def test_failed_partial_constructor_releases_only_its_thread_owned_sessions(
 ):
     import sys
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
     monkeypatch.setattr(
         onnx, "prepare_models", lambda *_a, **_kw: SimpleNamespace(root=tmp_path)
@@ -604,7 +553,13 @@ def test_failed_partial_constructor_releases_only_its_thread_owned_sessions(
     monkeypatch.setitem(
         sys.modules,
         "onnxruntime",
-        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        SimpleNamespace(
+            get_available_providers=lambda: [
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
     )
 
     class Runner:
@@ -643,7 +598,13 @@ def test_graph_validation_counts_duplicate_model_sessions_and_closes_all_on_mism
     monkeypatch.setitem(
         sys.modules,
         "onnxruntime",
-        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        SimpleNamespace(
+            get_available_providers=lambda: [
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
     )
     native, runners = make_pipeline("CPUExecutionProvider", count=2)
     runners[0].model_dir = runners[1].model_dir = "shared-asset"
@@ -812,8 +773,8 @@ def test_structure_config_replaces_wireless_weight_before_model_admission(
 ):
     import sys
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
-    snapshot = onnx.freeze_request({}, pipeline_id="PP-StructureV3")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
+    snapshot = onnx.freeze_request({"device": "cpu"}, pipeline_id="PP-StructureV3")
     monkeypatch.setitem(
         sys.modules,
         "paddlex.inference",
@@ -843,7 +804,13 @@ def test_structure_predict_uses_both_official_wireless_models_by_default(monkeyp
     monkeypatch.setitem(
         sys.modules,
         "onnxruntime",
-        SimpleNamespace(get_available_providers=lambda: ["CPUExecutionProvider"]),
+        SimpleNamespace(
+            get_available_providers=lambda: [
+                "CPUExecutionProvider",
+                "DmlExecutionProvider",
+            ],
+            ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential"),
+        ),
     )
     native, _runners = make_pipeline("CPUExecutionProvider", count=2)
     native.predict = lambda **kwargs: iter((kwargs,))

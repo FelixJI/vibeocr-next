@@ -408,8 +408,9 @@ async def _selection_http_checks() -> None:
             "component_variant_catalog"
         ]["variants"]
         variant_keys = {(v["feature_id"], v["accelerator"]) for v in variants}
-        if not variants or len(variant_keys) != len(variants):
+        if len(variant_keys) != len(variants):
             raise RuntimeError("component variant business keys are not unique")
+        # 统一推理闭包后组件档位全部退役，可选目录允许为空。
         selectable = {v["component_id"] for v in variants}
         if {
             "ocr_engine",
@@ -417,11 +418,14 @@ async def _selection_http_checks() -> None:
             "image_code_tools",
         }.intersection(selectable):
             raise RuntimeError("base components must not be selectable variants")
-        # 引擎 catalog 的 required_component 必须是可准备的组件。
+        # 引擎 catalog 的 required_component 指向 managed 统一推理闭包配方
+        # （paddleocr-ort-directml），不再要求出现在组件档位目录中；但必须
+        # 是已知的受管配方 id。
         engine_catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
+        managed_recipes = {"paddleocr-ort-directml"}
         for entry in engine_catalog["engines"]:
             required = entry.get("required_component")
-            if required is not None and required not in selectable:
+            if required is not None and required not in selectable | managed_recipes:
                 raise RuntimeError(
                     f"engine {entry['id']} requires unknown component {required}"
                 )

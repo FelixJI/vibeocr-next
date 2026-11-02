@@ -34,7 +34,19 @@ BASE_PROFILE = "win-x64-base"
 # #270：原生 Paddle 组件身份保留在 PROFILE_COMPONENTS/迁移表中供历史
 # 解析（旧记录/旧 marker 读取），但不再是可新安装组件：新目录、显式
 # 请求与缺省（None）闭包一律排除它们，不再落到任何安装 scope。
-RETIRED_NATIVE_PADDLE_COMPONENTS = frozenset({"paddleocr-cpu", "paddleocr-cuda"})
+# 统一推理闭包后，MinerU 组件档位（mineru-cpu/mineru-cuda）与 CUDA/Torch
+# 运行环境（gpu_runtime）同样退役：MinerU 随 paddleocr-ort-directml 环境
+# 携带，这些 id 只作为历史读取基准保留。
+RETIRED_INSTALLABLE_COMPONENTS = frozenset(
+    {
+        "paddleocr-cpu",
+        "paddleocr-cuda",
+        "mineru-cpu",
+        "mineru-cuda",
+        "gpu_runtime",
+    }
+)
+RETIRED_NATIVE_PADDLE_COMPONENTS = RETIRED_INSTALLABLE_COMPONENTS
 
 # Backend release 声明的候选源。Protocol 允许同 kind 多候选；单次选择
 # TUNA 是发布/运行时默认 package index，官方 PyPI 保留为显式候选，

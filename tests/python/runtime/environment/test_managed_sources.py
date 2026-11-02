@@ -246,7 +246,7 @@ def test_preview_binds_requested_effective_and_config_revision(
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
 
-    inherited = manager.preview_install(a["id"], "paddleocr-ort-cpu")
+    inherited = manager.preview_install(a["id"], "paddleocr-ort-directml")
     assert inherited["requested_source_ids"] is None
     assert inherited["source_ids"] == [
         "tuna-pypi",
@@ -272,7 +272,7 @@ def test_preview_binds_requested_effective_and_config_revision(
         "usage": "online_index",
     }
 
-    explicit = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
+    explicit = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
     assert explicit["requested_source_ids"] == ["pypi"]
     assert explicit["source_ids"] == [
         "pypi",
@@ -283,7 +283,9 @@ def test_preview_binds_requested_effective_and_config_revision(
 
     # 全局默认参与叠加：显式选模型源时 package 继承全局默认。
     manager.set_sources(None, "pypi", None)
-    combined = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("modelscope",))
+    combined = manager.preview_install(
+        a["id"], "paddleocr-ort-directml", ("modelscope",)
+    )
     assert combined["requested_source_ids"] == ["modelscope"]
     assert combined["source_ids"] == [
         "pypi",
@@ -306,8 +308,10 @@ def test_preview_binds_requested_effective_and_config_revision(
 
     # 来源配置变化 → 旧计划 confirm 时 stale；重新预览拿到新修订。
     with pytest.raises(RuntimeInstallPlanStale, match="preview again"):
-        manager.install(explicit["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
-    refreshed = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
+        manager.install(
+            explicit["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",)
+        )
+    refreshed = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
     assert refreshed["source_config_revision"] == 1
 
 
@@ -326,9 +330,9 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     _stub_installed_probe(manager, monkeypatch)
     _omit_unused_pip_bootstrap(monkeypatch)
     a = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
+    plan = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
     with pytest.raises(ManagedEnvironmentError, match="synthetic download failure"):
-        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
+        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",))
 
     # 失败终态冻结请求/生效来源，重启（重建 store）后仍可查。
     failure = next(
@@ -345,7 +349,7 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     ]
 
     # 后续新预览不冲掉旧来源证据。
-    manager.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
+    manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
     assert (
         next(item for item in manager.list()["environments"] if item["id"] == a["id"])[
             "last_install_failure"
@@ -354,14 +358,14 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     )
     # 旧 plan 已被新预览取代 → confirm 旧计划 stale（重新预览是显式动作）。
     with pytest.raises(RuntimeInstallPlanStale):
-        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",))
+        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",))
 
     # 未重新预览时同计划 retry 保留原意图：同来源、同计划成功并留下证据。
     retryable = _open(tmp_path, manifest, component, install_runner=flaky_install)
     _stub_installed_probe(retryable, monkeypatch)
-    retry_plan = retryable.preview_install(a["id"], "paddleocr-ort-cpu", ("pypi",))
+    retry_plan = retryable.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
     installed = retryable.install(
-        retry_plan["plan_id"], a["id"], "paddleocr-ort-cpu", ("pypi",)
+        retry_plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",)
     )
     assert installed["status"] == "installed"
     assert installed["source_ids"] == [
@@ -393,14 +397,14 @@ def test_inherited_install_uses_resolved_defaults(
     a = _write_record(manager, "a" * 32)
     manager.set_sources(None, "pypi", None)
     manager.set_sources(a["id"], "tuna-pypi", None)
-    plan = manager.preview_install(a["id"], "paddleocr-ort-cpu")  # 继承环境配置
+    plan = manager.preview_install(a["id"], "paddleocr-ort-directml")  # 继承环境配置
     assert plan["requested_source_ids"] is None
     assert plan["source_ids"] == [
         "tuna-pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
-    installed = manager.install(plan["plan_id"], a["id"], "paddleocr-ort-cpu")
+    installed = manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml")
     assert installed["source_ids"] == [
         "tuna-pypi",
         "paddleocr-modelscope",
@@ -548,7 +552,7 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
         "action": "preview_install",
         **base,
         "environment_id": a["id"],
-        "recipe": "paddleocr-ort-cpu",
+        "recipe": "paddleocr-ort-directml",
     }
     assert main(["--request-json", json.dumps(preview)]) == 0
     payload = json.loads(capsys.readouterr().out)["result"]
@@ -608,7 +612,7 @@ def test_venv_failure_retains_sanitized_diagnostics(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
     diagnostic = (
         "x" * 5000 + "\nvenv failed\nC:\\private\\fixture\npassword=fixture-secret"
     )
@@ -619,7 +623,7 @@ def test_venv_failure_retains_sanitized_diagnostics(
 
     monkeypatch.setattr(subprocess, "run", failed_venv)
     with pytest.raises(ManagedEnvironmentError, match=f"exit {returncode}"):
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
     persisted = manager._read()["environments"][record["id"]]
     failure = persisted["last_install_operation"]
     assert failure["reason_code"] == "venv_creation_failed"
@@ -743,7 +747,7 @@ def test_accepted_cancellation_records_terminal_failure_before_return(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
     receipts = []
 
     def venv(args, **kwargs):
@@ -772,7 +776,7 @@ def test_accepted_cancellation_records_terminal_failure_before_return(
 
     monkeypatch.setattr(manager, "_probe", probe)
     with pytest.raises(ManagedEnvironmentInstallCancelled):
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
     assert receipts == [True]
     persisted = manager._read()["environments"][record["id"]]
     assert persisted["revision"] == record["revision"]
@@ -799,7 +803,7 @@ def test_terminal_commit_rejects_late_cancellation(
     manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component, install_runner=lambda *_args: None)
     record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
 
     def run(args, **kwargs):
         result = subprocess.CompletedProcess(
@@ -814,9 +818,9 @@ def test_terminal_commit_rejects_late_cancellation(
     _stub_installed_probe(manager, monkeypatch)
     if failure:
         with pytest.raises(ManagedEnvironmentError, match="natural failure"):
-            manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
+            manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
     else:
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-cpu")
+        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
     before = manager._registry.read_text(encoding="utf-8")
     receipts = []
     manager.cancel_install(receipts.append)

@@ -386,15 +386,11 @@ def _build_recognition_mode_registry(
             )
         if not is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             # #270：保留的 Paddle 模式不再有原生 PaddlePaddle 后端；
-            # 旧原生环境不再作为可执行后端，提示准备对应 ONNX 环境。
+            # 旧原生环境不再作为可执行后端，提示准备统一推理闭包环境。
             return ModeAvailability(
                 RecognitionModeAvailability.PREPARATION_REQUIRED,
                 reason_code="mode_requires_paddle_onnx_environment",
-                required_component=(
-                    "paddleocr-ort-cuda"
-                    if accelerator == "nvidia_cuda"
-                    else "paddleocr-ort-cpu"
-                ),
+                required_component="paddleocr-ort-directml",
             )
         if definition.engine is not None:
             descriptors = {

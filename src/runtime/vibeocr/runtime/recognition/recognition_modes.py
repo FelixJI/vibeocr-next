@@ -187,13 +187,15 @@ def resolve_default_recognition_mode(
     return definition.mode_id
 
 
+# 统一推理闭包：全部 Paddle ONNX 模式与 MinerU 文档解析都由
+# paddleocr-ort-directml 环境承载（随包 mineru）。
 _DEFAULT_REQUIRED_COMPONENTS = {
-    RecognitionModeId.PADDLE_TEXT: "paddleocr-ort-cpu",
-    RecognitionModeId.PADDLE_STRUCTURE: "paddleocr-ort-cpu",
-    RecognitionModeId.PADDLE_DOCUMENT_VL: "paddleocr-ort-cpu",
-    RecognitionModeId.MINERU_DOCUMENT: "mineru-cpu",
-    RecognitionModeId.PADDLE_TABLE: "paddleocr-ort-cpu",
-    RecognitionModeId.PADDLE_FORMULA: "paddleocr-ort-cpu",
+    RecognitionModeId.PADDLE_TEXT: "paddleocr-ort-directml",
+    RecognitionModeId.PADDLE_STRUCTURE: "paddleocr-ort-directml",
+    RecognitionModeId.PADDLE_DOCUMENT_VL: "paddleocr-ort-directml",
+    RecognitionModeId.MINERU_DOCUMENT: "paddleocr-ort-directml",
+    RecognitionModeId.PADDLE_TABLE: "paddleocr-ort-directml",
+    RecognitionModeId.PADDLE_FORMULA: "paddleocr-ort-directml",
 }
 
 

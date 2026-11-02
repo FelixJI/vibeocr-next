@@ -2293,21 +2293,9 @@ class RuntimeInstaller:
                 blockers.append(
                     {"code": "platform_unsupported", "next_action": "use_windows_x64"}
                 )
-            if (
-                self.accelerator == "nvidia_cuda"
-                and self._desired_scope_ids()
-                != self.manifest.profiles[BASE_PROFILE].scopes[0].component_ids
-            ):
-                probe = probe_nvidia_driver()
-                if probe["status"] != "ok":
-                    # 探测超时（unknown）与命令失败同样按 fail-closed 处理，
-                    # 与抽 helper 前的 blocker 语义逐分支等价。
-                    blockers.append(
-                        {
-                            "code": probe["reason_code"] or "nvidia_driver_unavailable",
-                            "next_action": "install_supported_driver",
-                        }
-                    )
+            # NVIDIA 驱动安装门槛已随分设备档位退役：统一推理闭包走
+            # DirectML（不要求 NVIDIA 驱动），probe_nvidia_driver 仅保留在
+            # managed environments list() 的 hardware 投影里供前台展示。
             destinations = (
                 self.product_root,
                 self.paths.store_root,

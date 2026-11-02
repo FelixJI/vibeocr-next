@@ -18,9 +18,11 @@ from scripts.product_layout import (
 from scripts.release_smoke import _verify_runtime_code
 from tests.python.runtime.environment.test_runtime_installer import _release
 
+# 历史隔离 host 锁（不含 Paddle/MinerU）：统一闭包后 cpu 档位锁已删除，
+# 复用现存 base 锁内容满足同一 paddle_isolated 校验形态。
 CPU_HOST_LOCK = (
     Path(__file__).parents[2]
-    / "config/runtime/win-x64-cpu/requirements-win-x64-cpu.lock"
+    / "config/runtime/win-x64-base/requirements-win-x64-base.lock"
 )
 
 

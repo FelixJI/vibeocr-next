@@ -1246,8 +1246,8 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     DirectoryInfo? root = new(AppContext.BaseDirectory);
     while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
     Assert.NotNull(root);
-    string[] pins = File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", "win-x64-cu126",
-        "requirements-win-x64-cu126.lock"))
+    string[] pins = File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", "win-x64-paddle-ort-directml",
+        "requirements-win-x64-paddle-ort-directml.lock"))
       .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
       .Select(line => line.Trim().TrimEnd('\\').Trim()).ToArray();
     // 配方 pin 数随依赖锁定更新自然增减，不把历史数量包装成规模门禁；
