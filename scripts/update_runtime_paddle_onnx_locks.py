@@ -30,6 +30,14 @@ def main() -> int:
             "lock as constraints (untouched pins are still preferred from it)"
         ),
     )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help=(
+            "allow upgrading every pin to its latest compatible version "
+            "(otherwise uv prefers the pins already present in the output)"
+        ),
+    )
     args = parser.parse_args()
     uv = shutil.which("uv")
     if uv is None:
@@ -62,6 +70,7 @@ def main() -> int:
                 "windows",
                 "--generate-hashes",
                 *constraints,
+                *(["--upgrade"] if args.upgrade else []),
                 "--custom-compile-command",
                 "uv run python scripts/update_runtime_paddle_onnx_locks.py",
                 "--output-file",

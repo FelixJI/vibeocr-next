@@ -1,6 +1,6 @@
 """合成方向 fixture 的独立渲染检查，不需要 Paddle 或模型。"""
 
-import fitz
+import pymupdf as fitz
 from PIL import Image, ImageDraw
 
 from scripts.paddle_smoke_fixtures import draw_orientation_pdf, draw_structure_pdfs

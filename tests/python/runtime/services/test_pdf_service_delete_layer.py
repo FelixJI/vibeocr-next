@@ -1,6 +1,6 @@
 """delete_text_layers 词级 redact + 循环验证至清零。"""
 
-import fitz
+import pymupdf as fitz
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.pdf_service import PdfService
 

@@ -27,6 +27,14 @@ PROFILES = (
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=PROFILES, action="append")
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help=(
+            "allow upgrading every pin to its latest compatible version "
+            "(otherwise uv prefers the pins already present in the output)"
+        ),
+    )
     args = parser.parse_args()
     uv = shutil.which("uv")
     if uv is None:
@@ -48,6 +56,7 @@ def main() -> int:
                 "--python-platform",
                 "windows",
                 "--generate-hashes",
+                *(["--upgrade"] if args.upgrade else []),
                 "--custom-compile-command",
                 "uv run python scripts/update_runtime_host_locks.py",
                 "--output-file",

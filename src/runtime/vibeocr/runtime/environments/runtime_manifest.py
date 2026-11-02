@@ -420,11 +420,12 @@ def validate_requirements_lock(
             raise ManifestError("isolated host lock contains Paddle dependencies")
     if profile == "win-x64-base":
         # base 闭包只保留 Runtime 服务环境（PDF/二维码/Windows OCR 适配层），
-        # RapidOCR/RapidTable/onnxruntime 已随引擎退役移除；也不得混入 full
-        # 闭包的重型组件或任何 OpenCV 发行物（本仓不使用 contrib 专用模块，
-        # Paddle 环境自带 opencv-contrib-python）。winrt 投影的跨命名空间
-        # 依赖只声明在 [all] extra 里，但 await 完成回调与集合投影在运行时
-        # 导入 foundation 两个包；缺包时 Windows OCR 永久挂起。
+        # RapidOCR/RapidTable/onnxruntime 已随引擎退役移除（PDF 引擎用
+        # pymupdf-lite，不带 ORT layout 管线）；也不得混入 full 闭包的重型
+        # 组件或任何 OpenCV 发行物（本仓不使用 contrib 专用模块，Paddle 环境
+        # 自带 opencv-contrib-python）。winrt 投影的跨命名空间依赖只声明在
+        # [all] extra 里，但 await 完成回调与集合投影在运行时导入 foundation
+        # 两个包；缺包时 Windows OCR 永久挂起。
         for required in (
             "winrt-runtime",
             "winrt-windows-foundation",

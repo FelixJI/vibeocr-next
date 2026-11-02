@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
 from vibeocr.runtime.documents.pdf_service import PdfService, SaveResult

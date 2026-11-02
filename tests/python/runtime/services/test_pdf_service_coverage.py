@@ -6,8 +6,8 @@
 import logging
 from pathlib import Path
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.pdf_service import PdfService, SaveResult
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock

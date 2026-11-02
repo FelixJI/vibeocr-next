@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
 from vibeocr.runtime.documents.pdf_service import PdfService

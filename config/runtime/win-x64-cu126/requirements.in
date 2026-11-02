@@ -4,6 +4,9 @@
 # Host includes Base and MinerU; Paddle has a separate interpreter.
 -r ../win-x64-base/requirements.in
 mineru[torch]==4.0.10
+# docvortex 0.5.16+ 在 win-x64 强制 onnxruntime-directml，与 MinerU 4.0.10
+# 依赖的 onnxruntime（CPU 发行版）命名空间冲突；待上游统一后放开。
+docvortex<0.5.16
 opencv-python>=4.11
 torch @ https://download.pytorch.org/whl/cu126/torch-2.14.1%2Bcu126-cp313-cp313-win_amd64.whl
 torchvision @ https://download.pytorch.org/whl/cu126/torchvision-0.29.1%2Bcu126-cp313-cp313-win_amd64.whl

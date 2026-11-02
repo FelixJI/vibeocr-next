@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import fitz
+import pymupdf as fitz
 import pytest
 
 from scripts.verify_pdf_editing_export import verify_export
