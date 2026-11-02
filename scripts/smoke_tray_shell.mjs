@@ -59,6 +59,7 @@ async function main() {
   const candidate = path.join(smokeRoot, 'candidate');
   fs.mkdirSync(smokeRoot);
   fs.cpSync(source, candidate, { recursive: true, errorOnExist: true, force: false });
+  // --minimize-to-tray 验证“关闭按钮隐藏到托盘”语义（设置键名沿用 minimize_to_tray）。
   const minimizeToTray = process.argv.includes('--minimize-to-tray');
   if (minimizeToTray) {
     const configDirectory = path.join(candidate, 'state/config');
@@ -116,8 +117,12 @@ async function main() {
     evidence.openGestures = [];
     const icon = { AppPid: app.pid, FixturePid: helper.pid, Handle: initial.Owner.Handle, IconGuid: instanceId };
     for (const action of ['tray-left-click', 'tray-double-click']) {
-      await native(minimizeToTray ? 'minimize' : 'hide', { AppPid: app.pid, Handle: mainHandle });
-      if (minimizeToTray) await waitFor(async () => !(await state()).Main.Visible, 'Minimize did not hide to tray');
+      // 关闭到托盘：标题栏关闭（WM_CLOSE）只隐藏主窗，不退出进程。
+      await native(minimizeToTray ? 'close' : 'hide', { AppPid: app.pid, Handle: mainHandle });
+      if (minimizeToTray) {
+        await waitFor(async () => !(await state()).Main.Visible, 'Close did not hide to tray');
+        assert.equal(app.exitCode, null, 'Close-to-tray exited the isolated App.');
+      }
       await focusHelper();
       await native('tray-expose', icon);
       const input = JSON.parse(await native(action, icon));
@@ -134,10 +139,10 @@ async function main() {
       await native('restore', { AppPid: app.pid, Handle: mainHandle });
       if (mode === 'hidden') await native('hide', { AppPid: app.pid, Handle: mainHandle });
       if (mode === 'minimized') await native('minimize', { AppPid: app.pid, Handle: mainHandle });
-      if (minimizeToTray && mode === 'minimized') await waitFor(async () => !(await state()).Main.Visible, 'Minimize did not hide to tray');
       await focusHelper();
       const before = await state();
-      assert.equal(before.Main.Visible, mode !== 'hidden' && !(minimizeToTray && mode === 'minimized'));
+      // 最小化按钮任何时候都只最小化到任务栏：主窗保持可见（Iconic），设置开启也不隐藏。
+      assert.equal(before.Main.Visible, mode !== 'hidden');
       assert.equal(before.Main.Iconic, mode === 'minimized');
       assert.equal(before.ForegroundHandle, helper.handle);
       const record = { mode, before, cancellations: [] };

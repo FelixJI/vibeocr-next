@@ -77,12 +77,18 @@ public static class DesktopScreenQuery
 
     /// <summary>
     /// 前台窗口是否恰好覆盖给定显示器（无边框全屏）。最大化的有边框窗口
-    /// 会越出显示器约 7px，不会被误判。
+    /// 会越出显示器约 7px，不会被误判；桌面（Progman/WorkerW）虽铺满屏幕
+    /// 但不是全屏应用，主窗隐藏到托盘后前台落回桌面时不应触发退避。
     /// </summary>
     public static bool IsForegroundWindowFullscreen(PhysicalRectangle monitorBounds)
     {
         nint foreground = GetForegroundWindow();
         if (foreground == 0)
+        {
+            return false;
+        }
+
+        if (IsDesktopShellWindow(GetWindowClassName(foreground)))
         {
             return false;
         }
@@ -96,6 +102,16 @@ public static class DesktopScreenQuery
             && Math.Abs(rect.Top - monitorBounds.Y) <= FullscreenTolerancePx
             && Math.Abs(rect.Right - monitorBounds.Right) <= FullscreenTolerancePx
             && Math.Abs(rect.Bottom - monitorBounds.Bottom) <= FullscreenTolerancePx;
+    }
+
+    /// <summary>窗口类名是否为桌面 shell 窗口（桌面本体，铺满屏幕但非全屏应用）。</summary>
+    internal static bool IsDesktopShellWindow(string? className) =>
+        className is "Progman" or "WorkerW";
+
+    private static string? GetWindowClassName(nint window)
+    {
+        var name = new System.Text.StringBuilder(256);
+        return GetClassName(window, name, name.Capacity) > 0 ? name.ToString() : null;
     }
 
     private static void AddTaskbarEdge(HashSet<ScreenEdge> edges, nint taskbar)
@@ -129,6 +145,9 @@ public static class DesktopScreenQuery
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(nint window, out RectL rect);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int GetClassName(nint window, System.Text.StringBuilder name, int capacity);
 
     [DllImport("user32.dll")]
     private static extern nint MonitorFromRect(ref RectL rect, uint flags);

@@ -121,11 +121,7 @@ public sealed class ShellViewModel : INotifyPropertyChanged
         { SettingsError = "托盘设置保存失败，原配置已保留。"; }
     }
 
-    public void OnMinimized()
-    {
-        if (MinimizeToTray) HideToTray();
-    }
-
+    /// <summary>关闭到托盘：隐藏主窗，托盘图标负责恢复与退出。</summary>
     public void HideToTray()
     {
         _hideWindow();
