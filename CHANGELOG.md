@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+
+- **runtime:** 统一推理 Worker 空闲退出与持久运行 (#305) (1dc24f8)
+
+### Bug Fixes
+
+- **shell:** 修正关闭/最小化到托盘语义并修复主窗进托盘后悬浮工具栏失联 (#306) (cfc050e)
+
+### Dependencies
+
+- 全量升级三端依赖并切换 pymupdf-lite 2.0 (#307) (a3506df)
+
 ## 0.8.6
 
 ### Features
