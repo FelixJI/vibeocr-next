@@ -2537,12 +2537,12 @@ describe("AppShell", () => {
     // 识别参数编辑器承载 device 选项；保存走 recognition.setOptions。
     const deviceSelect = await screen.findByLabelText("运行设备");
     expect(deviceSelect).toHaveValue("cpu");
-    await user.selectOptions(deviceSelect, "cuda");
+    await user.selectOptions(deviceSelect, "directml");
     await user.click(screen.getByRole("button", { name: "保存参数" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "recognition.setOptions",
       modeId: "paddle_table",
-      options: { device: "cuda" },
+      options: { device: "directml" },
     });
     unmount();
   });
@@ -2947,7 +2947,7 @@ describe("AppShell", () => {
                 nextAction: "check_source_and_retry",
                 detail: "下载源连接失败。",
                 requestedSourceIds: null,
-                effectiveSourceIds: ["tuna-pypi"],
+                effectiveSourceIds: ["paddleocr-modelscope"],
               },
             },
           ],
@@ -2966,22 +2966,24 @@ describe("AppShell", () => {
               targetDevice: "cpu",
             },
           ],
-          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
             {
-              id: "tuna-pypi",
-              kind: "package_index",
-              displayName: "TUNA PyPI 镜像",
-              endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+              id: "paddleocr-modelscope",
+              kind: "paddleocr_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
             },
             {
-              id: "pypi",
-              kind: "package_index",
-              displayName: "PyPI 官方源",
-              endpoint: "https://pypi.org/simple",
+              id: "mineru-modelscope",
+              kind: "mineru_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
             },
           ],
-          environmentPackageSourceIds: ["tuna-pypi", "pypi"],
           environmentCanCancelInstall: true,
           environmentPlan: {
             planId: "plan-1",
@@ -2989,7 +2991,7 @@ describe("AppShell", () => {
             environmentRevision: 1,
             recipe: "paddleocr-ort-cpu",
             requestedRecipe: "paddleocr-ort-cpu",
-            sourceIds: ["tuna-pypi"],
+            sourceIds: ["paddleocr-modelscope"],
             requestedSourceIds: null,
             dependencies: ["paddleocr==3.2.0"],
           },
@@ -3019,13 +3021,13 @@ describe("AppShell", () => {
     );
     // 失败终态携带该操作绑定的请求/生效来源（请求为继承时不伪装显式）。
     expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
-      "请求源：跟随配置；生效源：TUNA PyPI 镜像",
+      "请求源：跟随配置；生效源：ModelScope",
     );
     await user.click(screen.getByText("本次依赖与来源明细（只读）"));
     expect(screen.getByText(/锁定依赖（1 项）/)).toBeVisible();
     expect(
       screen.getByText(
-        /计划：paddleocr-ort-cpu · 目标文档（失败后重新准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标文档（失败后重新准备）· 下载来源：ModelScope/,
       ),
     ).toBeVisible();
     expect(
@@ -3064,7 +3066,7 @@ describe("AppShell", () => {
     });
     restored.unmount();
   });
-  it("recommends catalog recipes with honest hardware gating and read-only reuse lookup", async () => {
+  it("recommends catalog recipes with read-only reuse lookup", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -3096,17 +3098,6 @@ describe("AppShell", () => {
         accelerator: "cpu",
         targetDevice: "cpu",
       },
-      {
-        id: "paddleocr-ort-cuda",
-        engine: "paddle",
-        family: "paddle-onnx",
-        familyDisplayName: "PaddleOCR ONNX",
-        provider: "CUDAExecutionProvider",
-        displayName: "PaddleOCR ONNX · NVIDIA CUDA",
-        configuredRecognitionTypes: ["text"],
-        accelerator: "nvidia_cuda",
-        targetDevice: "cuda",
-      },
     ];
     const settingsBase = {
       environments: [
@@ -3127,12 +3118,6 @@ describe("AppShell", () => {
       ],
       activeEnvironmentId: null,
       environmentRecipes: recipes,
-      // 真正不支持时明确禁用并给出原因（AC3）：驱动过旧。
-      environmentHardware: {
-        nvidiaDriverStatus: "unsupported",
-        nvidiaDriverReason: "nvidia_driver_incompatible",
-        nvidiaDriverVersion: "527.00",
-      },
     };
     const viewState: AppViewState = {
       connected: true,
@@ -3153,10 +3138,6 @@ describe("AppShell", () => {
         recipe: "paddleocr-ort-cpu",
       }),
     );
-    expect(
-      screen.getAllByText(/NVIDIA 驱动（Runtime 探测[^：]*）：不满足要求/)
-        .length,
-    ).toBeGreaterThan(0);
     // 目录分组来自 Runtime 投影，无前端臆造组合。
     expect(
       screen.getByText(/目标配置：PaddleOCR ONNX · CPU（文字识别，设备 cpu/),
@@ -3234,7 +3215,7 @@ describe("AppShell", () => {
       screen.queryByRole("button", { name: "切换到此环境并启动验证" }),
     ).not.toBeInTheDocument();
     // 切换引擎分区：MinerU 卡显式接管主导权后触发新配方的只读查询；
-    // 计划失效只在选择（后端/设备）变化时触发（见下方 CUDA 选择）。
+    // 计划失效只在选择（后端/设备）变化时触发。
     await user.click(screen.getByRole("button", { name: "查询可复用环境" }));
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
@@ -3242,24 +3223,6 @@ describe("AppShell", () => {
         recipe: "mineru-cpu",
       }),
     );
-    // 真正不支持的 GPU 后端明确禁用并给出原因，不发起查询；后端切换即
-    // 选择变化，同步失效旧计划。
-    await user.selectOptions(
-      screen.getByLabelText("Paddle 推理后端"),
-      "nvidia_cuda",
-    );
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
-    });
-    expect(
-      screen.getByText(
-        /不支持：当前 NVIDIA 驱动不满足安装要求；该配置当前不可选。/,
-      ),
-    ).toBeVisible();
-    expect(actions.run).not.toHaveBeenCalledWith({
-      type: "settings.findCompatibleEnvironment",
-      recipe: "paddleocr-ort-cuda",
-    });
     unmount();
   });
   it("prepares an unavailable recipe via auto-named create and a real preview without silent install", async () => {
@@ -3298,13 +3261,14 @@ describe("AppShell", () => {
           targetDevice: "cpu",
         },
       ],
-      environmentHardware: { nvidiaDriverStatus: "unknown" },
       environmentSources: [
         {
-          id: "tuna-pypi",
-          kind: "package_index",
-          displayName: "TUNA PyPI 镜像",
-          endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+          id: "paddleocr-modelscope",
+          kind: "paddleocr_model_registry",
+          provider: "modelscope",
+          displayName: "ModelScope",
+          endpoint: "https://www.modelscope.cn",
+          isDefault: true,
         },
       ],
     };
@@ -3431,7 +3395,7 @@ describe("AppShell", () => {
                 environmentRevision: 1,
                 recipe: "paddleocr-ort-cpu",
                 requestedRecipe: "paddleocr-ort-cpu",
-                sourceIds: ["tuna-pypi"],
+                sourceIds: ["paddleocr-modelscope"],
                 requestedSourceIds: null,
                 dependencies: ["paddleocr==3.2.0"],
               },
@@ -3442,7 +3406,7 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：paddleocr-ort-cpu · 目标PaddleOCR ONNX · CPU（空环境准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标PaddleOCR ONNX · CPU（空环境准备）· 下载来源：ModelScope/,
       ),
     ).toBeVisible();
     // AC8：安装只写入目标环境、不停止当前识别服务（活动保护以 Runtime 为准）。
@@ -3556,7 +3520,6 @@ describe("AppShell", () => {
           targetDevice: "cpu",
         },
       ],
-      environmentHardware: { nvidiaDriverStatus: "unknown" },
     };
     const viewState: AppViewState = {
       connected: true,
@@ -3855,7 +3818,24 @@ describe("AppShell", () => {
               targetDevice: "cpu",
             },
           ],
-          environmentPackageSourceIds: ["tuna-pypi"],
+          environmentSources: [
+            {
+              id: "paddleocr-modelscope",
+              kind: "paddleocr_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
+            },
+            {
+              id: "mineru-modelscope",
+              kind: "mineru_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
+            },
+          ],
         },
       },
     };
@@ -4205,8 +4185,6 @@ describe("AppShell", () => {
               targetDevice: "cpu",
             },
           ],
-          environmentHardware: { nvidiaDriverStatus: "unknown" },
-          environmentPackageSourceIds: ["tuna-pypi"],
           environmentPlan: {
             planId: "combined-plan",
             environmentId: "env-1",
@@ -4376,21 +4354,7 @@ describe("AppShell", () => {
               targetDevice: "cpu",
             },
           ],
-          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
-            {
-              id: "tuna-pypi",
-              isDefault: true,
-              kind: "package_index",
-              displayName: "TUNA PyPI 镜像",
-              endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
-            },
-            {
-              id: "pypi",
-              kind: "package_index",
-              displayName: "PyPI 官方源",
-              endpoint: "https://pypi.org/simple",
-            },
             {
               id: "paddleocr-huggingface",
               provider: "huggingface",
@@ -4428,17 +4392,10 @@ describe("AppShell", () => {
             },
           ],
           environmentDefaultSourceIds: [
-            "tuna-pypi",
             "paddleocr-huggingface",
             "mineru-huggingface",
           ],
           environmentResolvedDefaultSources: [
-            {
-              kind: "package_index",
-              id: "tuna-pypi",
-              displayName: "TUNA PyPI 镜像",
-              origin: "product_default",
-            },
             {
               kind: "paddleocr_model_registry",
               id: "paddleocr-huggingface",
@@ -4462,13 +4419,10 @@ describe("AppShell", () => {
       <App actions={actions} viewState={viewState} />,
     );
     // #294：来源设置在常规页面直接可见，验证目录/默认值与保存路径。
-    // 来源收敛为一个简单设置：目录展示名直出，默认值跟随 Runtime 解析；
-    // 不再提供“来源配置/全局默认来源”两处重复入口与 override 三层。
-    const packages = screen.getByLabelText("依赖包来源");
-    expect(packages).toHaveValue("tuna-pypi");
-    expect(
-      within(packages).getByRole("option", { name: "TUNA PyPI 镜像（默认）" }),
-    ).toBeInTheDocument();
+    // 来源收敛为一个简单设置：依赖已全部随包离线，只剩模型来源可配；
+    // 目录展示名直出，默认值跟随 Runtime 解析，不再提供“来源配置/
+    // 全局默认来源”两处重复入口与 override 三层。
+    expect(screen.queryByLabelText("依赖包来源")).not.toBeInTheDocument();
     const model = screen.getByLabelText("模型来源");
     expect(model).toHaveValue("huggingface");
     expect(within(model).getAllByRole("option")).toHaveLength(2);
@@ -4490,13 +4444,11 @@ describe("AppShell", () => {
     expect(screen.queryByText("下载来源")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
 
-    // 保存只写全局下载来源：依赖与模型一次保存，不按环境覆盖。
-    await user.selectOptions(packages, "pypi");
+    // 保存只写全局模型来源，不按环境覆盖。
     await user.selectOptions(model, "modelscope");
     await user.click(screen.getByRole("button", { name: "保存下载来源" }));
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.setEnvironmentSources",
-      packageSourceId: "pypi",
       paddleocrModelSourceId: "paddleocr-modelscope",
       mineruModelSourceId: "mineru-modelscope",
     });
@@ -4512,7 +4464,6 @@ describe("AppShell", () => {
             settings: {
               ...(viewState.features.settings as Record<string, unknown>),
               environmentDefaultSourceIds: [
-                "tuna-pypi",
                 "paddleocr-bos",
                 "mineru-modelscope",
               ],
@@ -4536,7 +4487,6 @@ describe("AppShell", () => {
         .at(-1)?.[0],
     ).toEqual({
       type: "settings.setEnvironmentSources",
-      packageSourceId: "tuna-pypi",
       paddleocrModelSourceId: "paddleocr-huggingface",
       mineruModelSourceId: "mineru-huggingface",
     });
@@ -4590,19 +4540,22 @@ describe("AppShell", () => {
               targetDevice: "cpu",
             },
           ],
-          environmentHardware: { nvidiaDriverStatus: "unknown" },
           environmentSources: [
             {
-              id: "tuna-pypi",
-              kind: "package_index",
-              displayName: "TUNA PyPI 镜像",
-              endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+              id: "paddleocr-modelscope",
+              kind: "paddleocr_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
             },
             {
-              id: "pypi",
-              kind: "package_index",
-              displayName: "PyPI 官方源",
-              endpoint: "https://pypi.org/simple",
+              id: "mineru-modelscope",
+              kind: "mineru_model_registry",
+              provider: "modelscope",
+              displayName: "ModelScope",
+              endpoint: "https://www.modelscope.cn",
+              isDefault: true,
             },
           ],
           environmentDefaultSourceIds: [],
@@ -4641,23 +4594,22 @@ describe("AppShell", () => {
                 environmentRevision: 1,
                 recipe: "paddleocr-ort-cpu",
                 requestedRecipe: "paddleocr-ort-cpu",
-                sourceIds: ["tuna-pypi"],
+                sourceIds: ["paddleocr-modelscope"],
                 requestedSourceIds: null,
                 dependencies: ["paddleocr==3.2.0"],
                 sources: [
                   {
-                    id: "tuna-pypi",
-                    kind: "package_index",
-                    displayName: "TUNA PyPI 镜像",
-                    endpoint:
-                      "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+                    id: "paddleocr-modelscope",
+                    kind: "paddleocr_model_registry",
+                    displayName: "ModelScope",
+                    endpoint: "https://www.modelscope.cn",
                     requested: false,
                     inheritedFrom: "global_default",
-                    usage: "online_index",
+                    usage: "model_preference",
                     actualEndpoint: null,
                   },
                 ],
-                dependencyOrigin: "online_index",
+                dependencyOrigin: "bundled_pack",
                 pythonOrigin: "product_bundle",
                 runtimeWheelOrigin: "product_bundle",
               },
@@ -4668,11 +4620,11 @@ describe("AppShell", () => {
     );
     expect(
       screen.getByText(
-        /计划：paddleocr-ort-cpu · 目标空白（空环境准备）· 下载来源：TUNA PyPI 镜像/,
+        /计划：paddleocr-ort-cpu · 目标空白（空环境准备）· 下载来源：ModelScope/,
       ),
     ).toBeVisible();
     await user.click(screen.getByText("本次依赖与来源明细（只读）"));
-    expect(screen.getByText(/TUNA PyPI 镜像（依赖包来源/)).toBeVisible();
+    expect(screen.getByText(/ModelScope（PaddleOCR 模型来源/)).toBeVisible();
     expect(screen.getByText(/已缓存模型直接复用/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "确认安装依赖" }));
     expect(actions.run).toHaveBeenCalledWith({

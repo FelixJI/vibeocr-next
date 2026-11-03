@@ -6,23 +6,19 @@
 
 | 配方 | 唯一 ORT namespace 分发包 | 附加运行库 |
 | --- | --- | --- |
-| `paddleocr-ort-cpu` | `onnxruntime==1.30.0` | 无 |
-| `paddleocr-ort-cuda` | `onnxruntime==1.30.0` | 与 Rapid 路径同一微软 CUDA13 EP v0.2.0 插件与七个固定 NVIDIA wheel |
-| `paddleocr-ort-directml` | `onnxruntime-directml==1.24.4` | Windows DirectML，无 CUDA/Paddle/Torch |
+| `paddleocr-ort-directml` | `onnxruntime-directml==1.24.4` | Windows DirectML，无 CUDA/Paddle/Torch；MinerU 随同一闭包携带 |
 
-三类 ORT 配方的生产闭包均不含 PaddlePaddle、Torch/Transformers 或用户端转换工具；独立 MinerU 依赖不受影响。新候选不携带原生 Paddle 锁；历史 manifest 与健康环境按只读兼容保留。
+统一推理闭包的生产依赖不含 PaddlePaddle、Torch/Transformers 或用户端转换工具，且全部经随包离线 pack 安装：在线依赖索引已退役，缺 pack 即 fail closed。历史分设备配方（cpu/cuda）与原生 Paddle 锁只按只读兼容保留。
 
-三闭包保持 CPython 3.13 / win-x64，使用 `paddleocr==3.7.0`、`paddlex[ocr]==3.7.2`，不启用 `doc-parser` extra。`scripts/update_runtime_paddle_onnx_locks.py` 约束各设备现有 ORT lock 中的版本，生成三个 source-neutral lock；根 Python lock 和 Pillow 升级不属于此变更。manifest 将三锁绑定到同一个产品候选，安装仍经 staging、探针、固定路径交换及失败回滚。
+统一闭包保持 CPython 3.13 / win-x64，使用 `paddleocr==3.7.0`、`paddlex[ocr]==3.7.2`，不启用 `doc-parser` extra。`scripts/update_runtime_paddle_onnx_locks.py` 约束 ORT lock 中的版本，生成 source-neutral lock；根 Python lock 和 Pillow 升级不属于此变更。manifest 将锁绑定到产品候选，安装仍经 staging、探针、固定路径交换及失败回滚。
 
-依赖下载量以本次安装计划解析出的新增工件字节为准，模型体积以冻结资产清单和已缓存文件为准；CPU/CUDA/DirectML、档位和辅助模型会改变体积，不能沿用原生 Paddle/Torch 的旧估值。未知解析量继续显示未知，不承诺固定压缩比例。
+依赖体积以冻结资产清单和已缓存文件为准；模型档位和辅助模型会改变体积，不能沿用原生 Paddle/Torch 的旧估值。未知解析量继续显示未知，不承诺固定压缩比例。
 
 Windows 的 `chardet` 原生扩展已在较长 Portable 路径下出现 DLL 导入失败；若提示文件名或扩展名太长，请缩短 Portable 目录后重新预览安装。
 
-`device` 的省略/`auto` 跟随所选环境；显式 `cpu` 可在三闭包运行，`cuda`/`directml` 要求相应闭包。环境安装计划沿用 CPU/CUDA 的宿主依赖 profile；DirectML 的 `target_device` 和任务 `provider` 独立表示图形设备，不将 CPU profile 冒充实际 CPU 执行。DirectML 用 DXGI `EnumAdapters1` 硬件 ordinal；软件适配器排除，ordinal 不与 CUDA id 混用。CUDA 需要 R580 或更新驱动，运行库从固定 wheel 加载，不要求 Toolkit 或 PyTorch。
+`device` 的省略/`auto` 跟随所选环境；统一闭包内 `cpu`/`directml` 可直接切换（同一闭包同时携带两个 EP，无需重装）。DirectML 的 `target_device` 和任务 `provider` 独立表示图形设备，不将 CPU profile 冒充实际 CPU 执行。DirectML 用 DXGI `EnumAdapters1` 硬件 ordinal；软件适配器排除。CUDA 支持已整体退役：DirectML 是唯一 GPU 后端，不要求 NVIDIA 驱动门槛。
 
 PaddleX 的 `device="cpu"` 仅选择其编排入口，`engine_config.providers` 与 `provider_options` 才决定 ORT 执行设备。每个启用 runner 都检查实际首 EP 并关闭 ORT 的运行失败自动 fallback。日志区分请求 EP、available EP、各 session 的实际 EP/选项与模型目录。GPU 执行证据使用真实 profile 节点；shape/control 的必要 CPU 分区单独保留，不能据此宣称整图 GPU 或将整图 CPU 标为 GPU。
-
-CUDA 对所有启用模型统一设置官方 [`prefer_nhwc=1`](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#prefer_nhwc)，由 ORT 插入等价布局转换，保持原始 FP32 权重、输入尺寸和批量。固定 ORT 1.30 / cuDNN 9.27 在 RTX 4090 的 300dpi 合成 PDF 上，small_rec 的 NCHW 1×7 depthwise 卷积首批六行曾触发 CUDA error 700；独立同张量复现后，NHWC 路径真实 CUDA 节点执行完成。原失败任务保留终态，不重放；CPU、显式 CPU 和 DirectML 配置不受该布局选项影响。
 
 布局等价不表示浮点逐元素一致：同一六行张量与独立 CPU 比较，最大概率绝对差约 0.002355，原诊断 `rtol=1e-3, atol=1e-4` 的 allclose 未通过，CTC argmax 则全部一致。完整 PDF 两侧均为 17 行、方向 0；16 行文本一致，一行出现额外空格，最大归一化坐标差约 0.403（原图约 1px）、行置信度差约 0.0256。保留原 token、有效几何及 score 口径，不宣称输出完全相同或全文无误。
 
@@ -30,11 +26,11 @@ DirectML 禁用 memory pattern、使用 sequential execution，包装层持锁�
 
 ## 同一 Paddle 环境的能力与维护
 
-CPU 与 CUDA 共享受管环境身份、固定目录及 CPU 基础闭包。`recipe` / `recipe_lock` 记录实际安装的完整闭包；可选 `selected_device` 独立记录下一次任务的默认设备，旧记录按原配方设备读取。CPU 查询可以复用 CUDA 闭包，但必须同时验证已安装闭包锁与所请求 CPU 子集的版本。DirectML 和 MinerU 仍使用独立环境。
+统一推理闭包内 DirectML 与 CPU 共享同一受管环境身份、固定目录与闭包。`recipe` / `recipe_lock` 记录实际安装的完整闭包；可选 `selected_device` 独立记录下一次任务的默认设备。设备切换（DirectML ↔ CPU）不改变闭包、不重装依赖。
 
-普通切换 CPU 不卸载 CUDA；同一 id 切换 CPU/CUDA 也要启动新 Supervisor、验证并提交设备选择。选择提交推进 `active_revision`；新任务冻结实际 device/provider，旧 host 不能再准入新任务，原任务不重放。CUDA 插件、驱动或会话失败不改变 CPU 基础依赖的健康状态，显式 CUDA 请求仍失败，不假装 CPU 成功。
+同一 id 切换设备要启动新 Supervisor、验证并提交设备选择。选择提交推进 `active_revision`；新任务冻结实际 device/provider，旧 host 不能再准入新任务，原任务不重放。
 
-增装、修复和明确移除 CUDA 均先预览并确认。增装计划仅在旧安装锁匹配且实际包版本可验证时折叠为新增/替换依赖；旧锁、缺包或探测不可用时列完整目标闭包，明确包含基础修复范围。七个 NVIDIA 包的实际名称和版本在确认摘要中显示；移除计划列移除的 NVIDIA 包。安装仍构造完整目标候选，再按既有 journal 换入/回滚，移除不在运行中的 venv 内执行 pip uninstall。普通切换不安装依赖；旧环境、来源偏好、下载缓存和共享模型缓存保留。退役槽位与缓存的物理释放量不能由逻辑文件大小推断。
+修复与重装先预览并确认：仅在旧安装锁匹配且实际包版本可验证时折叠为新增/替换依赖；旧锁、缺包或探测不可用时列完整目标闭包。依赖全部来自随包离线 pack（在线索引已退役）。安装仍构造完整目标候选，再按既有 journal 换入/回滚。普通切换不安装依赖；旧环境、模型源偏好、下载缓存和共享模型缓存保留。退役槽位与缓存的物理释放量不能由逻辑文件大小推断。
 
 活动环境维护按顺序执行：桌面产品维护 lease → Runtime stdin `prepare_maintenance` 冻结任务准入并验证零任务 → 停止服务 → 安装进程持 service-start/maintenance 门，确认无服务 lease，构建及验证候选 → 提交或回滚 → 释放 stdin reservation → 恢复选中设备的服务。嵌套锁顺序为任务准入、服务启动/维护、registry；服务 lease 与 job lease 复用 references 下的 OS 文件锁，不用 PID 判断崩溃存活。stdin 断开/取消自动释放 reservation，服务退出自动释放 lease；待恢复 journal 阻止新 host 启动。候选导入探针不启动 host，因此不会自锁。
 
@@ -64,7 +60,7 @@ C# `PaddleModeOptions` 是权威设置，TS 只展示 Runtime `supported_options
 
 主无辅助合成文本须完整返回 `VibeOCR 12345 TEST`。公开 smoke 保留 `paddle_smoke_fixtures.py` 的 `GOAL103|1120|2244`（既有 `Any`/`some`：命中任一配置 token）/ `1120` token 与 score、bbox/polygon、方向合同；8 页 `document_orientation.pdf` 按既有 `expected_rotate` 判断。启用 UVDoc 的简单合成行已观察到首字偏差，不能据此声称全文无误，辅助路径必须用既有文档 token 和有效几何另行验收。
 
-候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|cuda|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。smoke 优先复用当前兼容环境，CPU 可复用已增装 CUDA 的同一环境；公共后端按钮显式切换设备，并等待设备对应的就绪投影，不把同 id 当作切换已完成。默认 `-Provider cpu`，仅允许三个保留模式，不再安装或运行原生 Paddle/公式/VL。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
+候选 UI 复用 `scripts/smoke_paddle_modes.ps1 -Provider cpu|directml -ModelPreset tiny|small|medium`，ORT 阶段支持三个保留模式；`-InputKinds @('file','batch','pdf','pdf_text_layer')` 分别覆盖表格文件/批量、结构 PDF 和文字层入口。smoke 优先复用当前兼容环境；公共后端按钮显式切换设备，并等待设备对应的就绪投影，不把同 id 当作切换已完成。默认 `-Provider cpu`，仅允许三个保留模式，不再安装或运行原生 Paddle/公式/VL。最终仍须完整质量入口、真实候选 build/release_smoke、两源/离线/失败恢复与独立 R2 审阅，不以 import 或 provider 列表代替推理。
 
 单次识别、批量和 PDF 的“本次模型档位”分别继承已保存默认，或临时选择 tiny/small/medium。临时选择不落盘，重启后恢复继承；PDF 沿每个文档已有 TaskEngine 范围隔离。截图与选字沿单次识别的有效设置。提交前冻结有效档位，批量整批沿同一快照；后续切换只影响新的提交。
 

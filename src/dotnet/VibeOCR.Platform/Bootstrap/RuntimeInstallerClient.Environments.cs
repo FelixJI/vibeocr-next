@@ -74,9 +74,7 @@ public sealed record ManagedEnvironmentList(
     [property: JsonPropertyName("default_source_ids")] IReadOnlyList<string>? DefaultSourceIds = null,
     [property: JsonPropertyName("unknown_default_source_ids")] IReadOnlyList<string>? UnknownDefaultSourceIds = null,
     [property: JsonPropertyName("source_config_revision")] int SourceConfigRevision = 0,
-    [property: JsonPropertyName("package_source_ids")] IReadOnlyList<string>? PackageSourceIds = null,
     [property: JsonPropertyName("recipes")] IReadOnlyList<ManagedEnvironmentRecipe>? Recipes = null,
-    [property: JsonPropertyName("hardware")] ManagedEnvironmentHardware? Hardware = null,
     [property: JsonPropertyName("resolved_default_sources")] IReadOnlyList<ManagedEnvironmentResolvedSource>? ResolvedDefaultSources = null,
     [property: JsonPropertyName("capabilities")] IReadOnlyList<string>? Capabilities = null);
 
@@ -96,8 +94,7 @@ public sealed record ManagedEnvironmentPlan(
     [property: JsonPropertyName("python_origin")] string? PythonOrigin = null,
     [property: JsonPropertyName("runtime_wheel_origin")] string? RuntimeWheelOrigin = null,
     [property: JsonPropertyName("removed_dependencies")] IReadOnlyList<string>? RemovedDependencies = null,
-    [property: JsonPropertyName("requires_service_stop")] bool RequiresServiceStop = false,
-    [property: JsonPropertyName("cuda_plugin_action")] string? CudaPluginAction = null);
+    [property: JsonPropertyName("requires_service_stop")] bool RequiresServiceStop = false);
 
 /// <summary>计划内单来源：请求/继承标记、用途与脱敏端点。</summary>
 public sealed record ManagedEnvironmentPlanSource(
@@ -152,19 +149,6 @@ public sealed record ManagedEnvironmentRecipe(
     [property: JsonPropertyName("provider")] string? Provider = null,
     [property: JsonPropertyName("supports_remote_host")] bool SupportsRemoteHost = false,
     [property: JsonPropertyName("default_remote_host")] bool DefaultRemoteHost = false);
-
-/// <summary>list.hardware 投影：nvidia 驱动真值只由 Runtime 探测，宿主/前端只消费不检测。</summary>
-public sealed record ManagedEnvironmentHardware(
-    [property: JsonPropertyName("nvidia_driver")] ManagedEnvironmentNvidiaDriver? NvidiaDriver = null);
-
-/// <summary>
-/// status：ok＝驱动满足 CUDA 12.x 下限；unsupported＝命令明确无驱动/驱动过旧
-/// （reason_code 给出原因）；unknown＝探测超时，不得当作已支持或已否定。
-/// </summary>
-public sealed record ManagedEnvironmentNvidiaDriver(
-    [property: JsonPropertyName("status")] string Status,
-    [property: JsonPropertyName("reason_code")] string? ReasonCode = null,
-    [property: JsonPropertyName("driver_version")] string? DriverVersion = null);
 
 /// <summary>兼容环境查询命中：被选中的环境与选择依据（优先活动，其次稳定 id 序）。</summary>
 public sealed record ManagedEnvironmentSelection(
@@ -247,14 +231,14 @@ public interface IManagedEnvironmentClient
     Task<ManagedEnvironmentList> InitializeDefaultEnvironmentAsync(CancellationToken cancellationToken = default) =>
         ListEnvironmentsAsync(cancellationToken);
     Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? environmentId, string? paddleocrModelSourceId,
         string? mineruModelSourceId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("当前 Runtime 客户端不支持独立模型来源，请先更新 Runtime。");
     Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default);
     Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(string recipe, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException("当前 Runtime 不支持持久准备目标，请先更新 Runtime。");
     Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-        string? environmentId, string? packageSourceId, string? modelSourceId,
+        string? environmentId, string? modelSourceId,
         CancellationToken cancellationToken = default);
     Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
         string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
@@ -395,12 +379,11 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
   }
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? environmentId, string? paddleocrModelSourceId,
         string? mineruModelSourceId, CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironmentList>("set_sources", new()
         {
             ["environment_id"] = environmentId,
-            ["package_source_id"] = packageSourceId,
             ["paddleocr_model_source_id"] = paddleocrModelSourceId,
             ["mineru_model_source_id"] = mineruModelSourceId,
         }, cancellationToken);
@@ -412,12 +395,11 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
         InvokeEnvironmentAsync<ManagedEnvironment>("create", new() { ["name"] = name }, cancellationToken);
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-        string? environmentId, string? packageSourceId, string? modelSourceId,
+        string? environmentId, string? modelSourceId,
         CancellationToken cancellationToken = default) =>
         InvokeEnvironmentAsync<ManagedEnvironmentList>("set_sources", new()
         {
             ["environment_id"] = environmentId,
-            ["package_source_id"] = packageSourceId,
             ["model_source_id"] = modelSourceId,
         }, cancellationToken);
 

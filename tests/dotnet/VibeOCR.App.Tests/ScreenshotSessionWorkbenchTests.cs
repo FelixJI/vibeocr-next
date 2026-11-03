@@ -515,13 +515,13 @@ public sealed class ScreenshotSessionWorkbenchTests
       // 目录未声明 device 的模式 fail closed 拒绝；#270 后 paddle_formula
       // 本身已退役，落在 mode_unavailable 拒绝路径上（可改选恢复）。
       WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
-        new SetRecognitionOptionsCommand("paddle_formula", new PaddleModeOptions { Device = "cuda" }),
+        new SetRecognitionOptionsCommand("paddle_formula", new PaddleModeOptions { Device = "directml" }),
         TestContext.Current.CancellationToken);
       Assert.Equal("recognition_mode_retired", refused.Error?.Code);
       Assert.Empty(inference.Requests);
 
       Assert.Null((await handler.ExecuteAsync(
-        new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
+        new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "directml" }),
         TestContext.Current.CancellationToken)).Error);
 
       using var captured = new RecognitionStateAwaiter(handler,
@@ -536,7 +536,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       RecognitionWorkbenchState result = await completed.Task;
       SubmitRequest request = Assert.Single(inference.Requests);
       Assert.Equal("TABLE_RECOGNITION", request.Pipeline.PipelineId);
-      Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
+      Assert.Equal("directml", request.Pipeline.Options["device"].GetString());
       Assert.Null(request.Pipeline.Engine);
       Assert.NotNull(result.StructuredResult);
     }

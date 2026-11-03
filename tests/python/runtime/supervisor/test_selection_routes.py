@@ -91,8 +91,6 @@ async def test_health_declares_selection_capability_catalogs(
     assert sources == download_source_catalog_payload()["sources"]
     assert len({s["id"] for s in sources}) == len(sources)
     assert {s["id"] for s in sources} == {
-        "tuna-pypi",
-        "pypi",
         "huggingface",
         "modelscope",
         "paddleocr-huggingface",
@@ -102,7 +100,6 @@ async def test_health_declares_selection_capability_catalogs(
         "mineru-modelscope",
     }
     assert {s["kind"] for s in sources} == {
-        "package_index",
         "model_registry",
         "paddleocr_model_registry",
         "mineru_model_registry",
@@ -131,14 +128,14 @@ async def test_settings_roundtrips_download_source_ids(
                 "schema_version": 2,
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
-                "download_source_ids": ["pypi"],
+                "download_source_ids": ["paddleocr-modelscope"],
             },
         )
         assert put.status_code == 200
-        assert put.json()["download_source_ids"] == ["pypi"]
+        assert put.json()["download_source_ids"] == ["paddleocr-modelscope"]
 
         got = await client.get("/v2/settings")
-        assert got.json().get("download_source_ids") == ["pypi"]
+        assert got.json().get("download_source_ids") == ["paddleocr-modelscope"]
 
         same_kind = await client.put(
             "/v2/settings",
@@ -146,7 +143,7 @@ async def test_settings_roundtrips_download_source_ids(
                 "schema_version": 2,
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
-                "download_source_ids": ["tuna-pypi", "pypi"],
+                "download_source_ids": ["paddleocr-modelscope", "paddleocr-bos"],
             },
         )
         assert same_kind.status_code == 400
@@ -157,11 +154,14 @@ async def test_settings_roundtrips_download_source_ids(
                 "schema_version": 2,
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
-                "download_source_ids": ["pypi", "huggingface"],
+                "download_source_ids": ["paddleocr-modelscope", "mineru-modelscope"],
             },
         )
         assert model_source.status_code == 200
-        assert model_source.json()["download_source_ids"] == ["pypi", "huggingface"]
+        assert model_source.json()["download_source_ids"] == [
+            "paddleocr-modelscope",
+            "mineru-modelscope",
+        ]
 
         unknown = await client.put(
             "/v2/settings",

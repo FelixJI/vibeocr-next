@@ -78,7 +78,9 @@ def _stub_installed_probe(
 
 
 def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     b = _write_record(manager, "b" * 32)
@@ -87,12 +89,6 @@ def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
     assert listed["source_config_revision"] == 0
     assert listed["default_source_ids"] == []
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
-    assert _entry(env_a["resolved_sources"], "package_index") == {
-        "kind": "package_index",
-        "id": "tuna-pypi",
-        "display_name": "TUNA PyPI 镜像",
-        "origin": "product_default",
-    }
     assert _entry(env_a["resolved_sources"], "paddleocr_model_registry") == {
         "kind": "paddleocr_model_registry",
         "id": "paddleocr-modelscope",
@@ -100,22 +96,15 @@ def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
         "origin": "product_default",
     }
 
-    # 全局默认：package→PyPI，model→ModelScope；A/B 同时继承。
-    manager.set_sources(None, "pypi", "modelscope")
+    # 全局默认：共享 model→ModelScope；A/B 同时继承。
+    manager.set_sources(None, "modelscope")
     listed = manager.list()
     assert listed["default_source_ids"] == [
-        "pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
     assert listed["source_config_revision"] == 1
     for item in listed["environments"]:
-        assert _entry(item["resolved_sources"], "package_index") == {
-            "kind": "package_index",
-            "id": "pypi",
-            "display_name": "PyPI 官方源",
-            "origin": "global_default",
-        }
         assert _entry(item["resolved_sources"], "paddleocr_model_registry") == {
             "kind": "paddleocr_model_registry",
             "id": "paddleocr-modelscope",
@@ -123,55 +112,64 @@ def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
             "origin": "global_default",
         }
 
-    # 环境 A 只覆盖 package：model 继续继承全局；B 完全不动。
-    manager.set_sources(a["id"], "tuna-pypi", None)
+    # 环境 A 只覆盖 PaddleOCR 引擎源：MinerU 继续继承全局；B 完全不动。
+    manager.set_sources(a["id"], paddleocr_model_source_id="paddleocr-huggingface")
     listed = manager.list()
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
     env_b = next(item for item in listed["environments"] if item["id"] == b["id"])
-    assert env_a["override_source_ids"] == ["tuna-pypi"]
-    assert _entry(env_a["resolved_sources"], "package_index") == {
-        "kind": "package_index",
-        "id": "tuna-pypi",
-        "display_name": "TUNA PyPI 镜像",
+    assert env_a["override_source_ids"] == ["paddleocr-huggingface"]
+    assert _entry(env_a["resolved_sources"], "paddleocr_model_registry") == {
+        "kind": "paddleocr_model_registry",
+        "id": "paddleocr-huggingface",
+        "display_name": "Hugging Face",
         "origin": "environment_override",
     }
     assert (
-        _entry(env_a["resolved_sources"], "paddleocr_model_registry")["origin"]
+        _entry(env_a["resolved_sources"], "mineru_model_registry")["origin"]
         == "global_default"
     )
     assert env_b["override_source_ids"] == []
-    assert _entry(env_b["resolved_sources"], "package_index")["id"] == "pypi"
+    assert (
+        _entry(env_b["resolved_sources"], "paddleocr_model_registry")["id"]
+        == "paddleocr-modelscope"
+    )
     assert listed["source_config_revision"] == 2
 
     # 清除环境 override → 回到全局默认。
-    manager.set_sources(a["id"], None, None)
+    manager.set_sources(a["id"], None)
     env_a = next(
         item for item in manager.list()["environments"] if item["id"] == a["id"]
     )
     assert env_a["override_source_ids"] == []
-    assert _entry(env_a["resolved_sources"], "package_index")["id"] == "pypi"
+    assert (
+        _entry(env_a["resolved_sources"], "paddleocr_model_registry")["id"]
+        == "paddleocr-modelscope"
+    )
 
     # 未知 id 与错 kind 拒绝，不写入。
-    with pytest.raises(ManagedEnvironmentError, match="unknown package_index"):
-        manager.set_sources(None, "not-a-source", None)
     with pytest.raises(ManagedEnvironmentError, match="unknown model_registry"):
-        manager.set_sources(None, None, "tuna-pypi")
+        manager.set_sources(None, "not-a-source")
+    with pytest.raises(
+        ManagedEnvironmentError, match="unknown paddleocr_model_registry"
+    ):
+        manager.set_sources(None, paddleocr_model_source_id="mineru-modelscope")
     assert manager.list()["source_config_revision"] == 3
 
 
 def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     tmp_path: Path,
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
-    manager.set_sources(None, "pypi", "huggingface")
-    manager.set_sources(a["id"], None, "modelscope")
+    manager.set_sources(None, "huggingface")
+    manager.set_sources(a["id"], "modelscope")
 
     reopened = _open(tmp_path, manifest, component)
     listed = reopened.list()
     assert listed["default_source_ids"] == [
-        "pypi",
         "paddleocr-huggingface",
         "mineru-huggingface",
     ]
@@ -181,7 +179,10 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
         _entry(env_a["resolved_sources"], "paddleocr_model_registry")["origin"]
         == "environment_override"
     )
-    assert _entry(env_a["resolved_sources"], "package_index")["id"] == "pypi"
+    assert (
+        _entry(env_a["resolved_sources"], "mineru_model_registry")["origin"]
+        == "environment_override"
+    )
 
     # 旧 #104 schema（无新键、失败记录无来源字段）兼容可读，不伪造来源。
     legacy_id = "c" * 32
@@ -220,7 +221,11 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     assert legacy_env["source_ids"] == ["tuna-pypi"]
     assert "requested_source_ids" not in legacy_env["last_install_failure"]
     assert "effective_source_ids" not in legacy_env["last_install_failure"]
-    assert _entry(legacy_env["resolved_sources"], "package_index")["id"] == "tuna-pypi"
+    # 历史 package 记录按“被忽略”读取：resolved 只投影模型源。
+    assert [entry["kind"] for entry in legacy_env["resolved_sources"]] == [
+        "paddleocr_model_registry",
+        "mineru_model_registry",
+    ]
 
     # 目录外的历史 id：标注未知、解析回退产品默认，不 fail closed。
     with RuntimeStoreLock(manager._lock):
@@ -232,63 +237,66 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     assert listed["unknown_default_source_ids"] == ["future-source"]
     legacy_env = listed["environments"][0]
     assert legacy_env["unknown_source_ids"] == ["gone-model"]
-    assert _entry(legacy_env["resolved_sources"], "package_index")["id"] == "tuna-pypi"
     assert (
         _entry(legacy_env["resolved_sources"], "paddleocr_model_registry")["id"]
         == "paddleocr-modelscope"
+    )
+    assert (
+        _entry(legacy_env["resolved_sources"], "mineru_model_registry")["id"]
+        == "mineru-modelscope"
     )
 
 
 def test_preview_binds_requested_effective_and_config_revision(
     tmp_path: Path,
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
 
     inherited = manager.preview_install(a["id"], "paddleocr-ort-directml")
     assert inherited["requested_source_ids"] is None
     assert inherited["source_ids"] == [
-        "tuna-pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
     assert inherited["effective_source_ids"] == [
-        "tuna-pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
     assert inherited["source_config_revision"] == 0
     assert inherited["python_origin"] == "product_bundle"
     assert inherited["runtime_wheel_origin"] == "product_bundle"
-    assert inherited["dependency_origin"] == "online_index"
-    assert _entry(inherited["sources"], "package_index") == {
-        "id": "tuna-pypi",
-        "kind": "package_index",
-        "display_name": "TUNA PyPI 镜像",
-        "endpoint": "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
+    assert inherited["dependency_origin"] == "bundled_pack"
+    assert _entry(inherited["sources"], "paddleocr_model_registry") == {
+        "id": "paddleocr-modelscope",
+        "kind": "paddleocr_model_registry",
+        "display_name": "ModelScope",
+        "endpoint": "https://www.modelscope.cn",
         "requested": False,
         "inherited_from": "product_default",
-        "usage": "online_index",
+        "usage": "model_preference",
+        "actual_endpoint": None,
     }
 
-    explicit = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
-    assert explicit["requested_source_ids"] == ["pypi"]
+    explicit = manager.preview_install(
+        a["id"], "paddleocr-ort-directml", ("paddleocr-huggingface",)
+    )
+    assert explicit["requested_source_ids"] == ["paddleocr-huggingface"]
     assert explicit["source_ids"] == [
-        "pypi",
-        "paddleocr-modelscope",
+        "paddleocr-huggingface",
         "mineru-modelscope",
     ]
-    assert _entry(explicit["sources"], "package_index")["requested"] is True
+    assert _entry(explicit["sources"], "paddleocr_model_registry")["requested"] is True
 
-    # 全局默认参与叠加：显式选模型源时 package 继承全局默认。
-    manager.set_sources(None, "pypi", None)
+    # overlay：显式只选 PaddleOCR 源时 MinerU 补齐默认双引擎偏好。
     combined = manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("modelscope",)
+        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope",)
     )
-    assert combined["requested_source_ids"] == ["modelscope"]
+    assert combined["requested_source_ids"] == ["paddleocr-modelscope"]
     assert combined["source_ids"] == [
-        "pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
@@ -302,27 +310,35 @@ def test_preview_binds_requested_effective_and_config_revision(
         "usage": "model_preference",
         "actual_endpoint": None,
     }
-    assert _entry(combined["sources"], "package_index")["inherited_from"] == (
-        "global_default"
+    assert _entry(combined["sources"], "mineru_model_registry")["inherited_from"] == (
+        "product_default"
     )
 
     # 来源配置变化 → 旧计划 confirm 时 stale；重新预览拿到新修订。
+    manager.set_sources(None, "huggingface")
     with pytest.raises(RuntimeInstallPlanStale, match="preview again"):
         manager.install(
-            explicit["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",)
+            explicit["plan_id"],
+            a["id"],
+            "paddleocr-ort-directml",
+            ("paddleocr-huggingface",),
         )
-    refreshed = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
+    refreshed = manager.preview_install(
+        a["id"], "paddleocr-ort-directml", ("paddleocr-huggingface",)
+    )
     assert refreshed["source_config_revision"] == 1
 
 
 def test_install_freezes_sources_and_failure_evidence_is_durable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     attempts: list[str] = []
 
-    def flaky_install(_python: Path, _scope, endpoint: str) -> None:
-        attempts.append(endpoint)
+    def flaky_install(_python: Path, _scope) -> None:
+        attempts.append(_scope.scope_id)
         if len(attempts) == 1:
             raise ManagedEnvironmentError("synthetic download failure")
 
@@ -330,9 +346,16 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     _stub_installed_probe(manager, monkeypatch)
     _omit_unused_pip_bootstrap(monkeypatch)
     a = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
+    plan = manager.preview_install(
+        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     with pytest.raises(ManagedEnvironmentError, match="synthetic download failure"):
-        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",))
+        manager.install(
+            plan["plan_id"],
+            a["id"],
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
+        )
 
     # 失败终态冻结请求/生效来源，重启（重建 store）后仍可查。
     failure = next(
@@ -341,15 +364,20 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
         if item["id"] == a["id"]
     )["last_install_failure"]
     assert failure["phase"] == "failed"
-    assert failure["requested_source_ids"] == ["pypi"]
+    # 请求来源按去重排序冻结，生效来源按目录顺序冻结。
+    assert failure["requested_source_ids"] == [
+        "mineru-modelscope",
+        "paddleocr-modelscope",
+    ]
     assert failure["effective_source_ids"] == [
-        "pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
 
     # 后续新预览不冲掉旧来源证据。
-    manager.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
+    manager.preview_install(
+        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     assert (
         next(item for item in manager.list()["environments"] if item["id"] == a["id"])[
             "last_install_failure"
@@ -358,22 +386,31 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
     )
     # 旧 plan 已被新预览取代 → confirm 旧计划 stale（重新预览是显式动作）。
     with pytest.raises(RuntimeInstallPlanStale):
-        manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",))
+        manager.install(
+            plan["plan_id"],
+            a["id"],
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
+        )
 
     # 未重新预览时同计划 retry 保留原意图：同来源、同计划成功并留下证据。
     retryable = _open(tmp_path, manifest, component, install_runner=flaky_install)
     _stub_installed_probe(retryable, monkeypatch)
-    retry_plan = retryable.preview_install(a["id"], "paddleocr-ort-directml", ("pypi",))
+    retry_plan = retryable.preview_install(
+        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     installed = retryable.install(
-        retry_plan["plan_id"], a["id"], "paddleocr-ort-directml", ("pypi",)
+        retry_plan["plan_id"],
+        a["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["status"] == "installed"
     assert installed["source_ids"] == [
-        "pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     ]
-    assert attempts == ["https://pypi.org/simple"] * 2
+    assert attempts == ["paddleocr-ort-directml"] * 2
     assert (
         next(
             item for item in retryable.list()["environments"] if item["id"] == a["id"]
@@ -385,38 +422,40 @@ def test_install_freezes_sources_and_failure_evidence_is_durable(
 def test_inherited_install_uses_resolved_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
-    endpoints: list[str] = []
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
+    scopes: list[str] = []
 
-    def record_install(_python: Path, _scope, endpoint: str) -> None:
-        endpoints.append(endpoint)
+    def record_install(_python: Path, _scope) -> None:
+        scopes.append(_scope.scope_id)
 
     manager = _open(tmp_path, manifest, component, install_runner=record_install)
     _stub_installed_probe(manager, monkeypatch)
     _omit_unused_pip_bootstrap(monkeypatch)
     a = _write_record(manager, "a" * 32)
-    manager.set_sources(None, "pypi", None)
-    manager.set_sources(a["id"], "tuna-pypi", None)
+    manager.set_sources(None, "huggingface")
+    manager.set_sources(a["id"], paddleocr_model_source_id="paddleocr-modelscope")
     plan = manager.preview_install(a["id"], "paddleocr-ort-directml")  # 继承环境配置
     assert plan["requested_source_ids"] is None
     assert plan["source_ids"] == [
-        "tuna-pypi",
         "paddleocr-modelscope",
-        "mineru-modelscope",
+        "mineru-huggingface",
     ]
     installed = manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml")
     assert installed["source_ids"] == [
-        "tuna-pypi",
         "paddleocr-modelscope",
-        "mineru-modelscope",
+        "mineru-huggingface",
     ]
-    assert endpoints == ["https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"]
+    assert scopes == ["paddleocr-ort-directml"]
 
 
 def test_launch_projects_model_source_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32, status="installed", recipe="paddleocr-ort-cpu")
 
@@ -433,13 +472,13 @@ def test_launch_projects_model_source_environment(
     assert prepared["launch"]["environment"]["PADDLE_PDX_MODEL_SOURCE"] == "modelscope"
     assert prepared["launch"]["environment"]["MINERU_MODEL_SOURCE"] == "modelscope"
 
-    manager.set_sources(None, None, "modelscope")
+    manager.set_sources(None, "modelscope")
     prepared = manager.prepare_switch(a["id"])
     assert prepared["launch"]["environment"]["PADDLE_PDX_MODEL_SOURCE"] == "modelscope"
     assert prepared["launch"]["environment"]["MINERU_MODEL_SOURCE"] == "modelscope"
 
     # prepare 与 commit 之间来源配置变化 → launch 变化 → 切换失效需重预览。
-    manager.set_sources(None, None, "huggingface")
+    manager.set_sources(None, "huggingface")
     with pytest.raises(ManagedEnvironmentError, match="changed before switch"):
         manager.commit_switch(prepared)
     assert manager.list()["active_id"] is None
@@ -450,7 +489,9 @@ def test_launch_projects_model_source_environment(
 def test_set_sources_rejected_while_environment_operation_in_flight(
     tmp_path: Path,
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     b = _write_record(manager, "b" * 32)
@@ -461,17 +502,20 @@ def test_set_sources_rejected_while_environment_operation_in_flight(
     lock.acquire()
     try:
         with pytest.raises(ManagedEnvironmentError, match="in progress"):
-            manager.set_sources(a["id"], "pypi", None)
+            manager.set_sources(a["id"], "huggingface")
         # 全局默认与其它环境的写入不被 A 的在途操作阻塞。
-        manager.set_sources(None, "pypi", None)
-        manager.set_sources(b["id"], "pypi", None)
+        manager.set_sources(None, "modelscope")
+        manager.set_sources(b["id"], "huggingface")
     finally:
         lock.release()
     listed = manager.list()
-    assert listed["default_source_ids"] == ["pypi"]
+    assert listed["default_source_ids"] == [
+        "paddleocr-modelscope",
+        "mineru-modelscope",
+    ]
     assert next(item for item in listed["environments"] if item["id"] == b["id"])[
         "override_source_ids"
-    ] == ["pypi"]
+    ] == ["paddleocr-huggingface", "mineru-huggingface"]
     assert (
         next(item for item in listed["environments"] if item["id"] == a["id"])[
             "override_source_ids"
@@ -509,7 +553,9 @@ def test_sanitize_download_endpoint_strips_credentials_and_survives_bad_input() 
 def test_stdio_set_sources_and_inherited_preview_round_trip(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     base = {
@@ -523,28 +569,31 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
         "action": "set_sources",
         **base,
         "environment_id": None,
-        "package_source_id": "pypi",
-        "model_source_id": None,
+        "model_source_id": "huggingface",
     }
     assert main(["--request-json", json.dumps(request)]) == 0
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["response_kind"] == "environment"
     assert envelope["action"] == "set_sources"
-    assert envelope["result"]["default_source_ids"] == ["pypi"]
+    assert envelope["result"]["default_source_ids"] == [
+        "paddleocr-huggingface",
+        "mineru-huggingface",
+    ]
     assert any(
-        source["id"] == "pypi" and source["display_name"] == "PyPI 官方源"
+        source["id"] == "paddleocr-huggingface"
+        and source["display_name"] == "Hugging Face"
         for source in envelope["result"]["sources"]
     )
     # 端点脱敏：host 保留，无 userinfo/query。
-    tuna = next(
+    paddle = next(
         source
         for source in envelope["result"]["sources"]
-        if source["id"] == "tuna-pypi"
+        if source["id"] == "paddleocr-modelscope"
     )
-    endpoint = urlsplit(tuna["endpoint"])
+    endpoint = urlsplit(paddle["endpoint"])
     assert endpoint.scheme == "https"
-    assert endpoint.hostname == "mirrors.tuna.tsinghua.edu.cn"
-    assert "?" not in tuna["endpoint"] and "@" not in tuna["endpoint"]
+    assert endpoint.hostname == "www.modelscope.cn"
+    assert "?" not in paddle["endpoint"] and "@" not in paddle["endpoint"]
 
     preview = {
         "protocol_version": 2,
@@ -558,49 +607,53 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
     payload = json.loads(capsys.readouterr().out)["result"]
     assert payload["requested_source_ids"] is None
     assert payload["source_ids"] == [
-        "pypi",
-        "paddleocr-modelscope",
-        "mineru-modelscope",
+        "paddleocr-huggingface",
+        "mineru-huggingface",
     ]
     assert payload["sources"][0]["inherited_from"] == "global_default"
     assert re.fullmatch(r"[0-9a-f]{32}", payload["plan_id"])
 
 
-@pytest.mark.parametrize("requested", [None, ["pypi"]])
+@pytest.mark.parametrize(
+    "requested", [None, ["paddleocr-modelscope", "mineru-modelscope"]]
+)
 def test_interrupted_install_retains_frozen_sources_after_restart(
     tmp_path: Path, requested: list[str] | None
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
+    frozen = ["paddleocr-modelscope", "mineru-modelscope"]
     record = _write_record(
         manager,
         "a" * 32,
         last_install_operation={
             "environment_revision": 1,
             "plan_id": "b" * 32,
-            "recipe": "paddleocr-ort-cpu",
+            "recipe": "paddleocr-ort-directml",
             "phase": "installing",
             "reason_code": "",
             "next_action": "",
             "detail": "",
             "requested_source_ids": requested,
-            "effective_source_ids": ["pypi"],
+            "effective_source_ids": frozen,
         },
     )
     # A stopped installer leaves its journal in installing; new preferences
     # must not rewrite the source evidence when a restarted reader recovers it.
-    manager.set_sources(None, "tuna-pypi", None)
+    manager.set_sources(None, "huggingface")
     restarted = _open(tmp_path, manifest, component)
     failure = restarted.list()["environments"][0]["last_install_failure"]
     assert failure["phase"] == "failed"
     assert failure["reason_code"] == "install_interrupted"
     assert failure["requested_source_ids"] == requested
-    assert failure["effective_source_ids"] == ["pypi"]
+    assert failure["effective_source_ids"] == frozen
     with manager._target_operation(record["id"]):
         running = restarted.list()["environments"][0]["last_install_failure"]
         assert running["reason_code"] == "install_in_progress"
         assert running["requested_source_ids"] == requested
-        assert running["effective_source_ids"] == ["pypi"]
+        assert running["effective_source_ids"] == frozen
 
 
 @pytest.mark.parametrize("returncode", [1, -1])
@@ -609,7 +662,9 @@ def test_venv_failure_retains_sanitized_diagnostics(
 ) -> None:
     import subprocess
 
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
     plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
@@ -637,7 +692,9 @@ def test_venv_failure_retains_sanitized_diagnostics(
 
 
 def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32, override_source_ids=["modelscope"])
     with RuntimeStoreLock(manager._lock):
@@ -646,12 +703,13 @@ def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -
         manager._registry.write_text(json.dumps(data), encoding="utf-8")
     env = manager.list()["environments"][0]
     assert env["override_source_ids"] == ["paddleocr-modelscope", "mineru-modelscope"]
-    manager.set_sources(record["id"], None, paddleocr_model_source_id="paddleocr-bos")
+    manager.set_sources(record["id"], paddleocr_model_source_id="paddleocr-bos")
     env = manager.list()["environments"][0]
     assert (
         _entry(env["resolved_sources"], "paddleocr_model_registry")["id"]
         == "paddleocr-bos"
     )
+    # 单引擎提交不清除另一引擎 override：MinerU 保持环境覆盖。
     assert (
         _entry(env["resolved_sources"], "mineru_model_registry")["id"]
         == "mineru-modelscope"
@@ -663,7 +721,7 @@ def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -
         "PADDLE_PDX_MODEL_SOURCE": "bos",
         "MINERU_MODEL_SOURCE": "modelscope",
     }
-    manager.set_sources(record["id"], None, paddleocr_model_source_id=None)
+    manager.set_sources(record["id"], paddleocr_model_source_id=None)
     env = manager.list()["environments"][0]
     assert env["override_source_ids"] == ["mineru-modelscope"]
     assert (
@@ -675,19 +733,20 @@ def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -
         == "mineru-modelscope"
     )
     assert manager.list()["default_source_ids"] == [
-        "pypi",
         "paddleocr-huggingface",
         "mineru-huggingface",
     ]
 
 
 def test_engine_source_kind_mismatch_does_not_write(tmp_path: Path) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     with pytest.raises(
         ManagedEnvironmentError, match="unknown paddleocr_model_registry"
     ):
-        manager.set_sources(None, "pypi", paddleocr_model_source_id="mineru-modelscope")
+        manager.set_sources(None, paddleocr_model_source_id="mineru-modelscope")
     assert manager.list()["source_config_revision"] == 0
     assert manager.list()["default_source_ids"] == []
 
@@ -695,7 +754,9 @@ def test_engine_source_kind_mismatch_does_not_write(tmp_path: Path) -> None:
 def test_stdio_independent_engine_sources_preserve_absent_fields(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
@@ -703,14 +764,13 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
         "product_root": str(tmp_path / "product"),
         "component_lock": str(component),
         "runtime_manifest": str(manifest),
-        "package_source_id": "tuna-pypi",
+        "environment_id": None,
         "paddleocr_model_source_id": "paddleocr-bos",
         "mineru_model_source_id": "mineru-modelscope",
     }
     assert main(["--request-json", json.dumps(request)]) == 0
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["default_source_ids"] == [
-        "tuna-pypi",
         "paddleocr-bos",
         "mineru-modelscope",
     ]
@@ -718,7 +778,7 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
     del request["mineru_model_source_id"]
     assert main(["--request-json", json.dumps(request)]) == 0
     result = json.loads(capsys.readouterr().out)["result"]
-    assert result["default_source_ids"] == ["tuna-pypi", "mineru-modelscope"]
+    assert result["default_source_ids"] == ["mineru-modelscope"]
     assert (
         _entry(result["resolved_default_sources"], "paddleocr_model_registry")["id"]
         == "paddleocr-modelscope"
@@ -728,7 +788,6 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
         == "mineru-modelscope"
     )
     assert {source["id"] for source in result["sources"] if source["is_default"]} == {
-        "tuna-pypi",
         "paddleocr-modelscope",
         "mineru-modelscope",
     }
@@ -744,7 +803,9 @@ def test_accepted_cancellation_records_terminal_failure_before_return(
         ManagedEnvironmentInstallCancelled,
     )
 
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32)
     plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
@@ -800,7 +861,9 @@ def test_terminal_commit_rejects_late_cancellation(
 ) -> None:
     import subprocess
 
-    manifest, component = _release(tmp_path / "release")
+    manifest, component = _release(
+        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+    )
     manager = _open(tmp_path, manifest, component, install_runner=lambda *_args: None)
     record = _write_record(manager, "a" * 32)
     plan = manager.preview_install(record["id"], "paddleocr-ort-directml")

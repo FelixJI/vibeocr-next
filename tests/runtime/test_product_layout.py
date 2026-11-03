@@ -167,7 +167,6 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     ]
     advanced_packs = {
         "future-win-x64-base-cpu-profile.pack": b"cpu-full",
-        "future-win-x64-base-cu126-profile.pack": b"cuda-full",
         "vibeocr-runtime-pack-paddlex-future.zip": b"paddlex",
         "vibeocr-runtime-pack-mineru-future.zip": b"mineru",
     }
@@ -179,19 +178,15 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
     runtime_manifest["profiles"]["win-x64-cpu"]["runtime_pack_sha256"] = [
         hashlib.sha256(b"cpu-full").hexdigest()
     ]
-    runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack"] = [
-        "future-win-x64-base-cu126-profile.pack"
-    ]
-    runtime_manifest["profiles"]["win-x64-cu126"]["runtime_pack_sha256"] = [
-        hashlib.sha256(b"cuda-full").hexdigest()
-    ]
-    runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack"] = [
+    runtime_manifest["paddle_onnx_environments"]["directml"]["runtime_pack"] = [
+        *runtime_manifest["paddle_onnx_environments"]["directml"]["runtime_pack"],
         "vibeocr-runtime-pack-paddlex-future.zip",
-        "vibeocr-runtime-pack-mineru-future.zip",
     ]
-    runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack_sha256"] = [
+    runtime_manifest["paddle_onnx_environments"]["directml"]["runtime_pack_sha256"] = [
+        *runtime_manifest["paddle_onnx_environments"]["directml"][
+            "runtime_pack_sha256"
+        ],
         hashlib.sha256(b"paddlex").hexdigest(),
-        hashlib.sha256(b"mineru").hexdigest(),
     ]
     (backend / "runtime-manifest.json").write_text(
         json.dumps(runtime_manifest), encoding="utf-8"
@@ -208,12 +203,7 @@ def test_stage_product_layout_embeds_only_the_release_bound_base_runtime_closure
         runtime_manifest["python"]["archive"],
         runtime_manifest["profiles"]["win-x64-base"]["lock"],
         runtime_manifest["profiles"]["win-x64-cpu"]["lock"],
-        runtime_manifest["profiles"]["win-x64-cu126"]["lock"],
-        runtime_manifest["profiles"]["win-x64-cu126"]["install_scopes"][0]["lock"],
-        runtime_manifest["paddle_onnx_environments"]["cpu"]["lock"],
-        runtime_manifest["paddle_onnx_environments"]["cuda"]["lock"],
         runtime_manifest["paddle_onnx_environments"]["directml"]["lock"],
-        *runtime_manifest["paddle_onnx_environments"]["cpu"]["runtime_pack"],
         *runtime_manifest["paddle_onnx_environments"]["directml"]["runtime_pack"],
         runtime_manifest["paddle_model_pack"]["archive"],
         "offline-foundation.part-01.bundle",
@@ -392,7 +382,7 @@ def test_load_product_layout_rejects_safe_but_noncanonical_paths(
 
 
 @pytest.mark.parametrize("present", [True, False])
-@pytest.mark.parametrize("device", ["cpu", "directml"])
+@pytest.mark.parametrize("device", ["directml"])
 def test_stage_requires_declared_paddle_onnx_pack_and_lock(
     tmp_path: Path, present: bool, device: str
 ) -> None:
@@ -437,16 +427,12 @@ def test_stage_accepts_unified_directml_only_binding(tmp_path: Path) -> None:
     manifest_path = backend / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     ort = manifest["paddle_onnx_environments"]
-    for device in ("cpu", "cuda"):
-        for name in (ort[device]["lock"], *ort[device].get("runtime_pack", [])):
-            (backend / name).unlink()
-        ort.pop(device)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # CUDA 档位退役后 _release 只产 directml 绑定：默认形态即统一闭包。
+    assert set(ort) == {"directml"}
     stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
     staged = tmp_path / "VibeOCR/runtime/backend"
     assert (staged / ort["directml"]["lock"]).is_file()
     assert (staged / ort["directml"]["runtime_pack"][0]).is_file()
-    assert not (staged / "requirements-win-x64-paddle-ort-cpu.lock").exists()
 
 
 def test_stage_requires_bundled_paddle_model_pack(tmp_path: Path) -> None:

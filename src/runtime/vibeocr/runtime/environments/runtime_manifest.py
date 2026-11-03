@@ -13,41 +13,33 @@ from typing import Any
 from urllib.parse import unquote
 
 PROFILE_NAMES = ("win-x64-base",)
-# 历史组件档位（win-x64-cpu / win-x64-cu126）已随统一推理闭包退役：OCR/
+# 历史组件档位（win-x64-cpu）已随统一推理闭包退役：OCR/
 # 表格/结构/MinerU 全部由 managed paddleocr-ort-directml 环境承载（绑定见
 # paddle_onnx_environments）。历史 manifest 里的旧 profile 仍按旧规则读取
 # 校验（数据保留、不卸载），不再进入当前档位目录。
-_LEGACY_PROFILE_NAMES = ("win-x64-cpu", "win-x64-cu126")
+_LEGACY_PROFILE_NAMES = ("win-x64-cpu",)
 # base：随 Portable 携带的离线必备闭包（win-x64-base）。accelerator →
 # profile 的映射是 manifest 域的单一事实来源，selection policy 与
-# installer 共同消费；推理档位统一收敛到 directml 统一闭包后，cpu /
-# nvidia_cuda 仅作为历史 component lock 与旧 manifest 的读取归类键保留
-# （新构建不再产出对应 profile，新安装档位只有 base）。
+# installer 共同消费；推理档位统一收敛到 directml 统一闭包后，cpu 仅作为
+# 历史 component lock 与旧 manifest 的读取归类键保留（新构建不再产出对应
+# profile，新安装档位只有 base）。CUDA 档位（nvidia_cuda）已整体退役：
+# DirectML 是唯一 GPU 后端。
 ACCELERATOR_TO_PLAN = {
     "base": "win-x64-base",
     "cpu": "win-x64-cpu",
-    "nvidia_cuda": "win-x64-cu126",
 }
 PROFILE_COMPONENTS = {
     # 组件目录面向引擎/能力划分。基础闭包只保留 Runtime 服务环境（远程
     # 服务安装与 legacy runtime 的 host 底座）；RapidOCR/RapidTable 已随
     # 引擎退役移除，Paddle OCR/表格/结构与 MinerU 由 managed 统一推理环境
     # paddleocr-ort-directml 承载（绑定见 paddle_onnx_environments）。
-    # cpu / cu126 是历史档位定义：新构建不再产出对应 profile，仅为读取
+    # cpu 是历史档位定义：新构建不再产出对应 profile，仅为读取
     # 历史 manifest 与 component lock 保留校验基准。
     "win-x64-base": (("runtime_host", "Runtime 服务环境"),),
     "win-x64-cpu": (
         ("runtime_host", "Runtime 服务环境"),
         ("mineru-cpu", "MinerU 文档解析（CPU）"),
     ),
-    "win-x64-cu126": (
-        ("runtime_host", "Runtime 服务环境"),
-        ("mineru-cuda", "MinerU 文档解析（CUDA）"),
-        ("gpu_runtime", "CUDA/Torch 运行环境"),
-    ),
-}
-_DEFAULT_COMPONENT_DEPENDENCIES = {
-    ("win-x64-cu126", "mineru-cuda"): ("gpu_runtime",),
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
@@ -96,11 +88,9 @@ _RETIRED_ENGINE_COMPONENT_REPLACEMENTS = {
 }
 _RUNTIME_COMPONENT_BINDINGS = {
     ("win-x64-cpu", "mineru-cpu"): RuntimeComponentBinding("mineru", "mineru"),
-    ("win-x64-cu126", "mineru-cuda"): RuntimeComponentBinding("mineru", "mineru"),
 }
 _SHARED_RUNTIME_COMPONENT_BINDINGS = {
     "runtime_host": RuntimeComponentBinding("fastapi", "fastapi"),
-    "gpu_runtime": RuntimeComponentBinding("torch", "torch"),
 }
 
 
@@ -473,7 +463,7 @@ def validate_requirements_lock(
                 raise ManifestError(f"base lock contains {forbidden}")
     elif profile.startswith("win-x64-paddle-ort-"):
         device = profile.removeprefix("win-x64-paddle-ort-")
-        if device not in {"cpu", "cuda", "directml"}:
+        if device not in {"cpu", "directml"}:
             raise ManifestError(f"unsupported Paddle ONNX profile: {profile}")
         packages = {entry[0].split("==")[0].lower() for entry in entries}
         required = {
@@ -491,8 +481,6 @@ def validate_requirements_lock(
         }
         ort = "onnxruntime-directml" if device == "directml" else "onnxruntime"
         required.add(ort)
-        if device == "cuda":
-            required.add("nvidia-cudnn-cu13")
         if device == "directml":
             # directml 是唯一活跃形态：统一推理闭包随包携带 MinerU（ONNX
             # 线，无 torch），onnx 是 MinerU 布局管线的模型格式依赖。
@@ -514,45 +502,25 @@ def validate_requirements_lock(
             "rapidocr",
         }
         if device != "directml":
-            # cpu/cuda 仅作为历史锁读取校验：旧闭包不含 MinerU/onnx，混入
+            # cpu 仅作为历史锁读取校验：旧闭包不含 MinerU/onnx，混入
             # 即拒绝；directml 统一闭包两者都是声明成员。
             forbidden_runtimes |= {"onnx", "mineru"}
         if packages & forbidden_runtimes:
             raise ManifestError(
                 "Paddle ONNX lock contains another inference/training runtime"
             )
-    elif profile in ("win-x64-paddle-cpu", "win-x64-paddle-cu126"):
+    elif profile == "win-x64-paddle-cpu":
         declarations = "\n".join(entry[0].lower() for entry in entries)
         for forbidden in ("opencv-python==", "mineru==", "rapidocr=="):
             if forbidden in declarations:
                 raise ManifestError(f"Paddle environment contains {forbidden}")
         if "opencv-contrib-python==" not in declarations:
             raise ManifestError("Paddle environment is missing opencv-contrib-python")
-        if profile.endswith("-cpu") and "paddlepaddle-gpu" in declarations:
+        if "paddlepaddle-gpu" in declarations:
             raise ManifestError("Paddle CPU environment contains GPU Paddle")
-        if profile.endswith("-cu126") and "paddlepaddle-gpu" not in declarations:
-            raise ManifestError("Paddle CUDA environment is missing GPU Paddle")
-    elif profile == "win-x64-mineru-cpu":
-        declarations = "\n".join(entry[0].lower() for entry in entries)
-        if "mineru==" not in declarations or "fastapi==" not in declarations:
-            raise ManifestError("standalone MinerU lock lacks engine or Runtime host")
-        for forbidden in ("rapidocr==", "paddleocr==", "paddlepaddle==", "torch=="):
-            if forbidden in declarations:
-                raise ManifestError(f"standalone MinerU lock contains {forbidden}")
     elif profile == "win-x64-cpu":
         if "paddlepaddle-gpu" in lowered or "cu126" in lowered:
             raise ManifestError("CPU lock contains a GPU/cu126 artifact")
-    elif profile == "win-x64-cu126":
-        # #270：cu126 host 锁只承载 torch/gpu_runtime 闭包，不再要求原生
-        # PaddlePaddle。历史 loader 仍会读到旧集成锁（含 paddlepaddle-gpu）
-        # 或旧隔离锁：旧包存在本身不拒绝整个历史 manifest，只继续拒绝
-        # 从未属于 cu126 的 CPU paddlepaddle。
-        required_packages = ("torch", "torchvision", "cu126")
-        for required in required_packages:
-            if required not in lowered:
-                raise ManifestError(f"cu126 lock is missing {required}")
-        if re.search(r"(?m)^paddlepaddle==", lowered):
-            raise ManifestError("cu126 lock contains CPU paddlepaddle")
     else:
         raise ManifestError(f"unsupported profile: {profile}")
 
@@ -563,13 +531,7 @@ def default_profile_components(profile: str) -> tuple[RuntimeComponent, ...]:
     except KeyError as exc:
         raise ManifestError(f"unsupported profile: {profile}") from exc
     return tuple(
-        RuntimeComponent(
-            component_id,
-            display_name,
-            dependencies=_DEFAULT_COMPONENT_DEPENDENCIES.get(
-                (profile, component_id), ()
-            ),
-        )
+        RuntimeComponent(component_id, display_name)
         for component_id, display_name in values
     )
 
@@ -715,7 +677,7 @@ def load_runtime_manifest(
             verified_pack_digests[path] = digest
         return digest
 
-    # base 优先加载；历史 manifest 携带的 cpu/cu126 档位按同一规则校验并
+    # base 优先加载；历史 manifest 携带的 cpu 档位按同一规则校验并
     # 保留在 profiles 投影里（maintenance/selection 读取历史安装要用），
     # 新构建不再生成它们。
     ordered_profile_names = [
@@ -749,15 +711,7 @@ def load_runtime_manifest(
                 component_id = component.get("component_id")
                 display_name = component.get("display_name")
                 version_value = component.get("version")
-                default_dependencies = (
-                    _DEFAULT_COMPONENT_DEPENDENCIES.get((name, component_id), ())
-                    if isinstance(component_id, str)
-                    else ()
-                )
-                dependencies_value = component.get(
-                    "dependencies",
-                    default_dependencies,
-                )
+                dependencies_value = component.get("dependencies", ())
                 if (
                     not isinstance(component_id, str)
                     or not component_id
@@ -1018,15 +972,13 @@ def load_runtime_manifest(
     paddle_onnx = {}
     ort_records = data.get("paddle_onnx_environments", {})
     # 新 manifest 只绑定 directml（统一推理闭包：Paddle ONNX + MinerU）；
-    # 历史 manifest 的三设备绑定按历史锁规则整体读取，不允许部分集。
+    # CUDA 档位已退役：绑定集合只接受空集或统一 directml 闭包。
     if not isinstance(ort_records, dict) or set(ort_records) not in (
         set(),
         {"directml"},
-        {"cpu", "cuda", "directml"},
     ):
         raise ManifestError(
-            "Paddle ONNX environments must bind either the unified directml "
-            "closure or the legacy three-provider set"
+            "Paddle ONNX environments must bind the unified directml closure"
         )
     for device, record in ort_records.items():
         if not isinstance(record, dict):

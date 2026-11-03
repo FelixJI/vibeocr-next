@@ -35,7 +35,7 @@ def test_load_returns_default_when_no_settings_file_exists(tmp_path) -> None:
 
 def test_replace_survives_a_new_store_instance(tmp_path) -> None:
     path = tmp_path / "settings.json"
-    expected = _snapshot(ttl=600, sources=("pypi",))
+    expected = _snapshot(ttl=600, sources=("paddleocr-modelscope",))
 
     RuntimeSettingsStore(path).replace(expected)
 
@@ -124,7 +124,7 @@ def test_settings_survive_a_supervisor_module_restart(tmp_path) -> None:
     store = RuntimeSettingsStore(tmp_path / "settings.json")
     first_executor = _RecordingExecutor()
     first = _module(tmp_path, first_executor, store)
-    expected = _snapshot(ttl=600, sources=("pypi",))
+    expected = _snapshot(ttl=600, sources=("paddleocr-modelscope",))
 
     first.update_settings(expected)
 
@@ -209,7 +209,7 @@ def test_invalid_idle_policy_preserves_independent_remote_preferences(
             "paddle_idle_seconds": -1,
             "mineru_idle_seconds": 600,
             "extra": extra,
-            "download_source_ids": ["pypi"],
+            "download_source_ids": ["paddleocr-modelscope"],
         },
     }
     path = tmp_path / "settings.json"
@@ -227,7 +227,7 @@ def test_invalid_idle_policy_preserves_independent_remote_preferences(
     assert module.settings().extra["theme"] == "dark"
     assert module.settings().extra["model_preference"] == {"preset": "tiny"}
     assert module.settings().extra["mineru_connection"] == extra["mineru_connection"]
-    assert module.settings().download_source_ids == ("pypi",)
+    assert module.settings().download_source_ids == ("paddleocr-modelscope",)
     assert module.settings().paddle_idle_seconds == 600
     if valid_connection:
         assert readiness.current_connection().mode == "remote"
@@ -267,7 +267,7 @@ def test_migration_io_failure_keeps_valid_runtime_preferences_and_original(
             "schema_version": 2,
             "residency": {"default_ttl_seconds": 300, "pipelines": []},
             "extra": extra,
-            "download_source_ids": ["pypi"],
+            "download_source_ids": ["paddleocr-modelscope"],
         },
     }
     path = tmp_path / "settings.json"
@@ -296,7 +296,7 @@ def test_migration_io_failure_keeps_valid_runtime_preferences_and_original(
     assert (
         supervisor.settings().extra["mineru_connection"] == extra["mineru_connection"]
     )
-    assert supervisor.settings().download_source_ids == ("pypi",)
+    assert supervisor.settings().download_source_ids == ("paddleocr-modelscope",)
     assert supervisor.settings().paddle_idle_seconds == 300
     assert readiness.current_connection().mode == "remote"
     assert readiness.current_connection().api_key == "synthetic-key"

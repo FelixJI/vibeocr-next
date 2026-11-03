@@ -127,14 +127,10 @@ def test_restart_and_device_switch_preserve_selected_engine(tmp_path):
     )
     factory().ensure()
     assert len(calls) == 1
-    cuda = factory(accelerator="nvidia_cuda")
-    # 设备切换继承的 mineru 选择同样折叠：期望闭包保持 base-only，不再
-    # 重建 CUDA 组件闭包（mineru-cuda/gpu_runtime）；但设备档位身份变化
-    # 仍触发一次 base-only 重建。
-    assert set(cuda._desired_scope_ids()) == {"runtime_host"}
-    cuda.ensure()
-    assert len(calls) == 2
-    assert (tmp_path / "product" / "runtime.rollback").is_dir()
+    # CUDA 档位已退役：legacy 安装器不再有设备档位切换；mineru 折叠后的
+    # base-only 闭包经 ensure 幂等复用（无重建）。
+    factory().ensure()
+    assert len(calls) == 1
 
 
 def test_different_plan_cannot_reuse_operation_id(tmp_path):
@@ -525,34 +521,6 @@ async def test_http_replays_confirm_and_retry_while_ocr_blocks_new_installs(
             assert calls == ["win-x64-base"]
 
 
-@pytest.mark.parametrize(
-    "accelerators", [("cpu", "nvidia_cuda"), ("nvidia_cuda", "cpu")]
-)
-def test_base_device_switch_previews_candidate_cost_as_unknown(
-    tmp_path, monkeypatch, accelerators
-):
-    control, factory, calls, _, _ = _control(tmp_path)
-    monkeypatch.setattr(RuntimeInstaller, "_installation_blockers", lambda self: [])
-    old, new = accelerators
-    factory(accelerator=old, install_component_ids=()).ensure()
-    plan = control.preview_install_plan(
-        accelerator=new, install_component_ids=(), required_capabilities=(CAPABILITY,)
-    )["plan"]
-    assert {item["action"] for item in plan["components"]} == {"replace"}
-    assert plan["cost"]["download_bytes"] is None
-    assert plan["cost"]["additional_disk_bytes"] is None
-    assert "candidate_disk_usage_unknown" in plan["cost"]["unknown_reason_codes"]
-    receipt = control.execute(
-        operation="ensure",
-        operation_id="switch",
-        plan_id=plan["plan_id"],
-        required_capabilities=(CAPABILITY,),
-    )
-    assert receipt["snapshot"]["operation_state"] == "succeeded"
-    assert len(calls) == 2
-    assert (tmp_path / "product/runtime.rollback").is_dir()
-
-
 def test_confirmation_rechecks_failed_receipt_after_first_lookup_race(tmp_path):
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -628,7 +596,7 @@ def test_confirmation_rechecks_receipt_after_http_admission_race(tmp_path):
     assert calls == []
 
 
-@pytest.mark.parametrize("devices", [("cpu", "nvidia_cuda"), ("nvidia_cuda", "cpu")])
+@pytest.mark.parametrize("devices", [("base", "cpu"), ("cpu", "base")])
 def test_environment_control_follows_committed_device_after_switch(
     tmp_path, monkeypatch, devices
 ):
@@ -677,7 +645,9 @@ async def test_http_preview_distinguishes_inherited_and_explicit_download_source
             stager_root=tmp_path / "staging",
             executor=executor,
         )
-        module.update_settings(SettingsSnapshot(download_source_ids=("pypi",)))
+        module.update_settings(
+            SettingsSnapshot(download_source_ids=("paddleocr-modelscope",))
+        )
         app = create_app(module, "test-token", runtime_control=control)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -692,18 +662,22 @@ async def test_http_preview_distinguishes_inherited_and_explicit_download_source
             assert inherited.status_code == 200, inherited.text
             plan = inherited.json()["plan"]
             assert plan["requested_download_source_ids"] is None
-            assert plan["effective_download_source_ids"] == ["pypi"]
+            assert plan["effective_download_source_ids"] == [
+                "paddleocr-modelscope",
+                "mineru-modelscope",
+            ]
             assert read_plan(control.state_root, plan["plan_id"])["plan"] == plan
             explicit = await http.post(
                 "/v2/runtime/install-plan",
-                json={**request, "download_source_ids": ["tuna-pypi"]},
+                json={**request, "download_source_ids": ["paddleocr-bos"]},
             )
             assert explicit.status_code == 200, explicit.text
             assert explicit.json()["plan"]["requested_download_source_ids"] == [
-                "tuna-pypi"
+                "paddleocr-bos"
             ]
             assert explicit.json()["plan"]["effective_download_source_ids"] == [
-                "tuna-pypi"
+                "paddleocr-bos",
+                "mineru-modelscope",
             ]
             receipt = await http.post(
                 "/v2/runtime/maintenance",
@@ -717,7 +691,10 @@ async def test_http_preview_distinguishes_inherited_and_explicit_download_source
             assert receipt.status_code == 200, receipt.text
             snapshot = receipt.json()["snapshot"]
             assert snapshot.get("requested_download_source_ids") is None
-            assert snapshot["effective_download_source_ids"] == ["pypi"]
+            assert snapshot["effective_download_source_ids"] == [
+                "paddleocr-modelscope",
+                "mineru-modelscope",
+            ]
 
 
 def test_preview_holds_writer_lock_while_resolving_inherited_selection(tmp_path):
@@ -757,16 +734,14 @@ def test_preview_holds_writer_lock_while_resolving_inherited_selection(tmp_path)
         plan = pending.result()["plan"]
     # 继承的 mineru 选择按统一推理闭包折叠为 base-only 闭包。
     assert plan["effective_component_ids"] == ["runtime_host"]
-    # 组件选择已折叠，marker 只能经设备档位切换重建（accelerator 身份变化）。
-    factory(accelerator="nvidia_cuda", install_component_ids=()).ensure()
-    with pytest.raises(RuntimeInstallPlanStale):
-        control.execute(
-            operation="ensure",
-            operation_id="old-preview",
-            plan_id=plan["plan_id"],
-            required_capabilities=(CAPABILITY,),
-        )
-    assert len(calls) == 2
+    # CUDA 档位退役后无档位切换：旧计划仍可在当前闭包上确认执行。
+    control.execute(
+        operation="ensure",
+        operation_id="old-preview",
+        plan_id=plan["plan_id"],
+        required_capabilities=(CAPABILITY,),
+    )
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("same_root", [False, True])
@@ -1015,7 +990,9 @@ def test_shared_plan_retry_command_replay_checks_product_binding(tmp_path):
     assert owner.command(**request) == receipt
 
 
-@pytest.mark.parametrize("operation", ["ensure", "repair"])
+# ensure 分支依赖 CUDA 档位制造安装身份差异，档位退役后不可达；
+# repair 分支（漂移驱动重建）保留完整回滚契约。
+@pytest.mark.parametrize("operation", ["repair"])
 @pytest.mark.parametrize(
     "failure", ["final_probe", "launch_directory", "success_event", "success_fsync"]
 )
@@ -1035,7 +1012,7 @@ def test_activation_failure_restores_previous_runtime_and_choice(
     model.write_text("existing model", encoding="utf-8")
     installer = factory(
         operation_id="activation-failed",
-        accelerator="nvidia_cuda" if operation == "ensure" else "cpu",
+        accelerator="cpu",
         install_component_ids=(),
     )
 
@@ -1117,7 +1094,7 @@ def test_activation_failure_restores_previous_runtime_and_choice(
     assert restored._launch().python_executable == original._launch().python_executable
 
 
-@pytest.mark.parametrize("operation", ["ensure", "repair"])
+@pytest.mark.parametrize("operation", ["repair"])
 @pytest.mark.parametrize("failure", ["metadata_projection", "event_delivery"])
 def test_durable_success_survives_projection_or_delivery_failure(
     tmp_path, monkeypatch, operation, failure
@@ -1131,7 +1108,7 @@ def test_durable_success_survives_projection_or_delivery_failure(
     before = json.loads(marker.read_text(encoding="utf-8"))
     installer = factory(
         operation_id="commit-test",
-        accelerator="nvidia_cuda" if operation == "ensure" else "cpu",
+        accelerator="cpu",
         install_component_ids=(),
     )
     if operation == "repair":

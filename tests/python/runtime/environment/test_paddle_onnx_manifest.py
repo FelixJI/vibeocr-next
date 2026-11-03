@@ -90,15 +90,15 @@ def test_generated_manifest_binds_directml_lock_and_rejects_incomplete_or_change
             "document",
         ]
     data = json.loads(generated.read_text(encoding="utf-8"))
-    # 删除 directml 键后残留部分历史设备绑定：不允许部分集，整体拒绝。
+    # CUDA 退役后绑定集合只接受空或统一 directml 闭包：换成历史 cpu 键
+    # 整体拒绝，不允许部分/分设备残留。
     data["paddle_onnx_environments"]["cpu"] = data["paddle_onnx_environments"].pop(
         "directml"
     )
     generated.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(
         ManifestError,
-        match="must bind either the unified directml closure or the legacy "
-        "three-provider set",
+        match="must bind the unified directml closure",
     ):
         load_runtime_manifest(generated)
     data["paddle_onnx_environments"] = {

@@ -30,10 +30,10 @@ def _manager(
     )
     calls = []
 
-    def runner(python, scope, endpoint):
-        calls.append((scope.scope_id, scope.runtime_pack, endpoint))
+    def runner(python, scope):
+        calls.append((scope.scope_id, scope.runtime_pack))
         if install is not None:
-            install(python, scope, endpoint)
+            install(python, scope)
 
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -320,7 +320,7 @@ def test_retired_default_upgrade_failure_retries_without_changing_selection(
 ):
     failed = True
 
-    def install(_python, _scope, _source):
+    def install(_python, _scope):
         if failed:
             raise RuntimeError("offline pack unavailable")
 
@@ -492,7 +492,7 @@ def test_retired_default_upgrade_does_not_repurpose_existing_environment(
 
 
 def test_retired_default_upgrade_keeps_concurrent_user_selection(tmp_path, monkeypatch):
-    def install(_python, _scope, _source):
+    def install(_python, _scope):
         manager.commit_switch(manager.prepare_switch(selected["id"]))
 
     manager, _calls, _old, _ = _retired_default(tmp_path, monkeypatch, install)
@@ -529,7 +529,7 @@ def test_retired_default_upgrade_reserves_id_against_concurrent_create(
 def test_failed_default_install_retries_same_environment(tmp_path, monkeypatch):
     failed = True
 
-    def install(_python, _scope, _endpoint):
+    def install(_python, _scope):
         if failed:
             raise RuntimeError("offline pack unavailable")
 
@@ -583,7 +583,7 @@ def test_interrupted_creation_reuses_reserved_environment_id(
 
 
 def test_deleting_failed_default_does_not_recreate(tmp_path, monkeypatch):
-    def install(_python, _scope, _endpoint):
+    def install(_python, _scope):
         raise RuntimeError("offline pack unavailable")
 
     manager, calls = _manager(tmp_path, monkeypatch, install)
@@ -615,8 +615,6 @@ manager = ManagedEnvironmentStore(
 # still launches and collects the real venv/probe child and owns timeout cleanup.
 real_run = subprocess.run
 def bounded_run(*args, **kwargs):
-    if args[0][0] == 'nvidia-smi':
-        args = ([sys.executable, '-c', "print('575.64')"], *args[1:])
     kwargs['timeout'] = 5
     return real_run(*args, **kwargs)
 subprocess.run = bounded_run
@@ -626,8 +624,8 @@ def cancel():
     received.set()
 threading.Thread(target=_listen_environment_cancel, args=(cancel,), daemon=True).start()
 created = manager.create('live-control-pipe')
-hardware = manager.list()['hardware']['nvidia_driver']
-print(json.dumps({'status': created['status'], 'python_state': created['python_state'], 'driver_status': hardware['status']}), flush=True)
+manager.list()
+print(json.dumps({'status': created['status'], 'python_state': created['python_state']}), flush=True)
 assert received.wait(10), 'installer control pipe stopped receiving commands'
 """
     with subprocess.Popen(
@@ -655,7 +653,6 @@ assert received.wait(10), 'installer control pipe stopped receiving commands'
         assert json.loads(created) == {
             "status": "empty",
             "python_state": "ready",
-            "driver_status": "ok",
         }
         # Keep the installer input open throughout creation/probing, then use the
         # same channel to prove no external tool consumed or closed it.

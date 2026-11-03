@@ -42,8 +42,9 @@ public sealed record PaddleModeOptions
     ];
 
     // Rapid 模式退役映射：旧 recognition_device_options[rapid_text/rapid_table]
-    // 的设备值（auto|cpu|cuda）迁移为对应 Paddle 模式的 device 选项；仅当
-    // 当前模式没有自己的记录时生效，不覆盖已有 Paddle 设置。
+    // 的设备值（auto|cpu）迁移为对应 Paddle 模式的 device 选项；仅当
+    // 当前模式没有自己的记录时生效，不覆盖已有 Paddle 设置。CUDA 档位
+    // 已退役：历史 cuda 偏好不再迁移，回退默认 auto。
     private static readonly IReadOnlyDictionary<string, string> LegacyRapidDeviceModeIds =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -58,12 +59,13 @@ public sealed record PaddleModeOptions
         if (stored is null)
         {
             // 旧 Rapid 设备设置迁移（rapid_text→paddle_text、rapid_table→
-            // paddle_table）：auto|cpu|cuda 都是合法 Paddle device 值，其余
-            // 回退默认；是否真的支持 device 由目录 ProjectWire/ToWire 门控。
+            // paddle_table）：auto|cpu 是合法 Paddle device 值，其余（含
+            // 历史 cuda）回退默认；是否真的支持 device 由目录
+            // ProjectWire/ToWire 门控。
             if (LegacyRapidDeviceModeIds.TryGetValue(modeId, out string? rapidModeId) &&
                 root["recognition_device_options"]?[rapidModeId] is JsonValue legacy &&
                 legacy.TryGetValue<string>(out string? device) &&
-                device is "auto" or "cpu" or "cuda")
+                device is "auto" or "cpu")
                 return new PaddleModeOptions { Device = device };
             return new();
         }
@@ -95,7 +97,7 @@ public sealed record PaddleModeOptions
         ArgumentNullException.ThrowIfNull(mode);
         if (ModelPreset is not null && ModelPreset is not ("tiny" or "small" or "medium"))
             throw new ArgumentException("Unsupported Paddle model preset.");
-        if (Device is not null && Device is not ("auto" or "cpu" or "cuda" or "directml"))
+        if (Device is not null && Device is not ("auto" or "cpu" or "directml"))
             throw new ArgumentException("Unsupported Paddle provider.");
         JsonElement serialized = JsonSerializer.SerializeToElement(this, JsonOptions);
         var result = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
@@ -125,7 +127,7 @@ public sealed record PaddleModeOptions
         {
             if (!mode.SupportedOptions.Contains(property.Name, StringComparer.Ordinal)) continue;
             if (property.Name == "model_preset" && property.Value.GetString() is not ("tiny" or "small" or "medium")) continue;
-            if (property.Name == "device" && property.Value.GetString() is not ("auto" or "cpu" or "cuda" or "directml")) continue;
+            if (property.Name == "device" && property.Value.GetString() is not ("auto" or "cpu" or "directml")) continue;
             result.Add(property.Name, property.Value.Clone());
         }
         return result;

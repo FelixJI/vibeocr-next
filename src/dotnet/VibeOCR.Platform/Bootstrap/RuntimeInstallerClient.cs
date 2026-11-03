@@ -590,17 +590,16 @@ public sealed partial class RuntimeInstallerClient : IRuntimeInstallerClient
             using JsonDocument document = JsonDocument.Parse(
                 File.ReadAllBytes(_configuration.RuntimeManifest));
             JsonElement profiles = document.RootElement.GetProperty("profiles");
-            string profileId = _configuration.Accelerator == "nvidia_cuda"
-                ? profiles.EnumerateObject()
-                    .Select(item => item.Name)
-                    .First(name => name.Contains("cu", StringComparison.OrdinalIgnoreCase))
-                : profiles.EnumerateObject()
-                    .Select(item => item.Name)
-                    .First(name => name.EndsWith("cpu", StringComparison.OrdinalIgnoreCase));
+            // CUDA 档位已退役：nvidia_cuda 只是历史配置值，投影一律按 CPU
+            // 档 profile（与 Runtime 侧 startup 组件归档一致）。新 manifest
+            // 只产 base 档，历史 cpu 档缺席时回退 base。
+            string profileId = profiles.EnumerateObject()
+                .Select(item => item.Name)
+                .FirstOrDefault(name => name.EndsWith("cpu", StringComparison.OrdinalIgnoreCase))
+                ?? profiles.EnumerateObject().Select(item => item.Name).FirstOrDefault()
+                ?? "win-x64-base";
             JsonElement profile = profiles.GetProperty(profileId);
-            Host.Accelerator accelerator = _configuration.Accelerator == "nvidia_cuda"
-                ? Host.Accelerator.NvidiaCuda
-                : Host.Accelerator.Cpu;
+            Host.Accelerator accelerator = Host.Accelerator.Cpu;
             Host.RuntimeComponentDescriptor[] components = profile
                 .GetProperty("components")
                 .EnumerateArray()
