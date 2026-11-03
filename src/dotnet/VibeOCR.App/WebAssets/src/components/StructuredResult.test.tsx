@@ -807,6 +807,50 @@ it("edits a line in place via double-click or Enter through the host handler", a
   ).not.toBeInTheDocument();
 });
 
+it("跳转编辑请求让对应行滚动到位并直接进入编辑", async () => {
+  // jsdom 未实现 scrollIntoView：stub 记录调用以断言滚动定位发生。
+  const scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  const onUpdateLine = vi.fn(async () => true);
+  const { rerender } = render(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+    />,
+  );
+
+  // 新对象即新请求：目标行（宿主下标 1）进入编辑并滚动到最近位置。
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 1 }}
+    />,
+  );
+  expect(
+    screen.getByRole("textbox", { name: "编辑第 2 行" }),
+  ).toBeInTheDocument();
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+  // 行下标越界时忽略，不抛错不进入编辑。
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 99 }}
+    />,
+  );
+  expect(
+    screen.queryByRole("textbox", { name: "编辑第 100 行" }),
+  ).not.toBeInTheDocument();
+});
+
 it("copies a selected cell range with merged cells by anchor through the host handler", async () => {
   const onCopyCells = vi.fn(async () => true);
   const onCopy = vi.fn(async () => true);

@@ -1,6 +1,6 @@
 import { Button } from "@fluentui/react-components";
 import katex from "katex";
-import { useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import "katex/dist/katex.min.css";
 import "./StructuredResult.css";
 import { LineEditor } from "./LineEditor";
@@ -450,6 +450,7 @@ function LinesBlock({
   onUpdateLine,
   highlightLineIndex,
   onHoverLine,
+  activateLineRequest,
 }: {
   readonly lines: readonly ResultTextLine[];
   readonly modes: ResultTextModes;
@@ -458,13 +459,38 @@ function LinesBlock({
   /** 双向高亮：左侧图上行框悬停时对应行加亮（同一宿主行下标）。 */
   readonly highlightLineIndex?: number;
   readonly onHoverLine?: (index: number | undefined) => void;
+  /** 左侧 bbox 双击的跳转编辑请求（宿主行下标）：每次新对象触发一次，
+   * 对应行滚动到视野并直接进入编辑；行下标越界时忽略。 */
+  readonly activateLineRequest?: { index: number };
 }) {
   const [editing, setEditing] = useState<number | undefined>(undefined);
+  const [consumedRequest, setConsumedRequest] = useState<
+    { index: number } | undefined
+  >(undefined);
+  const listRef = useRef<HTMLOListElement | null>(null);
   const knownScores = lines.filter((line) => line.score !== null);
   const lowCount = lines.filter((line) => isLowConfidence(line.score)).length;
   // 展示用宿主预计算的模式文本（拼接权威）；缺失时由页级选择器禁用，
   // 这里仅回退基础逐行内容。
   const modeText = modes[mode];
+  // 跳转请求消费在 render 期派生调整（同页级 hover 绑定先例）：新对象
+  // 即新请求，越界下标忽略；编辑框由 LineEditor 自行聚焦全选。
+  if (activateLineRequest && activateLineRequest !== consumedRequest) {
+    setConsumedRequest(activateLineRequest);
+    if (
+      activateLineRequest.index >= 0 &&
+      activateLineRequest.index < lines.length
+    ) {
+      setEditing(activateLineRequest.index);
+    }
+  }
+  // 滚动定位是副作用：待行列表按新状态真实挂载后滚动目标行进视野。
+  useEffect(() => {
+    if (!consumedRequest) return;
+    listRef.current?.children
+      .item(consumedRequest.index)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [consumedRequest]);
   return (
     <section className="structured-block" aria-label="识别行文本">
       <p className="result-lines-summary">
@@ -474,7 +500,7 @@ function LinesBlock({
           : "，本引擎未提供置信度"}
       </p>
       {mode === "line" || modeText === undefined ? (
-        <ol className="result-lines-list">
+        <ol className="result-lines-list" ref={listRef}>
           {lines.map((line, index) => {
             const editable = onUpdateLine !== undefined;
             // 正在编辑的行不装触发器：编辑框事件不经父级 li。
@@ -569,6 +595,7 @@ export function StructuredResult({
   onUpdateLine,
   highlightLineIndex,
   onHoverLine,
+  activateLineRequest,
   mode = "raw",
 }: {
   readonly source: string;
@@ -578,6 +605,8 @@ export function StructuredResult({
   /** 双向高亮：与左侧校对图共享的悬停行下标（仅 lines 块消费）。 */
   readonly highlightLineIndex?: number;
   readonly onHoverLine?: (index: number | undefined) => void;
+  /** 左侧 bbox 双击的跳转编辑请求（仅 lines 块消费，见 LinesBlock）。 */
+  readonly activateLineRequest?: { index: number };
   /** 页级排版模式（lines 块展示形态；非 lines 块不受影响）。 */
   readonly mode?: ResultTextMode;
 }) {
@@ -620,6 +649,7 @@ export function StructuredResult({
               onUpdateLine={onUpdateLine}
               highlightLineIndex={highlightLineIndex}
               onHoverLine={onHoverLine}
+              activateLineRequest={activateLineRequest}
             />
           ) : null;
         }

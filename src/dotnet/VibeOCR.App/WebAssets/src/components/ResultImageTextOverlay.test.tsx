@@ -242,6 +242,46 @@ describe("result image text overlay", () => {
     );
     expect(onUpdateLine).toHaveBeenCalledWith(0, "旧行文本", "新行文本");
   });
+
+  it("双击/Enter 上报跳转回调且不在图上打开编辑器", async () => {
+    const lines: IndexedResultLine[] = [
+      {
+        index: 0,
+        line: { text: "第一行", score: 0.9, bbox: [0, 0, 500, 100] },
+      },
+    ];
+    const onActivateLine = vi.fn();
+    render(
+      <ResultImageTextOverlay
+        imageUrl="https://resource.vibeocr/result-image.png"
+        lines={lines}
+        onUpdateLine={vi.fn(async () => true)}
+        onActivateLine={onActivateLine}
+      />,
+    );
+    loadWithSize(
+      screen.getByRole("img", { name: "识别结果参考图" }) as HTMLImageElement,
+      1000,
+      500,
+    );
+
+    // 跳转模式：双击与键盘 Enter 都只上报宿主行下标，图上不再出现
+    // 原位编辑器。
+    await fireEvent.dblClick(screen.getByLabelText("第一行"));
+    expect(onActivateLine).toHaveBeenCalledTimes(1);
+    expect(onActivateLine).toHaveBeenCalledWith(0);
+    expect(
+      screen.queryByRole("textbox", { name: "编辑第 1 行" }),
+    ).not.toBeInTheDocument();
+
+    const trigger = screen.getByLabelText("第一行");
+    trigger.focus();
+    await fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(onActivateLine).toHaveBeenCalledTimes(2);
+    expect(
+      screen.queryByRole("textbox", { name: "编辑第 1 行" }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 it("keeps valid bbox lines when another result line has no bbox", () => {

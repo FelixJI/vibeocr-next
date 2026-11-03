@@ -445,7 +445,14 @@ test("bbox proofreading edits through the frozen result image", async ({
   await expect(rawSpan).not.toHaveClass(/line-hovered/);
   await expect(line).not.toHaveClass(/hovered/);
   await line.dblclick();
+  // 跳转语义：双击 bbox 不在图上打开原位编辑器，而是切到每行模式、
+  // 结果区对应行直接进入编辑。
+  const lineList = page.locator(".result-lines-list");
+  await expect(lineList).toBeVisible();
   const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
+  await expect(editor).toBeVisible();
+  await expect(lineList.filter({ has: editor })).not.toHaveCount(0);
+  await expect(page.locator(".overlay-line-editor")).toHaveCount(0);
   await editor.fill("改后的行文本");
   await rejectNextCommand(page);
   await page.getByRole("button", { name: "保存", exact: true }).click();
@@ -490,52 +497,4 @@ test("bbox proofreading edits through the frozen result image", async ({
   await page.screenshot({
     path: testInfo.outputPath("bbox-resize.png"),
   });
-});
-
-test("long-image proofreading editor stays inside the preview viewport", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 640, height: 480 });
-  await mountRecognitionResults(page);
-  await page.route("/long-proof.svg", (route) =>
-    route.fulfill({
-      contentType: "image/svg+xml",
-      body: '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="2400"><rect width="240" height="2400" fill="white"/></svg>',
-    }),
-  );
-  await page
-    .getByRole("img", { name: "识别结果参考图" })
-    .evaluate((image: HTMLImageElement) => {
-      image.src = "/long-proof.svg";
-    });
-  const line = page.getByLabel("第一段行一", { exact: true });
-  await expect
-    .poll(() =>
-      page
-        .getByRole("img", { name: "识别结果参考图" })
-        .evaluate((image: HTMLImageElement) => image.naturalHeight),
-    )
-    .toBe(2400);
-  await line.focus();
-  await page.keyboard.press("Enter");
-  const editor = page.getByRole("textbox", { name: "编辑第 1 行" });
-  await editor.fill("长图校对");
-  await expect
-    .poll(() =>
-      page.locator(".overlay-line-editor").evaluate((panel) => {
-        const view = document
-          .querySelector("#recognition-preview .canvas-stage")!
-          .getBoundingClientRect();
-        const rect = panel.getBoundingClientRect();
-        return (
-          rect.left >= view.left &&
-          rect.right <= view.right &&
-          rect.top >= view.top &&
-          rect.bottom <= view.bottom
-        );
-      }),
-    )
-    .toBe(true);
-  await page.getByRole("button", { name: "保存", exact: true }).click();
-  await expect(editor).toBeHidden();
 });
