@@ -304,9 +304,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     );
     const mineruSection = screen.getByLabelText("MinerU 本地引擎");
     expect(
-      within(mineruSection).queryByText(
-        /目录尚未同步或没有可用配方/,
-      ),
+      within(mineruSection).queryByText(/目录尚未同步或没有可用配方/),
     ).not.toBeInTheDocument();
     expect(
       within(mineruSection).getByText(/本地文档解析由统一推理闭包随包携带/),
