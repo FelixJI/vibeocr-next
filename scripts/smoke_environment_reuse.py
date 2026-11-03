@@ -91,9 +91,10 @@ def main() -> int:
 
         manager._install_runner = install
         records = []
-        for recipe in ("paddleocr-ort-directml", "paddleocr-ort-directml"):
-            print(f"Preparing real {recipe}", flush=True)
-            created = manager.create(recipe)
+        # create() 按显示名判重：两个同配方环境需要不同名称。
+        for index, recipe in enumerate(("paddleocr-ort-directml",) * 2, start=1):
+            print(f"Preparing real {recipe} #{index}", flush=True)
+            created = manager.create(f"统一推理闭包 {index}")
             plan = manager.preview_install(created["id"], recipe, ("tuna-pypi",))
             installed = manager.install(
                 plan["plan_id"], created["id"], recipe, ("tuna-pypi",)

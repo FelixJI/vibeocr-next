@@ -271,6 +271,57 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     );
   });
 
+  it("统一推理闭包目录下 MinerU 分区复用共享闭包配方", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    // 统一闭包形态：目录只剩 paddleocr-ort-directml，document 能力随
+    // 共享闭包声明；MinerU 分区必须识别该闭包而不是提示没有可用配方。
+    const unifiedRecipes = [
+      {
+        id: "paddleocr-ort-directml",
+        engine: "paddle",
+        family: "paddle-onnx",
+        familyDisplayName: "PaddleOCR ONNX + MinerU",
+        provider: "DmlExecutionProvider",
+        displayName: "PaddleOCR ONNX + MinerU · Windows DirectML",
+        configuredRecognitionTypes: ["text", "table", "structure", "document"],
+        accelerator: "cpu",
+        targetDevice: "directml",
+        pythonVersion: "3.13",
+        dependencies: ["paddleocr==3.7.0", "onnxruntime-directml==1.24.4"],
+        dependencyOrigin: "bundled_pack",
+      },
+    ];
+    const settings = {
+      environmentRecipes: unifiedRecipes,
+      environmentSources: sources,
+      environments: [],
+      environmentHardware: { nvidiaDriverStatus: "ok" },
+      environmentBusy: false,
+    };
+    render(
+      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
+    );
+    const mineruSection = screen.getByLabelText("MinerU 本地引擎");
+    expect(
+      within(mineruSection).queryByText(
+        /目录尚未同步或没有可用配方/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(mineruSection).getByText(/本地文档解析由统一推理闭包随包携带/),
+    ).toBeVisible();
+    await user.click(
+      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
+    );
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith({
+        type: "settings.findCompatibleEnvironment",
+        recipe: "paddleocr-ort-directml",
+      }),
+    );
+  });
+
   it("MinerU 分区显式查询后按 recipe 绑定展示结果与安装入口", async () => {
     const user = userEvent.setup();
     const actions = buildActions();

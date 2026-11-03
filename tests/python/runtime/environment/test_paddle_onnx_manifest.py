@@ -82,10 +82,12 @@ def test_generated_manifest_binds_directml_lock_and_rejects_incomplete_or_change
         validate_requirements_lock(
             scope.lock_path, profile=recipe.replace("paddleocr", "win-x64-paddle")
         )
+        # 统一闭包随包 MinerU：document 与 text/table/structure 同环境投影。
         assert ManagedEnvironmentStore._recipe_modes(recipe) == [
             "text",
             "table",
             "structure",
+            "document",
         ]
     data = json.loads(generated.read_text(encoding="utf-8"))
     # 删除 directml 键后残留部分历史设备绑定：不允许部分集，整体拒绝。

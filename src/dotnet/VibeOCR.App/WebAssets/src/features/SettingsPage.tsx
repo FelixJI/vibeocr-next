@@ -254,6 +254,7 @@ interface RecipeComponentGroup {
   readonly title: string;
   readonly purposeLabel: string;
   readonly purposeKey: string;
+  readonly modes: readonly string[];
   readonly byDevice: ReadonlyMap<string, ManagedEnvironmentRecipeState>;
 }
 
@@ -337,6 +338,7 @@ function recipeComponentGroups(
       engine: device.engine,
       title,
       purposeKey,
+      modes: [...(recipe.configuredRecognitionTypes ?? [])],
       purposeLabel: recognitionPurposeLabel(
         recipe.configuredRecognitionTypes ?? [],
       ),
@@ -1048,7 +1050,11 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const rawPlan = managedEnvironmentPlan(state.environmentPlan);
   const catalog = recipeComponentGroups(recipes);
   const paddleGroup = catalog.groups.find((group) => group.engine === "paddle");
-  const mineruGroup = catalog.groups.find((group) => group.engine === "mineru");
+  // 统一推理闭包没有独立的 mineru 引擎配方：本地 MinerU 分区复用声明
+  // document 能力的共享闭包分组（历史独立 mineru 目录形态仍按 engine 命中）。
+  const mineruGroup = catalog.groups.find(
+    (group) => group.engine === "mineru" || group.modes.includes("document"),
+  );
   const restoredChoice =
     !hasExplicitChoice && rawPlan?.requestedRecipe
       ? recipeChoice(
@@ -2688,7 +2694,7 @@ function EngineEnvironmentSection({
       <p className="form-note">
         {family === "paddle"
           ? "文字、表格与版面结构识别共用同一套 PaddleOCR 依赖，差别只在模型与管线（按需下载，各后端共用）。选择后端只做只读查询，确认后才安装或切换。"
-          : "MinerU 是独立于 Paddle 的本地文档解析引擎，CPU 与 CUDA 依赖闭包不同，模型首次使用时下载。远程模式不安装本地引擎，连接在下方“MinerU 连接”设置。"}
+          : "本地文档解析由统一推理闭包随包携带（与 PaddleOCR 同一环境），模型首次使用时下载。远程模式不安装本地引擎，连接在下方“MinerU 连接”设置。"}
       </p>
       {problems.map((problem) => (
         <p role="alert" key={problem}>

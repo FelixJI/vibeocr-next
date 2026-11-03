@@ -1421,8 +1421,9 @@ class ManagedEnvironmentStore:
         """配方 → 真实可用的识别类型（目录与公共记录共用同一投影）。"""
         if recipe == "paddleocr-ort-directml":
             # 统一推理闭包：OCR/表格/结构随 Paddle ONNX，文档解析随包内
-            # MinerU 服务（document 能力与 text/table/structure 同环境可用）。
-            return ["text", "table", "structure"]
+            # MinerU 服务；document 与 text/table/structure 同环境可用，
+            # 设置页 MinerU 本地引擎分区按该能力识别共享闭包。
+            return ["text", "table", "structure", "document"]
         if recipe in _RETIRED_ENGINE_RECIPES:
             # 退役配方（原生 Paddle / Rapid 系 / 分设备 paddle-ort、独立
             # MinerU）不再宣称任何识别类型；记录与健康状态仍保留。

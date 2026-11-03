@@ -1626,6 +1626,7 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
         "text",
         "table",
         "structure",
+        "document",
     ]
     # 统一闭包是唯一可安装配方，也是远程 MinerU 模式的推荐宿主（桌面
     # "启用远程模式"按 DefaultRemoteHost && SupportsRemoteHost 唯一命中）。
