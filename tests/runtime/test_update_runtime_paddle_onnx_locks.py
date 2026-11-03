@@ -86,9 +86,7 @@ def test_upgrade_drops_self_constraints_and_passes_upgrade(
     """--upgrade 必须同时解除自约束：uv 的 --upgrade 不覆盖显式 constraints，
     保留旧锁作为约束时所有 == 版本仍被硬性固定，升级命令会空转成功。"""
     commands = _capture_uv_commands(monkeypatch)
-    monkeypatch.setattr(
-        sys, "argv", ["update-runtime-paddle-onnx-locks", "--upgrade"]
-    )
+    monkeypatch.setattr(sys, "argv", ["update-runtime-paddle-onnx-locks", "--upgrade"])
     assert generator.main() == 0
     for command in commands:
         uv = _uv_command(command)

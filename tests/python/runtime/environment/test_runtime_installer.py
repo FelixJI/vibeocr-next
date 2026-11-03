@@ -2499,9 +2499,7 @@ def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path):
     # 也会被误判 engine_import_failed。
     assert manager._probe(record)["healthy"] is True
     # 同一闭包切回 directml 设备仍要求真实适配器，fail closed。
-    assert (
-        manager._probe_device(record, "directml")["reason"] == "engine_import_failed"
-    )
+    assert manager._probe_device(record, "directml")["reason"] == "engine_import_failed"
 
 
 def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
