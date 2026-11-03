@@ -253,6 +253,71 @@ describe("DiagnosticsPage 更新源选择", () => {
     });
   });
 
+  it("镜像前缀模式可从常用镜像快捷填入并保存", async () => {
+    const { actions } = setup({
+      about: {},
+      update: {
+        isBusy: false,
+        statusCode: "update.unchecked",
+        sources: directSources,
+        detectionEndpoint:
+          "https://github.com/FelixJI/vibeocr-next/releases/latest/download/",
+      },
+      diagnostics: {},
+    });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("radio", { name: "自定义源" }));
+    await user.selectOptions(
+      screen.getByLabelText("常用镜像"),
+      "https://ghfast.top/",
+    );
+
+    expect(screen.getByLabelText("镜像前缀")).toHaveValue(
+      "https://ghfast.top/",
+    );
+    await user.click(screen.getByRole("button", { name: "保存并使用" }));
+
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "update.setSource",
+      sourceId: "custom",
+      kind: "url_prefix",
+      url: "https://ghfast.top/",
+    });
+
+    // 手动编辑输入框后，快捷选择如实回到“手动输入”，不再冒充预置。
+    await user.clear(screen.getByLabelText("镜像前缀"));
+    await user.type(
+      screen.getByLabelText("镜像前缀"),
+      "https://mirror.example.com/vibeocr",
+    );
+    expect(screen.getByLabelText("常用镜像")).toHaveValue("");
+  });
+
+  it("正向代理模式不提供常用镜像预置", async () => {
+    setup({
+      about: {},
+      update: {
+        isBusy: false,
+        statusCode: "update.unchecked",
+        sources: directSources,
+        detectionEndpoint:
+          "https://github.com/FelixJI/vibeocr-next/releases/latest/download/",
+      },
+      diagnostics: {},
+    });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("radio", { name: "自定义源" }));
+
+    expect(screen.getByLabelText("常用镜像")).toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("自定义源类型"),
+      "forward_proxy",
+    );
+    expect(screen.queryByLabelText("常用镜像")).not.toBeInTheDocument();
+  });
+
   it("支持正向代理类型选择", async () => {
     const { actions } = setup({
       about: {},
