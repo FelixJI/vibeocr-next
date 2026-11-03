@@ -463,7 +463,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       [
         new SettingsEnvironmentRecipeState(
           "paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
-          ["text"], "cpu", "cpu", "3.13.15", "cp313", "win_amd64",
+          ["text"], "cpu", "cpu", ["cpu"], "3.13.15", "cp313", "win_amd64",
           "base", ["runtime_host", "paddleocr-ort-base"], "locked-sha",
           ["paddleocr==3.1.0"], "bundled_pack", "product_bundle", "product_bundle",
           Engine: "paddle", Family: "paddle-onnx", FamilyDisplayName: "PaddleOCR ONNX",
@@ -491,6 +491,10 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal("paddleocr-ort-cpu", recipe.GetProperty("id").GetString());
     Assert.Equal("PaddleOCR ONNX · CPU", recipe.GetProperty("displayName").GetString());
     Assert.Equal("cpu", recipe.GetProperty("accelerator").GetString());
+    Assert.Equal(
+      "cpu",
+      Assert.Single(recipe.GetProperty("supportedDevices").EnumerateArray())
+        .GetString());
     Assert.Equal("paddle", recipe.GetProperty("engine").GetString());
     Assert.Equal("paddle-onnx", recipe.GetProperty("family").GetString());
     Assert.Equal("CPUExecutionProvider", recipe.GetProperty("provider").GetString());

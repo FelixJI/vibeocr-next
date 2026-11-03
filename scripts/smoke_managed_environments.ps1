@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [int]$TimeoutMinutes = 120,
     [switch]$ProgressOnly,
-    [ValidateSet('paddleocr-ort-cpu')][string]$ProgressRecipe = 'paddleocr-ort-cpu',
+    [ValidateSet('paddleocr-ort-directml')][string]$ProgressRecipe = 'paddleocr-ort-directml',
     [string]$InstallerCacheRoot
 )
 
@@ -145,8 +145,8 @@ try {
         throw 'Install and switch evidence is incomplete'
     }
     foreach ($environment in $installed.evidence.installed_environments) {
-        if ($environment.status -ne 'installed' -or $environment.recipe -ne 'paddleocr-ort-cpu') {
-            throw "Expected publicly confirmed Paddle ONNX recipe for $($environment.name)"
+        if ($environment.status -ne 'installed' -or $environment.recipe -ne 'paddleocr-ort-directml') {
+            throw "Expected publicly confirmed unified closure recipe for $($environment.name)"
         }
     }
     foreach ($task in $installed.evidence.recognition) {

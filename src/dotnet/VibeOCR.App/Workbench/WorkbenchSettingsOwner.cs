@@ -862,7 +862,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     EnvironmentRecipes: viewModel.Environments?.Snapshot?.Recipes?.Select(recipe =>
       new SettingsEnvironmentRecipeState(
         recipe.Id, recipe.DisplayName, recipe.ConfiguredRecognitionTypes,
-        recipe.Accelerator, recipe.TargetDevice, recipe.PythonVersion, recipe.Abi,
+        recipe.Accelerator, recipe.TargetDevice, recipe.SupportedDevices, recipe.PythonVersion, recipe.Abi,
         recipe.Platform, recipe.ScopeId, recipe.ComponentIds, recipe.RecipeLock,
         recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
         recipe.RuntimeWheelOrigin, recipe.Engine, recipe.Family, recipe.FamilyDisplayName,

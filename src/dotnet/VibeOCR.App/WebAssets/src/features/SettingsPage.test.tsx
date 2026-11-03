@@ -287,6 +287,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         configuredRecognitionTypes: ["text", "table", "structure", "document"],
         accelerator: "cpu",
         targetDevice: "directml",
+        supportedDevices: ["directml", "cpu"],
         pythonVersion: "3.13",
         dependencies: ["paddleocr==3.7.0", "onnxruntime-directml==1.24.4"],
         dependencyOrigin: "bundled_pack",
@@ -295,7 +296,31 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     const settings = {
       environmentRecipes: unifiedRecipes,
       environmentSources: sources,
-      environments: [],
+      environments: [
+        {
+          id: "unified-installed",
+          name: "统一推理闭包",
+          revision: 1,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "ready",
+          configuredRecognitionTypes: [
+            "text",
+            "table",
+            "structure",
+            "document",
+          ],
+          targetDevice: "directml",
+        },
+      ],
+      environmentCompatibility: {
+        recipe: "paddleocr-ort-directml",
+        selectedEnvironmentId: "unified-installed",
+      },
       environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
@@ -309,15 +334,40 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(
       within(mineruSection).getByText(/本地文档解析由统一推理闭包随包携带/),
     ).toBeVisible();
+    // 兼容查询结果按配方绑定投影进 MinerU 分区（共享闭包同一配方命中）。
+    expect(
+      within(mineruSection).getByText(/可直接复用环境「统一推理闭包」/),
+    ).toBeVisible();
+    // 设备选择与安装配方分离：统一闭包同闭包支持 directml↔cpu 切换，
+    // 设备下拉枚举 supported_devices，切换命令发送用户选定设备。
+    const backend = screen.getByLabelText("Paddle 推理后端");
+    expect(backend).toHaveValue("directml");
+    expect(within(backend).getAllByRole("option")).toHaveLength(2);
+    const paddleSection = screen.getByLabelText("PaddleOCR 推理后端");
     await user.click(
-      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
-    );
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
+      within(paddleSection).getByRole("button", {
+        name: "切换到此环境并启动验证",
       }),
     );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.switchEnvironment",
+      environmentId: "unified-installed",
+      device: "directml",
+    });
+    await user.selectOptions(backend, "cpu");
+    expect(
+      within(paddleSection).getByText(/设备 cpu，Python 3\.13/),
+    ).toBeVisible();
+    await user.click(
+      within(paddleSection).getByRole("button", {
+        name: "切换到此环境并启动验证",
+      }),
+    );
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.switchEnvironment",
+      environmentId: "unified-installed",
+      device: "cpu",
+    });
   });
 
   it("MinerU 分区显式查询后按 recipe 绑定展示结果与安装入口", async () => {

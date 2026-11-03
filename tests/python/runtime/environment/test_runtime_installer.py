@@ -1637,6 +1637,8 @@ def test_recipe_catalog_projects_manifest_bound_scopes(
     assert directml["display_name"] == "PaddleOCR ONNX + MinerU · Windows DirectML"
     assert directml["accelerator"] == "cpu"
     assert directml["target_device"] == "directml"
+    # 目录同时投影设备全集：统一闭包可在同闭包 directml↔cpu 切换。
+    assert directml["supported_devices"] == ["directml", "cpu"]
     assert directml["python_version"] == "3.13.16"
     assert directml["abi"] == "cp313"
     assert directml["platform"] == "win_amd64"

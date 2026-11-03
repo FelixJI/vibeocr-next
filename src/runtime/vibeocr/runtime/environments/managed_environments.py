@@ -1431,6 +1431,19 @@ class ManagedEnvironmentStore:
         return []
 
     @staticmethod
+    def _supported_devices(recipe: str) -> list[str]:
+        """配方 → 可选设备全集（与 _with_device 的允许集一致）。
+
+        统一闭包（paddleocr-ort-*）安装档为声明的 target_device，但同闭包
+        携带 CPUExecutionProvider，可切换 CPU 推理；无元数据的退役配方不
+        出现在目录中，返回空集只作防御。
+        """
+        declared = _recipe_metadata(recipe).get("target_device")
+        if not isinstance(declared, str) or not declared:
+            return []
+        return [declared, "cpu"] if recipe.startswith("paddleocr-ort-") else [declared]
+
+    @staticmethod
     def _scope_pins(scope: RuntimeInstallScope) -> list[tuple[str, str, str | None]]:
         """锁文件 pin 列表：(规范小写名, 展示 pin, 锁定版本或 None)。
 
@@ -2594,6 +2607,10 @@ class ManagedEnvironmentStore:
                     "display_name": _RECIPE_DISPLAY_NAMES[recipe],
                     "configured_recognition_types": self._recipe_modes(recipe),
                     "accelerator": accelerator,
+                    # 目录同时投影配方支持的设备全集：统一闭包安装档为
+                    # directml，但同闭包可切换 CPU 推理（_with_device 的
+                    # 允许集），桌面设备选择与安装配方分离消费本字段。
+                    "supported_devices": self._supported_devices(recipe),
                     **_recipe_metadata(recipe),
                     "python_version": self.manifest.python.version,
                     "abi": self.manifest.python.abi,
