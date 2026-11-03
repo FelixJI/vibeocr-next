@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.UI.Input;
 using Microsoft.UI.System;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -52,6 +53,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private readonly ContentControl _gripIcon = ScreenshotToolbarIcons.CreateIcon("grip");
   private readonly Border _grip;
   private readonly Grid _root = new();
+  private readonly List<Button> _commandButtons = [];
   private readonly Popup _popup = new()
   {
     ShouldConstrainToRootBounds = false,
@@ -121,10 +123,16 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     _messages = new WindowMessageService(_handle);
     _messages.MessageHandled += OnMessageHandled;
     // Popup 的 XAML 进入/离开事件可能缺失或来自子控件；仅可见期间校验
-    // 真实屏幕坐标，隐藏、截图避让及释放时停止，不在后台轮询。
+    // 真实屏幕坐标，隐藏、截图避让及释放时停止，不在后台轮询。同一轮询
+    // 顺带驱动按钮 PointerOver/Normal 视觉状态：windowed Popup + NOACTIVATE
+    // 组合下 XAML 悬停状态更新不可靠，鼠标与按钮反馈由坐标权威兜底。
     _pointerTimer = _window.DispatcherQueue.CreateTimer();
     _pointerTimer.Interval = TimeSpan.FromMilliseconds(100);
-    _pointerTimer.Tick += (_, _) => UpdatePointerPresence();
+    _pointerTimer.Tick += (_, _) =>
+    {
+        UpdatePointerPresence();
+        UpdateButtonHoverStates();
+    };
     // 主题跟随：窗口生命周期内各订阅一次；系统线程回调封送 UI 线程。
     _root.ActualThemeChanged += OnRootActualThemeChanged;
     _themeSettings.Changed += OnSystemHighContrastChanged;
@@ -257,6 +265,12 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     ObjectDisposedException.ThrowIf(_disposed, this);
     _pointerTimer.Stop();
     _pointerOver = null;
+    // 隐藏瞬间按钮可能停在 PointerOver/Pressed：popup 关闭会丢弃待发的
+    // 指针事件，避让重开后残留冻结态；这里显式归位 Normal。
+    foreach (Button button in _commandButtons)
+    {
+      VisualStateManager.GoToState(button, "Normal", useTransitions: false);
+    }
     CancelPendingPopupOpen();
     _popup.IsOpen = false;
     ShowWindow(_handle, SwHide);
@@ -436,7 +450,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
 
   private Button CreateCommandButton(string iconName, string tooltip, FloatingToolbarCommand command)
   {
-    var button = new Button
+    var button = new HoverHandButton
     {
       Width = ButtonSizeDip,
       Height = ButtonSizeDip,
@@ -450,7 +464,64 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     AutomationProperties.SetName(button, tooltip);
     ToolTipService.SetToolTip(button, tooltip);
     button.Click += (_, _) => CommandInvoked?.Invoke(this, command);
+    _commandButtons.Add(button);
     return button;
+  }
+
+  /// <summary>
+  /// 悬停显示手型光标的命令按钮。ProtectedCursor 在 WinUI 3 是 protected，
+  /// 不能从外部按按钮设置（同 ScreenRegionPicker 先例）；截屏选区工具栏
+  /// 已确立“悬停工具栏按钮显示手型”的用户偏好，悬浮工具栏保持一致。
+  /// </summary>
+  private sealed class HoverHandButton : Button
+  {
+    public HoverHandButton() =>
+        ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.Hand);
+  }
+
+  /// <summary>
+  /// 轮询驱动的按钮悬停视觉：windowed Popup 承载内容 + NOACTIVATE 窗口
+  /// 组合下 XAML 的 PointerOver 状态更新不可靠（悬停无高亮、避让重开后
+  /// 残留按下态），以真实光标坐标为权威，按按钮强制切换 CommonStates。
+  /// </summary>
+  private void UpdateButtonHoverStates()
+  {
+    if (_disposed || !IsVisible || _commandButtons.Count == 0) return;
+    double scale = GetDpiForWindow(_handle) / 96.0;
+    if (scale <= 0) scale = 1;
+    if (!GetCursorPos(out PointL point)) return;
+    PhysicalRectangle bounds = GetBounds();
+    // 光标 → 窗口客户区 DIP 坐标；按钮矩形经 TransformToVisual 投影到
+    // 同一 _root 坐标系（popup 偏移为 0，客户区即 _root）。
+    double x = (point.X - bounds.X) / scale;
+    double y = (point.Y - bounds.Y) / scale;
+    Windows.Foundation.Rect[] rects = _commandButtons
+        .Select(button => button.TransformToVisual(_root).TransformBounds(
+            new Windows.Foundation.Rect(0, 0, button.ActualWidth, button.ActualHeight)))
+        .ToArray();
+    int hovered = HitTestButton(rects, x, y);
+    for (int index = 0; index < _commandButtons.Count; index++)
+    {
+      VisualStateManager.GoToState(
+          _commandButtons[index],
+          index == hovered ? "PointerOver" : "Normal",
+          useTransitions: true);
+    }
+  }
+
+  /// <summary>按钮矩形命中判定（纯函数供测试）：返回命中下标，未命中为 -1。</summary>
+  internal static int HitTestButton(Windows.Foundation.Rect[] rects, double x, double y)
+  {
+    for (int index = 0; index < rects.Length; index++)
+    {
+      Windows.Foundation.Rect rect = rects[index];
+      if (x >= rect.X && x < rect.X + rect.Width &&
+          y >= rect.Y && y < rect.Y + rect.Height)
+      {
+        return index;
+      }
+    }
+    return -1;
   }
 
   private void UpdatePointerPresence()
