@@ -66,18 +66,15 @@ if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
 }
 
 $baseLock = Join-Path $runtimeConfig 'win-x64-base/requirements-win-x64-base.lock'
-# 共享离线 wheel pool：base / Paddle ONNX CPU / DirectML 的闭包取并集，
-# 每个相同 wheel 只随产品分发一次；同名不同版本（冲突 pin）同时保留。
-# pool 只含去重 wheel；每个成员 lock 另产一个仅含 pack-requirements.txt
-# 的小 zip，经既有可重复 runtime_pack 元组接口绑定（requirements zip 在
-# 首位，各 scope 缓存目录独立），安装环境仍彼此隔离，不混装 CPU/DirectML
-# ONNX namespace。CUDA 闭包不随包（按需在线安装），模型包一次构建由三种
-# paddle-ort 环境共用。
-$cpuOrtLock = Join-Path $runtimeConfig 'win-x64-paddle-ort-cpu/requirements-win-x64-paddle-ort-cpu.lock'
+# 共享离线 wheel pool：base / 统一推理闭包（DirectML）取并集，每个相同
+# wheel 只随产品分发一次；同名不同版本（冲突 pin）同时保留。pool 只含
+# 去重 wheel；每个成员 lock 另产一个仅含 pack-requirements.txt 的小 zip，
+# 经既有可重复 runtime_pack 元组接口绑定（requirements zip 在首位，各
+# scope 缓存目录独立），安装环境仍彼此隔离。统一推理闭包随包携带 Paddle
+# ONNX 与 MinerU，模型包一次构建由该环境共用。
 $dmlOrtLock = Join-Path $runtimeConfig 'win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock'
 $poolLockArgs = @(
     '--pool-lock', "win-x64-base=$baseLock",
-    '--pool-lock', "win-x64-paddle-ort-cpu=$cpuOrtLock",
     '--pool-lock', "win-x64-paddle-ort-directml=$dmlOrtLock"
 )
 uv run --frozen --group build python (Join-Path $root 'scripts/build_runtime_pack.py') `
@@ -94,9 +91,8 @@ if ($poolParts.Count -lt 1) { throw 'Offline shared wheel pool is missing' }
 # 字符串，混用 .FullName 会在字符串上取空。
 $poolPartPaths = @($poolParts | ForEach-Object { $_.FullName })
 $basePoolReq = Join-Path $work "$poolStem.requirements-win-x64-base.zip"
-$cpuPoolReq = Join-Path $work "$poolStem.requirements-win-x64-paddle-ort-cpu.zip"
 $dmlPoolReq = Join-Path $work "$poolStem.requirements-win-x64-paddle-ort-directml.zip"
-foreach ($requirementsZip in @($basePoolReq, $cpuPoolReq, $dmlPoolReq)) {
+foreach ($requirementsZip in @($basePoolReq, $dmlPoolReq)) {
     if (-not (Test-Path -LiteralPath $requirementsZip -PathType Leaf)) {
         throw "Offline shared wheel pool requirements manifest is missing: $requirementsZip"
     }
@@ -104,7 +100,6 @@ foreach ($requirementsZip in @($basePoolReq, $cpuPoolReq, $dmlPoolReq)) {
 $packArgs = @()
 foreach ($pack in @($basePoolReq) + $poolPartPaths) { $packArgs += @('--base-runtime-pack', $pack) }
 $paddlePackArgs = @()
-foreach ($pack in @($cpuPoolReq) + $poolPartPaths) { $paddlePackArgs += @('--paddle-ort-cpu-runtime-pack', $pack) }
 foreach ($pack in @($dmlPoolReq) + $poolPartPaths) { $paddlePackArgs += @('--paddle-ort-directml-runtime-pack', $pack) }
 
 uv run --frozen --group build python (Join-Path $root 'scripts/build_runtime_pack.py') `
@@ -122,11 +117,6 @@ $manifestArgs = @(
     (Join-Path $root 'scripts/build_runtime_manifest.py'),
     '--runtime-wheel', $wheels[0].FullName,
     '--base-lock', $baseLock,
-    '--cpu-lock', (Join-Path $runtimeConfig 'win-x64-cpu/requirements-win-x64-cpu.lock'),
-    '--cu126-lock', (Join-Path $runtimeConfig 'win-x64-cu126/requirements-win-x64-cu126.lock'),
-    '--cu126-gpu-lock', (Join-Path $runtimeConfig 'win-x64-cu126-gpu/requirements-win-x64-cu126-gpu.lock'),
-    '--paddle-ort-cpu-lock', (Join-Path $runtimeConfig 'win-x64-paddle-ort-cpu/requirements-win-x64-paddle-ort-cpu.lock'),
-    '--paddle-ort-cuda-lock', (Join-Path $runtimeConfig 'win-x64-paddle-ort-cuda/requirements-win-x64-paddle-ort-cuda.lock'),
     '--paddle-ort-directml-lock', (Join-Path $runtimeConfig 'win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock'),
     '--paddle-model-pack', $paddleModelPack,
     '--python-archive', $pythonArchive,

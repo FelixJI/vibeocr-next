@@ -30,7 +30,7 @@ public sealed class PrerequisiteDetectorTests
   public void AcceptsCompatibleInstalledVersions()
   {
     var detector = new PrerequisiteDetector(
-        _ => new PrerequisiteSnapshot("10.0.9", "2.5.1", "140.0.3485.54", true));
+        _ => new PrerequisiteSnapshot("10.0.9", "2.6.4", "140.0.3485.54", true));
 
     PrerequisiteReport report = detector.Detect(Layout);
 
@@ -39,12 +39,12 @@ public sealed class PrerequisiteDetectorTests
   }
 
   [Theory]
-  [InlineData("9.0.17", "2.5.1", false)]
+  [InlineData("9.0.17", "2.6.4", false)]
   [InlineData("10.0.9", "2.2.0", false)]
-  [InlineData("10.0.9", "2.4.0", false)]
-  [InlineData("10.0.9", "2.5.1", true)]
-  [InlineData("10.0.9", "2.5.1.0", true)]
-  [InlineData("10.0.9", "2.6.0", true)]
+  [InlineData("10.0.9", "2.5.1", false)]
+  [InlineData("10.0.9", "2.6.4", true)]
+  [InlineData("10.0.9", "2.6.4.0", true)]
+  [InlineData("10.0.9", "2.7.0", true)]
   public void EnforcesMinimumDotNetAndWindowsAppRuntimeVersions(
       string desktop,
       string windowsAppRuntime,
@@ -70,10 +70,11 @@ public sealed class PrerequisiteDetectorTests
 
   [Theory]
   [InlineData("Microsoft.WindowsAppRuntime.2", 2, 2, false)]
-  [InlineData("Microsoft.WindowsAppRuntime.2", 2, 5, true)]
+  [InlineData("Microsoft.WindowsAppRuntime.2", 2, 5, false)]
+  [InlineData("Microsoft.WindowsAppRuntime.2", 2, 6, true)]
   [InlineData("Microsoft.WindowsAppRuntime.CBS.2", 2, 2, false)]
   [InlineData("Microsoft.WindowsAppRuntime.CBS.2", 2, 4, false)]
-  [InlineData("Microsoft.WindowsAppRuntime.CBS.2", 2, 5, true)]
+  [InlineData("Microsoft.WindowsAppRuntime.CBS.2", 2, 6, true)]
   [InlineData("Microsoft.WindowsAppRuntime.CBS.1.6", 6000, 900, false)]
   public void AcceptsOnlyCompatibleWindowsAppRuntimePackageIdentities(
       string name,

@@ -1,60 +1,19 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from test_runtime_installer import _pinned_versions, _release, _write_record
-from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
 from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 
 
-def test_cuda_closure_serves_cpu_without_device_probe(tmp_path: Path, monkeypatch):
-    manifest, component = _release(tmp_path / "release")
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    scope, _ = manager._recipe("paddleocr-ort-cuda")
-    versions = _pinned_versions(manager, "paddleocr-ort-cuda")
-    record = _write_record(
-        manager,
-        "paddle",
-        status="installed",
-        recipe="paddleocr-ort-cuda",
-        recipe_lock=scope.sha256,
-    )
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {
-            "healthy": True,
-            "reason": None,
-            "python": "python",
-            "versions": versions,
-            "platform": "win_amd64",
-        },
-    )
-    assert (
-        manager.find_compatible("paddleocr-ort-cpu")["selected"]["environment_id"]
-        == record["id"]
-    )
-    data = manager._read()
-    data["environments"][record["id"]]["recipe_lock"] = "f" * 64
-    _atomic_json(manager._registry, data)
-    assert manager.find_compatible("paddleocr-ort-cpu")["selected"] is None
-
-
-def test_explicit_selected_cpu_is_frozen_for_cuda_closure(monkeypatch):
+def test_explicit_selected_cpu_is_frozen_for_directml_closure(monkeypatch):
     from vibeocr.runtime.recognition.paddle_onnx import freeze_request
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cuda")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", "cpu")
     assert freeze_request({"device": "auto"})["device"] == "cpu"
-    assert freeze_request({"device": "cuda"})["device"] == "cuda"
+    assert freeze_request({"device": "directml"})["device"] == "directml"
 
 
 def test_service_and_admission_gates_release_without_pid_liveness(
@@ -121,14 +80,14 @@ def test_same_environment_selection_commit_changes_epoch_and_preserves_closure(
     data = manager._read()
     data["active_id"] = item["id"]
     data["environments"][item["id"]].update(
-        status="installed", recipe="paddleocr-ort-cuda", selected_device="cpu"
+        status="installed", recipe="paddleocr-ort-directml", selected_device="cpu"
     )
     _atomic_json(manager._registry, data)
     monkeypatch.setattr(manager, "_verified_health", lambda _: True)
-    with manager.switch_reservation(item["id"], "cuda") as prepared:
+    with manager.switch_reservation(item["id"], "directml") as prepared:
         assert manager._read()["environments"][item["id"]]["selected_device"] == "cpu"
         env = prepared["launch"]["environment"]
-        assert env["VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"] == "cuda"
+        assert env["VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"] == "directml"
         assert (
             int(env["VIBEOCR_MANAGED_SELECTION_REVISION"])
             == data["active_revision"] + 1
@@ -136,92 +95,15 @@ def test_same_environment_selection_commit_changes_epoch_and_preserves_closure(
         manager.commit_switch(prepared, started_health={})
     current = manager._read()
     assert current["active_revision"] == data["active_revision"] + 1
-    assert current["environments"][item["id"]]["selected_device"] == "cuda"
+    assert current["environments"][item["id"]]["selected_device"] == "directml"
     assert current["environments"][item["id"]]["revision"] == item["revision"]
-    assert current["environments"][item["id"]]["recipe"] == "paddleocr-ort-cuda"
+    assert current["environments"][item["id"]]["recipe"] == "paddleocr-ort-directml"
     before = manager._registry.read_bytes()
     monkeypatch.setattr(manager, "_verified_health", lambda _: False)
     with manager.switch_reservation(item["id"], "cpu") as prepared:
         with pytest.raises(ManagedEnvironmentError, match="not healthy"):
             manager.commit_switch(prepared, started_health={})
     assert manager._registry.read_bytes() == before
-
-
-def test_active_cpu_upgrade_reuses_id_and_reports_only_delta(tmp_path, monkeypatch):
-    from test_default_environment import _manager
-
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
-    data = manager._read()
-    data["active_id"] = item["id"]
-    data["environments"][item["id"]].update(
-        status="installed", recipe="paddleocr-ort-cpu"
-    )
-    _atomic_json(manager._registry, data)
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_: {"status": "ok", "driver_version": "630.20"},
-    )
-    prepared = manager.prepare_target("paddleocr-ort-cuda")
-    assert prepared["id"] == item["id"]
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cuda")
-    assert plan["requires_service_stop"]
-    assert len(manager._read()["environments"]) == 1
-    assert plan["cuda_plugin_action"] == "prepare"
-    assert plan["removed_dependencies"] == []
-    assert plan["dependencies"]
-
-
-def test_live_service_prevents_install_and_failed_cuda_keeps_healthy_cpu(
-    tmp_path, monkeypatch
-):
-    from test_environment_store_layout import _manager
-    from vibeocr.runtime.environments.managed_environments import (
-        ManagedEnvironmentError,
-    )
-    from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
-
-    manager, calls = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu")
-    manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    data = manager._read()
-    data["active_id"] = item["id"]
-    data["environments"][item["id"]]["selected_device"] = "cpu"
-    _atomic_json(manager._registry, data)
-    old = dict(data["environments"][item["id"]])
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_: {"status": "ok", "driver_version": "630.20"},
-    )
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cuda")
-    count = len(calls)
-    with RuntimeStoreLock(manager._references / item["id"] / "services" / "live.lock"):
-        with pytest.raises(ManagedEnvironmentError, match="service"):
-            manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    assert len(calls) == count
-    original = manager._probe
-
-    def probe(record):
-        result = original(record)
-        if record.get("_device_probe") == "cuda" and record["path"] == item["id"]:
-            return {**result, "healthy": False, "reason": "cuda_plugin_missing"}
-        return result
-
-    monkeypatch.setattr(manager, "_probe", probe)
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cuda")
-    with manager.maintenance_reservation(item["id"]):
-        with pytest.raises(ManagedEnvironmentError, match="cuda_plugin_missing"):
-            manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    current = manager._read()["environments"][item["id"]]
-    assert current["revision"] == old["revision"]
-    assert current["recipe"] == old["recipe"]
-    assert current["selected_device"] == "cpu"
-    assert manager._probe(current)["healthy"]
-    assert (
-        manager.list()["environments"][0]["last_install_failure"]["reason_code"]
-        == "cuda_plugin_missing"
-    )
 
 
 @pytest.mark.parametrize(
@@ -267,29 +149,6 @@ def test_maintenance_stdin_reservation_releases_on_eof_abort_and_invalid_control
         pass
 
 
-def test_selected_cpu_status_uses_cpu_subset_of_installed_cuda(tmp_path, monkeypatch):
-    from test_default_environment import _manager
-
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
-    data = manager._read()
-    data["environments"][item["id"]].update(
-        status="installed", recipe="paddleocr-ort-cuda", selected_device="cpu"
-    )
-    _atomic_json(manager._registry, data)
-    for device, expected in (("cpu", "cpu"), ("cuda", "nvidia_cuda")):
-        scope, closure, accelerator = manager.status_scope(
-            item["id"],
-            item["revision"],
-            Path(item["path"]),
-            "paddleocr-ort-cuda",
-            device,
-        )
-        assert scope.scope_id == f"paddleocr-ort-{device}"
-        assert closure is None and accelerator == expected
-    assert manager._read()["environments"][item["id"]]["recipe"] == "paddleocr-ort-cuda"
-
-
 def test_inactive_service_lease_protects_environment_from_cleanup(
     tmp_path, monkeypatch
 ):
@@ -316,112 +175,6 @@ def test_inactive_service_lease_protects_environment_from_cleanup(
     assert item["id"] not in manager._read()["environments"]
 
 
-def test_explicit_cuda_removal_rebuilds_cpu_without_changing_environment_identity(
-    tmp_path, monkeypatch
-):
-    from test_environment_store_layout import _manager
-
-    def install(python, scope, _endpoint):
-        if scope.scope_id == "paddleocr-ort-cuda":
-            (python.parent.parent / "synthetic-cuda.dll").write_bytes(b"owned fixture")
-
-    manager, calls = _manager(tmp_path, monkeypatch, install=install)
-    item = manager.create("paddle")
-
-    def apply(recipe):
-        plan = manager.preview_install(item["id"], recipe)
-        return plan, manager.install(plan["plan_id"], item["id"], recipe)
-
-    apply("paddleocr-ort-cpu")
-    data = manager._read()
-    data["active_id"] = item["id"]
-    _atomic_json(manager._registry, data)
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_: {"status": "ok", "driver_version": "630.20"},
-    )
-    marker = manager.paths.state_root / "model-cache" / "synthetic-model"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_bytes(b"keep")
-    with manager.maintenance_reservation(item["id"]):
-        _, cuda = apply("paddleocr-ort-cuda")
-    assert cuda["selected_device"] == "cpu"
-    assert (Path(cuda["path"]) / "synthetic-cuda.dll").exists()
-    count = len(calls)
-    monkeypatch.setattr(manager, "_verified_health", lambda _: True)
-    with manager.switch_reservation(item["id"], "cpu") as prepared:
-        manager.commit_switch(prepared, started_health={})
-    assert len(calls) == count
-    assert (Path(cuda["path"]) / "synthetic-cuda.dll").exists()
-    with manager.maintenance_reservation(item["id"]):
-        plan, cpu = apply("paddleocr-ort-cpu")
-    assert plan["cuda_plugin_action"] == "remove" and plan["removed_dependencies"]
-    assert cpu["id"] == cuda["id"] == item["id"]
-    assert cpu["selected_device"] == "cpu"
-    assert not (Path(cpu["path"]) / "synthetic-cuda.dll").exists()
-    assert marker.read_bytes() == b"keep"
-    assert len(manager._read()["environments"]) == 1
-
-
-@pytest.mark.parametrize(
-    "condition", ["current", "old_lock", "missing_package", "changed_version"]
-)
-def test_cuda_preview_only_folds_verified_installed_cpu_pins(
-    tmp_path, monkeypatch, condition
-):
-    manifest, component = _release(tmp_path / "release")
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    cpu, _ = manager._recipe("paddleocr-ort-cpu")
-    cuda, _ = manager._recipe("paddleocr-ort-cuda")
-    record = _write_record(
-        manager,
-        "paddle",
-        status="installed",
-        recipe="paddleocr-ort-cpu",
-        recipe_lock=cpu.sha256 if condition != "old_lock" else "f" * 64,
-    )
-    versions = _pinned_versions(manager, "paddleocr-ort-cpu")
-    if condition == "missing_package":
-        versions.pop("paddlex")
-    if condition == "changed_version":
-        versions["paddlex"] = "0.0.0"
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda _: {
-            "healthy": condition != "missing_package",
-            "versions": versions,
-            "reason": "engine_packages_missing"
-            if condition == "missing_package"
-            else None,
-            "python": "python",
-            "platform": "win_amd64",
-        },
-    )
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_: {"status": "ok", "driver_version": "630.20"},
-    )
-    plan = manager.preview_install(record["id"], "paddleocr-ort-cuda")
-    target = manager._scope_pins(cuda)
-    if condition in {"old_lock", "missing_package"}:
-        assert plan["dependencies"] == [display for _, display, _ in target]
-    else:
-        assert plan["dependencies"] == [
-            display
-            for name, display, version in target
-            if versions.get(name) != version
-        ]
-        if condition == "current":
-            assert plan["dependencies"]
-            assert all(pin.startswith("nvidia-") for pin in plan["dependencies"])
-
-
 def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
     tmp_path, monkeypatch
 ):
@@ -438,7 +191,7 @@ def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
 
     manager, _ = _manager(tmp_path, monkeypatch)
     item = manager.create("paddle")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
     manager.install(plan["plan_id"], item["id"], plan["recipe"])
     before = manager._read()
     before["active_id"] = item["id"]
@@ -446,11 +199,8 @@ def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
     before["environments"][item["id"]]["selected_device"] = "cpu"
     _atomic_json(manager._registry, before)
     old = dict(before["environments"][item["id"]])
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.managed_environments.probe_nvidia_driver",
-        lambda **_: {"status": "ok", "driver_version": "630.20"},
-    )
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cuda")
+    # 统一推理闭包内没有跨设备重装；取消语义用同 recipe 重装表达。
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
     events, receipts = [], []
 
     def observe(event):
@@ -516,7 +266,7 @@ def test_cancelled_install_keeps_recoverable_marker_when_terminal_write_is_full(
 
     manager, _ = _manager(tmp_path, monkeypatch)
     item = manager.create("paddle")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-cpu")
+    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
     receipts, events, failed_writes = [], [], []
     manager._event_sink = events.append
     original_write = managed_environments._atomic_json

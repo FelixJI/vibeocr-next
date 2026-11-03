@@ -1,6 +1,6 @@
 """结构性操作应置 has_structural_change=True，纯文字层/旋转操作不置。"""
 
-import fitz
+import pymupdf as fitz
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.pdf_service import PdfService
 

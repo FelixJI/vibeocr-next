@@ -235,8 +235,10 @@ class MinerUService(metaclass=SingletonMeta):
         if "MINERU_CONFIG" in env and not config_path.is_file():
             raise ValueError("MINERU_CONFIG must reference an existing config file")
         if not config_path.exists():
+            # MinerU 4.1 配置结构：small_backend 嵌套在 model 下，vlm 是顶层
+            # 段（4.0 的 model.vlm 已上提）。
             config_path.write_text(
-                "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
+                "model:\n  small_backend: onnx\nvlm:\n  engine: llama-cpp\n",
                 encoding="utf-8",
             )
         env["MINERU_HOME"] = str(home)
@@ -285,7 +287,24 @@ class MinerUService(metaclass=SingletonMeta):
 
         env = self._local_environment()
         if self.__class__._model_root is not None:
-            env["MINERU_MODEL_BASE_DIR"] = self.__class__._model_root
+            # MinerU 4.1 起本地模型根经 config.yaml 的 model.base_dir 解析
+            # （旧版 MINERU_MODEL_BASE_DIR env 已移除）；source 仍支持 env。
+            # 仅更新我们管理的默认 config；用户显式 MINERU_CONFIG 保持原样。
+            config_path = Path(env["MINERU_CONFIG"])
+            if config_path == (Path(env["MINERU_HOME"]) / "config.yaml").resolve():
+                import yaml
+
+                try:
+                    config = yaml.safe_load(config_path.read_text("utf-8")) or {}
+                except yaml.YAMLError:
+                    config = {}
+                model_config = config.setdefault("model", {})
+                model_config["base_dir"] = self.__class__._model_root
+                model_config["source"] = "local"
+                config_path.write_text(
+                    yaml.safe_dump(config, sort_keys=True, allow_unicode=True),
+                    encoding="utf-8",
+                )
             env["MINERU_MODEL_SOURCE"] = "local"
 
         with self.__class__._ownership_lock:

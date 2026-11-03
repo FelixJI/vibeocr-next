@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import fitz
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument
 from vibeocr.runtime.documents.pdf_service import PdfService

@@ -26,7 +26,6 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeStoreLock,
 )
 from vibeocr.runtime.environments.runtime_manifest import (
-    ACCELERATOR_TO_PLAN,
     ManifestError,
     RuntimeComponent,
     RuntimeInstallScope,
@@ -34,6 +33,7 @@ from vibeocr.runtime.environments.runtime_manifest import (
     covering_profile_id,
     load_runtime_manifest,
     migrate_legacy_component_ids,
+    plan_profile_id,
     runtime_component_binding,
     scoped_component_version,
 )
@@ -1154,15 +1154,16 @@ def declared_installed_closure(
         or len(set(installed)) != len(installed)
     ):
         return None
+    # 统一闭包后新 manifest 只产 base 档：旧 marker 的 cpu/cuda 档位 profile
+    # 缺席时按 base 投影（与 plan_profile_id/covering_profile_id 同一规则），
+    # 否则旧环境状态读取直接 KeyError。
+    profile_id = plan_profile_id(manifest, accelerator)
     plan_ids = {
-        component.component_id
-        for component in manifest.profiles[ACCELERATOR_TO_PLAN[accelerator]].components
+        component.component_id for component in manifest.profiles[profile_id].components
     }
     # 旧 marker 里的退役 id（rapidocr-base/原生 paddle 等）先折叠再比对：
     # 历史闭包应继续投影到覆盖 profile，而不是整体作废。
-    closure = frozenset(
-        migrate_legacy_component_ids(ACCELERATOR_TO_PLAN[accelerator], tuple(installed))
-    )
+    closure = frozenset(migrate_legacy_component_ids(profile_id, tuple(installed)))
     return closure if closure <= plan_ids else None
 
 
@@ -1200,14 +1201,13 @@ def _legacy_closure_with_current_code(
         or len(set(ids)) != len(ids)
     ):
         return None
+    # 与 declared_installed_closure 同一档位解析与退役折叠规则：新
+    # manifest 缺历史档位 profile 时按 base 投影，保证旧闭包可读取。
+    profile_id = plan_profile_id(manifest, accelerator)
     plan_ids = {
-        component.component_id
-        for component in manifest.profiles[ACCELERATOR_TO_PLAN[accelerator]].components
+        component.component_id for component in manifest.profiles[profile_id].components
     }
-    # 与 declared_installed_closure 同一退役折叠规则，保证旧闭包可投影。
-    closure = frozenset(
-        migrate_legacy_component_ids(ACCELERATOR_TO_PLAN[accelerator], tuple(ids))
-    )
+    closure = frozenset(migrate_legacy_component_ids(profile_id, tuple(ids)))
     return closure if closure <= plan_ids else None
 
 
@@ -1407,7 +1407,10 @@ def runtime_profile_status(
                 manifest, accelerator=accelerator, component_ids=closure
             )
             if closure is not None
-            else ACCELERATOR_TO_PLAN[accelerator]
+            # 无闭包证据（空 runtime root）时按 accelerator 档位投影；统一
+            # 闭包后新 manifest 只产 base 档，历史 accelerator 档位缺失时
+            # 回退 base，与 covering_profile_id 同一读取规则。
+            else plan_profile_id(manifest, accelerator)
         )
     descriptor = profile_descriptor(
         manifest.profiles[profile_id], accelerator=accelerator

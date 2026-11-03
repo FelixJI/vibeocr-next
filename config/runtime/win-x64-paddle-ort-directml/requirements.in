@@ -1,9 +1,11 @@
-# Managed Paddle ONNX closure; one onnxruntime namespace, no Paddle/Torch.
+# Managed unified inference closure (Paddle ONNX + MinerU); single
+# onnxruntime-directml namespace, no Paddle/Torch. DirectML EP 覆盖全 D3D12
+# GPU，CPU 推理走同闭包 CPUExecutionProvider（设备切换不换环境）。
 pillow>=12.3.0,<13
 numpy>=2.3.5
 httpx>=0.28.1
 jsonschema>=4.25.0
-pymupdf>=1.28.0
+pymupdf-lite>=2.0
 pydantic>=2.14.1
 fastapi>=0.139.0
 uvicorn>=0.51.0
@@ -33,3 +35,6 @@ paddlex[ocr]==3.7.2
 numpy==2.3.5
 modelscope-hub==0.4.5
 onnxruntime-directml==1.24.4
+# MinerU 随统一闭包携带（ONNX 线，无 torch）；win-x64 的 ORT 依赖同向
+# onnxruntime-directml，模型文件仍由共享模型缓存按需下载。
+mineru==4.1.3

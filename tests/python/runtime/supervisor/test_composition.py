@@ -474,7 +474,7 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
     assert entries["windows_text"]["required_component"] is None
     # #270：非 ONNX 环境中保留 Paddle 模式不再指向旧原生配方，而是提示
     # 准备对应 Paddle ONNX 环境。
-    assert entries["paddle_text"]["required_component"] == "paddleocr-ort-cpu"
+    assert entries["paddle_text"]["required_component"] == "paddleocr-ort-directml"
     assert entries["paddle_text"]["reason_code"] == (
         "mode_requires_paddle_onnx_environment"
     )
@@ -483,7 +483,7 @@ def test_recognition_mode_catalog_uses_provisioning_specific_components() -> Non
     resolver.invalidate_probe_cache()
     refreshed = {item["id"]: item for item in modes.catalog_payload()["modes"]}
     assert refreshed["paddle_text"]["availability"] == "preparation_required"
-    assert refreshed["paddle_text"]["required_component"] == "paddleocr-ort-cpu"
+    assert refreshed["paddle_text"]["required_component"] == "paddleocr-ort-directml"
 
 
 def test_build_paddle_executor_with_registry_wraps_router(

@@ -12,7 +12,7 @@
 显示页面顶部中央（而非右/下）。
 """
 
-import fitz
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.pdf_service import PdfService
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock

@@ -152,36 +152,18 @@ def test_download_source_catalog_rejects_duplicate_ids_and_unknown_model_sources
     }
 
 
-def test_component_variant_catalog_lists_only_selectable_full_components() -> None:
+def test_component_variant_catalog_is_empty_after_unified_inference_closure() -> None:
+    """统一推理闭包回归：组件档位退役后可选目录不再提供任何变体。
+
+    旧实现（目录列出 mineru-cpu/mineru-cuda/gpu_runtime 供选择，但显式
+    请求已被折叠为空——UI 展示静默无作用选项）上失败。
+    """
     catalog = component_variant_catalog_payload()
 
-    variants = catalog["variants"]
-    assert variants, "catalog must list the optional full-closure components"
-    business_keys = {(v["feature_id"], v["accelerator"]) for v in variants}
-    assert len(business_keys) == len(variants)
-    component_ids_by_accelerator: dict[str, set[str]] = {}
-    for variant in variants:
-        assert set(variant) == {"feature_id", "accelerator", "component_id"}
-        assert variant["accelerator"] in {"cpu", "nvidia_cuda"}
-        # 同一 accelerator 内 component_id 不得重复承载两个 feature。
-        per_accelerator = component_ids_by_accelerator.setdefault(
-            variant["accelerator"], set()
-        )
-        assert variant["component_id"] not in per_accelerator
-        per_accelerator.add(variant["component_id"])
-    # base 必备组件不进入可选目录；#270 后退役原生 Paddle 组件同样不进入
-    # 新目录（身份仅在 PROFILE_COMPONENTS/迁移表中保留）。
-    listed = {variant["component_id"] for variant in variants}
-    assert listed == {
-        "mineru-cpu",
-        "mineru-cuda",
-        "gpu_runtime",
-    }
-    assert selectable_component_ids("cpu") == ("mineru-cpu",)
-    assert set(selectable_component_ids("nvidia_cuda")) == {
-        "mineru-cuda",
-        "gpu_runtime",
-    }
+    assert catalog["variants"] == []
+    assert selectable_component_ids("cpu") == ()
+    assert selectable_component_ids("nvidia_cuda") == ()
+    assert selectable_component_ids_across_catalog() == frozenset()
 
 
 def test_component_ids_have_one_meaning_and_legacy_selection_migrates() -> None:
@@ -200,46 +182,55 @@ def test_component_ids_have_one_meaning_and_legacy_selection_migrates() -> None:
         assert (
             migrate_legacy_component_ids(profile, ("ocr_engine", "rapidocr-base")) == ()
         )
+    # 历史档位绑定仅保留读取基准：mineru-cpu 仍按旧 profile 解析到包名。
     assert runtime_component_binding("win-x64-cpu", "mineru-cpu").import_name == (
         "mineru"
     )
     with pytest.raises(ManifestError, match="binding is missing"):
         runtime_component_binding("win-x64-base", "ocr_engine")
 
-    assert migrate_legacy_component_ids(
-        "win-x64-cpu", ("ocr_engine", "document_parsing")
-    ) == ("mineru-cpu",)
-    assert migrate_legacy_component_ids("win-x64-cu126", ("document_parsing",)) == (
-        "mineru-cuda",
+    # 统一推理闭包：document_parsing 及其目标组件（mineru-cpu/mineru-cuda）、
+    # gpu_runtime 与 2.8 前的功能域组件在所有 profile 下统一折叠为空
+    # （MinerU 随 managed paddleocr-ort-directml 环境携带）。
+    for profile in ("win-x64-base", "win-x64-cpu", "win-x64-cu126"):
+        assert (
+            migrate_legacy_component_ids(
+                profile,
+                (
+                    "document_parsing",
+                    "mineru-cpu",
+                    "mineru-cuda",
+                    "gpu_runtime",
+                    "pdf_document_tools",
+                    "image_code_tools",
+                ),
+            )
+            == ()
+        )
+    assert (
+        migrate_legacy_component_ids("win-x64-cpu", ("ocr_engine", "document_parsing"))
+        == ()
     )
 
 
-def test_selection_policy_resolves_exact_cuda_dependency_closure() -> None:
+def test_selection_policy_folds_retired_cuda_closure_requests_to_base() -> None:
+    """统一推理闭包：gpu_runtime/document_parsing 请求不再解析 CUDA 组件闭包。
+
+    CUDA 依赖闭包（mineru-cuda + gpu_runtime）已随分设备配方退役：这些 id
+    在选择入口折叠为空，解析结果收敛到 base-only 闭包；推理环境由 managed
+    paddleocr-ort-directml 统一闭包承载，不再走组件安装路径。
+    """
     policy = _selection_policy()
 
-    gpu_only = policy.plan_start(
-        accelerator="nvidia_cuda",
-        install_component_ids=("gpu_runtime",),
-        download_source_ids=("pypi",),
-    )
-    document_parsing = policy.plan_start(
-        accelerator="nvidia_cuda",
-        install_component_ids=("document_parsing",),
-        download_source_ids=("pypi",),
-    )
-
-    assert gpu_only.requested_component_ids == ("gpu_runtime",)
-    assert gpu_only.install_scope.scope_id == "gpu-runtime"
-    assert gpu_only.effective_component_ids == (
-        "runtime_host",
-        "gpu_runtime",
-    )
-    assert document_parsing.install_scope.scope_id == "default"
-    assert document_parsing.effective_component_ids == (
-        "runtime_host",
-        "mineru-cuda",
-        "gpu_runtime",
-    )
+    for requested in (("gpu_runtime",), ("document_parsing",)):
+        resolved = policy.plan_start(
+            accelerator="nvidia_cuda",
+            install_component_ids=requested,
+            download_source_ids=("pypi",),
+        )
+        assert resolved.requested_component_ids == ()
+        assert resolved.install_scope.scope_id == "default"
+        assert resolved.effective_component_ids == ("runtime_host",)
 
 
 def test_selection_policy_canonicalizes_sources_and_rejects_same_kind() -> None:
@@ -356,8 +347,14 @@ def test_normalize_install_component_ids_distinguishes_omission_and_empty() -> N
     assert normalize_install_component_ids(None, accelerator="cpu") is None
     assert normalize_install_component_ids((), accelerator="cpu") == ()
     assert normalize_install_component_ids((), accelerator="base") == ()
-    assert normalize_install_component_ids(["document_parsing"], accelerator="cpu") == (
-        "mineru-cpu",
+    # 统一推理闭包：document_parsing 与 mineru/gpu_runtime 组件请求统一
+    # 折叠为空（不拒绝、不安装），OCR/MinerU 由 managed 环境承载。
+    assert (
+        normalize_install_component_ids(["document_parsing"], accelerator="cpu") == ()
+    )
+    assert (
+        normalize_install_component_ids(["gpu_runtime"], accelerator="nvidia_cuda")
+        == ()
     )
     assert normalize_install_component_ids(["ocr_engine"], accelerator="base") == ()
 
@@ -382,13 +379,10 @@ def test_normalize_install_component_ids_fails_closed() -> None:
         normalize_install_component_ids(["not-a-component"], accelerator="cpu")
     assert excinfo.value.code is ErrorCode.RUNTIME_COMPONENT_UNKNOWN
 
-    # gpu_runtime 在目录中，但只能装进 nvidia_cuda 档位：选择不得隐式换档。
+    # 可选组件闭包已随统一推理闭包退役折叠，“档位不匹配”分支不再可达；
+    # 重复请求仍在迁移前 fail closed。
     with pytest.raises(RuntimeSelectionError) as excinfo:
-        normalize_install_component_ids(["gpu_runtime"], accelerator="cpu")
-    assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
-
-    with pytest.raises(RuntimeSelectionError) as excinfo:
-        normalize_install_component_ids(["document_parsing"], accelerator="base")
+        normalize_install_component_ids(["document_parsing"] * 2, accelerator="cpu")
     assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
 
 
@@ -413,17 +407,14 @@ def test_retired_native_paddle_excluded_from_catalog_request_and_default_closure
     policy = _selection_policy()
     assert "paddleocr-cpu" not in selectable_component_ids_across_catalog()
     assert "paddleocr-cuda" not in selectable_component_ids_across_catalog()
-    # 缺省（None）闭包 = base + MinerU（+ gpu_runtime），不含 paddleocr-*。
+    # 统一推理闭包后缺省（None）闭包 = base 完整闭包，不含 paddleocr-*，
+    # 也不含已退役的 MinerU/CUDA 组件档位。
     default = policy.plan_start(
         accelerator="nvidia_cuda",
         install_component_ids=None,
         download_source_ids=None,
     )
-    assert set(default.effective_component_ids) == {
-        "runtime_host",
-        "mineru-cuda",
-        "gpu_runtime",
-    }
+    assert set(default.effective_component_ids) == {"runtime_host"}
     assert default.install_scope.scope_id == "default"
     # 旧基础 OCR 身份只折叠，不恢复已退役引擎；OCR 由托管 Paddle 环境提供。
     legacy = policy.plan_start(

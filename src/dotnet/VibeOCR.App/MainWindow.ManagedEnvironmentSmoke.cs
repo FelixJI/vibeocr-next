@@ -85,12 +85,12 @@ public sealed partial class MainWindow
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    await SelectSmokeValueAsync("#paddle-backend-select", "cpu");
+    await SelectSmokeValueAsync("#paddle-backend-select", "directml");
     await ClickManagedSmokeButtonAsync("准备此后端");
     await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
     await WaitForSmokeDomAsync(
       "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-ort-cpu') && " +
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-ort-directml') && " +
       "!!document.querySelector('.managed-environment-list') && " +
       "!document.querySelector(\"input[aria-label='新环境名称（留空自动命名）']\")",
       TimeSpan.FromMinutes(2));
@@ -259,9 +259,9 @@ public sealed partial class MainWindow
 
   private async Task<object> CompleteInstallProgressSmokeAsync()
   {
-    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "paddleocr-ort-cpu";
-    if (recipe is not "paddleocr-ort-cpu")
-      throw new InvalidOperationException("Progress smoke supports the isolated Paddle ONNX CPU recipe only.");
+    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "paddleocr-ort-directml";
+    if (recipe is not "paddleocr-ort-directml")
+      throw new InvalidOperationException("Progress smoke supports the unified DirectML closure recipe only.");
     await NavigateSmokeAsync("设置", ".settings-runtime-panel");
     await ClickManagedSmokeButtonAsync("查看环境清单");
     await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
@@ -280,11 +280,11 @@ public sealed partial class MainWindow
     return new { installed = SmokeEnvironmentEvidence(installed), install_progress = managedInstallProgressEvidence };
   }
 
-  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "paddleocr-ort-cpu")
+  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "paddleocr-ort-directml")
   {
     RecordManagedSmokeStage($"select {environment.Name}");
     await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#paddle-backend-select", "cpu");
+    await SelectSmokeValueAsync("#paddle-backend-select", "directml");
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +
@@ -473,7 +473,7 @@ public sealed partial class MainWindow
   private async Task VerifyPreparedTargetReuseAsync(ManagedEnvironment expected)
   {
     WorkbenchCommandReceipt prepared = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new PrepareEnvironmentCommand("paddleocr-ort-cpu")),
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new PrepareEnvironmentCommand("paddleocr-ort-directml")),
       CancellationToken.None);
     SettingsWorkbenchState settings = (await application.BootstrapAsync(CancellationToken.None))
       .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();

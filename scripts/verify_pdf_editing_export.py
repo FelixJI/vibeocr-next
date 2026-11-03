@@ -15,7 +15,7 @@ import argparse
 import json
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 
 HEALTH_NAME = "paddle-input-pdf_editing.json"
 REPORT_NAME = "pdf-editing-export-verification.json"

@@ -1,7 +1,7 @@
 # tests/services/test_pdf_service_bbox.py
 """Tests for PDF bbox coordinate inverse transform."""
 
-import fitz
+import pymupdf as fitz
 from vibeocr.runtime.documents.pdf_service import PdfService
 
 # 标准信纸尺寸 page_rect: 612×792 points

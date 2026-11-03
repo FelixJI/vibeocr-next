@@ -1,6 +1,6 @@
 """Tests for PdfSession dataclass."""
 
-import fitz
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.models.pdf_session import PdfSession

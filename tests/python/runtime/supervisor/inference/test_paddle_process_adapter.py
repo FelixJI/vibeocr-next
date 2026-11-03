@@ -90,9 +90,7 @@ def test_broken_worker_pipe_discards_process():
     assert adapter._process is None
 
 
-@pytest.mark.parametrize(
-    "recipe", ["paddleocr-ort-cpu", "paddleocr-ort-cuda", "paddleocr-ort-directml"]
-)
+@pytest.mark.parametrize("recipe", ["paddleocr-ort-directml"])
 def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch, recipe):
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
     monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
@@ -124,7 +122,7 @@ def test_onnx_worker_native_or_wire_failure_is_typed_and_discards_worker(
 ):
     from vibeocr.runtime.recognition.paddle_onnx import PaddleOnnxError
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     adapter = PaddleProcessAdapter(Path(sys.executable))
     process = MagicMock()
     process.poll.return_value = None
@@ -142,7 +140,7 @@ def test_onnx_cancellation_stops_worker_and_ignores_late_reply(monkeypatch):
         request_snapshot,
     )
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     adapter = PaddleProcessAdapter(Path(sys.executable))
     process = MagicMock()
     process.poll.return_value = None
@@ -167,7 +165,7 @@ def test_retained_worker_request_preserves_pipeline_id_and_frozen_selection(
     from vibeocr.runtime.recognition.paddle_onnx import freeze_request, request_snapshot
     from vibeocr.runtime_contracts import PipelineSelection
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setenv("PADDLE_PDX_MODEL_SOURCE", "huggingface")
     values = {"model_preset": "tiny", "use_doc_unwarping": True}
     selection = PipelineSelection(mode, options=values)
@@ -195,7 +193,7 @@ def test_worker_request_rejects_a_different_pipeline_than_frozen_job(monkeypatch
     )
     from vibeocr.runtime_contracts import PipelineSelection
 
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-cpu")
+    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     adapter = PaddleProcessAdapter(Path(sys.executable))
     request = MagicMock(return_value=[])
     monkeypatch.setattr(adapter, "_request", request)

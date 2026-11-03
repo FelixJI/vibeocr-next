@@ -22,10 +22,11 @@ from vibeocr.runtime.environments.model_cache import (
 )
 
 logger = logging.getLogger(__name__)
-RECIPES = ("paddleocr-ort-cpu", "paddleocr-ort-cuda", "paddleocr-ort-directml")
+# 统一推理闭包：directml 是唯一受管配方；设备层支持 DirectML EP 与
+# CPU EP 的同闭包切换（#299 的 cpu/cuda 分设备配方已退役）。
+RECIPES = ("paddleocr-ort-directml",)
 PROVIDERS = {
     "cpu": "CPUExecutionProvider",
-    "cuda": "CUDAExecutionProvider",
     "directml": "DmlExecutionProvider",
 }
 PRESETS = ("tiny", "small", "medium")
@@ -192,7 +193,7 @@ def constructor_kwargs(options: Any) -> dict:
         # 必须明确准备对应 Paddle ONNX 环境，而不是退回原生构造。
         raise PaddleOnnxError(
             "Paddle pipelines require a Paddle ONNX environment "
-            "(paddleocr-ort-cpu/cuda/directml); prepare it and switch to it"
+            "(paddleocr-ort-directml); prepare it and switch to it"
         )
     values = {
         key: getattr(options, key, default)
@@ -575,22 +576,12 @@ def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
         raise PaddleOnnxError(safe_runtime_detail(str(exc))) from exc
     import onnxruntime as ort
 
-    if snapshot["device"] == "cuda":
-        from vibeocr.runtime.recognition.onnx_devices import setup_cuda_plugin
-
-        if not setup_cuda_plugin():
-            raise PaddleOnnxError(
-                "CUDA DLL/plugin unavailable; repair the CUDA environment"
-            )
     provider = snapshot["provider"]
     if provider not in ort.get_available_providers():
         raise PaddleOnnxError(f"Requested provider unavailable: {provider}")
     provider_options = (
         {"device_id": str(snapshot["device_id"])} if snapshot["device"] != "cpu" else {}
     )
-    if snapshot["device"] == "cuda":
-        # cuDNN NCHW depthwise 1x7 fails on the frozen small_rec PDF batch; keep FP32 via NHWC.
-        provider_options["prefer_nhwc"] = "1"
     engine_config = {"providers": [provider], "provider_options": [provider_options]}
     if snapshot["device"] == "directml":
         engine_config.update(enable_mem_pattern=False, execution_mode="sequential")

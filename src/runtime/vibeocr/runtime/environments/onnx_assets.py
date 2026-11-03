@@ -1,25 +1,12 @@
-"""Release-pinned external ONNX Runtime assets shared by engine environments."""
+"""Release-pinned external assets shared by engine environments."""
 
 from __future__ import annotations
 
-import shutil
-import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from urllib.request import urlopen
 
 from vibeocr.runtime.environments.runtime_manifest import sha256_file
-
-# Microsoft 官方 CUDA 13 EP 插件（独立于 onnxruntime wheel 的固定 DLL 资产）。
-# 该插件同时服务 Paddle ONNX CUDA 环境；无需 onnxruntime-gpu 发行物。
-CUDA_PLUGIN_ARCHIVE = "cuda_ep_cuda13_0.2.0_win-x64.zip"
-CUDA_PLUGIN_URL = (
-    "https://github.com/microsoft/onnxruntime/releases/download/"
-    "plugin-ep-cuda/v0.2.0/" + CUDA_PLUGIN_ARCHIVE
-)
-# Microsoft's GitHub Release asset digest binds the ORT 1.30 CUDA 13 plugin.
-CUDA_PLUGIN_SHA256 = "e204c362a151e157cc56e047c76a3de54dd12c9a55d6ba3b1068686f4b47a489"
-CUDA_PLUGIN_DLL = "onnxruntime_providers_cuda.dll"
 
 
 def pinned_download(
@@ -42,24 +29,3 @@ def pinned_download(
     finally:
         partial.unlink(missing_ok=True)
     return destination
-
-
-def install_cuda_plugin(
-    runtime_root: Path, cache: Path, check_cancelled: Callable[[], None]
-) -> None:
-    archive_path = pinned_download(
-        CUDA_PLUGIN_URL,
-        cache / CUDA_PLUGIN_ARCHIVE,
-        CUDA_PLUGIN_SHA256,
-        check_cancelled,
-    )
-    target = runtime_root / "providers" / "cuda"
-    target.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        if sorted(archive.namelist()) != [CUDA_PLUGIN_DLL, "version.json"]:
-            raise ValueError("CUDA plugin archive contains unexpected members")
-        for name in (CUDA_PLUGIN_DLL, "version.json"):
-            check_cancelled()
-            with archive.open(name) as source, (target / name).open("wb") as output:
-                shutil.copyfileobj(source, output)
-    check_cancelled()

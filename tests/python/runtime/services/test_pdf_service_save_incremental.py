@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from vibeocr.runtime.documents.pdf_service import PdfService
 
 

@@ -7,7 +7,7 @@ add_text_layer_batch（一批页共享单一聚合子集），复用 save_with_r
 
 from __future__ import annotations
 
-import fitz
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.pdf_service import PdfService

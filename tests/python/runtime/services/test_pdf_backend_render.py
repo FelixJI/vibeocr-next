@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
-import fitz
+import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.pdf_backend_client import PdfBackendClient
 

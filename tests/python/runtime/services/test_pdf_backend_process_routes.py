@@ -10,8 +10,8 @@ import sys
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1337,12 +1337,16 @@ class TestBatchSaveEdgeCases:
             raise RuntimeError("compress boom")
 
         monkeypatch.setattr(backend.PdfService, "_compress_in_place", _compress_fail)
-        # 重开也失败
-        monkeypatch.setattr(
-            fitz,
-            "open",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("reopen boom")),
-        )
+        # 重开也失败。fitz.open() 无参调用是写层的空候选文档，需放行；
+        # 仅带参调用（从备份回滚后的磁盘重开）模拟失败。
+        _real_open = fitz.open
+
+        def _fail_reopen(*args, **kwargs):
+            if args or kwargs:
+                raise RuntimeError("reopen boom")
+            return _real_open()
+
+        monkeypatch.setattr(fitz, "open", _fail_reopen)
         resp = client.post(
             f"/session/{sid}/add_text_layer_batch",
             json={
@@ -1561,7 +1565,7 @@ class TestRemainingBranches:
         self, opened_scanned_session, tmp_path
     ):
         """长中英编辑：收缩写入成功，保存重开后末尾 token 完整、旧文字不重复。"""
-        import fitz as _fitz
+        import pymupdf as _fitz
 
         client, backend, sid, _ = opened_scanned_session
         _add_layer(

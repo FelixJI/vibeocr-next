@@ -72,7 +72,7 @@ internal static class Program
         : new string?[]
         {
           DotNetRuntimeProbe.FindVersion() != null ? null : ".NET Runtime 10 x64",
-          HasWindowsAppRuntime() ? null : "Windows App Runtime 2.5 x64",
+          HasWindowsAppRuntime() ? null : "Windows App Runtime 2.6 x64",
           HasWebView2(layout) ? null : "Microsoft Edge WebView2 Evergreen Runtime",
           HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
         })
@@ -143,7 +143,7 @@ internal static class Program
   // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
   // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.
   private const ushort MinimumWindowsAppRuntimeMajor = 2;
-  private const ushort MinimumWindowsAppRuntimeMinor = 5;
+  private const ushort MinimumWindowsAppRuntimeMinor = 6;
 
   private static bool HasWindowsAppRuntime()
   {

@@ -166,6 +166,8 @@ interface ManagedEnvironmentRecipeState {
   readonly configuredRecognitionTypes?: readonly string[] | null;
   readonly accelerator?: string | null;
   readonly targetDevice?: string | null;
+  /** 配方可选设备全集（统一闭包含 CPU 切换档）；缺失回落 targetDevice。 */
+  readonly supportedDevices?: readonly string[] | null;
   readonly pythonVersion?: string | null;
   readonly abi?: string | null;
   readonly platform?: string | null;
@@ -254,6 +256,9 @@ interface RecipeComponentGroup {
   readonly title: string;
   readonly purposeLabel: string;
   readonly purposeKey: string;
+  readonly modes: readonly string[];
+  /** 组内可选择的设备全集（配方的 supported_devices 并集，安装档优先）。 */
+  readonly devices: readonly string[];
   readonly byDevice: ReadonlyMap<string, ManagedEnvironmentRecipeState>;
 }
 
@@ -337,6 +342,20 @@ function recipeComponentGroups(
       engine: device.engine,
       title,
       purposeKey,
+      modes: [...(recipe.configuredRecognitionTypes ?? [])],
+      // 设备全集来自目录 supported_devices（统一闭包 = 安装档 + CPU 切换），
+      // 缺失时回落安装档；统一映射到选择键空间（cuda → nvidia_cuda），
+      // 设备选择由此驱动，安装配方仍按 byDevice 绑定。
+      devices: [
+        ...new Set([
+          ...(group?.devices ?? []),
+          ...(recipe.supportedDevices?.length
+            ? recipe.supportedDevices.map((item) =>
+                item === "cuda" ? "nvidia_cuda" : item,
+              )
+            : [device.device]),
+        ]),
+      ],
       purposeLabel: recognitionPurposeLabel(
         recipe.configuredRecognitionTypes ?? [],
       ),
@@ -349,6 +368,18 @@ function recipeComponentGroups(
     ),
     problems,
   };
+}
+
+// 设备 → 安装配方：按安装档绑定优先（byDevice）；统一闭包选 CPU 等非
+// 安装档设备时回落组内唯一配方（同闭包设备切换，不另装配方）。
+function recipeForDevice(
+  group: RecipeComponentGroup | undefined,
+  device: string,
+): ManagedEnvironmentRecipeState | null {
+  const bound = group?.byDevice.get(device);
+  if (bound) return bound;
+  const recipes = [...(group?.byDevice.values() ?? [])];
+  return recipes.length === 1 ? (recipes[0] ?? null) : null;
 }
 
 // 主要依赖摘要（#195）：仅从目录/计划的实际 dependencies 里筛白名单
@@ -1036,9 +1067,11 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   // 选择按引擎分区：Paddle 只记住推理后端，MinerU 单独记住安装设备；
   // 引擎焦点决定哪个分区驱动兼容性查询（宿主查询结果一次只绑定一个
   // 配方，两分区不能同时自动轮询互相覆盖）。
+  // 初始无设备偏好：分区默认设备取组内第一个可选设备（目录 devices，
+  // 统一闭包即安装档 directml；历史多配方目录仍按目录顺序默认 CPU）。
   const [engineDevices, setEngineDevices] = useState({
-    paddle: "cpu",
-    mineru: "cpu",
+    paddle: "",
+    mineru: "",
   });
   const [engineFocus, setEngineFocus] = useState<EngineSelection>("paddle");
   // 本地失效抑制：选择变化→宿主 invalidate 回传之间旧计划不得继续确认。
@@ -1048,7 +1081,11 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const rawPlan = managedEnvironmentPlan(state.environmentPlan);
   const catalog = recipeComponentGroups(recipes);
   const paddleGroup = catalog.groups.find((group) => group.engine === "paddle");
-  const mineruGroup = catalog.groups.find((group) => group.engine === "mineru");
+  // 统一推理闭包没有独立的 mineru 引擎配方：本地 MinerU 分区复用声明
+  // document 能力的共享闭包分组（历史独立 mineru 目录形态仍按 engine 命中）。
+  const mineruGroup = catalog.groups.find(
+    (group) => group.engine === "mineru" || group.modes.includes("document"),
+  );
   const restoredChoice =
     !hasExplicitChoice && rawPlan?.requestedRecipe
       ? recipeChoice(
@@ -1064,12 +1101,10 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     group: RecipeComponentGroup | undefined,
     preferred: string,
   ): string => {
-    const keys = [...(group?.byDevice.keys() ?? [])];
-    return keys.includes(preferred)
+    const devices = group?.devices ?? [];
+    return preferred && devices.includes(preferred)
       ? preferred
-      : keys.includes("cpu")
-        ? "cpu"
-        : (keys[0] ?? "");
+      : (devices[0] ?? "");
   };
   const paddleDevice = effectiveDeviceFor(
     paddleGroup,
@@ -1096,9 +1131,8 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     engine: "paddle" | "mineru",
     device: string,
   ): string | null =>
-    (engine === "paddle"
-      ? paddleGroup?.byDevice.get(device)?.id
-      : mineruGroup?.byDevice.get(device)?.id) ?? null;
+    recipeForDevice(engine === "paddle" ? paddleGroup : mineruGroup, device)
+      ?.id ?? null;
   // 快照已同步但仍无活动环境（初始化失败或默认环境被删）时，如实展示
   // 默认配置“尚未启动”；加载判定用宿主 typed 事实（快照是否已读到位），
   // 不依赖状态文案，空串/未投影不当作已加载。
@@ -2524,7 +2558,9 @@ function EngineEnvironmentSection({
   readonly plan: ManagedEnvironmentPlanState | undefined;
   readonly onPreview?: (environmentId: string, recipe: string) => void;
 }) {
-  const target = group?.byDevice.get(device);
+  // 安装配方按安装档设备绑定；统一闭包选 CPU 等非安装档设备时回落组内
+  // 唯一配方（同闭包设备切换，不另装配方）。
+  const target = recipeForDevice(group, device) ?? undefined;
   const hardware = managedEnvironmentHardware(state.environmentHardware);
   const environments = managedEnvironments(state.environments);
   const activeId = stringValue(state.activeEnvironmentId);
@@ -2554,7 +2590,7 @@ function EngineEnvironmentSection({
     compatibleEnvironment?.id === activeId &&
     compatibleEnvironment?.status === "installed" &&
     compatibleEnvironment.serviceState === "ready" &&
-    compatibleEnvironment.targetDevice === target?.targetDevice;
+    compatibleEnvironment.targetDevice === device;
   const pendingPlan = plan?.requestedRecipe === targetId ? plan : undefined;
   const preparing = useRef(false);
   const prepare = async () => {
@@ -2688,7 +2724,7 @@ function EngineEnvironmentSection({
       <p className="form-note">
         {family === "paddle"
           ? "文字、表格与版面结构识别共用同一套 PaddleOCR 依赖，差别只在模型与管线（按需下载，各后端共用）。选择后端只做只读查询，确认后才安装或切换。"
-          : "MinerU 是独立于 Paddle 的本地文档解析引擎，CPU 与 CUDA 依赖闭包不同，模型首次使用时下载。远程模式不安装本地引擎，连接在下方“MinerU 连接”设置。"}
+          : "本地文档解析由统一推理闭包随包携带（与 PaddleOCR 同一环境），模型首次使用时下载。远程模式不安装本地引擎，连接在下方“MinerU 连接”设置。"}
       </p>
       {problems.map((problem) => (
         <p role="alert" key={problem}>
@@ -2721,7 +2757,7 @@ function EngineEnvironmentSection({
               disabled={busy}
               onChange={(_, data) => onDeviceChange(String(data.value))}
             >
-              {[...group.byDevice.keys()].map((key) => (
+              {group.devices.map((key) => (
                 <option key={key} value={key}>
                   {engineDeviceOptionLabel(key)}
                 </option>
@@ -2735,8 +2771,7 @@ function EngineEnvironmentSection({
                 {recognitionPurposeLabel(
                   target.configuredRecognitionTypes ?? [],
                 ) || "用途未知"}
-                ，设备 {target.targetDevice ?? "未知"}，Python{" "}
-                {target.pythonVersion ?? "未知"}）
+                ，设备 {device}，Python {target.pythonVersion ?? "未知"}）
               </p>
               <p className="form-note">
                 依赖来源：{dependencyOriginNote(target.dependencyOrigin)}
@@ -2811,7 +2846,8 @@ function EngineEnvironmentSection({
                       void actions.run({
                         type: "settings.switchEnvironment",
                         environmentId: compatibleEnvironment.id,
-                        device: target?.targetDevice,
+                        // 切换按用户选定设备（统一闭包 directml↔cpu 同闭包切换）。
+                        device,
                       })
                     }
                   >

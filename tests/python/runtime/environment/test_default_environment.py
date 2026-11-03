@@ -14,10 +14,19 @@ from vibeocr.runtime.environments.managed_references import ManagedEnvironmentRe
 from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 
 
-def _manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install=None):
+def _manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install=None,
+    *,
+    unified_only: bool = False,
+):
     _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
+        tmp_path / "release",
+        with_base_pack=True,
+        with_paddle_packs=True,
+        unified_only=unified_only,
     )
     calls = []
 
@@ -56,7 +65,7 @@ def test_first_launch_installs_and_selects_default_once(tmp_path, monkeypatch):
     assert len(listed["environments"]) == 1
     environment = listed["environments"][0]
     assert environment["name"] == "默认环境"
-    assert environment["recipe"] == "paddleocr-ort-cpu"
+    assert environment["recipe"] == "paddleocr-ort-directml"
     assert listed["active_id"] == environment["id"]
     assert listed["active_revision"] == 1
     assert len(calls) == 1 and calls[0][1]
@@ -69,6 +78,44 @@ def test_first_launch_installs_and_selects_default_once(tmp_path, monkeypatch):
         "environment_id": None,
         "created": True,
     }
+
+
+def test_unified_manifest_initializes_default_and_switches(tmp_path, monkeypatch):
+    """正式新产物形态（仅 base profile + 单 directml 绑定）的默认环境闭环。
+
+    受管统一闭包的预览/安装/启动投影不得依赖已退役的 cpu 档位 profile
+    （win-x64-cpu）：覆盖判定与来源规划都按 base 档回退。"""
+    from vibeocr.runtime.environments.runtime_manifest import (
+        covering_profile_id,
+        load_runtime_manifest,
+    )
+
+    manager, calls = _manager(tmp_path, monkeypatch, unified_only=True)
+    loaded = load_runtime_manifest(manager.manifest.path)
+    assert set(loaded.profiles) == {"win-x64-base"}
+    assert set(loaded.paddle_onnx_environments) == {"paddleocr-ort-directml"}
+    assert (
+        covering_profile_id(
+            loaded,
+            accelerator="cpu",
+            component_ids={"paddleocr-ort-directml", "runtime_host"},
+        )
+        == "win-x64-base"
+    )
+
+    listed = manager.initialize_default()
+    assert listed["active_id"] == "paddleocr-ort-directml"
+    assert len(calls) == 1 and calls[0][1]
+    prepared = manager.prepare_switch(listed["active_id"])
+    launch = prepared["launch"]
+    assert launch is not None
+    assert (
+        launch["environment"]["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"]
+        == "paddleocr-ort-directml"
+    )
+    catalog = manager.recipe_catalog()
+    assert [entry["id"] for entry in catalog] == ["paddleocr-ort-directml"]
+    assert catalog[0]["default_remote_host"] is True
 
 
 def test_upgrade_from_empty_registry_gets_default(tmp_path, monkeypatch):
@@ -253,7 +300,7 @@ def test_upgrade_replaces_retired_default_without_removing_old_environment(
     # The real startup path prepares the selected environment after initialization.
     prepared = manager.prepare_switch(listed["active_id"])
 
-    assert prepared["environment_id"] == "paddleocr-ort-cpu"
+    assert prepared["environment_id"] == "paddleocr-ort-directml"
     assert prepared["requires_supervisor"]
     assert (
         manager._read()["environments"][old["id"]]
@@ -261,7 +308,7 @@ def test_upgrade_replaces_retired_default_without_removing_old_environment(
     )
     assert Path(old["path"]).is_dir()
     assert len(calls) == 1
-    assert manager.initialize_default()["active_id"] == "paddleocr-ort-cpu"
+    assert manager.initialize_default()["active_id"] == "paddleocr-ort-directml"
     assert len(calls) == 1
 
 
@@ -290,7 +337,7 @@ def test_retired_default_upgrade_failure_retries_without_changing_selection(
     assert len(manager._read()["environments"]) == 2
 
     failed = False
-    assert manager.initialize_default()["active_id"] == "paddleocr-ort-cpu"
+    assert manager.initialize_default()["active_id"] == "paddleocr-ort-directml"
     assert len(manager._read()["environments"]) == 2
     assert len(calls) == 2
 
@@ -432,13 +479,13 @@ def test_retired_default_upgrade_does_not_repurpose_existing_environment(
 ):
     manager, calls, old, _ = _retired_default(tmp_path, monkeypatch)
     existing = manager._create(
-        "默认环境（PaddleOCR）", environment_id="paddleocr-ort-cpu"
+        "默认环境（PaddleOCR）", environment_id="paddleocr-ort-directml"
     )
     before = manager._read()["environments"][existing["id"]]
 
     listed = manager.initialize_default()
 
-    assert listed["active_id"] == "paddleocr-ort-cpu-2"
+    assert listed["active_id"] == "paddleocr-ort-directml-2"
     assert manager._read()["environments"][existing["id"]] == before
     assert Path(old["path"]).is_dir()
     assert len(calls) == 1
@@ -466,8 +513,8 @@ def test_retired_default_upgrade_reserves_id_against_concurrent_create(
     concurrent = []
 
     def create_after_user(name, **kwargs):
-        if kwargs.get("environment_id") == "paddleocr-ort-cpu" and not concurrent:
-            user = create("paddleocr-ort-cpu")
+        if kwargs.get("environment_id") == "paddleocr-ort-directml" and not concurrent:
+            user = create("paddleocr-ort-directml")
             concurrent.append(manager._read()["environments"][user["id"]])
         return create(name, **kwargs)
 
@@ -513,7 +560,7 @@ def test_deleting_initialized_environment_does_not_recreate(tmp_path, monkeypatc
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("reserved_id", ["b" * 32, "rapidocr-cpu"])
+@pytest.mark.parametrize("reserved_id", ["b" * 32, "rapidocr-cpu", "paddleocr-ort-cpu"])
 def test_interrupted_creation_reuses_reserved_environment_id(
     tmp_path, monkeypatch, reserved_id
 ):
@@ -523,8 +570,14 @@ def test_interrupted_creation_reuses_reserved_environment_id(
     marker.write_text(
         json.dumps({"environment_id": reserved_id, "created": False}), encoding="utf-8"
     )
+    # rapidocr-cpu 与 paddleocr-ort-cpu 都是历史默认 slug：未完成创建时迁到
+    # 统一推理闭包新 slug；uuid 预留位保持不变。
+    expected_id = (
+        "paddleocr-ort-directml"
+        if reserved_id in ("rapidocr-cpu", "paddleocr-ort-cpu")
+        else reserved_id
+    )
     listed = manager.initialize_default()
-    expected_id = "paddleocr-ort-cpu" if reserved_id == "rapidocr-cpu" else reserved_id
     assert listed["active_id"] == expected_id
     assert len(listed["environments"]) == 1 and len(calls) == 1
 

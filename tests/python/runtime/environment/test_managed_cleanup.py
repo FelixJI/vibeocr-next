@@ -107,9 +107,9 @@ def test_failed_install_candidate_is_recoverable(tmp_path, monkeypatch):
 
     store, _ = _manager(tmp_path, monkeypatch, install=fail)
     target = store.create("安装失败")
-    plan = store.preview_install(target["id"], "paddleocr-ort-cpu")
+    plan = store.preview_install(target["id"], "paddleocr-ort-directml")
     with pytest.raises(RuntimeInstallError):
-        store.install(plan["plan_id"], target["id"], "paddleocr-ort-cpu")
+        store.install(plan["plan_id"], target["id"], "paddleocr-ort-directml")
     residual = next(
         item
         for item in store.preview_cleanup()["items"]
@@ -193,49 +193,44 @@ def _report(store, recipe, filename, name, digest):
 
 @pytest.mark.parametrize("executor", ["pip", "uv"])
 def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, executor):
+    # 统一推理闭包后 directml 是唯一引擎配方：保留环境仍引用的闭包下载
+    # 工件不随无关环境清理删除；最后一个引用环境移除后同一工件转为
+    # 未引用缓存，才可被清理回收。
     store, _ = _manager(tmp_path, monkeypatch)
     first, second, third = [
         store.create(name) for name in ("保留一", "保留二", "删除三")
     ]
-    scope, _ = store._recipe("paddleocr-ort-cpu")
+    scope, _ = store._recipe("paddleocr-ort-directml")
     allowed = _lock_allowed_hashes(scope.lock_path)
     name, hashes = next(iter(allowed.items()))
-    shared = _report(store, "paddleocr-ort-cpu", "shared.whl", name, next(iter(hashes)))
-    gpu_scope, _ = store._recipe("paddleocr-ort-cuda")
-    gpu_allowed = _lock_allowed_hashes(gpu_scope.lock_path)
-    gpu_name = next(name for name in gpu_allowed if name not in allowed)
-    unused = _report(
-        store,
-        "paddleocr-ort-cuda",
-        "unused.whl",
-        gpu_name,
-        next(iter(gpu_allowed[gpu_name])),
+    shared = _report(
+        store, "paddleocr-ort-directml", "shared.whl", name, next(iter(hashes))
     )
     if executor == "uv":
-        for recipe in ("paddleocr-ort-cpu", "paddleocr-ort-cuda"):
-            recipe_scope, _ = store._recipe(recipe)
-            report = (
-                store.paths.state_root
-                / "installer-cache"
-                / "resolve"
-                / f"{recipe_scope.lock_path.stem}-report.json"
-            )
-            inputs_path = report.with_suffix(".inputs.json")
-            inputs = json.loads(inputs_path.read_text())
-            inputs.update(
-                executor="uv-0.13.6",
-                target={
-                    "version": "3.13.16",
-                    "platform": "win-amd64",
-                    "implementation": "cpython",
-                    "gil_disabled": False,
-                },
-            )
-            _atomic_json(inputs_path, inputs)
+        report = (
+            store.paths.state_root
+            / "installer-cache"
+            / "resolve"
+            / f"{scope.lock_path.stem}-report.json"
+        )
+        inputs_path = report.with_suffix(".inputs.json")
+        inputs = json.loads(inputs_path.read_text())
+        inputs.update(
+            executor="uv-0.13.6",
+            target={
+                "version": "3.13.16",
+                "platform": "win-amd64",
+                "implementation": "cpython",
+                "gil_disabled": False,
+            },
+        )
+        _atomic_json(inputs_path, inputs)
     data = store._read()
     for item in (first, second):
         data["environments"][item["id"]].update(
-            status="installed", recipe="paddleocr-ort-cpu", recipe_lock=scope.sha256
+            status="installed",
+            recipe="paddleocr-ort-directml",
+            recipe_lock=scope.sha256,
         )
     _atomic_json(store._registry, data)
     assert _clean(store, f"environment:{third['id']}")["items"][0]["state"] == "deleted"
@@ -250,17 +245,29 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
         for item in plan["items"]
         if item["category"] == "dependency_cache" and not item["can_clean"]
     ]
-    assert len(eligible) == 1 and any(
+    assert eligible == [] and any(
         "shared.whl" in path for item in protected for path in item["paths"]
     )
+    assert Path(first["path"]).exists() and Path(second["path"]).exists()
+
+    # 引用环境全部移除后：工件成为未引用缓存，清理可回收。
+    for item in (first, second):
+        _clean(store, f"environment:{item['id']}")
+    plan = store.preview_cleanup()
+    eligible = [
+        item
+        for item in plan["items"]
+        if item["category"] == "dependency_cache" and item["can_clean"]
+    ]
+    assert len(eligible) == 1
+    assert any("shared.whl" in path for path in eligible[0]["paths"])
     assert (
         store.run_cleanup(plan["plan_id"], [eligible[0]["id"]])["items"][0][
             "removed_logical_bytes"
         ]
         > 0
     )
-    assert shared.exists() and not unused.exists()
-    assert Path(first["path"]).exists() and Path(second["path"]).exists()
+    assert not shared.exists()
 
 
 def test_reparse_descendant_cannot_be_deleted(tmp_path, monkeypatch):
@@ -396,9 +403,11 @@ def test_environment_and_residual_selection_does_not_double_count(
 
 def test_artifact_filename_does_not_claim_directory_contents(tmp_path, monkeypatch):
     store, _ = _manager(tmp_path, monkeypatch)
-    scope, _ = store._recipe("paddleocr-ort-cpu")
+    scope, _ = store._recipe("paddleocr-ort-directml")
     name, hashes = next(iter(_lock_allowed_hashes(scope.lock_path).items()))
-    path = _report(store, "paddleocr-ort-cpu", "known.whl", name, next(iter(hashes)))
+    path = _report(
+        store, "paddleocr-ort-directml", "known.whl", name, next(iter(hashes))
+    )
     path.unlink()
     path.mkdir()
     private = path / "unknown.txt"

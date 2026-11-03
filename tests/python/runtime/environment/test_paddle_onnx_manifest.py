@@ -1,4 +1,4 @@
-"""Generated release binding for the three isolated Paddle ONNX closures."""
+"""Generated release binding for the unified Paddle ONNX + MinerU closure."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from vibeocr.runtime.environments.runtime_manifest import (
 from scripts.build_runtime_manifest import build_runtime_manifest
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda", "directml"])
+@pytest.mark.parametrize("device", ["directml"])
 def test_paddle_host_locks_include_windows_ocr_projection(device):
     checkout = Path(__file__).resolve().parents[4]
     profile = f"win-x64-paddle-ort-{device}"
@@ -37,7 +37,7 @@ def test_paddle_host_locks_include_windows_ocr_projection(device):
         assert any(line.startswith(f"{package}==") for line in declarations), package
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda", "directml"])
+@pytest.mark.parametrize("device", ["directml"])
 def test_paddle_host_lock_rejects_missing_windows_ocr_projection(tmp_path, device):
     profile = f"win-x64-paddle-ort-{device}"
     lock = tmp_path / "requirements.lock"
@@ -49,24 +49,23 @@ def test_paddle_host_lock_rejects_missing_windows_ocr_projection(tmp_path, devic
         validate_requirements_lock(lock, profile=profile)
 
 
-def test_generated_manifest_binds_three_locks_and_rejects_incomplete_or_changed_closure(
+def test_generated_manifest_binds_directml_lock_and_rejects_incomplete_or_changed_closure(
     tmp_path,
 ):
+    """统一推理闭包：生成 manifest 只绑 directml 锁（含 MinerU/onnx 声明）。
+
+    不完整绑定（残留部分历史设备键）与被篡改的锁内容都必须 fail closed。
+    空绑定（paddle_onnx_environments 为 {}）是合法的 base-only manifest，
+    由 loader 的历史容忍规则接受，不在本测试的拒绝范围。
+    """
     manifest_path, _ = _release(tmp_path / "release")
     value = json.loads(manifest_path.read_text(encoding="utf-8"))
     root = manifest_path.parent
-    checkout = Path(__file__).resolve().parents[4]
-    locks = {
-        device: checkout
-        / f"config/runtime/win-x64-paddle-ort-{device}/requirements-win-x64-paddle-ort-{device}.lock"
-        for device in ("cpu", "cuda", "directml")
-    }
+    lock = tmp_path / "requirements-win-x64-paddle-ort-directml.lock"
+    lock.write_text(_lock_text("win-x64-paddle-ort-directml"), encoding="utf-8")
     generated = build_runtime_manifest(
         runtime_wheel=root / value["runtime_wheel"],
         base_lock=root / value["profiles"]["win-x64-base"]["lock"],
-        cpu_lock=root / value["profiles"]["win-x64-cpu"]["lock"],
-        cu126_lock=root / value["profiles"]["win-x64-cu126"]["lock"],
-        cu126_gpu_lock=root / "requirements-win-x64-cu126-gpu.lock",
         python_archive=root / value["python"]["archive"],
         python_version=value["python"]["version"],
         python_source_url=value["python"]["source_url"],
@@ -75,40 +74,45 @@ def test_generated_manifest_binds_three_locks_and_rejects_incomplete_or_changed_
         source_commit="0" * 40,
         build_workflow="tests/runtime",
         output_dir=tmp_path / "output",
-        paddle_onnx_locks=locks,
+        paddle_onnx_locks={"directml": lock},
     )
     manifest = load_runtime_manifest(generated)
-    assert set(manifest.paddle_onnx_environments) == {
-        f"paddleocr-ort-{device}" for device in locks
-    }
+    assert set(manifest.paddle_onnx_environments) == {"paddleocr-ort-directml"}
     for recipe, scope in manifest.paddle_onnx_environments.items():
         validate_requirements_lock(
             scope.lock_path, profile=recipe.replace("paddleocr", "win-x64-paddle")
         )
+        # 统一闭包随包 MinerU：document 与 text/table/structure 同环境投影。
         assert ManagedEnvironmentStore._recipe_modes(recipe) == [
             "text",
             "table",
             "structure",
+            "document",
         ]
     data = json.loads(generated.read_text(encoding="utf-8"))
-    del data["paddle_onnx_environments"]["directml"]
+    # 删除 directml 键后残留部分历史设备绑定：不允许部分集，整体拒绝。
+    data["paddle_onnx_environments"]["cpu"] = data["paddle_onnx_environments"].pop(
+        "directml"
+    )
     generated.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ManifestError, match="all three providers"):
+    with pytest.raises(
+        ManifestError,
+        match="must bind either the unified directml closure or the legacy "
+        "three-provider set",
+    ):
         load_runtime_manifest(generated)
-    data["paddle_onnx_environments"]["directml"] = manifest.raw[
-        "paddle_onnx_environments"
-    ]["directml"]
+    data["paddle_onnx_environments"] = {
+        "directml": manifest.raw["paddle_onnx_environments"]["directml"]
+    }
     generated.write_text(json.dumps(data), encoding="utf-8")
-    manifest.paddle_onnx_environments["paddleocr-ort-cpu"].lock_path.write_text(
+    manifest.paddle_onnx_environments["paddleocr-ort-directml"].lock_path.write_text(
         "corrupt", encoding="utf-8"
     )
     with pytest.raises(ManifestError, match="Paddle ONNX lock SHA-256 mismatch"):
         load_runtime_manifest(generated)
 
 
-@pytest.mark.parametrize(
-    "recipe", ["paddleocr-ort-cpu", "paddleocr-ort-cuda", "paddleocr-ort-directml"]
-)
+@pytest.mark.parametrize("recipe", ["paddleocr-ort-directml"])
 def test_managed_onnx_import_probe_disables_unfrozen_upstream_source_checks_only_in_child(
     tmp_path, recipe, monkeypatch
 ):

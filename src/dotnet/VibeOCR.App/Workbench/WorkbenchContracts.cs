@@ -1167,6 +1167,7 @@ public sealed record SettingsEnvironmentRecipeState(
   IReadOnlyList<string>? ConfiguredRecognitionTypes = null,
   string? Accelerator = null,
   string? TargetDevice = null,
+  IReadOnlyList<string>? SupportedDevices = null,
   string? PythonVersion = null,
   string? Abi = null,
   string? Platform = null,

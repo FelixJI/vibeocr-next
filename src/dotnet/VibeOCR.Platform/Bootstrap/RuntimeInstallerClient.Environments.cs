@@ -135,6 +135,7 @@ public sealed record ManagedEnvironmentRecipe(
     [property: JsonPropertyName("configured_recognition_types")] IReadOnlyList<string>? ConfiguredRecognitionTypes = null,
     [property: JsonPropertyName("accelerator")] string? Accelerator = null,
     [property: JsonPropertyName("target_device")] string? TargetDevice = null,
+    [property: JsonPropertyName("supported_devices")] IReadOnlyList<string>? SupportedDevices = null,
     [property: JsonPropertyName("python_version")] string? PythonVersion = null,
     [property: JsonPropertyName("abi")] string? Abi = null,
     [property: JsonPropertyName("platform")] string? Platform = null,
