@@ -153,7 +153,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Empty environment state changed across restart.");
     await VerifyPreparedTargetReuseAsync(initial[0]);
     WorkbenchCommandReceipt sources = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "modelscope", null)),
       CancellationToken.None);
     if (!sources.Ok) throw new InvalidOperationException("Managed fixture source selection failed.");
     await InstallSmokeRecipeAsync(initial[0]);
@@ -272,7 +272,7 @@ public sealed partial class MainWindow
     ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(["安装进度验收"], TimeSpan.FromMinutes(2));
     ManagedEnvironment target = list.Environments.Single(item => item.Name == "安装进度验收");
     WorkbenchCommandReceipt sources = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "tuna-pypi", null)),
+      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "modelscope", null)),
       CancellationToken.None);
     if (!sources.Ok) throw new InvalidOperationException("Progress fixture source selection failed.");
     await InstallSmokeRecipeAsync(target, recipe);
@@ -288,7 +288,7 @@ public sealed partial class MainWindow
     await ClickManagedSmokeButtonAsync("继续准备依赖");
     await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
       $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
+      "document.querySelector('.runtime-install-plan')?.textContent.includes('ModelScope')",
       TimeSpan.FromMinutes(2));
     RecordManagedSmokeStage($"install {environment.Name}");
     await ClickManagedSmokeButtonAsync("确认安装依赖");
