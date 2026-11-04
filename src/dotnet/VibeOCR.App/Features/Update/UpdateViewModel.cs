@@ -196,30 +196,6 @@ public sealed class UpdateViewModel : INotifyPropertyChanged, IDisposable
 
     public void Cancel() => _activeRun?.Cancel();
 
-    /// <summary>Lets update UI cancel Runtime and wait for its lease to release.</summary>
-    public async Task CancelRuntimeMaintenanceAndWaitAsync(CancellationToken cancellationToken)
-    {
-        StatusCode = "update.waitingRuntime";
-        Status = "正在取消运行时维护并等待其安全退出";
-        try
-        {
-            bool released = await _productMaintenance.CancelRuntimeMaintenanceAndWaitAsync(
-                TimeSpan.FromMinutes(2), cancellationToken);
-            StatusCode = released ? "update.runtimeReleased" : "update.runtimeBusy";
-            Status = released ? "运行时维护已退出，可以继续更新" : "没有可取消的运行时维护";
-        }
-        catch (OperationCanceledException)
-        {
-            StatusCode = "update.cancelled";
-            Status = "已取消等待运行时维护退出";
-        }
-        catch (TimeoutException)
-        {
-            StatusCode = "update.runtimeBusy";
-            Status = "运行时维护未在限定时间内退出，未开始应用更新";
-        }
-    }
-
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)

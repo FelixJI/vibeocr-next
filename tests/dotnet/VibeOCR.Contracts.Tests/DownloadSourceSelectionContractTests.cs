@@ -158,33 +158,6 @@ public sealed class DownloadSourceSelectionContractTests
         Assert.Null(legacy.DownloadSourceCatalog);
     }
 
-    [Fact]
-    public void GeneratedHostRequestCarriesOptionalSelection()
-    {
-        var request = new Host.RuntimeHostRequest
-        {
-            ProtocolVersion = 2,
-            Operation = Host.RuntimeHostOperation.Ensure,
-            ProductRoot = "C:/VibeOCR",
-            ComponentLock = "C:/VibeOCR/component-lock.json",
-            RuntimeManifest = "C:/VibeOCR/backend/runtime-manifest.json",
-            DownloadSourceIds = ["pypi-tuna", "hf-mirror"],
-        };
-
-        string json = JsonSerializer.Serialize(request);
-        Assert.Contains("\"download_source_ids\"", json);
-
-        var parsed = JsonSerializer.Deserialize<Host.RuntimeHostRequest>(json)!;
-        Assert.Equal(["pypi-tuna", "hf-mirror"], parsed.DownloadSourceIds);
-
-        const string legacyJson = """
-            {"protocol_version": 2, "operation": "ensure", "product_root": "C:/VibeOCR",
-             "component_lock": "C:/VibeOCR/component-lock.json",
-             "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json"}
-            """;
-        var legacy = JsonSerializer.Deserialize<Host.RuntimeHostRequest>(legacyJson)!;
-        Assert.Null(legacy.DownloadSourceIds);
-    }
 
     private static JsonDocument LoadGolden()
     {

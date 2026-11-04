@@ -104,7 +104,6 @@ public sealed partial class MainWindow : Window
   private readonly Func<bool>? smokeInferenceAttached;
   private readonly Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot;
   private readonly Func<ManagedEnvironmentSession?>? smokeManagedSession;
-  private readonly Func<int>? smokeInstallAttempts;
   private bool screenshotSmokeStarted;
   private bool managedEnvironmentSmokeStarted;
   private bool paddleModesSmokeStarted;
@@ -129,7 +128,6 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeStartupEnsureAttempts = null,
     Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot = null,
     Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
-    Func<int>? smokeInstallAttempts = null,
     ShellActionDispatcher? shellActions = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
     ISystemImportReader? systemImportReader = null,
@@ -153,7 +151,6 @@ public sealed partial class MainWindow : Window
     this.smokeStartupEnsureAttempts = smokeStartupEnsureAttempts;
     this.smokeEnvironmentSnapshot = smokeEnvironmentSnapshot;
     this.smokeManagedSession = smokeManagedSession;
-    this.smokeInstallAttempts = smokeInstallAttempts;
     smokeInferenceAttached = inferenceAttached;
 
     resourceRoot = Path.Combine(layout.DataRoot, "web-resources");

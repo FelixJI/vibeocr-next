@@ -85,7 +85,6 @@ DEFAULT_CAPABILITIES = (
     "qrcode.v2",
     "runtime.settings.v2",
     "runtime.maintenance.v1",
-    "runtime.maintenance.v2",
     "runtime.component-repair.v1",
     "runtime.capability-metadata.v1",
     "runtime.events.sse.v1",
@@ -97,7 +96,6 @@ DEFAULT_CAPABILITIES = (
     "ocr.mineru-remote-api.v1",
     "runtime.download-sources.v1",
     "runtime.component-selection.v1",
-    "runtime.install-plan.v1",
 )
 
 

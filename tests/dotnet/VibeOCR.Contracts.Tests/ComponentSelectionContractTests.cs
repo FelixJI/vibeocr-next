@@ -54,27 +54,6 @@ public sealed class ComponentSelectionContractTests
             JsonNode.Parse(fixture.GetRawText()), node!["install_component_ids"]));
     }
 
-    [Fact]
-    public void OmittingInstallComponentIdsKeepsLegacyWireShape()
-    {
-        var request = new RuntimeMaintenanceRequest
-        {
-            Operation = RuntimeMaintenanceOperation.Ensure,
-        };
-        var node = JsonNode.Parse(HttpV2Json.Serialize(request, typeof(RuntimeMaintenanceRequest)))!;
-        Assert.Null(node["install_component_ids"]);
-        Assert.Equal("ensure", node!["operation"]!.GetValue<string>());
-
-        var command = new RuntimeMaintenanceCommand
-        {
-            CommandId = "cmd-1",
-            Command = RuntimeMaintenanceCommandKind.Retry,
-            TargetOperationId = "op-1",
-            NewOperationId = "op-2",
-        };
-        var commandNode = JsonNode.Parse(HttpV2Json.Serialize(command, typeof(RuntimeMaintenanceCommand)))!;
-        Assert.Null(commandNode["install_component_ids"]);
-    }
 
     [Fact]
     public void CapabilityDescriptorCarriesOptionalVariantCatalog()
@@ -133,33 +112,6 @@ public sealed class ComponentSelectionContractTests
         Assert.Equal(Host.Accelerator.NvidiaCuda, parsed.Accelerator);
     }
 
-    [Fact]
-    public void GeneratedHostRequestCarriesOptionalInstallSelection()
-    {
-        var request = new Host.RuntimeHostRequest
-        {
-            ProtocolVersion = 2,
-            Operation = Host.RuntimeHostOperation.Ensure,
-            ProductRoot = "C:/VibeOCR",
-            ComponentLock = "C:/VibeOCR/component-lock.json",
-            RuntimeManifest = "C:/VibeOCR/backend/runtime-manifest.json",
-            InstallComponentIds = ["paddleocr-cpu", "mineru-cpu"],
-        };
-
-        string json = JsonSerializer.Serialize(request);
-        Assert.Contains("\"install_component_ids\"", json);
-
-        var parsed = JsonSerializer.Deserialize<Host.RuntimeHostRequest>(json)!;
-        Assert.Equal(["paddleocr-cpu", "mineru-cpu"], parsed.InstallComponentIds);
-
-        const string legacyJson = """
-            {"protocol_version": 2, "operation": "ensure", "product_root": "C:/VibeOCR",
-             "component_lock": "C:/VibeOCR/component-lock.json",
-             "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json"}
-            """;
-        var legacy = JsonSerializer.Deserialize<Host.RuntimeHostRequest>(legacyJson)!;
-        Assert.Null(legacy.InstallComponentIds);
-    }
 
     private static JsonDocument LoadGolden()
     {

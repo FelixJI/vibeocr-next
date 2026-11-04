@@ -71,8 +71,8 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
       : "";
   const sources = sourceOptions(update.sources);
   const updateBusy = booleanValue(update.isBusy);
-  // 修复入口不另造能力：运行环境重试与空环境修复是设置页的既有命令，
-  // 这里只导航过去；演示模式（无宿主桥）用本地哈希跳转保持入口可用。
+  // 修复入口不另造能力：运行环境状态检查在设置页，这里只导航过去；
+  // 演示模式（无宿主桥）用本地哈希跳转保持入口可用。
   const openSettings = () => {
     if (viewState.connected) {
       actions.navigate("settings");
@@ -195,17 +195,6 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
             >
               取消
             </CapabilityGate>
-            {booleanValue(update.canCancelRuntimeMaintenance) ? (
-              <CapabilityGate
-                capability="update.install"
-                capabilities={viewState.capabilities}
-                action={{ type: "update.cancelRuntimeMaintenance" }}
-                actions={actions}
-                icon={<Square aria-hidden="true" size={16} />}
-              >
-                取消运行时维护后更新
-              </CapabilityGate>
-            ) : null}
           </div>
         </Panel>
         <Panel title="服务健康" className="diagnostics-health-panel">
@@ -218,7 +207,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
             </Badge>
           </div>
           <p className="form-note">
-            识别服务未就绪时，可打开设置的运行环境分区重新检查状态、重试上次维护或修复空环境。
+            识别服务未就绪时，可打开设置的运行环境分区重新检查状态。
           </p>
           <div className="setting-row">
             <Button

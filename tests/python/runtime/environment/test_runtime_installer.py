@@ -1,3 +1,14 @@
+"""预构建运行时树（PR2）形态的 Runtime installer / ManagedEnvironmentStore 契约。
+
+构建期装配的展开解释器+依赖闭包树随产品分发：运行时零 venv 创建、零 uv、
+零安装事务。本文件覆盖：
+
+- manifest 装载（runtime_env 绑定、installer 绑定、loader 历史兼容）；
+- ManagedEnvironmentStore 的 product 环境注册/健康门/launch 投影；
+- 历史 venv/legacy 记录的只读探测与切换语义；
+- runtime-installer CLI 的 environment 白名单与错误信封。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
+import tempfile
 import threading
 import zipfile
 from pathlib import Path
@@ -20,12 +31,8 @@ from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentStore,
 )
 from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
-from vibeocr.runtime.environments.runtime_control import RuntimeControl
 from vibeocr.runtime.environments.runtime_installer import (
-    RuntimeInstaller,
     RuntimeInstallError,
-    _extract_python_archive,
-    _run_install_command,
     main,
 )
 from vibeocr.runtime.environments.runtime_layout import (
@@ -37,12 +44,8 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeStoreLock,
 )
 from vibeocr.runtime.environments.runtime_maintenance import (
-    RuntimeInstallFailure,
-    RuntimeMaintenanceReporter,
     _atomic_json,
     probe_runtime_components,
-    profile_descriptor,
-    runtime_profile_status,
     runtime_status_from_environment,
 )
 from vibeocr.runtime.environments.runtime_manifest import (
@@ -51,14 +54,21 @@ from vibeocr.runtime.environments.runtime_manifest import (
     validate_requirements_lock,
 )
 
-from scripts.build_runtime_manifest import (
-    _extract_product_runtime_code,
-    build_runtime_manifest,
-)
+from scripts.build_runtime_manifest import build_runtime_manifest
+from scripts.build_runtime_pack import write_runtime_env_manifest
 
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+_PYTHON_VERSION = "3.13.16"
+_PYTHON_SOURCE_URL = (
+    "https://github.com/astral-sh/python-build-standalone/releases/"
+    "download/20261001/"
+    "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
+    "-install_only.tar.gz"
+)
 
 
 def _lock_text(profile: str) -> str:
@@ -108,21 +118,164 @@ def _lock_text(profile: str) -> str:
             + "\n"
             + unified
         )
-    if profile == "win-x64-cpu":
-        return base + ("mineru==4.0.10 \\\n    --hash=sha256:" + "2" * 64 + "\n")
     raise AssertionError(f"unsupported fixture profile: {profile}")
 
 
+# ---------------------------------------------------------------------------
+# 可执行引擎树模板：一次构建，多个 release 复制。
+# 树内是真实 venv 解释器（-I 下 sys.prefix==树根）+ 统一闭包 dist-info 与
+# 引擎导入桩，product 记录的真实探针（distributions + import probe）可
+# 直接通过；需要失败注入的用例在复制出的树上改写桩文件。
+# ---------------------------------------------------------------------------
+
+_ENGINE_PACKAGES = (
+    "fastapi",
+    "paddleocr",
+    "paddlex",
+    "onnxruntime-directml",
+    "mineru",
+    "vibeocr-next-runtime",
+)
+
+_TEMPLATE_LOCK = threading.Lock()
+_TEMPLATE_TREE: Path | None = None
+_TEMPLATE_TREE_MANIFEST: Path | None = None
+
+
+def _seed_engine_stubs(site: Path, *, hardware_adapters: str = "True") -> None:
+    for name in _ENGINE_PACKAGES:
+        metadata = site / f"{name}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
+        )
+    (site / "paddleocr").mkdir(parents=True, exist_ok=True)
+    (site / "paddleocr" / "__init__.py").write_text(
+        "class PaddleOCR:\n    pass\n", encoding="utf-8"
+    )
+    (site / "onnxruntime").mkdir(parents=True, exist_ok=True)
+    (site / "onnxruntime" / "__init__.py").write_text(
+        "def get_available_providers():\n"
+        "    return ['DmlExecutionProvider', 'CPUExecutionProvider']\n",
+        encoding="utf-8",
+    )
+    parser = site / "mineru" / "parser"
+    parser.mkdir(parents=True, exist_ok=True)
+    for package in (site / "mineru", parser):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (parser / "api_server.py").write_text(
+        "def create_app(*args, **kwargs):\n"
+        "    raise AssertionError('probe must not initialize a server')\n",
+        encoding="utf-8",
+    )
+    recognition = site / "vibeocr" / "runtime" / "recognition"
+    recognition.mkdir(parents=True, exist_ok=True)
+    for package in (
+        site / "vibeocr",
+        site / "vibeocr" / "runtime",
+        recognition,
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (recognition / "directml_devices.py").write_text(
+        f"def hardware_adapters():\n    return {hardware_adapters}\n",
+        encoding="utf-8",
+    )
+
+
+def _engine_tree_template() -> tuple[Path, Path]:
+    """返回 (模板树, 模板树清单)：进程内单例，测试只读复制。"""
+    global _TEMPLATE_TREE, _TEMPLATE_TREE_MANIFEST
+    with _TEMPLATE_LOCK:
+        if _TEMPLATE_TREE is None or _TEMPLATE_TREE_MANIFEST is None:
+            root = Path(tempfile.mkdtemp(prefix="vibeocr-engine-tree-"))
+            tree = root / "runtime-env"
+            subprocess.run(
+                [sys._base_executable, "-m", "venv", "--without-pip", str(tree)],
+                check=True,
+            )
+            # 预构建树契约：python.exe 位于树根（构建校验与产品布局都锚定它）。
+            shutil.copyfile(
+                tree / "Scripts" / "python.exe"
+                if os.name == "nt"
+                else tree / "bin" / "python",
+                tree / "python.exe",
+            )
+            site = tree / "Lib" / "site-packages"
+            _seed_engine_stubs(site)
+            manifest = root / "runtime-env-manifest.json"
+            write_runtime_env_manifest(tree, manifest)
+            _TEMPLATE_TREE = tree
+            _TEMPLATE_TREE_MANIFEST = manifest
+        return _TEMPLATE_TREE, _TEMPLATE_TREE_MANIFEST
+
+
+def _component_lock_for(manifest_path: Path) -> Path:
+    component = {
+        "schema_version": 2,
+        "product": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
+            "version": "0.7.0",
+            "source_sha": "0" * 40,
+            "runtime_manifest_sha256": _sha(manifest_path.read_bytes()),
+            "accelerator": "cpu",
+        },
+        "required_capabilities": ["ocr.recognition.v2"],
+    }
+    component_path = manifest_path.parent / "component-lock.json"
+    component_path.write_text(
+        json.dumps(component, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return component_path
+
+
 def _release(
-    root: Path,
-    *,
-    with_base_pack: bool = False,
-    with_paddle_packs: bool = False,
-    with_paddle_model_pack: bool = False,
-    with_shared_pool: bool = False,
-    unified_only: bool = False,
+    product_root: Path, *, paddle_model_pack: Path | None = None
 ) -> tuple[Path, Path]:
-    root.mkdir()
+    """预构建运行时树形态的最小产品（PR2 默认形态）。
+
+    manifest 以 runtime_env 绑定装配：backend 位于
+    <product_root>/runtime/backend，树复制到 <product_root>/runtime/env/
+    runtime-env（与 product_layout 的产品布局一致），树清单留在 backend
+    侧；无 runtime wheel、无 python archive、无安装事务。
+    """
+    backend = product_root / "runtime" / "backend"
+    backend.mkdir(parents=True)
+    base_lock = backend / "requirements-win-x64-base.lock"
+    base_lock.write_text(_lock_text("win-x64-base"), encoding="utf-8")
+    paddle_lock = backend / "requirements-win-x64-paddle-ort-directml.lock"
+    paddle_lock.write_text(_lock_text("win-x64-paddle-ort-directml"), encoding="utf-8")
+    installer_executable = backend / "vibeocr-runtime-installer.exe"
+    installer_executable.write_bytes(b"installer")
+    tree, tree_manifest = _engine_tree_template()
+    manifest_path = build_runtime_manifest(
+        runtime_wheel=None,
+        base_lock=base_lock,
+        python_archive=None,
+        python_version=_PYTHON_VERSION,
+        python_source_url=_PYTHON_SOURCE_URL,
+        installer_executable=installer_executable,
+        version="0.7.0",
+        source_commit="0" * 40,
+        build_workflow="tests/python",
+        output_dir=backend,
+        capabilities=("ocr.recognition.v2",),
+        paddle_onnx_locks={"directml": paddle_lock},
+        runtime_env_tree=tree,
+        runtime_env_manifest=tree_manifest,
+        paddle_model_pack=paddle_model_pack,
+    )
+    # build 把树复制到 output_dir/runtime-env；产品布局把它放到 backend
+    # 的兄弟 env 目录（manifest.path.parent.parent/"env"/binding.root）。
+    product_env = product_root / "runtime" / "env" / "runtime-env"
+    product_env.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(backend / "runtime-env"), str(product_env))
+    return manifest_path, _component_lock_for(manifest_path)
+
+
+def _legacy_release(root: Path) -> tuple[Path, Path]:
+    """历史 wheel + python archive 形态：loader 只读兼容面（loader 校验用）。"""
+    root.mkdir(parents=True)
     wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         for module in (
@@ -139,168 +292,29 @@ def _release(
             "vibeocr_next_runtime-0.7.0.dist-info/METADATA",
             "Name: vibeocr-next-runtime\nVersion: 0.7.0\n",
         )
-    _extract_product_runtime_code(wheel, root, "0.7.0")
     python_archive = root / "cpython-3.13.16-win_amd64-install_only.tar.gz"
     python_archive.write_bytes(b"python-archive")
-    # 新形态：冻结安装器以裸可执行文件随 bundle 分发一次（manifest 直接
-    # 绑定其字节摘要）；产品端只落在 runtime/installer/ 稳定路径。
     installer_executable = root / "vibeocr-runtime-installer.exe"
     installer_executable.write_bytes(b"installer")
-    profiles = {}
-    for profile in ("win-x64-base", "win-x64-cpu"):
-        lock = root / f"requirements-{profile}.lock"
-        lock.write_text(_lock_text(profile), encoding="utf-8")
-        profiles[profile] = {
-            "lock": lock.name,
-            "sha256": _sha(lock.read_bytes()),
-            "runtime_pack": None,
-        }
-    # mineru 复合闭包与 cpu 缺省闭包相同：独立 MinerU 环境直接使用
-    # cpu 缺省 scope，不再登记重复的 standalone scope/锁。CUDA 档位
-    # （win-x64-cu126 及其 gpu-runtime scope）与分设备 cpu/cuda 锁已随
-    # CUDA 退役删除：绑定集合只允许空或统一 directml 闭包。
-    paddle_onnx = {}
-    for device in ("directml",):
-        lock = root / f"requirements-win-x64-paddle-ort-{device}.lock"
-        lock.write_text(_lock_text(f"win-x64-paddle-ort-{device}"), encoding="utf-8")
-        paddle_onnx[device] = {
-            "lock": lock.name,
-            "sha256": _sha(lock.read_bytes()),
-        }
-    if with_paddle_packs:
-        for device in ("directml",):
-            pack = root / f"vibeocr-runtime-pack-win-x64-paddle-ort-{device}-0.7.0.zip"
-            with zipfile.ZipFile(pack, mode="w") as archive:
-                archive.writestr("pack-requirements.txt", "paddleocr==3.7.0")
-                archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr-wheel")
-            paddle_onnx[device]["runtime_pack"] = [pack.name]
-            paddle_onnx[device]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
-    if with_paddle_model_pack:
-        pack = root / "vibeocr-paddle-models-0.7.0.zip"
-        with zipfile.ZipFile(pack, mode="w") as archive:
-            archive.writestr("PP-OCRv6_small_det/inference.onnx", b"det-model")
-        manifest_paddle_model_pack = {
-            "archive": pack.name,
-            "sha256": _sha(pack.read_bytes()),
-        }
-    if with_base_pack:
-        pack = root / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
-        with zipfile.ZipFile(pack, mode="w") as archive:
-            archive.writestr("pack-requirements.txt", "fastapi==1.0.0")
-            archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi-wheel")
-        profiles["win-x64-base"]["runtime_pack"] = [pack.name]
-        profiles["win-x64-base"]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
-    if with_shared_pool:
-        # 共享离线 wheel pool：base 与统一推理闭包共指同一个 wheel-only
-        # zip，各自的小 requirements zip 提供精确闭包清单（复用既有元组
-        # 绑定）。历史 cpu 分设备闭包（onnxruntime 1.30.0）已随 CUDA/
-        # 分设备档位退役，pool 不再携带其 wheel。
-        pool_stem = "vibeocr-runtime-pool-win-x64-0.7.0"
-        pool = root / f"{pool_stem}.zip"
-        with zipfile.ZipFile(pool, mode="w") as archive:
-            archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi-wheel")
-            archive.writestr("numpy-2.5.3-cp313-cp313-win_amd64.whl", b"numpy-base")
-            archive.writestr("numpy-2.3.5-cp313-cp313-win_amd64.whl", b"numpy-paddle")
-            archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr-wheel")
-            archive.writestr(
-                "onnxruntime-directml-1.24.4-cp313-cp313-win_amd64.whl", b"ort-dml"
-            )
-
-        def bind_shared_pool(lock_stem: str, requirements: str) -> None:
-            requirements_zip = root / f"{pool_stem}.{lock_stem}.zip"
-            with zipfile.ZipFile(requirements_zip, mode="w") as archive:
-                archive.writestr("pack-requirements.txt", requirements)
-            binding = [requirements_zip.name, pool.name]
-            digests = [
-                _sha(requirements_zip.read_bytes()),
-                _sha(pool.read_bytes()),
-            ]
-            if lock_stem == "requirements-win-x64-base":
-                profiles["win-x64-base"]["runtime_pack"] = binding
-                profiles["win-x64-base"]["runtime_pack_sha256"] = digests
-            else:
-                device = lock_stem.removeprefix("requirements-win-x64-paddle-ort-")
-                paddle_onnx[device]["runtime_pack"] = binding
-                paddle_onnx[device]["runtime_pack_sha256"] = digests
-
-        bind_shared_pool("requirements-win-x64-base", "fastapi==1.0.0\nnumpy==2.5.3\n")
-        bind_shared_pool(
-            "requirements-win-x64-paddle-ort-directml",
-            "fastapi==1.0.0\nnumpy==2.3.5\npaddleocr==3.7.0\n"
-            "onnxruntime-directml==1.24.4\n",
-        )
-    if unified_only:
-        # 正式新产物的 manifest 形态：仅 base profile + 单 directml 绑定
-        # （历史三档位/三设备绑定只是 loader 的读取兼容面）。
-        profiles = {"win-x64-base": profiles["win-x64-base"]}
-        paddle_onnx = {"directml": paddle_onnx["directml"]}
-    manifest = {
-        "schema_version": 2,
-        "paddle_onnx_environments": paddle_onnx,
-        **(
-            {"paddle_model_pack": manifest_paddle_model_pack}
-            if with_paddle_model_pack
-            else {}
-        ),
-        "product": {
-            "component": "next",
-            "repository": "FelixJI/vibeocr-next",
-            "version": "0.7.0",
-            "source_sha": "0" * 40,
-        },
-        "runtime_wheel": wheel.name,
-        "runtime_sha256": _sha(wheel.read_bytes()),
-        "python": {
-            "version": "3.13.16",
-            "abi": "cp313",
-            "platform": "win_amd64",
-            "source_url": (
-                "https://github.com/astral-sh/python-build-standalone/releases/"
-                "download/20261001/"
-                "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
-                "-install_only.tar.gz"
-            ),
-            "archive": python_archive.name,
-            "sha256": _sha(python_archive.read_bytes()),
-        },
-        "installer": {
-            "executable": installer_executable.name,
-            "executable_sha256": _sha(b"installer"),
-        },
-        "profiles": profiles,
-        "capabilities": ["ocr.recognition.v2"],
-        "build_workflow": "tests/runtime",
-    }
-    manifest_path = root / "runtime-manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, sort_keys=True) + "\n",
-        encoding="utf-8",
+    base_lock = root / "requirements-win-x64-base.lock"
+    base_lock.write_text(_lock_text("win-x64-base"), encoding="utf-8")
+    paddle_lock = root / "requirements-win-x64-paddle-ort-directml.lock"
+    paddle_lock.write_text(_lock_text("win-x64-paddle-ort-directml"), encoding="utf-8")
+    manifest_path = build_runtime_manifest(
+        runtime_wheel=wheel,
+        base_lock=base_lock,
+        python_archive=python_archive,
+        python_version=_PYTHON_VERSION,
+        python_source_url=_PYTHON_SOURCE_URL,
+        installer_executable=installer_executable,
+        version="0.7.0",
+        source_commit="0" * 40,
+        build_workflow="tests/python",
+        output_dir=root,
+        capabilities=("ocr.recognition.v2",),
+        paddle_onnx_locks={"directml": paddle_lock},
     )
-    component = {
-        "schema_version": 2,
-        "product": {
-            "component": "next",
-            "repository": "FelixJI/vibeocr-next",
-            "version": "0.7.0",
-            "source_sha": "0" * 40,
-            "runtime_manifest_sha256": _sha(manifest_path.read_bytes()),
-            "accelerator": "cpu",
-        },
-        "required_capabilities": ["ocr.recognition.v2"],
-    }
-    component_path = root / "component-lock.json"
-    component_path.write_text(
-        json.dumps(component, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return manifest_path, component_path
-
-
-def _fake_install(partial: Path, _manifest, _profile: str) -> Path:
-    python = partial / "Scripts" / "python.exe"
-    python.parent.mkdir(parents=True)
-    python.write_bytes(b"python")
-    return python
+    return manifest_path, _component_lock_for(manifest_path)
 
 
 def _rewrite_installer_binding(release: Path, binding: dict[str, str]) -> Path:
@@ -313,23 +327,78 @@ def _rewrite_installer_binding(release: Path, binding: dict[str, str]) -> Path:
     return manifest_path
 
 
+def _write_venv_record(
+    manager: ManagedEnvironmentStore, env_id: str, **overrides
+) -> dict:
+    """直接写入固定路径 venv 记录；配合 _materialize_venv 提供真实解释器。"""
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        record = {
+            "id": env_id,
+            "name": f"env-{env_id[:4]}",
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+            **overrides,
+        }
+        data["environments"][env_id] = record
+        _atomic_json(manager._registry, data)
+        return record
+
+
+def _materialize_venv(
+    manager: ManagedEnvironmentStore, env_id: str, *, bare: bool = False
+) -> Path:
+    """把引擎树模板复制为 environments/<id> 的历史 venv 布局（真实解释器）。
+
+    ``bare=True`` 清空 site-packages：空环境（status=empty）记录的探针要求
+    不含任何引擎/服务分发包。
+    """
+    tree, _manifest = _engine_tree_template()
+    destination = manager.root / env_id
+    shutil.copytree(tree, destination)
+    if bare:
+        shutil.rmtree(destination / "Lib" / "site-packages")
+        (destination / "Lib" / "site-packages").mkdir()
+    return destination
+
+
+def _patch_venv_base_python(
+    manager: ManagedEnvironmentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """历史 venv 记录的 base 解释器门：模板 venv 的 base_prefix 是本机解释器。"""
+    monkeypatch.setattr(
+        manager, "_expected_base_python", lambda: Path(sys._base_executable)
+    )
+
+
+# ---------------------------------------------------------------------------
+# installer 绑定与 manifest 装载
+# ---------------------------------------------------------------------------
+
+
 def test_installer_binding_resolves_bundle_sibling_and_product_layout(
     tmp_path: Path,
 ) -> None:
     """新形态直接绑定可执行文件：扁平 bundle 与规范产品布局都能校验。"""
-    release = tmp_path / "release"
-    manifest_path, _ = _release(release)
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
     loaded = load_runtime_manifest(manifest_path)
     assert loaded.installer.executable_name == "vibeocr-runtime-installer.exe"
     assert loaded.installer.archive_path is None
     assert loaded.installer.executable_sha256 == _sha(b"installer")
 
-    product = tmp_path / "product"
-    backend = product / "runtime" / "backend"
+    relocated = tmp_path / "relocated"
+    backend = relocated / "runtime" / "backend"
     backend.parent.mkdir(parents=True)
     shutil.copytree(release, backend)
+    shutil.copytree(product / "runtime" / "env", relocated / "runtime" / "env")
     (backend / "vibeocr-runtime-installer.exe").unlink()
-    installer_root = product / "runtime" / "installer"
+    installer_root = relocated / "runtime" / "installer"
     installer_root.mkdir()
     (installer_root / "vibeocr-runtime-installer.exe").write_bytes(b"installer")
     assert load_runtime_manifest(
@@ -341,8 +410,9 @@ def test_installer_binding_resolves_bundle_sibling_and_product_layout(
 def test_installer_binding_fails_closed_on_missing_or_tampered_executable(
     tmp_path: Path, kind: str
 ) -> None:
-    release = tmp_path / "release"
-    manifest_path, _ = _release(release)
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
     executable = release / "vibeocr-runtime-installer.exe"
     if kind == "missing":
         executable.unlink()
@@ -358,13 +428,13 @@ def test_installer_binding_fails_closed_when_any_present_copy_is_tampered(
     tmp_path: Path,
 ) -> None:
     """双候选位中任一存在的副本被篡改都必须 fail closed，不得被另一个遮蔽。"""
-    release = tmp_path / "release"
-    _release(release)
     product = tmp_path / "product"
-    backend = product / "runtime" / "backend"
+    release = _release(product)[0].parent
+    relocated = tmp_path / "relocated"
+    backend = relocated / "runtime" / "backend"
     backend.parent.mkdir(parents=True)
     shutil.copytree(release, backend)
-    installer_root = product / "runtime" / "installer"
+    installer_root = relocated / "runtime" / "installer"
     installer_root.mkdir()
     (installer_root / "vibeocr-runtime-installer.exe").write_bytes(b"tampered")
     with pytest.raises(ManifestError, match="Installer executable SHA-256 mismatch"):
@@ -372,8 +442,9 @@ def test_installer_binding_fails_closed_when_any_present_copy_is_tampered(
 
 
 def test_installer_binding_rejects_mixed_shapes(tmp_path: Path) -> None:
-    release = tmp_path / "release"
-    manifest_path, _ = _release(release)
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
     _rewrite_installer_binding(
         release,
         {
@@ -390,8 +461,9 @@ def test_legacy_zip_installer_manifest_still_loads_and_fails_closed(
     tmp_path: Path,
 ) -> None:
     """历史单成员 zip 绑定继续可读可验：旧 manifest 的离线修复/回滚兼容。"""
-    release = tmp_path / "release"
-    manifest_path, _ = _release(release)
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
     (release / "vibeocr-runtime-installer.exe").unlink()
     legacy_archive = release / "vibeocr-runtime-installer-v0.7.0-win-x64.zip"
     with zipfile.ZipFile(legacy_archive, mode="w") as archive:
@@ -422,12 +494,480 @@ def test_legacy_zip_installer_manifest_still_loads_and_fails_closed(
         load_runtime_manifest(manifest_path)
 
 
+def test_prebuilt_manifest_binds_runtime_env_tree(tmp_path: Path) -> None:
+    """预构建形态：runtime_env 绑定真实树与确定性树清单，无 wheel/archive。"""
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
+    manifest = load_runtime_manifest(manifest_path)
+    assert manifest.runtime_wheel is None
+    assert manifest.runtime_sha256 is None
+    assert manifest.python.archive_path is None
+    assert manifest.python.sha256 is None
+    binding = manifest.runtime_env
+    assert binding is not None
+    assert binding.root == "runtime-env"
+    assert binding.manifest_name == "runtime-env-manifest.json"
+    assert binding.manifest_path == release / "runtime-env-manifest.json"
+    assert binding.manifest_sha256 == _sha(binding.manifest_path.read_bytes())
+    tree = release.parent / "env" / "runtime-env"
+    assert (tree / "python.exe").is_file()
+    assert manifest.backend_version == "0.7.0"
+    assert manifest.sha256 == _sha(manifest_path.read_bytes())
+    assert set(manifest.profiles) == {"win-x64-base"}
+    assert set(manifest.paddle_onnx_environments) == {"paddleocr-ort-directml"}
+    # 全量校验（verify_artifacts=True）核对树清单摘要。
+    load_runtime_manifest(manifest_path)
+
+
+def test_prebuilt_manifest_rejects_tampered_tree_manifest(tmp_path: Path) -> None:
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
+    tree_manifest = release / "runtime-env-manifest.json"
+    tree_manifest.write_bytes(b"tampered")
+    with pytest.raises(ManifestError, match="runtime env manifest"):
+        load_runtime_manifest(manifest_path).verify_artifacts()
+
+
+def test_manifest_rejects_tampered_lock(tmp_path: Path) -> None:
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    release = manifest_path.parent
+    (release / "requirements-win-x64-base.lock").write_text(
+        "tampered", encoding="utf-8"
+    )
+    with pytest.raises(ManifestError, match="SHA-256 mismatch"):
+        load_runtime_manifest(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "directive",
+    ["--index-url https://pypi.org/simple", "--extra-index-url https://extra.invalid"],
+)
+def test_runtime_lock_rejects_embedded_source_directives(
+    tmp_path: Path,
+    directive: str,
+) -> None:
+    lock = tmp_path / "requirements-win-x64-base.lock"
+    lock.write_text(f"{directive}\n{_lock_text('win-x64-base')}", encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="source-neutral"):
+        validate_requirements_lock(lock, profile="win-x64-base")
+
+
+def test_manifest_rejects_old_schema(tmp_path: Path) -> None:
+    product = tmp_path / "product"
+    manifest_path, _ = _release(product)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ManifestError, match="schema_version must be 2"):
+        load_runtime_manifest(manifest_path)
+
+
+def test_legacy_wheel_manifest_still_verifies_bound_artifacts(tmp_path: Path) -> None:
+    """loader 历史兼容：wheel + python archive 绑定照常校验（只读面）。"""
+    release = tmp_path / "release"
+    manifest_path, _ = _legacy_release(release)
+    manifest = load_runtime_manifest(manifest_path)
+    assert manifest.runtime_wheel == "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
+    assert manifest.runtime_env is None
+    assert release / "runtime-code" / "vibeocr" / "runtime" / "host" / "main.py"
+
+    (release / "vibeocr_next_runtime-0.7.0-py3-none-any.whl").write_bytes(b"tampered")
+    with pytest.raises(ManifestError, match="Runtime wheel SHA-256 mismatch"):
+        load_runtime_manifest(manifest_path)
+
+
+def test_legacy_wheel_manifest_rejects_tampered_python_archive(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    manifest_path, _ = _legacy_release(release)
+    (release / "cpython-3.13.16-win_amd64-install_only.tar.gz").write_bytes(b"tampered")
+    with pytest.raises(ManifestError, match="Python archive SHA-256 mismatch"):
+        load_runtime_manifest(manifest_path)
+
+
+def test_shared_layout_requires_explicit_valid_registration(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    product = bundle / "classic"
+    product.mkdir(parents=True)
+    marker = bundle / "portable-layout.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "shared_root": "shared",
+                "products": {
+                    "classic": {
+                        "root": "classic",
+                        "component_lock": "component-lock.json",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest = "a" * 64
+    local = resolve_runtime_store(
+        product,
+        manifest_sha256=digest,
+    )
+    assert local.store_root == product.resolve()
+    shared = resolve_runtime_store(
+        product,
+        manifest_sha256=digest,
+        layout_manifest=marker,
+        product_id="classic",
+    )
+    assert shared.store_root == (bundle / "shared").resolve()
+    assert shared.runtime_root == (bundle / "shared" / "runtime").resolve()
+
+
+def test_shared_layout_rejects_traversal(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    product = bundle / "classic"
+    product.mkdir(parents=True)
+    marker = bundle / "portable-layout.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "shared_root": "../escape",
+                "products": {"classic": {"root": "classic"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(LayoutError):
+        resolve_runtime_store(
+            product,
+            manifest_sha256="a" * 64,
+            layout_manifest=marker,
+            product_id="classic",
+        )
+
+
+def test_store_lock_is_cross_handle_exclusive(tmp_path: Path) -> None:
+    first = RuntimeStoreLock(tmp_path / "locks" / "store.lock", timeout=0)
+    second = RuntimeStoreLock(tmp_path / "locks" / "store.lock", timeout=0)
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeLockTimeout):
+            second.acquire()
+    finally:
+        first.release()
+    second.acquire()
+    second.release()
+
+
+def test_component_lock_capability_mismatch_is_rejected(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    data = json.loads(component.read_text(encoding="utf-8"))
+    data["required_capabilities"].append("unknown.feature")
+    component.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ManagedEnvironmentError, match="component lock"):
+        ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+        )
+
+
+def test_component_lock_runtime_manifest_mismatch_is_rejected(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    data = json.loads(component.read_text(encoding="utf-8"))
+    data["product"]["runtime_manifest_sha256"] = "f" * 64
+    component.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ManagedEnvironmentError, match="component lock"):
+        ManagedEnvironmentStore(
+            product_root=tmp_path / "product",
+            component_lock=component,
+            runtime_manifest=manifest,
+        )
+
+
+# ---------------------------------------------------------------------------
+# product 环境注册 / 健康门 / launch 投影
+# ---------------------------------------------------------------------------
+
+
+def _product_tree(manager: ManagedEnvironmentStore) -> Path:
+    binding = manager.manifest.runtime_env
+    assert binding is not None
+    return manager.manifest.path.parent.parent / "env" / binding.root
+
+
+def test_initialize_default_registers_bundled_product_environment(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    listed = manager.initialize_default()
+    environment = listed["environments"][0]
+    assert environment["id"] == "paddleocr-ort-directml"
+    assert environment["name"] == "默认环境"
+    assert environment["kind"] == "product"
+    assert environment["status"] == "installed"
+    assert environment["recipe"] == "paddleocr-ort-directml"
+    assert environment["selected_device"] == "directml"
+    assert environment["path"] == str(_product_tree(manager))
+    assert listed["active_id"] == "paddleocr-ort-directml"
+    assert listed["active_revision"] == 1
+    # 真实探针：树内解释器 + dist-info/import 桩全部通过。
+    assert environment["python_state"] == "ready"
+    assert environment["dependency_state"] == "installed"
+    assert environment["engine_state"] == "unverified"
+    assert environment["operation_blocks"] == {
+        "switch": None,
+        "delete": "product_environment",
+    }
+    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
+    assert record["recipe_lock"] == scope.sha256
+
+    # 幂等：重复注册不递增 active_revision，也不重复布置模型。
+    again = manager.initialize_default()
+    assert again["active_revision"] == 1
+    assert len(again["environments"]) == 1
+
+
+def test_initialize_default_fails_closed_without_runtime_env_binding(
+    tmp_path: Path,
+) -> None:
+    """manifest 无 runtime_env 绑定（历史形态）时注册 fail closed，不重建。"""
+    manifest, component = _legacy_release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    with pytest.raises(ManagedEnvironmentError, match="not bound by manifest"):
+        manager.initialize_default()
+    assert manager._read()["environments"] == {}
+
+
+def test_initialize_default_fails_closed_when_tree_python_missing(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    tree = _product_tree(manager)
+    (tree / "python.exe").unlink()
+    (tree / "Scripts" / "python.exe").unlink()
+    with pytest.raises(ManagedEnvironmentError, match="tree is missing"):
+        manager.initialize_default()
+    assert manager._read()["environments"] == {}
+
+
+def test_product_probe_fails_closed_on_missing_tree_or_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    manager.initialize_default()
+    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    tree = _product_tree(manager)
+
+    binding = manager.manifest.runtime_env
+    assert binding is not None
+    binding.manifest_path.unlink()
+    missing_manifest = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )._probe(record)
+    assert missing_manifest["healthy"] is False
+    assert missing_manifest["reason"] == "product_runtime_env_missing"
+
+    tree_manifest = manifest.parent / "runtime-env-manifest.json"
+    tree_manifest.write_bytes(b"{}")
+    shutil.move(str(tree), str(tree.with_name("runtime-env-moved")))
+    missing_tree = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )._probe(record)
+    assert missing_tree["healthy"] is False
+    assert missing_tree["reason"] == "product_runtime_env_missing"
+
+
+_LEGACY_OPERATION = {
+    "environment_revision": 1,
+    "plan_id": "a" * 32,
+    "recipe": "paddleocr-ort-directml",
+    "phase": "failed",
+    "reason_code": "unknown",
+    "next_action": "preview_again",
+    "detail": "fixture",
+}
+
+
+def test_product_record_registry_validation_is_strict(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
+    product_record = {
+        "schema_version": 1,
+        "active_id": "paddleocr-ort-directml",
+        "active_revision": 1,
+        "environments": {
+            "paddleocr-ort-directml": {
+                "id": "paddleocr-ort-directml",
+                "name": "默认环境",
+                "revision": 1,
+                "kind": "product",
+                "path": "env/runtime-env",
+                "status": "installed",
+                "python_version": manager.manifest.python.version,
+                "abi": manager.manifest.python.abi,
+                "recipe": "paddleocr-ort-directml",
+                "recipe_lock": scope.sha256,
+                "selected_device": "directml",
+            }
+        },
+    }
+
+    def rewrite(mutator) -> None:
+        data = json.loads(json.dumps(product_record))
+        mutator(data)
+        manager._registry.parent.mkdir(parents=True, exist_ok=True)
+        manager._registry.write_text(json.dumps(data), encoding="utf-8")
+
+    # 固定形态记录可读。
+    rewrite(lambda data: None)
+    assert manager._read()["active_id"] == "paddleocr-ort-directml"
+
+    # path 标记被改动 → 拒绝。
+    rewrite(
+        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+            {"path": "runtime-env"}
+        )
+    )
+    with pytest.raises(ManagedEnvironmentError, match="product environment record"):
+        manager._read()
+
+    # recipe 偏离固定 slug → 拒绝。
+    rewrite(
+        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+            {"recipe": "paddleocr-ort-cpu"}
+        )
+    )
+    with pytest.raises(ManagedEnvironmentError, match="product environment record"):
+        manager._read()
+
+    # product 记录携带安装证据 → 拒绝（安装证据只属于历史 venv 记录）。
+    rewrite(
+        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+            {"last_install_operation": _LEGACY_OPERATION}
+        )
+    )
+    with pytest.raises(ManagedEnvironmentError, match="product environment record"):
+        manager._read()
+
+    # 非法 kind → 拒绝。
+    rewrite(
+        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+            {"kind": "bundled"}
+        )
+    )
+    with pytest.raises(ManagedEnvironmentError, match="environment record"):
+        manager._read()
+
+
+def test_product_launch_projects_recipe_and_device_without_code_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    manager.initialize_default()
+    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    tree = _product_tree(manager)
+    python = str(manager._interpreter_python(tree))
+    launch = manager._launch(record, python)
+    environment = launch["environment"]
+    assert launch["supervisor_module"] == "vibeocr.runtime.host.main"
+    assert launch["python_executable"] == python
+    assert environment["VIBEOCR_RUNTIME_ROOT"] == str(tree)
+    assert environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] == "paddleocr-ort-directml"
+    assert environment["VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"] == "directml"
+    assert environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
+    # 预构建树自带完整 site-packages：入口统一 python -m，不再注入产品代码根。
+    assert "VIBEOCR_PRODUCT_CODE_ROOT" not in environment
+
+
+def test_product_tree_is_never_a_cleanup_target(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    manager.initialize_default()
+    plan = manager.preview_cleanup()
+    product_items = [
+        item
+        for item in plan["items"]
+        if item.get("environment_id") == "paddleocr-ort-directml"
+    ]
+    assert product_items
+    assert all(not item["can_clean"] for item in product_items)
+    assert _product_tree(manager).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# 历史 venv / legacy 记录的只读探测
+# ---------------------------------------------------------------------------
+
+
+def test_venv_record_probe_gates_fail_closed(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    record = _write_venv_record(manager, "a" * 32)
+    # 无解释器：python_missing。
+    probe = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    assert probe._probe(record)["reason"] == "python_missing"
+    # 版本漂移：base_or_abi_changed，且不产生任何解释器解包副作用。
+    drifted = _write_venv_record(manager, "b" * 32, python_version="3.13.0")
+    _materialize_venv(manager, "b" * 32)
+    assert manager._probe(drifted)["reason"] == "base_or_abi_changed"
+    assert not (manager.root / "python-base").exists()
+
+
 def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    # legacy 记录的 runtime 根是 product_root/runtime：与预构建产品的
+    # runtime/backend 布局分属不同产品目录。
+    manifest, component = _release(tmp_path / "bundle")
     product = tmp_path / "product"
     runtime = product / "runtime"
     runtime.mkdir(parents=True)
@@ -470,8 +1010,6 @@ def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
     document = json.loads(manifest.read_text(encoding="utf-8"))
     document["product"]["source_sha"] = "a" * 40
     document["product"]["version"] = "0.8.0"
-    document["runtime_wheel"] = "vibeocr_next_runtime-0.8.0-py3-none-any.whl"
-    (manifest.parent / document["runtime_wheel"]).write_bytes(b"runtime-wheel")
     manifest.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
     binding = json.loads(component.read_text(encoding="utf-8"))
     binding["product"]["source_sha"] = "a" * 40
@@ -511,49 +1049,10 @@ def test_legacy_probe_reuses_frontend_update_but_rejects_runtime_or_abi_change(
     assert stalled["python_state"] == "unavailable"
 
 
-def test_managed_status_uses_installed_scope_without_legacy_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    created = manager.create("Paddle ONNX")
-    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
-    record = registry["environments"][created["id"]]
-    record.update(status="installed", recipe="paddleocr-ort-cpu")
-    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
-    root = manager._safe_path(record)
-    assert not (root / ".installed.json").exists()
-    for key, value in manager._launch(record, created["python"])["environment"].items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(
-        runtime_maintenance,
-        "_distribution_versions",
-        lambda _root: {"vibeocr-next-runtime": "0.7.0"},
-    )
-    monkeypatch.setattr(
-        runtime_maintenance,
-        "probe_runtime_components",
-        lambda _root, component_ids, **_kwargs: dict.fromkeys(component_ids, True),
-    )
-    runtime_maintenance._component_probe_cache.clear()
-    status = runtime_status_from_environment("named", "ready")
-    assert status["service_state"] == "ready", status
-    assert status["profile"]["profile_id"] == "win-x64-cpu"
-
-
 def test_legacy_cuda_launch_preserves_marker_accelerator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "bundle")
     runtime = tmp_path / "product" / "runtime"
     runtime.mkdir(parents=True)
     (runtime / "python.exe").write_bytes(b"synthetic interpreter")
@@ -594,15 +1093,13 @@ def test_legacy_cuda_launch_preserves_marker_accelerator(
 def test_legacy_status_reuses_current_product_code_after_frontend_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest_path, _ = _legacy_release(tmp_path / "product")
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
     document["product"]["version"] = "0.8.0"
     document["product"]["source_sha"] = "a" * 40
     document["runtime_wheel"] = "vibeocr_next_runtime-0.8.0-py3-none-any.whl"
     (manifest_path.parent / document["runtime_wheel"]).write_bytes(b"current wheel")
-    manifest_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
     manifest = load_runtime_manifest(manifest_path, verify_artifacts=False)
     root = tmp_path / "old-runtime"
     root.mkdir()
@@ -624,6 +1121,11 @@ def test_legacy_status_reuses_current_product_code_after_frontend_update(
     (old_metadata / "METADATA").write_text(
         "Name: vibeocr-next-runtime\nVersion: 0.7.0\n", encoding="utf-8"
     )
+    fastapi_metadata = root / "Lib/site-packages/fastapi-1.0.0.dist-info"
+    fastapi_metadata.mkdir(parents=True)
+    (fastapi_metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: fastapi\nVersion: 1.0.0\n", encoding="utf-8"
+    )
     code_root = tmp_path / "current-product-code"
     current_metadata = code_root / "vibeocr_next_runtime-0.8.0.dist-info"
     current_metadata.mkdir(parents=True)
@@ -638,6 +1140,8 @@ def test_legacy_status_reuses_current_product_code_after_frontend_update(
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "legacy")
     monkeypatch.setattr(runtime_maintenance.sys, "prefix", str(root))
     monkeypatch.setattr(runtime_maintenance.sys, "version_info", (3, 13, 16))
+    from vibeocr.runtime.environments.runtime_maintenance import runtime_profile_status
+
     current = runtime_profile_status(
         manifest,
         accelerator="cpu",
@@ -680,154 +1184,81 @@ def test_legacy_status_reuses_current_product_code_after_frontend_update(
     )
 
 
-def test_product_code_bootstrap_keeps_environment_packages_and_no_bytecode(
-    tmp_path: Path,
-) -> None:
-    environment = tmp_path / "environment"
-    subprocess.run(
-        [sys._base_executable, "-m", "venv", "--without-pip", str(environment)],
-        check=True,
-    )
-    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    site_packages = environment / (
-        "Lib/site-packages"
-        if os.name == "nt"
-        else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
-    )
-    site_packages.mkdir(parents=True, exist_ok=True)
-    (site_packages / "engine_only.py").write_text("VALUE = 'environment'\n")
-    old_metadata = site_packages / "vibeocr_next_runtime-0.7.0.dist-info"
-    old_metadata.mkdir()
-    (old_metadata / "METADATA").write_text(
-        "Name: vibeocr-next-runtime\nVersion: 0.7.0\n", encoding="utf-8"
-    )
-    code_root = tmp_path / "product" / "runtime-code"
-    current_metadata = code_root / "vibeocr_next_runtime-0.8.0.dist-info"
-    current_metadata.mkdir(parents=True)
-    (current_metadata / "METADATA").write_text(
-        "Name: vibeocr-next-runtime\nVersion: 0.8.0\n", encoding="utf-8"
-    )
-    modules = (
-        "vibeocr.runtime.host.main",
-        "vibeocr.runtime.recognition.paddle_worker",
-        "vibeocr.runtime.documents.pdf_backend_process",
-    )
-    script = (
-        "import importlib.metadata,json,sys,engine_only;"
-        "print(json.dumps({'file':__file__,'prefix':sys.prefix,"
-        "'runtime':importlib.metadata.version('vibeocr-next-runtime'),"
-        "'engine':engine_only.VALUE}))"
-    )
-    for module in modules:
-        source = code_root.joinpath(*module.split(".")).with_suffix(".py")
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(script, encoding="utf-8")
-        command = (
-            "import os,runpy,sys;"
-            "sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);"
-            f"runpy.run_module('{module}',run_name='__main__')"
-        )
-        result = subprocess.run(
-            [str(python), "-I", "-B", "-c", command],
-            check=True,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "VIBEOCR_PRODUCT_CODE_ROOT": str(code_root)},
-        )
-        body = json.loads(result.stdout)
-        assert Path(body["file"]) == source
-        assert Path(body["prefix"]) == environment
-        assert body["runtime"] == "0.8.0"
-        assert body["engine"] == "environment"
-    assert not list(code_root.rglob("__pycache__"))
-
-
-def test_named_environments_are_real_empty_venvs_and_switch_is_cas(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+def test_venv_record_registry_rejects_external_python(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    first = manager.create("空环境一")
-    second = manager.create("空环境二")
-    assert first["python_state"] == second["python_state"] == "ready"
-    assert first["dependency_state"] == "empty"
-    assert first["engine_state"] == "unavailable"
-    assert first["operation_blocks"] == {
-        "preview_install": None,
-        "switch": None,
-        "repair_empty": None,
-        "delete": None,
-    }
-    assert first["id"] != second["id"]
-    assert not set(first["packages"]).intersection(
-        {"fastapi", "rapidocr", "paddleocr", "mineru", "torch", "onnxruntime"}
-    )
-    assert Path(first["python"]).is_file()
-    assert (
-        len(
-            ManagedEnvironmentStore(
-                product_root=tmp_path / "product",
-                component_lock=component,
-                runtime_manifest=manifest,
-                base_python=sys._base_executable,
-            ).list()["environments"]
-        )
-        == 2
-    )
-    prepared = manager.prepare_switch(first["id"])
-    assert prepared["requires_supervisor"] is False
-    manager.commit_switch(prepared)
-    plan = manager.preview_install(first["id"], "paddleocr-ort-directml")
-    assert plan["environment_id"] == first["id"]
-    assert plan["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert plan["dependencies"]
-    with pytest.raises(ManagedEnvironmentError, match="stale"):
-        manager.commit_switch(prepared)
-    manager.commit_switch(manager.prepare_switch(second["id"]))
-    assert manager.list()["active_id"] == second["id"]
-
-
-def test_named_environment_registry_rejects_external_python(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("isolated")
+    _write_venv_record(manager, "a" * 32)
     registry = manager.paths.state_root / "environments.json"
     value = json.loads(registry.read_text(encoding="utf-8"))
-    value["environments"][item["id"]]["path"] = str(Path(sys._base_executable))
+    value["environments"]["a" * 32]["path"] = str(Path(sys._base_executable))
     registry.write_text(json.dumps(value), encoding="utf-8")
     with pytest.raises(ManagedEnvironmentError, match="outside managed store"):
         manager.list()
 
 
-def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    first = manager.create("running")
-    second = manager.create("target")
+    base = _write_venv_record(manager, "a" * 32)
+    for suffix in ("b" * 16, "b" * 32):
+        record = {
+            **base,
+            "revision": 2,
+            "path": f"{base['id']}/revisions/2-{suffix}",
+        }
+        assert manager._safe_path(record) == manager.root / record["path"]
+
+
+def test_installed_switch_rejects_unverified_supervisor_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    record = _write_venv_record(
+        manager, "installed", status="installed", recipe="paddleocr-ort-cpu"
+    )
+    python = str(manager._venv_python(manager._safe_path(record)))
+    monkeypatch.setattr(
+        manager,
+        "_probe",
+        lambda _record: {"healthy": True, "python": python, "reason": None},
+    )
+    prepared = manager.prepare_switch(record["id"])
+    assert prepared["launch"]["python_executable"] == python
+    with pytest.raises(ManagedEnvironmentError, match="not healthy"):
+        manager.commit_switch(
+            prepared, started_health={"port": 1, "instance_id": "not-running"}
+        )
+    assert manager.list()["active_id"] is None
+
+
+def test_active_job_reference_blocks_switch_and_delete(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
+    )
+    first = _write_venv_record(manager, "running")
+    second = _write_venv_record(manager, "target")
+    python = str(manager._venv_python(manager._safe_path(first)))
+    manager._probe = lambda record: {  # noqa: B010 - 测试内替换实例探针
+        "healthy": True,
+        "reason": None,
+        "python": python,
+    }
     manager.commit_switch(manager.prepare_switch(first["id"]))
     references = ManagedEnvironmentReferences(
         manager._registry,
@@ -845,7 +1276,6 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         assert manager.list()["active_id"] == first["id"]
         with pytest.raises(ManagedEnvironmentError, match="active jobs"):
             manager.prepare_switch(second["id"])
-        assert manager.preview_install(second["id"], "paddleocr-ort-directml")
     finally:
         references.release(job_id)
     assert not (references.reference_root / f"{job_id}.lock").exists()
@@ -854,1245 +1284,9 @@ def test_active_job_reference_blocks_switch_install_and_delete(tmp_path: Path) -
         references.admit(str(uuid4()))
 
 
-def _omit_unused_pip_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
-    # These tests inject the installer: only the real venv/lock/probe paths
-    # matter, and the injected runners never invoke pip. Bootstrapping an
-    # unused pip costs seconds of ensurepip per candidate venv, which made CI
-    # time out before it reached the concurrent operations whose one-second
-    # deadline we verify.
-    run = subprocess.run
-
-    def without_pip(args: list[str], **kwargs):
-        if args[1:4] == ["-I", "-m", "venv"] and "--without-pip" not in args:
-            args = [*args[:-1], "--without-pip", args[-1]]
-        return run(args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", without_pip)
-
-
-def test_inactive_install_does_not_block_active_job_admission_or_target_conflict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    started = threading.Event()
-    finish = threading.Event()
-
-    def install(_python: Path, _scope) -> None:
-        started.set()
-        assert finish.wait(10)
-
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=install,
-    )
-    active = manager.create("active")
-    target = manager.create("target")
-    manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(
-        target["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    original_probe = manager._probe
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: (
-            {
-                "healthy": True,
-                "reason": None,
-                "python": str(manager._venv_python(manager._safe_path(record))),
-            }
-            if record["status"] == "installed"
-            else original_probe(record)
-        ),
-    )
-    installed: list[object] = []
-    worker = threading.Thread(
-        target=lambda: installed.append(
-            manager.install(
-                plan["plan_id"],
-                target["id"],
-                "paddleocr-ort-directml",
-                ("paddleocr-modelscope", "mineru-modelscope"),
-            )
-        ),
-        daemon=True,
-    )
-    worker.start()
-    admitted = threading.Event()
-    admission_errors: list[Exception] = []
-    references = ManagedEnvironmentReferences(
-        manager._registry,
-        manager._lock,
-        manager._references,
-        active["id"],
-        active["revision"],
-    )
-
-    def admit() -> None:
-        job_id = str(uuid4())
-        try:
-            references.admit(job_id)
-            admitted.set()
-            references.release(job_id)
-        except Exception as error:
-            admission_errors.append(error)
-
-    admission = threading.Thread(target=admit, daemon=True)
-    conflict_finished = threading.Event()
-    conflict_errors: list[Exception] = []
-
-    def delete_target() -> None:
-        try:
-            manager.delete(target["id"])
-        except Exception as error:
-            conflict_errors.append(error)
-        finally:
-            conflict_finished.set()
-
-    conflict = threading.Thread(target=delete_target, daemon=True)
-    try:
-        assert started.wait(5)
-        running = next(
-            item
-            for item in manager.list()["environments"]
-            if item["id"] == target["id"]
-        )
-        assert running["last_install_failure"]["reason_code"] == "install_in_progress"
-        assert running["last_install_failure"]["plan_id"] == plan["plan_id"]
-        admission.start()
-        conflict.start()
-        assert admitted.wait(1), "A job admission waited on B's package installation"
-        assert not admission_errors
-        assert conflict_finished.wait(1), "B delete waited on B's installation"
-        assert len(conflict_errors) == 1
-        assert isinstance(conflict_errors[0], ManagedEnvironmentError)
-    finally:
-        finish.set()
-        worker.join(10)
-        if admission.ident is not None:
-            admission.join(10)
-        if conflict.ident is not None:
-            conflict.join(10)
-    assert len(installed) == 1
-    assert manager.list()["active_id"] == active["id"]
-    assert (
-        next(
-            item
-            for item in manager.list()["environments"]
-            if item["id"] == target["id"]
-        )["last_install_failure"]
-        is None
-    )
-
-
-def test_inactive_install_commit_rejects_active_pointer_drift(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    started = threading.Event()
-    finish = threading.Event()
-
-    def install(_python: Path, _scope) -> None:
-        started.set()
-        assert finish.wait(10)
-
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=install,
-    )
-    active = manager.create("active")
-    target = manager.create("target")
-    replacement = manager.create("replacement")
-    manager.commit_switch(manager.prepare_switch(active["id"]))
-    plan = manager.preview_install(
-        target["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    # The deadline measures lock contention, not interpreter startup for replacement.
-    original_probe = manager._probe
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: (
-            {
-                "healthy": True,
-                "reason": None,
-                "python": str(manager._venv_python(manager._safe_path(record))),
-            }
-            if record["status"] == "installed" or record["id"] == replacement["id"]
-            else original_probe(record)
-        ),
-    )
-    install_errors: list[Exception] = []
-
-    def run_install() -> None:
-        try:
-            manager.install(
-                plan["plan_id"],
-                target["id"],
-                "paddleocr-ort-directml",
-                ("paddleocr-modelscope", "mineru-modelscope"),
-            )
-        except Exception as error:
-            install_errors.append(error)
-
-    worker = threading.Thread(target=run_install, daemon=True)
-    worker.start()
-    switched = threading.Event()
-    switch_errors: list[Exception] = []
-
-    def switch() -> None:
-        try:
-            manager.commit_switch(manager.prepare_switch(replacement["id"]))
-            switched.set()
-        except Exception as error:
-            switch_errors.append(error)
-
-    switch_worker = threading.Thread(target=switch, daemon=True)
-    try:
-        assert started.wait(5)
-        switch_worker.start()
-        assert switched.wait(1), "Unrelated active-pointer switch waited on B install"
-    finally:
-        finish.set()
-        worker.join(10)
-        if switch_worker.ident is not None:
-            switch_worker.join(10)
-    assert not switch_errors
-    assert len(install_errors) == 1
-    assert isinstance(install_errors[0], runtime_maintenance.RuntimeInstallPlanStale)
-    registry = manager.list()
-    assert registry["active_id"] == replacement["id"]
-    assert (
-        next(item for item in registry["environments"] if item["id"] == target["id"])[
-            "status"
-        ]
-        == "empty"
-    )
-
-
-def test_installed_switch_rejects_unverified_supervisor_health(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("installed")
-    registry = manager.paths.state_root / "environments.json"
-    value = json.loads(registry.read_text(encoding="utf-8"))
-    value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
-    )
-    registry.write_text(json.dumps(value), encoding="utf-8")
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {"healthy": True, "python": item["python"], "reason": None},
-    )
-    prepared = manager.prepare_switch(item["id"])
-    assert prepared["launch"]["python_executable"] == item["python"]
-    with pytest.raises(ManagedEnvironmentError, match="not healthy"):
-        manager.commit_switch(
-            prepared, started_health={"port": 1, "instance_id": "not-running"}
-        )
-    assert manager.list()["active_id"] is None
-
-
-def test_empty_environment_repairs_changed_python_binding(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("portable")
-    registry = manager.paths.state_root / "environments.json"
-    value = json.loads(registry.read_text(encoding="utf-8"))
-    value["environments"][item["id"]]["python_version"] = "3.13.0"
-    registry.write_text(json.dumps(value), encoding="utf-8")
-    assert manager.list()["environments"][0]["reason"] == "base_or_abi_changed"
-    repaired = manager.repair_empty(item["id"])
-    assert repaired["revision"] == 2
-    assert repaired["python_state"] == "ready"
-    assert repaired["packages"] == []
-
-
-def test_repair_after_failed_install_clears_stale_revision_failure_only_on_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def fail_install(_python: Path, _scope) -> None:
-        raise ManagedEnvironmentError("synthetic install failure")
-
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=fail_install,
-    )
-    item = manager.create("failed then repaired")
-    plan = manager.preview_install(
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    failure = manager.list()["environments"][0]["last_install_failure"]
-    assert failure["environment_revision"] == 1
-
-    registry = manager.paths.state_root / "environments.json"
-    value = json.loads(registry.read_text(encoding="utf-8"))
-    value["environments"][item["id"]]["python_version"] = "3.13.0"
-    registry.write_text(json.dumps(value), encoding="utf-8")
-
-    def fail_repair() -> Path:
-        raise ManagedEnvironmentError("synthetic repair failure")
-
-    original_base_python = manager._base_python
-    monkeypatch.setattr(manager, "_base_python", fail_repair)
-    with pytest.raises(ManagedEnvironmentError, match="synthetic repair failure"):
-        manager.repair_empty(item["id"])
-    assert manager.list()["environments"][0]["last_install_failure"] == failure
-
-    monkeypatch.setattr(manager, "_base_python", original_base_python)
-    repaired = manager.repair_empty(item["id"])
-    # 固定路径布局：修复在 staging 重建后换入固定路径；失败候选被回收，
-    # 旧损坏 venv 移入唯一退役槽位。
-    assert repaired["revision"] == 2
-    assert repaired["path"] == str(manager.root / item["id"])
-    assert (manager.root / item["id"]).is_dir()
-    assert not (manager.root / ".staging" / item["id"]).exists()
-    assert (manager.root / ".retired" / item["id"]).is_dir()
-    assert repaired["last_install_failure"] is None
-    assert (
-        ManagedEnvironmentStore(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            base_python=sys._base_executable,
-        ).list()["environments"][0]["last_install_failure"]
-        is None
-    )
-    stored = json.loads(registry.read_text(encoding="utf-8"))
-    assert "last_install_operation" not in stored["environments"][item["id"]]
-
-
-def test_named_environment_probe_does_not_extract_missing_base(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    product = tmp_path / "product"
-    creator = ManagedEnvironmentStore(
-        product_root=product,
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = creator.create("portable")
-    reader = ManagedEnvironmentStore(
-        product_root=product,
-        component_lock=component,
-        runtime_manifest=manifest,
-    )
-    base = reader.root / "python-base"
-    assert not base.exists()
-    assert reader.list()["environments"][0]["reason"] == "base_or_abi_changed"
-    assert not base.exists()
-    with pytest.raises(ManagedEnvironmentError, match="base_or_abi_changed"):
-        reader.prepare_switch(item["id"])
-    assert not base.exists()
-
-
-def test_failed_named_install_preserves_empty_revision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def fail_install(_python: Path, _scope) -> None:
-        raise ManagedEnvironmentError("synthetic install failure")
-
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=fail_install,
-    )
-    item = manager.create("target")
-    manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    # 请求来源与预览冻结不一致 → 计划失效，不得进入安装。
-    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-huggingface", "mineru-modelscope"),
-        )
-    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    with pytest.raises(ManagedEnvironmentError, match="synthetic"):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    surviving = manager.list()["environments"][0]
-    assert surviving["revision"] == 1
-    assert surviving["status"] == "empty"
-    assert surviving["python_state"] == "ready"
-    assert manager.list()["active_id"] == item["id"]
-    failure = surviving["last_install_failure"]
-    assert failure["reason_code"] == "unknown"
-    assert failure["phase"] == "failed"
-    assert failure["recipe"] == "paddleocr-ort-directml"
-    assert failure["environment_revision"] == 1
-    stored = json.loads(manager._registry.read_text(encoding="utf-8"))
-    assert (
-        stored["environments"][item["id"]]["last_install_operation"]["plan_id"]
-        == plan["plan_id"]
-    )
-    assert (
-        ManagedEnvironmentStore(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            base_python=sys._base_executable,
-        ).list()["environments"][0]["last_install_failure"]
-        == failure
-    )
-
-
-def test_named_install_failure_redacts_diagnostics_and_interruption_is_durable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def fail(_python: Path, _scope) -> None:
-        raise RuntimeInstallError(
-            "https://user:secret@example.invalid/private C:/private/work "
-            "token=secretvalue",
-            reason_code="network_error",
-            next_action="check_source_and_retry",
-        )
-
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=fail,
-    )
-    first = manager.create("failed")
-    other = manager.create("unaffected")
-    plan = manager.preview_install(
-        first["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    with pytest.raises(RuntimeInstallError):
-        manager.install(
-            plan["plan_id"],
-            first["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    registry_text = manager._registry.read_text(encoding="utf-8")
-    assert "secretvalue" not in registry_text
-    assert "example.invalid" not in registry_text
-    assert "C:/private/work" not in registry_text
-    records = {item["id"]: item for item in manager.list()["environments"]}
-    failure = records[first["id"]]["last_install_failure"]
-    assert failure["reason_code"] == "network_error"
-    assert failure["next_action"] == "check_source_and_retry"
-    assert failure["plan_id"] == plan["plan_id"]
-    assert records[other["id"]]["last_install_failure"] is None
-
-    def interrupted(_python: Path, _scope) -> None:
-        raise SystemExit(1)
-
-    manager._install_runner = interrupted
-    with pytest.raises(SystemExit):
-        manager.install(
-            plan["plan_id"],
-            first["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    recovered = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    ).list()["environments"]
-    by_id = {item["id"]: item for item in recovered}
-    assert by_id[first["id"]]["status"] == "empty"
-    assert (
-        by_id[first["id"]]["last_install_failure"]["reason_code"]
-        == "install_interrupted"
-    )
-    # 中断投影也携带 plan_id：调用方据此把终态归属回本次安装计划。
-    assert by_id[first["id"]]["last_install_failure"]["plan_id"] == plan["plan_id"]
-    assert by_id[other["id"]]["last_install_failure"] is None
-
-
-def test_new_environment_preview_supersedes_old_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    installed_sources: list[str] = []
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=lambda _python, _scope: installed_sources.append(
-            _scope.scope_id
-        ),
-    )
-    current = manager.create("current")
-    target = manager.create("target")
-    manager.commit_switch(manager.prepare_switch(current["id"]))
-    old = manager.preview_install(
-        target["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    fresh = manager.preview_install(
-        target["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-
-    with pytest.raises(
-        runtime_maintenance.RuntimeInstallPlanStale, match="preview again"
-    ):
-        manager.install(
-            old["plan_id"],
-            target["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    assert manager.list()["active_id"] == current["id"]
-    assert manager.list()["environments"][1]["status"] == "empty"
-
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {
-            "healthy": True,
-            "python": str(manager._venv_python(manager._safe_path(record))),
-            "reason": None,
-        },
-    )
-    installed = manager.install(
-        fresh["plan_id"],
-        target["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    assert installed["revision"] == 2
-    assert installed["status"] == "installed"
-    assert installed["last_install_failure"] is None
-    assert installed_sources == ["paddleocr-ort-directml"]
-    assert manager.list()["active_id"] == current["id"]
-
-
-def test_named_recipe_addition_rejects_incompatible_engine(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("engines")
-    registry = manager.paths.state_root / "environments.json"
-    value = json.loads(registry.read_text(encoding="utf-8"))
-    # 历史分设备 paddle-ort 记录：读取保留，但与统一闭包不同源，不能在
-    # 同一环境上叠加安装。
-    value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
-    )
-    registry.write_text(json.dumps(value), encoding="utf-8")
-    before = registry.read_bytes()
-    # 独立 MinerU 配方已并入统一闭包：分设备配方一律按退役拒绝。
-    with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
-        manager.preview_install(item["id"], "mineru-cpu")
-    assert registry.read_bytes() == before
-    with pytest.raises(ManagedEnvironmentError, match="no compatible locked recipe"):
-        manager.preview_install(item["id"], "paddleocr-ort-directml")
-    assert registry.read_bytes() == before
-    fresh = manager.create("fresh")
-    explicit = manager.preview_install(fresh["id"], "paddleocr-ort-directml")
-    assert explicit["requested_recipe"] == "paddleocr-ort-directml"
-    assert explicit["recipe"] == "paddleocr-ort-directml"
-    # #270：旧原生 Paddle 配方退役，预览安装以明确退役错误拒绝。
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        manager.preview_install(fresh["id"], "paddleocr-cpu")
-
-
-def test_saved_retired_paddle_plan_rejected_at_confirmation(tmp_path: Path) -> None:
-    """#270 回归：旧已保存的 paddleocr-cpu 安装计划不能绕过 preview 拒绝。
-
-    旧实现允许已保存 plan 直接确认安装（复用历史 manifest 的隔离锁）；
-    本断言在旧实现上失败。
-    """
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("engines")
-    registry = manager.paths.state_root / "environments.json"
-    value = json.loads(registry.read_text(encoding="utf-8"))
-    value["environments"][item["id"]].update(
-        {"status": "installed", "recipe": "paddleocr-ort-cpu"}
-    )
-    registry.write_text(json.dumps(value), encoding="utf-8")
-    # 模拟旧版本保存的退役配方计划（preview 拒绝之前已落盘的文件）。
-    plan = {
-        "plan_id": "a" * 32,
-        "environment_id": item["id"],
-        "environment_revision": item["revision"],
-        "active_revision": value["active_revision"],
-        "requested_recipe": "paddleocr-cpu",
-        "recipe": "paddleocr-cpu",
-        "recipe_lock": "0" * 64,
-        "requested_source_ids": ["paddleocr-modelscope", "mineru-modelscope"],
-        "source_ids": ["paddleocr-modelscope", "mineru-modelscope"],
-        "effective_source_ids": ["paddleocr-modelscope", "mineru-modelscope"],
-        "source_config_revision": 0,
-        "runtime_manifest": manager.manifest.sha256,
-    }
-    plan_path = manager.paths.state_root / "environment-plans" / f"{item['id']}.json"
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(json.dumps(plan), encoding="utf-8")
-    with pytest.raises(ManagedEnvironmentError, match="retired"):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-cpu",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    latest = json.loads(registry.read_text(encoding="utf-8"))
-    # 拒绝发生在写入之前：环境记录不被改写。
-    assert latest["environments"][item["id"]]["recipe"] == "paddleocr-ort-cpu"
-
-
-def test_named_preview_includes_direct_url_dependencies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    item = manager.create("directml")
-    # CUDA 支持已退役：DirectML 覆盖全 D3D12 GPU，不再探测 NVIDIA 驱动，
-    # 依赖投影无驱动门槛。
-    dependencies = manager.preview_install(item["id"], "paddleocr-ort-directml")[
-        "dependencies"
-    ]
-    assert "onnxruntime-directml==1.24.4" in dependencies
-    assert "mineru==4.1.3" in dependencies
-    assert "onnx==1.23.2" in dependencies
-
-
-def _all_recipes_release(root: Path, **release_kwargs) -> tuple[Path, Path]:
-    """默认 release + 历史 Paddle 隔离锁：可安装配方全部可解析。
-
-    仅绑定历史原生 Paddle CPU 隔离锁（读取兼容面）：CUDA 隔离锁
-    （win-x64-cu126 profile）已随档位退役，不再出现在 manifest。
-    """
-    manifest, component = _release(root, **release_kwargs)
-    value = json.loads(manifest.read_text(encoding="utf-8"))
-    paddle_cpu = manifest.parent / "requirements-win-x64-paddle-cpu.lock"
-    paddle_cpu.write_text(
-        "paddlepaddle==3.3.1 \\\n    --hash=sha256:" + "7" * 64 + "\n",
-        encoding="utf-8",
-    )
-    value["profiles"]["win-x64-cpu"]["paddle_environment"] = {
-        "lock": paddle_cpu.name,
-        "sha256": _sha(paddle_cpu.read_bytes()),
-    }
-    manifest.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
-    binding = json.loads(component.read_text(encoding="utf-8"))
-    binding["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
-    component.write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
-    return manifest, component
-
-
-def _write_record(manager: ManagedEnvironmentStore, env_id: str, **overrides) -> dict:
-    """直接写入注册表记录：不建真实 venv，兼容查询只关心身份与证据。"""
-    from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
-
-    with RuntimeStoreLock(manager._lock):
-        data = manager._read()
-        record = {
-            "id": env_id,
-            "name": f"env-{env_id[:4]}",
-            "revision": 1,
-            "kind": "venv",
-            "path": str(Path(env_id) / "revisions" / "1"),
-            "status": "empty",
-            "python_version": manager.manifest.python.version,
-            "abi": manager.manifest.python.abi,
-            **overrides,
-        }
-        data["environments"][env_id] = record
-        _atomic_json(manager._registry, data)
-        return record
-
-
-def _pinned_versions(manager: ManagedEnvironmentStore, recipe: str) -> dict[str, str]:
-    scope, _accelerator = manager._recipe(recipe)
-    return {
-        name: version
-        for name, _display, version in ManagedEnvironmentStore._scope_pins(scope)
-        if version is not None
-    }
-
-
-def test_recipe_catalog_projects_manifest_bound_scopes(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    # 统一推理闭包：directml 是唯一可安装配方；历史 Paddle 隔离锁也不再
-    # 让原生/分设备配方回到目录（与 preview 同源）。
-    assert [entry["id"] for entry in manager.recipe_catalog()] == [
-        "paddleocr-ort-directml",
-    ]
-
-    standalone_manifest, standalone_component = _all_recipes_release(
-        tmp_path / "standalone", with_base_pack=True, with_paddle_packs=True
-    )
-    full = ManagedEnvironmentStore(
-        product_root=tmp_path / "standalone-product",
-        component_lock=standalone_component,
-        runtime_manifest=standalone_manifest,
-        base_python=sys._base_executable,
-    )
-    catalog = full.recipe_catalog()
-    assert full.list()["recipes"] == catalog
-    # #270 + 统一闭包：旧原生 Paddle 与分设备（CPU/CUDA/独立 MinerU）配方
-    # 均已从可安装目录退役（记录/诊断保留）。
-    assert [entry["id"] for entry in catalog] == [
-        "paddleocr-ort-directml",
-    ]
-    entry = {item["id"]: item for item in catalog}
-    directml = entry["paddleocr-ort-directml"]
-    assert directml["engine"] == "paddle"
-    assert directml["family"] == "paddle-onnx"
-    assert directml["provider"] == "DmlExecutionProvider"
-    assert directml["configured_recognition_types"] == [
-        "text",
-        "table",
-        "structure",
-        "document",
-    ]
-    # 统一闭包是唯一可安装配方，也是远程 MinerU 模式的推荐宿主（桌面
-    # "启用远程模式"按 DefaultRemoteHost && SupportsRemoteHost 唯一命中）。
-    assert [item["id"] for item in catalog if item["default_remote_host"]] == [
-        "paddleocr-ort-directml"
-    ]
-    assert all(item["supports_remote_host"] for item in catalog)
-    assert directml["display_name"] == "PaddleOCR ONNX + MinerU · Windows DirectML"
-    assert directml["accelerator"] == "cpu"
-    assert directml["target_device"] == "directml"
-    # 目录同时投影设备全集：统一闭包可在同闭包 directml↔cpu 切换。
-    assert directml["supported_devices"] == ["directml", "cpu"]
-    assert directml["python_version"] == "3.13.16"
-    assert directml["abi"] == "cp313"
-    assert directml["platform"] == "win_amd64"
-    assert directml["scope_id"] == "paddleocr-ort-directml"
-    assert "paddleocr==3.7.0" in directml["dependencies"]
-    assert "onnxruntime-directml==1.24.4" in directml["dependencies"]
-    assert "mineru==4.1.3" in directml["dependencies"]
-    # 退役配方不再宣称任何识别类型，预览安装明确拒绝。
-    target_record = _write_record(full, "b" * 32)
-    for recipe in ("paddleocr-cuda", "paddleocr-ort-cpu", "mineru-cuda"):
-        with pytest.raises(ManagedEnvironmentError, match="retired"):
-            full.preview_install(target_record["id"], recipe)
-        assert full._recipe_modes(recipe) == []
-
-    # 目录与 preview 同源：锁、pin 与来源分类完全一致，前台不得另算。
-    target = _write_record(full, "a" * 32)
-    for recipe in ("paddleocr-ort-directml",):
-        plan = full.preview_install(target["id"], recipe)
-        assert entry[recipe]["recipe_lock"] == plan["recipe_lock"]
-        assert entry[recipe]["dependencies"] == plan["dependencies"]
-        assert entry[recipe]["dependency_origin"] == plan["dependency_origin"]
-        assert entry[recipe]["python_origin"] == plan["python_origin"]
-
-
-def test_managed_environment_list_projects_runtime_hardware_truth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-
-    def missing_driver(*_args: object, **_kwargs: object) -> object:
-        raise FileNotFoundError("nvidia-smi")
-
-    # CUDA 支持退役后列表不再探测 NVIDIA 驱动：即便驱动探测必然失败，
-    # list() 也不得 shell out 或携带硬件/package 来源投影。
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.subprocess.run",
-        missing_driver,
-    )
-    payload = manager.list()
-    assert "hardware" not in payload
-    assert "package_source_ids" not in payload
-
-
-def test_find_compatible_prefers_active_then_stable_id_and_reports_reasons(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
-    pinned = _pinned_versions(manager, "paddleocr-ort-directml")
-
-    def healthy_probe(record: dict) -> dict:
-        return {
-            "healthy": True,
-            "reason": None,
-            "python": str(manager._venv_python(manager._safe_path(record))),
-            "versions": dict(pinned),
-            "platform": "win_amd64",
-        }
-
-    monkeypatch.setattr(manager, "_probe", healthy_probe)
-    a = _write_record(
-        manager,
-        "a" * 32,
-        status="installed",
-        recipe="paddleocr-ort-directml",
-        recipe_lock=scope.sha256,
-    )
-    b = _write_record(
-        manager,
-        "b" * 32,
-        status="installed",
-        recipe="paddleocr-ort-directml",
-        recipe_lock=scope.sha256,
-    )
-    empty = _write_record(manager, "c" * 32)
-    legacy_no_evidence = _write_record(
-        manager, "d" * 32, status="installed", recipe="paddleocr-ort-directml"
-    )
-    _write_record(
-        manager,
-        "e" * 32,
-        status="installed",
-        recipe="paddleocr-cpu",
-        recipe_lock="f" * 64,
-    )
-    from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
-
-    with RuntimeStoreLock(manager._lock):
-        data = manager._read()
-        data["environments"]["legacy"] = {
-            "id": "legacy",
-            "name": "原有环境",
-            "revision": 1,
-            "kind": "legacy",
-            "path": "runtime",
-            "status": "installed",
-            "python_version": manager.manifest.python.version,
-            "abi": manager.manifest.python.abi,
-        }
-        _atomic_json(manager._registry, data)
-
-    before = manager._registry.read_bytes()
-    result = manager.find_compatible("paddleocr-ort-directml")
-    assert manager._registry.read_bytes() == before
-    assert result["recipe"] == "paddleocr-ort-directml"
-    assert result["recipe_lock"] == scope.sha256
-    assert result["selected"] == {
-        "environment_id": a["id"],
-        "environment_revision": 1,
-        "recipe": "paddleocr-ort-directml",
-        "selection_reason": "deterministic_id_order",
-    }
-    assert [item["environment_id"] for item in result["environments"]] == [
-        a["id"],
-        b["id"],
-        empty["id"],
-        legacy_no_evidence["id"],
-        "e" * 32,
-        "legacy",
-    ]
-    assert {
-        item["environment_id"]: item["reason_code"] for item in result["environments"]
-    } == {
-        a["id"]: "selected_compatible_environment",
-        b["id"]: "compatible_lower_priority",
-        empty["id"]: "environment_empty",
-        legacy_no_evidence["id"]: "lock_evidence_missing",
-        "e" * 32: "recipe_mismatch",
-        "legacy": "legacy_environment",
-    }
-
-    explicit = manager.find_compatible("paddleocr-ort-directml", b["id"])
-    assert explicit["selected"]["environment_id"] == b["id"]
-    assert explicit["selected"]["selection_reason"] == "explicit_environment"
-    assert (
-        manager.find_compatible("paddleocr-ort-directml", empty["id"])["selected"]
-        is None
-    )
-    with pytest.raises(ManagedEnvironmentError, match="unknown explicit"):
-        manager.find_compatible("paddleocr-ort-directml", "missing-target")
-
-    # 活动环境优先；同配方低优先级环境如实标记。
-    with RuntimeStoreLock(manager._lock):
-        data = manager._read()
-        data["active_id"] = b["id"]
-        data["active_revision"] += 1
-        _atomic_json(manager._registry, data)
-    result = manager.find_compatible("paddleocr-ort-directml")
-    assert result["selected"]["environment_id"] == b["id"]
-    assert result["selected"]["selection_reason"] == "active_environment"
-    by_id = {item["environment_id"]: item for item in result["environments"]}
-    assert by_id[b["id"]]["reason_code"] == "selected_active_environment"
-    assert by_id[b["id"]]["active"] is True
-    assert by_id[a["id"]]["reason_code"] == "compatible_lower_priority"
-    assert by_id[a["id"]]["active"] is False
-
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {**healthy_probe(record), "platform": "win_arm64"},
-    )
-    wrong_platform = manager.find_compatible("paddleocr-ort-directml")
-    assert wrong_platform["selected"] is None
-    assert {
-        item["reason_code"]
-        for item in wrong_platform["environments"]
-        if item["environment_id"] in {a["id"], b["id"]}
-    } == {"platform_mismatch"}
-
-    # 安装后版本漂移：探针健康但 pin 不匹配，不得选中。
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {
-            **healthy_probe(record),
-            "versions": {**pinned, "fastapi": "2.0.0"},
-        },
-    )
-    drifted = manager.find_compatible("paddleocr-ort-directml")
-    assert drifted["selected"] is None
-    assert {
-        item["reason_code"]
-        for item in drifted["environments"]
-        if item["environment_id"] in {a["id"], b["id"]}
-    } == {"locked_version_mismatch"}
-
-    # 探针不健康：原因原样透传，不选中。
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {
-            "healthy": False,
-            "reason": "engine_import_failed",
-            "python": str(manager._venv_python(manager._safe_path(record))),
-        },
-    )
-    broken = manager.find_compatible("paddleocr-ort-directml")
-    assert broken["selected"] is None
-    assert {
-        item["reason_code"]
-        for item in broken["environments"]
-        if item["environment_id"] in {a["id"], b["id"]}
-    } == {"engine_import_failed"}
-
-    # 无锁证据的旧环境：query 不验证，但 list 与手工切换保持可用。
-    monkeypatch.setattr(manager, "_probe", healthy_probe)
-    prepared = manager.prepare_switch(legacy_no_evidence["id"])
-    assert prepared["environment_id"] == legacy_no_evidence["id"]
-    assert (
-        next(
-            item
-            for item in manager.list()["environments"]
-            if item["id"] == legacy_no_evidence["id"]
-        )["status"]
-        == "installed"
-    )
-
-    # 未知配方拒绝。
-    with pytest.raises(ManagedEnvironmentError, match="unknown engine recipe"):
-        manager.find_compatible("not-a-recipe")
-
-
-@pytest.mark.parametrize(
-    ("url", "expected_version", "installed_version", "reason"),
-    [
-        (
-            "https://example.invalid/Paddle_GPU-3.3.1-cp313-cp313-win_amd64.whl",
-            "3.3.1",
-            "3.3.1",
-            "selected_compatible_environment",
-        ),
-        (
-            "https://example.invalid/Paddle_GPU-3.3.1-cp313-cp313-win_amd64.whl",
-            "3.3.1",
-            "3.3.0",
-            "locked_version_mismatch",
-        ),
-        ("https://example.invalid/paddle.whl", None, "3.3.1", "locked_version_unknown"),
-        (
-            "https://example.invalid/other-3.3.1-cp313-cp313-win_amd64.whl",
-            None,
-            "3.3.1",
-            "locked_version_unknown",
-        ),
-    ],
-)
-def test_compatible_query_checks_wheel_version_and_normalized_distribution_name(
-    tmp_path, monkeypatch, url, expected_version, installed_version, reason
-):
-    from dataclasses import replace
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    scope, accelerator = manager._recipe("paddleocr-ort-directml")
-    lock = tmp_path / "query.lock"
-    lock.write_text(f"Paddle.GPU @ {url}\n", encoding="utf-8")
-    scope = replace(scope, lock_path=lock, sha256=_sha(lock.read_bytes()))
-    monkeypatch.setattr(manager, "_recipe", lambda _recipe: (scope, accelerator))
-    _write_record(
-        manager,
-        "a" * 32,
-        status="installed",
-        recipe="paddleocr-ort-directml",
-        recipe_lock=scope.sha256,
-    )
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: {
-            "healthy": True,
-            "reason": None,
-            "platform": "win_amd64",
-            "versions": {"paddle-gpu": installed_version},
-        },
-    )
-    assert manager._scope_pins(scope) == [
-        ("paddle-gpu", f"Paddle.GPU @ {url}", expected_version)
-    ]
-    result = manager.find_compatible("paddleocr-ort-directml")
-    assert result["environments"][0]["reason_code"] == reason
-    assert (result["selected"] is not None) == (
-        reason == "selected_compatible_environment"
-    )
-
-
-def test_install_freezes_recipe_lock_and_query_round_trips_cli(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=lambda _python, _scope: None,
-    )
-    pinned = _pinned_versions(manager, "paddleocr-ort-directml")
-    monkeypatch.setattr(
-        manager,
-        "_probe",
-        lambda record: (
-            {
-                "healthy": True,
-                "reason": None,
-                "python": str(manager._venv_python(manager._safe_path(record))),
-                "versions": dict(pinned),
-                "platform": "win_amd64",
-            }
-            if record["status"] == "installed"
-            else ManagedEnvironmentStore._probe(manager, record)
-        ),
-    )
-    item = manager.create("reusable")
-    plan = manager.preview_install(
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    installed = manager.install(
-        plan["plan_id"],
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    assert installed["status"] == "installed"
-    record = manager._read()["environments"][item["id"]]
-    assert record["recipe_lock"] == plan["recipe_lock"]
-
-    # 重启后按锁证据命中同一环境。
-    reopened = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    monkeypatch.setattr(
-        reopened,
-        "_probe",
-        lambda record: {
-            "healthy": True,
-            "reason": None,
-            "python": str(reopened._venv_python(reopened._safe_path(record))),
-            "versions": dict(pinned),
-            "platform": "win_amd64",
-        },
-    )
-    assert (
-        reopened.find_compatible("paddleocr-ort-directml")["selected"]["environment_id"]
-        == (item["id"])
-    )
-
-    base = {
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-    }
-    request = {
-        "protocol_version": 2,
-        "request_kind": "environment",
-        "action": "find_compatible",
-        "recipe": "paddleocr-ort-directml",
-        **base,
-    }
-    # CLI 在新 store 实例上运行真实探针；本测试的合成 venv 无包，
-    # 用类级 stub 保持与上方同一健康投影。
-    monkeypatch.setattr(
-        ManagedEnvironmentStore,
-        "_probe",
-        lambda self, record: {
-            "healthy": True,
-            "reason": None,
-            "python": str(self._venv_python(self._safe_path(record))),
-            "versions": dict(pinned),
-            "platform": "win_amd64",
-        },
-    )
-    assert main(["--request-json", json.dumps(request)]) == 0
-    envelope = json.loads(capsys.readouterr().out)
-    assert envelope["response_kind"] == "environment"
-    assert envelope["action"] == "find_compatible"
-    assert envelope["result"]["selected"]["environment_id"] == item["id"]
-    assert [recipe["id"] for recipe in envelope["result"]["recipes"]][0] == (
-        "paddleocr-ort-directml"
-    )
-
-    unknown = {**request, "recipe": "not-a-recipe"}
-    assert main(["--request-json", json.dumps(unknown)]) == 1
-    failure = json.loads(capsys.readouterr().out)
-    assert failure["ok"] is False
-    assert "unknown engine recipe" in failure["error"]["message"]
+# ---------------------------------------------------------------------------
+# 引擎探针（历史 venv 记录；product 记录同源复用）
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -2113,22 +1307,16 @@ def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
 
     from vibeocr.runtime.environments import managed_environments
 
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    record = _write_record(
+    root = _materialize_venv(manager, "probe-diagnostic")
+    record = _write_venv_record(
         manager, "probe-diagnostic", status="installed", recipe=recipe
     )
-    root = manager._safe_path(record)
-    python = manager._venv_python(root)
-    python.parent.mkdir(parents=True)
-    python.write_bytes(b"test interpreter")
     stderr = (
         "discarded diagnostic prefix" + "x" * 2200 + "\nnative import failed: 诊断尾部"
     )
@@ -2176,347 +1364,173 @@ def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
     assert "discarded diagnostic prefix" not in result["detail"]
 
 
-def test_named_install_rejects_native_import_failure_without_committing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_venv_engine_probe_fails_closed_on_broken_native_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def install(python: Path, _scope) -> None:
-        site = python.parent.parent / "Lib" / "site-packages"
-        for name in (
-            "fastapi",
-            "paddleocr",
-            "paddlex",
-            "onnxruntime-directml",
-            "mineru",
-        ):
-            metadata = site / f"{name}-1.0.dist-info"
-            metadata.mkdir(parents=True)
-            (metadata / "METADATA").write_text(
-                f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
-            )
-        (site / "onnxruntime").mkdir()
-        (site / "paddleocr").mkdir()
-        (site / "paddleocr" / "__init__.py").write_text(
-            "class PaddleOCR: pass", encoding="utf-8"
-        )
-        (site / "onnxruntime" / "__init__.py").write_text(
-            "raise ImportError('native extension cannot load')\n", encoding="utf-8"
-        )
-
+    """已安装记录的引擎 import 闭包损坏：list/prepare_switch 同一探针 fail closed。"""
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=install,
     )
-    item = manager.create("native")
-    plan = manager.preview_install(
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
+    _patch_venv_base_python(manager, monkeypatch)
+    root = _materialize_venv(manager, "native")
+    record = _write_venv_record(
+        manager, "native", status="installed", recipe="paddleocr-ort-directml"
     )
-    with pytest.raises(
-        ManagedEnvironmentError, match="engine_import_failed"
-    ) as excinfo:
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    assert "CalledProcessError after " in str(excinfo.value)
-    assert "native extension cannot load" in str(excinfo.value)
-    surviving = manager.list()["environments"][0]
-    assert surviving["status"] == "empty"
-    assert surviving["revision"] == 1
-    assert surviving["last_install_failure"]["reason_code"] == "engine_import_failed"
-    assert "CalledProcessError after " in surviving["last_install_failure"]["detail"]
-    assert "native extension cannot load" in surviving["last_install_failure"]["detail"]
-    candidate = manager._staging_path(item["id"])
-    assert candidate.is_dir()
-    # 模拟旧实现把坏候选提交进注册表：候选换入固定路径，探针必须
-    # 在同一导入闭包上 fail closed。
-    shutil.rmtree(manager.root / item["id"])
-    os.rename(candidate, manager.root / item["id"])
-    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
-    registry["environments"][item["id"]].pop("last_install_operation")
-    registry["environments"][item["id"]].update(
-        {
-            "revision": 2,
-            "path": item["id"],
-            "status": "installed",
-            "recipe": "paddleocr-ort-directml",
-            "source_ids": ["tuna-pypi"],
-        }
+    (root / "Lib" / "site-packages" / "onnxruntime" / "__init__.py").write_text(
+        "raise ImportError('native extension cannot load')\n", encoding="utf-8"
     )
-    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
-    unavailable = manager.list()["environments"][0]
+    probe = manager._probe(record)
+    assert probe["healthy"] is False
+    assert probe["reason"] == "engine_import_failed"
+    assert "native extension cannot load" in probe["detail"]
+    unavailable = next(
+        item for item in manager.list()["environments"] if item["id"] == record["id"]
+    )
     assert unavailable["python_state"] == "ready"
     assert unavailable["dependency_state"] == "installed"
     assert unavailable["engine_state"] == "unavailable"
     assert "engine_import_failed" in unavailable["reason"]
     assert "shorter Portable location" in unavailable["reason"]
+    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
+        manager.prepare_switch(record["id"])
 
 
-def test_named_install_paddleocr_probe_imports_real_transitive_closure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_venv_engine_probe_imports_real_transitive_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Paddle 惰性导入的真实符号闭包失败必须在安装/切换前被发现；不实例化引擎。
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def install(python: Path, _scope) -> None:
-        site = python.parent.parent / "Lib" / "site-packages"
-        for name in (
-            "fastapi",
-            "paddleocr",
-            "paddlex",
-            "onnxruntime-directml",
-            "mineru",
-            "shapely",
-        ):
-            metadata = site / f"{name}-1.0.dist-info"
-            metadata.mkdir(parents=True)
-            (metadata / "METADATA").write_text(
-                f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
-            )
-        # 旧探针的叶子依赖必须健康：契约只在 paddleocr 真实导入闭包上失败。
-        for name in ("pyclipper", "onnxruntime"):
-            (site / name).mkdir()
-            (site / name / "__init__.py").write_text("", encoding="utf-8")
-        (site / "paddleocr").mkdir()
-        (site / "paddleocr" / "__init__.py").write_text(
-            "from importlib import import_module\n"
-            "_LAZY_IMPORTS = {'PaddleOCR': 'paddleocr.main'}\n"
-            "def __getattr__(name):\n"
-            "    if name in _LAZY_IMPORTS:\n"
-            "        return getattr(import_module(_LAZY_IMPORTS[name]), name)\n"
-            "    raise AttributeError(name)\n",
-            encoding="utf-8",
-        )
-        (site / "paddleocr" / "main.py").write_text(
-            "from paddleocr.ch_ppocr_det import TextDetector\n"
-            "class PaddleOCR:\n"
-            "    def __init__(self, *args, **kwargs):\n"
-            "        raise AssertionError('probe must not instantiate the engine')\n",
-            encoding="utf-8",
-        )
-        det = site / "paddleocr" / "ch_ppocr_det"
-        det.mkdir()
-        (det / "__init__.py").write_text(
-            "from .main import TextDetector\n", encoding="utf-8"
-        )
-        (det / "main.py").write_text(
-            "from .utils import DBPostProcess\nclass TextDetector:\n    pass\n",
-            encoding="utf-8",
-        )
-        (det / "utils.py").write_text(
-            "from shapely.geometry import Polygon\nclass DBPostProcess:\n    pass\n",
-            encoding="utf-8",
-        )
-        (site / "shapely").mkdir()
-        (site / "shapely" / "__init__.py").write_text(
-            "from shapely.lib import GEOSException\n", encoding="utf-8"
-        )
-        (site / "shapely" / "lib.py").write_text(
-            "raise ImportError('DLL load failed while importing lib')\n",
-            encoding="utf-8",
-        )
-        (site / "shapely" / "geometry.py").write_text("", encoding="utf-8")
-
+    """Paddle 惰性导入的真实符号闭包失败必须被探针发现；不实例化引擎。"""
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=install,
     )
-    item = manager.create("closure")
-    manager.commit_switch(manager.prepare_switch(item["id"]))
-    plan = manager.preview_install(
-        item["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
+    _patch_venv_base_python(manager, monkeypatch)
+    root = _materialize_venv(manager, "closure")
+    record = _write_venv_record(
+        manager, "closure", status="installed", recipe="paddleocr-ort-directml"
     )
-    with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
-        manager.install(
-            plan["plan_id"],
-            item["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
+    site = root / "Lib" / "site-packages"
+    for name in ("shapely",):
+        metadata = site / f"{name}-1.0.dist-info"
+        metadata.mkdir(parents=True, exist_ok=True)
+        (metadata / "METADATA").write_text(
+            f"Name: {name}\nVersion: 1.0\n", encoding="utf-8"
         )
-    surviving = manager.list()["environments"][0]
-    assert surviving["status"] == "empty"
-    assert surviving["revision"] == 1
-    assert surviving["python_state"] == "ready"
-    assert manager.list()["active_id"] == item["id"]
-    failure = surviving["last_install_failure"]
-    assert failure["reason_code"] == "engine_import_failed"
-    assert failure["phase"] == "failed"
-    assert failure["next_action"] == "repair_environment"
-    assert failure["environment_revision"] == 1
-
-    # 若探针未覆盖真实闭包（旧实现），候选修订会被提交为已安装环境；
-    # 模拟该状态时，list/prepare_switch 也必须按同一探针 fail closed。
-    candidate = manager._staging_path(item["id"])
-    shutil.rmtree(manager.root / item["id"])
-    os.rename(candidate, manager.root / item["id"])
-    registry = json.loads(manager._registry.read_text(encoding="utf-8"))
-    registry["environments"][item["id"]].pop("last_install_operation")
-    registry["environments"][item["id"]].update(
-        {
-            "revision": 2,
-            "path": item["id"],
-            "status": "installed",
-            "recipe": "paddleocr-ort-directml",
-            "source_ids": ["tuna-pypi"],
-        }
+    # 旧探针的叶子依赖必须健康：契约只在 paddleocr 真实导入闭包上失败。
+    for name in ("pyclipper",):
+        (site / name).mkdir(parents=True, exist_ok=True)
+        (site / name / "__init__.py").write_text("", encoding="utf-8")
+    (site / "paddleocr" / "__init__.py").write_text(
+        "from importlib import import_module\n"
+        "_LAZY_IMPORTS = {'PaddleOCR': 'paddleocr.main'}\n"
+        "def __getattr__(name):\n"
+        "    if name in _LAZY_IMPORTS:\n"
+        "        return getattr(import_module(_LAZY_IMPORTS[name]), name)\n"
+        "    raise AttributeError(name)\n",
+        encoding="utf-8",
     )
-    manager._registry.write_text(json.dumps(registry), encoding="utf-8")
-    unavailable = manager.list()["environments"][0]
-    assert unavailable["python_state"] == "ready"
-    assert unavailable["dependency_state"] == "installed"
-    assert "engine_import_failed" in unavailable["reason"]
+    (site / "paddleocr" / "main.py").write_text(
+        "from paddleocr.ch_ppocr_det import TextDetector\n"
+        "class PaddleOCR:\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        "        raise AssertionError('probe must not instantiate the engine')\n",
+        encoding="utf-8",
+    )
+    det = site / "paddleocr" / "ch_ppocr_det"
+    det.mkdir(parents=True, exist_ok=True)
+    (det / "__init__.py").write_text(
+        "from .main import TextDetector\n", encoding="utf-8"
+    )
+    (det / "main.py").write_text(
+        "from .utils import DBPostProcess\nclass TextDetector:\n    pass\n",
+        encoding="utf-8",
+    )
+    (det / "utils.py").write_text(
+        "from shapely.geometry import Polygon\nclass DBPostProcess:\n    pass\n",
+        encoding="utf-8",
+    )
+    (site / "shapely").mkdir(parents=True, exist_ok=True)
+    (site / "shapely" / "__init__.py").write_text(
+        "from shapely.lib import GEOSException\n", encoding="utf-8"
+    )
+    (site / "shapely" / "lib.py").write_text(
+        "raise ImportError('DLL load failed while importing lib')\n",
+        encoding="utf-8",
+    )
+    (site / "shapely" / "geometry.py").write_text("", encoding="utf-8")
+
+    result = manager._probe(record)
+    assert result["healthy"] is False
+    assert result["reason"] == "engine_import_failed"
+    assert "DLL load failed" in result["detail"]
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
-        manager.prepare_switch(item["id"])
+        manager.prepare_switch(record["id"])
 
 
 def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
     tmp_path, monkeypatch
 ):
     """统一闭包探针覆盖随包 MinerU 的 server 绑定：不启动、不下载。"""
-    manifest, component = _all_recipes_release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    item = manager.create("mineru")
-    record = manager._read()["environments"][item["id"]]
-    record.update(status="installed", recipe="paddleocr-ort-directml")
-    site = (
-        manager._venv_python(manager._safe_path(record)).parent.parent
-        / "Lib/site-packages"
+    _patch_venv_base_python(manager, monkeypatch)
+    root = _materialize_venv(manager, "mineru")
+    record = _write_venv_record(
+        manager, "mineru", status="installed", recipe="paddleocr-ort-directml"
     )
-    for name in (
-        "fastapi",
-        "paddleocr",
-        "paddlex",
-        "onnxruntime-directml",
-        "mineru",
-    ):
-        metadata = site / f"{name}-1.0.dist-info"
-        metadata.mkdir(parents=True)
-        (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
-    (site / "paddleocr").mkdir()
-    (site / "paddleocr" / "__init__.py").write_text(
-        "class PaddleOCR: pass\n", encoding="utf-8"
-    )
-    (site / "onnxruntime").mkdir()
-    (site / "onnxruntime" / "__init__.py").write_text(
-        "def get_available_providers():\n    return ['DmlExecutionProvider']\n",
-        encoding="utf-8",
-    )
-    directml_devices = site / "vibeocr/runtime/recognition"
-    directml_devices.mkdir(parents=True)
-    for package in (site / "vibeocr", site / "vibeocr/runtime", directml_devices):
-        (package / "__init__.py").write_text("", encoding="utf-8")
-    (directml_devices / "directml_devices.py").write_text(
-        "def hardware_adapters():\n    return True\n", encoding="utf-8"
-    )
-    parser = site / "mineru/parser"
-    parser.mkdir(parents=True)
-    (parser.parent / "__init__.py").write_text("")
-    (parser / "__init__.py").write_text("")
-    server = parser / "api_server.py"
-    private_home = manager.paths.state_root / "environments" / item["id"] / "mineru4"
+    site = root / "Lib" / "site-packages"
+    private_home = manager.paths.state_root / "environments" / record["id"] / "mineru4"
     monkeypatch.setenv("MINERU_HOME", str(tmp_path / "unrelated"))
-    server.write_text(
+    (site / "mineru" / "parser" / "api_server.py").write_text(
         "import os\n"
         f"assert os.environ['MINERU_HOME'] == {str(private_home)!r}\n"
         "def create_app(*args, **kwargs):\n"
         "    raise AssertionError('probe must not initialize models or a server')\n"
         "if __name__ == '__main__':\n"
-        "    raise AssertionError('probe must not run the server')\n"
+        "    raise AssertionError('probe must not run the server')\n",
+        encoding="utf-8",
     )
     assert manager._probe(record)["healthy"] is True
     # 包级导入仍成功，但真实 server 闭包损坏必须报告失败。
-    server.write_text("raise ImportError('server dependency missing')\n")
+    (site / "mineru" / "parser" / "api_server.py").write_text(
+        "raise ImportError('server dependency missing')\n", encoding="utf-8"
+    )
     assert manager._probe(record)["reason"] == "engine_import_failed"
     assert not private_home.exists()
 
 
-def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path):
+def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path, monkeypatch):
     """统一闭包选 CPU 设备时健康探针不得要求 DXGI 适配器。
 
     无 D3D12 适配器的 Windows 虚拟机必须能以 CPU 设备使用闭包内的
     CPUExecutionProvider；GPU 硬件检查只在选择 directml 设备时执行。"""
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    item = manager.create("cpu-only")
-    record = manager._read()["environments"][item["id"]]
-    record.update(
-        status="installed", recipe="paddleocr-ort-directml", selected_device="cpu"
+    _patch_venv_base_python(manager, monkeypatch)
+    root = _materialize_venv(manager, "cpu-only")
+    record = _write_venv_record(
+        manager,
+        "cpu-only",
+        status="installed",
+        recipe="paddleocr-ort-directml",
+        selected_device="cpu",
     )
-    site = (
-        manager._venv_python(manager._safe_path(record)).parent.parent
-        / "Lib/site-packages"
-    )
-    for name in (
-        "fastapi",
-        "paddleocr",
-        "paddlex",
-        "onnxruntime-directml",
-        "mineru",
-    ):
-        metadata = site / f"{name}-1.0.dist-info"
-        metadata.mkdir(parents=True)
-        (metadata / "METADATA").write_text(f"Name: {name}\nVersion: 1.0\n")
-    (site / "paddleocr").mkdir()
-    (site / "paddleocr" / "__init__.py").write_text(
-        "class PaddleOCR: pass\n", encoding="utf-8"
-    )
-    (site / "onnxruntime").mkdir()
-    (site / "onnxruntime" / "__init__.py").write_text(
-        "def get_available_providers():\n"
-        "    return ['DmlExecutionProvider', 'CPUExecutionProvider']\n",
-        encoding="utf-8",
-    )
-    directml_devices = site / "vibeocr/runtime/recognition"
-    directml_devices.mkdir(parents=True)
-    for package in (site / "vibeocr", site / "vibeocr/runtime", directml_devices):
-        (package / "__init__.py").write_text("", encoding="utf-8")
+    site = root / "Lib" / "site-packages"
     # 无 DXGI 适配器的机器（Windows 虚拟机等）。
-    (directml_devices / "directml_devices.py").write_text(
+    (site / "vibeocr" / "runtime" / "recognition" / "directml_devices.py").write_text(
         "def hardware_adapters():\n    return []\n", encoding="utf-8"
-    )
-    parser = site / "mineru/parser"
-    parser.mkdir(parents=True)
-    (parser.parent / "__init__.py").write_text("")
-    (parser / "__init__.py").write_text("")
-    (parser / "api_server.py").write_text(
-        "def create_app(*args, **kwargs):\n"
-        "    raise AssertionError('probe must not initialize a server')\n",
-        encoding="utf-8",
     )
 
     # 旧实现无条件断言 hardware_adapters() 非空：无适配器机器上 CPU 设备
@@ -2526,84 +1540,109 @@ def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path):
     assert manager._probe_device(record, "directml")["reason"] == "engine_import_failed"
 
 
-def test_named_revision_path_accepts_old_and_new_random_tails(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+def test_missing_model_does_not_erase_installed_dependencies(tmp_path: Path) -> None:
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    item = manager.create("portable")
-    for suffix in ("a" * 16, "a" * 32):
-        record = {
-            **item,
-            "revision": 2,
-            "path": f"{item['id']}/revisions/2-{suffix}",
-        }
-        assert manager._safe_path(record) == manager.root / record["path"]
+    record = _write_venv_record(
+        manager, "model-missing", status="installed", recipe="paddleocr-ort-directml"
+    )
+    result = manager._public_record(
+        record, {"healthy": False, "reason": "engine_model_missing", "python": "python"}
+    )
+    assert result["dependency_state"] == "installed"
+    assert result["model_state"] == "missing"
+    assert result["engine_state"] == "unverified"
+    assert result["service_state"] == "not_started"
+    assert result["target_device"] == "directml" and result["actual_device"] is None
 
 
-def test_standalone_mineru_recipe_excludes_rapidocr(tmp_path: Path) -> None:
-    """独立 MinerU 配方退役：MinerU 随统一闭包携带且不含 RapidOCR。"""
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    value = json.loads(manifest.read_text(encoding="utf-8"))
+# ---------------------------------------------------------------------------
+# 配方目录 / 列表投影 / CLI
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_catalog_projects_manifest_bound_scopes(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "product")
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    item = manager.create("mineru")
-    with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
-        manager.preview_install(item["id"], "mineru-cpu")
-    generated = build_runtime_manifest(
-        runtime_wheel=manifest.parent / value["runtime_wheel"],
-        base_lock=manifest.parent / value["profiles"]["win-x64-base"]["lock"],
-        paddle_onnx_locks={
-            "directml": manifest.parent
-            / value["paddle_onnx_environments"]["directml"]["lock"]
-        },
-        python_archive=manifest.parent / value["python"]["archive"],
-        python_version=value["python"]["version"],
-        python_source_url=value["python"]["source_url"],
-        installer_executable=manifest.parent / value["installer"]["executable"],
-        version="0.7.0",
-        source_commit="0" * 40,
-        build_workflow="tests/runtime",
-        output_dir=tmp_path / "output",
-        capabilities=("ocr.recognition.v2",),
+    catalog = manager.recipe_catalog()
+    assert manager.list()["recipes"] == catalog
+    # 统一推理闭包：directml 是唯一可安装配方；历史原生 Paddle 与分设备
+    # （CPU/CUDA/独立 MinerU）配方均已从可安装目录退役（记录保留）。
+    assert [entry["id"] for entry in catalog] == ["paddleocr-ort-directml"]
+    directml = catalog[0]
+    assert directml["engine"] == "paddle"
+    assert directml["family"] == "paddle-onnx"
+    assert directml["provider"] == "DmlExecutionProvider"
+    assert directml["configured_recognition_types"] == [
+        "text",
+        "table",
+        "structure",
+        "document",
+    ]
+    # 统一闭包是唯一可安装配方，也是远程 MinerU 模式的推荐宿主。
+    assert [item["id"] for item in catalog if item["default_remote_host"]] == [
+        "paddleocr-ort-directml"
+    ]
+    assert all(item["supports_remote_host"] for item in catalog)
+    assert directml["display_name"] == "PaddleOCR ONNX + MinerU · Windows DirectML"
+    assert directml["accelerator"] == "cpu"
+    assert directml["target_device"] == "directml"
+    # 目录同时投影设备全集：统一闭包可在同闭包 directml↔cpu 切换。
+    assert directml["supported_devices"] == ["directml", "cpu"]
+    assert directml["python_version"] == _PYTHON_VERSION
+    assert directml["abi"] == "cp313"
+    assert directml["platform"] == "win_amd64"
+    assert directml["scope_id"] == "paddleocr-ort-directml"
+    assert "paddleocr==3.7.0" in directml["dependencies"]
+    assert "onnxruntime-directml==1.24.4" in directml["dependencies"]
+    assert "mineru==4.1.3" in directml["dependencies"]
+    assert directml["python_origin"] == "product_bundle"
+    assert directml["runtime_wheel_origin"] == "product_bundle"
+    # 退役配方不再宣称任何识别类型，且不可再解析安装 scope。
+    for recipe in ("paddleocr-cuda", "paddleocr-ort-cpu", "mineru-cuda"):
+        assert manager._recipe_modes(recipe) == []
+        with pytest.raises(ManagedEnvironmentError, match="engine recipe is retired"):
+            manager._recipe(recipe)
+
+
+def test_managed_environment_list_projects_runtime_hardware_truth(
+    tmp_path: Path,
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    manager = ManagedEnvironmentStore(
+        product_root=tmp_path / "product",
+        component_lock=component,
+        runtime_manifest=manifest,
     )
-    assert (generated.parent / "runtime-code/vibeocr/runtime/host/main.py").is_file()
-    loaded = load_runtime_manifest(generated)
-    # 新构建只产出 base profile；推理栈全部由 directml 统一闭包绑定承载。
-    assert set(loaded.profiles) == {"win-x64-base"}
-    assert set(loaded.paddle_onnx_environments) == {"paddleocr-ort-directml"}
-    closure_lock = loaded.paddle_onnx_environments["paddleocr-ort-directml"]
-    lock_text = closure_lock.lock_path.read_text(encoding="utf-8")
-    assert "mineru==4.1.3" in lock_text
-    assert "rapidocr" not in lock_text
+    # CUDA 支持退役后列表不再探测 NVIDIA 驱动（runtime_installer 已不
+    # import subprocess）：list() 不得携带硬件/package 来源投影。
+    import vibeocr.runtime.environments.runtime_installer as installer_module
+
+    assert not hasattr(installer_module, "subprocess")
+    payload = manager.list()
+    assert "hardware" not in payload
+    assert "package_source_ids" not in payload
+    # 预构建树后 capabilities 不再包含安装进度。
+    assert payload["capabilities"] == [
+        "environment.cleanup.v1",
+        "environment.switch-reservation.v1",
+    ]
 
 
 def test_frozen_manager_exposes_named_environment_list(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def nvidia_ok(*_args: object, **_kwargs: object) -> object:
-        from types import SimpleNamespace
-
-        return SimpleNamespace(returncode=0, stdout="552.44\n")
-
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_installer.subprocess.run", nvidia_ok
-    )
+    manifest, component = _release(tmp_path / "product")
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
@@ -2618,10 +1657,10 @@ def test_frozen_manager_exposes_named_environment_list(
     assert [entry["id"] for entry in response["result"].pop("recipes")] == [
         "paddleocr-ort-directml",
     ]
-    # CUDA 支持已退役：list 不再携带硬件投影。
+    # CUDA 支持已退役：list 不再携带硬件投影；零安装后 capabilities 只剩
+    # 清理与切换预留。
     assert response["result"] == {
         "capabilities": [
-            "environment.install_progress.v1",
             "environment.cleanup.v1",
             "environment.switch-reservation.v1",
         ],
@@ -2717,12 +1756,78 @@ def test_frozen_manager_exposes_named_environment_list(
     }
 
 
+def test_cli_initialize_default_registers_product_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "initialize_default",
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    assert main(["--request-json", json.dumps(request)]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["action"] == "initialize_default"
+    assert envelope["result"]["active_id"] == "paddleocr-ort-directml"
+    environment = envelope["result"]["environments"][0]
+    assert environment["kind"] == "product"
+    assert environment["python_state"] == "ready"
+
+
+def test_cli_rejects_retired_request_kinds_and_actions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    base = {
+        "protocol_version": 2,
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    # request_kind 白名单：在线安装/maintenance 的 kind 已随预构建树退役。
+    for request in (
+        {"request_kind": "install_plan", "operation": "ensure", **base},
+        {"request_kind": "start", "operation": "ensure", **base},
+        {"request_kind": "environment", "action": "install", **base},
+        {"request_kind": "environment", "action": "preview_install", **base},
+        {"request_kind": "environment", "action": "prepare_target", **base},
+        {"request_kind": "environment", "action": "find_compatible", **base},
+        {"request_kind": "environment", "action": "repair_empty", **base},
+    ):
+        assert main(["--request-json", json.dumps(request)]) == 1, request
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "invalid_request"
+
+
+def test_cli_rejects_retired_request_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest, component = _release(tmp_path / "product")
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "list",
+        "name": "新环境",
+        "recipe": "paddleocr-ort-directml",
+        "accepted_event_streams": ["ndjson.v1"],
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
+    }
+    assert main(["--request-json", json.dumps(request)]) == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "invalid_request"
+
+
 def test_named_environment_error_envelope_redacts_private_details(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "product")
 
     def fail(_manager: ManagedEnvironmentStore) -> dict:
         raise RuntimeInstallError(
@@ -2747,424 +1852,61 @@ def test_named_environment_error_envelope_redacts_private_details(
     assert "[url]" in output
 
 
-def _tar_with(path: Path, member_name: str, content: bytes = b"python") -> None:
-    with tarfile.open(path, mode="w:gz") as archive:
-        info = tarfile.TarInfo(member_name)
-        info.size = len(content)
-        archive.addfile(info, io.BytesIO(content))
-
-
-def test_python_archive_extracts_only_stripped_python_root(tmp_path: Path) -> None:
-    archive = tmp_path / "python.tar.gz"
-    _tar_with(archive, "python/python.exe")
-    destination = tmp_path / "runtime"
-    destination.mkdir()
-    _extract_python_archive(archive, destination)
-    assert (destination / "python.exe").read_bytes() == b"python"
-
-
-def test_python_archive_reports_actual_uncompressed_bytes(tmp_path: Path) -> None:
-    archive = tmp_path / "python.tar.gz"
-    _tar_with(archive, "python/python.exe", b"python")
-    destination = tmp_path / "runtime"
-    destination.mkdir()
-    samples: list[tuple[int, int]] = []
-
-    _extract_python_archive(
-        archive,
-        destination,
-        progress=lambda current, total: samples.append((current, total)),
-    )
-
-    assert samples == [(6, 6)]
-
-
-def test_python_archive_coalesces_dense_progress_without_losing_completion(
+def test_runtime_host_emits_unicode_paths_as_utf8(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    archive = tmp_path / "python.tar.gz"
-    with tarfile.open(archive, mode="w:gz") as stream:
-        for index in range(103):
-            info = tarfile.TarInfo(f"python/Lib/module-{index}.py")
-            info.size = 1
-            stream.addfile(info, io.BytesIO(b"x"))
-    destination = tmp_path / "runtime"
-    destination.mkdir()
-    samples: list[tuple[int, int]] = []
-
-    _extract_python_archive(
-        archive,
-        destination,
-        progress=lambda current, total: samples.append((current, total)),
-    )
-
-    assert samples[-1] == (103, 103)
-    assert len(samples) <= 102
-
-
-def test_python_archive_does_not_repeat_completion_for_empty_tail_files(
-    tmp_path: Path,
-) -> None:
-    archive = tmp_path / "python.tar.gz"
-    with tarfile.open(archive, mode="w:gz") as stream:
-        content = tarfile.TarInfo("python/python.exe")
-        content.size = 1
-        stream.addfile(content, io.BytesIO(b"x"))
-        for index in range(3):
-            empty = tarfile.TarInfo(f"python/empty-{index}.txt")
-            empty.size = 0
-            stream.addfile(empty, io.BytesIO())
-    destination = tmp_path / "runtime"
-    destination.mkdir()
-    samples: list[tuple[int, int]] = []
-
-    _extract_python_archive(
-        archive,
-        destination,
-        progress=lambda current, total: samples.append((current, total)),
-    )
-
-    assert samples == [(1, 1)]
-
-
-def test_python_archive_rejects_traversal(tmp_path: Path) -> None:
-    archive = tmp_path / "python.tar.gz"
-    _tar_with(archive, "python/../escape.exe")
-    destination = tmp_path / "runtime"
-    destination.mkdir()
-    with pytest.raises(RuntimeInstallError, match="unsafe"):
-        _extract_python_archive(archive, destination)
-    assert not (tmp_path / "escape.exe").exists()
-
-
-def test_manifest_verifies_raw_hash_and_bound_artifacts(tmp_path: Path) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manifest = load_runtime_manifest(manifest_path)
-    assert manifest.backend_version == "0.7.0"
-    assert manifest.runtime_wheel == "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
-    assert manifest.sha256 == _sha(manifest_path.read_bytes())
-    assert set(manifest.profiles) == {"win-x64-base", "win-x64-cpu"}
-
-
-def test_manifest_rejects_tampered_lock(tmp_path: Path) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    (manifest_path.parent / "requirements-win-x64-cpu.lock").write_text(
-        "tampered",
-        encoding="utf-8",
-    )
-    with pytest.raises(ManifestError, match="SHA-256 mismatch"):
-        load_runtime_manifest(manifest_path)
-
-
-@pytest.mark.parametrize(
-    "directive",
-    ["--index-url https://pypi.org/simple", "--extra-index-url https://extra.invalid"],
-)
-def test_runtime_lock_rejects_embedded_source_directives(
-    tmp_path: Path,
-    directive: str,
-) -> None:
-    lock = tmp_path / "requirements-win-x64-cpu.lock"
-    lock.write_text(f"{directive}\n{_lock_text('win-x64-cpu')}", encoding="utf-8")
-
-    with pytest.raises(ManifestError, match="source-neutral"):
-        validate_requirements_lock(lock, profile="win-x64-cpu")
-
-
-def test_manifest_rejects_tampered_runtime_wheel(tmp_path: Path) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    (manifest_path.parent / "vibeocr_next_runtime-0.7.0-py3-none-any.whl").write_bytes(
-        b"tampered"
-    )
-    with pytest.raises(ManifestError, match="Runtime wheel SHA-256 mismatch"):
-        load_runtime_manifest(manifest_path)
-
-
-def test_manifest_rejects_old_schema(tmp_path: Path) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["schema_version"] = 1
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ManifestError, match="schema_version must be 2"):
-        load_runtime_manifest(manifest_path)
-
-
-def test_manifest_rejects_tampered_python_archive(tmp_path: Path) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    (
-        manifest_path.parent / "cpython-3.13.16-win_amd64-install_only.tar.gz"
-    ).write_bytes(b"tampered")
-    with pytest.raises(ManifestError, match="Python archive SHA-256 mismatch"):
-        load_runtime_manifest(manifest_path)
-
-
-def test_shared_layout_requires_explicit_valid_registration(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundle"
-    product = bundle / "classic"
-    product.mkdir(parents=True)
-    marker = bundle / "portable-layout.json"
-    marker.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "shared_root": "shared",
-                "products": {
-                    "classic": {
-                        "root": "classic",
-                        "component_lock": "component-lock.json",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    digest = "a" * 64
-    local = resolve_runtime_store(
-        product,
-        manifest_sha256=digest,
-    )
-    assert local.store_root == product.resolve()
-    shared = resolve_runtime_store(
-        product,
-        manifest_sha256=digest,
-        layout_manifest=marker,
-        product_id="classic",
-    )
-    assert shared.store_root == (bundle / "shared").resolve()
-    assert shared.runtime_root == (bundle / "shared" / "runtime").resolve()
-
-
-def test_shared_layout_rejects_traversal(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundle"
-    product = bundle / "classic"
-    product.mkdir(parents=True)
-    marker = bundle / "portable-layout.json"
-    marker.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "shared_root": "../escape",
-                "products": {"classic": {"root": "classic"}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(LayoutError):
-        resolve_runtime_store(
-            product,
-            manifest_sha256="a" * 64,
-            layout_manifest=marker,
-            product_id="classic",
-        )
-
-
-def test_ensure_is_atomic_and_idempotent(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    first = installer.ensure()
-    second = installer.ensure()
-    assert first == second
-    assert len(calls) == 1
-    assert calls == [installer.paths.runtime_root.with_name("runtime.installing")]
-    assert Path(first.python_executable).is_file()
-    assert not installer.paths.runtime_root.with_name("runtime.installing").exists()
-    assert installer.inspect().integrity == "verified"
-    assert installer.inspect().accelerator == "cpu"
-    portable_path_keys = {
-        "VIBEOCR_PRODUCT_ROOT",
-        "VIBEOCR_RUNTIME_ROOT",
-        "PIP_CACHE_DIR",
-        "UV_CACHE_DIR",
-        "HF_HOME",
-        "MODELSCOPE_CACHE",
-        "PADDLE_PDX_CACHE_HOME",
-        "TEMP",
-        "TMP",
+    output = io.BytesIO()
+    stdout = io.TextIOWrapper(output, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    moved_root = tmp_path / "移动后"
+    request = {
+        "protocol_version": 2,
+        "request_kind": "environment",
+        "action": "list",
+        "product_root": str(moved_root),
+        "component_lock": str(moved_root / "component-lock.json"),
+        "runtime_manifest": str(moved_root / "runtime-manifest.json"),
     }
-    assert all(
-        Path(first.environment[key]).is_relative_to(installer.paths.store_root)
-        for key in portable_path_keys
-    )
-    assert first.environment["PIP_CONFIG_FILE"] == os.devnull
-    assert first.environment["PYTHONNOUSERSITE"] == "1"
-    assert Path(first.environment["MINERU_HOME"]).is_dir()
-    assert first.environment["VIBEOCR_RUNTIME_ACCELERATOR"] == "cpu"
-    assert first.environment["VIBEOCR_USE_GPU"] == "false"
+
+    assert main(["--request-json", json.dumps(request, ensure_ascii=False)]) == 1
+
+    stdout.flush()
+    # stdout 被强制重配为 UTF-8：JSON 可解码，且本地路径按 [path] 脱敏。
+    envelope = json.loads(output.getvalue().decode("utf-8"))
+    assert envelope["ok"] is False
+    assert "[path]" in envelope["error"]["message"]
 
 
-def test_launch_environment_is_derived_from_installer_profile(
-    tmp_path: Path,
+def test_runtime_host_allows_standard_streams_without_reconfigure(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
+    stdout = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", None)
 
-    launch = installer.ensure()
+    assert main(["--request-json", "not-json"]) == 1
 
-    # CUDA 档位已退役：legacy Runtime 宿主恒按 CPU 档投影 GPU 兼容标志。
-    assert launch is not None
-    assert launch.environment["VIBEOCR_RUNTIME_ACCELERATOR"] == "cpu"
-    assert launch.environment["VIBEOCR_USE_GPU"] == "false"
+    assert json.loads(stdout.getvalue())["error"]["code"] == "invalid_request"
 
 
-def test_failed_install_leaves_no_partial_or_final(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def fail(_partial: Path, _manifest, _profile: str) -> Path:
-        raise RuntimeInstallError("boom")
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=fail,
-    )
-    with pytest.raises(RuntimeInstallError, match="boom"):
-        installer.ensure()
-    assert not installer.paths.runtime_root.exists()
-    assert not installer.paths.runtime_root.with_name("runtime.installing").exists()
-    assert installer.maintenance_snapshot()["operation_state"] == "failed"
-
-
-@pytest.mark.parametrize("resolver_timeout", [False, True])
-def test_failed_repair_preserves_previous_runtime_until_verified_commit(
-    tmp_path: Path,
-    resolver_timeout: bool,
+def test_runtime_host_does_not_swallow_stdout_write_errors(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    launch = initial.ensure()
-    assert launch is not None
-    preserved = initial.paths.runtime_root / "preserved.txt"
-    preserved.write_text("previous-runtime", encoding="utf-8")
-    marker_before = (initial.paths.runtime_root / ".installed.json").read_bytes()
+    class FailingWriter:
+        def write(self, _value: str) -> None:
+            raise OSError("stdout unavailable")
 
-    def fail(_partial: Path, _manifest, _profile: str) -> Path:
-        if resolver_timeout:
-            _run_install_command(
-                [sys.executable, "-c", "import time; time.sleep(30)"],
-                timeout=0.3,
-                env=dict(os.environ),
-                reporter=repair._reporter,
-                heartbeat_code="runtime.resolve_packages",
-            )
-        raise RuntimeInstallError("repair failed")
+    monkeypatch.setattr(sys, "stdout", FailingWriter())
+    monkeypatch.setattr(sys, "stderr", None)
 
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=fail,
-        component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "runtime_host"
-            for component_id in component_ids
-        },
-        operation_id="failed-repair",
-    )
-
-    reason = "reason=total_timeout" if resolver_timeout else "repair failed"
-    with pytest.raises(RuntimeInstallError, match=reason):
-        repair.repair()
-
-    assert preserved.read_text(encoding="utf-8") == "previous-runtime"
-    assert (
-        initial.paths.runtime_root / ".installed.json"
-    ).read_bytes() == marker_before
-    assert Path(launch.python_executable).is_file()
-    assert not initial.paths.runtime_root.with_name("runtime.installing").exists()
-    assert not initial.paths.runtime_root.with_name("runtime.rollback").exists()
-
-    assert repair._reporter.snapshot["operation_state"] == "failed"
-    if resolver_timeout:
-        with pytest.raises(
-            RuntimeInstallFailure, match="operation=failed-repair"
-        ) as replayed:
-            repair._reporter._store.raise_replayed_failure("failed-repair")
-        assert "reason=total_timeout" in str(replayed.value)
+    with pytest.raises(OSError, match="stdout unavailable"):
+        main(["--request-json", "not-json"])
 
 
-def test_component_import_probe_reports_integrity_failed_drift(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    inspected = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-        component_probe=lambda _root, component_ids, _profile_id: {
-            component_id: component_id != "runtime_host"
-            for component_id in component_ids
-        },
-    )
-
-    component_status = inspected.profile_payload()["components"][0]
-    inspection = inspected.inspect(emit=False)
-
-    assert component_status["actual_state"] == "drifted"
-    assert component_status["drift_reason"] == "integrity_failed"
-    assert component_status["repairable"] is True
-    assert inspection.status == "missing"
-    assert inspection.integrity == "not-installed"
+# ---------------------------------------------------------------------------
+# 组件探测（runtime_maintenance 保留面）
+# ---------------------------------------------------------------------------
 
 
 def test_base_component_probe_uses_runtime_host_binding(
@@ -3197,176 +1939,95 @@ def test_base_component_probe_uses_runtime_host_binding(
     ) == {"runtime_host": True}
 
 
-def test_runtime_control_inspect_probes_components_once(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    probe_calls: list[tuple[Path, tuple[str, ...]]] = []
+@pytest.mark.parametrize("llama_available", [True, False])
+def test_mineru_cpu_probe_uses_mineru4_llama_binding(
+    tmp_path, monkeypatch, llama_available
+):
+    import contextlib
+    import importlib
+    from types import SimpleNamespace
 
-    def probe(
-        runtime_root: Path, component_ids: tuple[str, ...], _profile_id: str
-    ) -> dict[str, bool]:
-        probe_calls.append((runtime_root, component_ids))
-        return {component_id: True for component_id in component_ids}
+    def import_module(name):
+        if name in {"mineru", "onnxruntime"} or (
+            name == "mineru_llama_cpp" and llama_available
+        ):
+            return SimpleNamespace()
+        raise ImportError(name)
 
-    inspected = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        component_probe=probe,
-        operation_id="inspect-once",
-    )
-    control = object.__new__(RuntimeControl)
-    control._installer_factory = lambda **_kwargs: inspected
-    control._active_snapshot = None
-
-    result = control.execute_with_result(operation="inspect")
-
-    assert result.state.integrity == "verified"
-    # base-only 安装后，展示投影按已安装闭包的覆盖 profile 回报
-    # win-x64-base，而不是 accelerator plan 的 cpu 视角。
-    assert result.profile["profile_id"] == "win-x64-base"
-    assert len(probe_calls) == 1
-    assert probe_calls[0][0] == inspected.paths.runtime_root
-    assert all(
-        component["actual_state"] == "ready"
-        for component in result.profile["components"]
-    )
-
-
-def test_ensure_ready_runtime_probes_components_once(tmp_path: Path) -> None:
-    # 回归：就绪运行时的启动 ensure 在 ready 判定与 _launch 校验之间
-    # 复用同一次组件导入探测；重复探测会让每次产品启动都多付一遍
-    # 已安装组件的冷导入成本。
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    probe_calls: list[Path] = []
-
-    def probe(
-        runtime_root: Path, component_ids: tuple[str, ...], _profile_id: str
-    ) -> dict[str, bool]:
-        probe_calls.append(runtime_root)
-        return {component_id: True for component_id in component_ids}
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-        component_probe=probe,
-        operation_id="ensure-once",
-    )
-
-    launch = installer.ensure()
-
-    assert launch is not None
-    assert Path(launch.python_executable).is_file()
-    assert len(probe_calls) == 1
-    assert probe_calls[0] == installer.paths.runtime_root
-
-
-def test_inspect_and_ensure_report_covering_profile_after_base_only_install(
-    tmp_path: Path,
-) -> None:
-    # 回归：base-only 安装后，inspect 与 ensure 信封的 profile 投影必须
-    # 回报已安装闭包的覆盖 profile（win-x64-base），而不是 accelerator
-    # plan（win-x64-cpu）——plan 视角的组件集与绑定并不描述已安装的
-    # 运行时，还会把闭包外组件谎报成 desired ready。
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def probe(
-        _runtime_root: Path, component_ids: tuple[str, ...], _profile_id: str
-    ) -> dict[str, bool]:
-        return {component_id: True for component_id in component_ids}
-
-    product = tmp_path / "product"
-    control = RuntimeControl.from_installer_factory(
-        lambda **kwargs: RuntimeInstaller(
-            product_root=product,
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=_fake_install,
-            component_probe=probe,
-            **kwargs,
+    def run(command, **kwargs):
+        output = io.StringIO()
+        with monkeypatch.context() as patch, contextlib.redirect_stdout(output):
+            patch.setattr(sys, "argv", ["probe", command[-1]])
+            patch.setattr(importlib, "import_module", import_module)
+            exec(command[-2], {})
+        return subprocess.CompletedProcess(
+            command, 0, stdout=output.getvalue(), stderr=""
         )
-    )
-    control.execute_with_result(
-        operation="ensure",
-        install_component_ids=(),
-        download_source_ids=("paddleocr-modelscope", "mineru-modelscope"),
-    )
 
-    inspected = control.execute_with_result(operation="inspect")
-    ensured = control.execute_with_result(
-        operation="ensure",
-        install_component_ids=(),
-        download_source_ids=("paddleocr-modelscope", "mineru-modelscope"),
+    monkeypatch.setattr(runtime_maintenance.subprocess, "run", run)
+    assert (
+        probe_runtime_components(tmp_path, ("mineru-cpu",))["mineru-cpu"]
+        is llama_available
     )
-
-    for result in (inspected, ensured):
-        assert result.state.status == "ready"
-        assert result.profile["profile_id"] == "win-x64-base"
-        assert result.profile["accelerator"] == "cpu"
-        assert [item["component_id"] for item in result.profile["components"]] == [
-            "runtime_host",
-        ]
-        # 覆盖 profile 投影内全部组件都属于已安装闭包，desired ready 如实。
-        assert all(
-            item["desired_state"] == "ready" for item in result.profile["components"]
-        )
-        assert all(
-            item["actual_state"] == "ready" for item in result.profile["components"]
-        )
 
 
 def test_runtime_status_ready_for_healthy_base_only_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 回归：健康的 base-only 运行时不得被 /v2/runtime/status 判成
-    # degraded——plan 投影下闭包外组件显示 missing 是展示层
-    # 谎报，状态投影必须按已安装闭包的覆盖 profile 判定。
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    installer = RuntimeInstaller(
+    """legacy 记录的启动投影：健康 base 闭包不得被 /v2/runtime/status 判 degraded。"""
+    manifest, component = _release(tmp_path / "bundle")
+    manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        accelerator="cpu",
-        install_component_ids=(),
-        install_runner=_fake_install,
-        component_probe=lambda _root, ids, _profile_id: dict.fromkeys(ids, True),
     )
-    launch = installer.ensure()
-    assert launch is not None
-    for key, value in launch.environment.items():
+    runtime = manager.paths.runtime_root
+    runtime.mkdir(parents=True)
+    (runtime / "python.exe").write_bytes(b"python")
+    runtime_metadata = (
+        runtime / "Lib" / "site-packages" / "vibeocr_next_runtime-0.7.0.dist-info"
+    )
+    runtime_metadata.mkdir(parents=True)
+    (runtime_metadata / "METADATA").write_text(
+        "Name: vibeocr-next-runtime\nVersion: 0.7.0\n", encoding="utf-8"
+    )
+    fastapi_metadata = runtime / "Lib" / "site-packages" / "fastapi-1.0.0.dist-info"
+    fastapi_metadata.mkdir(parents=True)
+    (fastapi_metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: fastapi\nVersion: 1.0.0\n", encoding="utf-8"
+    )
+    (runtime / ".installed.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "backend_version": manager.manifest.backend_version,
+                "manifest_sha256": manager.manifest.sha256,
+                "accelerator": "cpu",
+                "component_ids": ["runtime_host"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        data["environments"]["legacy"] = {
+            "id": "legacy",
+            "name": "原有环境",
+            "revision": 1,
+            "kind": "legacy",
+            "path": "runtime",
+            "status": "installed",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+        }
+        data["active_id"] = "legacy"
+        data["active_revision"] = 1
+        _atomic_json(manager._registry, data)
+    launch = manager._launch(
+        manager._read()["environments"]["legacy"], str(runtime / "python.exe")
+    )
+    for key, value in launch["environment"].items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(
         runtime_maintenance,
@@ -3386,1595 +2047,10 @@ def test_runtime_status_ready_for_healthy_base_only_runtime(
     )
 
 
-def test_component_lock_capability_mismatch_is_rejected(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    data = json.loads(component.read_text(encoding="utf-8"))
-    data["required_capabilities"].append("unknown.feature")
-    component.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(RuntimeInstallError, match="missing required"):
-        RuntimeInstaller(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=_fake_install,
-        )
-
-
-def test_component_lock_runtime_manifest_mismatch_is_rejected(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    data = json.loads(component.read_text(encoding="utf-8"))
-    data["product"]["runtime_manifest_sha256"] = "f" * 64
-    component.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(
-        RuntimeInstallError, match="component lock runtime manifest mismatch"
-    ):
-        RuntimeInstaller(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=_fake_install,
-        )
-
-
-def test_store_lock_is_cross_handle_exclusive(tmp_path: Path) -> None:
-    first = RuntimeStoreLock(tmp_path / "locks" / "store.lock", timeout=0)
-    second = RuntimeStoreLock(tmp_path / "locks" / "store.lock", timeout=0)
-    first.acquire()
-    try:
-        with pytest.raises(RuntimeLockTimeout):
-            second.acquire()
-    finally:
-        first.release()
-    second.acquire()
-    second.release()
-
-
-def test_repair_is_idempotent_when_runtime_has_no_drift(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    installer.ensure()
-    original_marker = installer.paths.runtime_root / "original.txt"
-    original_marker.write_text("old", encoding="utf-8")
-
-    installer.repair()
-
-    assert calls == [installer.paths.runtime_root.with_name("runtime.installing")]
-    assert original_marker.read_text(encoding="utf-8") == "old"
-
-
-def test_failed_operation_id_replays_failure_without_reexecuting(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def fail_install(partial: Path, runtime_manifest, profile: str) -> Path:
-        del partial, runtime_manifest, profile
-        raise RuntimeInstallError("expected failure")
-
-    failed = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=fail_install,
-        operation_id="stable-operation",
-    )
-    with pytest.raises(RuntimeInstallError, match="expected failure"):
-        failed.ensure()
-    calls: list[Path] = []
-
-    def unexpected_install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    replay = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=unexpected_install,
-        operation_id="stable-operation",
-    )
-
-    with pytest.raises(RuntimeInstallFailure, match="expected failure"):
-        replay.ensure()
-    assert calls == []
-    assert replay.maintenance_snapshot() == failed.maintenance_snapshot()
-
-
-def test_component_repair_reports_requested_and_effective_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="base",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    Path(initial._launch().python_executable).unlink()
-
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="base",
-        install_runner=install,
-        operation_id="repair-1",
-        component_ids=("runtime_host",),
-    )
-    repair.repair()
-
-    assert len(calls) == 2
-    snapshot = repair.maintenance_snapshot()
-    assert snapshot is not None
-    assert snapshot["requested_component_ids"] == ["runtime_host"]
-    # 统一闭包后 base 是唯一有效修复范围（可选组件档位已退役）。
-    assert snapshot["effective_component_ids"] == ["runtime_host"]
-    assert repair.paths.runtime_root.is_dir()
-
-
-def test_component_drift_uses_installed_distribution_and_selected_repair(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest, component_lock = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    # 漂移探测只对声明了 version 的组件做版本比对：给 base 的 runtime_host
-    # 注入版本声明，并同步 component lock 的 manifest 摘要。
-    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
-    manifest_payload["profiles"]["win-x64-base"]["components"] = [
-        {
-            "component_id": "runtime_host",
-            "display_name": "Runtime 服务环境",
-            "version": "1.0.0",
-        }
-    ]
-    manifest.write_text(json.dumps(manifest_payload) + "\n", encoding="utf-8")
-    lock_payload = json.loads(component_lock.read_text(encoding="utf-8"))
-    lock_payload["product"]["runtime_manifest_sha256"] = _sha(manifest.read_bytes())
-    component_lock.write_text(json.dumps(lock_payload) + "\n", encoding="utf-8")
-    calls: list[Path] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        calls.append(partial)
-        python = _fake_install(partial, runtime_manifest, profile)
-        metadata = partial / "Lib" / "site-packages" / "fastapi-1.0.0.dist-info"
-        metadata.mkdir(parents=True)
-        (metadata / "METADATA").write_text(
-            "Metadata-Version: 2.1\nName: fastapi\nVersion: 1.0.0\n",
-            encoding="utf-8",
-        )
-        return python
-
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component_lock,
-        runtime_manifest=manifest,
-        accelerator="base",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    metadata = (
-        initial.paths.runtime_root
-        / "Lib"
-        / "site-packages"
-        / "fastapi-1.0.0.dist-info"
-        / "METADATA"
-    )
-    metadata.write_text(
-        "Metadata-Version: 2.1\nName: fastapi\nVersion: 0.9.0\n",
-        encoding="utf-8",
-    )
-    drifted = next(
-        item
-        for item in initial.profile_payload()["components"]
-        if item["component_id"] == "runtime_host"
-    )
-    assert drifted["actual_state"] == "drifted"
-    assert drifted["actual_version"] == "0.9.0"
-    assert drifted["drift_reason"] == "version_mismatch"
-    metadata.unlink()
-    missing = next(
-        item
-        for item in initial.profile_payload()["components"]
-        if item["component_id"] == "runtime_host"
-    )
-    assert missing["actual_state"] == "missing"
-
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component_lock,
-        runtime_manifest=manifest,
-        accelerator="base",
-        install_runner=install,
-        operation_id="repair-component",
-        component_ids=("runtime_host",),
-    )
-    repair.repair()
-
-    assert len(calls) == 2
-    repaired = next(
-        item
-        for item in repair.profile_payload()["components"]
-        if item["component_id"] == "runtime_host"
-    )
-    assert repaired["actual_state"] == "ready"
-
-
-def test_runtime_host_json_contract_selects_and_persists_accelerator(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    request = {
-        "protocol_version": 2,
-        "operation": "inspect",
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-        # 请求显式覆盖 component lock 缺省（cpu）：base 档位仍可选。
-        "accelerator": "base",
-    }
-    assert main(["--request-json", json.dumps(request)]) == 0
-    envelope = json.loads(capsys.readouterr().out)
-    assert envelope["protocol_version"] == 2
-    assert envelope["ok"] is True
-    assert envelope["operation"] == "inspect"
-    assert envelope["state"]["accelerator"] == "base"
-    assert envelope["state"]["runtime_root"].endswith("runtime")
-    assert "profile" not in envelope["state"]
-    assert envelope["profile"]["profile_id"] == "win-x64-base"
-    assert envelope["profile"]["components"][-1]["component_id"] == "runtime_host"
-    assert envelope["maintenance"]["operation_state"] == "succeeded"
-    descriptors = {item["name"]: item for item in envelope["capability_descriptors"]}
-    recognition = descriptors["ocr.recognition.v2"]
-    assert recognition == {
-        "name": "ocr.recognition.v2",
-        "lifecycle": "active",
-        "introduced_in": "2.0.0",
-        "deprecated_in": None,
-        "sunset_at": None,
-        "replacement": None,
-    }
-
-
-def test_runtime_host_emits_unicode_paths_as_utf8(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    output = io.BytesIO()
-    stdout = io.TextIOWrapper(output, encoding="cp1252")
-    monkeypatch.setattr(sys, "stdout", stdout)
-    moved_root = tmp_path / "移动后"
-    request = {
-        "protocol_version": 2,
-        "operation": "inspect",
-        "product_root": str(moved_root),
-        "component_lock": str(moved_root / "component-lock.json"),
-        "runtime_manifest": str(moved_root / "runtime-manifest.json"),
-    }
-
-    assert main(["--request-json", json.dumps(request, ensure_ascii=False)]) == 1
-
-    stdout.flush()
-    envelope = json.loads(output.getvalue().decode("utf-8"))
-    assert envelope["ok"] is False
-    assert moved_root.name in envelope["error"]["message"]
-
-
-def test_runtime_host_allows_standard_streams_without_reconfigure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stdout = io.StringIO()
-    monkeypatch.setattr(sys, "stdout", stdout)
-    monkeypatch.setattr(sys, "stderr", None)
-
-    assert main(["--request-json", "not-json"]) == 1
-
-    assert json.loads(stdout.getvalue())["error"]["code"] == "invalid_request"
-
-
-def test_runtime_host_does_not_swallow_stdout_write_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FailingWriter:
-        def write(self, _value: str) -> None:
-            raise OSError("stdout unavailable")
-
-    monkeypatch.setattr(sys, "stdout", FailingWriter())
-    monkeypatch.setattr(sys, "stderr", None)
-
-    with pytest.raises(OSError, match="stdout unavailable"):
-        main(["--request-json", "not-json"])
-
-
-def test_runtime_host_emits_opt_in_ndjson_progress(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    request = {
-        "protocol_version": 2,
-        "operation": "inspect",
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-        "accelerator": "cpu",
-        "accepted_event_streams": ["ndjson.v1"],
-    }
-
-    assert main(["--request-json", json.dumps(request)]) == 0
-
-    messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    events = messages[:-1]
-    response = messages[-1]
-    assert [event["event_type"] for event in events] == ["progress", "snapshot"]
-    assert [event["snapshot"]["sequence"] for event in events] == [1, 2]
-    assert all(event["operation"] == "inspect" for event in events)
-    assert response["ok"] is True
-    assert response["maintenance"] == events[-1]["snapshot"]
-
-
-def test_runtime_host_rejects_unknown_event_stream(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    request = {
-        "protocol_version": 2,
-        "operation": "inspect",
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-        "accepted_event_streams": ["sse.v1"],
-    }
-
-    assert main(["--request-json", json.dumps(request)]) == 1
-    envelope = json.loads(capsys.readouterr().out)
-    assert envelope["error"]["code"] == "invalid_request"
-
-
-def test_install_progress_and_http_status_share_the_persisted_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    events: list[dict] = []
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-        event_sink=events.append,
-    )
-
-    launch = installer.ensure()
-
-    assert [event["snapshot"]["phase"] for event in events] == [
-        "validate_binding",
-        "wait_for_lock",
-        "prepare_runtime",
-        "install_profile",
-        "verify_runtime",
-        "commit_runtime",
-        "commit_runtime",
-    ]
-    assert events[-1]["snapshot"]["operation_state"] == "succeeded"
-    for key, value in launch.environment.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_maintenance.probe_runtime_components",
-        lambda _root, component_ids, **_kwargs: {
-            component_id: True for component_id in component_ids
-        },
-    )
-    runtime_maintenance._component_probe_cache.clear()
-    status = runtime_status_from_environment("instance-test", "ready")
-    assert status["maintenance"]["sequence"] == events[-1]["snapshot"]["sequence"]
-    assert status["maintenance"]["message_code"] == "runtime.ensure_complete"
-    assert status["profile"]["components"][0] == {
-        "component_id": "runtime_host",
-        "display_name": "Runtime 服务环境",
-        "state": "ready",
-        "desired_state": "ready",
-        "desired_version": None,
-        "actual_state": "ready",
-        "actual_version": None,
-        "drift_reason": "none",
-        "repairable": False,
-    }
-    assert status["source"]["backend_source_sha"] == "0" * 40
-
-    monkeypatch.setattr(
-        "vibeocr.runtime.environments.runtime_maintenance.probe_runtime_components",
-        lambda _root, component_ids, **_kwargs: {
-            component_id: component_id != "runtime_host"
-            for component_id in component_ids
-        },
-    )
-    runtime_maintenance._component_probe_cache.clear()
-    degraded = runtime_status_from_environment("instance-test", "ready")
-    assert degraded["service_state"] == "degraded"
-    assert degraded["profile"]["components"][0]["drift_reason"] == ("integrity_failed")
-
-
-def test_long_install_command_emits_heartbeat(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest_path, _ = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manifest = load_runtime_manifest(manifest_path)
-    events: list[dict] = []
-    reporter = RuntimeMaintenanceReporter(
-        state_root=tmp_path / "state",
-        profile=profile_descriptor(
-            manifest.profiles["win-x64-cpu"],
-            accelerator="cpu",
-        ),
-        event_sink=events.append,
-    )
-    reporter.start("ensure", total_steps=7)
-    reporter.advance(
-        phase="install_profile",
-        current=4,
-        total=7,
-        message_code="runtime.install_profile",
-    )
-    events_before_cancel_checks = list(events)
-    for _ in range(100):
-        reporter.check_cancelled()
-    assert events == events_before_cancel_checks
-
-    from vibeocr.runtime.environments import runtime_installer as installer_module
-
-    monkeypatch.setattr(
-        installer_module,
-        "_CHILD_HEARTBEAT_INTERVAL_SECONDS",
-        0.2,
-    )
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "import sys, time\n"
-            "print('Collecting torch-2.7.0', flush=True)\n"
-            "time.sleep(0.6)\n"
-            "print('noise line without status prefix', flush=True)\n"
-            "time.sleep(0.6)\n"
-            "print('Downloading torch-2.7.0-cp313 (2.5 GB)', flush=True)\n"
-        ),
-    ]
-
-    _run_install_command(
-        command,
-        timeout=60,
-        env={**os.environ},
-        reporter=reporter,
-        heartbeat_code="runtime.install_profile",
-    )
-
-    heartbeats = [event for event in events if event["event_type"] == "heartbeat"]
-    assert heartbeats
-    assert heartbeats[0]["snapshot"]["phase"] == "install_profile"
-    assert heartbeats[0]["message_code"] == "runtime.install_profile"
-    # 状态行明细按变化回报：无前缀的噪声行不产生事件
-    detail_events = [event for event in events if event.get("fallback_message")]
-    assert "reason=started" in detail_events[0]["fallback_message"]
-    assert [event["fallback_message"] for event in detail_events[1:]] == [
-        "Collecting torch-2.7.0",
-        "Downloading torch-2.7.0-cp313 (2.5 GB)",
-    ]
-    for event in detail_events:
-        assert event["event_type"] == "progress"
-        assert event["snapshot"]["phase"] == "install_profile"
-
-
-def test_child_status_detail_only_matches_known_prefixes() -> None:
-    from vibeocr.runtime.environments.runtime_installer import _child_status_detail
-
-    assert (
-        _child_status_detail("Collecting numpy==2.3.1\n") == "Collecting numpy==2.3.1"
-    )
-    assert (
-        _child_status_detail("Downloading torch-2.7.0-cp313 (2.5 GB)\r\n")
-        == "Downloading torch-2.7.0-cp313 (2.5 GB)"
-    )
-    assert _child_status_detail("Using cached scipy-1.16.0.whl") is not None
-    assert _child_status_detail("noise line") is None
-    assert _child_status_detail("   ") is None
-    # 超长行（如 Installing collected packages 全量列表）有界截断
-    assert len(_child_status_detail("Collecting " + "x" * 500)) == 160
-
-
-def test_run_install_command_failure_keeps_stderr_tail() -> None:
-    """pip 失败时错误信息必须携带子进程输出尾部，不能再只剩 exit code。"""
-
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "import sys\n"
-            "print('Collecting big-wheel')\n"
-            "print('ERROR: Could not find a version for req-x', file=sys.stderr)\n"
-            "sys.exit(1)\n"
-        ),
-    ]
-    with pytest.raises(RuntimeInstallError) as excinfo:
-        _run_install_command(
-            command,
-            timeout=60,
-            env={**os.environ},
-            reporter=None,
-            heartbeat_code="runtime.install_profile",
-        )
-    message = str(excinfo.value)
-    assert "runtime.install_profile failed with exit code 1" in message
-    assert "ERROR: Could not find a version for req-x" in message
-
-
-def test_run_install_command_failure_tail_is_bounded_and_prefers_stderr() -> None:
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "import sys\n"
-            "for index in range(60):\n"
-            "    print(f'noise-{index}')\n"
-            "print('ERROR: hash mismatch for wheel-y', file=sys.stderr)\n"
-            "sys.exit(1)\n"
-        ),
-    ]
-    with pytest.raises(RuntimeInstallError) as excinfo:
-        _run_install_command(
-            command,
-            timeout=60,
-            env={**os.environ},
-            reporter=None,
-            heartbeat_code="runtime.install_profile",
-        )
-    message = str(excinfo.value)
-    assert "hash mismatch for wheel-y" in message
-    # stderr 优先且整条消息有界：stdout 噪声不应全部进入错误信息
-    assert "noise-0\n" not in message
-
-
-def test_runtime_host_rejects_legacy_profile_field(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    request = {
-        "protocol_version": 2,
-        "operation": "inspect",
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-        "profile": "win-x64-cpu",
-    }
-    assert main(["--request-json", json.dumps(request)]) == 1
-    envelope = json.loads(capsys.readouterr().out)
-    assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "invalid_request"
-
-
-# ---------------------------------------------------------------------------
-# base-offline 离线安装路径（计划 §4.2）
-# ---------------------------------------------------------------------------
-
-
-def _run_default_installer(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    with_base_pack: bool,
-    profile: str = "win-x64-base",
-    with_shared_pool: bool = False,
-) -> tuple[list[list[str]], Path, Path]:
-    """Run ``_default_install_runner`` with captured uv commands.
-
-    Returns (captured_commands, partial_root, manifest_path). The Python
-    archive extraction and every child process are faked so the test only
-    asserts command construction and pack handling.
-    """
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    manifest_path, _ = _release(
-        tmp_path / "release",
-        with_base_pack=with_base_pack,
-        with_shared_pool=with_shared_pool,
-    )
-    manifest = load_runtime_manifest(manifest_path)
-    partial_root = tmp_path / "runtimes" / "runtime-0" / "partial"
-    partial_root.mkdir(parents=True)
-    commands: list[list[str]] = []
-
-    def fake_run(command, *, timeout, env, reporter, heartbeat_code, gate_python=None):  # type: ignore[no-untyped-def]
-        commands.append(list(command))
-
-    def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
-        (destination / "python.exe").write_bytes(b"python")
-
-    monkeypatch.setattr(installer, "_run_install_command", fake_run)
-    monkeypatch.setattr(installer, "_extract_python_archive", fake_extract_python)
-    installer._default_install_runner(
-        partial_root,
-        manifest,
-        manifest.profiles[profile].scopes[0],
-    )
-    return commands, partial_root, manifest_path
-
-
-class TestOfflineRuntimePack:
-    def test_bound_pack_installs_with_no_index_and_find_links(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        commands, partial_root, manifest_path = _run_default_installer(
-            tmp_path, monkeypatch, with_base_pack=True
-        )
-        profile_install = commands[0]
-        assert "--no-index" in profile_install
-        # 离线路径不做逐件 --require-hashes:pack 完整性由 manifest 绑定。
-        assert "--require-hashes" not in profile_install
-        # pack 是纯 wheel 闭包，离线安装永不触发本机构建。
-        assert "--only-binary=:all:" in profile_install
-        find_links = profile_install[
-            profile_install.index("--find-links") + 1  # type: ignore[arg-type]
-        ]
-        pack_dir = Path(find_links)
-        # pack 已解压到 state 缓存且包含全部 wheel。
-        assert (pack_dir / "fastapi-1.0.0-py3-none-any.whl").is_file()
-        assert (pack_dir / ".complete").is_file()
-        # 完整标记存在时重复安装幂等复用，不重复解压。
-        marker_before = (pack_dir / ".complete").stat().st_mtime_ns
-        # 同一 partial 目录重复执行：完整标记存在时直接复用解压结果。
-        from vibeocr.runtime.environments import runtime_installer as installer
-
-        manifest = load_runtime_manifest(manifest_path)
-        commands.clear()
-        installer._default_install_runner(
-            partial_root,
-            manifest,
-            manifest.profiles["win-x64-base"].scopes[0],
-        )
-        assert commands[0][commands[0].index("--find-links") + 1] == find_links
-        assert (pack_dir / ".complete").stat().st_mtime_ns == marker_before
-
-    def test_same_version_new_manifest_pack_rebuilds_cached_wheels(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        commands, partial_root, manifest_path = _run_default_installer(
-            tmp_path, monkeypatch, with_base_pack=True
-        )
-        first_command = commands[0]
-        pack_dir = Path(first_command[first_command.index("--find-links") + 1])
-        assert (pack_dir / "fastapi-1.0.0-py3-none-any.whl").is_file()
-
-        document = json.loads(manifest_path.read_text(encoding="utf-8"))
-        profile = document["profiles"]["win-x64-base"]
-        pack_path = manifest_path.parent / profile["runtime_pack"][0]
-        with zipfile.ZipFile(pack_path, mode="w") as archive:
-            archive.writestr("pack-requirements.txt", "fastapi==1.0.0\n")
-            archive.writestr("fastapi-1.0.0-new-py3-none-any.whl", b"new-wheel")
-        profile["runtime_pack_sha256"] = [_sha(pack_path.read_bytes())]
-        manifest_path.write_text(json.dumps(document), encoding="utf-8")
-        manifest = load_runtime_manifest(manifest_path)
-
-        from vibeocr.runtime.environments import runtime_installer as installer
-
-        installer._default_install_runner(
-            partial_root,
-            manifest,
-            manifest.profiles["win-x64-base"].scopes[0],
-        )
-        assert not (pack_dir / "fastapi-1.0.0-py3-none-any.whl").exists()
-        assert (pack_dir / "fastapi-1.0.0-new-py3-none-any.whl").read_bytes() == (
-            b"new-wheel"
-        )
-
-    def test_missing_bound_pack_fails_closed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from vibeocr.runtime.environments import runtime_installer as installer
-
-        manifest_path, _ = _release(tmp_path / "release", with_base_pack=True)
-        (tmp_path / "release" / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip").unlink()
-        partial_root = tmp_path / "runtimes" / "runtime-0" / "partial"
-        partial_root.mkdir(parents=True)
-        manifest = load_runtime_manifest(manifest_path, verify_artifacts=False)
-
-        def fake_run(
-            command, *, timeout, env, reporter, heartbeat_code, gate_python=None
-        ):  # type: ignore[no-untyped-def]
-            raise AssertionError("install must not run when the pack is missing")
-
-        monkeypatch.setattr(installer, "_run_install_command", fake_run)
-
-        def fake_extract_python(archive_path, destination, *, progress=None):  # type: ignore[no-untyped-def]
-            (destination / "python.exe").write_bytes(b"python")
-
-        monkeypatch.setattr(installer, "_extract_python_archive", fake_extract_python)
-        with pytest.raises(RuntimeInstallError, match="runtime pack is missing"):
-            installer._default_install_runner(
-                partial_root,
-                manifest,
-                manifest.profiles["win-x64-base"].scopes[0],
-            )
-
-
-def test_control_installer_store_composition_retries_durable_selection(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    product_root = tmp_path / "product"
-    constructed: list[dict[str, object]] = []
-
-    def fail_install(_partial: Path, _manifest, _profile: str) -> Path:
-        raise RuntimeInstallError("synthetic install failure")
-
-    def factory(**kwargs):  # type: ignore[no-untyped-def]
-        constructed.append(dict(kwargs))
-        install_runner = (
-            fail_install
-            if kwargs.get("operation_id") == "composition-failed"
-            else _fake_install
-        )
-        return RuntimeInstaller(
-            product_root=product_root,
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=install_runner,
-            **kwargs,
-        )
-
-    control = RuntimeControl.from_installer_factory(factory)
-    with pytest.raises(RuntimeInstallError, match="synthetic install failure"):
-        control.execute(
-            operation="ensure",
-            operation_id="composition-failed",
-            install_component_ids=("document_parsing",),
-            download_source_ids=("huggingface",),
-        )
-
-    restarted = RuntimeControl.from_installer_factory(factory)
-    receipt = restarted.command(
-        command_id="composition-retry-command",
-        command="retry",
-        target_operation_id="composition-failed",
-        new_operation_id="composition-retried",
-    )
-    assert receipt["snapshot"]["operation_state"] == "succeeded"
-    assert receipt["snapshot"]["requested_download_source_ids"] == ["huggingface"]
-    assert receipt["snapshot"]["effective_download_source_ids"] == [
-        "huggingface",
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    retried = next(
-        item
-        for item in constructed
-        if item.get("operation_id") == "composition-retried"
-    )
-    # document_parsing 是退役组件档位：重试按折叠后的 base 闭包持久化。
-    assert retried["install_component_ids"] == ()
-    assert retried["download_source_ids"] == ("huggingface",)
-
-    store = runtime_maintenance.RuntimeOperationStore(restarted.state_root)
-    failed_intent = store.intent("composition-failed")
-    assert failed_intent["requested_download_source_ids"] == ["huggingface"]
-    # intent 的 durable 投影排序存储；snapshot 按目录顺序回显。
-    assert failed_intent["download_source_ids"] == [
-        "huggingface",
-        "mineru-modelscope",
-        "paddleocr-modelscope",
-    ]
-    intent = store.intent("composition-retried")
-    assert intent["install_component_ids"] == []
-    assert intent["requested_download_source_ids"] == ["huggingface"]
-    assert intent["download_source_ids"] == [
-        "huggingface",
-        "mineru-modelscope",
-        "paddleocr-modelscope",
-    ]
-    observation = restarted.observe("composition-retried")
-    assert observation["snapshot"]["operation_state"] == "succeeded"
-    assert observation["snapshot"]["requested_download_source_ids"] == ["huggingface"]
-    assert observation["snapshot"]["effective_download_source_ids"] == [
-        "huggingface",
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert observation["events"][-1]["snapshot"]["operation_state"] == "succeeded"
-
-    default_receipt = restarted.execute(
-        operation="ensure",
-        operation_id="composition-default-source",
-        install_component_ids=(),
-    )
-    assert default_receipt["snapshot"]["effective_download_source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    default_intent = runtime_maintenance.RuntimeOperationStore(
-        restarted.state_root
-    ).intent("composition-default-source")
-    assert default_intent["requested_download_source_ids"] is None
-    assert default_intent["download_source_ids"] == [
-        "mineru-modelscope",
-        "paddleocr-modelscope",
-    ]
-
-
-def test_extract_runtime_pack_rejects_unsafe_members(tmp_path: Path) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    pack = tmp_path / "pack.zip"
-    with zipfile.ZipFile(pack, mode="w") as archive:
-        archive.writestr("../evil.whl", b"evil")
-    with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack(
-            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
-        )
-
-    pack2 = tmp_path / "pack2.zip"
-    with zipfile.ZipFile(pack2, mode="w") as archive:
-        archive.writestr("payload.txt", b"not a wheel")
-    with pytest.raises(RuntimeInstallError, match="unsafe runtime pack member"):
-        installer._extract_runtime_pack(
-            [pack2], tmp_path / "cache2", expected_sha256=(_sha(pack2.read_bytes()),)
-        )
-
-
-def test_base_accelerator_maps_to_base_profile() -> None:
-    from vibeocr.runtime.environments.runtime_installer import ACCELERATOR_TO_PLAN
-
-    assert ACCELERATOR_TO_PLAN["base"] == "win-x64-base"
-
-
-def test_extract_runtime_pack_requires_pack_requirements(tmp_path: Path) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    pack = tmp_path / "pack.zip"
-    with zipfile.ZipFile(pack, mode="w") as archive:
-        archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"wheel")
-    with pytest.raises(RuntimeInstallError, match="lacks pack-requirements.txt"):
-        installer._extract_runtime_pack(
-            [pack], tmp_path / "cache", expected_sha256=(_sha(pack.read_bytes()),)
-        )
-
-
-def test_multi_part_pack_extracts_into_one_directory(tmp_path: Path) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    part1 = tmp_path / "vibeocr-runtime-pack-win-x64-cpu-0.7.0.part01.zip"
-    part2 = tmp_path / "vibeocr-runtime-pack-win-x64-cpu-0.7.0.part02.zip"
-    with zipfile.ZipFile(part1, mode="w") as archive:
-        archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
-        archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"rapidocr-wheel")
-    with zipfile.ZipFile(part2, mode="w") as archive:
-        archive.writestr("onnxruntime-1.28.0-cp313-cp313-win_amd64.whl", b"ort")
-
-    binding = (_sha(part1.read_bytes()), _sha(part2.read_bytes()))
-    pack_dir = installer._extract_runtime_pack(
-        [part1, part2], tmp_path / "cache", expected_sha256=binding
-    )
-    assert pack_dir.name == "vibeocr-runtime-pack-win-x64-cpu-0.7.0"
-    assert (pack_dir / "pack-requirements.txt").is_file()
-    assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").is_file()
-    assert (pack_dir / "onnxruntime-1.28.0-cp313-cp313-win_amd64.whl").is_file()
-    assert (pack_dir / ".complete").is_file()
-    # 幂等:完整标记存在时直接复用。
-    again = installer._extract_runtime_pack(
-        [part1, part2], tmp_path / "cache", expected_sha256=binding
-    )
-    assert again == pack_dir
-
-
-def test_shared_pool_tuple_extracts_per_scope_cache(tmp_path: Path) -> None:
-    """共享 pool + 成员 requirements zip 的元组解包：各 scope 独立缓存目录。"""
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    base_requirements = tmp_path / "pool.requirements-win-x64-base.zip"
-    with zipfile.ZipFile(base_requirements, mode="w") as archive:
-        archive.writestr("pack-requirements.txt", "fastapi==1.0.0\n")
-    cpu_requirements = tmp_path / "pool.requirements-win-x64-paddle-ort-cpu.zip"
-    with zipfile.ZipFile(cpu_requirements, mode="w") as archive:
-        archive.writestr("pack-requirements.txt", "paddleocr==3.7.0\n")
-    pool = tmp_path / "pool.zip"
-    with zipfile.ZipFile(pool, mode="w") as archive:
-        archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi")
-        archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr")
-    cache = tmp_path / "cache"
-
-    base_dir = installer._extract_runtime_pack(
-        [base_requirements, pool],
-        cache,
-        expected_sha256=(
-            _sha(base_requirements.read_bytes()),
-            _sha(pool.read_bytes()),
-        ),
-    )
-    cpu_dir = installer._extract_runtime_pack(
-        [cpu_requirements, pool],
-        cache,
-        expected_sha256=(
-            _sha(cpu_requirements.read_bytes()),
-            _sha(pool.read_bytes()),
-        ),
-    )
-
-    # 缓存目录以首个成员命名：各 scope 独立，不互相重建。
-    assert base_dir.name == "pool.requirements-win-x64-base"
-    assert cpu_dir.name == "pool.requirements-win-x64-paddle-ort-cpu"
-    assert (base_dir / "pack-requirements.txt").read_text(encoding="utf-8") == (
-        "fastapi==1.0.0\n"
-    )
-    assert (cpu_dir / "pack-requirements.txt").read_text(encoding="utf-8") == (
-        "paddleocr==3.7.0\n"
-    )
-    for directory in (base_dir, cpu_dir):
-        assert (directory / "fastapi-1.0.0-py3-none-any.whl").is_file()
-        assert (directory / "paddleocr-3.7.0-py3-none-any.whl").is_file()
-        assert (directory / ".complete").is_file()
-
-
-def test_load_runtime_manifest_hashes_each_shared_pool_file_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """同一 pool 分片被多个绑定引用时，每次加载只对文件哈希一次。"""
-    from vibeocr.runtime.environments import runtime_manifest as manifest_module
-
-    manifest_path, _ = _release(tmp_path / "release", with_shared_pool=True)
-    counts: dict[str, int] = {}
-    original = manifest_module.sha256_file
-
-    def counting(path: Path) -> str:
-        key = str(path)
-        counts[key] = counts.get(key, 0) + 1
-        return original(path)
-
-    monkeypatch.setattr(manifest_module, "sha256_file", counting)
-    load_runtime_manifest(manifest_path)
-    pool_reads = [
-        count
-        for path, count in counts.items()
-        if path.endswith("pool-win-x64-0.7.0.zip")
-    ]
-    assert pool_reads == [1]
-
-
-class TestSharedWheelPool:
-    def test_base_scope_installs_precise_requirements_from_shared_pool(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        commands, _partial_root, _manifest_path = _run_default_installer(
-            tmp_path, monkeypatch, with_base_pack=False, with_shared_pool=True
-        )
-        install = commands[0]
-        assert "--no-index" in install
-        assert "--require-hashes" not in install
-        assert "--only-binary=:all:" in install
-        pack_dir = Path(install[install.index("--find-links") + 1])  # type: ignore[arg-type]
-        assert pack_dir.name == (
-            "vibeocr-runtime-pool-win-x64-0.7.0.requirements-win-x64-base"
-        )
-        requirements = (pack_dir / "pack-requirements.txt").read_text(encoding="utf-8")
-        # 精确闭包：base 拿 base 的 numpy pin，不拿 Paddle 的 2.3.5。
-        assert "numpy==2.5.3" in requirements
-        assert "numpy==2.3.5" not in requirements
-        # 解包后的共享目录含全量 wheel（两个 numpy 版本共存，各取所需）。
-        assert (pack_dir / "numpy-2.5.3-cp313-cp313-win_amd64.whl").is_file()
-        assert (pack_dir / "numpy-2.3.5-cp313-cp313-win_amd64.whl").is_file()
-        assert install[install.index("-r") + 1] == str(  # type: ignore[arg-type]
-            pack_dir / "pack-requirements.txt"
-        )
-
-    def test_paddle_scopes_install_their_own_requirements_from_shared_pool(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from vibeocr.runtime.environments import managed_environments
-
-        manifest_path, component = _release(tmp_path / "release", with_shared_pool=True)
-        manifest = load_runtime_manifest(manifest_path)
-        commands: list[list[str]] = []
-        monkeypatch.setattr(
-            managed_environments,
-            "_run_install_command",
-            lambda command, **kwargs: commands.append(list(command)),
-        )
-        store = managed_environments.ManagedEnvironmentStore(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest_path,
-            base_python=Path(sys.executable),
-        )
-        expectations = {
-            "directml": ("onnxruntime-directml==1.24.4", "onnxruntime==1.30.0"),
-        }
-        for device, (required, forbidden) in expectations.items():
-            commands.clear()
-            store._install_scope(
-                Path(sys.executable),
-                manifest.paddle_onnx_environments[f"paddleocr-ort-{device}"],
-            )
-            install = commands[0]
-            assert "--no-index" in install
-            pack_dir = Path(install[install.index("--find-links") + 1])  # type: ignore[arg-type]
-            assert pack_dir.name == (
-                f"vibeocr-runtime-pool-win-x64-0.7.0.requirements-"
-                f"win-x64-paddle-ort-{device}"
-            )
-            requirements = (pack_dir / "pack-requirements.txt").read_text(
-                encoding="utf-8"
-            )
-            # CPU/DirectML 各自的 ONNX namespace 精确隔离。
-            assert required in requirements
-            assert forbidden not in requirements
-            assert install[install.index("-r") + 1] == str(  # type: ignore[arg-type]
-                pack_dir / "pack-requirements.txt"
-            )
-
-
-def test_old_runtime_pack_marker_rebuilds_only_its_cache_directory(
-    tmp_path: Path,
-) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    pack = tmp_path / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
-    with zipfile.ZipFile(pack, mode="w") as archive:
-        archive.writestr("pack-requirements.txt", "rapidocr==3.9.2\n")
-        archive.writestr("rapidocr-3.9.2-py3-none-any.whl", b"fresh")
-    cache = tmp_path / "cache"
-    pack_dir = cache / pack.stem
-    pack_dir.mkdir(parents=True)
-    (pack_dir / ".complete").write_text("ok\n", encoding="utf-8")
-    (pack_dir / "stale.whl").write_bytes(b"stale")
-    sibling = cache / "other-pack"
-    sibling.mkdir()
-    (sibling / "keep.txt").write_text("preserve", encoding="utf-8")
-
-    extracted = installer._extract_runtime_pack(
-        [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
-    )
-
-    assert extracted == pack_dir
-    assert not (pack_dir / "stale.whl").exists()
-    assert (pack_dir / "rapidocr-3.9.2-py3-none-any.whl").read_bytes() == b"fresh"
-    assert (pack_dir / ".complete").read_text(encoding="utf-8") != "ok\n"
-    assert (sibling / "keep.txt").read_text(encoding="utf-8") == "preserve"
-
-
-def test_runtime_pack_cache_rejects_escaping_stem_and_reparse_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from vibeocr.runtime.environments import runtime_installer as installer
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    sibling = tmp_path / "keep.txt"
-    sibling.write_text("preserve", encoding="utf-8")
-    escaping = tmp_path / "...zip"
-    escaping.write_bytes(b"zip")
-    with pytest.raises(RuntimeInstallError, match="cache name is unsafe"):
-        installer._extract_runtime_pack(
-            [escaping], cache, expected_sha256=(_sha(escaping.read_bytes()),)
-        )
-
-    pack = tmp_path / "pack.zip"
-    pack.write_bytes(b"zip")
-    destination = cache / "pack"
-    destination.mkdir()
-    original_is_junction = Path.is_junction
-    monkeypatch.setattr(
-        Path,
-        "is_junction",
-        lambda path: path == destination or original_is_junction(path),
-    )
-    with pytest.raises(RuntimeInstallError, match="reparse point"):
-        installer._extract_runtime_pack(
-            [pack], cache, expected_sha256=(_sha(pack.read_bytes()),)
-        )
-    assert destination.is_dir()
-    assert sibling.read_text(encoding="utf-8") == "preserve"
-
-
-def test_ensure_with_explicit_base_only_scope_installs_base_lock(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    seen_profiles: list[str] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        seen_profiles.append(profile)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    installer.ensure()
-
-    assert seen_profiles == ["win-x64-base"]
-    marker = json.loads(
-        (installer.paths.runtime_root / ".installed.json").read_text(encoding="utf-8")
-    )
-    assert "document_parsing" not in marker["component_ids"]
-    snapshot = installer.maintenance_snapshot()
-    # 显式空集回显 requested=[]（base-only），effective 为 base 闭包。
-    assert snapshot["requested_component_ids"] == []
-    assert "document_parsing" not in snapshot["effective_component_ids"]
-    # base-only 缺 full 可选组件不算漂移：inspect 仍 ready。
-    assert installer.inspect().integrity == "verified"
-
-
-@pytest.mark.parametrize(
-    ("install_component_ids", "expected_profile"),
-    [
-        ((), "win-x64-base"),
-        # 历史可选组件 id（document_parsing/mineru-*）请求折叠为 base 闭包：
-        # 探针按实际安装 scope（base）探测，不再升档到历史 cpu 档位。
-        (("document_parsing",), "win-x64-base"),
-    ],
-)
-def test_install_probe_uses_actual_install_scope_profile(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    install_component_ids: tuple[str, ...],
-    expected_profile: str,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def probe(
-        runtime_root: Path,
-        component_ids: tuple[str, ...],
-        profile_id: str,
-    ) -> dict[str, bool]:
-        if runtime_root.name != "runtime.installing":
-            return dict.fromkeys(component_ids, True)
-        return dict.fromkeys(component_ids, profile_id == expected_profile)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        component_probe=probe,
-        install_component_ids=install_component_ids,
-    )
-
-    assert installer.ensure() is not None
-
-
-def test_repair_preserves_trusted_base_only_closure_when_runtime_is_incomplete(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    installed_profiles: list[str] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        installed_profiles.append(profile)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    base_only = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=(),
-    )
-    base_only.ensure()
-    Path(base_only._launch().python_executable).unlink()
-
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-    )
-    repair.repair()
-
-    assert installed_profiles == ["win-x64-base", "win-x64-base"]
-    marker = json.loads(
-        (repair.paths.runtime_root / ".installed.json").read_text(encoding="utf-8")
-    )
-    assert "document_parsing" not in marker["component_ids"]
-
-
-def test_repair_fails_closed_when_installed_marker_is_untrusted(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    initial = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    initial.ensure()
-    marker_path = initial.paths.runtime_root / ".installed.json"
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    marker["manifest_sha256"] = "f" * 64
-    marker_path.write_text(json.dumps(marker), encoding="utf-8")
-
-    repair = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-    )
-
-    with pytest.raises(RuntimeInstallError, match="untrusted installed marker"):
-        repair.repair()
-
-
-def test_ensure_with_optional_components_reports_independent_closure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """历史可选组件请求（document_parsing → mineru）折叠为 base 唯一闭包。"""
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    seen_profiles: list[str] = []
-
-    def install(partial: Path, runtime_manifest, profile: str) -> Path:
-        seen_profiles.append(profile)
-        return _fake_install(partial, runtime_manifest, profile)
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=install,
-        install_component_ids=("document_parsing",),
-    )
-    installer.ensure()
-
-    # 独立 MinerU 安装域已随统一闭包退役：可选组件请求不再升档 full 档位。
-    assert seen_profiles == ["win-x64-base"]
-    snapshot = installer.maintenance_snapshot()
-    assert snapshot["requested_component_ids"] == []
-    assert snapshot["effective_component_ids"] == ["runtime_host"]
-
-
-def test_startup_selection_is_base_only_without_an_installed_marker(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-    )
-
-    inspection = installer.inspect_snapshot(emit=False)
-
-    assert inspection.state.startup_install_component_ids == ()
-    assert inspection.state.integrity == "not-installed"
-
-
-def test_startup_selection_surfaces_retired_paddle_as_unsupported(
-    tmp_path: Path,
-) -> None:
-    """#270：历史 marker 携带的退役 paddle 选择读取不崩溃、不自动安装；
-    新显式请求在构造期被可诊断拒绝且无副作用。"""
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    product = tmp_path / "product"
-
-    def probe(_root: Path, ids: tuple[str, ...], _profile: str) -> dict[str, bool]:
-        return dict.fromkeys(ids, True)
-
-    # 用合法 gpu_runtime 组件建立真实安装，再把 marker 改写为历史形态
-    # （旧版本写入的退役显式选择），模拟升级后的历史记录。
-    previous = RuntimeInstaller(
-        product_root=product,
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_component_ids=(),
-        install_runner=_fake_install,
-        component_probe=probe,
-    )
-    previous.ensure()
-    marker_path = previous._marker()
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    marker["requested_component_ids"] = ["paddleocr-cuda"]
-    marker["component_ids"] = ["rapidocr-base", "runtime_host", "paddleocr-cuda"]
-    marker_path.write_text(json.dumps(marker), encoding="utf-8")
-
-    from vibeocr.runtime.environments.runtime_selection import RuntimeSelectionError
-
-    # 显式退役请求：构造期拒绝，无任何写入副作用。
-    with pytest.raises(RuntimeSelectionError, match="retired"):
-        RuntimeInstaller(
-            product_root=product,
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_component_ids=("paddleocr-cuda",),
-            install_runner=_fake_install,
-        )
-    with pytest.raises(RuntimeSelectionError, match="retired"):
-        RuntimeInstaller(
-            product_root=product,
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_component_ids=("paddleocr-cuda", "mineru-cuda"),
-            install_runner=_fake_install,
-        )
-
-    # 历史读取：startup 选择被标注为不支持（None），inspect 不崩溃、
-    # 不自动把退役闭包带回安装面。
-    current = RuntimeInstaller(
-        product_root=product,
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        component_probe=probe,
-    )
-    inspection = current.inspect_snapshot(emit=False)
-    assert inspection.state.integrity == "not-installed"
-    # 旧 marker 携带的退役选择不再回灌：启动选择被标注不支持（None），
-    # 当前安装闭包也不含 paddleocr-cuda。
-    assert inspection.state.startup_install_component_ids is None
-    assert "paddleocr-cuda" not in current._selection.effective_component_ids
-    # 历史 marker 原文不被静默改写。
-    kept = json.loads(marker_path.read_text(encoding="utf-8"))
-    assert kept["requested_component_ids"] == ["paddleocr-cuda"]
-
-
-@pytest.mark.parametrize(
-    "invalid_marker", ["malformed", "unsupported_component", "retired_component"]
-)
-def test_startup_selection_rejects_unusable_prior_intent(
-    tmp_path: Path, invalid_marker: str
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    previous = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_component_ids=(),
-        install_runner=_fake_install,
-        component_probe=lambda _root, ids, _profile: dict.fromkeys(ids, True),
-    )
-    previous.ensure()
-    marker_path = previous._marker()
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    if invalid_marker == "malformed":
-        marker["component_ids"] = "paddleocr-cuda"
-    elif invalid_marker == "unsupported_component":
-        marker["requested_component_ids"] = ["retired-cuda"]
-    else:
-        # #270：历史版本写入的退役组件显式选择。
-        marker["requested_component_ids"] = ["paddleocr-cuda"]
-    marker_path.write_text(json.dumps(marker), encoding="utf-8")
-
-    current = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-    )
-    inspection = current.inspect_snapshot(emit=False)
-    assert inspection.state.integrity == (
-        "not-installed" if invalid_marker == "malformed" else "verified"
-    )
-    assert inspection.state.startup_install_component_ids is None
-    with pytest.raises(RuntimeInstallError, match="installed marker|startup selection"):
-        current.ensure()
-
-
-def test_unknown_install_component_fails_closed(tmp_path: Path) -> None:
-    from vibeocr.runtime.environments.runtime_selection import RuntimeSelectionError
-    from vibeocr.runtime_contracts import ErrorCode
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    with pytest.raises(RuntimeSelectionError) as excinfo:
-        RuntimeInstaller(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            install_runner=_fake_install,
-            install_component_ids=("not-a-component",),
-        )
-    assert excinfo.value.code is ErrorCode.RUNTIME_COMPONENT_UNKNOWN
-
-    # gpu_runtime 是退役组件档位：请求折叠为 base 闭包，不再隐式换档安装
-    # 历史 cuda 档位。
-    folded = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=("gpu_runtime",),
-    )
-    assert folded._selection.effective_component_ids == ("runtime_host",)
-
-
-def test_maintenance_snapshot_echoes_download_source_intent(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    explicit = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        download_source_ids=("huggingface",),
-        install_component_ids=(),
-    )
-    explicit.ensure()
-    snapshot = explicit.maintenance_snapshot()
-    assert snapshot["requested_download_source_ids"] == ["huggingface"]
-    # 显式共享模型源按 overlay 补齐两引擎默认 ModelScope 偏好。
-    assert snapshot["effective_download_source_ids"] == [
-        "huggingface",
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-
-    omitted = RuntimeInstaller(
-        product_root=tmp_path / "product2",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_runner=_fake_install,
-        install_component_ids=(),
-    )
-    omitted.ensure()
-    snapshot = omitted.maintenance_snapshot()
-    # 省略：requested 不出现，effective 解析为缺省双引擎模型源。
-    assert "requested_download_source_ids" not in snapshot
-    assert snapshot["effective_download_source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-
-
-def test_base_only_ensure_probes_with_base_binding_not_plan_binding(
-    tmp_path: Path,
-) -> None:
-    """base-only 安装的漂移探测必须用 base profile 的 import 绑定。
-
-    accelerator=cpu + 显式空安装范围时，应按 base host 闭包探测，
-    不因当前计划为 cpu 而把尚未安装的 MinerU 视为基础闭包漂移。
-    """
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    probe_profiles: list[str] = []
-
-    def probe(
-        _runtime_root: Path, component_ids: tuple[str, ...], profile_id: str
-    ) -> dict[str, bool]:
-        probe_profiles.append(profile_id)
-        # 只按绑定是否来自 base profile 判定；full cpu 尚未安装。
-        return {
-            component_id: profile_id == "win-x64-base" for component_id in component_ids
-        }
-
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        accelerator="cpu",
-        install_component_ids=(),
-        install_runner=_fake_install,
-        component_probe=probe,
-        operation_id="base-only-ensure",
-    )
-
-    launch = installer.ensure()
-
-    assert launch is not None
-    assert Path(launch.python_executable).is_file()
-    assert probe_profiles
-    # 漂移探测（非展示 payload）必须以 base 覆盖 profile 探测
-    assert "win-x64-base" in probe_profiles
-    assert installer._drifted_component_ids() == ()
-    # 幂等复跑：base 闭包 ready，不触发重装
-    assert installer.ensure() is not None
-
-
 def test_drift_projection_uses_covering_profile_declared_versions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """base-only 安装按 Runtime host 绑定比较版本，不能把 full MinerU 视为已安装。"""
     # 单测没有真实 Python runtime：组件 import 探测统一视为通过，
     # 使断言聚焦在“声明版本/分布绑定按哪个 profile 投影”。
     monkeypatch.setattr(
@@ -4982,11 +2058,9 @@ def test_drift_projection_uses_covering_profile_declared_versions(
         "_cached_runtime_component_probe",
         lambda _root, component_ids, **_kwargs: dict.fromkeys(component_ids, True),
     )
-    """base-only 安装按 Runtime host 绑定比较版本，不能把 full MinerU 视为已安装。"""
+    from vibeocr.runtime.environments.runtime_maintenance import runtime_profile_status
 
-    manifest_path, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest_path, component = _legacy_release(tmp_path / "product")
     document = json.loads(manifest_path.read_text(encoding="utf-8"))
     # 声明组件必须与 loader 派生的稳定 id 顺序一致，仅注入版本差异
     document["profiles"]["win-x64-base"]["components"] = [
@@ -4996,18 +2070,23 @@ def test_drift_projection_uses_covering_profile_declared_versions(
             "version": "1.0.0",
         },
     ]
-    document["profiles"]["win-x64-cpu"]["components"] = [
-        {
-            "component_id": "runtime_host",
-            "display_name": "Runtime HTTP host",
-            "version": "1.0.0",
-        },
-        {
-            "component_id": "mineru-cpu",
-            "display_name": "MinerU CPU document parsing",
-            "version": "4.0.10",
-        },
-    ]
+    legacy_profile = {
+        "lock": document["profiles"]["win-x64-base"]["lock"],
+        "sha256": document["profiles"]["win-x64-base"]["sha256"],
+        "components": [
+            {
+                "component_id": "runtime_host",
+                "display_name": "Runtime HTTP host",
+                "version": "1.0.0",
+            },
+            {
+                "component_id": "mineru-cpu",
+                "display_name": "MinerU CPU document parsing",
+                "version": "4.0.10",
+            },
+        ],
+    }
+    document["profiles"]["win-x64-cpu"] = legacy_profile
     manifest_path.write_text(
         json.dumps(document, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -5051,8 +2130,6 @@ def test_drift_projection_uses_covering_profile_declared_versions(
         runtime_root=runtime_root,
         profile_id="win-x64-base",
     )
-    # plan 视角必须显式请求：省略 profile_id 的默认投影按已安装闭包的
-    # 覆盖 profile（此处为 win-x64-base）选择组件集与绑定。
     cpu_view = runtime_profile_status(
         loaded,
         accelerator="cpu",
@@ -5077,195 +2154,29 @@ def test_drift_projection_uses_covering_profile_declared_versions(
     assert cpu_states["runtime_host"] == "ready"
     assert cpu_states["mineru-cpu"] == "missing"
 
-    installer = RuntimeInstaller(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest_path,
-        accelerator="cpu",
-        install_component_ids=(),
-        install_runner=_fake_install,
-        component_probe=lambda _root, ids, _profile: dict.fromkeys(ids, True),
-    )
-    assert installer._drifted_component_ids() == ()
+
+# ---------------------------------------------------------------------------
+# 解析报告 / 加锁哈希（保留的下载校验工具）
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("model_source_ids", "expected_source_environment"),
-    [
-        (
-            ("paddleocr-huggingface", "mineru-huggingface"),
-            {
-                "PADDLE_PDX_MODEL_SOURCE": "huggingface",
-                "MINERU_MODEL_SOURCE": "huggingface",
-            },
-        ),
-        (
-            ("paddleocr-modelscope", "mineru-modelscope"),
-            {
-                "PADDLE_PDX_MODEL_SOURCE": "modelscope",
-                "MINERU_MODEL_SOURCE": "modelscope",
-            },
-        ),
-    ],
-)
-def test_document_parsing_ensure_passes_selected_model_source_to_native_clients(
+def test_lock_allowed_hashes_parses_equals_and_direct_url_declarations(
     tmp_path: Path,
-    model_source_ids: tuple[str, ...],
-    expected_source_environment: dict[str, str],
 ) -> None:
-    """Runtime control 仅把选择投影为上游 downloader 的环境变量。"""
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    product = tmp_path / "product"
-    control = RuntimeControl.from_installer_factory(
-        lambda **kwargs: RuntimeInstaller(
-            product_root=product,
-            component_lock=component,
-            runtime_manifest=manifest,
-            accelerator="cpu",
-            component_probe=lambda _root, ids, _profile_id: dict.fromkeys(ids, True),
-            install_runner=_fake_install,
-            **kwargs,
-        )
-    )
-
-    result = control.execute_with_result(
-        operation="ensure",
-        install_component_ids=("document_parsing",),
-        download_source_ids=model_source_ids,
-    )
-    launch = result.launch
-
-    assert launch is not None
-    snapshot = result.receipt["snapshot"]
-    assert snapshot["requested_download_source_ids"] == list(model_source_ids)
-    # 双引擎显式模型源完整命中：不再有 package index，也不再补默认源。
-    assert snapshot["effective_download_source_ids"] == list(model_source_ids)
-    state_root = Path(launch.environment["VIBEOCR_RUNTIME_STATE_ROOT"])
-    assert Path(launch.model_root) == state_root / "models"
-    assert Path(launch.model_root).is_dir()
-    assert Path(launch.environment["HF_HOME"]).is_relative_to(state_root)
-    assert Path(launch.environment["MODELSCOPE_CACHE"]).is_relative_to(state_root)
-    assert Path(launch.environment["MODELSCOPE_HOME"]).is_relative_to(state_root)
-    assert (
-        launch.environment["MODELSCOPE_CREDENTIALS_PATH"]
-        == (launch.environment["MODELSCOPE_HOME"])
-    )
-    shared_models = Path(launch.environment["VIBEOCR_SHARED_MODEL_CACHE"])
-    assert shared_models == state_root / "model-cache"
-    assert Path(launch.environment["PADDLE_PDX_CACHE_HOME"]).is_relative_to(state_root)
-    # 依赖随产品离线分发：目录已无 package index 源，pip 索引不再投影。
-    assert "PIP_INDEX_URL" not in launch.environment
-    mineru_config = Path(launch.environment["MINERU_HOME"]) / "config.yaml"
-    assert mineru_config == state_root / "mineru4" / "config.yaml"
-    assert mineru_config.parent.is_dir()
-    assert not mineru_config.exists()
-    assert {
-        key: launch.environment[key] for key in expected_source_environment
-    } == expected_source_environment
-    assert "VIBEOCR_MODEL_ROOT" not in launch.environment
-    assert "VIBEOCR_RESOLVED_MODELS" not in launch.environment
-
-
-class _MeasuredRecorder:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, int, int | None]] = []
-        self.codes: list[str] = []
-
-    def advance_measured(
-        self,
-        *,
-        phase: str,
-        unit: str,
-        current: int,
-        total: int | None,
-        message_code: str,
-        component_id: str | None = None,
-        estimated_remaining_seconds: int | None = None,
-        message_args: dict[str, str] | None = None,
-    ) -> None:
-        self.calls.append((unit, current, total))
-
-        self.codes.append(message_code)
-
-    def check_cancelled(self) -> None:
-        pass
-
-    def record_activity(self) -> None:
-        pass
-
-    def heartbeat(self, **kwargs) -> None:
-        pass
-
-
-class TestOnlineArtifactDownload:
-    def test_lock_allowed_hashes_parses_equals_and_direct_url_declarations(
-        self, tmp_path: Path
-    ) -> None:
-        from vibeocr.runtime.environments import runtime_installer as installer
-
-        lock = tmp_path / "requirements.lock"
-        lock.write_text(
-            "antlr4-python3-runtime==4.9.3 \\n"
-            "    --hash=sha256:" + "a" * 64 + " \\n"
-            "    --hash=sha256:" + "b" * 64 + "\n"
-            "paddlepaddle-gpu @ https://example.invalid/paddle.whl \\n"
-            "    --hash=sha256:" + "c" * 64 + "\n",
-            encoding="utf-8",
-        )
-        allowed = installer._lock_allowed_hashes(lock)
-        assert allowed["antlr4-python3-runtime"] == {"a" * 64, "b" * 64}
-        assert allowed["paddlepaddle-gpu"] == {"c" * 64}
-
-
-def test_install_runner_rejects_native_paddle_scopes(tmp_path, monkeypatch):
-    """#270 回归：安装写边界拒绝原生 Paddle 组件/绑定，不因历史 manifest 重新安装。
-
-    旧实现会递归安装 engines/paddle 隔离解释器；本断言在旧实现上失败。
-    """
-    from dataclasses import replace
-
     from vibeocr.runtime.environments import runtime_installer as installer
-    from vibeocr.runtime.environments.runtime_manifest import PaddleEnvironment
 
-    manifest_path, _ = _release(tmp_path / "release", with_base_pack=False)
-    manifest = load_runtime_manifest(manifest_path)
-    paddle_lock = tmp_path / "paddle.lock"
-    paddle_lock.write_text("paddlepaddle==3.3.1")
-    default_scope = replace(
-        manifest.profiles["win-x64-cpu"].scopes[0],
-        component_ids=("runtime_host", "paddleocr-cpu"),
+    lock = tmp_path / "requirements.lock"
+    lock.write_text(
+        "antlr4-python3-runtime==4.9.3 \\n"
+        "    --hash=sha256:" + "a" * 64 + " \\n"
+        "    --hash=sha256:" + "b" * 64 + "\n"
+        "paddlepaddle-gpu @ https://example.invalid/paddle.whl \\n"
+        "    --hash=sha256:" + "c" * 64 + "\n",
+        encoding="utf-8",
     )
-    bound_scope = replace(
-        manifest.profiles["win-x64-cpu"].scopes[0],
-        paddle_environment=PaddleEnvironment(paddle_lock, "a" * 64),
-    )
-    root = tmp_path / "candidate"
-    started = []
-
-    def extract(_archive, destination, **kwargs):
-        started.append(destination)
-        destination.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr(installer, "_extract_python_archive", extract)
-    monkeypatch.setattr(
-        installer,
-        "_run_install_command",
-        lambda command, **kwargs: started.append(command),
-    )
-    # 默认 scope 含 paddleocr-cpu 组件 → 写边界拒绝。
-    with pytest.raises(
-        RuntimeInstallError, match="native Paddle components are retired"
-    ):
-        installer._default_install_runner(root, manifest, default_scope)
-    # 历史绑定（paddle_environment）→ 同样拒绝，不再递归安装隔离解释器。
-    with pytest.raises(
-        RuntimeInstallError, match="native Paddle components are retired"
-    ):
-        installer._default_install_runner(root, manifest, bound_scope)
-    assert started == []
-    assert not (root / "engines" / "paddle").exists()
+    allowed = installer._lock_allowed_hashes(lock)
+    assert allowed["antlr4-python3-runtime"] == {"a" * 64, "b" * 64}
+    assert allowed["paddlepaddle-gpu"] == {"c" * 64}
 
 
 def test_resolve_report_accepts_only_files_in_bound_download_cache(tmp_path):
@@ -5293,281 +2204,3 @@ def test_resolve_report_accepts_only_files_in_bound_download_cache(tmp_path):
         installer._parse_resolve_report(report, tmp_path / "other")
     with pytest.raises(RuntimeInstallError, match="outside download cache"):
         installer._parse_resolve_report(report)
-
-
-@pytest.mark.parametrize("llama_available", [True, False])
-def test_mineru_cpu_probe_uses_mineru4_llama_binding(
-    tmp_path, monkeypatch, llama_available
-):
-    import contextlib
-    import importlib
-    from types import SimpleNamespace
-
-    def import_module(name):
-        if name in {"mineru", "onnxruntime"} or (
-            name == "mineru_llama_cpp" and llama_available
-        ):
-            return SimpleNamespace()
-        raise ImportError(name)
-
-    def run(command, **kwargs):
-        output = io.StringIO()
-        with monkeypatch.context() as patch, contextlib.redirect_stdout(output):
-            patch.setattr(sys, "argv", ["probe", command[-1]])
-            patch.setattr(importlib, "import_module", import_module)
-            exec(command[-2], {})
-        return subprocess.CompletedProcess(
-            command, 0, stdout=output.getvalue(), stderr=""
-        )
-
-    monkeypatch.setattr(runtime_maintenance.subprocess, "run", run)
-    assert (
-        probe_runtime_components(tmp_path, ("mineru-cpu",))["mineru-cpu"]
-        is llama_available
-    )
-
-
-def test_prepare_target_survives_restart_and_never_claims_named_empty_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def open_store():
-        return ManagedEnvironmentStore(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            base_python=sys._base_executable,
-            install_runner=lambda *_args: pytest.fail("preparation must not install"),
-        )
-
-    manager = open_store()
-    user = manager.create("PaddleOCR ONNX · CPU")
-    prepared = manager.prepare_target("paddleocr-ort-directml")
-    assert prepared["id"] != user["id"]
-    assert prepared["status"] == "empty" and prepared["packages"] == []
-    assert manager.prepare_target("paddleocr-ort-directml")["id"] == prepared["id"]
-    reopened = open_store()
-    assert reopened.prepare_target("paddleocr-ort-directml")["id"] == prepared["id"]
-    assert len(reopened.list()["environments"]) == 2
-    assert reopened._read()["environments"][user["id"]]["status"] == "empty"
-
-
-def test_prepare_target_reservation_recovers_interrupted_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    create = manager._create
-    monkeypatch.setattr(
-        manager,
-        "_create",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted")),
-    )
-    with pytest.raises(OSError, match="interrupted"):
-        manager.prepare_target("paddleocr-ort-directml")
-    reservation = manager._read()["prepare_targets"]["paddleocr-ort-directml"]
-    monkeypatch.setattr(manager, "_create", create)
-    with pytest.raises(ManagedEnvironmentError, match="reserved for preparation"):
-        manager.create(reservation["name"])
-    target = manager.prepare_target("paddleocr-ort-directml")
-    assert target["id"] == reservation["environment_id"]
-    assert len(manager.list()["environments"]) == 1
-
-
-def test_missing_model_does_not_erase_installed_dependencies(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    record = _write_record(
-        manager, "model-missing", status="installed", recipe="paddleocr-ort-directml"
-    )
-    result = manager._public_record(
-        record, {"healthy": False, "reason": "engine_model_missing", "python": "python"}
-    )
-    assert result["dependency_state"] == "installed"
-    assert result["model_state"] == "missing"
-    assert result["engine_state"] == "unverified"
-    assert result["service_state"] == "not_started"
-    assert result["target_device"] == "directml" and result["actual_device"] is None
-
-
-def test_preparation_reassigns_ownership_after_user_installs_another_recipe(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-    )
-    previous = manager.prepare_target("paddleocr-ort-directml")
-    data = manager._read()
-    data["environments"][previous["id"]].update(status="installed", recipe="mineru-cpu")
-    manager._registry.write_text(json.dumps(data), encoding="utf-8")
-    replacement = manager.prepare_target("paddleocr-ort-directml")
-    assert replacement["id"] != previous["id"]
-    assert replacement["status"] == "empty"
-    assert manager.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
-    assert manager._read()["environments"][previous["id"]]["recipe"] == "mineru-cpu"
-    assert Path(previous["python"]).is_file()
-
-
-def test_deleted_preparation_target_ends_plan_lifecycle_and_rejects_stale_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F292-01 回归：删除终结准备归属与落盘计划，旧 plan 不得越过 CAS。
-
-    旧实现在删除完成后保留 prepare_targets 归属与 environment-plans 计划，
-    同 id 重建（revision 回到 1）后旧 plan 通过 revision/CAS 进入安装器。
-    """
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=lambda *_args: pytest.fail(
-            "stale plan must not reach the installer"
-        ),
-    )
-    prepared = manager.prepare_target("paddleocr-ort-directml")
-    plan = manager.preview_install(
-        prepared["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    manager.delete(prepared["id"])
-    # 删除即终结该对象的准备归属与落盘安装计划。
-    data = manager._read()
-    assert not data.get("prepare_targets", {}).get("paddleocr-ort-directml")
-    assert not (
-        manager.paths.state_root / "environment-plans" / f"{prepared['id']}.json"
-    ).is_file()
-    replacement = manager.prepare_target("paddleocr-ort-directml")
-    assert replacement["status"] == "empty"
-    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
-        manager.install(
-            plan["plan_id"],
-            replacement["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-    # 拒绝发生在写入之前：新对象记录不被改写。
-    record = manager._read()["environments"][replacement["id"]]
-    assert record["status"] == "empty"
-    assert "last_install_operation" not in record
-
-
-def test_manual_same_name_recreate_rejects_deleted_environment_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F292-01 回归：手工删除后同名同 slug 重建，旧 plan 同样必须失效。"""
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = ManagedEnvironmentStore(
-        product_root=tmp_path / "product",
-        component_lock=component,
-        runtime_manifest=manifest,
-        base_python=sys._base_executable,
-        install_runner=lambda *_args: pytest.fail(
-            "stale plan must not reach the installer"
-        ),
-    )
-    first = manager.create("手工环境")
-    plan = manager.preview_install(
-        first["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    manager.delete(first["id"])
-    second = manager.create("手工环境")
-    assert second["id"] == first["id"]
-    assert not (
-        manager.paths.state_root / "environment-plans" / f"{second['id']}.json"
-    ).is_file()
-    with pytest.raises(runtime_maintenance.RuntimeInstallPlanStale):
-        manager.install(
-            plan["plan_id"],
-            second["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-
-
-def test_preparation_repairs_owned_stale_active_paddle_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """过期 Paddle 锁仍不可直接复用；确认修复沿同 id 停服事务。"""
-    _omit_unused_pip_bootstrap(monkeypatch)
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-
-    def open_store() -> ManagedEnvironmentStore:
-        return ManagedEnvironmentStore(
-            product_root=tmp_path / "product",
-            component_lock=component,
-            runtime_manifest=manifest,
-            base_python=sys._base_executable,
-            install_runner=lambda *_args: None,
-        )
-
-    manager = open_store()
-    previous = manager.prepare_target("paddleocr-ort-directml")
-    with RuntimeStoreLock(manager._lock):
-        data = manager._read()
-        data["environments"][previous["id"]].update(
-            status="installed",
-            recipe="paddleocr-ort-directml",
-            recipe_lock="0" * 64,
-        )
-        data["active_id"] = previous["id"]
-        data["active_revision"] += 1
-        _atomic_json(manager._registry, data)
-    # scope 锁过期：探针健康的活动环境也无法按当前配方复用。
-    assert manager.find_compatible("paddleocr-ort-directml")["selected"] is None
-    replacement = manager.prepare_target("paddleocr-ort-directml")
-    assert replacement["id"] == previous["id"]
-    assert replacement["status"] == "installed"
-    # 原活动环境完整保留且仍为活动环境。
-    data = manager._read()
-    assert data["active_id"] == previous["id"]
-    assert data["environments"][previous["id"]]["status"] == "installed"
-    # 明确确认后使用维护屏障重建，预览不改变旧记录。
-    plan = manager.preview_install(
-        replacement["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    assert plan["environment_id"] == replacement["id"]
-    assert plan["requires_service_stop"]
-    assert manager.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
-    reopened = open_store()
-    assert reopened.prepare_target("paddleocr-ort-directml")["id"] == replacement["id"]
-    listed = reopened.list()
-    assert len(listed["environments"]) == 1
-    assert listed["active_id"] == previous["id"]

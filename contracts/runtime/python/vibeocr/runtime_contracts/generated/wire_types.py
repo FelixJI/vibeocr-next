@@ -566,94 +566,6 @@ class RuntimeComponentStatus(TypedDict, total=False):
     repairable: NotRequired[bool]
 
 
-class RuntimeInstallPlan(TypedDict, total=False):
-    plan_id: Required[str]
-    expires_at: Required[str]
-    accelerator: Required[Literal['cpu', 'nvidia_cuda']]
-    profile_id: Required[str]
-    requested_component_ids: Required[list[str] | None]
-    effective_component_ids: Required[list[str]]
-    requested_download_source_ids: Required[list[str] | None]
-    effective_download_source_ids: Required[list[str]]
-    source: Required[RuntimeSourceIdentity]
-    components: Required[list[RuntimeInstallPlanComponent]]
-    blockers: Required[list[RuntimeInstallPlanBlocker]]
-    cost: Required[RuntimeInstallPlanCost]
-
-
-class RuntimeInstallPlanBlocker(TypedDict, total=False):
-    code: Required[str]
-    component_id: NotRequired[str]
-    next_action: Required[str]
-
-
-class RuntimeInstallPlanComponent(TypedDict, total=False):
-    component_id: Required[str]
-    action: Required[Literal['retain', 'install', 'replace', 'remove']]
-    dependency_state: Required[Literal['satisfied', 'pending']]
-    reason_codes: Required[list[str]]
-
-
-class RuntimeInstallPlanCost(TypedDict, total=False):
-    download_bytes: Required[int | None]
-    additional_disk_bytes: Required[int | None]
-    unknown_reason_codes: Required[list[str]]
-
-
-class RuntimeInstallPlanRequest(TypedDict, total=False):
-    accelerator: NotRequired[Literal['cpu', 'nvidia_cuda']]
-    install_component_ids: NotRequired[list[str]]
-    download_source_ids: NotRequired[list[str]]
-    required_capabilities: Required[list[str]]
-
-
-class RuntimeInstallPlanResponse(TypedDict, total=False):
-    schema_version: Required[Literal[2]]
-    plan: Required[RuntimeInstallPlan]
-    negotiated_capabilities: Required[list[str]]
-
-
-class RuntimeMaintenanceCommandRequest(TypedDict, total=False):
-    command_id: Required[str]
-    command: Required[Literal['cancel', 'retry']]
-    target_operation_id: Required[str]
-    new_operation_id: NotRequired[str]
-    expected_sequence: NotRequired[int]
-    plan_id: NotRequired[str]
-    install_component_ids: NotRequired[list[str]]
-    download_source_ids: NotRequired[list[str]]
-    required_capabilities: NotRequired[list[str]]
-
-
-class RuntimeMaintenanceEvent(TypedDict, total=False):
-    schema_version: Required[Literal[2]]
-    event_type: Required[Literal['snapshot', 'progress', 'heartbeat']]
-    sequence: Required[int]
-    operation: Required[Literal['inspect', 'ensure', 'repair']]
-    snapshot: Required[RuntimeMaintenanceStatus]
-    message_code: Required[str]
-    message_args: NotRequired[dict[str, Any]]
-    fallback_message: NotRequired[str]
-
-
-class RuntimeMaintenanceReceipt(TypedDict, total=False):
-    schema_version: Required[Literal[2]]
-    operation_id: Required[str]
-    snapshot: Required[RuntimeMaintenanceStatus]
-    negotiated_capabilities: Required[list[str]]
-
-
-class RuntimeMaintenanceRequest(TypedDict, total=False):
-    operation_id: NotRequired[str]
-    operation: Required[Literal['inspect', 'ensure', 'repair']]
-    profile_id: NotRequired[str]
-    plan_id: NotRequired[str]
-    component_ids: NotRequired[list[str]]
-    install_component_ids: NotRequired[list[str]]
-    download_source_ids: NotRequired[list[str]]
-    required_capabilities: NotRequired[list[str]]
-
-
 class RuntimeMaintenanceStatus(TypedDict, total=False):
     operation_id: Required[str]
     source_operation_id: NotRequired[str | None]
@@ -672,17 +584,6 @@ class RuntimeMaintenanceStatus(TypedDict, total=False):
     effective_download_source_ids: NotRequired[list[str]]
     source: NotRequired[RuntimeSourceIdentity]
     plan_id: NotRequired[str]
-
-
-class RuntimeMaintenanceUpdate(TypedDict, total=False):
-    schema_version: Required[Literal[2]]
-    operation_id: Required[str]
-    snapshot: Required[RuntimeMaintenanceStatus]
-    events: Required[list[RuntimeMaintenanceEvent]]
-    oldest_sequence: Required[int]
-    through_sequence: Required[int]
-    more: Required[bool]
-    replay_expires_at: Required[str | None]
 
 
 class RuntimePreloadRequest(TypedDict, total=False):

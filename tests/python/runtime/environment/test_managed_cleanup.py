@@ -11,15 +11,19 @@ from uuid import uuid4
 
 import pytest
 from test_environment_store_layout import _manager
+from test_runtime_installer import _materialize_venv, _patch_venv_base_python
+from vibeocr.runtime.environments.managed_cleanup import remember_path
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
 from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
-from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
     _lock_allowed_hashes,
 )
 from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
-from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
+from vibeocr.runtime.environments.runtime_maintenance import (
+    RuntimeInstallPlanStale,
+    _atomic_json,
+)
 
 
 def _clean(store, *ids):
@@ -27,11 +31,48 @@ def _clean(store, *ids):
     return store.run_cleanup(plan["plan_id"], list(ids))
 
 
+def _real_venv(store, env_id: str) -> None:
+    """用真实解释器树替换 _record 布置的占位目录（bare venv 形态）。"""
+    shutil.rmtree(store.root / env_id)
+    _materialize_venv(store, env_id, bare=True)
+
+
+def _record(store, name: str, **overrides) -> dict:
+    """直接写注册表 venv 记录并布置固定路径目录（create 已随零安装退役）。
+
+    需要健康探针/真实解释器的用例另行配合 _materialize_venv(bare=True)。
+    """
+    env_id = overrides.pop("id", name)
+    root = store.root / env_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyvenv.cfg").write_text("", encoding="utf-8")
+    with RuntimeStoreLock(store._lock):
+        data = store._read()
+        record = {
+            "id": env_id,
+            "name": name,
+            "revision": 1,
+            "kind": "venv",
+            "path": env_id,
+            "status": "empty",
+            "python_version": store.manifest.python.version,
+            "abi": store.manifest.python.abi,
+            **overrides,
+        }
+        data["environments"][env_id] = record
+        _atomic_json(store._registry, data)
+        remember_path(store, env_id, 1, root)
+        # 公共投影与旧 create() 一致使用绝对路径；注册表内保存相对 id。
+        return {**record, "path": str(root)}
+
+
 def test_only_owned_environment_paths_are_removed(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    active = store.create("保留 CPU")
+    store = _manager(tmp_path, monkeypatch)
+    _patch_venv_base_python(store, monkeypatch)
+    active = _record(store, "保留 CPU")
+    _real_venv(store, active["id"])
     store.commit_switch(store.prepare_switch(active["id"]))
-    target = store.create("删除 GPU")
+    target = _record(store, "删除 GPU")
     # 未知目录放在管理存储根下（不在任何已登记环境路径内）：
     # 环境删除只删自己的固定路径，未知数据继续受保护。
     unknown = store.root / "999-unknown"
@@ -50,8 +91,8 @@ def test_only_owned_environment_paths_are_removed(tmp_path, monkeypatch):
 
 
 def test_partial_failure_reopens_and_continues(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("待清理")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "待清理")
     original = shutil.rmtree
 
     def fail(path):
@@ -67,7 +108,6 @@ def test_partial_failure_reopens_and_continues(tmp_path, monkeypatch):
         product_root=store.product_root,
         component_lock=store.component_lock_path,
         runtime_manifest=store.manifest.path,
-        base_python=sys._base_executable,
     )
     pending = next(
         item
@@ -80,8 +120,8 @@ def test_partial_failure_reopens_and_continues(tmp_path, monkeypatch):
 
 
 def test_pending_before_unregister_is_not_healthy(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("中断删除")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "中断删除")
     relative = store._read()["environments"][target["id"]]["path"]
     path = store.paths.state_root / "environment-cleanup.json"
     ledger = json.loads(path.read_text(encoding="utf-8"))
@@ -101,30 +141,33 @@ def test_pending_before_unregister_is_not_healthy(tmp_path, monkeypatch):
     assert _clean(store, f"pending:{target['id']}")["items"][0]["state"] == "deleted"
 
 
-def test_failed_install_candidate_is_recoverable(tmp_path, monkeypatch):
-    def fail(_python, _scope):
-        raise RuntimeInstallError("fixture install failure")
-
-    store, _ = _manager(tmp_path, monkeypatch, install=fail)
-    target = store.create("安装失败")
-    plan = store.preview_install(target["id"], "paddleocr-ort-directml")
-    with pytest.raises(RuntimeInstallError):
-        store.install(plan["plan_id"], target["id"], "paddleocr-ort-directml")
-    residual = next(
+def test_staged_residual_is_recoverable(tmp_path, monkeypatch):
+    # 历史换入/安装事务在 staging 槽位留下的已登记残留：环境记录保留，
+    # 残留项可被显式清理回收。
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "安装失败")
+    residual = store._staging_path(target["id"])
+    with RuntimeStoreLock(store._lock):
+        remember_path(store, target["id"], 2, residual)
+    residual.mkdir(parents=True)
+    (residual / "partial.bin").write_bytes(b"partial")
+    item = next(
         item
         for item in store.preview_cleanup()["items"]
         if item["category"] == "residual"
     )
-    assert residual["can_clean"]
-    assert _clean(store, residual["id"])["items"][0]["state"] == "deleted"
+    assert item["can_clean"]
+    assert _clean(store, item["id"])["items"][0]["state"] == "deleted"
     assert Path(target["path"]).exists()
 
 
 def test_new_job_reference_invalidates_plan(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    active = store.create("活动")
+    store = _manager(tmp_path, monkeypatch)
+    _patch_venv_base_python(store, monkeypatch)
+    active = _record(store, "活动")
+    _real_venv(store, active["id"])
     store.commit_switch(store.prepare_switch(active["id"]))
-    target = store.create("闲置")
+    target = _record(store, "闲置")
     plan = store.preview_cleanup()
     references = ManagedEnvironmentReferences(
         store._registry, store._lock, store._references, active["id"], 1
@@ -139,10 +182,14 @@ def test_new_job_reference_invalidates_plan(tmp_path, monkeypatch):
     assert Path(target["path"]).exists()
 
 
-@pytest.mark.parametrize("lock_kind", ["install", "model", "switch"])
+@pytest.mark.parametrize("lock_kind", ["environment", "model", "switch"])
 def test_new_operation_invalidates_plan(tmp_path, monkeypatch, lock_kind):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("目标")
+    store = _manager(tmp_path, monkeypatch)
+    if lock_kind == "switch":
+        _patch_venv_base_python(store, monkeypatch)
+    target = _record(store, "目标")
+    if lock_kind == "switch":
+        _real_venv(store, target["id"])
     plan = store.preview_cleanup()
     if lock_kind == "model":
         guard = RuntimeStoreLock(
@@ -196,9 +243,9 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
     # 统一推理闭包后 directml 是唯一引擎配方：保留环境仍引用的闭包下载
     # 工件不随无关环境清理删除；最后一个引用环境移除后同一工件转为
     # 未引用缓存，才可被清理回收。
-    store, _ = _manager(tmp_path, monkeypatch)
+    store = _manager(tmp_path, monkeypatch)
     first, second, third = [
-        store.create(name) for name in ("保留一", "保留二", "删除三")
+        _record(store, name) for name in ("保留一", "保留二", "删除三")
     ]
     scope, _ = store._recipe("paddleocr-ort-directml")
     allowed = _lock_allowed_hashes(scope.lock_path)
@@ -271,8 +318,8 @@ def test_shared_downloads_survive_unreferenced_cleanup(tmp_path, monkeypatch, ex
 
 
 def test_reparse_descendant_cannot_be_deleted(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("外部链接")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "外部链接")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep").write_text("private")
@@ -300,8 +347,8 @@ def test_reparse_descendant_cannot_be_deleted(tmp_path, monkeypatch):
 
 
 def test_cancel_before_delete_keeps_environment(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("取消")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "取消")
     plan = store.preview_cleanup()
     receipts = []
     store.cancel_cleanup(receipts.append)
@@ -312,8 +359,8 @@ def test_cancel_before_delete_keeps_environment(tmp_path, monkeypatch):
 
 
 def test_stat_change_rejects_plan_without_hashing(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("目录变化")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "目录变化")
     plan = store.preview_cleanup()
     (Path(target["path"]) / "new.txt").write_text("new evidence")
     with pytest.raises(RuntimeInstallPlanStale):
@@ -323,8 +370,10 @@ def test_stat_change_rejects_plan_without_hashing(tmp_path, monkeypatch):
 def test_guarded_host_holds_target_until_commit_and_unguarded_wire_fails(
     tmp_path, monkeypatch
 ):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("guarded")
+    store = _manager(tmp_path, monkeypatch)
+    _patch_venv_base_python(store, monkeypatch)
+    target = _record(store, "guarded")
+    _real_venv(store, target["id"])
     plan = store.preview_cleanup()
     request = {
         "protocol_version": 2,
@@ -376,10 +425,8 @@ def test_guarded_host_holds_target_until_commit_and_unguarded_wire_fails(
 def test_environment_and_residual_selection_does_not_double_count(
     tmp_path, monkeypatch
 ):
-    from vibeocr.runtime.environments.managed_cleanup import remember_path
-
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("重叠")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "重叠")
     # 固定布局下的残留位于换入槽位（环境目录之外）：环境项覆盖
     # 当前路径与全部已登记归属，重叠选择不得重复计数。
     residual = store._staging_path(target["id"])
@@ -402,7 +449,7 @@ def test_environment_and_residual_selection_does_not_double_count(
 
 
 def test_artifact_filename_does_not_claim_directory_contents(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
+    store = _manager(tmp_path, monkeypatch)
     scope, _ = store._recipe("paddleocr-ort-directml")
     name, hashes = next(iter(_lock_allowed_hashes(scope.lock_path).items()))
     path = _report(
@@ -425,8 +472,8 @@ def test_artifact_filename_does_not_claim_directory_contents(tmp_path, monkeypat
 
 
 def test_new_preview_invalidates_previous_confirmation(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("重新检查")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "重新检查")
     old = store.preview_cleanup()
     current = store.preview_cleanup()
     selection = [f"environment:{target['id']}"]
@@ -440,8 +487,8 @@ def test_new_preview_invalidates_previous_confirmation(tmp_path, monkeypatch):
 
 
 def test_cleanup_request_crosses_real_host_process(tmp_path, monkeypatch):
-    store, _ = _manager(tmp_path, monkeypatch)
-    target = store.create("真实 Host 清理")
+    store = _manager(tmp_path, monkeypatch)
+    target = _record(store, "真实 Host 清理")
     plan = store.preview_cleanup()
     request = {
         "protocol_version": 2,

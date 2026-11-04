@@ -17,12 +17,12 @@ namespace VibeOCR.App.Tests;
 
 /// <summary>
 /// 未安装任何可选识别组件时的 MinerU 远程模式契约：
-/// 远程模式宿主入口（PrepareRemoteHostCommand）只复用 Runtime 权威事务
-/// （兼容查询/离线安装/切换），会话内重试复用同一专用环境 id，不按名称
-/// 复用用户环境、不触碰用户空环境；准备期间跨步骤禁重入；入口打通后
-/// 同一会话可完成“保存远程配置 → 触发真实预加载”链路；失败状态经
-/// RunAsync seam 用户可见；远程准备失败仅对 Runtime 白名单化的
-/// ValidationError reason 给出操作建议，不回显服务正文/URL/Key。
+/// 远程模式宿主入口（PrepareRemoteHostCommand）只按 Runtime 目录的
+/// DefaultRemoteHost 配方切换已安装的随包环境（预构建语义：不新建、
+/// 不安装），准备期间跨步骤禁重入；入口打通后同一会话可完成
+/// “保存远程配置 → 触发真实预加载”链路；失败状态经 RunAsync seam
+/// 用户可见；远程准备失败仅对 Runtime 白名单化的 ValidationError
+/// reason 给出操作建议，不回显服务正文/URL/Key。
 /// </summary>
 public sealed class MineruRemoteWithoutLocalEnginesTests
 {
@@ -36,11 +36,8 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     var inference = new RemoteHostInferenceClient();
     var manager = new RemoteHostManager(
       new ManagedEnvironmentList("base", 1,
-        [ManagedEnvironment("base", "基础环境", "installed")],
+        [ManagedEnvironment("base", "基础环境", "installed", "paddleocr-ort-cpu")],
         Recipes: Catalog()));
-    manager.Compatibility = new ManagedEnvironmentQueryResult(
-      "paddleocr-ort-cpu",
-      Selected: new ManagedEnvironmentSelection("base", 1, "paddleocr-ort-cpu", "active_environment"));
     var environments = new ManagedEnvironmentSettings(manager,
       (id, _) => { manager.SetActive(id); return Task.CompletedTask; },
       () => null, new ProductMaintenanceCoordinator());
@@ -53,18 +50,15 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       await WaitUntilAsync(() => manager.Switches.Count == 1,
         $"switch was not started: {environments.Status}");
 
-      // 已有可复用环境：只切换启动，不新建、不预览、不安装。
+      // 已安装的随包环境：只切换启动，不新建、不安装。
       Assert.Equal(["base"], manager.Switches);
-      Assert.Empty(manager.CreatedNames);
-      Assert.Empty(manager.Previews);
-      Assert.Empty(manager.Installs);
       Assert.Equal("base", manager.List.ActiveId);
     }
     finally { await handler.DisposeAsync(); Directory.Delete(root, recursive: true); }
   }
 
   [Fact]
-  public async Task PrepareRemoteHostCreatesOwnEnvironmentAndLeavesUserEnvironmentsAlone()
+  public async Task PrepareRemoteHostWithoutInstalledBaseFailsAndLeavesUserEnvironmentsAlone()
   {
     var inference = new RemoteHostInferenceClient();
     var manager = new RemoteHostManager(
@@ -79,55 +73,16 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     {
       await handler.ExecuteAsync(new PrepareRemoteHostCommand(),
         TestContext.Current.CancellationToken);
-      await WaitUntilAsync(() => manager.Switches.Count == 1, "switch was not started");
+      await WaitUntilAsync(() =>
+        environments.Status.Contains("未找到已安装的随包基础服务环境", StringComparison.Ordinal),
+        "missing prebuilt base was not projected");
 
-      // 只使用本次创建的专用环境：create → 离线基础配方预览 → 安装 → 切换。
-      Assert.Equal(["远程基础服务"], manager.CreatedNames);
-      string target = Assert.Single(manager.Switches);
-      Assert.NotEqual("user", target);
-      Assert.Equal([(target, "paddleocr-ort-cpu")], manager.Previews);
-      Assert.Equal([("plan-1", target)], manager.Installs);
+      // 预构建语义：无已安装随包环境时如实失败，不新建、不安装、不切换。
+      Assert.Empty(manager.Switches);
       ManagedEnvironment user = Assert.Single(
         manager.List.Environments, item => item.Id == "user");
       Assert.Equal("empty", user.Status);
-      Assert.Equal(target, manager.List.ActiveId);
-    }
-    finally { await handler.DisposeAsync(); Directory.Delete(root, recursive: true); }
-  }
-
-  [Fact]
-  public async Task PrepareRemoteHostRetriesReuseSessionEnvironmentWithoutPileUp()
-  {
-    var inference = new RemoteHostInferenceClient();
-    var manager = new RemoteHostManager(
-      new ManagedEnvironmentList(null, 0, [], Recipes: Catalog()))
-    { InstallThrows = new InvalidOperationException("offline pack unavailable") };
-    var environments = new ManagedEnvironmentSettings(manager,
-      (id, _) => { manager.SetActive(id); return Task.CompletedTask; },
-      () => null, new ProductMaintenanceCoordinator());
-    await using var handler = CreateHandler(inference, environments, out string root);
-    try
-    {
-      await handler.ExecuteAsync(new PrepareRemoteHostCommand(),
-        TestContext.Current.CancellationToken);
-      await WaitUntilAsync(
-        () => !environments.IsBusy &&
-          environments.Status.Contains("安装未完成", StringComparison.Ordinal),
-        "install failure was not projected");
-      Assert.Empty(manager.Switches);
-
-      // 会话内重试：复用同一专用环境 id 续装，不追加“远程基础服务 2”。
-      manager.InstallThrows = null;
-      await handler.ExecuteAsync(new PrepareRemoteHostCommand(),
-        TestContext.Current.CancellationToken);
-      await WaitUntilAsync(() => manager.Switches.Count == 1, "retry switch was not started");
-
-      Assert.Equal(["远程基础服务"], manager.CreatedNames);
-      string target = Assert.Single(manager.Switches);
-      Assert.Equal(target, manager.CreatedTargetId);
-      Assert.Equal(target, manager.List.ActiveId);
-      Assert.Equal("installed", Assert.Single(
-        manager.List.Environments, item => item.Id == target).Status);
+      Assert.Equal("user", manager.List.ActiveId);
     }
     finally { await handler.DisposeAsync(); Directory.Delete(root, recursive: true); }
   }
@@ -137,9 +92,11 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
   {
     var inference = new RemoteHostInferenceClient();
     var manager = new RemoteHostManager(
-      new ManagedEnvironmentList(null, 0, [], Recipes: Catalog()))
+      new ManagedEnvironmentList("base", 1,
+        [ManagedEnvironment("base", "基础环境", "installed", "paddleocr-ort-cpu")],
+        Recipes: Catalog()))
     {
-      FindGate = new TaskCompletionSource<ManagedEnvironmentQueryResult>(
+      ListGate = new TaskCompletionSource(
         TaskCreationOptions.RunContinuationsAsynchronously),
     };
     var environments = new ManagedEnvironmentSettings(manager,
@@ -160,55 +117,26 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       SettingsWorkbenchState firstState = Assert.IsType<SettingsWorkbenchState>(published);
       Assert.True(firstState.EnvironmentBusy == true);
 
-      // 第一次仍在兼容查询挂起：第二次点击必须被拒绝，不新建、不安装。
+      // 第一次仍在清单读取挂起：第二次点击必须被拒绝，不切换。
       WorkbenchCommandOutcome second = await handler.ExecuteAsync(
         new PrepareRemoteHostCommand(), TestContext.Current.CancellationToken);
       Assert.NotNull(second.Error);
-      Assert.Empty(manager.CreatedNames);
-      Assert.Empty(manager.Installs);
       Assert.Empty(manager.Switches);
 
-      manager.FindGate.SetResult(new ManagedEnvironmentQueryResult("paddleocr-ort-cpu"));
+      manager.ListGate.SetResult();
       await WaitUntilAsync(() => manager.Switches.Count == 1, "first chain did not finish");
-      Assert.Equal(["远程基础服务"], manager.CreatedNames);
-      Assert.Single(manager.Installs);
+      Assert.Equal(["base"], manager.Switches);
     }
     finally
     {
-      manager.FindGate.TrySetResult(new ManagedEnvironmentQueryResult("paddleocr-ort-cpu"));
+      manager.ListGate.TrySetResult();
       await handler.DisposeAsync();
       Directory.Delete(root, recursive: true);
     }
   }
 
-  [Fact]
-  public async Task FailedBaseInstallDoesNotSwitchEnvironment()
-  {
-    var inference = new RemoteHostInferenceClient();
-    var manager = new RemoteHostManager(
-      new ManagedEnvironmentList(null, 0, [], Recipes: Catalog()))
-    { InstallThrows = new InvalidOperationException("offline pack unavailable") };
-    var environments = new ManagedEnvironmentSettings(manager,
-      (id, _) => { manager.SetActive(id); return Task.CompletedTask; },
-      () => null, new ProductMaintenanceCoordinator());
-    await using var handler = CreateHandler(inference, environments, out string root);
-    try
-    {
-      await handler.ExecuteAsync(new PrepareRemoteHostCommand(),
-        TestContext.Current.CancellationToken);
-      await WaitUntilAsync(
-        () => environments.Status.Contains("安装未完成", StringComparison.Ordinal),
-        "install failure was not projected");
-
-      // 安装失败：不切换、活动环境不变；失败经状态 seam 用户可见。
-      Assert.Empty(manager.Switches);
-      Assert.Null(manager.List.ActiveId);
-    }
-    finally { await handler.DisposeAsync(); Directory.Delete(root, recursive: true); }
-  }
-
   // ------------------------------------------------------------------
-  // 完整链路：空环境 → 入口创建 base 并启动 → 保存远程配置 → 可预加载
+  // 完整链路：随包 base 已注册 → 入口切换启动 → 保存远程配置 → 可预加载
   // ------------------------------------------------------------------
 
   [Fact]
@@ -217,7 +145,10 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     var inference = new RemoteHostInferenceClient();
     var manager = new RemoteHostManager(
       new ManagedEnvironmentList("user", 1,
-        [ManagedEnvironment("user", "我的环境", "empty")],
+        [
+          ManagedEnvironment("user", "我的环境", "empty"),
+          ManagedEnvironment("base", "基础环境", "installed", "paddleocr-ort-cpu"),
+        ],
         Recipes: Catalog()));
     // 切换完成后目录声明远程能力与模式目录（Runtime 真实行为：supervisor
     // 承载后 capability 始终声明，无需本地 mineru 包）。
@@ -292,7 +223,10 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
   {
     var manager = new RemoteHostManager(
       new ManagedEnvironmentList("user", 1,
-        [ManagedEnvironment("user", "我的环境", "empty")],
+        [
+          ManagedEnvironment("user", "我的环境", "empty"),
+          ManagedEnvironment("base", "基础环境", "installed", "paddleocr-ort-cpu"),
+        ],
         Recipes: Catalog()));
     var environments = new ManagedEnvironmentSettings(manager,
       (_, _) => Task.CompletedTask, () => null, new ProductMaintenanceCoordinator());
@@ -413,9 +347,10 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     out string root) => CreateHandler(inference, environments, out root, out _);
 
   private static ManagedEnvironment ManagedEnvironment(
-    string id, string name, string status) =>
-    new(id, name, 1, "venv", status, "python", "ready", status, "unavailable",
-      "not_applicable", "not_started", null);
+    string id, string name, string status, string? recipe = null) =>
+    new(id, name, 1, recipe is null ? "venv" : "product", status, "python", "ready",
+      status, "unavailable", "not_applicable", "not_started", null,
+      Recipe: recipe);
 
   private static IReadOnlyList<ManagedEnvironmentRecipe> Catalog() =>
   [
@@ -428,15 +363,9 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
   private sealed class RemoteHostManager(ManagedEnvironmentList list) : IManagedEnvironmentClient
   {
     public ManagedEnvironmentList List { get; private set; } = list;
-    public ManagedEnvironmentQueryResult? Compatibility { get; set; }
-    public TaskCompletionSource<ManagedEnvironmentQueryResult>? FindGate { get; init; }
-    public List<string> CreatedNames { get; } = [];
-    public string? CreatedTargetId { get; private set; }
-    public List<(string EnvironmentId, string Recipe)> Previews { get; } = [];
-    public List<(string PlanId, string EnvironmentId)> Installs { get; } = [];
+    public TaskCompletionSource? ListGate { get; init; }
     public List<string> Switches { get; } = [];
-    public Exception? InstallThrows { get; set; }
-    private int findCalls;
+    private int listCalls;
 
     public void SetActive(string id)
     {
@@ -444,64 +373,15 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
       List = List with { ActiveId = id };
     }
 
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
-      CancellationToken cancellationToken = default) => Task.FromResult(List);
-
-    public async Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
-      string recipe, CancellationToken cancellationToken = default)
+    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
+      CancellationToken cancellationToken = default)
     {
-      // 首次查询可被测试挂起，模拟长查询/安装期间的重复点击。
-      if (Interlocked.Increment(ref findCalls) == 1 && FindGate is not null)
+      // 首次读取可被测试挂起，模拟准备期间的重复点击。
+      if (Interlocked.Increment(ref listCalls) == 1 && ListGate is not null)
       {
-        return await FindGate.Task.WaitAsync(cancellationToken);
+        await ListGate.Task.WaitAsync(cancellationToken);
       }
-      return Compatibility ?? new ManagedEnvironmentQueryResult(recipe);
-    }
-
-    public Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(
-      string recipe, CancellationToken cancellationToken = default)
-    {
-      ManagedEnvironment? target = List.Environments.FirstOrDefault(item => item.Id == CreatedTargetId);
-      return target is not null ? Task.FromResult(target) : CreateEnvironmentAsync("远程基础服务", cancellationToken);
-    }
-
-    public Task<ManagedEnvironment> CreateEnvironmentAsync(
-      string name, CancellationToken cancellationToken = default)
-    {
-      CreatedNames.Add(name);
-      string id = $"created-{CreatedNames.Count}";
-      CreatedTargetId = id;
-      var created = ManagedEnvironment(id, name, "empty");
-      List = List with { Environments = [.. List.Environments, created] };
-      return Task.FromResult(created);
-    }
-
-    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
-      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      Previews.Add((environmentId, recipe));
-      return Task.FromResult(new ManagedEnvironmentPlan(
-        "plan-1", environmentId, 1, List.ActiveRevision, recipe, []));
-    }
-
-    public Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      Installs.Add((plan.PlanId, plan.EnvironmentId));
-      if (InstallThrows is not null) throw InstallThrows;
-      List = List with
-      {
-        Environments =
-        [
-          .. List.Environments.Select(item => item.Id == plan.EnvironmentId
-            ? item with { Status = "installed" }
-            : item),
-        ],
-      };
-      return Task.FromResult(
-        ManagedEnvironment(plan.EnvironmentId, "远程基础服务", "installed"));
+      return List;
     }
 
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
@@ -521,9 +401,6 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
       string? environmentId, string? modelSourceId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
-      string environmentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task DeleteEnvironmentAsync(
       string environmentId, CancellationToken cancellationToken = default) => throw new NotSupportedException();

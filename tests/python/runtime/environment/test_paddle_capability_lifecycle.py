@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from test_runtime_installer import _write_venv_record
+from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 
 
@@ -75,13 +78,16 @@ def test_same_environment_selection_commit_changes_epoch_and_preserves_closure(
         ManagedEnvironmentError,
     )
 
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
+    manager = _manager(tmp_path, monkeypatch)
+    item = _write_venv_record(
+        manager,
+        "paddle",
+        status="installed",
+        recipe="paddleocr-ort-directml",
+        selected_device="cpu",
+    )
     data = manager._read()
     data["active_id"] = item["id"]
-    data["environments"][item["id"]].update(
-        status="installed", recipe="paddleocr-ort-directml", selected_device="cpu"
-    )
     _atomic_json(manager._registry, data)
     monkeypatch.setattr(manager, "_verified_health", lambda _: True)
     with manager.switch_reservation(item["id"], "directml") as prepared:
@@ -110,23 +116,41 @@ def test_same_environment_selection_commit_changes_epoch_and_preserves_closure(
     "control,expected",
     [("", 0), ('{"action":"abort_switch"}\n', 0), ('{"action":"invalid"}\n', 1)],
 )
-def test_maintenance_stdin_reservation_releases_on_eof_abort_and_invalid_control(
+def test_switch_control_stdin_reservation_releases_on_eof_abort_and_invalid_control(
     tmp_path, monkeypatch, capsys, control, expected
 ):
     import json
 
     from test_default_environment import _manager
+    from test_runtime_installer import _materialize_venv
+    from vibeocr.runtime.environments.managed_environments import (
+        ManagedEnvironmentStore,
+    )
     from vibeocr.runtime.environments.managed_references import admission_lock
     from vibeocr.runtime.environments.runtime_installer import main
     from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
+    manager = _manager(tmp_path, monkeypatch)
+    item = _write_venv_record(manager, "paddle")
+    _materialize_venv(manager, "paddle", bare=True)
+    # main() 内部重建 store：base 解释器门按类级补丁对历史 venv 记录放行。
+    monkeypatch.setattr(
+        ManagedEnvironmentStore,
+        "_expected_base_python",
+        lambda self: Path(sys._base_executable),
+    )
 
     class Control:
         def readline(self, _limit):
+            # 预留期间目标环境操作锁被持有：同环境的其它操作 fail closed。
+            reservation = RuntimeStoreLock(
+                manager.paths.locks_root
+                / "environment-operations"
+                / f"{item['id']}.lock",
+                timeout=0,
+            )
             with pytest.raises(RuntimeLockTimeout):
-                with admission_lock(manager._references, item["id"]):
+                with reservation:
                     pass
             return control
 
@@ -134,7 +158,7 @@ def test_maintenance_stdin_reservation_releases_on_eof_abort_and_invalid_control
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
-        "action": "prepare_maintenance",
+        "action": "prepare_switch",
         "environment_id": item["id"],
         "product_root": str(manager.product_root),
         "component_lock": str(manager.component_lock_path),
@@ -144,7 +168,7 @@ def test_maintenance_stdin_reservation_releases_on_eof_abort_and_invalid_control
         main(["--request-json", json.dumps(request), "--environment-switch-control"])
         == expected
     )
-    assert '"action": "prepare_maintenance"' in capsys.readouterr().out
+    assert '"action": "prepare_switch"' in capsys.readouterr().out
     with admission_lock(manager._references, item["id"]):
         pass
 
@@ -156,10 +180,10 @@ def test_inactive_service_lease_protects_environment_from_cleanup(
     from vibeocr.runtime.environments.managed_environments import (
         ManagedEnvironmentError,
     )
-    from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
+    manager = _manager(tmp_path, monkeypatch)
+    item = _write_venv_record(manager, "paddle")
+    (manager.root / "paddle").mkdir(parents=True, exist_ok=True)
     with RuntimeStoreLock(manager._references / item["id"] / "services" / "live.lock"):
         plan = manager.preview_cleanup()
         entry = next(
@@ -175,130 +199,12 @@ def test_inactive_service_lease_protects_environment_from_cleanup(
     assert item["id"] not in manager._read()["environments"]
 
 
-def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
-    tmp_path, monkeypatch
-):
-    import os
+def test_registry_record_python_resolves_record_not_path(tmp_path, monkeypatch) -> None:
+    """_record_python 吃记录：公共探针/启动投影不得把 Path 传进去。"""
+    from test_default_environment import _manager
 
-    from test_environment_store_layout import _manager
-    from vibeocr.runtime.environments.managed_environments import (
-        ManagedEnvironmentInstallCancelled,
-    )
-    from vibeocr.runtime.environments.runtime_installer import (
-        _failure_envelope,
-        _run_install_command,
-    )
-
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
-    manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    before = manager._read()
-    before["active_id"] = item["id"]
-    before["active_revision"] = 5
-    before["environments"][item["id"]]["selected_device"] = "cpu"
-    _atomic_json(manager._registry, before)
-    old = dict(before["environments"][item["id"]])
-    # 统一推理闭包内没有跨设备重装；取消语义用同 recipe 重装表达。
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
-    events, receipts = [], []
-
-    def observe(event):
-        events.append(event)
-        if "cancel-ready" in event.get("log", {}).get("text", "") and not receipts:
-            manager.cancel_install(receipts.append)
-
-    manager._event_sink = observe
-
-    def install(python, _scope):
-        _run_install_command(
-            [
-                sys._base_executable,
-                "-c",
-                "import time; print('cancel-ready', flush=True); time.sleep(30)",
-            ],
-            timeout=15,
-            env=dict(os.environ),
-            reporter=manager._install_observer,
-            heartbeat_code="runtime.install_profile",
-            gate_python=python,
-        )
-
-    monkeypatch.setattr(manager, "_install_runner", install)
-    with pytest.raises(ManagedEnvironmentInstallCancelled) as cancelled:
-        manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    assert receipts == [True]
-    failure = _failure_envelope(cancelled.value, operation=None, maintenance=None)
-    assert failure["error"]["canonical_code"] == "CANCELLED"
-    assert failure["error"]["category"] == "cancelled"
-    after = manager._read()
-    current = after["environments"][item["id"]]
-    assert after["active_id"] == before["active_id"]
-    assert after["active_revision"] == before["active_revision"]
-    for key in (
-        "recipe",
-        "recipe_lock",
-        "revision",
-        "selected_device",
-        "status",
-        "source_ids",
-    ):
-        assert current[key] == old[key]
-    assert manager._probe(current)["healthy"]
-    operation = current["last_install_operation"]
-    assert operation["phase"] == "failed"
-    assert operation["reason_code"] == "install_interrupted"
-    assert operation["next_action"] == "preview_again"
-    assert operation["plan_id"] == plan["plan_id"]
-    assert events[-1]["state"] == "cancelled"
-    assert not any(event["state"] in ("failed", "succeeded") for event in events)
-    manager.cancel_install(receipts.append)
-    assert receipts == [True, False]
-
-
-def test_cancelled_install_keeps_recoverable_marker_when_terminal_write_is_full(
-    tmp_path, monkeypatch
-):
-    import errno
-
-    from test_environment_store_layout import _manager
-    from vibeocr.runtime.environments import managed_environments
-
-    manager, _ = _manager(tmp_path, monkeypatch)
-    item = manager.create("paddle")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml")
-    receipts, events, failed_writes = [], [], []
-    manager._event_sink = events.append
-    original_write = managed_environments._atomic_json
-
-    def write(path, data):
-        operation = (
-            data.get("environments", {})
-            .get(item["id"], {})
-            .get("last_install_operation", {})
-        )
-        if path == manager._registry and operation.get("phase") == "failed":
-            failed_writes.append(operation)
-            raise OSError(errno.ENOSPC, "synthetic full disk")
-        original_write(path, data)
-
-    def install(*_args):
-        manager.cancel_install(receipts.append)
-        manager._check_install_cancelled()
-
-    monkeypatch.setattr(managed_environments, "_atomic_json", write)
-    monkeypatch.setattr(manager, "_install_runner", install)
-    with pytest.raises(managed_environments.ManagedEnvironmentInstallCancelled):
-        manager.install(plan["plan_id"], item["id"], plan["recipe"])
-    assert failed_writes[0]["reason_code"] == "install_interrupted"
-    assert (
-        manager._read()["environments"][item["id"]]["last_install_operation"]["phase"]
-        == "installing"
-    )
-    assert (
-        manager.list()["environments"][0]["last_install_failure"]["reason_code"]
-        == "install_interrupted"
-    )
-    assert events[-1]["state"] == "cancelled"
-    manager.cancel_install(receipts.append)
-    assert receipts == [True, False]
+    manager = _manager(tmp_path, monkeypatch)
+    item = _write_venv_record(manager, "paddle", status="installed")
+    root = manager._safe_path(item)
+    assert manager._record_python(item) == manager._venv_python(root)
+    assert isinstance(root, Path)

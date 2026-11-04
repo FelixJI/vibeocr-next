@@ -8,7 +8,6 @@
     "runtime.settings.v2",
     "runtime.maintenance.v1",
     "task.progress.v1",
-    "runtime.maintenance.v2",
     "runtime.component-repair.v1",
     "runtime.capability-metadata.v1",
     "runtime.events.sse.v1",
@@ -18,7 +17,6 @@
     "runtime.component-selection.v1",
     "ocr.recognition-modes.v1",
     "ocr.mineru-config.v1",
-    "runtime.install-plan.v1",
     "ocr.mineru-remote-api.v1",
     "ocr.default-recognition-mode.v1",
     "pdf.page-inspect.v1",
@@ -78,14 +76,6 @@
       "description": "Consume typed units and determinate or indeterminate progress on Runtime jobs and stage events.",
       "lifecycle": "active",
       "introduced_in": "2.2.0",
-      "deprecated_in": null,
-      "sunset_at": null,
-      "replacement": null
-    },
-    "runtime.maintenance.v2": {
-      "description": "Use idempotent Runtime maintenance operations, commands, durable sequence cursors, and replay.",
-      "lifecycle": "active",
-      "introduced_in": "2.3.0",
       "deprecated_in": null,
       "sunset_at": null,
       "replacement": null
@@ -164,14 +154,6 @@
     },
     "ocr.mineru-remote-api.v1": {
       "description": "Configure a self-hosted MinerU 4 V1 parsing service through SettingsSnapshot.extra.mineru_connection without installing local MinerU dependencies or models; retain local mode and never fall back from a failed remote request to local execution.",
-      "lifecycle": "active",
-      "introduced_in": "2.9.0",
-      "deprecated_in": null,
-      "sunset_at": null,
-      "replacement": null
-    },
-    "runtime.install-plan.v1": {
-      "description": "Preview a read-only Runtime install plan for ensure over runtime.maintenance.v2, runtime.component-selection.v1 and runtime.download-sources.v1: requested and effective component/source closures, retain/install/replace/remove actions with machine reason codes, honest blockers with next actions, deduplicated cost totals and expiry, confirmed later via plan_id on maintenance start or retry without installing, downloading, or changing any active environment.",
       "lifecycle": "active",
       "introduced_in": "2.9.0",
       "deprecated_in": null,

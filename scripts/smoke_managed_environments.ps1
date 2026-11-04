@@ -2,12 +2,12 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProductRoot,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
-    [int]$TimeoutMinutes = 120,
-    [switch]$ProgressOnly,
-    [ValidateSet('paddleocr-ort-directml')][string]$ProgressRecipe = 'paddleocr-ort-directml',
-    [string]$InstallerCacheRoot
+    [int]$TimeoutMinutes = 120
 )
 
+# 预构建运行时树冒烟（PR2）：解释器与依赖闭包随产品分发、运行时零安装。
+# 桌面 fixture 只验证随包 paddleocr-ort-directml 产品环境（kind=product）
+# 已注册、active 指向它且推理会话已附着；安装/进度/取消事务已退役。
 $ErrorActionPreference = 'Stop'
 if ($TimeoutMinutes -le 0) { throw 'TimeoutMinutes must be positive' }
 $source = (Resolve-Path -LiteralPath $ProductRoot).Path.TrimEnd('\')
@@ -21,6 +21,7 @@ foreach ($marker in @(
     'app\VibeOCR.WinUI.exe',
     'app\metadata\product-layout.json',
     'runtime\backend\runtime-manifest.json',
+    'runtime\env\runtime-env\python.exe',
     'runtime\installer\vibeocr-runtime-installer.exe'
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $marker) -PathType Leaf)) {
@@ -43,18 +44,6 @@ $previousInstance = $env:VIBEOCR_SELF_TEST_INSTANCE
 $previousHealth = $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH
 $previousPhase = $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE
 $previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
-$previousProgressRecipe = $env:VIBEOCR_MANAGED_PROGRESS_RECIPE
-$env:VIBEOCR_MANAGED_PROGRESS_RECIPE = $ProgressRecipe
-if ($InstallerCacheRoot) {
-    $cache = (Resolve-Path -LiteralPath $InstallerCacheRoot).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $cache 'downloads/artifacts') -PathType Container)) {
-        throw 'InstallerCacheRoot must be an explicitly selected synthetic installer cache'
-    }
-    # Runtime store is rooted in the portable mutable state directory.
-    $targetCache = Join-Path $candidate 'state/state/installer-cache'
-    New-Item -ItemType Directory -Path $targetCache -Force | Out-Null
-    Get-ChildItem -LiteralPath $cache -Force | Copy-Item -Destination $targetCache -Recurse -Force
-}
 
 function Invoke-ManagedPhase([string]$phase) {
     $healthPath = Join-Path $smokeRoot "managed-environment-$phase.json"
@@ -64,7 +53,9 @@ function Invoke-ManagedPhase([string]$phase) {
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE = $phase
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     $executable = Join-Path $candidate 'app\VibeOCR.WinUI.exe'
-    # create/install 阶段测试常规准备/确认与旧空环境恢复；restart 验证生产启动。
+    # restart 阶段语义保留生产启动路径（桌面按 phase 名决定后台启动）：
+    # 首次启动即在后台 initialize_default 注册产品环境并启动 Supervisor，
+    # fixture 只验证事实。
     $process = Start-Process -FilePath $executable `
         -ArgumentList "--profile production --install-root `"$candidate`"" `
         -WorkingDirectory (Split-Path -Parent $executable) `
@@ -76,121 +67,35 @@ function Invoke-ManagedPhase([string]$phase) {
         }
         throw "Managed environment $phase timed out after $TimeoutMinutes minutes"
     }
-    if (-not (Test-Path -LiteralPath $healthPath -PathType Leaf)) {
+    if ($process.ExitCode -ne 0) {
         throw "Managed environment $phase exited without health evidence (exit $($process.ExitCode))"
     }
+    if (-not (Test-Path -LiteralPath $healthPath -PathType Leaf)) { throw "Health evidence missing: $healthPath" }
     $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
-    if ($process.ExitCode -ne 0 -or $health.schema_version -ne 1 -or
-        $health.state -ne 'passed' -or $health.phase -ne $phase) {
+    if ($health.state -ne 'passed' -or $health.phase -ne $phase) {
         throw "Managed environment $phase failed: $($health.error)"
     }
     return $health
 }
 
-function Test-ManagedPython([string]$python, [bool]$expectEmpty) {
-    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-        throw "Managed interpreter missing: $python"
-    }
-    $code = 'import importlib.util,json,sys; print(json.dumps({"prefix":sys.prefix,"executable":sys.executable,"packages":{p:importlib.util.find_spec(p) is not None for p in ("pip","fastapi","onnxruntime","paddleocr","mineru","torch")}}))'
-    $output = & $python -I -B -c $code
-    if ($LASTEXITCODE -ne 0) { throw "Managed interpreter probe failed: $python" }
-    $probe = $output | ConvertFrom-Json
-    if (-not $probe.prefix -or -not $probe.executable) {
-        throw "Managed interpreter probe incomplete: $python"
-    }
-    if ($expectEmpty) {
-        foreach ($name in @('pip', 'fastapi', 'onnxruntime', 'paddleocr', 'mineru', 'torch')) {
-            if ($probe.packages.$name) { throw "Empty environment unexpectedly contains $name" }
-        }
-    }
-    return $probe
-}
-
 try {
-    if ($ProgressOnly) {
-        $progress = Invoke-ManagedPhase 'progress'
-        if ($progress.install_attempts -ne 1 -or $progress.evidence.installed.status -ne 'installed') {
-            throw 'Progress smoke did not complete exactly one real install'
-        }
-        Test-ManagedPython $progress.evidence.installed.python $false | Out-Null
-        Write-Host "Managed install progress passed. Isolated evidence retained at: $smokeRoot"
-        return
+    $prebuilt = Invoke-ManagedPhase 'restart'
+    $environment = $prebuilt.evidence.environment
+    if ($environment.kind -ne 'product' -or
+        $environment.recipe -ne 'paddleocr-ort-directml' -or
+        $environment.status -ne 'installed' -or
+        $environment.python_state -ne 'ready') {
+        throw "Prebuilt product environment is not healthy: $($environment | ConvertTo-Json -Compress)"
     }
-    $created = Invoke-ManagedPhase 'create'
-    if ($created.install_attempts -ne 0 -or $created.evidence.active_id -or
-        $created.evidence.environments.Count -ne 2) {
-        throw 'Creation phase unexpectedly installed or activated an environment'
+    if ($prebuilt.evidence.active_id -ne $environment.id -or
+        $prebuilt.evidence.service_state -ne 'Ready') {
+        throw 'Active environment does not point at the healthy prebuilt product environment'
     }
-    $emptyProbes = @()
-    foreach ($environment in $created.evidence.environments) {
-        if ($environment.status -ne 'empty' -or $environment.python_state -ne 'ready') {
-            throw "Named environment is not empty: $($environment.name)"
-        }
-        $probe = Test-ManagedPython $environment.python $true
-        if (-not $probe.prefix.Equals($environment.path, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Empty environment prefix mismatch: $($environment.name)"
-        }
-        $emptyProbes += $probe
-    }
-
-    $installed = Invoke-ManagedPhase 'install'
-    if ($installed.install_attempts -ne 2 -or
-        $installed.evidence.install_attempts_after_switch_back -ne 2 -or
-        -not $installed.evidence.local_qr_ready -or
-        $installed.evidence.capture.Width -le 0 -or
-        $installed.evidence.capture.Height -le 0 -or
-        $installed.evidence.capture.WhitePixels -le 10000 -or
-        $installed.evidence.capture.DarkPixels -le 100 -or
-        $installed.evidence.recognition.Count -ne 2) {
-        throw 'Install and switch evidence is incomplete'
-    }
-    foreach ($environment in $installed.evidence.installed_environments) {
-        if ($environment.status -ne 'installed' -or $environment.recipe -ne 'paddleocr-ort-directml') {
-            throw "Expected publicly confirmed unified closure recipe for $($environment.name)"
-        }
-    }
-    foreach ($task in $installed.evidence.recognition) {
-        if (-not $task.task_id -or -not $task.environment_id -or
-            $task.environment_revision -lt 1 -or -not $task.ocr_visible) {
-            throw 'OCR task lacks managed environment evidence'
-        }
-        $probe = Test-ManagedPython $task.python $false
-        $target = $installed.evidence.installed_environments |
-            Where-Object { $_.id -eq $task.environment_id } |
-            Select-Object -First 1
-        if (-not $target -or
-            $target.revision -ne $task.environment_revision -or
-            $target.path -ne $task.environment_path -or
-            -not $probe.prefix.Equals($target.path, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "OCR interpreter prefix mismatch: $($task.task_id)"
-        }
-    }
-    if ($installed.evidence.switch_back.environment_id -ne $created.evidence.environments[0].id) {
-        throw 'Switch back did not restore environment A'
-    }
-
-    $restarted = Invoke-ManagedPhase 'restart'
-    if ($restarted.install_attempts -ne 0 -or
-        $restarted.evidence.active_id -ne $created.evidence.environments[0].id -or
-        $restarted.evidence.service_state -ne 'Ready' -or
-        $restarted.evidence.projected_service_state -ne 'ready') {
-        throw 'Active environment A was not ready after restart without installation'
-    }
-    $cleanup = Invoke-ManagedPhase 'cleanup'
-    if ($cleanup.install_attempts -ne 0 -or
-        $cleanup.evidence.removed_environment_id -ne $created.evidence.environments[1].id -or
-        -not $cleanup.evidence.recognition.ocr_visible -or
-        (Test-Path -LiteralPath $cleanup.evidence.removed_path) -or
-        -not (Test-Path -LiteralPath $cleanup.evidence.retained_path)) {
-        throw 'Public cleanup did not remove only B and preserve A recognition without installation'
-    }
-    Write-Host "Managed environment E2E passed: A/B installs, OCR, switch-back, restart, public cleanup and retained OCR."
-    Write-Host "Isolated evidence retained at: $smokeRoot"
+    Write-Host "Prebuilt managed environment smoke passed. Isolated evidence retained at: $smokeRoot"
 } finally {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke
     $env:VIBEOCR_SELF_TEST_INSTANCE = $previousInstance
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH = $previousHealth
     $env:VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE = $previousPhase
     $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebViewData
-    $env:VIBEOCR_MANAGED_PROGRESS_RECIPE = $previousProgressRecipe
 }

@@ -8,7 +8,7 @@ using System.Text;
 
 namespace VibeOCR.App.Tests;
 
-public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
+public sealed class WorkbenchBridgeCodecTests
 {
   [Theory]
   [InlineData("cpu")]
@@ -219,18 +219,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(command, session));
   }
 
-  [Theory]
-  [InlineData("rapidocr-cpu")]
-  [InlineData("文字识别 CPU-2")]
-  [InlineData("0123456789abcdef0123456789abcdef")]
-  public void EnvironmentCommandsAcceptRuntimeReadableIds(string environmentId)
-  {
-    Guid sessionId = Guid.NewGuid();
-    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "paddleocr-ort-cpu" });
-    var command = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId).Command);
-    Assert.Equal(environmentId, command.EnvironmentId);
-  }
 
   [Theory]
   [InlineData("../environment")]
@@ -246,89 +234,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
   }
 
-  [Fact]
-  public void EnvironmentPreviewBindsSelectedPackageSource()
-  {
-    Guid sessionId = Guid.NewGuid();
-    string environmentId = Guid.NewGuid().ToString("N");
-    string json = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "previewEnvironmentInstall",
-            "arguments": {
-              "environmentId": "{{environmentId}}",
-              "recipe": "paddleocr-ort-cpu",
-              "sourceId": "pypi"
-            }
-          }
-        }
-      }
-      """;
-    var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      ParseForTest(json, sessionId).Command);
-    Assert.Equal("pypi", preview.SourceId);
-    // 桥只校验 id 形状，不硬编码目录成员；目录成员由管理器 fail closed。
-    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      ParseForTest(json.Replace("\"pypi\"", "\"un trusted!\""), sessionId));
-  }
 
-  [Fact]
-  public void EnvironmentPreviewAndConfirmAllowFollowWithoutExplicitSource()
-  {
-    Guid sessionId = Guid.NewGuid();
-    string environmentId = Guid.NewGuid().ToString("N");
-    string previewJson = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "previewEnvironmentInstall",
-            "arguments": {
-              "environmentId": "{{environmentId}}",
-              "recipe": "paddleocr-ort-cpu"
-            }
-          }
-        }
-      }
-      """;
-    var preview = Assert.IsType<PreviewEnvironmentInstallCommand>(
-      ParseForTest(previewJson, sessionId).Command);
-    Assert.Null(preview.SourceId);
-
-    string confirmJson = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "confirmEnvironmentInstall",
-            "arguments": {
-              "planId": "{{new string('a', 32)}}"
-            }
-          }
-        }
-      }
-      """;
-    var confirm = Assert.IsType<ConfirmEnvironmentInstallCommand>(
-      ParseForTest(confirmJson, sessionId).Command);
-    Assert.Null(confirm.SourceId);
-  }
 
   [Fact]
   public void SetEnvironmentSourcesRoutesGlobalAndScopedSaves()
@@ -445,126 +351,9 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       "原设置已保留",
       toolbar.GetProperty("error").GetString());
   }
-  [Fact]
-  public void SettingsStateProjectsEnvironmentCatalogHardwareAndCompatibility()
-  {
-    var state = new SettingsWorkbenchState(
-      WorkbenchTheme.Light,
-      false,
-      "settings.ready",
-      "cpu",
-      false,
-      EnvironmentRecipes:
-      [
-        new SettingsEnvironmentRecipeState(
-          "paddleocr-ort-cpu", "PaddleOCR ONNX · CPU",
-          ["text"], "cpu", "cpu", ["cpu"], "3.13.15", "cp313", "win_amd64",
-          "base", ["runtime_host", "paddleocr-ort-base"], "locked-sha",
-          ["paddleocr==3.1.0"], "bundled_pack", "product_bundle", "product_bundle",
-          Engine: "paddle", Family: "paddle-onnx", FamilyDisplayName: "PaddleOCR ONNX",
-          Provider: "CPUExecutionProvider", SupportsRemoteHost: true, DefaultRemoteHost: true),
-      ],
-      EnvironmentCompatibility: new SettingsEnvironmentCompatibilityState(
-        "paddleocr-ort-cpu",
-        SelectedEnvironmentId: "abc",
-        SelectedEnvironmentRevision: 2,
-        SelectionReason: "active_environment",
-        Environments:
-        [
-          new SettingsEnvironmentQueryMatchState(
-            "abc", "用户环境", 2, "installed", Active: true, Selected: true,
-            ReasonCode: "selected_active_environment"),
-        ]));
-    using JsonDocument json = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(
-      Guid.NewGuid(),
-      new WorkbenchStateEnvelope(9, "settings", WorkbenchStateChange.Replace, state)));
-    JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
-    // 配方目录/兼容结果只投影 Runtime 真值，前台不另算依赖。
-    JsonElement recipe = Assert.Single(settings.GetProperty("environmentRecipes").EnumerateArray());
-    Assert.Equal("paddleocr-ort-cpu", recipe.GetProperty("id").GetString());
-    Assert.Equal("PaddleOCR ONNX · CPU", recipe.GetProperty("displayName").GetString());
-    Assert.Equal("cpu", recipe.GetProperty("accelerator").GetString());
-    Assert.Equal(
-      "cpu",
-      Assert.Single(recipe.GetProperty("supportedDevices").EnumerateArray())
-        .GetString());
-    Assert.Equal("paddle", recipe.GetProperty("engine").GetString());
-    Assert.Equal("paddle-onnx", recipe.GetProperty("family").GetString());
-    Assert.Equal("CPUExecutionProvider", recipe.GetProperty("provider").GetString());
-    Assert.True(recipe.GetProperty("defaultRemoteHost").GetBoolean());
-    JsonElement compatibility = settings.GetProperty("environmentCompatibility");
-    Assert.Equal("paddleocr-ort-cpu", compatibility.GetProperty("recipe").GetString());
-    Assert.Equal("abc", compatibility.GetProperty("selectedEnvironmentId").GetString());
-    JsonElement match = Assert.Single(compatibility.GetProperty("environments").EnumerateArray());
-    Assert.Equal("selected_active_environment", match.GetProperty("reasonCode").GetString());
-  }
 
-  [Fact]
-  public void FindCompatibleEnvironmentDecodesRecipeAndRejectsUnknownIds()
-  {
-    Guid sessionId = Guid.NewGuid();
-    string json = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "findCompatibleEnvironment",
-            "arguments": {
-              "recipe": "mineru-cpu"
-            }
-          }
-        }
-      }
-      """;
-    var find = Assert.IsType<FindCompatibleEnvironmentCommand>(
-      ParseForTest(json, sessionId).Command);
-    Assert.Equal("mineru-cpu", find.Recipe);
-    // 桥只做协议 id 类型守卫；未知输入拒绝，不降 input validation。
-    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      ParseForTest(
-        json.Replace("mineru-cpu", "invalid/recipe"), sessionId));
-    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      ParseForTest(
-        json.Replace("\"recipe\": \"mineru-cpu\"", "\"environmentId\": \"abc\""),
-        sessionId));
-  }
 
-  [Theory]
-  [InlineData("paddleocr-ort-cpu")]
-  [InlineData("paddleocr-ort-cuda")]
-  [InlineData("paddleocr-ort-directml")]
-  [InlineData("mineru-cpu")]
-  [InlineData("mineru-cuda")]
-  [InlineData("custom.engine+gpu_v2")]
-  public void SupportedRecipesReachPrepareFindAndPreview(string recipe)
-  {
-    Guid session = Guid.NewGuid();
-    string arguments = JsonSerializer.Serialize(new { recipe });
-    Assert.Equal(recipe, Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(
-      CommandJson(session, "settings", "prepareEnvironment", arguments), session).Command).Recipe);
-    Assert.Equal(recipe, Assert.IsType<FindCompatibleEnvironmentCommand>(ParseForTest(
-      CommandJson(session, "settings", "findCompatibleEnvironment", arguments), session).Command).Recipe);
-    Assert.Equal(recipe, Assert.IsType<PreviewEnvironmentInstallCommand>(ParseForTest(
-      CommandJson(session, "settings", "previewEnvironmentInstall", JsonSerializer.Serialize(new { environmentId = "test", recipe })), session).Command).Recipe);
-  }
 
-  [Fact]
-  public void PrepareEnvironmentDecodesOnlySupportedRecipe()
-  {
-    Guid session = Guid.NewGuid();
-    string json = CommandJson(session, "settings", "prepareEnvironment", "{\"recipe\":\"paddleocr-ort-cuda\"}");
-    var command = Assert.IsType<PrepareEnvironmentCommand>(ParseForTest(json, session).Command);
-    Assert.Equal("paddleocr-ort-cuda", command.Recipe);
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
-      json.Replace("paddleocr-ort-cuda", "invalid/recipe"), session));
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(
-      CommandJson(session, "settings", "prepareEnvironment", "{}"), session));
-  }
 
   [Fact]
   public void SettingsStateProjectsProgressActivityAndNullableBackend()
@@ -1230,120 +1019,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal("Proprietary", state.GetProperty("license").GetString());
   }
 
-  [Theory]
-  [InlineData("running")]
-  [InlineData("succeeded")]
-  [InlineData("failed")]
-  public void MaximumProfileProgressAndUnicodeLogsFitCompleteStateAndBootstrap(string terminal)
-  {
-    DirectoryInfo? root = new(AppContext.BaseDirectory);
-    while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
-    Assert.NotNull(root);
-    string[] pins = File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", "win-x64-paddle-ort-directml",
-        "requirements-win-x64-paddle-ort-directml.lock"))
-      .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
-      .Select(line => line.Trim().TrimEnd('\\').Trim()).ToArray();
-    // 配方 pin 数随依赖锁定更新自然增减，不把历史数量包装成规模门禁；
-    // 只要求读到真实非空配方，容量与完整性契约由下方全量序列化与字节预算断言承担。
-    Assert.NotEmpty(pins);
-    var dependencies = pins.Select(pin => new VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallDependency
-    {
-      Name = System.Text.RegularExpressions.Regex.Match(pin, "^[A-Za-z0-9_.-]+").Value,
-      Version = "1.0.0",
-      DownloadState = "cached", InstallState = terminal == "running" ? "pending" : "installed",
-    }).ToArray();
-    var progress = new VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent
-    {
-      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32),
-      PlanId = new string('b', 32), EnvironmentId = "容量验收", EnvironmentRevision = 1,
-      Seq = 852, Timestamp = "2026-10-08T03:47:40Z", Phase = terminal == "running" ? "install" : "complete",
-      State = terminal, Current = "依赖已验证并提交", Dependencies = dependencies, DependencyTotalKnown = true,
-      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
-      Log = new VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallLog { Stream = "stdout", Text = "最后一条有用输出", Truncated = false },
-    };
-    string[] logs = Enumerable.Range(0, 180).Select(index => $"{index}: " + new string('文', 300) + "😀\"<>&").Append("最后一条有用输出").ToArray();
-    var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, terminal == "running", "settings.ready", "cpu", false,
-      StatusMessage: new string('字', 1000), EnvironmentInstallProgress: progress,
-      EnvironmentInstallLog: logs, EnvironmentSupportsInstallProgress: true,
-      EnvironmentSnapshotLoaded: true, EnvironmentListFetchAttempted: true,
-      EnvironmentPlan: new SettingsEnvironmentPlanState(new string('b', 32), "容量验收", "cu126", ["tuna-pypi"], pins, "cu126"),
-      EnvironmentRecipes: [new SettingsEnvironmentRecipeState("cu126", "完整 CUDA 配方", Dependencies: pins)],
-      HotkeyActions: [new SettingsHotkeyActionState("screenshot_recognize", "快捷截图识别", "Ctrl+Alt+Q", "Ctrl+Alt+Q", null, "Ctrl+Alt+Q")]);
-    var envelope = new WorkbenchStateEnvelope(99, "settings", WorkbenchStateChange.Replace, settings);
-    Guid session = Guid.NewGuid();
-    string stateJson = WorkbenchBridgeCodec.SerializeState(session, envelope);
-    var bootstrap = new WorkbenchBootstrap(2, session, 99, WorkbenchRoute.Settings,
-      [envelope,
-        new(98, "shell", WorkbenchStateChange.Replace, new ShellWorkbenchState(WorkbenchRoute.Settings)),
-        new(98, "recognition", WorkbenchStateChange.Replace, new RecognitionWorkbenchState(false, "recognition.failed")),
-        new(98, "imageEdit", WorkbenchStateChange.Replace, new ImageEditWorkbenchState(false, "recognition.session")),
-        new(98, "batch", WorkbenchStateChange.Replace, new BatchWorkbenchState(false, 40, 20, 20,
-          Enumerable.Range(0, 40).Select(index => new BatchWorkbenchItem(Guid.Empty, new string('名', 80), "batch.item.failed", new string('错', 120))).ToArray())),
-        new(98, "pdf", WorkbenchStateChange.Replace, new PdfWorkbenchState(false, "pdf.failed", 64, 0,
-          Pages: Enumerable.Range(0, 64).Select(index => new PdfWorkbenchPage(index, "pdf.page.done", new WorkbenchResourceReference("https://app.vibeocr/__resource/" + new string('a', 32), "image/png", 1024))).ToArray(),
-          Documents: Enumerable.Range(0, 16).Select(index => new PdfDocumentSummary(new string('b', 32), "文档", 64, true, false, "idle", false)).ToArray())),
-        new(98, "qrcode", WorkbenchStateChange.Replace, new QrCodeWorkbenchState(false, "qrcode.ready", [], null)),
-        new(98, "update", WorkbenchStateChange.Replace, new UpdateWorkbenchState(false, "update.current", null, false)),
-        new(98, "diagnostics", WorkbenchStateChange.Replace, new DiagnosticsWorkbenchState("ready", "v2", true, [])),
-        new(98, "about", WorkbenchStateChange.Replace, new AboutWorkbenchState("0.3.0", "MIT", "https://example.invalid"))],
-      new HashSet<string> { "runtime.environments" });
-    foreach (var scope in bootstrap.States)
-      output.WriteLine($"complete-snapshot scope={scope.Scope} utf8Bytes={Encoding.UTF8.GetByteCount(WorkbenchBridgeCodec.SerializeState(session, scope))}");
-    Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), bootstrap));
-    var startup = WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap);
-    Assert.True(startup.RequiresSnapshot);
-    using (JsonDocument control = JsonDocument.Parse(startup.Json))
-    {
-      var payload = control.RootElement.GetProperty("payload");
-      Assert.Equal("snapshot", payload.GetProperty("stateTransfer").GetString());
-      Assert.Equal(10, payload.GetProperty("stateScopes").GetArrayLength());
-      Assert.False(payload.TryGetProperty("features", out _));
-    }
-    Assert.True(Encoding.UTF8.GetByteCount(startup.Json) <= WorkbenchBridgeCodec.MaxMessageBytes);
-    var small = WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap with { States = [envelope] });
-    Assert.False(small.RequiresSnapshot);
-    foreach (string json in new[] { stateJson, small.Json })
-    {
-      int bytes = Encoding.UTF8.GetByteCount(json);
-      output.WriteLine($"install-budget state={terminal} envelope={(json == stateJson ? "state" : "bootstrap")} bytes={bytes} limit={WorkbenchBridgeCodec.MaxMessageBytes}");
-      Assert.True(bytes <= WorkbenchBridgeCodec.MaxMessageBytes);
-      using JsonDocument document = JsonDocument.Parse(json);
-      JsonElement payload = document.RootElement.GetProperty("payload");
-      JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
-      // 首次加载契约字段必须过桥（typed 事实，非文案）。
-      Assert.True(projected.GetProperty("environmentSnapshotLoaded").GetBoolean());
-      Assert.True(projected.GetProperty("environmentListFetchAttempted").GetBoolean());
-      JsonElement observed = projected.GetProperty("environmentInstallProgress");
-      Assert.Equal(terminal, observed.GetProperty("state").GetString());
-      Assert.Equal(progress.AttemptId, observed.GetProperty("attempt_id").GetString());
-      Assert.Equal(852, observed.GetProperty("seq").GetInt64());
-      Assert.Equal(pins.Length, observed.GetProperty("dependencies").GetArrayLength());
-      Assert.Equal(JsonValueKind.Null, observed.GetProperty("log").ValueKind);
-      Assert.Equal(JsonSerializer.Serialize(progress with { Log = null }), observed.GetRawText());
-      string[] visible = projected.GetProperty("environmentInstallLog").EnumerateArray().Select(item => item.GetString()!).ToArray();
-      Assert.Contains("截断", visible[0]);
-      Assert.Equal("最后一条有用输出", visible[^1]);
-      Assert.True(visible.Length < logs.Length);
-    }
-    Assert.Equal(logs, settings.EnvironmentInstallLog);
-    Assert.NotNull(settings.EnvironmentInstallProgress!.Log);
-    // A single escaped Unicode entry can itself exceed the remaining envelope
-    // budget; preserve its useful suffix without splitting a surrogate pair.
-    string oneLineJson = WorkbenchBridgeCodec.SerializeState(session, envelope with { State = settings with
-    {
-      StatusMessage = new string('字', 4000),
-      EnvironmentInstallLog = [string.Concat(Enumerable.Repeat("文😀", 1300)) + "最后一条有用输出"],
-    } });
-    Assert.True(Encoding.UTF8.GetByteCount(oneLineJson) <= WorkbenchBridgeCodec.MaxMessageBytes);
-    using (JsonDocument oneLine = JsonDocument.Parse(oneLineJson))
-    {
-      string suffix = oneLine.RootElement.GetProperty("payload").GetProperty("state").GetProperty("environmentInstallLog")[1].GetString()!;
-      Assert.EndsWith("最后一条有用输出", suffix);
-      Assert.DoesNotContain("\ufffd", suffix);
-    }
-    // The next exact terminal is independently serializable after a large log event.
-    WorkbenchBridgeCodec.SerializeState(session, envelope with { Revision = 100, State = settings with { EnvironmentInstallProgress = progress with { State = "succeeded", Phase = "complete", Seq = 853 } } });
-  }
 
   [Fact]
   public void BootstrapTransferNeverBypassesAnOversizedSingleScope()
@@ -1354,56 +1029,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Throws<WorkbenchBridgeProtocolException>(() => WorkbenchBridgeCodec.SerializeBootstrapResponse(Guid.NewGuid(), bootstrap));
   }
 
-  [Fact]
-  public void RetainedRecipeCleanupFlowFitsStateAndBootstrapAfterExplicitLifecycleTransition()
-  {
-    DirectoryInfo? root = new(AppContext.BaseDirectory);
-    while (root is not null && !File.Exists(Path.Combine(root.FullName, "repository.json"))) root = root.Parent;
-    Assert.NotNull(root);
-    var settings = new SettingsWorkbenchState(WorkbenchTheme.Light, false, "settings.ready", "cpu", false,
-      StatusMessage: new string('字', 4000));
-    // 配方锁目录随 Runtime 交付集合演进（Rapid 锁已随 RapidOCR 退役删除）；
-    // 这里直接消费当前仓库的全部真实锁文件，不硬编码目录清单。
-    string[] recipeLocks = Directory.EnumerateDirectories(Path.Combine(root.FullName, "config", "runtime"))
-      .Select(dir => Path.GetFileName(dir))
-      .Where(id => File.Exists(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock")))
-      .OrderBy(id => id, StringComparer.Ordinal)
-      .ToArray();
-    var recipes = recipeLocks.Select(id => new SettingsEnvironmentRecipeState(id, id,
-      Dependencies: File.ReadAllLines(Path.Combine(root.FullName, "config", "runtime", id, $"requirements-{id}.lock"))
-        .Where(line => System.Text.RegularExpressions.Regex.IsMatch(line, "^[A-Za-z0-9_.-]+(?:==| @ )"))
-        .Select(line => line.Split(" --hash=", StringSplitOptions.None)[0].Trim().TrimEnd('\\').Trim()).ToArray())).ToArray();
-    var cleanupItems = Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupItem(
-      $"item:{index}", index == 0 ? "dependency_cache" : "models", $"清理与保留资源 {index}", null,
-      index == 0 ? 1024 : null, index == 0, new string('原', 200),
-      [new string('路', 200)], LastError: new string('错', 200), PathCount: 128)).ToArray();
-    settings = settings with
-    {
-      EnvironmentRecipes = recipes,
-      EnvironmentSupportsCleanup = true,
-      EnvironmentCleanupPlan = new VibeOCR.Platform.Bootstrap.ManagedCleanupPlan(new string('c', 32), cleanupItems, "logical_bytes", "不保证物理释放，缓存可能需要重新下载"),
-      EnvironmentCleanupResult = new VibeOCR.Platform.Bootstrap.ManagedCleanupResult(new string('d', 32), Enumerable.Range(0, 3).Select(index => new VibeOCR.Platform.Bootstrap.ManagedCleanupResultItem($"previous:{index}", "failed", new string('错', 200), 1024)).ToArray(), "logical_bytes"),
-    };
-    // PreviewCleanupAsync clears the previous terminal display and install plan;
-    // the persistent installed/failure records remain available separately.
-    Assert.Null(settings.EnvironmentInstallProgress);
-    Assert.Null(settings.EnvironmentPlan);
-    var envelope = new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, settings);
-    Guid session = Guid.NewGuid();
-    string state = WorkbenchBridgeCodec.SerializeState(session, envelope);
-    string bootstrap = WorkbenchBridgeCodec.SerializeBootstrap(Guid.NewGuid(), new WorkbenchBootstrap(
-      2, session, 1, WorkbenchRoute.Settings, [envelope], new HashSet<string> { "runtime.environments" }));
-    foreach (string json in new[] { state, bootstrap })
-    {
-      Assert.True(Encoding.UTF8.GetByteCount(json) <= WorkbenchBridgeCodec.MaxMessageBytes);
-      using JsonDocument document = JsonDocument.Parse(json);
-      JsonElement payload = document.RootElement.GetProperty("payload");
-      JsonElement projected = payload.TryGetProperty("state", out JsonElement value) ? value : payload.GetProperty("features").GetProperty("settings");
-      Assert.Equal(recipeLocks.Length, projected.GetProperty("environmentRecipes").GetArrayLength());
-      Assert.Equal(3, projected.GetProperty("environmentCleanupPlan").GetProperty("items").GetArrayLength());
-      Assert.Equal("failed", projected.GetProperty("environmentCleanupResult").GetProperty("items")[0].GetProperty("state").GetString());
-    }
-  }
 
   [Fact]
   public void BoundedFeatureWindowFitsTheBridgeForWorstCaseUnicode()

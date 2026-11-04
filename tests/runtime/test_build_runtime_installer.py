@@ -1,16 +1,10 @@
 from pathlib import Path
 
-from vibeocr.runtime.environments.bundled_uv import uv_executable
-
 from scripts import build_runtime_installer as builder
 
 
-def test_frozen_installer_binds_uv_and_licenses_inside_single_exe(
-    tmp_path, monkeypatch
-):
-    uv_binary = uv_executable()
+def test_frozen_installer_is_single_exe_without_bundled_uv(tmp_path, monkeypatch):
     commands = []
-    monkeypatch.setattr(builder, "uv_executable", lambda: uv_binary)
 
     def build(command, **kwargs):
         commands.append(command)
@@ -22,14 +16,10 @@ def test_frozen_installer_binds_uv_and_licenses_inside_single_exe(
         output_dir=tmp_path / "output", work_dir=tmp_path / "work"
     )
     command = commands[0]
-    assert command[command.index("--add-binary") + 1] == f"{uv_binary};uv"
-    license_arg = command[command.index("--add-data") + 1]
-    license_path, destination = license_arg.split(";")
-    assert destination == "uv/licenses"
-    assert {p.name for p in Path(license_path).iterdir()} == {
-        "LICENSE-MIT",
-        "LICENSE-APACHE",
-    }
+    # 预构建运行时树（PR2）后安装器不再内嵌 uv：运行时零安装，exe 只
+    # 保留环境注册/切换/清理侍者。
+    assert "--add-binary" not in command
+    assert "--add-data" not in command
     # 冻结安装器必须携带 environments 包数据：模型布置读取冻结清单
     # paddle_onnx_models.json（importlib.resources），缺失时 exe 内
     # FileNotFoundError。

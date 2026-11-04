@@ -79,6 +79,26 @@ def _verify_velopack_feed(artifacts: Path, version: str) -> tuple[Path, Path | N
 
 
 def _verify_runtime_code(product_root: Path, version: str) -> None:
+    # 预构建运行时树（PR2）优先：树内解释器自带完整依赖闭包（-I 不
+    # 排除解释器自身 site-packages），直接 import host/contracts 并对账
+    # runtime wheel 版本与解释器版本；树缺失才回退历史 runtime-code 形态。
+    tree_python = product_root / "runtime" / "env" / "runtime-env" / "python.exe"
+    if tree_python.is_file():
+        tree_script = (
+            "import importlib.metadata,sys\n"
+            "assert importlib.metadata.version('vibeocr-next-runtime')=="
+            "sys.argv[1]\n"
+            "import vibeocr.runtime.host.main\n"
+            "import vibeocr.runtime_contracts\n"
+            "assert sys.version_info[:3]==(3,13,16)\n"
+        )
+        subprocess.run(
+            [str(tree_python), "-I", "-B", "-c", tree_script, version],
+            check=True,
+            timeout=120,
+            cwd=product_root,
+        )
+        return
     code_root = product_root / "runtime/backend/runtime-code"
     script = (
         "import importlib.metadata,sys\n"
@@ -170,7 +190,9 @@ def verify(artifacts: Path, version: str) -> None:
                 str(product_root),
             ],
             check=True,
-            timeout=120,
+            # 预构建树冷启动（解释器树首启 + WebView2 初始化）实测可超
+            # 120s；300s 与 CI release_smoke 步骤预算对齐。
+            timeout=300,
         )
 
 

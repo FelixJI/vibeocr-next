@@ -6,7 +6,6 @@ from typing import Any, Literal, NotRequired, Required, TypedDict
 Accelerator = Literal['cpu', 'nvidia_cuda']
 DownloadSourceKind = str
 ExecutionPipelineId = Literal['OCR', 'PP-StructureV3', 'MinerU', 'PaddleOCR-VL', 'TABLE_RECOGNITION', 'FORMULA_RECOGNITION']
-IntegrityStatus = Literal['verified', 'not-installed']
 MineruTierAvailability = Literal['ready', 'preparation_required', 'unavailable']
 MineruTierId = Literal['flash', 'basic', 'standard', 'advanced']
 OcrEngineAvailability = Literal['ready', 'preparation_required', 'unavailable']
@@ -17,28 +16,6 @@ RecognitionModeFamily = Literal['text', 'document', 'specialized']
 RecognitionModeId = Literal['rapid_text', 'windows_text', 'paddle_text', 'paddle_structure', 'paddle_document_vl', 'mineru_document', 'paddle_table', 'paddle_formula']
 RecognitionModeLifecycleKind = Literal['unmanaged', 'model_residency', 'process_keep_alive']
 RecognitionModeProvisioning = Literal['base_runtime', 'operating_system', 'advanced_component']
-RuntimeHostErrorCode = Literal['invalid_request', 'invalid_binding', 'install_failed', 'lock_timeout', 'io_error']
-RuntimeHostEventStream = Literal['ndjson.v1', 'ndjson.v2']
-RuntimeHostOperation = Literal['inspect', 'ensure', 'repair']
-RuntimeMaintenanceCommandKind = Literal['cancel', 'retry']
-RuntimeMaintenanceEventType = Literal['snapshot', 'progress', 'heartbeat']
-RuntimeMaintenancePhase = Literal['validate_binding', 'wait_for_lock', 'prepare_runtime', 'install_profile', 'install_backend', 'verify_runtime', 'commit_runtime']
-RuntimeOperationState = Literal['queued', 'running', 'succeeded', 'failed', 'cancelled']
-RuntimeStatus = Literal['ready', 'missing']
-
-
-class CapabilityDescriptor(TypedDict, total=False):
-    name: Required[str]
-    lifecycle: Required[Literal['active', 'deprecated']]
-    introduced_in: Required[str]
-    deprecated_in: Required[str | None]
-    sunset_at: Required[str | None]
-    replacement: Required[str | None]
-    ocr_engine_catalog: NotRequired[OcrEngineCatalog]
-    recognition_mode_catalog: NotRequired[RecognitionModeCatalog]
-    download_source_catalog: NotRequired[DownloadSourceCatalog]
-    component_variant_catalog: NotRequired[ComponentVariantCatalog]
-    mineru_config_catalog: NotRequired[MineruConfigCatalog]
 
 
 class ComponentVariantCatalog(TypedDict, total=False):
@@ -61,28 +38,6 @@ class DownloadSourceDescriptor(TypedDict, total=False):
     endpoint: Required[str]
 
 
-class ManagedEnvironmentInstallEvent(TypedDict, total=False):
-    event_version: Required[Literal[1]]
-    event_kind: Required[Literal['environment_install']]
-    attempt_id: Required[str]
-    plan_id: Required[str]
-    environment_id: Required[str]
-    environment_revision: Required[int]
-    seq: Required[int]
-    timestamp: Required[str]
-    phase: Required[Literal['prepare', 'resolve', 'unpack', 'download', 'install', 'runtime_wheel', 'verify', 'complete']]
-    state: Required[Literal['running', 'succeeded', 'failed', 'cancelled']]
-    current: Required[str]
-    dependencies: Required[list[ManagedInstallDependency]]
-    dependency_total_known: Required[bool]
-    download_files_total: Required[int | None]
-    download_files_completed: Required[int]
-    bytes_current: Required[int]
-    bytes_total: Required[int | None]
-    heartbeat: Required[bool]
-    log: NotRequired[ManagedInstallLog]
-
-
 class ManagedEnvironmentRequest(TypedDict, total=False):
     protocol_version: Required[Literal[2]]
     request_kind: Required[Literal['environment']]
@@ -91,16 +46,12 @@ class ManagedEnvironmentRequest(TypedDict, total=False):
     runtime_manifest: Required[str]
     layout_manifest: NotRequired[str]
     product_id: NotRequired[str]
-    action: Required[Literal['list', 'initialize_default', 'create', 'set_sources', 'preview_install', 'install', 'prepare_switch', 'prepare_maintenance', 'commit_switch', 'repair_empty', 'delete', 'find_compatible', 'prepare_target', 'preview_cleanup', 'run_cleanup']]
-    name: NotRequired[str]
+    action: Required[Literal['list', 'initialize_default', 'set_sources', 'prepare_switch', 'commit_switch', 'delete', 'preview_cleanup', 'run_cleanup']]
     environment_id: NotRequired[str | None]
-    recipe: NotRequired[str]
     device: NotRequired[Literal['cpu', 'directml']]
-    source_ids: NotRequired[list[str] | None]
     model_source_id: NotRequired[str | None]
     paddleocr_model_source_id: NotRequired[str | None]
     mineru_model_source_id: NotRequired[str | None]
-    accepted_event_streams: NotRequired[list[Literal['environment.install_progress.v1']]]
     plan_id: NotRequired[str]
     item_ids: NotRequired[list[str]]
     prepared: NotRequired[dict[str, Any]]
@@ -112,19 +63,6 @@ class ManagedEnvironmentResponse(TypedDict, total=False):
     response_kind: Required[Literal['environment']]
     action: Required[str]
     result: Required[dict[str, Any]]
-
-
-class ManagedInstallDependency(TypedDict, total=False):
-    name: Required[str]
-    version: Required[str | None]
-    download_state: Required[Literal['pending', 'bundled', 'cached', 'downloading', 'downloaded']]
-    install_state: Required[Literal['pending', 'installed']]
-
-
-class ManagedInstallLog(TypedDict, total=False):
-    stream: Required[Literal['stdout', 'stderr']]
-    text: Required[str]
-    truncated: Required[bool]
 
 
 class MineruConfigCatalog(TypedDict, total=False):
@@ -181,228 +119,3 @@ class RecognitionModeLifecycle(TypedDict, total=False):
     supports_ttl: Required[bool]
     supports_pinning: Required[bool]
     supports_release: Required[bool]
-
-
-class RuntimeComponentDescriptor(TypedDict, total=False):
-    component_id: Required[str]
-    display_name: Required[str]
-    version: NotRequired[str]
-    state: NotRequired[Literal['not_required', 'pending', 'installing', 'verifying', 'ready', 'failed', 'cancelled']]
-    desired_state: NotRequired[Literal['ready', 'not_required']]
-    desired_version: NotRequired[str | None]
-    actual_state: NotRequired[Literal['ready', 'missing', 'drifted', 'unknown']]
-    actual_version: NotRequired[str | None]
-    drift_reason: NotRequired[Literal['none', 'missing', 'version_mismatch', 'identity_mismatch', 'integrity_failed', 'unexpected']]
-    repairable: NotRequired[bool]
-
-
-class RuntimeHostError(TypedDict, total=False):
-    code: Required[RuntimeHostErrorCode]
-    message: Required[str]
-    retryable: Required[bool]
-    canonical_code: NotRequired[str]
-    category: NotRequired[Literal['validation', 'auth', 'not_found', 'conflict', 'capability', 'identity', 'cancelled', 'oom', 'transient', 'backend_unavailable', 'internal']]
-    retry_after: NotRequired[int]
-    message_code: NotRequired[str]
-    detail: NotRequired[dict[str, Any]]
-
-
-class RuntimeHostFailure(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    ok: Required[Literal[False]]
-    operation: Required[RuntimeHostOperation | None]
-    error: Required[RuntimeHostError]
-    maintenance: NotRequired[RuntimeMaintenanceSnapshot | None]
-
-
-class RuntimeHostRequest(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    operation: Required[RuntimeHostOperation]
-    product_root: Required[str]
-    component_lock: Required[str]
-    runtime_manifest: Required[str]
-    accelerator: NotRequired[Accelerator | None]
-    layout_manifest: NotRequired[str | None]
-    product_id: NotRequired[str | None]
-    operation_id: NotRequired[str]
-    plan_id: NotRequired[str]
-    component_ids: NotRequired[list[str]]
-    required_capabilities: NotRequired[list[str]]
-    download_source_ids: NotRequired[list[str]]
-    install_component_ids: NotRequired[list[str]]
-    accepted_event_streams: NotRequired[list[RuntimeHostEventStream]]
-
-
-class RuntimeHostSuccess(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    ok: Required[Literal[True]]
-    operation: Required[RuntimeHostOperation]
-    state: Required[RuntimeState]
-    launch: NotRequired[RuntimeLaunch | None]
-    profile: NotRequired[RuntimeProfileDescriptor | None]
-    maintenance: NotRequired[RuntimeMaintenanceSnapshot | None]
-    negotiated_capabilities: NotRequired[list[str]]
-    capability_descriptors: NotRequired[list[CapabilityDescriptor]]
-
-
-class RuntimeInstallPlan(TypedDict, total=False):
-    plan_id: Required[str]
-    expires_at: Required[str]
-    accelerator: Required[Accelerator]
-    profile_id: Required[str]
-    requested_component_ids: Required[list[str] | None]
-    effective_component_ids: Required[list[str]]
-    requested_download_source_ids: Required[list[str] | None]
-    effective_download_source_ids: Required[list[str]]
-    source: Required[RuntimeSourceIdentity]
-    components: Required[list[RuntimeInstallPlanComponent]]
-    blockers: Required[list[RuntimeInstallPlanBlocker]]
-    cost: Required[RuntimeInstallPlanCost]
-
-
-class RuntimeInstallPlanBlocker(TypedDict, total=False):
-    code: Required[str]
-    component_id: NotRequired[str]
-    next_action: Required[str]
-
-
-class RuntimeInstallPlanComponent(TypedDict, total=False):
-    component_id: Required[str]
-    action: Required[Literal['retain', 'install', 'replace', 'remove']]
-    dependency_state: Required[Literal['satisfied', 'pending']]
-    reason_codes: Required[list[str]]
-
-
-class RuntimeInstallPlanCost(TypedDict, total=False):
-    download_bytes: Required[int | None]
-    additional_disk_bytes: Required[int | None]
-    unknown_reason_codes: Required[list[str]]
-
-
-class RuntimeInstallPlanRequest(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    request_kind: Required[Literal['install_plan']]
-    product_root: Required[str]
-    component_lock: Required[str]
-    runtime_manifest: Required[str]
-    layout_manifest: NotRequired[str]
-    product_id: NotRequired[str]
-    accelerator: NotRequired[Accelerator]
-    install_component_ids: NotRequired[list[str]]
-    download_source_ids: NotRequired[list[str]]
-    required_capabilities: Required[list[str]]
-
-
-class RuntimeInstallPlanResponse(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    response_kind: Required[Literal['install_plan']]
-    plan: Required[RuntimeInstallPlan]
-
-
-class RuntimeLaunch(TypedDict, total=False):
-    python_executable: Required[str]
-    supervisor_module: Required[str]
-    working_directory: Required[str]
-    model_root: Required[str]
-    environment: Required[dict[str, Any]]
-
-
-class RuntimeMaintenanceCommandRequest(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    request_kind: Required[Literal['command']]
-    command: Required[RuntimeMaintenanceCommandKind]
-    command_id: Required[str]
-    target_operation_id: Required[str]
-    new_operation_id: NotRequired[str]
-    expected_sequence: NotRequired[int]
-    plan_id: NotRequired[str]
-    product_root: Required[str]
-    component_lock: Required[str]
-    runtime_manifest: Required[str]
-    accelerator: NotRequired[Accelerator]
-    layout_manifest: NotRequired[str]
-    product_id: NotRequired[str]
-    download_source_ids: NotRequired[list[str]]
-    install_component_ids: NotRequired[list[str]]
-    required_capabilities: NotRequired[list[str]]
-    accepted_event_streams: NotRequired[list[RuntimeHostEventStream]]
-
-
-class RuntimeMaintenanceEvent(TypedDict, total=False):
-    schema_version: NotRequired[Literal[2]]
-    protocol_version: Required[Literal[2]]
-    event_version: Required[Literal[1]]
-    event_type: Required[RuntimeMaintenanceEventType]
-    sequence: NotRequired[int]
-    operation: Required[RuntimeHostOperation]
-    snapshot: Required[RuntimeMaintenanceSnapshot]
-    message_code: Required[str]
-    message_args: NotRequired[dict[str, Any]]
-    fallback_message: NotRequired[str]
-
-
-class RuntimeMaintenanceObserveRequest(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    request_kind: Required[Literal['observe']]
-    operation_id: Required[str]
-    after_sequence: Required[int]
-    limit: NotRequired[int]
-    product_root: Required[str]
-    component_lock: Required[str]
-    runtime_manifest: Required[str]
-    accelerator: NotRequired[Accelerator]
-    layout_manifest: NotRequired[str]
-    product_id: NotRequired[str]
-
-
-class RuntimeMaintenanceSnapshot(TypedDict, total=False):
-    operation_id: Required[str]
-    source_operation_id: NotRequired[str | None]
-    sequence: Required[int]
-    operation: Required[RuntimeHostOperation]
-    operation_state: Required[RuntimeOperationState]
-    phase: Required[RuntimeMaintenancePhase]
-    profile_id: Required[str]
-    component_id: NotRequired[str | None]
-    requested_component_ids: NotRequired[list[str]]
-    effective_component_ids: NotRequired[list[str]]
-    source: NotRequired[RuntimeSourceIdentity]
-    plan_id: NotRequired[str]
-    updated_at: Required[str]
-    progress: NotRequired[ProgressSnapshot | None]
-
-
-class RuntimeMaintenanceUpdate(TypedDict, total=False):
-    protocol_version: Required[Literal[2]]
-    ok: Required[Literal[True]]
-    request_kind: Required[Literal['observe']]
-    operation_id: Required[str]
-    snapshot: Required[RuntimeMaintenanceSnapshot]
-    events: Required[list[RuntimeMaintenanceEvent]]
-    oldest_sequence: Required[int]
-    through_sequence: Required[int]
-    more: Required[bool]
-    replay_expires_at: NotRequired[str | None]
-
-
-class RuntimeProfileDescriptor(TypedDict, total=False):
-    profile_id: Required[str]
-    accelerator: Required[Accelerator]
-    components: Required[list[RuntimeComponentDescriptor]]
-
-
-class RuntimeSourceIdentity(TypedDict, total=False):
-    backend_version: Required[str]
-    backend_source_sha: Required[str]
-    runtime_manifest_sha256: Required[str]
-
-
-class RuntimeState(TypedDict, total=False):
-    runtime_root: Required[str]
-    accelerator: Required[Accelerator]
-    status: Required[RuntimeStatus]
-    integrity: Required[IntegrityStatus]
-    manifest_sha256: Required[str]
-    backend_version: Required[str]
-    source: NotRequired[RuntimeSourceIdentity]
-    startup_install_component_ids: NotRequired[list[str] | None]

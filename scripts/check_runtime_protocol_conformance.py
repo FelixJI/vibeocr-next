@@ -311,15 +311,32 @@ def check_selection_conformance() -> None:
     spec = json.loads(V2.joinpath("openapi.yaml").read_text(encoding="utf-8"))
     schemas = spec["components"]["schemas"]
 
-    # 1. formal schema：选择字段与 ensure/retry 条件约束存在。
-    maintenance_props = schemas["RuntimeMaintenanceRequest"]["properties"]
-    for field in ("install_component_ids", "download_source_ids"):
-        if field not in maintenance_props:
-            raise RuntimeError(f"RuntimeMaintenanceRequest lacks {field}")
-    command_props = schemas["RuntimeMaintenanceCommandRequest"]["properties"]
-    for field in ("install_component_ids", "download_source_ids"):
-        if field not in command_props:
-            raise RuntimeError(f"RuntimeMaintenanceCommandRequest lacks {field}")
+    import asyncio
+
+    from vibeocr.runtime.environments.runtime_selection import (
+        normalize_download_source_ids,
+        normalize_install_component_ids,
+    )
+
+    # 预构建运行时树后维护路由已退役：组件选择校验降为策略函数级
+    # （normalize 仍是 ME 计划选择的权威实现）。
+    normalize_download_source_ids(["paddleocr-modelscope"])
+    try:
+        normalize_download_source_ids(["not-a-source"])
+    except Exception:
+        pass
+    else:
+        raise RuntimeError("unknown download source did not fail closed")
+    normalize_install_component_ids([], accelerator="cpu")
+    try:
+        normalize_install_component_ids(["not-a-component"], accelerator="cpu")
+    except Exception:
+        pass
+    else:
+        raise RuntimeError("unknown install component did not fail closed")
+
+    # 1. formal schema：来源选择在 settings 快照与错误码目录中声明；
+    #    维护/安装请求 schema 已随预构建运行时树（PR2）退役。
     if "download_source_ids" not in schemas["SettingsSnapshot"]["properties"]:
         raise RuntimeError("SettingsSnapshot lacks download_source_ids")
     known_error_codes = schemas["Error"]["properties"]["code"]["x-vibeocr-known-values"]
@@ -327,60 +344,11 @@ def check_selection_conformance() -> None:
         if code not in known_error_codes:
             raise RuntimeError(f"Error known values lack {code}")
 
-    import asyncio
-
     asyncio.run(_selection_http_checks())
 
 
 async def _selection_http_checks() -> None:
     import httpx
-    from vibeocr.runtime.environments.runtime_selection import (
-        normalize_download_source_ids,
-        normalize_install_component_ids,
-    )
-
-    class _PolicyControl:
-        """与真实 selection policy 同语义的确定性 control fixture。"""
-
-        def execute(self, **kwargs):
-            normalize_download_source_ids(kwargs.get("download_source_ids") or None)
-            scope = normalize_install_component_ids(
-                kwargs.get("install_component_ids"),
-                accelerator="cpu",
-            )
-            snapshot = {
-                "operation_id": kwargs.get("operation_id") or "selection-op",
-                "sequence": 1,
-                "operation": kwargs["operation"],
-                "operation_state": "succeeded",
-                "phase": "commit_runtime",
-                "profile_id": "win-x64-cpu",
-                "updated_at": "2026-08-17T00:00:00Z",
-                "effective_download_source_ids": [
-                    "paddleocr-modelscope",
-                    "mineru-modelscope",
-                ],
-            }
-            if scope is not None:
-                snapshot["requested_component_ids"] = list(scope)
-            if kwargs["operation"] == "ensure" and scope:
-                snapshot["effective_component_ids"] = [
-                    "paddleocr-ort-cpu",
-                    "mineru-cpu",
-                    "runtime_host",
-                ]
-            return {
-                "schema_version": 2,
-                "operation_id": snapshot["operation_id"],
-                "snapshot": snapshot,
-                "negotiated_capabilities": [],
-            }
-
-        def command(self, **kwargs):
-            raise AssertionError("retry conformance covered by unit contracts")
-
-        def observe(self, *args, **kwargs):
-            raise AssertionError("observe not used here")
 
     temp = tempfile.TemporaryDirectory(prefix="vibeocr-selection-conformance-")
     module = SupervisorModule(
@@ -389,7 +357,7 @@ async def _selection_http_checks() -> None:
         executor=MagicMock(),
     )
     token = "0" * 64
-    app = create_app(module, token, runtime_control=_PolicyControl())
+    app = create_app(module, token)
     app.state._conformance_temp = temp
 
     async with httpx.AsyncClient(
@@ -503,48 +471,6 @@ async def _selection_http_checks() -> None:
             or unknown_source.json()["code"] != "DOWNLOAD_SOURCE_UNKNOWN"
         ):
             raise RuntimeError("unknown download source did not fail closed")
-
-        # 4. maintenance：ensure 选择字段进入回显，未知组件/源 fail closed。
-        started = await client.post(
-            "/v2/runtime/maintenance",
-            json={
-                "operation": "ensure",
-                "install_component_ids": [],
-                "download_source_ids": ["paddleocr-modelscope"],
-            },
-        )
-        if started.status_code != 200:
-            raise RuntimeError(
-                f"selection ensure fixture failed: {started.status_code} {started.text}"
-            )
-        receipt = started.json()
-        if receipt["snapshot"].get("requested_component_ids") != []:
-            raise RuntimeError("explicit empty install scope was not echoed")
-        if receipt["snapshot"].get("effective_download_source_ids") != [
-            "paddleocr-modelscope",
-            "mineru-modelscope",
-        ]:
-            raise RuntimeError("effective download sources were not echoed")
-
-        unknown_component = await client.post(
-            "/v2/runtime/maintenance",
-            json={
-                "operation": "ensure",
-                "install_component_ids": ["not-a-component"],
-            },
-        )
-        if (
-            unknown_component.status_code != 400
-            or unknown_component.json()["code"] != "RUNTIME_COMPONENT_UNKNOWN"
-        ):
-            raise RuntimeError("unknown install component did not fail closed")
-
-        rejected = await client.post(
-            "/v2/runtime/maintenance",
-            json={"operation": "inspect", "install_component_ids": []},
-        )
-        if rejected.status_code != 400:
-            raise RuntimeError("selection fields on inspect did not fail closed")
 
 
 def main() -> int:

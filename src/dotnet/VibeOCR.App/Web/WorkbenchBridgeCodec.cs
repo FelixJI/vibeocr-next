@@ -85,13 +85,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> UpdateSourceArgumentFields = ["sourceId", "kind", "url"];
   private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
   private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
-  private static readonly HashSet<string> EnvironmentNameArgumentFields = ["name"];
   private static readonly HashSet<string> EnvironmentIdArgumentFields = ["environmentId"];
-  private static readonly HashSet<string> EnvironmentRecipeArgumentFields = ["environmentId", "recipe", "sourceId"];
-  private static readonly HashSet<string> EnvironmentRecipeOnlyArgumentFields = ["environmentId", "recipe"];
-  private static readonly HashSet<string> RecipeOnlyArgumentFields = ["recipe"];
-  private static readonly HashSet<string> PlanIdArgumentFields = ["planId", "sourceId"];
-  private static readonly HashSet<string> PlanIdOnlyArgumentFields = ["planId"];
   private static readonly HashSet<string> EnvironmentSourceDefaultsArgumentFields =
     ["modelSourceId"];
   private static readonly HashSet<string> EnvironmentSourcesArgumentFields =
@@ -213,7 +207,6 @@ public static class WorkbenchBridgeCodec
         captureScene,
       },
     }, SerializerOptions);
-    json = BoundInstallLogToMessage(json);
     EnsureMessageSize(json);
     return json;
   }
@@ -268,7 +261,6 @@ public static class WorkbenchBridgeCodec
         state = statePayload,
       },
     }, SerializerOptions);
-    json = BoundInstallLogToMessage(json);
     EnsureMessageSize(json);
     return json;
   }
@@ -1044,46 +1036,6 @@ public static class WorkbenchBridgeCodec
       case ("settings", "refreshEnvironmentList"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RefreshEnvironmentListCommand();
-      case ("settings", "createEnvironment"):
-        EnsureObjectWithFields(arguments, EnvironmentNameArgumentFields, "command arguments");
-        string? environmentName = arguments.GetProperty("name").GetString();
-        if (string.IsNullOrWhiteSpace(environmentName) || environmentName.Length > 80)
-          throw new WorkbenchBridgeProtocolException("运行环境名称无效。");
-        return new CreateEnvironmentCommand(environmentName);
-      case ("settings", "previewEnvironmentInstall"):
-      {
-        bool hasPreviewSource = !HasExactFields(arguments, EnvironmentRecipeOnlyArgumentFields);
-        EnsureObjectWithFields(
-          arguments,
-          hasPreviewSource ? EnvironmentRecipeArgumentFields : EnvironmentRecipeOnlyArgumentFields,
-          "command arguments");
-        string recipeEnvironmentId = ParseEnvironmentId(arguments);
-        string? recipe = arguments.GetProperty("recipe").GetString();
-        if (string.IsNullOrWhiteSpace(recipe) || recipe.Length > 80 ||
-            recipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
-          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
-        // sourceId 省略 → 本次显式“跟随环境/全局配置”；目录 id 由管理器校验，
-        // 桥只校验形状，不硬编码目录成员。
-        string? previewSourceId = hasPreviewSource
-          ? ParseSourceId(arguments.GetProperty("sourceId"))
-          : null;
-        return new PreviewEnvironmentInstallCommand(recipeEnvironmentId, recipe, previewSourceId);
-      }
-      case ("settings", "confirmEnvironmentInstall"):
-      {
-        bool hasConfirmSource = !HasExactFields(arguments, PlanIdOnlyArgumentFields);
-        EnsureObjectWithFields(
-          arguments,
-          hasConfirmSource ? PlanIdArgumentFields : PlanIdOnlyArgumentFields,
-          "command arguments");
-        string? environmentPlanId = arguments.GetProperty("planId").GetString();
-        if (string.IsNullOrWhiteSpace(environmentPlanId) || environmentPlanId.Length > 64)
-          throw new WorkbenchBridgeProtocolException("环境安装计划无效。");
-        string? confirmedSourceId = hasConfirmSource
-          ? ParseSourceId(arguments.GetProperty("sourceId"))
-          : null;
-        return new ConfirmEnvironmentInstallCommand(environmentPlanId, confirmedSourceId);
-      }
       case ("settings", "setEnvironmentSources"):
       {
         bool independent = arguments.TryGetProperty("paddleocrModelSourceId", out _) ||
@@ -1102,12 +1054,6 @@ public static class WorkbenchBridgeCodec
           independent ? ParseSourceId(arguments.GetProperty("mineruModelSourceId")) : null,
           independent);
       }
-      case ("settings", "cancelEnvironmentInstall"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new CancelEnvironmentInstallCommand();
-      case ("settings", "invalidateEnvironmentPlan"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new InvalidateEnvironmentPlanCommand();
       case ("settings", "switchEnvironment"):
         EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "environmentId", "device" }, "command arguments");
         string? requestedDevice = null;
@@ -1147,29 +1093,6 @@ public static class WorkbenchBridgeCodec
       case ("settings", "deleteEnvironment"):
         EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
         return new DeleteEnvironmentCommand(ParseEnvironmentId(arguments));
-      case ("settings", "repairEmptyEnvironment"):
-        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
-        return new RepairEmptyEnvironmentCommand(ParseEnvironmentId(arguments));
-      case ("settings", "findCompatibleEnvironment"):
-      {
-        // 桥只校验有界标识形状；目录成员由宿主按 Runtime 目录核验。
-        EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
-        string? compatibleRecipe = arguments.GetProperty("recipe").GetString();
-        if (string.IsNullOrWhiteSpace(compatibleRecipe) || compatibleRecipe.Length > 80 ||
-            compatibleRecipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
-          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
-        return new FindCompatibleEnvironmentCommand(compatibleRecipe);
-      }
-      case ("settings", "prepareEnvironment"):
-      {
-        // 目录成员由宿主按 Runtime 目录核验，不复制配方白名单。
-        EnsureObjectWithFields(arguments, RecipeOnlyArgumentFields, "command arguments");
-        string? prepareRecipe = arguments.GetProperty("recipe").GetString();
-        if (string.IsNullOrWhiteSpace(prepareRecipe) || prepareRecipe.Length > 80 ||
-            prepareRecipe.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.' or '+')))
-          throw new WorkbenchBridgeProtocolException("运行环境配方无效。");
-        return new PrepareEnvironmentCommand(prepareRecipe);
-      }
       case ("settings", "setTheme"):
         EnsureObjectWithFields(arguments, ThemeArgumentFields, "command arguments");
         return new SetThemeCommand(ParseTheme(
@@ -1324,21 +1247,6 @@ public static class WorkbenchBridgeCodec
       case ("settings", "prepareRemoteHost"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PrepareRemoteHostCommand();
-      case ("settings", "installRuntime"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new InstallRuntimeCommand();
-      case ("settings", "confirmRuntimeInstall"):
-        EnsureObjectWithFields(arguments, new HashSet<string> { "planId" }, "command arguments");
-        string? planId = arguments.GetProperty("planId").GetString();
-        if (string.IsNullOrWhiteSpace(planId) || planId.Length > 256)
-          throw new WorkbenchBridgeProtocolException("安装计划标识无效。");
-        return new ConfirmRuntimeInstallCommand(planId);
-      case ("settings", "cancelRuntimeMaintenance"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new CancelRuntimeMaintenanceCommand();
-      case ("settings", "retryRuntimeMaintenance"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new RetryRuntimeMaintenanceCommand();
       case ("recognition", "setOptions"):
         EnsureObjectWithFields(arguments, RecognitionOptionsFields, "command arguments");
         string? modeId = arguments.GetProperty("modeId").GetString();
@@ -1366,9 +1274,6 @@ public static class WorkbenchBridgeCodec
       case ("update", "cancel"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new CancelUpdateCommand();
-      case ("update", "cancelRuntimeMaintenance"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new CancelRuntimeForUpdateCommand();
       case ("update", "setSource"):
         return ParseSetUpdateSource(arguments);
       case ("diagnostics", "refresh"):
@@ -2041,10 +1946,8 @@ public static class WorkbenchBridgeCodec
       settings.ProgressDetail,
       settings.ProgressPercent,
       progressActive = settings.ProgressActive,
-      settings.CanPreviewInstall,
       environments = settings.Environments ?? [],
       settings.ActiveEnvironmentId,
-      environmentPlan = settings.EnvironmentPlan,
       settings.EnvironmentStatus,
       settings.EnvironmentSnapshotLoaded,
       settings.EnvironmentListFetchAttempted,
@@ -2053,10 +1956,6 @@ public static class WorkbenchBridgeCodec
       environmentDefaultSourceIds = settings.EnvironmentDefaultSourceIds ?? [],
       environmentResolvedDefaultSources = settings.EnvironmentResolvedDefaultSources ?? [],
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
-      settings.EnvironmentCanCancelInstall,
-      settings.EnvironmentInstallProgress,
-      settings.EnvironmentInstallLog,
-      settings.EnvironmentSupportsInstallProgress,
       settings.EnvironmentSupportsCleanup,
       settings.EnvironmentCleanupPlan,
       settings.EnvironmentCleanupResult,
@@ -2064,14 +1963,6 @@ public static class WorkbenchBridgeCodec
       settings.EnvironmentCleanupPage,
       settings.EnvironmentCleanupPageCount,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
-      environmentCompatibility = settings.EnvironmentCompatibility is null ? null : new
-      {
-        settings.EnvironmentCompatibility.Recipe,
-        selectedEnvironmentId = settings.EnvironmentCompatibility.SelectedEnvironmentId,
-        selectedEnvironmentRevision = settings.EnvironmentCompatibility.SelectedEnvironmentRevision,
-        selectionReason = settings.EnvironmentCompatibility.SelectionReason,
-        environments = settings.EnvironmentCompatibility.Environments ?? [],
-      },
       mineruConnection = settings.MineruConnection is null ? null : new
       {
         settings.MineruConnection.Supported,
@@ -2101,30 +1992,6 @@ public static class WorkbenchBridgeCodec
         settings.MineruRecognition.DefaultTier,
       },
       recognitionModes = settings.RecognitionModes ?? [],
-      installPlan = settings.InstallPlan is not { } plan ? null : new
-      {
-        plan.PlanId, plan.ExpiresAt,
-        accelerator = plan.Accelerator == VibeOCR.Runtime.Contracts.Generated.Host.Accelerator.Cpu ? "CPU" : "NVIDIA CUDA",
-        plan.ProfileId, plan.EffectiveComponentIds, plan.EffectiveDownloadSourceIds,
-        components = plan.Components.Select(component => new
-        { component.ComponentId, component.Action, component.DependencyState, component.ReasonCodes }),
-        blockers = plan.Blockers.Select(blocker => new { blocker.Code, blocker.ComponentId, blocker.NextAction }),
-        cost = new { plan.Cost.DownloadBytes, plan.Cost.AdditionalDiskBytes, plan.Cost.UnknownReasonCodes },
-      },
-      maintenance = settings.Maintenance is null ? null : new
-      {
-        settings.Maintenance.IsRunning,
-        settings.Maintenance.StatusCode,
-        settings.Maintenance.OperationId,
-        requestedComponentIds = settings.Maintenance.RequestedComponentIds,
-        effectiveComponentIds = settings.Maintenance.EffectiveComponentIds,
-        requestedSourceIds = settings.Maintenance.RequestedSourceIds,
-        effectiveSourceIds = settings.Maintenance.EffectiveSourceIds,
-        settings.Maintenance.CanCancel,
-        settings.Maintenance.CanRetry,
-        settings.Maintenance.FailureReason,
-        settings.Maintenance.FailureCode,
-      },
     },
     UpdateWorkbenchState update => new
     {
@@ -2165,53 +2032,6 @@ public static class WorkbenchBridgeCodec
     _ => throw new WorkbenchBridgeProtocolException(
       "Workbench state type is not supported."),
   };
-
-  private static string BoundInstallLogToMessage(string json)
-  {
-    if (Encoding.UTF8.GetByteCount(json) <= MaxMessageBytes) return json;
-    JsonNode root = JsonNode.Parse(json)!;
-    JsonNode? payload = root["payload"];
-    JsonNode? settings = payload?["state"] ?? payload?["features"]?["settings"];
-    if (settings?["environmentInstallLog"] is not JsonArray logs || logs.Count == 0) return json;
-    string[] entries = logs.Select(item => item!.GetValue<string>()).ToArray();
-    // The event's log is already in the host log list; preserve all authority
-    // fields and trim only this optional, newly added display material.
-    if (settings["environmentInstallProgress"] is { } progress) progress["log"] = null;
-    logs.Clear();
-    logs.Add("[较早输出已截断；显示内容受桥接容量限制]");
-    int available = MaxMessageBytes - Encoding.UTF8.GetByteCount(root.ToJsonString(SerializerOptions));
-    if (available < 0) return root.ToJsonString(SerializerOptions); // Authority alone still fails closed.
-    var tail = new List<string>();
-    for (int index = entries.Length - 1; index >= 0; index--)
-    {
-      int bytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(entries[index], SerializerOptions)) + 1;
-      if (bytes <= available)
-      {
-        tail.Add(entries[index]);
-        available -= bytes;
-        continue;
-      }
-      if (tail.Count == 0 && available > 3)
-      {
-        // Keep a useful suffix even when one Unicode line uses the entire budget.
-        string last = entries[index];
-        int low = 0, high = last.Length;
-        while (low < high)
-        {
-          int middle = (low + high) / 2;
-          int start = middle < last.Length && char.IsLowSurrogate(last[middle]) ? middle + 1 : middle;
-          int size = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(last[start..], SerializerOptions)) + 1;
-          if (size <= available) high = middle;
-          else low = middle + 1;
-        }
-        if (low < last.Length && char.IsLowSurrogate(last[low])) low++;
-        if (low < last.Length) tail.Add(last[low..]);
-      }
-      break;
-    }
-    for (int index = tail.Count - 1; index >= 0; index--) logs.Add(tail[index]);
-    return root.ToJsonString(SerializerOptions);
-  }
 
   private static void EnsureMessageSize(string json)
   {

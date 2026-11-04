@@ -137,7 +137,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     confirmPdfClose = confirmPdfClose ?? (_ => Task.FromResult(PdfCloseDecision.Cancel));
 
     Resources = new WorkbenchResourcesOwner(resourceBroker, resourceRoot);
-    Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, InvalidateImageRecognition, optionsLayout, windowHandle);
+    Settings = new WorkbenchSettingsOwner(ensureRuntimeReady, inferenceAttached, settingsFactory, shell, shellActions, supervisorInstanceId, operations, RefreshFeatureCatalogStatesAsync, optionsLayout, windowHandle);
     Selection = new WorkbenchSelectionOwner(ensureRuntimeReady, inferenceAttached, optionsLayout, Settings, GetRecognitionTaskEngine);
     Image = new WorkbenchImageOwner(annotatedImagePlatform, annotationStore, ensureRuntimeReady, inferenceAttached, optionsLayout, pinScreenshot, recognitionFactory, resourceBroker, shellActions, structuredClipboard, supervisorInstanceId, textLayerRecognitionFactory, resultActionPlatform, Settings, Resources, Selection, operations, SynchronizeBatchMode, systemImportReader, projectStore, projectSavePicker, projectOpenPicker, pinSnapshotWriter, pinHistory);
     // 工程打开事务终止（取消/超时/替换）经既有状态邮箱发布终态，不触碰 UI 线程。
@@ -484,7 +484,6 @@ public sealed class DesktopWorkbenchCommandHandler :
     ImageConversion.Release(); Resources.Release(); Batch.Release(); Pdf.Release(); operations.Release();
   }
 
-  private void InvalidateImageRecognition() => Image.InvalidateScreenshotSessionRecognitionOnMaintenance();
   private string? GetRecognitionTaskEngine() => Image.TaskEngine;
   private void SynchronizeBatchMode() => Batch.SynchronizeBatchMode();
 

@@ -142,18 +142,14 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
     public void ProductRuntimeLaunchUsesIsolatedCurrentCodeWithoutBytecodeWrites()
     {
         var launch = new RuntimeLaunch("C:\\env\\python.exe", "vibeocr.runtime.host.main",
-            "C:\\product", "C:\\models", new Dictionary<string, string>
-            {
-                ["VIBEOCR_PRODUCT_CODE_ROOT"] = "C:\\product\\runtime\\backend\\runtime-code",
-            });
+            "C:\\product", "C:\\models", new Dictionary<string, string>());
 
         IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);
 
-        // -I 忽略 PYTHONUTF8/PYTHONIOENCODING 环境变量，唯一有效的
-        // argv 钉子是 -X utf8（中文路径日志乱码回归）。
-        Assert.Equal(["-I", "-B", "-X", "utf8", "-c"], arguments.Take(5));
-        Assert.Contains("VIBEOCR_PRODUCT_CODE_ROOT", arguments[5]);
-        Assert.Contains("vibeocr.runtime.host.main", arguments[5]);
+        // 预构建运行时树（PR2）：supervisor 统一经模块入口启动，树内
+        // site-packages 自带完整闭包；-X utf8 仍是隔离模式下钉死 UTF-8
+        // 输出契约的唯一 argv 钉子（中文路径日志乱码回归）。
+        Assert.Equal(["-X", "utf8", "-m", launch.SupervisorModule], arguments);
     }
 
     [Fact]
@@ -225,21 +221,9 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
 
         public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
-        public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-        public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
-            string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task<ManagedEnvironment> InstallEnvironmentAsync(
-            ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
         public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
             string? environmentId, string? modelSourceId,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
-            string environmentId, CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
         public Task DeleteEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
     }

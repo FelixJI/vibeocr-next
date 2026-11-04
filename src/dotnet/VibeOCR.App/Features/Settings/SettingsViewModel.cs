@@ -7,9 +7,7 @@ using VibeOCR.App.Services;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
-using VibeOCR.App.Features.Maintenance;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.App.Features.Settings;
 
@@ -101,26 +99,11 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public SettingsViewModel(
         IInferenceClient inference,
         RuntimeStatusViewModel? runtimeStatus = null,
-        Func<IRuntimeInstallerClient>? installerFactory = null,
-        ProductMaintenanceCoordinator? productMaintenance = null,
-        Func<CancellationToken, Task>? stopService = null,
-        Func<Task>? restoreService = null,
-        string? operationStorePath = null,
         ManagedEnvironmentSettings? environments = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
         Environments = environments;
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
-        Maintenance = installerFactory is null
-            ? new RuntimeMaintenanceCoordinator(
-                () => throw new InvalidOperationException(
-                    "Runtime installer is unavailable in this mode."),
-                RuntimeStatus,
-                productMaintenance)
-            : new RuntimeMaintenanceCoordinator(
-                installerFactory,
-                RuntimeStatus,
-                productMaintenance, stopService, restoreService, operationStorePath);
     }
 
     public Task<ResidencyStatus> ReadWorkerResidencyAsync(CancellationToken cancellationToken) =>
@@ -139,7 +122,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public async Task<bool> SetWorkerIdleAsync(int paddleSeconds, int mineruSeconds, CancellationToken cancellationToken)
     {
         if (paddleSeconds < 0 || mineruSeconds < 0) throw new ArgumentOutOfRangeException(nameof(paddleSeconds));
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return false; }
         await _settingsGate.WaitAsync(cancellationToken);
         try
         {
@@ -223,9 +205,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     internal RecognitionSelectionSnapshot? RecognitionSelection =>
         Volatile.Read(ref _recognitionSelection);
 
-    /// <summary>Durable maintenance operations driven by the staged selection.</summary>
-    public RuntimeMaintenanceCoordinator Maintenance { get; }
-
     public Task LoadSnapshotAsync(CancellationToken cancellationToken) =>
         LoadSnapshotAsync(refreshEnvironments: true, cancellationToken);
 
@@ -234,7 +213,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         if (refreshEnvironments && Environments is not null)
             await Environments.RefreshAsync(cancellationToken);
-        await Maintenance.RestoreAsync(cancellationToken);
         long generation = BeginBusy("正在读取模型驻留状态");
         try
         {
@@ -366,8 +344,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public async Task SetSourceAsync(string kind, string? sourceId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(kind);
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
-        Maintenance.DiscardPlan();
         if (_selection is null)
         {
             Status = "运行时目录尚未加载，请先刷新运行时";
@@ -388,7 +364,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                     _inference,
                     next.Count == 0 ? null : next,
                     cancellationToken);
-                Maintenance.DiscardPlan();
                 _selectedSourceIds = updated.DownloadSourceIds ?? [];
                 Sources = ProjectSources(_selection, _selectedSourceIds);
                 Status = "已保存下载源偏好";
@@ -417,7 +392,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         string? apiKey,
         CancellationToken cancellationToken)
     {
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
@@ -473,7 +447,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modeId);
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
@@ -556,7 +529,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         string? language,
         CancellationToken cancellationToken)
     {
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
@@ -637,7 +609,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// </summary>
     public async Task PrepareMineruRemoteAsync(CancellationToken cancellationToken)
     {
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         RuntimeSelectionService? selection = _selection;
         if (selection is null)
         {
@@ -738,8 +709,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public void SetPendingAccelerator(string accelerator)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accelerator);
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
-        Maintenance.DiscardPlan();
         _selectionStaged = true;
         PendingBackend = accelerator;
         Features = _selection is null
@@ -751,134 +720,24 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public void SetFeatureEnabled(string featureId, bool enabled)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
-        if (Maintenance.State.IsRunning) { Status = "运行环境维护尚未结束。"; return; }
         IReadOnlyList<SettingsFeatureOption> current = Features;
         if (!current.Any(item => item.FeatureId == featureId))
         {
             Status = $"未知功能 {featureId}";
             return;
         }
-        Maintenance.DiscardPlan();
         _selectionStaged = true;
         Features = [.. current.Select(item => item.FeatureId == featureId
             ? item with { Selected = enabled }
             : item)];
         Status = enabled
-            ? $"已选择功能 {featureId}（安装属运行时维护操作）"
+            ? $"已选择功能 {featureId}"
             : $"已取消功能 {featureId}";
     }
 
     /// <summary>Selected optional feature ids for the pending accelerator (N4 consumes these).</summary>
     public IReadOnlyList<string> PendingFeatureIds =>
         [.. Features.Where(item => item.Selected).Select(item => item.FeatureId)];
-
-    /// <summary>
-    /// 用户确认后以显式 intent 启动 ensure:未选功能时发送空 component 列表
-    /// (显式 base-only);来源使用当前 Backend Settings 偏好。
-    /// </summary>
-    public async Task PreviewInstallAsync(CancellationToken cancellationToken)
-    {
-        if (_selection is null)
-        {
-            Status = "运行时目录尚未加载，请先刷新运行时";
-            return;
-        }
-        try
-        {
-            await Maintenance.PreviewAsync(
-                _selection,
-                PendingBackend,
-                PendingFeatureIds,
-                _selectedSourceIds,
-                cancellationToken);
-            Status = "请核对 Backend 返回的安装计划，再确认执行。";
-        }
-        catch (OperationCanceledException)
-        {
-            Status = "运行时维护操作已取消";
-        }
-        catch (RuntimeSelectionException error)
-        {
-            Status = LocalizeSelection(error);
-        }
-        catch (RuntimeInstallerException)
-        {
-            Status = "安装预览失败，请检查下载来源或导出诊断。";
-        }
-        catch (Exception error) when (error is InvalidOperationException or NotSupportedException)
-        {
-            Status = error.Message;
-        }
-    }
-
-    public async Task ConfirmInstallAsync(string planId, CancellationToken cancellationToken)
-    {
-        string? previousOperation = Maintenance.State.OperationId;
-        try
-        {
-            await Maintenance.ConfirmAsync(planId, cancellationToken);
-            Status = "运行环境维护已完成";
-        }
-        catch (OperationCanceledException) { Status = "运行环境维护已取消"; }
-        catch (Exception error) when (error is RuntimeInstallerException or InvalidOperationException or NotSupportedException)
-        {
-            // Only envelope-granted retryable failures prompt a direct retry.
-            Status = error is RuntimeInstallerException installerError
-                ? string.Equals(installerError.CanonicalCode, "CANCELLED", StringComparison.Ordinal)
-                    ? "运行环境维护已取消"
-                    : installerError.Retryable
-                        ? "安装失败，可重试、调整下载来源或导出诊断。"
-                        : "安装失败，请重新预览安装范围或导出诊断。"
-                : error.Message;
-        }
-        finally
-        {
-            if (Maintenance.State.OperationId != previousOperation && !Maintenance.State.IsRunning)
-            {
-                // The restored Supervisor owns the current device and engine availability.
-                // Do not let recognition reuse the pre-maintenance catalog if refresh fails.
-                string outcome = Status;
-                ClearSelection();
-                if (Maintenance.State.StatusCode == "succeeded") _selectionStaged = false;
-                await LoadSnapshotAsync(CancellationToken.None);
-                if (_selection is not null) Status = outcome;
-            }
-        }
-    }
-
-    public void CancelMaintenance() => Maintenance.Cancel();
-
-    public async Task RetryMaintenanceAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Maintenance.RetryAsync(cancellationToken);
-            if (Maintenance.Plan is not { } plan) return;
-            _selectionStaged = true;
-            PendingBackend = plan.Accelerator == Host.Accelerator.Cpu ? "cpu" : "nvidia_cuda";
-            if (_selection is not null)
-            {
-                HashSet<string> requested = (plan.RequestedComponentIds ?? []).ToHashSet(StringComparer.Ordinal);
-                string[] selected = _selection.Variants
-                    .Where(variant => variant.Accelerator == PendingBackend && requested.Contains(variant.ComponentId))
-                    .Select(variant => variant.FeatureId).ToArray();
-                Features = ProjectFeatures(_selection, PendingBackend, selected);
-            }
-            Status = "已重新预览上次安装范围，请核对并确认。";
-        }
-        catch (OperationCanceledException)
-        {
-            Status = "已取消";
-        }
-        catch (RuntimeInstallerException)
-        {
-            Status = "重新预览失败，请检查运行环境或导出诊断。";
-        }
-        catch (Exception error) when (error is InvalidOperationException or NotSupportedException)
-        {
-            Status = error.Message;
-        }
-    }
 
     public void Cancel() { }
 

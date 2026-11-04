@@ -16,8 +16,8 @@ paths of one fresh Runtime store against real Windows files:
   manager previews again and finishes the interrupted removals.
 
 Retained-environment Supervisor health and the synthetic OCR round trip
-are proven by ``scripts/smoke_environment_reuse.py`` and the WinUI native
-smoke; this script intentionally does not repeat them.
+are proven by the WinUI native smoke; this script intentionally does not
+repeat them.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -86,10 +87,14 @@ def seed_installer_cache(product_root: Path, source: Path) -> dict:
 
 
 def _create_candidate_venv(manager: ManagedEnvironmentStore, destination: Path) -> None:
-    """Build the same real candidate revision bytes production install uses."""
+    """Build the historical venv layout bytes the ledger once owned.
+
+    预构建运行时树后生产不再创建 venv；本脚本用它构造历史环境数据，
+    验证空间清理对既有 venv 记录/槽位残留的回收语义不变。
+    """
     result = subprocess.run(
         [
-            str(manager._base_python()),
+            sys.executable,
             "-I",
             "-m",
             "venv",
@@ -535,9 +540,7 @@ def main() -> int:
             assert (manager.root / "python-base").is_dir()
         evidence["not_covered_here"] = [
             "retained-environment Supervisor health and synthetic OCR: proven by "
-            "scripts/smoke_environment_reuse.py and the WinUI native smoke",
-            "retained-environment download-artifact retention reason: proven by "
-            "scripts/smoke_environment_reuse.py after its CUDA cleanup",
+            "the WinUI native smoke",
             "host wire/bridge/WinUI cleanup surfaces: covered by repository "
             "tests and the native managed-environments smoke",
         ]

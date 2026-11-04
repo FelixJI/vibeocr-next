@@ -1,9 +1,7 @@
-using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Windows.Storage;
 using Windows.Storage.Streams;
-using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Services;
 using VibeOCR.Platform.Bootstrap;
@@ -13,10 +11,7 @@ namespace VibeOCR.App;
 
 public sealed partial class MainWindow
 {
-  private const string SmokeEnvironmentA = "PaddleOCR ONNX · CPU";
-  private const string SmokeEnvironmentB = "Smoke B";
   private string managedSmokeStage = "starting";
-  private readonly List<object> managedInstallProgressEvidence = [];
 
   private void RecordManagedSmokeStage(string stage)
   {
@@ -24,13 +19,20 @@ public sealed partial class MainWindow
     AppLog.Info($"Managed environment smoke: {stage}");
   }
 
+  /// <summary>
+  /// 预构建运行时树冒烟：启动后台 initialize_default 后，断言随包
+  /// paddleocr-ort-directml 产品环境已注册（kind=product、installed）且
+  /// active 指向它、会话已附着，然后写健康 JSON 退出。安装/进度/取消
+  /// 事务已随在线安装退役，本 fixture 不再驱动它们。
+  /// </summary>
   private async Task CompleteManagedEnvironmentE2eSmokeAsync()
   {
     string? path = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_HEALTH");
     string? phase = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE");
     string expected = Path.Combine(Directory.GetParent(layout.InstallRoot)!.FullName,
       $"managed-environment-{phase}.json");
-    if (phase is not ("create" or "install" or "restart" or "sources" or "progress" or "cleanup") || path is null ||
+    if (phase is null || phase.Length is < 1 or > 32 ||
+        !phase.All(character => char.IsAsciiLetterOrDigit(character) || character == '-') || path is null ||
         !string.Equals(Path.GetFullPath(path), expected, StringComparison.OrdinalIgnoreCase))
     {
       Close();
@@ -39,28 +41,17 @@ public sealed partial class MainWindow
 
     try
     {
-      if (screenshotSmokePicker is null || smokeSubmitAttempts is null ||
-          smokeLastJobId is null || smokeInferenceAttached is null ||
-          smokeEnvironmentSnapshot is null || smokeManagedSession is null ||
-          smokeInstallAttempts is null)
+      if (smokeEnvironmentSnapshot is null || smokeManagedSession is null ||
+          smokeInferenceAttached is null)
         throw new InvalidOperationException("Managed environment smoke dependencies are missing.");
 
       RecordManagedSmokeStage(phase);
-      object evidence = phase switch
-      {
-        "create" => await CreateSmokeEnvironmentsAsync(),
-        "install" => await InstallAndSwitchSmokeEnvironmentsAsync(),
-        "sources" => await CompleteSourceSettingsSmokeAsync(),
-        "progress" => await CompleteInstallProgressSmokeAsync(),
-        "cleanup" => await CompleteCleanupSmokeAsync(),
-        _ => await VerifyRestartedSmokeEnvironmentAsync(),
-      };
+      object evidence = await VerifyPrebuiltProductEnvironmentAsync();
       File.WriteAllText(path, JsonSerializer.Serialize(new
       {
         schema_version = 1,
         state = "passed",
         phase,
-        install_attempts = smokeInstallAttempts(),
         evidence,
       }));
     }
@@ -73,428 +64,42 @@ public sealed partial class MainWindow
         phase,
         stage = managedSmokeStage,
         error = error.ToString(),
-        install_attempts = smokeInstallAttempts?.Invoke(),
-        install_progress = managedInstallProgressEvidence,
       }));
     }
     Close();
   }
 
-  private async Task<object> CreateSmokeEnvironmentsAsync()
+  private async Task<object> VerifyPrebuiltProductEnvironmentAsync()
   {
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    await SelectSmokeValueAsync("#paddle-backend-select", "directml");
-    await ClickManagedSmokeButtonAsync("准备此后端");
-    await WaitForSmokeEnvironmentsAsync([SmokeEnvironmentA], TimeSpan.FromMinutes(5));
-    await WaitForSmokeDomAsync(
-      "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('paddleocr-ort-directml') && " +
-      "!!document.querySelector('.managed-environment-list') && " +
-      "!document.querySelector(\"input[aria-label='新环境名称（留空自动命名）']\")",
-      TimeSpan.FromMinutes(2));
-    await SaveManagedSmokePreviewAsync("confirmation");
-    await ClickManagedSmokeButtonAsync("取消");
-    // 第二个空环境只用于验证隔离和旧记录兼容；用户不再需要手工创建。
-    WorkbenchCommandReceipt created = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand(SmokeEnvironmentB)),
-      CancellationToken.None);
-    if (!created.Ok)
-      throw new InvalidOperationException($"Smoke fixture creation failed: {created.Error?.Code}");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
-      [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(5));
-    if (list.ActiveId is not null || smokeInferenceAttached!() || smokeInstallAttempts!() != 0)
-      throw new InvalidOperationException("Empty environment creation started a service or installer.");
-    ManagedEnvironment[] environments = SmokePair(list);
-    await VerifyPreparedTargetReuseAsync(environments[0]);
-    if (environments.Any(item => item.Status != "empty" || item.PythonState != "ready"))
-      throw new InvalidOperationException("Named environments are not executable empty environments.");
-    // 空闲（无服务/无维护）不得渲染滚动维护进度；目标设备未读取真实
-    // 快照前不得冒充任何设备（AC1）。
-    await WaitForSmokeDomAsync(
-      "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
-      $"panel.textContent.includes({JsonSerializer.Serialize($"默认运行环境：{SmokeEnvironmentA}（尚未启动）")}) && " +
-      "!panel.querySelector('[role=progressbar]'); })()",
-      TimeSpan.FromSeconds(30));
-    await SaveManagedSmokePreviewAsync("environment-list");
-    return new { active_id = list.ActiveId, environments = environments.Select(SmokeEnvironmentEvidence) };
-  }
-
-  private async Task<object> InstallAndSwitchSmokeEnvironmentsAsync()
-  {
-    if (smokeInferenceAttached!() || smokeInstallAttempts!() != 0)
-      throw new InvalidOperationException("Restarting empty environments installed or started a service.");
-    await NavigateSmokeAsync("单次识别", "button");
-    await ClickManagedSmokeButtonAsync("截图");
-    RecognitionWorkbenchState captured = await WaitForScreenshotStateAsync(
-      state => !state.IsBusy && state.ScreenshotSession is not null, TimeSpan.FromSeconds(30));
-    SyntheticScreenRegionPicker.CaptureEvidence capture = screenshotSmokePicker!.Evidence ??
-      throw new InvalidOperationException("Synthetic screenshot was not captured.");
-    if (captured.Result is not null || smokeSubmitAttempts!() != 0 || smokeInstallAttempts!() != 0)
-      throw new InvalidOperationException("Empty-environment screenshot submitted OCR or installed dependencies.");
-
-    await NavigateSmokeAsync("二维码与条码", "#qr-content");
-    await EnterSmokeTextAsync("#qr-content", "VibeOCR managed environment smoke 123");
-    await ClickManagedSmokeButtonAsync("生成图片");
-    await WaitForSmokeDomAsync("document.querySelector('.qr-resource-preview')?.naturalWidth > 0",
-      TimeSpan.FromSeconds(15));
-    if (smokeInferenceAttached() || smokeInstallAttempts() != 0)
-      throw new InvalidOperationException("Local QR generation installed or started a service.");
-
-    // 导航证明用稳定 runtime 面板：冷启动权威清单未到时 React 不渲染
-    // 环境列表（environments.length===0），名单由随后等待覆盖。
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList empty = await WaitForSmokeEnvironmentsAsync(
-      [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
-    ManagedEnvironment[] initial = SmokePair(empty);
-    if (initial.Any(item => item.Status != "empty") || empty.ActiveId is not null)
-      throw new InvalidOperationException("Empty environment state changed across restart.");
-    await VerifyPreparedTargetReuseAsync(initial[0]);
-    WorkbenchCommandReceipt sources = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "modelscope", null)),
-      CancellationToken.None);
-    if (!sources.Ok) throw new InvalidOperationException("Managed fixture source selection failed.");
-    await InstallSmokeRecipeAsync(initial[0]);
-    await InstallSmokeRecipeAsync(initial[1]);
-    if (smokeInstallAttempts() != 2)
-      throw new InvalidOperationException("Expected two real manager install attempts.");
-    ManagedEnvironment[] installed = SmokePair(smokeEnvironmentSnapshot!() ??
-      throw new InvalidOperationException("Installed environment state is unavailable."));
-
-    object first = await SwitchAndRecognizeSmokeAsync(initial[0]);
-    object second = await SwitchAndRecognizeSmokeAsync(initial[1]);
-    int beforeSwitchBack = smokeInstallAttempts();
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await SelectSmokeEnvironmentAsync(initial[0].Id);
-    await ClickManagedSmokeButtonAsync("切换到此环境");
-    ManagedEnvironmentSession returned = await WaitForSmokeSessionAsync(initial[0].Id);
-    if (smokeInstallAttempts() != beforeSwitchBack)
-      throw new InvalidOperationException("Switching back invoked the installer.");
-    return new
-    {
-      empty_restart = initial.Select(SmokeEnvironmentEvidence),
-      installed_environments = installed.Select(SmokeEnvironmentEvidence),
-      capture,
-      local_qr_ready = true,
-      recognition = new[] { first, second },
-      switch_back = new { environment_id = returned.EnvironmentId, revision = returned.Revision },
-      install_attempts_after_switch_back = smokeInstallAttempts(),
-      install_progress = managedInstallProgressEvidence,
-    };
-  }
-
-  private async Task<object> CompleteCleanupSmokeAsync()
-  {
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
-      [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
-    ManagedEnvironment[] pair = SmokePair(list);
-    if (list.ActiveId != pair[0].Id || pair.Any(item => item.Status != "installed"))
-      throw new InvalidOperationException("Cleanup requires the isolated installed A/B fixture.");
-    await WaitForManagedSmokeEnvironmentListAsync();
-    await ClickManagedSmokeButtonAsync("检查可清理项");
-    await WaitForSmokeDomAsync("document.querySelector('[aria-label=可清理项]')?.textContent.includes('Smoke B') === true",
-      TimeSpan.FromMinutes(2));
-    SettingsWorkbenchState preview = (await application.BootstrapAsync(CancellationToken.None))
-      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
-    ManagedCleanupPlan plan = preview.EnvironmentCleanupPlan ?? throw new InvalidOperationException("Cleanup plan missing.");
-    if (plan.Items.Single(item => item.Id == $"environment:{pair[0].Id}").CanClean ||
-        !plan.Items.Single(item => item.Id == $"environment:{pair[1].Id}").CanClean)
-      throw new InvalidOperationException("Cleanup protection does not match active/idle environments.");
-    string selected = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-      "(() => { const row = [...document.querySelectorAll('[aria-label=可清理项] > li')].find(x => x.textContent.includes('Smoke B')); " +
-      "const box = row?.querySelector('input[type=checkbox]'); if (!box || box.disabled) return false; box.click(); return true; })()");
-    if (selected != "true") throw new InvalidOperationException("Idle environment cleanup checkbox is unavailable.");
-    await ClickManagedSmokeButtonAsync("预览所选清理影响");
-    await SaveManagedSmokePreviewAsync("cleanup-confirmation");
-    await ClickManagedSmokeButtonAsync("确认清理所选项目");
-    await WaitForSmokeDomAsync("document.querySelector('[aria-label=清理结果]')?.textContent.includes('已移除') === true",
-      TimeSpan.FromMinutes(5));
-    SettingsWorkbenchState completed = (await application.BootstrapAsync(CancellationToken.None))
-      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
-    ManagedCleanupResult result = completed.EnvironmentCleanupResult ?? throw new InvalidOperationException("Cleanup result missing.");
-    if (result.Items.Count != 1 || result.Items[0].Id != $"environment:{pair[1].Id}" || result.Items[0].State != "deleted" ||
-        Directory.Exists(pair[1].Path) || !Directory.Exists(pair[0].Path) ||
-        smokeEnvironmentSnapshot!()!.Environments.Any(item => item.Id == pair[1].Id))
-      throw new InvalidOperationException("Cleanup result disagrees with registry or actual directories.");
-    await SaveManagedSmokePreviewAsync("cleanup-result");
-    object recognition = await SwitchAndRecognizeSmokeAsync(pair[0]);
-    if (smokeInstallAttempts!() != 0) throw new InvalidOperationException("Retained OCR environment was reinstalled.");
-    return new { removed_environment_id = pair[1].Id, retained_environment_id = pair[0].Id,
-      removed_path = pair[1].Path, retained_path = pair[0].Path, result, recognition };
-  }
-  private async Task<object> VerifyRestartedSmokeEnvironmentAsync()
-  {
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    // 先等真实会话，再走公开只读清单动作，避免冻结 attach 前的陈旧投影。
-    await WaitForSmokeSessionAsync(null, requireProjection: false);
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(
-      [SmokeEnvironmentA, SmokeEnvironmentB], TimeSpan.FromMinutes(2));
-    ManagedEnvironment a = SmokePair(list)[0];
-    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(a.Id);
-    await SelectSmokeEnvironmentAsync(a.Id);
-    await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
-      TimeSpan.FromMinutes(2));
-    ManagedEnvironment projected = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == a.Id);
-    if (projected.ServiceState != "ready" || projected.Revision != session.Revision)
-      throw new InvalidOperationException("Running environment projection stayed stale after startup.");
-    if (list.ActiveId != a.Id || a.Revision != session.Revision ||
-        smokeInstallAttempts!() != 0 || !smokeInferenceAttached!())
-      throw new InvalidOperationException("Restart did not reuse active A without installation.");
+    // 先等真实会话附着：initialize_default 在启动后台准备中完成注册并
+    // 启动服务；这里只验证事实，不触发任何安装或切换。
+    RecordManagedSmokeStage("wait session");
+    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(null, requireProjection: false);
+    ManagedEnvironmentList list = await WaitForSmokeProductEnvironmentAsync(
+      TimeSpan.FromMinutes(10));
+    ManagedEnvironment product = list.Environments.SingleOrDefault(item =>
+        string.Equals(item.Kind, "product", StringComparison.Ordinal) &&
+        string.Equals(item.Recipe, "paddleocr-ort-directml", StringComparison.Ordinal))
+      ?? throw new InvalidOperationException(
+        "Prebuilt product environment (kind=product, recipe=paddleocr-ort-directml) is not registered.");
+    if (list.ActiveId != product.Id)
+      throw new InvalidOperationException(
+        $"Active environment does not point at the product environment: active={list.ActiveId}.");
+    if (!string.Equals(product.Status, "installed", StringComparison.Ordinal))
+      throw new InvalidOperationException(
+        $"Prebuilt product environment is not installed: {product.Status} ({product.Reason}).");
+    if (product.Revision != session.Revision || session.EnvironmentId != product.Id ||
+        !smokeInferenceAttached!())
+      throw new InvalidOperationException(
+        "Attached session does not match the active prebuilt product environment.");
     await SaveManagedSmokePreviewAsync("environment-list");
     return new
     {
       active_id = list.ActiveId,
       active_revision = list.ActiveRevision,
-      python = a.Python,
+      environment = SmokeEnvironmentEvidence(product),
       service_state = session.Status.ServiceState.ToString(),
-      projected_service_state = projected.ServiceState,
     };
-  }
-
-  private async Task<object> CompleteInstallProgressSmokeAsync()
-  {
-    string recipe = Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_PROGRESS_RECIPE") ?? "paddleocr-ort-directml";
-    if (recipe is not "paddleocr-ort-directml")
-      throw new InvalidOperationException("Progress smoke supports the unified DirectML closure recipe only.");
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    WorkbenchCommandReceipt created = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand("安装进度验收")),
-      CancellationToken.None);
-    if (!created.Ok) throw new InvalidOperationException("Progress fixture creation failed.");
-    ManagedEnvironmentList list = await WaitForSmokeEnvironmentsAsync(["安装进度验收"], TimeSpan.FromMinutes(2));
-    ManagedEnvironment target = list.Environments.Single(item => item.Name == "安装进度验收");
-    WorkbenchCommandReceipt sources = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetEnvironmentSourcesCommand(null, "modelscope", null)),
-      CancellationToken.None);
-    if (!sources.Ok) throw new InvalidOperationException("Progress fixture source selection failed.");
-    await InstallSmokeRecipeAsync(target, recipe);
-    ManagedEnvironment installed = smokeEnvironmentSnapshot!()!.Environments.Single(item => item.Id == target.Id);
-    return new { installed = SmokeEnvironmentEvidence(installed), install_progress = managedInstallProgressEvidence };
-  }
-
-  private async Task InstallSmokeRecipeAsync(ManagedEnvironment environment, string recipe = "paddleocr-ort-directml")
-  {
-    RecordManagedSmokeStage($"select {environment.Name}");
-    await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#paddle-backend-select", "directml");
-    await ClickManagedSmokeButtonAsync("继续准备依赖");
-    await WaitForSmokeDomAsync("!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      $"document.querySelector('.runtime-install-plan')?.textContent.includes('{recipe}') && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('ModelScope')",
-      TimeSpan.FromMinutes(2));
-    RecordManagedSmokeStage($"install {environment.Name}");
-    await ClickManagedSmokeButtonAsync("确认安装依赖");
-    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(45));
-    var phases = new HashSet<string>(StringComparer.Ordinal);
-    var observations = new List<object>();
-    bool liveLog = false;
-    bool capturedLiveLog = false;
-    while (true)
-    {
-      SettingsWorkbenchState settingsState = (await application.BootstrapAsync(timeout.Token))
-        .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
-      ManagedEnvironmentInstallProgress? progress = settingsState.EnvironmentInstallProgress;
-      if (progress?.EnvironmentId == environment.Id && progress.State == "running" &&
-          settingsState.EnvironmentCanCancelInstall)
-      {
-        string visible = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-          "JSON.stringify({phase:document.querySelector('.environment-install-progress')?.dataset.installPhase," +
-          "log:document.querySelector('.environment-install-progress pre')?.textContent ?? ''})");
-        using JsonDocument dom = JsonDocument.Parse(JsonSerializer.Deserialize<string>(visible) ?? "{}");
-        bool phaseVisible = dom.RootElement.TryGetProperty("phase", out JsonElement domPhase) &&
-          domPhase.GetString() == progress.Phase;
-        string logText = dom.RootElement.GetProperty("log").GetString() ?? "";
-        bool hasLog = phaseVisible && settingsState.EnvironmentInstallLog?.Count > 0 &&
-          !string.IsNullOrWhiteSpace(logText) && !logText.Contains("等待命令输出", StringComparison.Ordinal);
-        liveLog |= hasLog;
-        if (hasLog && !capturedLiveLog)
-        {
-          await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-            "(() => { const log = document.querySelector('.environment-install-progress details:last-child'); if(log && !log.open) log.querySelector('summary').click(); })()");
-          await SaveManagedSmokePreviewAsync($"live-progress-{environment.Id}");
-          capturedLiveLog = true;
-        }
-        if (phaseVisible && phases.Add(progress.Phase) || hasLog && observations.Count < 10)
-          observations.Add(new
-          {
-            observed_at = DateTimeOffset.UtcNow,
-            event_time = progress.Timestamp,
-            progress.Phase,
-            progress.Seq,
-            dependencies = progress.Dependencies.Count,
-            progress.DownloadFilesCompleted,
-            progress.DownloadFilesTotal,
-            live_log = hasLog,
-            dom = visible
-          });
-      }
-      ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
-        .SingleOrDefault(item => item.Id == environment.Id);
-      if (current?.LastInstallFailure is { Phase: "failed" } failure)
-      {
-        managedInstallProgressEvidence.Add(new { environment_id = environment.Id, recipe,
-          observed = observations, failure, terminal = progress, logs = settingsState.EnvironmentInstallLog });
-        if (progress is null || progress.EnvironmentId != environment.Id || progress.State is not ("failed" or "cancelled"))
-          throw new InvalidOperationException("Installation failure did not expose a bound terminal progress state.");
-        await WaitForInstallProgressDomAsync(progress);
-        await SaveManagedSmokePreviewAsync($"failed-progress-{environment.Id}");
-        throw new InvalidOperationException(
-          $"Environment install failed: {failure.ReasonCode}: {failure.Detail}");
-      }
-      if (current?.Status == "installed" && current.Revision > environment.Revision)
-      {
-        if (phases.Count < 2 || !liveLog || progress?.State != "succeeded" ||
-            progress.Dependencies.Any(item => item.InstallState != "installed"))
-          throw new InvalidOperationException("Installation did not expose continuous live phases/logs and committed package state.");
-        await WaitForInstallProgressDomAsync(progress);
-        string terminalDom = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-          "JSON.stringify(document.querySelector('.environment-install-progress')?.dataset)");
-        managedInstallProgressEvidence.Add(new
-        {
-          environment_id = environment.Id,
-          recipe,
-          observed = observations,
-          finished_event_time = progress.Timestamp,
-          finished_observed_at = DateTimeOffset.UtcNow,
-          terminal = progress,
-          terminal_dom = terminalDom
-        });
-        await SaveManagedSmokePreviewAsync($"progress-{environment.Id}");
-        // 安装终态后维护进度动画必须退出，不得残留空闲滚动（AC2）。
-        await WaitForSmokeDomAsync(
-          "(() => { const panel = document.querySelector('.settings-runtime-panel'); return !!panel && " +
-          "!panel.querySelector('[role=progressbar]'); })()",
-          TimeSpan.FromSeconds(30));
-        return;
-      }
-      if (current?.Status is "failed" or "unavailable")
-        throw new InvalidOperationException($"Environment install failed: {current.Reason}");
-      await Task.Delay(250, timeout.Token);
-    }
-  }
-
-  private Task WaitForInstallProgressDomAsync(ManagedEnvironmentInstallProgress progress)
-  {
-    string expected = JsonSerializer.Serialize(new
-    {
-      attempt = progress.AttemptId,
-      seq = progress.Seq.ToString(System.Globalization.CultureInfo.InvariantCulture),
-      environment = progress.EnvironmentId,
-      state = progress.State,
-      phase = progress.Phase,
-      installed = progress.Dependencies.Count(item => item.InstallState == "installed").ToString(System.Globalization.CultureInfo.InvariantCulture),
-      total = progress.DependencyTotalKnown ? progress.Dependencies.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown"
-    });
-    return WaitForSmokeDomAsync("(() => { const expected = " + expected +
-      "; const actual = document.querySelector('.environment-install-progress')?.dataset; return !!actual && " +
-      "actual.installAttempt === expected.attempt && actual.installSeq === expected.seq && " +
-      "actual.installEnvironment === expected.environment && actual.installState === expected.state && " +
-      "actual.installPhase === expected.phase && actual.installInstalled === expected.installed && " +
-      "actual.installTotal === expected.total; })()", TimeSpan.FromSeconds(30));
-  }
-
-  private async Task<object> SwitchAndRecognizeSmokeAsync(ManagedEnvironment environment)
-  {
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    RecordManagedSmokeStage($"select {environment.Name}");
-    await SelectSmokeEnvironmentAsync(environment.Id);
-    await ClickManagedSmokeButtonAsync(smokeEnvironmentSnapshot!()?.ActiveId == environment.Id
-      ? "启动并验证当前环境" : "切换到此环境");
-    RecordManagedSmokeStage($"wait for service {environment.Name}");
-    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
-    RecordManagedSmokeStage($"service ready {environment.Name}");
-    ManagedEnvironment current = smokeEnvironmentSnapshot!()?.Environments.Single(item =>
-      item.Id == environment.Id) ?? throw new InvalidOperationException("Environment disappeared.");
-    if (current.Revision != session.Revision || !smokeInferenceAttached!())
-      throw new InvalidOperationException("Supervisor does not match selected environment revision.");
-    await NavigateSmokeAsync("单次识别", "button");
-    int before = smokeSubmitAttempts!();
-    string? previousSessionId = (await application.BootstrapAsync(CancellationToken.None))
-      .States.Select(item => item.State).OfType<RecognitionWorkbenchState>()
-      .Single().ScreenshotSession?.SessionId;
-    await ClickManagedSmokeButtonAsync("截图");
-    RecognitionWorkbenchState capturedState = await WaitForScreenshotStateAsync(state => !state.IsBusy &&
-      state.ScreenshotSession is { } captured &&
-      captured.SessionId != previousSessionId && state.Result is null,
-      TimeSpan.FromSeconds(30));
-    // Host state arrives before React has necessarily replaced the previous
-    // editor. Wait for this exact session and its pixels before dispatching OCR.
-    // sceneEditing 会话的 canvas-editor 与“识别当前图”只在现场窗口渲染（主窗是
-    // EmptyStage）；session DOM 查现场面，识别结果仍在主窗。
-    await WaitForSmokeDomAsync(
-      "document.querySelector('.canvas-editor')?.dataset.screenshotSession === " +
-      JsonSerializer.Serialize(capturedState.ScreenshotSession!.SessionId),
-      TimeSpan.FromSeconds(30),
-      editorSurface: true);
-    await WaitForCanvasAsync();
-    RecordManagedSmokeStage($"recognize {environment.Name}");
-    await WaitForAutomaticTextLayerAsync(capturedState.ScreenshotSession!);
-    before = smokeSubmitAttempts();
-    await ClickSmokeButtonAsync("识别文字");
-    await WaitForScreenshotStateAsync(state =>
-    {
-      if (!state.IsBusy && state.StatusCode is "recognition.cancelled" or
-          "recognition.modeUnavailable" or "recognition.expired")
-        throw new InvalidOperationException($"Managed smoke OCR stopped: {state.StatusCode}");
-      return !state.IsBusy && state.Result is not null;
-    }, TimeSpan.FromMinutes(35));
-    await WaitForSmokeDomAsync("(document.querySelector('.result-document')?.textContent ?? '').includes('VibeOCR') && (document.querySelector('.result-document')?.textContent ?? '').includes('123')",
-      TimeSpan.FromSeconds(15));
-    if (smokeSubmitAttempts() != before + 1 || string.IsNullOrWhiteSpace(smokeLastJobId!()))
-      throw new InvalidOperationException("Synthetic OCR task was not submitted exactly once.");
-    string taskId = smokeLastJobId()!;
-    var observed = await session.Client.ObserveAsync(taskId, 0, CancellationToken.None);
-    if (observed.Snapshot.JobId != taskId ||
-        observed.Snapshot.EnvironmentId != session.EnvironmentId ||
-        observed.Snapshot.EnvironmentRevision != session.Revision)
-      throw new InvalidOperationException("Job record environment binding does not match the active session.");
-    return new
-    {
-      task_id = observed.Snapshot.JobId,
-      environment_id = observed.Snapshot.EnvironmentId,
-      environment_revision = observed.Snapshot.EnvironmentRevision,
-      python = current.Python,
-      environment_path = current.Path,
-      // The Python path is read from the manager. The script separately probes
-      // sys.prefix; it is path evidence, not a value reported by the OCR task.
-      python_evidence = "manager_path_pending_read_only_prefix_probe",
-      ocr_visible = true,
-    };
-  }
-
-  private async Task VerifyPreparedTargetReuseAsync(ManagedEnvironment expected)
-  {
-    WorkbenchCommandReceipt prepared = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new PrepareEnvironmentCommand("paddleocr-ort-directml")),
-      CancellationToken.None);
-    SettingsWorkbenchState settings = (await application.BootstrapAsync(CancellationToken.None))
-      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
-    ManagedEnvironmentList? list = smokeEnvironmentSnapshot!();
-    if (!prepared.Ok || settings.EnvironmentPlan?.EnvironmentId != expected.Id ||
-        settings.EnvironmentPlan.EnvironmentRevision != expected.Revision ||
-        list?.Environments.Count != 2 || smokeInstallAttempts!() != 0)
-      throw new InvalidOperationException("Repeated preparation changed the target or installed dependencies.");
-    WorkbenchCommandReceipt cancelled = await application.ExecuteAsync(
-      new WorkbenchCommandEnvelope(Guid.NewGuid(), new InvalidateEnvironmentPlanCommand()), CancellationToken.None);
-    if (!cancelled.Ok) throw new InvalidOperationException("Repeated preparation could not be cancelled.");
-  }
-
-  private static ManagedEnvironment[] SmokePair(ManagedEnvironmentList list)
-  {
-    ManagedEnvironment[] pair = [
-      list.Environments.Single(item => item.Name == SmokeEnvironmentA),
-      list.Environments.Single(item => item.Name == SmokeEnvironmentB),
-    ];
-    if (pair[0].Id == pair[1].Id) throw new InvalidOperationException("Smoke environment IDs overlap.");
-    return pair;
   }
 
   private static object SmokeEnvironmentEvidence(ManagedEnvironment environment) => new
@@ -502,6 +107,7 @@ public sealed partial class MainWindow
     id = environment.Id,
     name = environment.Name,
     revision = environment.Revision,
+    kind = environment.Kind,
     status = environment.Status,
     python_state = environment.PythonState,
     python = environment.Python,
@@ -509,14 +115,18 @@ public sealed partial class MainWindow
     recipe = environment.Recipe,
   };
 
-  private async Task<ManagedEnvironmentList> WaitForSmokeEnvironmentsAsync(
-    string[] names, TimeSpan timeout)
+  /// <summary>等待预构建产品环境出现在快照：按 kind/recipe 匹配（product
+  /// 环境的名字是“默认环境”，不随配方目录显示名变化）。</summary>
+  private async Task<ManagedEnvironmentList> WaitForSmokeProductEnvironmentAsync(
+    TimeSpan timeout)
   {
     using var cancellation = new CancellationTokenSource(timeout);
     while (true)
     {
       ManagedEnvironmentList? list = smokeEnvironmentSnapshot!();
-      if (list is not null && names.All(name => list.Environments.Any(item => item.Name == name)))
+      if (list is not null && list.Environments.Any(item =>
+          string.Equals(item.Kind, "product", StringComparison.Ordinal) &&
+          string.Equals(item.Recipe, "paddleocr-ort-directml", StringComparison.Ordinal)))
         return list;
       await Task.Delay(100, cancellation.Token);
     }
@@ -614,12 +224,12 @@ public sealed partial class MainWindow
 
   private async Task SaveManagedSmokePreviewAsync(string stage)
   {
-    bool progress = stage.Contains("progress", StringComparison.Ordinal);
-    string selector = progress ? ".environment-install-progress" : stage == "confirmation" ? ".runtime-install-plan" : ".managed-environment-list";
-    if (selector == ".managed-environment-list") await WaitForManagedSmokeEnvironmentListAsync();
+    // 环境列表位于设置页路由下：截图前先导航（Paddle 冒烟同一入口）。
+    await NavigateSmokeAsync("设置", ".managed-environment-list");
+    if (stage == "environment-list") await WaitForManagedSmokeEnvironmentListAsync();
     await WaitForSmokeDomAsync(
-      "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(selector) +
-      "); if (!e" + (progress ? "" : " || !e.querySelector('button:not(:disabled)')") + ") return false; " +
+      "(() => { const e = document.querySelector(" + JsonSerializer.Serialize(".managed-environment-list") +
+      "); if (!e) return false; " +
       "e.scrollIntoView({block:'center'}); return true; })()",
       TimeSpan.FromSeconds(30));
     await Task.Delay(100);

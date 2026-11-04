@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.build_runtime_manifest import _extract_product_runtime_code
 from scripts.product_layout import (
     LAYOUT_RELATIVE_PATH,
     ProductLayoutError,
@@ -16,7 +17,9 @@ from scripts.product_layout import (
     stage_product_layout,
 )
 from scripts.release_smoke import _verify_runtime_code
-from tests.python.runtime.environment.test_runtime_installer import _release
+from tests.python.runtime.environment.test_runtime_installer import (
+    _lock_text,
+)
 
 # 历史隔离 host 锁（不含 Paddle/MinerU）：统一闭包后 cpu 档位锁已删除，
 # 复用现存 base 锁内容满足同一 paddle_isolated 校验形态。
@@ -39,6 +42,201 @@ def _legacy_paddle_cpu_lock_text() -> str:
         )
         + "\n"
     )
+
+
+def _build_prebuilt_bundle(
+    output_dir: Path,
+    model_pack: Path,
+    *,
+    base_lock: Path | None = None,
+    dml_lock: Path | None = None,
+    installer: Path | None = None,
+    tree: Path | None = None,
+    env_manifest: Path | None = None,
+) -> tuple[Path, Path]:
+    """本地构建预构建形态 bundle：manifest/锁/安装器在 output_dir 根，
+    树复制到 output_dir/runtime-env（product_layout 的 backend 输入）。"""
+    from scripts.build_runtime_manifest import build_runtime_manifest
+    from scripts.build_runtime_pack import write_runtime_env_manifest
+    from tests.python.runtime.environment.test_runtime_installer import (
+        _component_lock_for,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if base_lock is None:
+        base_lock = output_dir / "requirements-win-x64-base.lock"
+        base_lock.write_text(_lock_text("win-x64-base"), encoding="utf-8")
+    if dml_lock is None:
+        dml_lock = output_dir / "requirements-win-x64-paddle-ort-directml.lock"
+        dml_lock.write_text(_lock_text("win-x64-paddle-ort-directml"), encoding="utf-8")
+    if installer is None:
+        installer = output_dir / "vibeocr-runtime-installer.exe"
+        installer.write_bytes(b"installer")
+    if tree is None or env_manifest is None:
+        tree = output_dir / "runtime-env-src"
+        (tree / "Lib").mkdir(parents=True, exist_ok=True)
+        (tree / "python.exe").write_bytes(b"python-bin")
+        (tree / "Lib" / "os.py").write_bytes(b"os")
+        env_manifest = output_dir / "runtime-env-manifest.json"
+        write_runtime_env_manifest(tree, env_manifest)
+    manifest_path = build_runtime_manifest(
+        runtime_wheel=None,
+        base_lock=base_lock,
+        python_archive=None,
+        python_version="3.13.16",
+        python_source_url=(
+            "https://github.com/astral-sh/python-build-standalone/releases/"
+            "download/20261001/"
+            "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
+            "-install_only.tar.gz"
+        ),
+        installer_executable=installer,
+        version="9.9.9",
+        source_commit="a" * 40,
+        build_workflow="test",
+        output_dir=output_dir,
+        paddle_onnx_locks={"directml": dml_lock},
+        paddle_model_pack=model_pack,
+        runtime_env_tree=tree,
+        runtime_env_manifest=env_manifest,
+    )
+    return manifest_path, _component_lock_for(manifest_path)
+
+
+def _packaged_release(root: Path) -> tuple[Path, Path]:
+    """历史 wheel + runtime-pack 形态 bundle（loader/product_layout 读兼容面）。
+
+    预构建树（PR2）后新产物不再携带 wheel/python 归档/profile runtime
+    pack；这里手写历史 manifest 验证 staging 对既有声明的兼容与校验。
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    wheel = root / "vibeocr_next_runtime-0.7.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, mode="w") as archive:
+        for module in (
+            "vibeocr/runtime/__init__.py",
+            "vibeocr/runtime/host/main.py",
+            "vibeocr/runtime/environments/env_config.py",
+            "vibeocr/runtime/recognition/paddle_worker.py",
+            "vibeocr/runtime/documents/pdf_backend_process.py",
+            "vibeocr/runtime_contracts/__init__.py",
+        ):
+            archive.writestr(module, "")
+        archive.writestr("vibeocr/runtime/environments/dependency_profiles.json", "{}")
+        archive.writestr(
+            "vibeocr_next_runtime-0.7.0.dist-info/METADATA",
+            "Name: vibeocr-next-runtime\nVersion: 0.7.0\n",
+        )
+    python_archive = root / "cpython-3.13.16-win_amd64-install_only.tar.gz"
+    python_archive.write_bytes(b"python-archive")
+    installer_executable = root / "vibeocr-runtime-installer.exe"
+    installer_executable.write_bytes(b"installer")
+    _extract_product_runtime_code(wheel, root, "0.7.0")
+
+    def _sha(data: bytes) -> str:
+        import hashlib
+
+        return hashlib.sha256(data).hexdigest()
+
+    def _lock_body(profile: str) -> str:
+        if profile == "win-x64-base":
+            return _lock_text("win-x64-base")
+        # 历史档位（win-x64-cpu）已退役：读兼容校验只需结构合法的
+        # exact 锁，这里合成最小条目。
+        return (
+            "fastapi==1.0.0 \\\n  --hash=sha256:" + "1" * 64 + "\n"
+            "opencv-contrib-python==4.12.0.88 \\\n  --hash=sha256:" + "7" * 64 + "\n"
+        )
+
+    profiles: dict[str, dict] = {}
+    for profile in ("win-x64-base", "win-x64-cpu"):
+        lock = root / f"requirements-{profile}.lock"
+        lock.write_text(_lock_body(profile), encoding="utf-8")
+        profiles[profile] = {
+            "lock": lock.name,
+            "sha256": _sha(lock.read_bytes()),
+            "runtime_pack": None,
+        }
+    paddle_onnx: dict[str, dict] = {}
+    lock = root / "requirements-win-x64-paddle-ort-directml.lock"
+    lock.write_text(_lock_text("win-x64-paddle-ort-directml"), encoding="utf-8")
+    paddle_onnx["directml"] = {
+        "lock": lock.name,
+        "sha256": _sha(lock.read_bytes()),
+    }
+    pack = root / "vibeocr-runtime-pack-win-x64-paddle-ort-directml-0.7.0.zip"
+    with zipfile.ZipFile(pack, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "paddleocr==3.7.0")
+        archive.writestr("paddleocr-3.7.0-py3-none-any.whl", b"paddleocr-wheel")
+    paddle_onnx["directml"]["runtime_pack"] = [pack.name]
+    paddle_onnx["directml"]["runtime_pack_sha256"] = [_sha(pack.read_bytes())]
+    base_pack = root / "vibeocr-runtime-pack-win-x64-base-0.7.0.zip"
+    with zipfile.ZipFile(base_pack, mode="w") as archive:
+        archive.writestr("pack-requirements.txt", "fastapi==1.0.0")
+        archive.writestr("fastapi-1.0.0-py3-none-any.whl", b"fastapi-wheel")
+    profiles["win-x64-base"]["runtime_pack"] = [base_pack.name]
+    profiles["win-x64-base"]["runtime_pack_sha256"] = [_sha(base_pack.read_bytes())]
+    model_pack = root / "vibeocr-paddle-models-0.7.0.zip"
+    with zipfile.ZipFile(model_pack, mode="w") as archive:
+        archive.writestr("PP-OCRv6_small_det/inference.onnx", b"det-model")
+    manifest = {
+        "schema_version": 2,
+        "paddle_onnx_environments": paddle_onnx,
+        "paddle_model_pack": {
+            "archive": model_pack.name,
+            "sha256": _sha(model_pack.read_bytes()),
+        },
+        "product": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
+            "version": "0.7.0",
+            "source_sha": "0" * 40,
+        },
+        "runtime_wheel": wheel.name,
+        "runtime_sha256": _sha(wheel.read_bytes()),
+        "python": {
+            "version": "3.13.16",
+            "abi": "cp313",
+            "platform": "win_amd64",
+            "source_url": (
+                "https://github.com/astral-sh/python-build-standalone/releases/"
+                "download/20261001/"
+                "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
+                "-install_only.tar.gz"
+            ),
+            "archive": python_archive.name,
+            "sha256": _sha(python_archive.read_bytes()),
+        },
+        "installer": {
+            "executable": installer_executable.name,
+            "executable_sha256": _sha(b"installer"),
+        },
+        "profiles": profiles,
+        "capabilities": ["ocr.recognition.v2"],
+        "build_workflow": "tests/runtime",
+    }
+    manifest_path = root / "runtime-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    component = {
+        "schema_version": 2,
+        "product": {
+            "component": "next",
+            "repository": "FelixJI/vibeocr-next",
+            "version": "0.7.0",
+            "source_sha": "0" * 40,
+            "runtime_manifest_sha256": _sha(manifest_path.read_bytes()),
+            "accelerator": "cpu",
+        },
+        "required_capabilities": ["ocr.recognition.v2"],
+    }
+    component_path = root / "component-lock.json"
+    component_path.write_text(
+        json.dumps(component, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path, component_path
 
 
 def _release_inputs(tmp_path: Path) -> dict[str, Path]:
@@ -66,12 +264,7 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
         "<configuration />", encoding="utf-8"
     )
     backend = tmp_path / "backend-release"
-    manifest_path, component_lock = _release(
-        backend,
-        with_base_pack=True,
-        with_paddle_packs=True,
-        with_paddle_model_pack=True,
-    )
+    manifest_path, component_lock = _packaged_release(backend)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     identities = tmp_path / "component-identities.json"
     identities.write_text(
@@ -518,7 +711,6 @@ def test_stage_product_layout_still_carries_legacy_zip_bound_installer(
 def _prebuilt_release_inputs(tmp_path: Path) -> dict[str, Path]:
     """预构建运行时树形态的最小 bundle 输入（PR2）。"""
     from scripts.build_runtime_pack import write_runtime_env_manifest
-    from scripts.build_runtime_manifest import build_runtime_manifest
 
     tree = tmp_path / "runtime-env"
     (tree / "Lib").mkdir(parents=True)
@@ -545,14 +737,17 @@ def _prebuilt_release_inputs(tmp_path: Path) -> dict[str, Path]:
     dml_lock = tmp_path / "requirements-win-x64-paddle-ort-directml.lock"
     dml_lock.write_text(
         base_lock.read_text(encoding="utf-8")
-        + "paddleocr==3.7.0 \\n  --hash=sha256:" + "7" * 64 + "\n"
+        + "paddleocr==3.7.0 \\n  --hash=sha256:"
+        + "7" * 64
+        + "\n"
         "paddlex==3.7.2 \\n  --hash=sha256:" + "7" * 64 + "\n"
         "opencv-contrib-python==5.0.0.93 \\n  --hash=sha256:" + "7" * 64 + "\n"
         "fastapi==1.0.0 \\n  --hash=sha256:" + "1" * 64 + "\n"
         "winrt-runtime==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
         "winrt-windows-foundation==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
         "winrt-windows-foundation-collections==3.2.1 \\n  --hash=sha256:"
-        + "6" * 64
+        + "6"
+        * 64
         + "\n"
         "winrt-windows-globalization==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
         "winrt-windows-graphics-imaging==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
@@ -563,33 +758,22 @@ def _prebuilt_release_inputs(tmp_path: Path) -> dict[str, Path]:
         "onnx==1.23.2 \\n  --hash=sha256:" + "2" * 64 + "\n",
         encoding="utf-8",
     )
-    output_dir = tmp_path / "runtime-bundle"
-    build_runtime_manifest(
-        runtime_wheel=None,
+    manifest_path, component_lock = _build_prebuilt_bundle(
+        tmp_path / "runtime-bundle",
+        model_pack,
         base_lock=base_lock,
-        python_archive=None,
-        python_version="3.13.16",
-        python_source_url=(
-            "https://github.com/astral-sh/python-build-standalone/releases/"
-            "download/20261001/"
-            "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
-            "-install_only.tar.gz"
-        ),
-        installer_executable=installer,
-        version="9.9.9",
-        source_commit="a" * 40,
-        build_workflow="test",
-        output_dir=output_dir,
-        paddle_onnx_locks={"directml": dml_lock},
-        paddle_model_pack=model_pack,
-        runtime_env_tree=tree,
-        runtime_env_manifest=env_manifest,
+        dml_lock=dml_lock,
+        installer=installer,
+        tree=tree,
+        env_manifest=env_manifest,
     )
 
     inputs = _release_inputs(tmp_path)
     # 重建 app/bootstrapper 等输入被 build_runtime_manifest 共用 tmp_path；
     # backend 指向新 bundle。
-    inputs["backend_release_dir"] = output_dir
+    inputs["backend_release_dir"] = tmp_path / "runtime-bundle"
+    inputs["component_lock"] = component_lock
+    del manifest_path
     return inputs
 
 

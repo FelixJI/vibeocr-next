@@ -2347,24 +2347,14 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public string ActiveId { get; set; } = "paddle";
     public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
       Task.FromResult(new ManagedEnvironmentList(ActiveId, 1, []));
-    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId,
       string? modelSourceId, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(string environmentId,
-      string recipe, IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-    public Task<ManagedEnvironment> InstallEnvironmentAsync(ManagedEnvironmentPlan plan,
-      IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(PreparedEnvironmentSwitch prepared,
       StartedEnvironmentHealth? startedHealth = null, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();
-    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task DeleteEnvironmentAsync(string environmentId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
   }

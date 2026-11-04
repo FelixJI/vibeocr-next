@@ -3570,31 +3570,6 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   internal sealed class CaptureInProgressException : Exception
   {
   }
-  internal void InvalidateScreenshotSessionRecognitionOnMaintenance()
-  {
-    foreach (ImageSessionChannel channel in (ImageSessionChannel[])
-      [recognitionChannel, imageEditChannel, pinEditChannel])
-    {
-      if (channel.RecognitionDemand is null &&
-        (channel.SessionId is null ||
-          (channel.ViewModel is not { IsBusy: true } &&
-            channel.TextLayer is null && channel.SessionResult is null)))
-      {
-        continue;
-      }
-      WorkbenchImageOwner.AdvanceImageGeneration(channel);
-      channel.ViewModel?.Cancel();
-      channel.ViewModel?.InvalidateResult();
-      if (channel == recognitionChannel)
-      {
-        ClearResultActions();
-      }
-      channel.SessionResult = null;
-      InvalidateScreenshotTextLayer(channel);
-      operations.Publish(SessionState(channel, false, "recognition.expired"));
-    }
-  }
-
   internal async Task RefreshCatalogStateAsync(CancellationToken cancellationToken)
   {
     RecognitionViewModel viewModel = RecognitionVm;

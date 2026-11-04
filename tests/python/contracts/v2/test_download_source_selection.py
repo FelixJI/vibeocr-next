@@ -78,28 +78,6 @@ def _component_schema_validator(name: str) -> jsonschema.Draft202012Validator:
     )
 
 
-def _host_request_validator() -> jsonschema.Draft202012Validator:
-    return jsonschema.Draft202012Validator(
-        {
-            "$ref": "#/$defs/RuntimeHostRequest",
-            "$defs": _host_schema()["$defs"],
-        }
-    )
-
-
-def _host_request(selection: list | None) -> dict:
-    request = {
-        "protocol_version": 2,
-        "operation": "ensure",
-        "product_root": "C:/VibeOCR",
-        "component_lock": "C:/VibeOCR/component-lock.json",
-        "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json",
-    }
-    if selection is not None:
-        request["download_source_ids"] = selection
-    return request
-
-
 def test_source_kinds_are_single_sourced_across_layers() -> None:
     spec_kind = _spec()["components"]["schemas"]["DownloadSourceKind"]
     assert tuple(spec_kind["x-vibeocr-known-values"]) == DOWNLOAD_SOURCE_KINDS
@@ -207,85 +185,6 @@ def test_empty_settings_selection_normalizes_to_golden_omission() -> None:
     _settings_snapshot_validator().validate(payload)
 
 
-def test_http_maintenance_snapshots_source_selection_and_rejects_wrong_operations() -> (
-    None
-):
-    request = dtos.RuntimeMaintenanceRequest(
-        operation=dtos.RuntimeMaintenanceOperation.ENSURE,
-        download_source_ids=("pypi-tuna", "hf-mirror"),
-    )
-    payload = request.to_payload()
-    assert payload["download_source_ids"] == ["pypi-tuna", "hf-mirror"]
-    _component_schema_validator("RuntimeMaintenanceRequest").validate(payload)
-
-    command = dtos.RuntimeMaintenanceCommand(
-        command_id="command-1",
-        command=dtos.RuntimeMaintenanceCommandKind.RETRY,
-        target_operation_id="op-1",
-        new_operation_id="op-2",
-        download_source_ids=("pypi-official", "hf-official"),
-    )
-    _component_schema_validator("RuntimeMaintenanceCommandRequest").validate(
-        command.to_payload()
-    )
-
-    with pytest.raises(ValueError, match="require ensure"):
-        dtos.RuntimeMaintenanceRequest(
-            operation=dtos.RuntimeMaintenanceOperation.INSPECT,
-            download_source_ids=("pypi-tuna",),
-        )
-    with pytest.raises(ValueError, match="require retry"):
-        dtos.RuntimeMaintenanceCommand(
-            command_id="command-2",
-            command=dtos.RuntimeMaintenanceCommandKind.CANCEL,
-            target_operation_id="op-1",
-            download_source_ids=("pypi-tuna",),
-        )
-    with pytest.raises(ValueError, match="must be non-empty"):
-        dtos.RuntimeMaintenanceRequest(
-            operation=dtos.RuntimeMaintenanceOperation.ENSURE,
-            download_source_ids=(),
-        )
-    with pytest.raises(ValueError, match="must be non-empty"):
-        dtos.RuntimeMaintenanceCommand(
-            command_id="command-3",
-            command=dtos.RuntimeMaintenanceCommandKind.RETRY,
-            target_operation_id="op-1",
-            new_operation_id="op-3",
-            download_source_ids=(),
-        )
-
-
-def test_runtime_host_requests_carry_optional_selection() -> None:
-    host = _host_schema()
-    for envelope in ("RuntimeHostRequest", "RuntimeMaintenanceCommandRequest"):
-        properties = host["$defs"][envelope]["properties"]
-        selection = properties["download_source_ids"]
-        assert {
-            key: selection[key] for key in ("type", "minItems", "uniqueItems", "items")
-        } == {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": True,
-            "items": {"type": "string", "minLength": 1},
-        }
-        assert "kinds not present" in selection["description"]
-        assert "Backend-declared default for that kind" in selection["description"]
-        assert "download_source_ids" not in host["$defs"][envelope]["required"]
-    # Observe requests are read-only and never select sources.
-    assert (
-        "download_source_ids"
-        not in host["$defs"]["RuntimeMaintenanceObserveRequest"]["properties"]
-    )
-
-    _host_request_validator().validate(_host_request(["pypi-tuna", "hf-mirror"]))
-    _host_request_validator().validate(_host_request(None))
-    with pytest.raises(jsonschema.ValidationError):
-        _host_request_validator().validate(_host_request(["pypi-tuna", "pypi-tuna"]))
-    with pytest.raises(jsonschema.ValidationError):
-        _host_request_validator().validate(_host_request([]))
-
-
 def test_download_source_catalog_rides_on_health_descriptor() -> None:
     golden = _runtime_api_golden()
     jsonschema.Draft202012Validator(
@@ -339,9 +238,9 @@ def test_download_source_catalog_rides_on_health_descriptor() -> None:
 
 def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
     host = _host_schema()
-    assert host["$defs"]["CapabilityDescriptor"]["properties"][
-        "download_source_catalog"
-    ] == {"$ref": "#/$defs/DownloadSourceCatalog"}
+    # Runtime Host 面已缩为 environment 侍者：来源目录 defs 仍在 host schema
+    # 上，不再挂在已删除的 CapabilityDescriptor 下。
+    assert "CapabilityDescriptor" not in host["$defs"]
     descriptor = host["$defs"]["DownloadSourceDescriptor"]
     assert set(descriptor["required"]) == {"kind", "id", "endpoint"}
     kind_description = host["$defs"]["DownloadSourceKind"]["description"]
@@ -427,15 +326,9 @@ def test_generated_bindings_expose_strongly_typed_source_selection() -> None:
     assert "public enum DownloadSourceKind" not in csharp_wire
 
     host_wire = (V2 / "generated/RuntimeHostWireTypes.g.cs").read_text(encoding="utf-8")
-    request_record = host_wire.split("public sealed record RuntimeHostRequest", 1)[
-        1
-    ].split("\n}", 1)[0]
-    assert "public IReadOnlyList<string>? DownloadSourceIds { get; init; }" in (
-        request_record
-    )
-    command_record = host_wire.split(
-        "public sealed record RuntimeMaintenanceCommandRequest", 1
+    # Runtime Host 的来源选择请求面已退役；host wire 只保留目录结构类型。
+    assert "RuntimeHostRequest" not in host_wire
+    host_descriptor = host_wire.split(
+        "public sealed record DownloadSourceDescriptor", 1
     )[1].split("\n}", 1)[0]
-    assert "public IReadOnlyList<string>? DownloadSourceIds { get; init; }" in (
-        command_record
-    )
+    assert "public required string Endpoint { get; init; }" in host_descriptor

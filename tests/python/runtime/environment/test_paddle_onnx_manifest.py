@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_runtime_installer import _lock_text, _release
+from test_runtime_installer import (
+    _legacy_release,
+    _lock_text,
+    _release,
+    _write_venv_record,
+)
 from vibeocr.runtime.environments.managed_environments import ManagedEnvironmentStore
 from vibeocr.runtime.environments.runtime_manifest import (
     ManifestError,
@@ -58,7 +63,9 @@ def test_generated_manifest_binds_directml_lock_and_rejects_incomplete_or_change
     空绑定（paddle_onnx_environments 为 {}）是合法的 base-only manifest，
     由 loader 的历史容忍规则接受，不在本测试的拒绝范围。
     """
-    manifest_path, _ = _release(tmp_path / "release")
+    # build 侧锁绑定校验与形态无关：用历史 wheel+archive 形态构造
+    # 完整 manifest 载荷（预构建形态的 wheel/archive 均为 None）。
+    manifest_path, _ = _legacy_release(tmp_path / "release")
     value = json.loads(manifest_path.read_text(encoding="utf-8"))
     root = manifest_path.parent
     lock = tmp_path / "requirements-win-x64-paddle-ort-directml.lock"
@@ -121,11 +128,8 @@ def test_managed_onnx_import_probe_disables_unfrozen_upstream_source_checks_only
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
     )
-    item = manager.create("ort")
-    record = manager._read()["environments"][item["id"]]
-    record.update(status="installed", recipe=recipe)
+    record = _write_venv_record(manager, "ort", status="installed", recipe=recipe)
     monkeypatch.delenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", raising=False)
     launch = manager._launch(record, sys.executable)
     assert launch["environment"]["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"

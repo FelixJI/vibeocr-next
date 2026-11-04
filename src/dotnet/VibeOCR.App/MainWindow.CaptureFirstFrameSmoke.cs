@@ -45,7 +45,7 @@ public sealed partial class MainWindow
       int cycles = Environment.GetEnvironmentVariable("VIBEOCR_CAPTURE_FIRST_FRAME_CYCLES") switch
       { "20" => 20, "1" => 1, _ => throw new InvalidOperationException("Expected 20 or 1 capture cycles.") };
       if (screenshotSmokePicker is null || smokeSubmitAttempts is null ||
-          smokeStartupEnsureAttempts is null || smokeInferenceAttached is null || smokeInstallAttempts is null)
+          smokeStartupEnsureAttempts is null || smokeInferenceAttached is null)
         throw new InvalidOperationException("Capture measurement dependencies are missing.");
       await Task.Yield();
       baseline = CaptureCounts();
@@ -96,8 +96,8 @@ public sealed partial class MainWindow
             CaptureCounts() != baseline || !webHost.HasBridgeBinding)
           throw new InvalidOperationException("Closed editor retained callbacks/resources or destroyed the main bridge.");
         if (smokeSubmitAttempts() != 0 || smokeStartupEnsureAttempts() != 0 ||
-            smokeInstallAttempts() != 0 || smokeInferenceAttached())
-          throw new InvalidOperationException("Pure capture created Runtime/OCR/Installer demand.");
+            smokeInferenceAttached())
+          throw new InvalidOperationException("Pure capture created Runtime/OCR demand.");
         long closedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         await Task.Delay(1000);
         long settledAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -133,7 +133,6 @@ public sealed partial class MainWindow
         baseline, rows, dispatch_tail_ms = probe?.Drain(), callbacks_after_stop = callbacksAfterStop,
         submit_attempts = smokeSubmitAttempts?.Invoke(),
         startup_ensure_attempts = smokeStartupEnsureAttempts?.Invoke(),
-        installer_attempts = smokeInstallAttempts?.Invoke(),
         inference_attached = smokeInferenceAttached?.Invoke(),
         dpi = WindowGeometryPolicy.GetWindowScale(WindowNative.GetWindowHandle(this)) * 96,
         timing_endpoint = "source canvas/background ready; native WebView Opacity=1",

@@ -477,9 +477,10 @@ public sealed class InferenceSupervisorProcessTests
     [Fact]
     public async Task ProductCodeSupervisorLogsRoundTripUtf8AndStripAnsi()
     {
-        // 真实子进程回归：复用生产 product-code 调用链（-I -B -c + runpy），
-        // 在 PYTHONUTF8=1 环境下输出中文路径与 ANSI 色码，验证 argv 级
-        // -X utf8、C# 管道 UTF-8 钉子与 AppendLog 边界清洗。
+        // 真实子进程回归：复用生产模块入口调用链（-X utf8 -m），用
+        // PYTHONPATH 指向假 supervisor 包，在 PYTHONUTF8=1 环境下输出中文
+        // 路径与 ANSI 色码，验证 argv 级 -X utf8、C# 管道 UTF-8 钉子与
+        // AppendLog 边界清洗。
         string root = Path.Combine(
             Path.GetTempPath(), $"vibeocr-supervisor-utf8-{Guid.NewGuid():N}");
         string codeRoot = Path.Combine(root, "runtime-code");
@@ -507,9 +508,11 @@ public sealed class InferenceSupervisorProcessTests
             Path.Combine(root, "models"),
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["VIBEOCR_PRODUCT_CODE_ROOT"] = codeRoot,
-                // 与生产一致携带 PYTHONUTF8=1：-I 会忽略它，回归必须证明
-                // argv 的 -X utf8 才是决定性钉子。
+                // 测试用 PYTHONPATH 把模块入口解析到上面的假包；生产闭包
+                // 在预构建树内解析。与生产一致携带 PYTHONUTF8=1：隔离
+                // 模式下它被忽略，回归必须证明 argv 的 -X utf8 才是决定
+                // 性钉子。
+                ["PYTHONPATH"] = codeRoot,
                 ["PYTHONUTF8"] = "1",
             });
         IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);

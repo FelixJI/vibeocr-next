@@ -188,17 +188,14 @@ class PdfBackendClient:
             port = self._find_free_port()
             self._base_url = f"http://127.0.0.1:{port}"
 
-            product_code = os.environ.get("VIBEOCR_PRODUCT_CODE_ROOT")
-            module_arguments = (
-                [
-                    "-I",
-                    "-B",
-                    "-c",
-                    "import os,runpy,sys;sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);runpy.run_module('vibeocr.runtime.documents.pdf_backend_process',run_name='__main__')",
-                ]
-                if product_code
-                else ["-m", "vibeocr.runtime.documents.pdf_backend_process"]
-            )
+            # 预构建树入口统一 ``-I -m``：与 Paddle worker 同一模式，
+            # 模块直接从树内闭包解析。
+            module_arguments = [
+                "-I",
+                "-B",
+                "-m",
+                "vibeocr.runtime.documents.pdf_backend_process",
+            ]
             cmd = [
                 python_exe,
                 *module_arguments,
