@@ -349,6 +349,30 @@ def _write_venv_record(
         return record
 
 
+def _write_product_record(manager: ManagedEnvironmentStore, **overrides) -> dict:
+    """写入 product 固定记录：树是 _release 装配的产品树（真实解释器）。"""
+    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        record = {
+            "id": "product",
+            "name": "默认环境",
+            "revision": 1,
+            "kind": "product",
+            "path": "env/runtime-env",
+            "status": "installed",
+            "python_version": manager.manifest.python.version,
+            "abi": manager.manifest.python.abi,
+            "recipe": "paddleocr-ort-directml",
+            "recipe_lock": scope.sha256,
+            "selected_device": "directml",
+            **overrides,
+        }
+        data["environments"]["product"] = record
+        _atomic_json(manager._registry, data)
+        return record
+
+
 def _materialize_venv(
     manager: ManagedEnvironmentStore, env_id: str, *, bare: bool = False
 ) -> Path:
@@ -709,14 +733,14 @@ def test_initialize_default_registers_bundled_product_environment(
     )
     listed = manager.initialize_default()
     environment = listed["environments"][0]
-    assert environment["id"] == "paddleocr-ort-directml"
+    assert environment["id"] == "product"
     assert environment["name"] == "默认环境"
     assert environment["kind"] == "product"
     assert environment["status"] == "installed"
     assert environment["recipe"] == "paddleocr-ort-directml"
     assert environment["selected_device"] == "directml"
     assert environment["path"] == str(_product_tree(manager))
-    assert listed["active_id"] == "paddleocr-ort-directml"
+    assert listed["active_id"] == "product"
     assert listed["active_revision"] == 1
     # 真实探针：树内解释器 + dist-info/import 桩全部通过。
     assert environment["python_state"] == "ready"
@@ -726,7 +750,7 @@ def test_initialize_default_registers_bundled_product_environment(
         "switch": None,
         "delete": "product_environment",
     }
-    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    record = manager._read()["environments"]["product"]
     scope, _accelerator = manager._recipe("paddleocr-ort-directml")
     assert record["recipe_lock"] == scope.sha256
 
@@ -778,7 +802,7 @@ def test_product_probe_fails_closed_on_missing_tree_or_manifest(
         runtime_manifest=manifest,
     )
     manager.initialize_default()
-    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    record = manager._read()["environments"]["product"]
     tree = _product_tree(manager)
 
     binding = manager.manifest.runtime_env
@@ -825,11 +849,11 @@ def test_product_record_registry_validation_is_strict(tmp_path: Path) -> None:
     scope, _accelerator = manager._recipe("paddleocr-ort-directml")
     product_record = {
         "schema_version": 1,
-        "active_id": "paddleocr-ort-directml",
+        "active_id": "product",
         "active_revision": 1,
         "environments": {
-            "paddleocr-ort-directml": {
-                "id": "paddleocr-ort-directml",
+            "product": {
+                "id": "product",
                 "name": "默认环境",
                 "revision": 1,
                 "kind": "product",
@@ -852,20 +876,18 @@ def test_product_record_registry_validation_is_strict(tmp_path: Path) -> None:
 
     # 固定形态记录可读。
     rewrite(lambda data: None)
-    assert manager._read()["active_id"] == "paddleocr-ort-directml"
+    assert manager._read()["active_id"] == "product"
 
     # path 标记被改动 → 拒绝。
     rewrite(
-        lambda data: data["environments"]["paddleocr-ort-directml"].update(
-            {"path": "runtime-env"}
-        )
+        lambda data: data["environments"]["product"].update({"path": "runtime-env"})
     )
     with pytest.raises(ManagedEnvironmentError, match="product environment record"):
         manager._read()
 
     # recipe 偏离固定 slug → 拒绝。
     rewrite(
-        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+        lambda data: data["environments"]["product"].update(
             {"recipe": "paddleocr-ort-cpu"}
         )
     )
@@ -874,7 +896,7 @@ def test_product_record_registry_validation_is_strict(tmp_path: Path) -> None:
 
     # product 记录携带安装证据 → 拒绝（安装证据只属于历史 venv 记录）。
     rewrite(
-        lambda data: data["environments"]["paddleocr-ort-directml"].update(
+        lambda data: data["environments"]["product"].update(
             {"last_install_operation": _LEGACY_OPERATION}
         )
     )
@@ -882,11 +904,7 @@ def test_product_record_registry_validation_is_strict(tmp_path: Path) -> None:
         manager._read()
 
     # 非法 kind → 拒绝。
-    rewrite(
-        lambda data: data["environments"]["paddleocr-ort-directml"].update(
-            {"kind": "bundled"}
-        )
-    )
+    rewrite(lambda data: data["environments"]["product"].update({"kind": "bundled"}))
     with pytest.raises(ManagedEnvironmentError, match="environment record"):
         manager._read()
 
@@ -901,7 +919,7 @@ def test_product_launch_projects_recipe_and_device_without_code_root(
         runtime_manifest=manifest,
     )
     manager.initialize_default()
-    record = manager._read()["environments"]["paddleocr-ort-directml"]
+    record = manager._read()["environments"]["product"]
     tree = _product_tree(manager)
     python = str(manager._interpreter_python(tree))
     launch = manager._launch(record, python)
@@ -925,13 +943,15 @@ def test_product_tree_is_never_a_cleanup_target(tmp_path: Path) -> None:
     )
     manager.initialize_default()
     plan = manager.preview_cleanup()
+    # 产品树在受管存储之外，由 Velopack 更新整体替换：不进入清理目录
+    # （既非可清理项，也非受保护环境项）。
     product_items = [
         item
         for item in plan["items"]
-        if item.get("environment_id") == "paddleocr-ort-directml"
+        if item.get("environment_id") == "product"
+        or any("runtime-env" in path for path in item["paths"])
     ]
-    assert product_items
-    assert all(not item["can_clean"] for item in product_items)
+    assert not product_items
     assert _product_tree(manager).is_dir()
 
 
@@ -1313,10 +1333,8 @@ def test_engine_import_probe_preserves_failure_kind_elapsed_and_stderr_tail(
         component_lock=component,
         runtime_manifest=manifest,
     )
-    root = _materialize_venv(manager, "probe-diagnostic")
-    record = _write_venv_record(
-        manager, "probe-diagnostic", status="installed", recipe=recipe
-    )
+    record = _write_product_record(manager)
+    root = _product_tree(manager)
     stderr = (
         "discarded diagnostic prefix" + "x" * 2200 + "\nnative import failed: 诊断尾部"
     )
@@ -1374,11 +1392,8 @@ def test_venv_engine_probe_fails_closed_on_broken_native_import(
         component_lock=component,
         runtime_manifest=manifest,
     )
-    _patch_venv_base_python(manager, monkeypatch)
-    root = _materialize_venv(manager, "native")
-    record = _write_venv_record(
-        manager, "native", status="installed", recipe="paddleocr-ort-directml"
-    )
+    record = _write_product_record(manager, selected_device="cpu")
+    root = _product_tree(manager)
     (root / "Lib" / "site-packages" / "onnxruntime" / "__init__.py").write_text(
         "raise ImportError('native extension cannot load')\n", encoding="utf-8"
     )
@@ -1408,11 +1423,8 @@ def test_venv_engine_probe_imports_real_transitive_closure(
         component_lock=component,
         runtime_manifest=manifest,
     )
-    _patch_venv_base_python(manager, monkeypatch)
-    root = _materialize_venv(manager, "closure")
-    record = _write_venv_record(
-        manager, "closure", status="installed", recipe="paddleocr-ort-directml"
-    )
+    record = _write_product_record(manager, selected_device="cpu")
+    root = _product_tree(manager)
     site = root / "Lib" / "site-packages"
     for name in ("shapely",):
         metadata = site / f"{name}-1.0.dist-info"
@@ -1481,11 +1493,8 @@ def test_mineru_probe_imports_server_binding_without_starting_or_downloading(
         component_lock=component,
         runtime_manifest=manifest,
     )
-    _patch_venv_base_python(manager, monkeypatch)
-    root = _materialize_venv(manager, "mineru")
-    record = _write_venv_record(
-        manager, "mineru", status="installed", recipe="paddleocr-ort-directml"
-    )
+    record = _write_product_record(manager, selected_device="cpu")
+    root = _product_tree(manager)
     site = root / "Lib" / "site-packages"
     private_home = manager.paths.state_root / "environments" / record["id"] / "mineru4"
     monkeypatch.setenv("MINERU_HOME", str(tmp_path / "unrelated"))
@@ -1518,15 +1527,8 @@ def test_unified_probe_cpu_device_does_not_require_gpu_adapter(tmp_path, monkeyp
         component_lock=component,
         runtime_manifest=manifest,
     )
-    _patch_venv_base_python(manager, monkeypatch)
-    root = _materialize_venv(manager, "cpu-only")
-    record = _write_venv_record(
-        manager,
-        "cpu-only",
-        status="installed",
-        recipe="paddleocr-ort-directml",
-        selected_device="cpu",
-    )
+    record = _write_product_record(manager, selected_device="cpu")
+    root = _product_tree(manager)
     site = root / "Lib" / "site-packages"
     # 无 DXGI 适配器的机器（Windows 虚拟机等）。
     (site / "vibeocr" / "runtime" / "recognition" / "directml_devices.py").write_text(
@@ -1771,7 +1773,7 @@ def test_cli_initialize_default_registers_product_environment(
     assert main(["--request-json", json.dumps(request)]) == 0
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["action"] == "initialize_default"
-    assert envelope["result"]["active_id"] == "paddleocr-ort-directml"
+    assert envelope["result"]["active_id"] == "product"
     environment = envelope["result"]["environments"][0]
     assert environment["kind"] == "product"
     assert environment["python_state"] == "ready"

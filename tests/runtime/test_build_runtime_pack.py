@@ -486,8 +486,6 @@ def test_runtime_env_manifest_is_deterministic(tmp_path: Path) -> None:
     manifest = json.loads(first.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
     assert manifest["file_count"] == 2
-    assert [entry["path"] for entry in manifest["files"]] == [
-        "Lib/os.py",
-        "python.exe",
-    ]
-    assert manifest["files"][1]["sha256"] == hashlib.sha256(b"bin").hexdigest()
+    # 逐文件摘要不在树清单层重复：树内容完整性由产品发布清单唯一对账，
+    # 清单文件自身字节由 manifest.runtime_env.manifest_sha256 绑定。
+    assert "files" not in manifest

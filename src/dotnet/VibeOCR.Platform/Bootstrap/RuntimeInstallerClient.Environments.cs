@@ -289,8 +289,14 @@ public sealed partial class RuntimeInstallerClient : IManagedEnvironmentClient
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? modelSourceId,
         CancellationToken cancellationToken = default) =>
-        // 统一模型源写入语义：单一来源同时作为 Paddle/MinerU 模型偏好。
-        SetEnvironmentSourcesAsync(environmentId, modelSourceId, modelSourceId, cancellationToken);
+        // 统一模型源经 model_source_id 发送：Runtime 负责把它展开为每引擎
+        // 的标准来源 ID（paddleocr-modelscope / mineru-modelscope），
+        // 直接转调独立来源重载会因 ID 形态不符被拒绝。
+        InvokeEnvironmentAsync<ManagedEnvironmentList>("set_sources", new()
+        {
+            ["environment_id"] = environmentId,
+            ["model_source_id"] = modelSourceId,
+        }, cancellationToken);
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
         string? environmentId, string? paddleocrModelSourceId,

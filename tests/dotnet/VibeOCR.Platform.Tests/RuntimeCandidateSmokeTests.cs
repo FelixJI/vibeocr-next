@@ -91,7 +91,7 @@ public sealed class RuntimeCandidateSmokeTests
         // 由 initialize_default 幂等注册，并可重复调用。
         ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
         ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
-        Assert.Equal("paddleocr-ort-directml", defaultEnvironment.Id);
+        Assert.Equal("product", defaultEnvironment.Id);
         Assert.Equal("默认环境", defaultEnvironment.Name);
         Assert.Equal("paddleocr-ort-directml", defaultEnvironment.Recipe);
         Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);

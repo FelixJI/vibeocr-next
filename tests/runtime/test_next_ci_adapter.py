@@ -339,7 +339,7 @@ def _configure_release_smoke_fixture(
             if fail_bootstrapper:
                 raise subprocess.CalledProcessError(30, command)
         elif "smoke_web_workbench.ps1" in command[2]:
-            assert kwargs["timeout"] == 120
+            assert kwargs["timeout"] == 300
             product_root = Path(command[command.index("-ProductRoot") + 1])
             assert (product_root / "app/VibeOCR.WinUI.exe").is_file()
             if fail_smoke:

@@ -30,6 +30,8 @@ from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
 
 _ENV_ID = "paddleocr-ort-directml"
+# product 环境的注册表 ID 独立于配方名（避免与历史默认 venv 的 slug 冲突）。
+_PRODUCT_ID = "product"
 
 
 def _manager(
@@ -46,15 +48,15 @@ def _manager(
         component_lock=component,
         runtime_manifest=manifest,
     )
-    # 历史 venv/legacy 记录的健康门在合成环境里按本机解释器放行；
-    # product 记录保留真实树探针。
+    # 合成环境里 installed 记录（历史 venv 与 product）统一按本机解释器
+    # 放行：本组用例聚焦注册/迁移/active 语义，不依赖真实树探针。
     monkeypatch.setattr(
         manager, "_expected_base_python", lambda: Path(sys._base_executable)
     )
     probe = manager._probe
 
     def healthy_synthetic(record: dict) -> dict:
-        if record["status"] == "installed" and record["kind"] != "product":
+        if record["status"] == "installed":
             return {
                 "healthy": True,
                 "reason": None,
@@ -74,7 +76,7 @@ def test_first_launch_registers_default_once(tmp_path: Path, monkeypatch) -> Non
     assert environment["name"] == "默认环境"
     assert environment["kind"] == "product"
     assert environment["recipe"] == _ENV_ID
-    assert listed["active_id"] == _ENV_ID
+    assert listed["active_id"] == _PRODUCT_ID
     assert listed["active_revision"] == 1
     again = manager.initialize_default()
     assert again["active_revision"] == 1
@@ -100,7 +102,7 @@ def test_upgrade_from_empty_registry_gets_default(tmp_path, monkeypatch) -> None
         encoding="utf-8",
     )
     listed = manager.initialize_default()
-    assert listed["active_id"] == _ENV_ID
+    assert listed["active_id"] == _PRODUCT_ID
 
 
 def test_upgrade_keeps_existing_environment_and_active_selection(
@@ -112,10 +114,11 @@ def test_upgrade_keeps_existing_environment_and_active_selection(
     manager.commit_switch(manager.prepare_switch(user["id"]))
     before = manager.list()
     listed = manager.initialize_default()
-    # 注册 product 记录但不抢占用户选择。
-    assert listed["active_id"] == user["id"]
-    assert listed["active_revision"] == before["active_revision"]
-    assert {item["id"] for item in listed["environments"]} == {user["id"], _ENV_ID}
+    # 历史 venv 在预构建产品形态下不可运行：active 一律迁移到 product
+    # 环境（venv 记录与目录按数据保护保留，可由空间清理回收）。
+    assert listed["active_id"] == _PRODUCT_ID
+    assert listed["active_revision"] == before["active_revision"] + 1
+    assert {item["id"] for item in listed["environments"]} == {user["id"], _PRODUCT_ID}
 
 
 def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch) -> None:
@@ -128,7 +131,7 @@ def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch) -> None:
     (legacy / ".installed.json").write_text("{}", encoding="utf-8")
     listed = manager.initialize_default()
     assert listed["active_id"] == "legacy"
-    assert {item["id"] for item in listed["environments"]} == {"legacy", _ENV_ID}
+    assert {item["id"] for item in listed["environments"]} == {"legacy", _PRODUCT_ID}
     # legacy 记录不是退役 venv 默认：不产生迁移标记。
     assert not (
         manager.paths.state_root / "default-environment-migration.json"
@@ -263,16 +266,28 @@ def test_upgrade_migrates_retired_default_and_reclaims_old_tree(
     assert old_root.is_dir()
 
     listed = manager.initialize_default()
+    marker = manager.paths.state_root / "default-environment-migration.json"
 
-    # 旧退役默认匹配先前读数：active 切到 product 环境并回收旧树。
-    assert listed["active_id"] == _ENV_ID
+    # 旧退役默认匹配先前读数：active 切到 product 环境；初始化只登记
+    # 迁移 marker，旧树保留到 Supervisor 健康切换提交后回收（回滚语义）。
+    assert listed["active_id"] == _PRODUCT_ID
+    assert old["id"] in manager._read()["environments"]
+    assert old_root.exists()
+    assert json.loads(marker.read_text(encoding="utf-8"))["retired_id"] == old["id"]
+    # 启动激活链等价模拟：prepare + 健康证据 commit 提交成功后，迁移
+    # 回收由 switch_reservation 的收尾收敛。
+    monkeypatch.setattr(
+        ManagedEnvironmentStore,
+        "_verified_health",
+        staticmethod(lambda evidence: True),
+    )
+    with manager.switch_reservation(_PRODUCT_ID) as prepared:
+        manager.commit_switch(prepared)
     assert old["id"] not in manager._read()["environments"]
     assert not old_root.exists()
-    assert not (
-        manager.paths.state_root / "default-environment-migration.json"
-    ).exists()
+    assert not marker.exists()
     # 幂等重跑：注册与迁移都不再产生变化。
-    assert manager.initialize_default()["active_id"] == _ENV_ID
+    assert manager.initialize_default()["active_id"] == _PRODUCT_ID
 
 
 @pytest.mark.parametrize(
@@ -281,32 +296,46 @@ def test_upgrade_migrates_retired_default_and_reclaims_old_tree(
 def test_retired_default_migration_marker_binds_prior_reading(
     tmp_path, monkeypatch, environment_id
 ) -> None:
-    """迁移标记按先前读数登记；清理失败时保留证据供重试。"""
+    """迁移回收在健康切换提交后执行；清理失败保留证据供重试。"""
     manager, old = _retired_default(
         tmp_path, monkeypatch, environment_id=environment_id
     )
     old_root = manager.root / old["path"]
     marker = manager.paths.state_root / "default-environment-migration.json"
-    original_remove = shutil.rmtree
+    monkeypatch.setattr(
+        ManagedEnvironmentStore,
+        "_verified_health",
+        staticmethod(lambda evidence: True),
+    )
 
+    listed = manager.initialize_default()
+    assert listed["active_id"] == _PRODUCT_ID
+    # 初始化只登记 marker：旧环境保留，回收延后到健康提交。
+    assert old["id"] in manager._read()["environments"]
+    assert old_root.exists()
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "retired_id": old["id"],
+        "retired_revision": old["revision"],
+        "replacement_id": _PRODUCT_ID,
+    }
+
+    # 健康切换提交时清理失败：记录注销先行，旧树作为 pending 残留与
+    # marker 一起保留证据，切换本身不受影响；重试按磁盘现状收敛。
     def fail(_path):
         raise PermissionError("fixture file in use")
 
+    original_remove = shutil.rmtree
     monkeypatch.setattr(shutil, "rmtree", fail)
     try:
-        listed = manager.initialize_default()
+        with manager.switch_reservation(_PRODUCT_ID) as prepared:
+            manager.commit_switch(prepared)
     finally:
         monkeypatch.setattr(shutil, "rmtree", original_remove)
-    assert listed["active_id"] == _ENV_ID
     assert old["id"] not in manager._read()["environments"]
     assert old_root.exists()
-    migration = json.loads(marker.read_text(encoding="utf-8"))
-    assert migration == {
-        "retired_id": old["id"],
-        "retired_revision": old["revision"],
-        "replacement_id": _ENV_ID,
-    }
-    # 重启后重跑 initialize_default 收敛迁移。
+    assert marker.exists()
+
+    # 重启后新的启动激活链重试收敛迁移。
     reopened = ManagedEnvironmentStore(
         product_root=manager.product_root,
         component_lock=manager.component_lock_path,
@@ -315,7 +344,21 @@ def test_retired_default_migration_marker_binds_prior_reading(
     monkeypatch.setattr(
         reopened, "_expected_base_python", lambda: Path(sys._base_executable)
     )
-    assert reopened.initialize_default()["active_id"] == _ENV_ID
+    reopened_probe = reopened._probe
+
+    def reopened_synthetic(record: dict) -> dict:
+        if record["status"] == "installed":
+            return {
+                "healthy": True,
+                "reason": None,
+                "python": str(reopened._record_python(record)),
+            }
+        return reopened_probe(record)
+
+    monkeypatch.setattr(reopened, "_probe", reopened_synthetic)
+    assert reopened.initialize_default()["active_id"] == _PRODUCT_ID
+    with reopened.switch_reservation(_PRODUCT_ID) as prepared:
+        reopened.commit_switch(prepared)
     assert not old_root.exists()
     assert not marker.exists()
 
@@ -329,8 +372,9 @@ def test_custom_named_uuid_environment_is_not_a_default(tmp_path, monkeypatch) -
         data["environments"][old["id"]]["name"] = "用户的 Rapid 环境"
         _atomic_json(manager._registry, data)
     listed = manager.initialize_default()
-    # 非默认命名的退役环境不迁移：只注册 product 记录，保持用户选择。
-    assert listed["active_id"] == old["id"]
+    # 非默认命名的退役环境不登记迁移回收：active 仍按 venv 迁移语义
+    # 切到 product，旧记录与目录保留（无 marker，交由空间清理回收）。
+    assert listed["active_id"] == _PRODUCT_ID
     assert old["id"] in manager._read()["environments"]
     assert (manager.root / old["path"]).is_dir()
     assert not (
@@ -375,7 +419,7 @@ def test_legacy_default_marker_file_is_not_read(tmp_path, monkeypatch) -> None:
 
     listed = manager.initialize_default()
 
-    assert listed["active_id"] == _ENV_ID
+    assert listed["active_id"] == _PRODUCT_ID
     assert marker.read_text(encoding="utf-8") == stale
 
 
@@ -463,15 +507,15 @@ def test_product_environment_cannot_be_deleted(tmp_path, monkeypatch) -> None:
     manager.initialize_default()
     # active 状态：预览即受保护。
     with pytest.raises(Exception, match="暂不可删除"):
-        manager.delete(_ENV_ID)
+        manager.delete(_PRODUCT_ID)
     # 非 active 也不可删：product 树随产品分发，不属于可清理对象。
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         data["active_id"] = None
         _atomic_json(manager._registry, data)
     with pytest.raises(Exception):
-        manager.delete(_ENV_ID)
-    assert _ENV_ID in manager._read()["environments"]
+        manager.delete(_PRODUCT_ID)
+    assert _PRODUCT_ID in manager._read()["environments"]
 
 
 def test_switch_control_reports_success_after_migration_cleanup(tmp_path, monkeypatch):
@@ -538,17 +582,15 @@ sys.exit(main(sys.argv[1:]))
         child.communicate(timeout=10)
 
 
-def test_status_scope_resolves_product_environment(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_status_scope_resolves_product_environment(tmp_path: Path, monkeypatch) -> None:
     # 回归：status_scope 的存活校验必须接受 kind=product（预构建树随
     # 产品分发）；/v2/runtime/status 的 supervisor 状态解析依赖它，
     # 误判 stale 会让状态路由 500 并阻断启动切换链。
     manager = _manager(tmp_path, monkeypatch)
     manager.initialize_default()
-    record = manager._read()["environments"][_ENV_ID]
+    record = manager._read()["environments"][_PRODUCT_ID]
     scope, closure, accelerator = manager.status_scope(
-        _ENV_ID,
+        _PRODUCT_ID,
         record["revision"],
         manager._safe_path(record),
         record["recipe"],

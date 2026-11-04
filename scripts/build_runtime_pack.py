@@ -737,23 +737,17 @@ def build_runtime_env(
 
 
 def write_runtime_env_manifest(tree: Path, destination: Path) -> dict:
-    """确定性树清单：排序相对路径 + size + sha256，供 manifest 绑定与发布校验。"""
-    files: list[dict] = []
-    for path in sorted(tree.rglob("*"), key=lambda item: item.as_posix()):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(tree).as_posix()
-        files.append(
-            {
-                "path": relative,
-                "size": path.stat().st_size,
-                "sha256": _sha256_file(path),
-            }
-        )
+    """确定性树清单：文件规模锚点；清单文件自身字节摘要由 manifest 的
+    runtime_env.manifest_sha256 绑定并在 verify_artifacts 校验。
+
+    树内容的逐文件完整性由产品发布清单（finalize_product_release 对
+    全部资产的 files 对账）唯一负责；此处不再重复逐文件摘要（无独立
+    校验消费者的 hash 层不叠加）。
+    """
+    file_count = sum(1 for path in tree.rglob("*") if path.is_file())
     manifest = {
         "schema_version": 1,
-        "file_count": len(files),
-        "files": files,
+        "file_count": file_count,
     }
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(

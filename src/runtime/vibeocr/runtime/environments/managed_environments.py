@@ -236,6 +236,10 @@ _SWAP_RETIRED_ROOT = ".retired"
 # root 由 manifest runtime_env 绑定声明）；注册表 product 记录的 path
 # 字段固定为该标记值，真实树路径在 _safe_path 里以 manifest 重新锚定。
 _PRODUCT_ENVIRONMENT_PATH = "env/runtime-env"
+# 预构建产品环境的注册表 ID：独立于配方名，避免与历史版本自动创建的
+# 默认 venv（id=paddleocr-ort-directml 等 slug/uuid）冲突——这些记录在
+# 升级后按数据保护原则保留只读。
+_PRODUCT_ENVIRONMENT_ID = "product"
 
 
 def _is_reserved_directory_name(value: str) -> bool:
@@ -1012,7 +1016,8 @@ class ManagedEnvironmentStore:
             ):
                 raise ManagedEnvironmentError("environment recipe is invalid")
             if record["kind"] == "product" and (
-                record["status"] != "installed"
+                env_id != _PRODUCT_ENVIRONMENT_ID
+                or record["status"] != "installed"
                 or record.get("recipe") != _DEFAULT_ENVIRONMENT_SLUG
                 or record["path"] != _PRODUCT_ENVIRONMENT_PATH
                 or "last_install_operation" in record
@@ -1157,6 +1162,20 @@ class ManagedEnvironmentStore:
             }
         root = self._safe_path(record)
         python = self._record_python(record)
+        if (
+            record["kind"] == "venv"
+            and record["status"] == "installed"
+            and self.manifest.runtime_env is not None
+        ):
+            # 历史 venv 环境按数据保护原则保留只读：其 site-packages 内的
+            # 旧 Runtime 代码无法读取预构建 manifest，在本产品形态下不可
+            # 运行，如实投影不可用（切换入口 fail closed）。空环境只是
+            # 占位（不启动 Supervisor），保持可切换语义。
+            return {
+                "healthy": False,
+                "reason": "legacy_venv_unsupported",
+                "python": str(python),
+            }
         if record["kind"] == "product":
             # 预构建树的健康门：树目录与确定性树清单随产品分发且必须
             # 存在（缺失代表发布闭包损坏，fail closed 不重建）；解释器
@@ -1627,7 +1646,8 @@ class ManagedEnvironmentStore:
         旧退役默认环境的迁移只登记归属并切换 active，不重装，旧目录在
         健康使用 product 环境后由 _finish_default_migration 回收。
         """
-        env_id = _DEFAULT_ENVIRONMENT_SLUG
+        env_id = _PRODUCT_ENVIRONMENT_ID
+        recipe = _DEFAULT_ENVIRONMENT_SLUG
         binding = self.manifest.runtime_env
         if binding is None:
             raise ManagedEnvironmentError(
@@ -1636,14 +1656,17 @@ class ManagedEnvironmentStore:
         tree = self.manifest.path.parent.parent / "env" / binding.root
         if not self._interpreter_python(tree).is_file():
             raise ManagedEnvironmentError("product runtime environment tree is missing")
-        scope, _accelerator = self._recipe(env_id)
+        scope, _accelerator = self._recipe(recipe)
         with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 active = data["environments"].get(data["active_id"])
+                # 历史 venv 环境在本产品形态下不可运行：其 site-packages
+                # 内的旧 Runtime 代码无法读取预构建 manifest，一律迁移
+                # active 到产品树（数据保留只读，可由空间清理回收）。
+                legacy_active = active is not None and active["kind"] == "venv"
                 retired_default = (
-                    active is not None
-                    and active["kind"] == "venv"
+                    legacy_active
                     and active["status"] == "installed"
                     and (
                         active["id"] in _LEGACY_DEFAULT_ENVIRONMENT_SLUGS
@@ -1665,7 +1688,7 @@ class ManagedEnvironmentStore:
                         "status": "installed",
                         "python_version": self.manifest.python.version,
                         "abi": self.manifest.python.abi,
-                        "recipe": env_id,
+                        "recipe": recipe,
                         "recipe_lock": scope.sha256,
                         "selected_device": "directml",
                     }
@@ -1692,7 +1715,7 @@ class ManagedEnvironmentStore:
                 data["active_id"] is None
                 or (
                     data["active_id"] != env_id
-                    and retired_default
+                    and legacy_active
                     and (data["active_id"], data["active_revision"])
                     == previous_selection
                 )
@@ -1701,7 +1724,9 @@ class ManagedEnvironmentStore:
                 data["active_id"] = env_id
                 data["active_revision"] += 1
                 _atomic_json(self._registry, data)
-        self._finish_default_migration(env_id)
+        # 退役默认环境的目录回收不在初始化时执行：迁移 marker 留给
+        # switch_reservation/commit_switch 在 Supervisor 健康提交成功后
+        # 由 _finish_default_migration 收敛，保留回滚语义。
         return self.list()
 
     def _staging_path(self, env_id: str) -> Path:

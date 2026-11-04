@@ -474,6 +474,11 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
     for env_id, record in environments.items():
         if env_id in ledger["pending"]:
             continue
+        if record["kind"] == "product":
+            # 产品树随产品载荷分发（runtime/env，在受管存储之外），由
+            # Velopack 更新整体替换：不生成可清理项，也不能按受管存储的
+            # 相对路径表示（relative_to 会失配）。
+            continue
         path = store._safe_path(record)
         owned = [
             store.root / relative
