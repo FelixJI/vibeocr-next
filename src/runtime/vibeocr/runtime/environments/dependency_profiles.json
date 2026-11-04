@@ -3,7 +3,7 @@
   "dependencies": {
     "torch": "torch>=2.6.0",
     "paddleocr": "paddleocr==3.7.0",
-    "mineru": "mineru==4.0.10",
+    "mineru": "mineru==4.1.3",
     "markdown": "markdown>=3.11.2",
     "pymupdf": "pymupdf>=1.28.0",
     "fastapi": "fastapi>=0.139.0",

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import pytest
 from vibeocr.runtime.environments.settings_store import RuntimeSettingsStoreError
 from vibeocr.runtime.host import composition
@@ -19,7 +18,6 @@ from vibeocr.runtime.jobs.staging import StagedInput
 from vibeocr.runtime.recognition import mineru_readiness as readiness
 from vibeocr.runtime.recognition.mineru_adapter import MinerUProcessAdapter
 from vibeocr.runtime.recognition.mineru_api import (
-    MineruApiClient,
     MineruCancelled,
     MineruDocument,
 )
@@ -338,7 +336,10 @@ class TestModeCatalogGating:
     def test_remote_mode_ready_without_local_package(
         self, isolated_connection, monkeypatch: MonkeyPatch
     ):
+        # 4.1 语义：remote 解析由远端承担，但官方传输 SDK（mineru.parser.
+        # api_client）仍须本地可导入（readiness._mineru4_installed）。
         monkeypatch.setattr(composition, "_mineru_available", lambda: False)
+        monkeypatch.setattr(readiness, "_mineru4_installed", lambda: True)
         isolated_connection.configure_connection(
             isolated_connection.connection_from_extra(REMOTE_EXTRA)
         )
@@ -347,6 +348,19 @@ class TestModeCatalogGating:
         }
         assert modes["mineru_document"]["availability"] == "ready"
         assert modes["mineru_document"]["required_component"] is None
+
+    def test_remote_mode_blocked_without_sdk_client(
+        self, isolated_connection, monkeypatch: MonkeyPatch
+    ):
+        """缺官方 SDK 客户端时 remote 模式同样停留准备态（不再 remote-or）。"""
+        monkeypatch.setattr(readiness, "_mineru4_installed", lambda: False)
+        isolated_connection.configure_connection(
+            isolated_connection.connection_from_extra(REMOTE_EXTRA)
+        )
+        modes = {
+            mode["id"]: mode for mode in _registry(True).catalog_payload()["modes"]
+        }
+        assert modes["mineru_document"]["availability"] == "preparation_required"
 
     def test_local_mode_without_package_stays_blocked(
         self, isolated_connection, monkeypatch: MonkeyPatch
@@ -430,59 +444,62 @@ class TestSettingsWire:
 
 
 class TestRemoteConfigErrorsFailOncePerItem:
-    """真实 MinerUApiClient + MockTransport 经 Executor 的确定性失败。
+    """真实 MinerUApiClient facade（SDK seam 注入失败）经 Executor 的确定性失败。
 
-    回归：远程上传 404/401 抛 MineruConfigError(VALIDATION_ERROR, reason)，
-    旧实现落入通用恢复路径按 UNKNOWN 无意义重试；现在必须只发一次上传
-    POST，outcome 的 error_code=VALIDATION_ERROR 且 message=reason。
+    回归：远程端点/凭据配置错误抛 MineruConfigError(VALIDATION_ERROR, reason)，
+    旧实现落入通用恢复路径按 UNKNOWN 无意义重试；现在必须只发起一次解析
+    尝试，outcome 的 error_code=VALIDATION_ERROR 且 message=reason。
+    传输层的真实 HTTP 形状由 mineru_sdk_contract/ 覆盖。
     """
 
     @pytest.mark.parametrize(
-        ("status", "reason"),
+        ("code", "message", "reason"),
         [
-            (404, "mineru_api_endpoint_incompatible"),
-            (401, "mineru_api_authentication_failed"),
+            (
+                "http_error",
+                'HTTP 404: {"detail": "Not Found"}',
+                "mineru_api_endpoint_incompatible",
+            ),
+            ("invalid_api_key", "secret material", "mineru_api_authentication_failed"),
         ],
+        ids=["endpoint-404", "auth-401"],
     )
-    def test_upload_rejection_fails_items_once_without_retry(
-        self, isolated_connection, tmp_path, status, reason
+    def test_config_rejection_fails_items_once_without_retry(
+        self, isolated_connection, tmp_path, monkeypatch, code, message, reason
     ):
-        posts: list[str] = []
+        parse_attempts: list[str] = []
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.method == "POST":
-                posts.append(request.url.path)
-            return httpx.Response(status)
+        class _SdkError(Exception):
+            def __init__(self) -> None:
+                self.code = code
+                self.message = message
+                super().__init__(f"[{code}] {message}")
 
-        class _RemoteApi:
-            """对齐 MinerUService 远程路径：真实 client.parse。"""
+        class _FailingParser:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
 
-            def file_parse(
-                self,
-                files: list[tuple[str, bytes]],
-                *,
-                options: Any = None,
-                backend: str | None = None,
-                cancelled: Any = lambda: False,
-            ) -> Any:
-                config = (
-                    options
-                    if isinstance(options, MineruConfig)
-                    else MineruConfig(tier=MineruTier.FLASH)
-                )
-                return MineruApiClient(
-                    "https://mineru.example.com/api",
-                    transport=httpx.MockTransport(handler),
-                ).parse(list(files), config, cancelled=cancelled)
+            async def parse_async(self, path: Any, **_kwargs: Any) -> Any:
+                parse_attempts.append(str(path))
+                raise _SdkError()
+
+        monkeypatch.setattr(
+            "vibeocr.runtime.recognition.mineru_api._load_api_parser",
+            lambda: _FailingParser,
+        )
 
         isolated_connection.configure_connection(
             isolated_connection.connection_from_extra(REMOTE_EXTRA)
         )
+        from vibeocr.runtime.recognition.mineru_service import MinerUService
+
+        service = MinerUService.__new__(MinerUService)
         executor = MinerUExecutor(
-            adapter_factory=lambda: MinerUProcessAdapter(
-                client_factory=lambda: _RemoteApi()
-            )
+            adapter_factory=lambda: MinerUProcessAdapter(client_factory=lambda: service)
         )
+        # 经 settings 链应用远程连接：adapter 惰性创建时会用 executor 快照
+        # 重新 configure_connection，未设置会被默认 local 覆盖。
+        executor.configure_settings(_snapshot(REMOTE_EXTRA))
         reg = JobRegistry(instance_id="mineru-remote-retry")
         record = reg.create(
             kind=JobKind.MINERU_PARSE,
@@ -511,7 +528,7 @@ class TestRemoteConfigErrorsFailOncePerItem:
         executor.execute(record, staged)
 
         snap = record.snapshot()
-        assert posts == ["/api/v1/uploads"]
+        assert len(parse_attempts) == 1  # 配置错误不重试
         assert snap.state is JobState.FAILED
         assert snap.items[0].state is ItemState.FAILED
         assert record.item_errors["it-0"] == "VALIDATION_ERROR"
@@ -561,7 +578,6 @@ def _text_document(text: str, *, extra_middle_block: bool = False) -> MineruDocu
             "schema_version": "2.0",
             "pages": [{"page_idx": 0, "blocks": middle_blocks}],
         },
-        archive=b"",
     )
 
 

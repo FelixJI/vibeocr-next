@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from importlib import metadata
+from importlib import import_module, metadata
 from urllib.parse import urlsplit
 
 from vibeocr.runtime.recognition.mineru_config import LANGUAGES, MineruConfigError
@@ -130,11 +130,26 @@ def configure_connection(connection: MineruConnection) -> None:
             _connection = connection
 
 
+_sdk_client_available: bool | None = None
+
+
 def _mineru4_installed() -> bool:
-    try:
-        return metadata.version("mineru").split(".")[0] == "4"
-    except metadata.PackageNotFoundError:
-        return False
+    """官方 SDK 客户端（mineru.parser.api_client）是否可导入。
+
+    客户端依赖与本地推理就绪是两件事：远程解析由远端承担，但传输 SDK
+    必须在本进程可导入；本地的模型/推理就绪仍由 tier 准备流程负责。
+    结果按进程缓存：缺包环境不得因反复探测拖慢其他工具。
+    """
+    global _sdk_client_available
+    if _sdk_client_available is None:
+        try:
+            if metadata.version("mineru").split(".")[0] != "4":
+                raise ImportError("MinerU SDK major version is not 4")
+            import_module("mineru.parser.api_client")
+            _sdk_client_available = True
+        except Exception:  # noqa: BLE001 - 任何导入失败都按缺 SDK 处理
+            _sdk_client_available = False
+    return _sdk_client_available
 
 
 def mark_executed(
@@ -165,9 +180,10 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
             if observe_runtime
             else set()
         )
-    # 远程模式由自部署服务器承担解析，本地 mineru 包不是就绪前提；
+    # 客户端 SDK 是两种模式共同的前提：远程解析虽由远端承担，传输仍需
+    # 本进程可导入官方 parser；本地推理/模型就绪另由 tier 准备流程表达。
     # 仍要求当前进程实际完成该 tier 的准备解析后才标记 ready。
-    installed = remote or _mineru4_installed()
+    installed = _mineru4_installed()
     return {
         "default_tier": "basic",
         # 本地 MinerU 4 无 language 通道且 OCR 恒用内置 ch 模型（覆盖中英），

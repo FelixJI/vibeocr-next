@@ -355,17 +355,19 @@ def _build_recognition_mode_registry(
     def mineru_document_ready() -> bool:
         """MinerU 文档模式可用性在读取时动态判定。
 
-        远程连接的自部署服务器承担解析，本地无 mineru 包/模型即可用；
-        local 连接仍以本地依赖可导入为门禁。"""
+        远程连接的自部署服务器承担解析，本地无需模型，但官方传输 SDK
+        （mineru.parser.api_client）仍必须在本进程可导入——客户端依赖
+        与本地推理就绪分开判定；local 连接同样以 SDK 可导入为门禁。"""
         if not use_mineru:
             return False
         from vibeocr.runtime.recognition.mineru_readiness import (
             CONNECTION_REMOTE,
+            _mineru4_installed,
             current_connection,
         )
 
         if current_connection().mode == CONNECTION_REMOTE:
-            return True
+            return _mineru4_installed()
         return _mineru_available()
 
     from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
@@ -471,9 +473,9 @@ def _build_recognition_mode_registry(
 
 
 def _mineru_available() -> bool:
-    """Return True if a real MinerU backend is importable in this environment."""
+    """Return True if the official MinerU SDK client is importable here."""
     try:
-        import mineru  # type: ignore  # noqa: F401
+        import mineru.parser.api_client  # type: ignore  # noqa: F401
     except Exception:
         return False
     return True

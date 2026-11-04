@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ PYTHON_SOURCES = [
     "tests/runtime",
     "tests/python",
 ]
+MINERU_SDK_CONTRACTS = "tests/python/runtime/services/mineru_sdk_contract"
 
 
 def resolve_executable(command: str) -> str:
@@ -28,9 +30,50 @@ def resolve_executable(command: str) -> str:
     return shutil.which(command) or command
 
 
+def run_mineru_sdk_contract_tests() -> None:
+    """在装配的专用 venv 中运行真实 MinerU SDK 合同测试。
+
+    ``VIBEOCR_SKIP_MINERU_SDK_CONTRACTS=1`` 显式跳过（离线开发）；装配或
+    测试失败（uv 不可用、网络失败、用例失败）都直接失败，不静默降级。
+    """
+    label = "mineru-sdk-contracts"
+    if os.environ.get("VIBEOCR_SKIP_MINERU_SDK_CONTRACTS") == "1":
+        print(
+            "::warning title=Quality stage::SKIPPED: MinerU SDK contract tests "
+            "(VIBEOCR_SKIP_MINERU_SDK_CONTRACTS=1)",
+            flush=True,
+        )
+        return
+    print(f"::notice title=Quality stage::{label} started", flush=True)
+    subprocess.run(
+        [sys.executable, "scripts/prepare_mineru_sdk_tests.py"], cwd=ROOT, check=True
+    )
+    venv_python = (
+        ROOT
+        / "build"
+        / "mineru-sdk-contract-venv"
+        / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    )
+    environment = {**os.environ, "VIBEOCR_MINERU_SDK_CONTRACTS": "1"}
+    subprocess.run(
+        [
+            str(venv_python),
+            "-m",
+            "pytest",
+            MINERU_SDK_CONTRACTS,
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=ROOT,
+        check=True,
+        env=environment,
+    )
+    print(f"::notice title=Quality stage::{label} completed", flush=True)
+
+
 def main() -> int:
     npm = resolve_executable("npm")
-    for label, command in (
+    stages: list[tuple[str, list[str]]] = [
         (
             "ruff-check",
             [sys.executable, "-m", "ruff", "check", *PYTHON_SOURCES],
@@ -60,6 +103,14 @@ def main() -> int:
             [sys.executable, "scripts/check_runtime_protocol_conformance.py"],
         ),
         ("pytest", [sys.executable, "-m", "pytest", "tests/runtime", "tests/python"]),
+    ]
+    for label, command in stages:
+        print(f"::notice title=Quality stage::{label} started", flush=True)
+        subprocess.run(command, cwd=ROOT, check=True)
+        print(f"::notice title=Quality stage::{label} completed", flush=True)
+    # 根 pytest 之后：真实 MinerU SDK 合同在专用 venv 中运行。
+    run_mineru_sdk_contract_tests()
+    for label, command in (
         ("web-format", [npm, "run", "format:check", "--prefix", WEB_ASSETS]),
         ("web-lint", [npm, "run", "lint", "--prefix", WEB_ASSETS]),
         ("web-typecheck", [npm, "run", "typecheck", "--prefix", WEB_ASSETS]),

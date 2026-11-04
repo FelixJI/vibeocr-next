@@ -58,7 +58,7 @@ def test_source_checkout_uses_engine_profile_not_root_dev_dependencies(
 
     assert specs["paddleocr"] == "paddleocr==3.7.0"
     assert "paddlepaddle" not in specs and "paddlepaddle-gpu" not in specs
-    assert specs["mineru"] == "mineru==4.0.10"
+    assert specs["mineru"] == "mineru==4.1.3"
     assert (
         env_config.validate_dep_check_consistency(
             runtime_layout.resolve_app_paths().install_root

@@ -519,7 +519,7 @@ if __import__('os').environ['MINERU_MODEL_SOURCE'] == 'modelscope':
     assert constants.API_MAX_RETRIES == constants.DOWNLOAD_RETRY_TIMES == 1
     assert constants.DOWNLOAD_TIMEOUT == 1
 markers = 0
-assert version('mineru') == '4.0.10'
+assert version('mineru') == '4.1.3'
 from vibeocr.runtime.recognition.mineru_service import MinerUService
 service = object.__new__(MinerUService)
 service._prepare_cached_models('basic', lambda: False)

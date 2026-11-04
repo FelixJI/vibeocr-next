@@ -522,7 +522,6 @@ class TestFileParse:
                     }
                 ],
             },
-            archive=b"",
         )
         # 真实契约违规（块数量不一致）：修复前后都必须确定性失败。
         bad = MineruDocument(
@@ -562,7 +561,6 @@ class TestFileParse:
                     }
                 ],
             },
-            archive=b"",
         )
         s = _make_service()
         monkeypatch.setattr(

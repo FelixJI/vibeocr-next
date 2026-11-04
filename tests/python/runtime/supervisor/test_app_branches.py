@@ -1467,35 +1467,63 @@ async def test_command_retry_returns_new_job_ref(
 
 
 @pytest.mark.parametrize(
-    ("upstream_status", "reason"),
+    ("code", "message", "reason"),
     [
-        (404, "mineru_api_endpoint_incompatible"),
-        (405, "mineru_api_endpoint_incompatible"),
-        (401, "mineru_api_authentication_failed"),
-        (403, "mineru_api_authentication_failed"),
+        (
+            "http_error",
+            "HTTP 404: secret endpoint body",
+            "mineru_api_endpoint_incompatible",
+        ),
+        (
+            "http_error",
+            "HTTP 405: secret endpoint body",
+            "mineru_api_endpoint_incompatible",
+        ),
+        ("invalid_api_key", "secret key material", "mineru_api_authentication_failed"),
     ],
+    ids=["endpoint-404", "endpoint-405", "auth-failed"],
 )
 async def test_remote_mineru_preload_reports_actionable_configuration_error(
     pdf_app,
     supervisor_token: str,
     pdf_module: SupervisorModule,
     monkeypatch: pytest.MonkeyPatch,
-    upstream_status: int,
+    code: str,
+    message: str,
     reason: str,
 ) -> None:
+    """远程端点/凭据配置错误必须以可行动的 VALIDATION_ERROR 呈现且不泄漏。
+
+    4.1.3 起传输由官方 SDK 承担：经 ``_load_api_parser`` seam 注入对应分类
+    形状的 SDK 异常（真实 HTTP 形状由 mineru_sdk_contract 覆盖）。
+    """
     from vibeocr.runtime.recognition.mineru_api import MineruApiClient
     from vibeocr.runtime_contracts import MineruConfig, MineruTier
 
-    requests: list[httpx.Request] = []
+    attempts: list[str] = []
 
-    def upstream(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(upstream_status, text="private-token secret endpoint")
+    class _SdkError(Exception):
+        def __init__(self) -> None:
+            self.code = code
+            self.message = message
+            super().__init__(f"[{code}] {message}")
+
+    class _FailingParser:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def parse_async(self, path: Any, **_kwargs: Any) -> Any:
+            attempts.append(str(path))
+            raise _SdkError()
+
+    monkeypatch.setattr(
+        "vibeocr.runtime.recognition.mineru_api._load_api_parser",
+        lambda: _FailingParser,
+    )
 
     client = MineruApiClient(
         "https://remote.example/proxy",
         api_key="private-token",
-        transport=httpx.MockTransport(upstream),
     )
 
     def preload(pipelines: tuple[str, ...], *, recognition_modes=None) -> None:
@@ -1514,9 +1542,8 @@ async def test_remote_mineru_preload_reports_actionable_configuration_error(
     assert response.json()["detail"]["reason"] == reason
     assert "private-token" not in response.text
     assert "remote.example" not in response.text
-    assert [(item.method, item.url.path) for item in requests] == [
-        ("POST", "/proxy/v1/uploads")
-    ]
+    # 配置错误一次性失败，不重试解析。
+    assert len(attempts) == 1
 
 
 @pytest.mark.parametrize(
