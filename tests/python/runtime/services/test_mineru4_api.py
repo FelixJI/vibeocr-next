@@ -1,16 +1,18 @@
-"""MinerU 4 transport contracts and real 4.0.2 result projections."""
+"""MinerU 4 投影合同与真实 4.0.x 结果投影（传输合同见 mineru_sdk_contract/）。
 
-import io
+官方 SDK 4.1.3 Tasks 协议的传输/取消/错误分类合同由
+``tests/python/runtime/services/mineru_sdk_contract/``（真实 SDK + 受控
+服务器）覆盖；本文件保留结果投影契约（schema 校验、页/块身份、表格、
+caption/footnote、data URI）与 tier 目录门禁。
+"""
+
 import json
-import zipfile
 from pathlib import Path
 
-import httpx
 import pytest
+from vibeocr.runtime.recognition import mineru_readiness as readiness
 from vibeocr.runtime.recognition.mineru_api import (
-    MineruApiClient,
     MineruApiError,
-    MineruCancelled,
     MineruDocument,
 )
 from vibeocr.runtime.recognition.mineru_config import (
@@ -34,7 +36,7 @@ def test_real_basic_three_page_projection():
     # excluded from text by the existing product contract, retained in blocks.
     middle = json.loads((FIXTURES / "basic-middle.json").read_text())
     structured = json.loads((FIXTURES / "basic-structured.json").read_text())
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     assert [b["page_idx"] for b in result.content_list] == [0, 1, 2]
     assert result.content_list[0]["bbox"] == [115.0, 131.0, 364.0, 150.0]
     assert "page 3" in result.content_list[2]["text"]
@@ -85,7 +87,7 @@ def test_real_407_empty_page_without_blocks_key_projects():
             {"page_idx": 1, "blocks": []},
         ]
     }
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     assert result.raw_text == "content page"
     assert [block["page_idx"] for block in result.content_list] == [0]
 
@@ -125,7 +127,7 @@ def test_genuine_block_count_mismatch_is_still_rejected():
         ]
     }
     with pytest.raises(MineruApiError, match="block identity mismatch"):
-        project_document(MineruDocument("", structured, middle, b""))
+        project_document(MineruDocument("", structured, middle))
 
 
 @pytest.mark.parametrize(
@@ -156,132 +158,59 @@ def test_legacy_equivalence_and_explicit_tier():
     assert resolve_mineru_config(PipelineSelection("MinerU", mineru=config)) is config
 
 
-class Server:
-    def __init__(self, status="completed"):
-        self.status = status
-        self.calls = []
-        self.job_payload = None
-        self.middle = {
-            "schema": "docvortex.middle",
-            "schema_version": "2.0",
-            "pages": [],
-        }
-        self.artifacts = {
-            "markdown": b"",
-            "middle_json": json.dumps(self.middle).encode(),
-            "structured_content": b'{"pages": []}',
-            "zip": b"zip",
-        }
-
-    def __call__(self, req):
-        path = req.url.path
-        self.calls.append((req.method, path))
-        if req.method == "DELETE" or path.endswith("/cancel"):
-            return httpx.Response(200, json={})
-        if path == "/v1/uploads":
-            return httpx.Response(
-                200,
-                json={
-                    "id": "upload-1",
-                    "upload_url": "https://untrusted.example/upload",
-                },
-            )
-        if path == "/v1/uploads/upload-1/content":
-            assert req.content == b"pdf"
-            return httpx.Response(200, json={})
-        if path == "/v1/uploads/upload-1/complete":
-            return httpx.Response(200, json={"file": {"id": "input-1"}})
-        if path == "/v1/parse/jobs":
-            self.job_payload = json.loads(req.content)
-            return httpx.Response(200, json={"job_id": "job-1", "status": "queued"})
-        if path == "/v1/parse/jobs/job-1":
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job-1",
-                    "status": self.status,
-                    "tier": self.job_payload["tier"],
-                    "files": [
-                        {
-                            "name": "sample.pdf",
-                            "status": "completed"
-                            if self.status == "completed"
-                            else "failed",
-                            "error": {"code": "parse_failed"},
-                            "output_files": {
-                                k: {"file_id": k, "bytes": len(v)}
-                                for k, v in self.artifacts.items()
-                            },
-                        }
-                    ],
-                },
-            )
-        if path.startswith("/v1/files/"):
-            return httpx.Response(200, content=self.artifacts[path.split("/")[3]])
-        raise AssertionError(path)
-
-
-def test_upload_job_outputs_and_full_document(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server()
-    result = MineruApiClient(
-        "http://127.0.0.1", transport=httpx.MockTransport(server)
-    ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-    assert isinstance(result["sample.pdf"], MineruDocument)
-    assert server.job_payload["files"][0]["page_range"] == "all"
-    assert server.job_payload["tier"] == "basic"
-    assert ("DELETE", "/v1/files/input-1") in server.calls
-    assert ("DELETE", "/v1/files/zip") in server.calls
-    assert all("file_parse" not in path for _, path in server.calls)
-
-
-def test_partial_is_per_file_failure_not_success(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server("partial")
-    result = MineruApiClient(
-        "http://127.0.0.1", transport=httpx.MockTransport(server)
-    ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-    assert isinstance(result["sample.pdf"], MineruApiError)
-
-
-def test_cancel_active_job_does_not_retry_or_change_tier(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server("running")
-
-    def cancelled():
-        return ("GET", "/v1/parse/jobs/job-1") in server.calls
-
-    with pytest.raises(MineruCancelled):
-        MineruApiClient(
-            "http://127.0.0.1", transport=httpx.MockTransport(server)
-        ).parse(
-            [("sample.pdf", b"pdf")],
-            MineruConfig(tier=MineruTier.ADVANCED),
-            cancelled=cancelled,
-        )
-    assert ("DELETE", "/v1/parse/jobs/job-1") in server.calls
-    assert server.calls.count(("POST", "/v1/parse/jobs")) == 1
-    assert server.job_payload["tier"] == "advanced"
-
-
 def test_unsafe_referenced_sidecar_is_rejected():
+    # SDK save() 已把素材物化为 images 映射；middle_json 引用的路径仍必须
+    # 过安全校验，绝不把任意路径当作图片键。
     middle = {
         "schema": "docvortex.middle",
         "schema_version": "2.0",
         "pages": [],
         "image_path": "../outside.png",
     }
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w") as z:
-        z.writestr("../outside.png", b"bad")
     with pytest.raises(MineruApiError, match="Unsafe"):
-        project_document(MineruDocument("", {"pages": []}, middle, archive.getvalue()))
+        project_document(
+            MineruDocument("", {"pages": []}, middle, images={"../outside.png": b"bad"})
+        )
+
+
+def test_missing_referenced_sidecar_fails_closed():
+    # middle_json 引用的素材在 images 映射中缺失：按失败处理，不得以空
+    # 图片通过（传输层的对应合同见 mineru_sdk_contract 的 sidecar 用例）。
+    middle = {
+        "schema": "docvortex.middle",
+        "schema_version": "2.0",
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {
+                        "type": "image",
+                        "index": 0,
+                        "content": [
+                            {
+                                "type": "image_body",
+                                "index": 0,
+                                "image_path": "images/missing.jpg",
+                                "content": "",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    structured = {
+        "pages": [
+            {
+                "page_idx": 0,
+                "blocks": [
+                    {"type": "image", "bbox": [0.1, 0.1, 0.9, 0.9], "content": ""}
+                ],
+            }
+        ]
+    }
+    with pytest.raises(MineruApiError, match="Missing MinerU image sidecar"):
+        project_document(MineruDocument("", structured, middle))
 
 
 def test_real_native_table_and_embedded_image():
@@ -291,7 +220,7 @@ def test_real_native_table_and_embedded_image():
     structured = json.loads(
         (FIXTURES / "table-image-structured.json").read_text(encoding="utf8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     table = next(b for b in result.content_list if b["type"] == "table")
     assert "Apples" in table["text"] and "18" in table["text"]
     assert table["table"]["row_count"] == 3
@@ -300,57 +229,10 @@ def test_real_native_table_and_embedded_image():
     assert "blue product sample" in result.raw_text
 
 
-def test_unconfirmed_cancel_retains_inputs(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server("running")
-    with pytest.raises(MineruCancelled):
-        MineruApiClient(
-            "http://127.0.0.1", transport=httpx.MockTransport(server)
-        ).parse(
-            [("sample.pdf", b"pdf")],
-            MineruConfig(tier=MineruTier.BASIC),
-            cancelled=lambda: ("GET", "/v1/parse/jobs/job-1") in server.calls,
-        )
-    assert not any(
-        method == "DELETE" and path.startswith("/v1/files/")
-        for method, path in server.calls
-    )
-
-
-def test_upstream_disconnect_does_not_resubmit(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server()
-
-    def handler(request):
-        if request.url.path == "/v1/parse/jobs/job-1":
-            raise httpx.RemoteProtocolError("server restarted", request=request)
-        return server(request)
-
-    with pytest.raises(httpx.RemoteProtocolError):
-        MineruApiClient(
-            "http://127.0.0.1", transport=httpx.MockTransport(handler)
-        ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.ADVANCED))
-    assert server.calls.count(("POST", "/v1/parse/jobs")) == 1
-    assert server.job_payload["tier"] == "advanced"
-
-
-def test_deadline_before_upload_has_no_side_effects():
-    server = Server()
-    with pytest.raises(TimeoutError):
-        MineruApiClient(
-            "http://127.0.0.1", timeout=0, transport=httpx.MockTransport(server)
-        ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-    assert server.calls == []
-
-
 def test_catalog_requires_actual_execution_not_just_installed_packages(monkeypatch):
-    from vibeocr.runtime.recognition import mineru_readiness as readiness
-
-    monkeypatch.setattr(readiness.metadata, "version", lambda _: "4.0.2")
+    # SDK 客户端已安装（4.1 起以 mineru.parser.api_client 可导入为准），
+    # 但 tier 就绪仍要求真实执行观察。
+    monkeypatch.setattr(readiness, "_mineru4_installed", lambda: True)
     monkeypatch.setattr(readiness, "_observations", {})
     assert all(
         tier["availability"] == "preparation_required"
@@ -372,69 +254,6 @@ def test_catalog_requires_actual_execution_not_just_installed_packages(monkeypat
         readiness.require_ready(MineruTier.BASIC)
 
 
-@pytest.mark.parametrize("state", ["completed", "failed", "partial", "canceled"])
-def test_recorded_native_job_terminal_states(state, monkeypatch):
-    import base64
-
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    recorded = json.loads((FIXTURES / f"job-{state}.json").read_text(encoding="utf-8"))
-    job = recorded["job"]
-    server = Server()
-
-    def handler(request):
-        if request.method == "GET" and request.url.path == "/v1/parse/jobs/job-1":
-            return httpx.Response(200, json=job)
-        if request.method == "GET" and request.url.path.startswith("/v1/files/"):
-            return httpx.Response(
-                200,
-                content=base64.b64decode(
-                    recorded["outputs"][request.url.path.split("/")[3]]
-                ),
-            )
-        return server(request)
-
-    client = MineruApiClient("http://127.0.0.1", transport=httpx.MockTransport(handler))
-    inputs = [(file["name"], b"pdf") for file in job["files"]]
-    config = MineruConfig(tier=MineruTier(job["tier"]))
-    if state == "canceled":
-        with pytest.raises(MineruCancelled):
-            client.parse(inputs, config)
-    else:
-        result = client.parse(inputs, config)
-        for file in job["files"]:
-            expected = (
-                MineruDocument if file["status"] == "completed" else MineruApiError
-            )
-            assert isinstance(result[file["name"]], expected)
-
-
-def test_confirmed_native_cancel_deletes_owned_inputs(monkeypatch):
-    monkeypatch.setattr(
-        "vibeocr.runtime.recognition.mineru_api.time.sleep", lambda _: None
-    )
-    server = Server("running")
-    recorded = json.loads((FIXTURES / "cancel-response.json").read_text())
-
-    def handler(request):
-        if request.method == "DELETE" and request.url.path == "/v1/parse/jobs/job-1":
-            server.calls.append((request.method, request.url.path))
-            return httpx.Response(200, json=recorded)
-        return server(request)
-
-    with pytest.raises(MineruCancelled):
-        MineruApiClient(
-            "http://127.0.0.1", transport=httpx.MockTransport(handler)
-        ).parse(
-            [("sample.pdf", b"pdf")],
-            MineruConfig(tier=MineruTier.BASIC),
-            cancelled=lambda: ("GET", "/v1/parse/jobs/job-1") in server.calls,
-        )
-    assert ("DELETE", "/v1/parse/jobs/job-1") in server.calls
-    assert ("DELETE", "/v1/files/input-1") in server.calls
-
-
 def test_native_code_body_is_not_rendered_markdown():
     # Validated docvortex.middle/2.0 and rendered by locked docvortex 0.4.14.
     middle = json.loads((FIXTURES / "code-middle.json").read_text(encoding="utf-8"))
@@ -442,7 +261,7 @@ def test_native_code_body_is_not_rendered_markdown():
         (FIXTURES / "code-structured.json").read_text(encoding="utf-8")
     )
     assert structured["pages"][0]["blocks"][0]["content"] == "```python\nprint(1)\n```"
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     assert result.raw_text == "print(1)"
     assert result.content_list[0]["code_body"] == "print(1)"
     assert result.markdown_text == "```\nprint(1)\n```"
@@ -455,7 +274,7 @@ def test_native_semantic_text_lists_equations_and_code_annotations():
     structured = json.loads(
         (FIXTURES / "semantic-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     assert (
         result.raw_text
         == "A * B < C\nfirst\nsecond\nx=1\nExample code\nprint(1)\nCode note"
@@ -480,7 +299,7 @@ def test_native_visual_annotations_survive_all_projections(suffix):
     structured = json.loads(
         (FIXTURES / f"annotations-{suffix}-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     for kind in ("image", "chart", "table"):
         caption = f"{kind} caption *literal*"
         footnote = f"{kind} note <b>literal</b>"
@@ -502,7 +321,7 @@ def test_native_visual_bodies_formula_fallback_and_nested_code_fence(suffix):
     structured = json.loads(
         (FIXTURES / f"annotations-{suffix}-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     assert result.raw_text.count("image body *literal*") == 1
     assert "image body \\*literal\\*" in result.markdown_text
     assert "image body *literal*" in result.html_text
@@ -528,7 +347,7 @@ def test_native_table_fallback_and_index_keep_semantic_content(suffix):
     structured = json.loads(
         (FIXTURES / f"annotations-{suffix}-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     fallback = next(b for b in result.content_list if b["type"] == "table_unparsed")
     assert fallback["text"] == "Item  Count\nApple  12"
     for projection in (result.raw_text, result.markdown_text, result.html_text):
@@ -557,7 +376,7 @@ def test_native_empty_code_keeps_annotations(suffix):
     structured = json.loads(
         (FIXTURES / f"annotations-{suffix}-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     for projection in (result.raw_text, result.markdown_text, result.html_text):
         assert projection.count("Empty code caption") == 1
         assert projection.count("Empty code note") == 1
@@ -576,7 +395,7 @@ def test_native_projection_survives_office_export(suffix, fmt, tmp_path):
     structured = json.loads(
         (FIXTURES / f"annotations-{suffix}-structured.json").read_text(encoding="utf-8")
     )
-    result = project_document(MineruDocument("", structured, middle, b""))
+    result = project_document(MineruDocument("", structured, middle))
     path = tmp_path / f"result.{fmt}"
     assert ExportService.export(result, path, fmt)
     if fmt == "docx":

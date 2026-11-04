@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-import io
 import re
-import zipfile
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -79,31 +77,28 @@ def _image_paths(value: object) -> set[str]:
 
 
 def _read_images(document: MineruDocument) -> dict[str, bytes]:
+    """校验 middle_json 引用的素材已由 SDK 物化且路径安全。
+
+    SDK ``save(writer)`` 已完成素材外置与校验；这里保留产品侧的存在性、
+    路径与大小合同，缺少引用素材的结果不允许以空图片通过。
+    """
     images: dict[str, bytes] = {}
-    paths = _image_paths(document.middle_json)
-    if not paths:
-        return images
-    try:
-        with zipfile.ZipFile(io.BytesIO(document.archive)) as archive:
-            names = archive.namelist()
-            for path in sorted(paths):
-                normalized = PurePosixPath(path)
-                if (
-                    "\\" in path
-                    or ":" in path
-                    or normalized.is_absolute()
-                    or ".." in normalized.parts
-                    or normalized.as_posix() != path
-                ):
-                    raise MineruApiError("Unsafe MinerU image sidecar path")
-                if names.count(path) != 1:
-                    raise MineruApiError("Missing or duplicate MinerU image sidecar")
-                info = archive.getinfo(path)
-                if info.file_size > 128 * 1024 * 1024:
-                    raise MineruApiError("MinerU image sidecar exceeds size limit")
-                images[path] = archive.read(info)
-    except zipfile.BadZipFile as exc:
-        raise MineruApiError("Invalid MinerU output archive") from exc
+    for path in sorted(_image_paths(document.middle_json)):
+        normalized = PurePosixPath(path)
+        if (
+            "\\" in path
+            or ":" in path
+            or normalized.is_absolute()
+            or ".." in normalized.parts
+            or normalized.as_posix() != path
+        ):
+            raise MineruApiError("Unsafe MinerU image sidecar path")
+        payload = document.images.get(path)
+        if payload is None:
+            raise MineruApiError("Missing MinerU image sidecar")
+        if len(payload) > 128 * 1024 * 1024:
+            raise MineruApiError("MinerU image sidecar exceeds size limit")
+        images[path] = payload
     return images
 
 

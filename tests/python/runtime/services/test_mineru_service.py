@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("httpx", reason="httpx not installed")
 
 from vibeocr.runtime.recognition.mineru_service import MinerUService
+from vibeocr.runtime_contracts import MineruConfig, MineruOcrMode, MineruTier
 
 
 def _make_api_response(md_content="", content_list=None, images=None):
@@ -141,7 +142,7 @@ class TestMinerUService:
         assert "mineru.parser.api_server" in cmd
         assert "--host" in cmd
         assert "--port" in cmd
-        # MinerU 4（含锁定的 4.0.10）api_server CLI 无 --language 选项，传入即
+        # MinerU 4（含锁定的 4.1.3）api_server CLI 无 --language 选项，传入即
         # Click 退出码 2 导致服务无法启动（#208 冻结安装真实回归发现）。
         assert "--language" not in cmd
         assert "--tier" in cmd
@@ -329,6 +330,85 @@ class TestBuildOcrResult:
         for text_block in result.text_blocks:
             content = result.content_list[text_block.content_index]
             assert content["block_id"] == text_block.content_id
+
+
+class TestCallApiTierMapping:
+    """_call_api 的 4.1 tier 语义（本地分支）。
+
+    启动档即服务上限：advanced 请求以 advanced 上限启动子进程；模型部署档
+    沿用 SDK 共享配置（advanced/standard -> standard 部署、basic -> basic）；
+    flash 是无模型纯抽取档，不做模型准备。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self):
+        from vibeocr.runtime.recognition.core.singleton_meta import SingletonMeta
+
+        SingletonMeta._instances.pop(MinerUService, None)
+        MinerUService._initialized = False
+        MinerUService._api_process = None
+        MinerUService._api_url = ""
+        MinerUService._job_guard = None
+        MinerUService._server_tier = "basic"
+        MinerUService._model_root = None
+        yield
+        SingletonMeta._instances.pop(MinerUService, None)
+        MinerUService._initialized = False
+        MinerUService._api_process = None
+        MinerUService._api_url = ""
+        MinerUService._job_guard = None
+        MinerUService._server_tier = "basic"
+        MinerUService._model_root = None
+
+    @pytest.mark.parametrize(
+        ("tier", "server_tier", "prepared_tier"),
+        [
+            (MineruTier.ADVANCED, "advanced", "standard"),
+            (MineruTier.STANDARD, "standard", "standard"),
+            (MineruTier.BASIC, "basic", "basic"),
+            (MineruTier.FLASH, "flash", None),
+        ],
+        ids=["advanced", "standard", "basic", "flash"],
+    )
+    def test_tier_controls_server_and_model_preparation(
+        self, monkeypatch, tier, server_tier, prepared_tier
+    ):
+        from vibeocr.runtime.recognition.mineru_api import MineruDocument
+
+        document = MineruDocument(
+            markdown="",
+            structured_content={"pages": []},
+            middle_json={
+                "schema": "docvortex.middle",
+                "schema_version": "2.0",
+                "pages": [],
+            },
+        )
+        prepared: list[str] = []
+
+        def fake_prepare(tier_argument, cancelled, *, owner=None):
+            prepared.append(tier_argument)
+
+        class FakeClient:
+            def parse(self, files, config, *, cancelled=lambda: False):
+                return {name: document for name, _ in files}
+
+        service = MinerUService.__new__(MinerUService)
+        monkeypatch.setattr(service, "_prepare_cached_models", fake_prepare)
+        monkeypatch.setattr(service, "_ensure_api_running", lambda **_k: None)
+        monkeypatch.setattr(
+            "vibeocr.runtime.recognition.mineru_service.MineruApiClient",
+            lambda url, **_kwargs: FakeClient(),
+        )
+        ocr_mode = MineruOcrMode.TXT if tier is MineruTier.FLASH else MineruOcrMode.OCR
+        config = MineruConfig(tier=tier, ocr_mode=ocr_mode)
+        result = service._call_api(b"%PDF-tier", "input.pdf", config)
+        assert isinstance(result["input.pdf"], MineruDocument)
+        assert MinerUService._server_tier == server_tier
+        if prepared_tier is None:
+            assert prepared == []  # flash 无模型，不做准备
+        else:
+            assert prepared == [prepared_tier]
 
 
 class TestMinerUIntegration:

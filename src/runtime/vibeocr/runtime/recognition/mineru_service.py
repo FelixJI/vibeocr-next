@@ -601,13 +601,17 @@ class MinerUService(metaclass=SingletonMeta):
                         "MinerU remote request canceled after response"
                     )
                 return result
-            tier = (
-                "standard"
-                if config.tier in (MineruTier.STANDARD, MineruTier.ADVANCED)
-                else "basic"
-            )
+            # 4.1 启动档即服务上限（含全部较低档位）：advanced 请求必须以
+            # advanced 上限启动子进程，不再折叠到 standard（standard 上限
+            # 不再开放 advanced）；flash 是无模型的纯原生抽取档。
+            tier = config.tier.value
             if config.tier != MineruTier.FLASH:
-                self._prepare_cached_models(tier, cancelled, owner=owner)
+                # 模型部署档沿用 SDK 的共享配置：advanced 复用 standard 部署。
+                self._prepare_cached_models(
+                    "basic" if config.tier == MineruTier.BASIC else "standard",
+                    cancelled,
+                    owner=owner,
+                )
             with self.__class__._ownership_lock:
                 self._require_owner(owner)
                 if self.__class__._server_tier != tier:

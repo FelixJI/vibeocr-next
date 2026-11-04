@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 _MINERU_AVAILABLE = True
 try:
-    import mineru  # type: ignore  # noqa: F401
+    import mineru.parser.api_client  # type: ignore  # noqa: F401
 except Exception:
     _MINERU_AVAILABLE = False
 

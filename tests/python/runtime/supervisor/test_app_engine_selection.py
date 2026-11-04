@@ -647,7 +647,8 @@ async def test_mineru_prepare_refresh_and_typed_submit(
     )
     from vibeocr.runtime_contracts import MineruTier
 
-    monkeypatch.setattr(readiness.metadata, "version", lambda _: "4.0.2")
+    # SDK 客户端已安装（4.1 起以 mineru.parser.api_client 可导入为准）。
+    monkeypatch.setattr(readiness, "_mineru4_installed", lambda: True)
     monkeypatch.setattr(readiness, "_observations", {})
     module, executor = _module(tmp_path, None)
     module.recognition_mode_registry = RecognitionModeRegistry(
@@ -888,7 +889,7 @@ async def test_cold_mineru_second_http_submit_does_not_block_health_or_cancel(
 
     monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
     monkeypatch.setattr(readiness, "_observations", {})
-    monkeypatch.setattr(readiness.metadata, "version", lambda _: "4.0.2")
+    monkeypatch.setattr(readiness, "_mineru4_installed", lambda: True)
     readiness.mark_executed(MineruTier.BASIC)
     adapter = MinerUProcessAdapter(client_factory=Client, lifecycle=Lifecycle())
     module = SupervisorModule(

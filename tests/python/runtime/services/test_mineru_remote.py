@@ -1,20 +1,19 @@
 """远程自部署 MinerU 4 连接（Backend #113）回归。
 
-旧实现会在以下场景失败：无 mineru 包时直接构造 MinerUService 会启动本地
-子进程、MineruApiClient 无 Bearer/重定向防护、连接配置无解析与门禁。
+旧实现会在以下场景失败：直接构造 MinerUService 会启动本地子进程、
+连接配置无解析与门禁。官方 SDK 4.1.3 起 Bearer/错误脱敏/取消等传输
+安全合同由 ``mineru_sdk_contract/``（真实 SDK + 受控服务器）覆盖；本
+文件聚焦连接解析 fail-closed、repr 不泄漏、观察集、语言门禁与远程
+构造不启动本地 API。
 """
 
 from __future__ import annotations
 
-import json
-from importlib import metadata
 from unittest.mock import patch
 
-import httpx
 import pytest
 from vibeocr.runtime.recognition import mineru_readiness as readiness
 from vibeocr.runtime.recognition.mineru_api import (
-    MineruApiClient,
     MineruApiError,
     MineruDocument,
 )
@@ -28,6 +27,17 @@ from vibeocr.runtime_contracts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def sdk_client_installed(monkeypatch: pytest.MonkeyPatch):
+    """默认按“官方 SDK 客户端已安装”运行（4.1 起为 local/remote 共同前提）。
+
+    根环境不装 mineru；观察集/prepare 流程测试关心的是连接归属语义，
+    不是包探测。依赖缺失语义由 TestTierCatalogGating 显式覆盖（其内部
+    的 setattr 覆盖本夹具）。
+    """
+    monkeypatch.setattr(readiness, "_mineru4_installed", lambda: True)
+
+
 @pytest.fixture()
 def isolated_connection(monkeypatch: pytest.MonkeyPatch):
     """重置模块级连接与观察集，测试间互不污染。"""
@@ -35,16 +45,6 @@ def isolated_connection(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(readiness, "_observations", {})
     yield readiness
     monkeypatch.setattr(readiness, "_connection", readiness.MineruConnection())
-
-
-@pytest.fixture()
-def not_installed_mineru(monkeypatch: pytest.MonkeyPatch):
-    """本地未安装 mineru 包（Base Runtime）——远程模式仍必须可用。"""
-
-    def raise_not_found(name: str) -> str:
-        raise metadata.PackageNotFoundError(name)
-
-    monkeypatch.setattr(readiness.metadata, "version", raise_not_found)
 
 
 REMOTE_URL = "https://mineru.example.com/selfhosted"
@@ -206,37 +206,49 @@ class TestObservationIdentity:
 
 
 # ---------------------------------------------------------------------------
-# tier 目录门禁：remote 无本地依赖可用，local 无依赖仍拦截
+# tier 目录门禁：SDK 客户端是 local/remote 共同前提，本地无依赖仍拦截
 # ---------------------------------------------------------------------------
 
 
 class TestTierCatalogGating:
-    def test_remote_catalog_does_not_require_local_package(
-        self, isolated_connection, not_installed_mineru
+    @pytest.mark.parametrize("sdk_installed", [True, False])
+    def test_remote_catalog_gates_on_sdk_client_availability(
+        self, isolated_connection, monkeypatch, sdk_installed
     ):
+        """4.1 语义：remote 解析由远端承担，但官方传输 SDK 必须本地可导入。
+
+        缺 SDK（Base Runtime 未装统一推理闭包）时 remote 目录同样停留在
+        ``mineru_dependencies_required``，执行观察也不得宣告就绪。
+        """
+        monkeypatch.setattr(readiness, "_mineru4_installed", lambda: sdk_installed)
         readiness.configure_connection(_remote_connection())
         payload = readiness.catalog_payload()
         assert all(
             tier["availability"] == "preparation_required" for tier in payload["tiers"]
         )
-        assert all(
-            tier["reason_code"] == "mineru_execution_preparation_required"
-            for tier in payload["tiers"]
+        expected_reason = (
+            "mineru_execution_preparation_required"
+            if sdk_installed
+            else "mineru_dependencies_required"
         )
+        assert all(tier["reason_code"] == expected_reason for tier in payload["tiers"])
         readiness.mark_executed(MineruTier.BASIC)
         basic = next(
             tier
             for tier in readiness.catalog_payload()["tiers"]
             if tier["id"] == "basic"
         )
-        assert basic["availability"] == "ready"
+        assert basic["availability"] == (
+            "ready" if sdk_installed else "preparation_required"
+        )
 
-    def test_local_catalog_without_package_stays_blocked(
-        self, isolated_connection, not_installed_mineru
+    def test_local_catalog_without_sdk_stays_blocked(
+        self, isolated_connection, monkeypatch
     ):
+        monkeypatch.setattr(readiness, "_mineru4_installed", lambda: False)
         readiness.configure_connection(_remote_connection())
         readiness.mark_executed(MineruTier.BASIC)
-        # 切回 local：观察集被清空，且本地无依赖仍拦截。
+        # 切回 local：观察集被清空，且本地无 SDK 仍拦截。
         readiness.configure_connection(readiness.MineruConnection())
         payload = readiness.catalog_payload()
         assert all(
@@ -319,12 +331,11 @@ class TestMinerUServiceRemote:
                 markdown="",
                 structured_content={"pages": []},
                 middle_json=middle,
-                archive=b"",
             )
         )
         created = []
 
-        def fake_client(url, *, timeout, api_key=None, transport=None):
+        def fake_client(url, *, timeout, api_key=None):
             recording.url, recording.api_key = url, api_key
             created.append((url, api_key))
             return recording
@@ -341,10 +352,10 @@ class TestMinerUServiceRemote:
     def test_remote_failure_never_falls_back_to_local(
         self, isolated_connection, monkeypatch
     ):
-        error = MineruApiError("MinerU GET /v1/uploads: HTTP 503")
+        error = MineruApiError("mineru_transport_error_task_polling")
         recording = _RecordingClient(error=error)
 
-        def fake_client(url, *, timeout, api_key=None, transport=None):
+        def fake_client(url, *, timeout, api_key=None):
             return recording
 
         monkeypatch.setattr(
@@ -436,7 +447,7 @@ class TestMinerUServiceRemote:
                 }
             ],
         }
-        return MineruDocument("", structured, middle, b"")
+        return MineruDocument("", structured, middle)
 
     def test_remote_prepare_validates_each_tier_through_remote(
         self, isolated_connection, monkeypatch
@@ -468,7 +479,7 @@ class TestMinerUServiceRemote:
             data, filename, options=None, *, files=None, cancelled=lambda: False
         ):
             if options.tier is MineruTier.BASIC:
-                raise MineruApiError("MinerU POST /v1/parse/jobs: HTTP 500")
+                raise MineruApiError("mineru_sdk_internal_error")
             return {filename: document}
 
         readiness.configure_connection(_remote_connection())
@@ -528,138 +539,3 @@ class TestMinerUServiceRemote:
         # 切换之后开始解析的 tier 归属 B，正常计入。
         readiness.require_ready(MineruTier.BASIC)
         readiness.require_ready(MineruTier.STANDARD)
-
-
-# ---------------------------------------------------------------------------
-# MineruApiClient：Bearer、重定向、错误脱敏
-# ---------------------------------------------------------------------------
-
-
-class RemoteServer:
-    """复用 mineru4 V1 上传/jobs/files 流程的最小自部署服务器假件。
-
-    REMOTE_URL 带反代路径前缀 ``/selfhosted``：假件先剥离该前缀再匹配
-    路由，从而锁定客户端把前缀保留在每个请求上（反代部署契约）。
-    """
-
-    _PREFIX = "/selfhosted"
-
-    def __init__(self, *, redirect_to=None, fail_with=None):
-        self.redirect_to = redirect_to
-        self.fail_with = fail_with
-        self.requests = []
-        self.middle = {
-            "schema": "docvortex.middle",
-            "schema_version": "2.0",
-            "pages": [],
-        }
-        self.artifacts = {
-            "markdown": b"",
-            "middle_json": json.dumps(self.middle).encode(),
-            "structured_content": b'{"pages": []}',
-            "zip": b"zip",
-        }
-
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        path = request.url.path
-        assert path.startswith(self._PREFIX), path
-        path = path[len(self._PREFIX) :]
-        if self.redirect_to is not None and path == "/v1/uploads":
-            return httpx.Response(302, headers={"Location": self.redirect_to})
-        if self.fail_with is not None and path == "/v1/uploads":
-            return httpx.Response(
-                self.fail_with, text=f"echo {request.headers.get('authorization')}"
-            )
-        if request.method == "DELETE" or path.endswith("/cancel"):
-            return httpx.Response(200, json={})
-        if path == "/v1/uploads":
-            return httpx.Response(200, json={"id": "upload-1"})
-        if path == "/v1/uploads/upload-1/content":
-            return httpx.Response(200, json={})
-        if path == "/v1/uploads/upload-1/complete":
-            return httpx.Response(200, json={"file": {"id": "input-1"}})
-        if path == "/v1/parse/jobs":
-            return httpx.Response(
-                200, json={"job_id": "job-1", "status": "queued", "tier": "basic"}
-            )
-        if path == "/v1/parse/jobs/job-1":
-            return httpx.Response(
-                200,
-                json={
-                    "job_id": "job-1",
-                    "status": "completed",
-                    "tier": "basic",
-                    "files": [
-                        {
-                            "name": "sample.pdf",
-                            "status": "completed",
-                            "output_files": {
-                                kind: {"file_id": kind, "bytes": len(data)}
-                                for kind, data in self.artifacts.items()
-                            },
-                        }
-                    ],
-                },
-            )
-        if path.startswith("/v1/files/"):
-            return httpx.Response(200, content=self.artifacts[path.split("/")[3]])
-        raise AssertionError(path)
-
-
-class TestRemoteTransportSecurity:
-    def test_bearer_sent_on_every_request(self):
-        server = RemoteServer()
-        result = MineruApiClient(
-            REMOTE_URL,
-            transport=httpx.MockTransport(server),
-            api_key=REMOTE_KEY,
-        ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-        assert isinstance(result["sample.pdf"], MineruDocument)
-        assert server.requests, "requests were issued"
-        assert all(
-            request.headers.get("authorization") == f"Bearer {REMOTE_KEY}"
-            for request in server.requests
-        )
-
-    def test_empty_key_sends_no_authorization(self):
-        server = RemoteServer()
-        MineruApiClient(REMOTE_URL, transport=httpx.MockTransport(server)).parse(
-            [("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC)
-        )
-        assert all(
-            request.headers.get("authorization") is None for request in server.requests
-        )
-
-    def test_redirect_is_never_followed_even_same_origin(self):
-        server = RemoteServer(redirect_to=f"{REMOTE_URL}/elsewhere")
-        with pytest.raises(MineruApiError, match="redirect rejected"):
-            MineruApiClient(
-                REMOTE_URL,
-                transport=httpx.MockTransport(server),
-                api_key=REMOTE_KEY,
-            ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-        # 只发出了被拒的初始请求；没有任何后续请求被重定向牵引。
-        assert len(server.requests) == 1
-
-    def test_cross_origin_redirect_is_rejected_without_location_leak(self):
-        server = RemoteServer(redirect_to="https://attacker.example/steal")
-        with pytest.raises(MineruApiError) as caught:
-            MineruApiClient(
-                REMOTE_URL, transport=httpx.MockTransport(server), api_key=REMOTE_KEY
-            ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-        message = str(caught.value)
-        assert "attacker.example" not in message
-        assert REMOTE_URL not in message
-
-    def test_error_message_does_not_echo_url_key_or_server_body(self):
-        server = RemoteServer(fail_with=500)
-        with pytest.raises(MineruApiError) as caught:
-            MineruApiClient(
-                REMOTE_URL, transport=httpx.MockTransport(server), api_key=REMOTE_KEY
-            ).parse([("sample.pdf", b"pdf")], MineruConfig(tier=MineruTier.BASIC))
-        message = str(caught.value)
-        assert "HTTP 500" in message
-        assert REMOTE_KEY not in message
-        assert "Bearer" not in message
-        assert "echo" not in message

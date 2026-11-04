@@ -775,8 +775,9 @@ def test_paddle_available_returns_false_on_import_error(
 
 
 def test_mineru_available_detects_importable_module() -> None:
+    # 4.1 起可用性以官方 SDK 客户端（mineru.parser.api_client）可导入为准。
     try:
-        import mineru  # type: ignore  # noqa: F401
+        import mineru.parser.api_client  # type: ignore  # noqa: F401
 
         expected = True
     except Exception:
@@ -787,14 +788,14 @@ def test_mineru_available_detects_importable_module() -> None:
 def test_mineru_available_returns_false_on_import_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The except branch returns False when mineru import raises."""
+    """The except branch returns False when the SDK client import raises."""
     import builtins
 
     real_import = builtins.__import__
 
     def raise_importerror(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]  # noqa: A002 - mirrors builtins.__import__ signature
-        if name == "mineru":
-            raise ImportError("no mineru")
+        if name == "mineru.parser.api_client":
+            raise ImportError("no mineru sdk client")
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", raise_importerror)
