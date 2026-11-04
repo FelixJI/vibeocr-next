@@ -44,14 +44,11 @@ from vibeocr.runtime.environments.runtime_installer import (
     _extract_python_archive,
     _extract_runtime_pack,
     _load_component_lock,
-    _local_install_requirements,
     _normalize_dist_name,
-    _prepare_online_artifacts,
     _python_in,
     _run_install_command,
     _uv_command,
     _uv_install_environment,
-    probe_nvidia_driver,
 )
 from vibeocr.runtime.environments.runtime_layout import resolve_runtime_store
 from vibeocr.runtime.environments.runtime_lock import (
@@ -72,7 +69,6 @@ from vibeocr.runtime.environments.runtime_manifest import (
 )
 from vibeocr.runtime.environments.runtime_selection import (
     DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
-    DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
     DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
     RuntimeSelectionError,
     RuntimeSelectionPolicy,
@@ -87,7 +83,6 @@ from vibeocr.runtime.environments.runtime_selection import (
 _NAME = re.compile(r"^[^\\/\x00-\x1f]{1,80}$")
 _SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 _SOURCE_KINDS = (
-    DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
     DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
     DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
 )
@@ -448,9 +443,9 @@ class ManagedEnvironmentStore:
             marker = json.loads((root / ".installed.json").read_text(encoding="utf-8"))
             accelerator = marker["accelerator"]
         else:
-            accelerator = (
-                "nvidia_cuda" if self._selected_device(record) == "cuda" else "cpu"
-            )
+            # CUDA 档位已退役：managed 环境一律按 CPU 档位投影，设备
+            # （DirectML/CPU EP）由 VIBEOCR_MANAGED_ENVIRONMENT_DEVICE 表达。
+            accelerator = "cpu"
         environment = {
             "VIBEOCR_PRODUCT_ROOT": str(self.product_root),
             "VIBEOCR_LAYOUT_MANIFEST": self.layout_manifest,
@@ -550,8 +545,8 @@ class ManagedEnvironmentStore:
     ) -> dict[str, str | None]:
         """全局默认 → 环境override 的每 kind 解析；未覆盖 kind 回退产品默认。
 
-        默认依赖包源是 TUNA，PaddleOCR 与 MinerU 各自默认 ModelScope。
-        来源只代表安装依赖与下载模型；旧共享模型偏好在读取时展开。
+        目录只剩模型源：PaddleOCR 与 MinerU 各自默认 ModelScope；历史
+        package_index 选择在读取时过滤（依赖全部离线随包，无 pip 索引语义）。
         """
         merged: dict[str, str] = {}
         merged.update(self._kind_source_map(data.get("default_source_ids") or ()))
@@ -640,21 +635,23 @@ class ManagedEnvironmentStore:
         )
         entries: list[dict] = []
         for source in selection.effective_download_sources:
-            entry = {
-                "id": source.source_id,
-                "kind": source.kind,
-                "display_name": download_source_display_name(source.source_id),
-                "endpoint": sanitize_download_endpoint(source.endpoint),
-                "requested": (requested is not None and source.source_id in requested),
-                "inherited_from": self._source_origin(data, record, source.source_id),
-            }
-            if source.kind != DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX:
-                # 模型源只是偏好投影；原生 downloader 的真实端点未知。
-                entry["usage"] = "model_preference"
-                entry["actual_endpoint"] = None
-            else:
-                entry["usage"] = "online_index"
-            entries.append(entry)
+            # 目录只剩模型源：偏好投影；原生 downloader 的真实端点未知。
+            entries.append(
+                {
+                    "id": source.source_id,
+                    "kind": source.kind,
+                    "display_name": download_source_display_name(source.source_id),
+                    "endpoint": sanitize_download_endpoint(source.endpoint),
+                    "requested": (
+                        requested is not None and source.source_id in requested
+                    ),
+                    "inherited_from": self._source_origin(
+                        data, record, source.source_id
+                    ),
+                    "usage": "model_preference",
+                    "actual_endpoint": None,
+                }
+            )
         return entries
 
     def _resolved_source_entries(self, data: dict, record: dict | None) -> list[dict]:
@@ -675,7 +672,6 @@ class ManagedEnvironmentStore:
     def set_sources(
         self,
         env_id: str | None,
-        package_source_id: str | None,
         model_source_id: str | None | object = _UNSET_SOURCE,
         *,
         paddleocr_model_source_id: str | None | object = _UNSET_SOURCE,
@@ -684,7 +680,8 @@ class ManagedEnvironmentStore:
         """保存全局默认或单环境override；null 表示清除该 kind 回退继承。
 
         只写配置：不下载、不安装、不重启；同环境在途操作会被 target
-        operation lock 拒绝，保存 A 不会修改 B。
+        operation lock 拒绝，保存 A 不会修改 B。目录只剩模型源：
+        PaddleOCR 与 MinerU 各自选择提供方。
 
         显式保存全局默认（``env_id is None``）时，本次提交的 kinds 会
         同步清除所有环境的旧 override：新 UI 只有一个全局设置入口，
@@ -695,9 +692,7 @@ class ManagedEnvironmentStore:
         ``env_id`` 接口保留供旧数据/兼容；未显式提交的 kinds 不动旧配置。
         """
         catalog = {source["id"]: source for source in self._source_catalog()}
-        requested: dict[str, str | None | object] = {
-            DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX: package_source_id,
-        }
+        requested: dict[str, str | None | object] = {}
         if model_source_id is not _UNSET_SOURCE:
             if model_source_id is not None and model_source_id not in {
                 "huggingface",
@@ -1272,7 +1267,13 @@ class ManagedEnvironmentStore:
                 or marker["backend_version"] != details.get("runtime_version")
                 or not isinstance(marker.get("manifest_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", marker["manifest_sha256"])
-                or marker.get("accelerator") not in ACCELERATOR_TO_PLAN
+                # 历史 marker 可能携带 nvidia_cuda（CUDA 档位退役前的安装
+                # 记录）：读取层按已知历史值放行，投影保留原值。
+                or marker.get("accelerator")
+                not in (
+                    *ACCELERATOR_TO_PLAN,
+                    "nvidia_cuda",
+                )
                 or not isinstance(marker.get("component_ids"), list)
                 or not marker["component_ids"]
                 or any(
@@ -1619,10 +1620,8 @@ class ManagedEnvironmentStore:
         return total
 
     def list(self) -> dict:
-        # 硬件真值只由 Runtime 探测一次（与安装预检同一 helper）：
-        # unsupported 携带原因，unknown 只代表探测超时/未完成。探测不触碰
-        # 注册表，在锁外执行，避免把 nvidia-smi 的超时预算计入存储锁。
-        hardware = {"nvidia_driver": probe_nvidia_driver()}
+        # CUDA 支持已退役：不再探测 NVIDIA 驱动（DirectML 由引擎按设备
+        # 可用性自行回退），列表不携带硬件投影。
         # 先收敛可能被中断的固定路径换入，探针/路径才是真值。
         self._recover_all_swaps()
         with RuntimeStoreLock(self._lock):
@@ -1640,7 +1639,6 @@ class ManagedEnvironmentStore:
                     managed_cleanup.SWITCH_CAPABILITY,
                 ],
                 "recipes": self.recipe_catalog(),
-                "hardware": hardware,
                 "sources": [
                     {
                         "id": source["id"],
@@ -1657,11 +1655,6 @@ class ManagedEnvironmentStore:
                 "resolved_default_sources": self._resolved_source_entries(data, None),
                 "unknown_default_source_ids": self._unknown_source_ids(default_ids),
                 "source_config_revision": int(data.get("source_config_revision") or 0),
-                "package_source_ids": [
-                    source["id"]
-                    for source in catalog
-                    if source["kind"] == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
-                ],
                 "environments": [
                     self._public_record(record, self._probe(record), data)
                     for record in data["environments"].values()
@@ -2488,17 +2481,10 @@ class ManagedEnvironmentStore:
                 )
             scope, accelerator = self._recipe(recipe)
             selection = self._plan_selection(data, record, accelerator, source_ids)
-            if (
-                len(
-                    [
-                        source
-                        for source in selection.effective_download_sources
-                        if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
-                    ]
-                )
-                != 1
-            ):
-                raise ManagedEnvironmentError("one package index source is required")
+            if not scope.runtime_pack:
+                # 统一推理闭包必须绑定随包离线包：缺失代表发布闭包错误，
+                # fail closed 而不是退回在线索引（在线依赖安装已退役）。
+                raise ManagedEnvironmentError("bound offline engine pack is missing")
             if recipe.startswith("paddleocr-ort-") and any(
                 source.source_id == "paddleocr-bos"
                 for source in selection.effective_download_sources
@@ -2507,13 +2493,6 @@ class ManagedEnvironmentStore:
                     "Paddle ONNX requires Hugging Face or ModelScope; BOS assets are not bound"
                 )
             sources = self._source_entries(data, record, selection)
-            for source in sources:
-                if source["kind"] == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX:
-                    # 随包离线包存在时依赖不走在线索引；缺失离线包安装时会
-                    # fail closed，不静默改用网络源。
-                    source["usage"] = (
-                        "bundled_pack" if scope.runtime_pack else "online_index"
-                    )
             plan = {
                 "plan_id": uuid4().hex,
                 "environment_id": env_id,
@@ -2571,20 +2550,15 @@ class ManagedEnvironmentStore:
                 **plan,
                 "dependencies": dependencies,
                 "removed_dependencies": removed_dependencies,
-                # CUDA EP 插件计划已随分设备配方退役：统一推理闭包内
-                # directml/cpu 切换不涉及外部插件资产。
-                "cuda_plugin_action": None,
                 "requires_service_stop": record["status"] == "installed"
                 and data["active_id"] == env_id,
                 "sources": sources,
                 # 资产来源分类：固定解释器归档与内部 wheel 随产品分发；
-                # 依赖来自随包离线包或锁定的在线索引；模型只是偏好，
+                # 依赖来自随包离线包（在线索引已退役）；模型只是偏好，
                 # 实际下载端点未知，缓存命中不计为新下载。
                 "python_origin": "product_bundle",
                 "runtime_wheel_origin": "product_bundle",
-                "dependency_origin": (
-                    "bundled_pack" if scope.runtime_pack else "online_index"
-                ),
+                "dependency_origin": "bundled_pack",
             }
 
     def recipe_catalog(self) -> list[dict]:
@@ -2621,9 +2595,7 @@ class ManagedEnvironmentStore:
                     "dependencies": [
                         display for _name, display, _version in self._scope_pins(scope)
                     ],
-                    "dependency_origin": (
-                        "bundled_pack" if scope.runtime_pack else "online_index"
-                    ),
+                    "dependency_origin": "bundled_pack",
                     "python_origin": "product_bundle",
                     "runtime_wheel_origin": "product_bundle",
                 }
@@ -2811,11 +2783,6 @@ class ManagedEnvironmentStore:
                     raise RuntimeInstallPlanStale(
                         "source configuration changed; preview again"
                     )
-                source = next(
-                    source
-                    for source in selection.effective_download_sources
-                    if source.kind == DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
-                )
                 revision = record["revision"] + 1
                 staging = self._staging_path(env_id)
                 # 固定候选槽位被上次失败/中断的候选占用时按 ledger 记录
@@ -2875,7 +2842,7 @@ class ManagedEnvironmentStore:
                         next_action="check_directory_permissions",
                     )
                 self._check_install_cancelled()
-                self._install_runner(self._venv_python(staging), scope, source.endpoint)
+                self._install_runner(self._venv_python(staging), scope)
                 self._check_install_cancelled()
                 candidate = {
                     key: value
@@ -2994,9 +2961,7 @@ class ManagedEnvironmentStore:
             observer.finish("succeeded", "依赖已验证并提交；模型与服务尚未启动")
             return self._public_record(candidate, relocated, latest)
 
-    def _install_scope(
-        self, python: Path, scope: RuntimeInstallScope, endpoint: str
-    ) -> None:
+    def _install_scope(self, python: Path, scope: RuntimeInstallScope) -> None:
         if sha256_file(scope.lock_path) != scope.sha256:
             raise ManagedEnvironmentError("engine recipe lock does not match manifest")
         wheel = self.manifest.path.parent / self.manifest.runtime_wheel
@@ -3021,58 +2986,34 @@ class ManagedEnvironmentStore:
         )
         (cache / "temp").mkdir(parents=True, exist_ok=True)
         pack_files = [self.manifest.path.parent / name for name in scope.runtime_pack]
-        if pack_files and not all(path.is_file() for path in pack_files):
+        # 在线依赖安装已退役：统一推理闭包必须绑定完整随包离线包，
+        # 缺失代表发布闭包错误，fail closed 而不是退回在线索引。
+        if not pack_files or not all(path.is_file() for path in pack_files):
             raise ManagedEnvironmentError("bound offline engine pack is missing")
         observer = self._install_observer
         env = _uv_install_environment(env, cache)
         command = _uv_command(python, "install")
-        if pack_files and all(path.is_file() for path in pack_files):
-            if observer is not None:
-                observer.set_phase("unpack", "解包随产品提供的离线依赖")
-            pack_dir = _extract_runtime_pack(
-                pack_files,
-                cache / "runtime-packs",
-                expected_sha256=scope.runtime_pack_sha256,
+        if observer is not None:
+            observer.set_phase("unpack", "解包随产品提供的离线依赖")
+        pack_dir = _extract_runtime_pack(
+            pack_files,
+            cache / "runtime-packs",
+            expected_sha256=scope.runtime_pack_sha256,
+        )
+        if observer is not None:
+            observer.requirements(
+                pack_dir / "pack-requirements.txt", self.manifest.python.version
             )
-            if observer is not None:
-                observer.requirements(
-                    pack_dir / "pack-requirements.txt", self.manifest.python.version
-                )
-                observer.bundled()
-            command += [
-                "--offline",
-                "--no-index",
-                "--find-links",
-                str(pack_dir),
-                "--only-binary=:all:",
-                "-r",
-                str(pack_dir / "pack-requirements.txt"),
-            ]
-        else:
-            if observer is not None:
-                observer.set_phase("resolve", "解析锁定依赖及可复用缓存")
-            downloaded = _prepare_online_artifacts(
-                python, scope.lock_path, endpoint, cache, observer, env
-            )
-            command += [
-                "--default-index",
-                endpoint,
-                "--index-strategy",
-                "first-index",
-                "--find-links",
-                str(downloaded),
-                "--no-deps",
-                "--require-hashes",
-                "-r",
-                str(
-                    _local_install_requirements(
-                        scope.lock_path,
-                        downloaded,
-                        cache / "resolve" / f"{scope.lock_path.stem}-report.json",
-                        self.manifest.python.version,
-                    )
-                ),
-            ]
+            observer.bundled()
+        command += [
+            "--offline",
+            "--no-index",
+            "--find-links",
+            str(pack_dir),
+            "--only-binary=:all:",
+            "-r",
+            str(pack_dir / "pack-requirements.txt"),
+        ]
         if observer is not None:
             observer.set_phase("install", "安装锁定依赖批次")
         _run_install_command(

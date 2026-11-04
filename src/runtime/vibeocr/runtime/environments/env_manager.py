@@ -37,27 +37,11 @@ PYTHON_STANDALONE_URLS = [
 ]
 
 # 历史环境设备信息与 MinerU CUDA 兼容标签；不再用于安装原生 Paddle。
-CUDA_VERSION_MAP = {
-    "11.8": "cu118",
-    # CUDA 12.x 全部归并到 cu126（cu121/cu123 的 paddle wheel 不存在）。
-    # CUDA 12 同大版本共享 cublas64_12.dll，cu126 runtime 向下兼容 12.0+。
-    "12.0": "cu126",
-    "12.1": "cu126",
-    "12.2": "cu126",
-    "12.3": "cu126",
-    "12.4": "cu126",
-    "12.5": "cu126",
-    "12.6": "cu126",
-    "12.7": "cu126",
-    "12.8": "cu126",
-    "12.9": "cu126",
-    # CUDA 13.x 驱动仍兼容 CUDA 12.x 运行时，故映射到 cu126。
-    "13.0": "cu126",
-    "13.1": "cu126",
-    "13.2": "cu126",
-}
 
 logger = logging.getLogger(__name__)
+
+# CUDA 支持已退役：legacy 依赖检测缓存的硬件字段恒为无 GPU。
+_LEGACY_HARDWARE_INFO = {"has_gpu": False, "cuda_version": None}
 
 _dep_specs_cache: dict[str, str] | None = None
 
@@ -917,11 +901,10 @@ def check_embedded_environment_dependencies(
                             )
                         else:
                             logger.info("[依赖检测] 缓存过期，已用实时结果刷新")
-                        has_gpu, cuda_version = detect_gpu()
                         create_cache_entry(
                             project_root,
                             cached_deps,
-                            {"has_gpu": has_gpu, "cuda_version": cuda_version},
+                            _LEGACY_HARDWARE_INFO,
                         )
                 return cached_deps
             logger.info("[依赖检测] 缓存无 dependencies 字段，执行实时检测")
@@ -936,13 +919,8 @@ def check_embedded_environment_dependencies(
     if dependencies.get("paddlepaddle"):
         print("[依赖检测] PaddlePaddle已安装")
 
-    # 3. 更新缓存
-    has_gpu, cuda_version = detect_gpu()
-    hardware_info = {
-        "has_gpu": has_gpu,
-        "cuda_version": cuda_version,
-    }
-    create_cache_entry(project_root, dependencies, hardware_info)
+    # 3. 更新缓存（CUDA 支持已退役：legacy 检测缓存恒记录无 GPU）
+    create_cache_entry(project_root, dependencies, _LEGACY_HARDWARE_INFO)
 
     return dependencies
 
@@ -1335,12 +1313,7 @@ def is_embedded_environment_ready(project_root: Path) -> tuple[bool, list[str]]:
             # 重新写入缓存
             for pkg, installed in verified.items():
                 deps[pkg] = installed
-            has_gpu, cuda_version = detect_gpu()
-            hardware_info = {
-                "has_gpu": has_gpu,
-                "cuda_version": cuda_version,
-            }
-            create_cache_entry(project_root, deps, hardware_info)
+            create_cache_entry(project_root, deps, _LEGACY_HARDWARE_INFO)
 
     return len(missing) == 0, missing
 
@@ -1536,7 +1509,7 @@ def _run_pip(
 def install_backend_dependencies(
     python_exe: Path | None = None,
     *,
-    profile: Literal["cpu", "gpu-cu126"] = "cpu",
+    profile: Literal["cpu"] = "cpu",
     network_type: Literal["domestic", "international"] = "international",
     progress_callback=None,
 ) -> tuple[bool, str]:
@@ -1838,337 +1811,6 @@ def uninstall_removed_deps(
         return False, f"部分依赖卸载失败: {', '.join(failed)}"
     report("依赖清理", "已移除依赖清理完成")
     return True, "已移除依赖清理完成"
-
-
-def detect_cuda_version(
-    cancel_event: threading.Event | None = None,
-) -> str | None:
-    """
-    检测系统CUDA版本
-
-    Returns:
-        CUDA版本字符串（如 "cu126"），如果未检测到则返回 None
-    """
-    # CUDA版本映射到PaddlePaddle支持的版本
-    # paddlepaddle-gpu 3.3.1 win wheel 仅提供 cu118 / cu126 / cu129；本项目统一用 cu126。
-    cuda_version_map = CUDA_VERSION_MAP
-
-    def find_best_match(major_minor: str) -> str | None:
-        """查找最匹配的 PaddlePaddle CUDA 版本"""
-        if major_minor in cuda_version_map:
-            return cuda_version_map[major_minor]
-        # 尝试找到最接近的版本（向下兼容）
-        try:
-            version_float = float(major_minor)
-            best_match = None
-            for supported_ver, paddle_tag in cuda_version_map.items():
-                if float(supported_ver) <= version_float:
-                    best_match = paddle_tag
-            return best_match
-        except ValueError:
-            return None
-
-    try:
-        # 方法1: 解析 nvidia-smi 输出获取 CUDA 版本
-        # 注意: nvidia-smi 的 --query-gpu 不支持 cuda_version 字段
-        # 需要解析 nvidia-smi 的表头输出
-        # timeout=10s：nvidia-smi 首次调用在驱动冷启动时可能 >5s（实测触发
-        # TimeoutExpired → 被误判为"无 CUDA"）。提到 10s 留足冷启动余量。
-        result = _run_pip(
-            ["nvidia-smi"],
-            timeout=10,
-            cancel_event=cancel_event,
-        )
-        if result.returncode == 0 and result.stdout:
-            # 新版 Windows 驱动显示 "CUDA UMD Version: X.Y"，
-            # 旧版/其他平台仍为 "CUDA Version: X.Y"。
-            import re
-
-            match = re.search(r"CUDA(?:\s+UMD)?\s+Version:\s*(\d+\.\d+)", result.stdout)
-            if match:
-                cuda_version = match.group(1)
-                logger.info("[硬件检测] CUDA版本 (nvidia-smi): %s", cuda_version)
-
-                major_minor = ".".join(cuda_version.split(".")[:2])
-                paddle_cuda = find_best_match(major_minor)
-                if paddle_cuda:
-                    logger.info("[硬件检测] 对应PaddlePaddle CUDA版本: %s", paddle_cuda)
-                    return paddle_cuda
-
-    except InstallCancelled:
-        return None
-    except FileNotFoundError:
-        # nvidia-smi 不在 PATH（非 NVIDIA 机器 / 打包态 PATH 裁剪）→ 静默，属正常
-        logger.debug("[硬件检测] nvidia-smi 不在 PATH，跳过该方法")
-    except subprocess.TimeoutExpired:
-        logger.warning("[硬件检测] nvidia-smi 10s 超时（驱动卡死或冷启动），跳过该方法")
-    except Exception as e:
-        logger.warning("[硬件检测] nvidia-smi 检测失败: %s: %s", type(e).__name__, e)
-
-    try:
-        # 方法2: 检查nvcc版本
-        result = _run_pip(
-            ["nvcc", "--version"],
-            timeout=10,
-            cancel_event=cancel_event,
-        )
-        if result.returncode == 0:
-            # 输出包含: "release 12.6"
-            import re
-
-            match = re.search(r"release\s+(\d+\.\d+)", result.stdout)
-            if match:
-                cuda_version = match.group(1)
-                logger.info("[硬件检测] CUDA版本 (nvcc): %s", cuda_version)
-
-                paddle_cuda = find_best_match(cuda_version)
-                if paddle_cuda:
-                    logger.info("[硬件检测] 对应PaddlePaddle CUDA版本: %s", paddle_cuda)
-                    return paddle_cuda
-
-    except InstallCancelled:
-        return None
-    except FileNotFoundError:
-        logger.debug("[硬件检测] nvcc 不在 PATH（未装 CUDA Toolkit），跳过")
-    except subprocess.TimeoutExpired:
-        logger.warning("[硬件检测] nvcc 10s 超时，跳过")
-    except Exception as e:
-        logger.warning("[硬件检测] nvcc 检测失败: %s: %s", type(e).__name__, e)
-
-    logger.warning(
-        "[硬件检测] 无法检测CUDA版本（nvidia-smi 与 nvcc 均不可用/失败，"
-        "将回退 CPU；若机器确有 NVIDIA GPU，请检查驱动安装与 PATH）"
-    )
-    return None
-
-
-def detect_gpu(
-    cancel_event: threading.Event | None = None,
-) -> tuple[bool, str | None]:
-    """
-    检测系统是否有可用的NVIDIA GPU及CUDA版本
-
-    Returns:
-        (是否有GPU, CUDA版本标识如"cu126"或None)
-    """
-    try:
-        result = _run_pip(
-            ["nvidia-smi", "-L"],
-            timeout=10,
-            cancel_event=cancel_event,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            logger.info("[硬件检测] 检测到GPU: %s", result.stdout.strip())
-            cuda_version = detect_cuda_version(cancel_event)
-            return True, cuda_version
-    except InstallCancelled:
-        return False, None
-    except FileNotFoundError:
-        logger.debug("[硬件检测] nvidia-smi 不在 PATH（无 NVIDIA GPU 或打包态裁剪）")
-    except subprocess.TimeoutExpired:
-        logger.warning("[硬件检测] nvidia-smi -L 10s 超时")
-    except Exception as e:
-        logger.warning("[硬件检测] nvidia-smi -L 失败: %s: %s", type(e).__name__, e)
-
-    logger.info("[硬件检测] 未检测到NVIDIA GPU，将使用CPU版本")
-    return False, None
-
-
-def detect_gpu_info(
-    cancel_event: threading.Event | None = None,
-) -> dict[str, object]:
-    """一次性探测 NVIDIA GPU 的硬件信息（供 UI 展示）
-
-    通过单次 ``nvidia-smi`` 调用解析 GPU 名称、显存、CUDA 版本，
-    避免 UI 层多次 shell out。任何环节失败都回退到现有 detect_gpu() 的
-    简单结果（仅 has_gpu + cuda），保证调用方总能拿到可用结构。
-
-    Returns:
-        ``{"has_gpu": bool, "name": str, "vram_mb": int, "cuda": str | None}``
-        - has_gpu：是否有可用的 NVIDIA GPU
-        - name：GPU 型号（无 GPU 时为空串）
-        - vram_mb：总显存 MB（无 GPU 时为 0）
-        - cuda：CUDA 版本 cu-tag（如 "cu126"），无 GPU 或解析失败为 None
-    """
-    import re
-
-    # 结果默认值（无 GPU / 解析失败）
-    info: dict[str, object] = {
-        "has_gpu": False,
-        "name": "",
-        "vram_mb": 0,
-        "cuda": None,
-    }
-
-    try:
-        result = _run_pip(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,driver_version",
-                "--format=csv,noheader,nounits",
-            ],
-            timeout=10,
-            cancel_event=cancel_event,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            # nvidia-smi 不可用 → 回退到 detect_gpu（处理 nvcc 等次要探测路径）
-            has_gpu, cuda = detect_gpu(cancel_event)
-            info["has_gpu"] = has_gpu
-            info["cuda"] = cuda
-            return info
-
-        # 取第一块 GPU 的信息（多卡场景仅展示首卡）
-        first_line = result.stdout.strip().splitlines()[0]
-        # 格式："NVIDIA GeForce RTX 4090, 24564 MiB, 560.94"（nounits 已去掉单位，
-        # 但 memory.total 仍带 "MiB"，按逗号拆分后 strip）
-        parts = [p.strip() for p in first_line.split(",")]
-        name = parts[0] if parts else ""
-        vram_mb = 0
-        if len(parts) > 1:
-            # "24564 MiB" → 24564；纯数字也兼容
-            m = re.search(r"(\d+)", parts[1])
-            if m:
-                vram_mb = int(m.group(1))
-
-        info["has_gpu"] = True
-        info["name"] = name
-        info["vram_mb"] = vram_mb
-        info["cuda"] = detect_cuda_version(cancel_event)
-        return info
-    except InstallCancelled:
-        return info
-    except Exception as e:
-        logger.warning(
-            "[硬件检测] detect_gpu_info 解析失败: %s: %s", type(e).__name__, e
-        )
-        has_gpu, cuda = detect_gpu(cancel_event)
-        info["has_gpu"] = has_gpu
-        info["cuda"] = cuda
-        return info
-
-
-def _resolve_cached_use_gpu(project_root: Path) -> bool | None:
-    """从机器缓存解析实际 GPU 后端，缓存不足时返回 None。"""
-    is_valid, cached_data = is_cache_valid(project_root)
-    if not (is_valid and cached_data):
-        return None
-
-    pending = cached_data.get("pending_backend")
-    if pending == "gpu":
-        return True
-    if pending == "cpu":
-        return False
-
-    hardware_info = cached_data.get("hardware_info") or {}
-    if "has_gpu" in hardware_info:
-        return bool(hardware_info["has_gpu"])
-    return None
-
-
-def resolve_use_gpu(project_root: Path) -> bool:
-    """决定运行时是否使用 GPU（缓存优先 + 探测回退）
-
-    避免在无 GPU 的机器上硬编码 use_gpu=True，让 OCR worker 以 CPU 模式启动。
-
-    策略：
-    1. 读 machine_cache 的 hardware_info.has_gpu（依赖检测时由
-       check_embedded_environment_dependencies 写入）
-    2. 缓存有效且含 has_gpu → 直接返回
-    3. 缓存缺失/失效/无 hardware_info → 回退 detect_gpu() 实时探测
-
-    Args:
-        project_root: 项目根目录
-
-    Returns:
-        是否使用 GPU
-    """
-    cached = _resolve_cached_use_gpu(project_root)
-    if cached is not None:
-        return cached
-
-    # 缓存不可用，实时探测
-    has_gpu, _cuda_version = detect_gpu()
-    return has_gpu
-
-
-# 进程级运行时 GPU 能力缓存：避免多个 UI widget 各自重复 shell out nvidia-smi。
-# 仅缓存 resolve_use_gpu 的结果（尊重 pending_backend），不缓存 detect_gpu_info
-# （后者是纯展示用、无副作用，且后端切换后缓存需失效，故不缓存）。
-_runtime_gpu_capability_cache: bool | None = None
-
-
-def get_runtime_gpu_capability(
-    project_root: Path, *, detected_has_gpu: bool | None = None
-) -> bool:
-    """获取运行时是否具备 GPU 推理能力（进程级缓存）
-
-    与 ``resolve_use_gpu`` 的语义一致：基于"实际运行后端"判断，而非单纯的
-    物理 GPU 存在性。因此以下两种情况都返回 False：
-    - 无符合 CUDA 条件的 NVIDIA GPU
-    - 有 GPU 但用户在设置页选择了 CPU 后端（``pending_backend="cpu"``）
-
-    结果做进程级缓存，避免多个 PreprocessOptionsWidget 实例各自探测。
-    缓存在进程生命周期内有效——后端切换需要重启才生效（见 switch_paddle_backend
-    写入 pending_backend 的注释），故无需主动失效。
-
-    ``detected_has_gpu`` 供已在后台完成物理 GPU 探测的调用方传入。
-    缓存中的 pending/current 后端仍优先；缓存不足时直接复用
-    该结果，避免再次 shell out ``nvidia-smi``。
-
-    Args:
-        project_root: 项目根目录
-        detected_has_gpu: 后台已探测的物理 GPU 结果，可选
-
-    Returns:
-        运行时是否使用 GPU 后端
-    """
-    global _runtime_gpu_capability_cache
-    if _runtime_gpu_capability_cache is not None:
-        return _runtime_gpu_capability_cache
-
-    cached = _resolve_cached_use_gpu(project_root)
-    if cached is not None:
-        resolved = cached
-    elif detected_has_gpu is not None:
-        resolved = bool(detected_has_gpu)
-    else:
-        resolved = resolve_use_gpu(project_root)
-    _runtime_gpu_capability_cache = resolved
-    return _runtime_gpu_capability_cache
-
-
-def switch_paddle_backend(
-    project_root: Path,
-    target: str,
-    network_type: Literal["domestic", "international"] = "domestic",
-    progress_callback=None,
-    cancel_event: threading.Event | None = None,
-    on_proc: Callable[[subprocess.Popen], None] | None = None,
-) -> tuple[bool, str]:
-    """切换 PaddlePaddle 后端（GPU ↔ CPU）
-
-    #270：原生 PaddlePaddle 后端已随产品退役。该入口必须在任何
-    pip uninstall / 安装写操作之前明确拒绝——绝不能先卸载历史环境
-    再失败；已安装的历史环境保持原样，请改用 Paddle ONNX 环境。
-
-    Args:
-        project_root: 项目根目录
-        target: "gpu" 或 "cpu"
-        network_type: 网络类型
-        progress_callback: 进度回调 (stage, message)
-        cancel_event: 协作式取消事件，set 后中止卸载/安装
-        on_proc: 子进程启动回调，用于记录当前 Popen 供 cancel 时 kill
-
-    Returns:
-        (是否成功, 消息)
-    """
-    if target not in ("gpu", "cpu"):
-        return False, f"无效的后端目标: {target}（应为 'gpu' 或 'cpu'）"
-    del project_root, network_type, progress_callback, cancel_event, on_proc
-    return False, (
-        "原生 PaddlePaddle 后端已退役，后端切换入口已关闭；"
-        "请改用 Paddle ONNX 环境（CPU/CUDA/DirectML）"
-    )
 
 
 def get_project_root() -> Path:

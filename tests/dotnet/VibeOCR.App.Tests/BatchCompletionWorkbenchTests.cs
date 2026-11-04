@@ -24,7 +24,7 @@ public sealed class BatchCompletionWorkbenchTests
   public async Task PaddleTableDeviceOptionSubmitsOnBatchWire()
   {
     // 批量入口与单次/截图共享同一选项冻结链：显式 paddle_table 任务携带
-    // options.device=cuda，不静默改 CPU。
+    // options.device=directml，不静默改 CPU。
     var client = new BatchRunClient();
     await using var harness = await CompletionHarness.CreateAsync(client);
     CancellationToken cancellationToken = TestContext.Current.CancellationToken;
@@ -37,9 +37,9 @@ public sealed class BatchCompletionWorkbenchTests
       if (state is BatchWorkbenchState batchState) deviceState = batchState;
     };
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
+      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "directml" }),
       cancellationToken)).Error);
-    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
+    Assert.Equal("directml", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
       .Options!["device"].GetString());
     Assert.Null((await harness.Handler.ExecuteAsync(
       new SetBatchTaskEngineCommand("paddle_table"), cancellationToken)).Error);
@@ -48,7 +48,7 @@ public sealed class BatchCompletionWorkbenchTests
     await client.WaitSubmittedAsync(cancellationToken);
     Assert.Equal("TABLE_RECOGNITION", client.LastRequest!.Pipeline.PipelineId);
     Assert.Null(client.LastRequest.Pipeline.Engine);
-    Assert.Equal("cuda", client.LastRequest.Pipeline.Options["device"].GetString());
+    Assert.Equal("directml", client.LastRequest.Pipeline.Options["device"].GetString());
   }
 
   [Fact]

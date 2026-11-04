@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from vibeocr.runtime.environments.network_detector import get_pip_mirror
 from vibeocr.runtime.environments.runtime_manifest import (
     ACCELERATOR_TO_PLAN,
     PROFILE_COMPONENTS,
@@ -22,13 +21,16 @@ from vibeocr.runtime.environments.runtime_manifest import (
 )
 from vibeocr.runtime_contracts import ErrorCode
 
+# 历史契约值：package_index 源 kind 已随在线依赖安装退役，仅保留常量
+# 供旧 payload 的读取识别，不再进入目录或有效选择。
 DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX = "package_index"
 DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY = "model_registry"
 DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY = "paddleocr_model_registry"
 DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY = "mineru_model_registry"
 
 # 可选组件目录只描述 full 档位：base 档位的闭包是必备项，不可选择。
-VARIANT_ACCELERATORS = ("cpu", "nvidia_cuda")
+# CUDA 档位（nvidia_cuda）已退役，不在目录中展开。
+VARIANT_ACCELERATORS = ("cpu",)
 BASE_PROFILE = "win-x64-base"
 
 # #270：原生 Paddle 组件身份保留在 PROFILE_COMPONENTS/迁移表中供历史
@@ -48,23 +50,12 @@ RETIRED_INSTALLABLE_COMPONENTS = frozenset(
 )
 RETIRED_NATIVE_PADDLE_COMPONENTS = RETIRED_INSTALLABLE_COMPONENTS
 
-# Backend release 声明的候选源。Protocol 允许同 kind 多候选；单次选择
-# TUNA 是发布/运行时默认 package index，官方 PyPI 保留为显式候选，
-# 不做静默 fallback。模型源选择只投影到 PaddleX/MinerU 官方环境值；
-# 上游原生 downloader 继续拥有模型下载与文件生命周期。历史共享
-# model_registry 条目保留在目录中供旧计划/意图/设置解析（UI 已隐藏），
-# 默认模型源为 ModelScope（仅代表安装依赖与下载模型）。
+# Backend release 声明的候选源。依赖全部随产品离线分发后目录只剩模型
+# 源：选择只投影到 PaddleX/MinerU 官方环境值，上游原生 downloader 继续
+# 拥有模型下载与文件生命周期。历史 package_index 源 id（tuna-pypi/pypi）
+# 与共享 model_registry 条目不再出现在目录中，只作为旧计划/意图/设置
+# 的读取兼容在解析点过滤或展开，默认模型源为 ModelScope。
 _DOWNLOAD_SOURCES: tuple[dict[str, str], ...] = (
-    {
-        "kind": DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
-        "id": "tuna-pypi",
-        "endpoint": get_pip_mirror("domestic"),
-    },
-    {
-        "kind": DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
-        "id": "pypi",
-        "endpoint": get_pip_mirror("international"),
-    },
     {
         "kind": DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
         "id": "huggingface",
@@ -90,14 +81,14 @@ _DOWNLOAD_SOURCES += tuple(
         ("mineru", "modelscope", "https://www.modelscope.cn"),
     )
 )
-_DEFAULT_DOWNLOAD_SOURCE_IDS = ("tuna-pypi",)
+# 历史 package index id：目录已退役，读取路径静默忽略。
+_RETIRED_PACKAGE_SOURCE_IDS = frozenset({"tuna-pypi", "pypi"})
+_DEFAULT_DOWNLOAD_SOURCE_IDS: tuple[str, ...] = ()
 _DEFAULT_MODEL_SOURCE_IDS = ("paddleocr-modelscope", "mineru-modelscope")
 
 # 展示名映射：目录 payload 仍只携带 kind/id/endpoint（wire 契约不变），
 # 管理通道的名称投影由此处单点提供，避免各端重复硬编码。
 _DOWNLOAD_SOURCE_DISPLAY_NAMES: dict[str, str] = {
-    "tuna-pypi": "TUNA PyPI 镜像",
-    "pypi": "PyPI 官方源",
     "huggingface": "Hugging Face",
     "modelscope": "ModelScope",
 }
@@ -139,11 +130,17 @@ def download_source_provider(source_id: str) -> str | None:
 
 
 def expand_legacy_model_sources(source_ids: Sequence[str]) -> tuple[str, ...]:
-    """Expand historical shared preferences; explicit engine preferences take precedence."""
+    """Expand historical shared preferences and drop retired package indexes.
+
+    历史 package_index 源 id（tuna-pypi/pypi）已随在线依赖安装退役：读取
+    旧计划/意图/设置时静默忽略；共享 huggingface/modelscope 偏好按原有
+    规则展开，显式引擎偏好优先。
+    """
     result = [
         source_id
         for source_id in source_ids
         if source_id not in {"huggingface", "modelscope"}
+        and source_id not in _RETIRED_PACKAGE_SOURCE_IDS
     ]
     for source_id in source_ids:
         if source_id in {"huggingface", "modelscope"}:
@@ -229,9 +226,11 @@ class RuntimeSelectionPolicy:
             )
             for source in catalog
         )
-        self._default_download_source_ids = self._resolve_source_ids(
-            tuple(default_download_source_ids)
-        )
+        defaults = tuple(default_download_source_ids)
+        if not defaults:
+            # 目录只剩模型源：缺省 = 双引擎 ModelScope 偏好。
+            defaults = _DEFAULT_MODEL_SOURCE_IDS
+        self._default_download_source_ids = self._resolve_source_ids(defaults)
 
     @classmethod
     def from_manifest(
@@ -283,7 +282,9 @@ class RuntimeSelectionPolicy:
         requested_sources = (
             None
             if download_source_ids is None
-            else self._resolve_source_ids(tuple(download_source_ids))
+            # 仅含历史 package index 的请求等效未请求（与
+            # normalize_download_source_ids 同语义：继承默认来源）。
+            else (self._resolve_source_ids(tuple(download_source_ids)) or None)
         )
         default_sources = (
             self._resolve_source_ids(tuple(default_download_source_ids))
@@ -292,7 +293,7 @@ class RuntimeSelectionPolicy:
         )
         effective_source_ids = (
             default_sources
-            if requested_sources is None
+            if not requested_sources
             else self._overlay_source_ids(default_sources, requested_sources)
         )
         selected = set(effective_source_ids)
@@ -309,11 +310,17 @@ class RuntimeSelectionPolicy:
         )
 
     def _resolve_source_ids(self, requested: tuple[str, ...]) -> tuple[str, ...]:
+        # 历史 package index 选择在读取层静默忽略（依赖全部离线随包后
+        # 不再有任何 pip 索引语义）。过滤后为空 = 没有有效来源请求，
+        # 由调用方按继承/默认来源处理（例如历史冻结计划只记录了纯
+        # 包源 effective 集合时回退产品默认），而不是拒绝整个选择。
+        requested = tuple(
+            source_id
+            for source_id in requested
+            if source_id not in _RETIRED_PACKAGE_SOURCE_IDS
+        )
         if not requested:
-            raise RuntimeSelectionError(
-                ErrorCode.VALIDATION_ERROR,
-                "download_source_ids must contain at least one source",
-            )
+            return ()
         if len(set(requested)) != len(requested):
             raise RuntimeSelectionError(
                 ErrorCode.VALIDATION_ERROR,
@@ -475,8 +482,9 @@ class RuntimeSelectionPolicy:
 
 
 def default_download_sources(
-    *, include_model_sources: bool = False
+    *, include_model_sources: bool = True
 ) -> tuple[dict[str, str], ...]:
+    """目录内当前缺省源：依赖索引源已退役，缺省即双引擎模型源。"""
     defaults = set(_DEFAULT_DOWNLOAD_SOURCE_IDS)
     if include_model_sources:
         defaults.update(_DEFAULT_MODEL_SOURCE_IDS)
@@ -523,7 +531,6 @@ def download_source_catalog_payload(
     for source in entries:
         source_kind = source["kind"]
         if source_kind not in {
-            DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX,
             DOWNLOAD_SOURCE_KIND_MODEL_REGISTRY,
             DOWNLOAD_SOURCE_KIND_PADDLEOCR_MODEL_REGISTRY,
             DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
@@ -533,16 +540,12 @@ def download_source_catalog_payload(
                 f"unsupported download source kind: {source_kind}",
             )
         source_id = source["id"]
-        if (
-            source_kind != DOWNLOAD_SOURCE_KIND_PACKAGE_INDEX
-            and source_id not in _MODEL_SOURCE_ENVIRONMENT
-        ):
+        if source_id not in _MODEL_SOURCE_ENVIRONMENT:
             raise RuntimeSelectionError(
                 ErrorCode.VALIDATION_ERROR,
                 f"unsupported model registry source id: {source_id}",
             )
-        # Protocol 只要求 source id 唯一；同 kind 可以声明多个候选，
-        # “package_index 至多选一个”属于单次 selection 的约束。
+        # Protocol 只要求 source id 唯一；目录只携带模型源。
         if source_id in seen_ids:
             raise RuntimeSelectionError(
                 ErrorCode.VALIDATION_ERROR,
@@ -601,12 +604,19 @@ def selectable_component_ids_across_catalog() -> frozenset[str]:
 def normalize_download_source_ids(
     requested: Sequence[str] | None,
 ) -> tuple[str, ...]:
-    """规范化源选择：省略/空 → Backend 缺省源；未知 id、同 kind 多选 fail closed。"""
+    """规范化源选择：省略/空/仅历史 package 源 → 双引擎模型默认；未知 id、
+    同 kind 多选 fail closed；历史 package index id 静默忽略。"""
     catalog = {
         source["id"]: source for source in download_source_catalog_payload()["sources"]
     }
+    if requested is not None:
+        requested = tuple(
+            source_id
+            for source_id in requested
+            if source_id not in _RETIRED_PACKAGE_SOURCE_IDS
+        )
     if not requested:
-        return _DEFAULT_DOWNLOAD_SOURCE_IDS
+        return _DEFAULT_MODEL_SOURCE_IDS
     if len(set(requested)) != len(requested):
         raise RuntimeSelectionError(
             ErrorCode.VALIDATION_ERROR,
@@ -685,7 +695,13 @@ def normalize_install_component_ids(
     legacy_request = any(
         item in {"ocr_engine", "document_parsing"} for item in requested
     )
-    plan = ACCELERATOR_TO_PLAN[accelerator]
+    plan = ACCELERATOR_TO_PLAN.get(accelerator)
+    if plan is None:
+        # CUDA 档位已退役：未知/退役 accelerator 可诊断拒绝，不裸抛 KeyError。
+        raise RuntimeSelectionError(
+            ErrorCode.VALIDATION_ERROR,
+            f"unsupported accelerator: {accelerator}",
+        )
     requested = migrate_legacy_component_ids(plan, requested)
     # #270：显式退役组件请求（含旧 ocr_engine 迁移出的原生 Paddle）
     # 可诊断拒绝；历史读取兼容由调用方捕获后回退，不静默改写用户选择。

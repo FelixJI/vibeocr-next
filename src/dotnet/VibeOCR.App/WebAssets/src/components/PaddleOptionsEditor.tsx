@@ -97,11 +97,10 @@ export function PaddleOptionsEditor({
           >
             <option value="auto">跟随运行环境</option>
             <option value="cpu">CPU</option>
-            <option value="cuda">NVIDIA CUDA</option>
             <option value="directml">Windows DirectML</option>
           </Select>
           <p className="form-note">
-            CUDA 和 DirectML 需要对应的 ONNX 环境；不可用时会明确失败。
+            DirectML 需要对应的 ONNX 环境；不可用时会明确失败。
           </p>
         </div>
       )}

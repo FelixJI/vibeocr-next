@@ -623,7 +623,7 @@ public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
 public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string? SourceId) : WorkbenchCommand;
 public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string? SourceId) : WorkbenchCommand;
 public sealed record SetEnvironmentSourcesCommand(
-  string? EnvironmentId, string? PackageSourceId, string? ModelSourceId,
+  string? EnvironmentId, string? ModelSourceId,
   string? PaddleocrModelSourceId = null, string? MineruModelSourceId = null,
   bool IndependentModelSources = false) : WorkbenchCommand;
 public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
@@ -1092,13 +1092,11 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<string>? EnvironmentDefaultSourceIds = null,
   IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
   IReadOnlyList<SettingsEnvironmentResolvedSourceState>? EnvironmentResolvedDefaultSources = null,
-  IReadOnlyList<string>? EnvironmentPackageSourceIds = null,
   bool EnvironmentCanCancelInstall = false,
   VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent? EnvironmentInstallProgress = null,
   IReadOnlyList<string>? EnvironmentInstallLog = null,
   bool EnvironmentSupportsInstallProgress = false,
   IReadOnlyList<SettingsEnvironmentRecipeState>? EnvironmentRecipes = null,
-  SettingsEnvironmentHardwareState? EnvironmentHardware = null,
   SettingsEnvironmentCompatibilityState? EnvironmentCompatibility = null,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null,
@@ -1186,14 +1184,6 @@ public sealed record SettingsEnvironmentRecipeState(
   bool DefaultRemoteHost = false);
 
 /// <summary>
-/// 硬件可用性投影（list.hardware）：nvidia 驱动真值只由 Runtime 探测，
-/// 宿主/前端不检测硬件；状态缺失时按未探测（unknown）呈现。
-/// </summary>
-public sealed record SettingsEnvironmentHardwareState(
-  string NvidiaDriverStatus,
-  string? NvidiaDriverReason = null,
-  string? NvidiaDriverVersion = null);
-
 /// <summary>当前选择配方的 find_compatible 只读结果（绑定配方 id，防止旧结果覆盖新选择）。</summary>
 public sealed record SettingsEnvironmentCompatibilityState(
   string Recipe,

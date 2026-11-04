@@ -356,7 +356,10 @@ async def _selection_http_checks() -> None:
                 "phase": "commit_runtime",
                 "profile_id": "win-x64-cpu",
                 "updated_at": "2026-08-17T00:00:00Z",
-                "effective_download_source_ids": ["pypi"],
+                "effective_download_source_ids": [
+                    "paddleocr-modelscope",
+                    "mineru-modelscope",
+                ],
             }
             if scope is not None:
                 snapshot["requested_component_ids"] = list(scope)
@@ -402,8 +405,10 @@ async def _selection_http_checks() -> None:
         ]
         if not sources or len({s["id"] for s in sources}) != len(sources):
             raise RuntimeError("download source catalog ids are not unique/non-empty")
-        if not any(source["id"] == "tuna-pypi" for source in sources):
-            raise RuntimeError("trusted TUNA package index is not declared")
+        if not any(source["id"] == "paddleocr-modelscope" for source in sources):
+            raise RuntimeError("default ModelScope model source is not declared")
+        if {"tuna-pypi", "pypi"}.intersection({source["id"] for source in sources}):
+            raise RuntimeError("retired package index sources must not be declared")
         variants = descriptors["runtime.component-selection.v1"][
             "component_variant_catalog"
         ]["variants"]
@@ -477,10 +482,12 @@ async def _selection_http_checks() -> None:
                 "schema_version": 2,
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
-                "download_source_ids": ["pypi"],
+                "download_source_ids": ["paddleocr-modelscope"],
             },
         )
-        if put.status_code != 200 or put.json().get("download_source_ids") != ["pypi"]:
+        if put.status_code != 200 or put.json().get("download_source_ids") != [
+            "paddleocr-modelscope"
+        ]:
             raise RuntimeError("settings download_source_ids roundtrip failed")
         unknown_source = await client.put(
             "/v2/settings",
@@ -503,7 +510,7 @@ async def _selection_http_checks() -> None:
             json={
                 "operation": "ensure",
                 "install_component_ids": [],
-                "download_source_ids": ["pypi"],
+                "download_source_ids": ["paddleocr-modelscope"],
             },
         )
         if started.status_code != 200:
@@ -513,7 +520,10 @@ async def _selection_http_checks() -> None:
         receipt = started.json()
         if receipt["snapshot"].get("requested_component_ids") != []:
             raise RuntimeError("explicit empty install scope was not echoed")
-        if receipt["snapshot"].get("effective_download_source_ids") != ["pypi"]:
+        if receipt["snapshot"].get("effective_download_source_ids") != [
+            "paddleocr-modelscope",
+            "mineru-modelscope",
+        ]:
             raise RuntimeError("effective download sources were not echoed")
 
         unknown_component = await client.post(

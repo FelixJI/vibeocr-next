@@ -2350,7 +2350,7 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId,
-      string? packageSourceId, string? modelSourceId, CancellationToken cancellationToken = default) =>
+      string? modelSourceId, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(string environmentId,
       string recipe, IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) =>

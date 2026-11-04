@@ -30,10 +30,10 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetEnvironmentSourcesCommand setEnvironmentSources => await RunEnvironmentAsync(
       environment => setEnvironmentSources.IndependentModelSources
         ? environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
-            setEnvironmentSources.PackageSourceId, setEnvironmentSources.PaddleocrModelSourceId,
+            setEnvironmentSources.PaddleocrModelSourceId,
             setEnvironmentSources.MineruModelSourceId, cancellationToken)
         : environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
-            setEnvironmentSources.PackageSourceId, setEnvironmentSources.ModelSourceId,
+            setEnvironmentSources.ModelSourceId,
             cancellationToken), cancellationToken),
     PreviewEnvironmentInstallCommand preview => await RunEnvironmentAsync(
       environment => environment.PreviewAsync(preview.EnvironmentId, preview.Recipe,
@@ -837,7 +837,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
           source.Requested, source.InheritedFrom, source.Usage, source.ActualEndpoint)).ToArray(),
         environmentPlan.DependencyOrigin, environmentPlan.PythonOrigin,
         environmentPlan.RuntimeWheelOrigin, environmentPlan.RemovedDependencies,
-        environmentPlan.RequiresServiceStop, environmentPlan.CudaPluginAction)
+        environmentPlan.RequiresServiceStop)
       : null,
     EnvironmentStatus: viewModel.Environments?.Status ?? "",
     // 加载判定事实（不随文案变化）：快照是否已读到位、清单读取是否已尝试。
@@ -854,7 +854,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     EnvironmentResolvedDefaultSources: viewModel.Environments?.Snapshot?.ResolvedDefaultSources?.Select(source =>
       new SettingsEnvironmentResolvedSourceState(source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
     EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
-    EnvironmentPackageSourceIds: viewModel.Environments?.Snapshot?.PackageSourceIds,
     EnvironmentCanCancelInstall: viewModel.Environments?.CanCancelInstall ?? false,
     EnvironmentInstallProgress: viewModel.Environments?.InstallProgress,
     EnvironmentInstallLog: viewModel.Environments?.InstallLog,
@@ -867,13 +866,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
         recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
         recipe.RuntimeWheelOrigin, recipe.Engine, recipe.Family, recipe.FamilyDisplayName,
         recipe.Provider, recipe.SupportsRemoteHost, recipe.DefaultRemoteHost)).ToArray(),
-    EnvironmentHardware: viewModel.Environments?.Snapshot?.Hardware is { } hardware
-      ? new SettingsEnvironmentHardwareState(
-        hardware.NvidiaDriver?.Status ?? "unknown",
-        hardware.NvidiaDriver?.ReasonCode,
-        hardware.NvidiaDriver?.DriverVersion)
-      // 旧 Runtime payload 无 hardware：诚实按未探测呈现，不臆造可用性。
-      : new SettingsEnvironmentHardwareState("unknown"),
     EnvironmentSupportsCleanup: viewModel.Environments?.SupportsCleanup ?? false,
     EnvironmentCleanupPlan: viewModel.Environments?.CleanupPlanPage,
     EnvironmentCleanupResult: viewModel.Environments?.CleanupResultPage,

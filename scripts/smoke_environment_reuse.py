@@ -25,7 +25,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from smoke_environment_cleanup import seed_installer_cache
-from vibeocr.runtime.environments import managed_environments, runtime_installer
+from vibeocr.runtime.environments import managed_environments
 from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentError,
     ManagedEnvironmentStore,
@@ -95,9 +95,14 @@ def main() -> int:
         for index, recipe in enumerate(("paddleocr-ort-directml",) * 2, start=1):
             print(f"Preparing real {recipe} #{index}", flush=True)
             created = manager.create(f"统一推理闭包 {index}")
-            plan = manager.preview_install(created["id"], recipe, ("tuna-pypi",))
+            plan = manager.preview_install(
+                created["id"], recipe, ("paddleocr-modelscope", "mineru-modelscope")
+            )
             installed = manager.install(
-                plan["plan_id"], created["id"], recipe, ("tuna-pypi",)
+                plan["plan_id"],
+                created["id"],
+                recipe,
+                ("paddleocr-modelscope", "mineru-modelscope"),
             )
             assert installed["status"] == "installed"
             assert (
@@ -200,7 +205,6 @@ def main() -> int:
         evidence["initial_install_calls"] = initial_calls
         blocked = {
             "installer_calls": 0,
-            "dependency_download_calls": 0,
             "install_command_calls": 0,
         }
 
@@ -211,16 +215,12 @@ def main() -> int:
 
             return closed
 
-        # Close the real dependency preparation graph only after both real installs.
+        # Close the real dependency installation entry points only after both
+        # real installs. Online preparation/download paths no longer exist in
+        # the product (dependencies ship in the bundled offline packs).
         # Health probes and the local Supervisor health HTTP remain unmodified.
         manager._install_runner = deny("installer_calls")
-        managed_environments._prepare_online_artifacts = deny(
-            "dependency_download_calls"
-        )
         managed_environments._run_install_command = deny("install_command_calls")
-        runtime_installer._download_resolved_artifacts = deny(
-            "dependency_download_calls"
-        )
         evidence["reuse"] = blocked
         processes = []
 

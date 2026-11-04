@@ -6,17 +6,20 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-import httpx
 import jsonschema
 import pytest
-from test_runtime_download_progress import _artifact, _transport
 from vibeocr.runtime.environments import runtime_installer as installer
 from vibeocr.runtime.environments.managed_install_progress import ManagedInstallObserver
 
 
 def _observer(events: list[dict]) -> ManagedInstallObserver:
     return ManagedInstallObserver(
-        events.append, lambda: None, "a" * 32, "test-env", 2, ["tuna-pypi"]
+        events.append,
+        lambda: None,
+        "a" * 32,
+        "test-env",
+        2,
+        ["paddleocr-modelscope", "mineru-modelscope"],
     )
 
 
@@ -75,55 +78,6 @@ def test_unparsed_requirements_and_conflicting_pins_keep_total_unknown(
     assert observer.total_known
     assert [item["name"] for item in observer.dependencies] == ["a"]
     assert observer.dependencies[0]["version"] == "1.0"
-
-
-def test_cached_files_are_not_new_downloads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    a, allowed_a = _artifact(b"cached")
-    b, allowed_b = _artifact(b"new", "https://example.invalid/b.whl")
-    b = installer._ResolvedArtifact("b", b.url, b.sha256, "b.whl")
-    (tmp_path / a.filename).write_bytes(b"cached")
-    lock = tmp_path / "requirements.txt"
-    lock.write_text("a==1\nb==2\n", encoding="utf-8")
-    events: list[dict] = []
-    observer = _observer(events)
-    observer.requirements(lock, "3.13.7")
-    _transport(
-        monkeypatch,
-        lambda request: httpx.Response(
-            200,
-            headers={"Content-Length": "3"},
-            stream=httpx.ByteStream(b"" if request.method == "HEAD" else b"new"),
-        ),
-    )
-    installer._download_resolved_artifacts(
-        (a, b), {**allowed_a, "b": allowed_b["a"]}, tmp_path, observer
-    )
-    assert events[0]["download_files_total"] is None
-    assert events[-1]["download_files_total"] == 1
-    assert events[-1]["download_files_completed"] == 1
-    assert [item["download_state"] for item in events[-1]["dependencies"]] == [
-        "cached",
-        "downloaded",
-    ]
-    assert all(
-        item["install_state"] == "pending" for item in events[-1]["dependencies"]
-    )
-    second: list[dict] = []
-    cached = _observer(second)
-    cached.requirements(lock, "3.13.7")
-    installer._download_resolved_artifacts(
-        (a, b), {**allowed_a, "b": allowed_b["a"]}, tmp_path, cached
-    )
-    assert (
-        second[-1]["download_files_total"]
-        == second[-1]["download_files_completed"]
-        == 0
-    )
-    assert all(
-        item["download_state"] == "cached" for item in second[-1]["dependencies"]
-    )
 
 
 def test_real_command_output_arrives_before_exit_and_is_redacted(
@@ -202,74 +156,3 @@ def test_observer_failure_does_not_break_command_or_cancellation() -> None:
             reporter=observer,
             heartbeat_code="runtime.install_profile",
         )
-
-
-@pytest.mark.parametrize("resolver_fails", [False, True])
-def test_online_artifacts_keep_resolve_phase_until_resolution_succeeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolver_fails: bool
-) -> None:
-    lock = tmp_path / "requirements.txt"
-    lock.write_text("a==1\n", encoding="utf-8")
-    report = tmp_path / "report.json"
-    report.write_text(
-        json.dumps(
-            {
-                "install": [
-                    {
-                        "metadata": {"name": "a", "version": "1"},
-                        "download_info": {"url": "https://example.invalid/a.whl"},
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    events: list[dict] = []
-    observer = _observer(events)
-    observer.set_phase("resolve")
-    resolving_phases: list[str] = []
-    downloaded = False
-    original_parse = installer._parse_resolve_report
-
-    def resolve(*args) -> Path:
-        resolving_phases.append(observer.phase)
-        if resolver_fails:
-            raise installer.RuntimeInstallError("resolver failed")
-        return report
-
-    def parse(path: Path, root: Path) -> tuple[installer._ResolvedArtifact, ...]:
-        resolving_phases.append(observer.phase)
-        return original_parse(path, root)
-
-    def download(artifacts, allowed, root: Path, reporter) -> Path:
-        nonlocal downloaded
-        assert reporter is observer and observer.phase == "download"
-        downloaded = True
-        return root
-
-    monkeypatch.setattr(installer, "_resolve_online_report", resolve)
-    monkeypatch.setattr(installer, "_parse_resolve_report", parse)
-    monkeypatch.setattr(installer, "_download_resolved_artifacts", download)
-    if resolver_fails:
-        with pytest.raises(installer.RuntimeInstallError, match="resolver failed"):
-            installer._prepare_online_artifacts(
-                Path(sys._base_executable),
-                lock,
-                "https://example.invalid",
-                tmp_path,
-                observer,
-                {},
-            )
-        assert not downloaded and observer.phase == "resolve"
-        assert resolving_phases == ["resolve"]
-        assert all(event["phase"] != "download" for event in events)
-    else:
-        installer._prepare_online_artifacts(
-            Path(sys._base_executable),
-            lock,
-            "https://example.invalid",
-            tmp_path,
-            observer,
-            {},
-        )
-        assert downloaded and resolving_phases == ["resolve", "resolve"]

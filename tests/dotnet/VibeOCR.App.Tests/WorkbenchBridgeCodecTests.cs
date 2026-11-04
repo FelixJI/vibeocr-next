@@ -12,7 +12,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
 {
   [Theory]
   [InlineData("cpu")]
-  [InlineData("cuda")]
   [InlineData("directml")]
   public void EnvironmentSwitchCarriesAnIndependentExplicitDevice(string device)
   {
@@ -348,7 +347,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
             "scope": "settings",
             "action": "setEnvironmentSources",
             "arguments": {
-              "packageSourceId": "pypi",
               "modelSourceId": null
             }
           }
@@ -358,7 +356,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     var global = Assert.IsType<SetEnvironmentSourcesCommand>(
       ParseForTest(globalJson, sessionId).Command);
     Assert.Null(global.EnvironmentId);
-    Assert.Equal("pypi", global.PackageSourceId);
     Assert.Null(global.ModelSourceId);
     string independentJson = globalJson.Replace("\"modelSourceId\": null",
       "\"paddleocrModelSourceId\": \"paddleocr-bos\", \"mineruModelSourceId\": \"mineru-modelscope\"");
@@ -383,7 +380,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
             "action": "setEnvironmentSources",
             "arguments": {
               "environmentId": "{{environmentId}}",
-              "packageSourceId": null,
               "modelSourceId": "modelscope"
             }
           }
@@ -393,12 +389,11 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     var scoped = Assert.IsType<SetEnvironmentSourcesCommand>(
       ParseForTest(scopedJson, sessionId).Command);
     Assert.Equal(environmentId, scoped.EnvironmentId);
-    Assert.Null(scoped.PackageSourceId);
     Assert.Equal("modelscope", scoped.ModelSourceId);
 
     Assert.Throws<WorkbenchBridgeProtocolException>(() =>
       ParseForTest(
-        globalJson.Replace("\"modelscope\"", "\"bad id\"").Replace("\"pypi\"", "\"bad id\""),
+        scopedJson.Replace("\"modelscope\"", "\"bad id\""),
         sessionId));
   }
 
@@ -469,8 +464,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
           Engine: "paddle", Family: "paddle-onnx", FamilyDisplayName: "PaddleOCR ONNX",
           Provider: "CPUExecutionProvider", SupportsRemoteHost: true, DefaultRemoteHost: true),
       ],
-      EnvironmentHardware: new SettingsEnvironmentHardwareState(
-        "unsupported", "nvidia_driver_incompatible", "527.00"),
       EnvironmentCompatibility: new SettingsEnvironmentCompatibilityState(
         "paddleocr-ort-cpu",
         SelectedEnvironmentId: "abc",
@@ -486,7 +479,7 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
       Guid.NewGuid(),
       new WorkbenchStateEnvelope(9, "settings", WorkbenchStateChange.Replace, state)));
     JsonElement settings = json.RootElement.GetProperty("payload").GetProperty("state");
-    // 配方目录/硬件/兼容结果都只投影 Runtime 真值，前台不另算依赖或检测硬件。
+    // 配方目录/兼容结果只投影 Runtime 真值，前台不另算依赖。
     JsonElement recipe = Assert.Single(settings.GetProperty("environmentRecipes").EnumerateArray());
     Assert.Equal("paddleocr-ort-cpu", recipe.GetProperty("id").GetString());
     Assert.Equal("PaddleOCR ONNX · CPU", recipe.GetProperty("displayName").GetString());
@@ -499,10 +492,6 @@ public sealed class WorkbenchBridgeCodecTests(ITestOutputHelper output)
     Assert.Equal("paddle-onnx", recipe.GetProperty("family").GetString());
     Assert.Equal("CPUExecutionProvider", recipe.GetProperty("provider").GetString());
     Assert.True(recipe.GetProperty("defaultRemoteHost").GetBoolean());
-    JsonElement hardware = settings.GetProperty("environmentHardware");
-    Assert.Equal("unsupported", hardware.GetProperty("nvidiaDriverStatus").GetString());
-    Assert.Equal("nvidia_driver_incompatible", hardware.GetProperty("nvidiaDriverReason").GetString());
-    Assert.Equal("527.00", hardware.GetProperty("nvidiaDriverVersion").GetString());
     JsonElement compatibility = settings.GetProperty("environmentCompatibility");
     Assert.Equal("paddleocr-ort-cpu", compatibility.GetProperty("recipe").GetString());
     Assert.Equal("abc", compatibility.GetProperty("selectedEnvironmentId").GetString());

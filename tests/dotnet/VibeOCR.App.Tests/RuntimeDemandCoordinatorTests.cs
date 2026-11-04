@@ -566,7 +566,7 @@ public sealed class RuntimeDemandCoordinatorTests
     public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(PreparedEnvironmentSwitch prepared,
       StartedEnvironmentHealth? startedHealth = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId, string? packageSourceId,
+    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId,
       string? modelSourceId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(string environmentId, string recipe,
       IReadOnlyList<string>? sourceIds = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();

@@ -508,11 +508,11 @@ public sealed class ManagedEnvironmentSettings(
 
     /// <summary>保存全局默认或单环境 override 来源偏好：只写配置，不下载/不安装/不重启。</summary>
     public Task SetSourcesAsync(
-        string? environmentId, string? packageSourceId, string? modelSourceId,
+        string? environmentId, string? modelSourceId,
         CancellationToken cancellationToken) => RunAsync(async () =>
     {
         ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
-            environmentId, packageSourceId, modelSourceId, cancellationToken);
+            environmentId, modelSourceId, cancellationToken);
         Snapshot = updated;
         // 来源配置变化使旧预览/兼容结果失效（confirm 时管理器也会拒绝旧计划）。
         InvalidateSelectionPlans();
@@ -531,12 +531,12 @@ public sealed class ManagedEnvironmentSettings(
     }, cancellationToken);
 
     public Task SetSourcesAsync(
-        string? environmentId, string? packageSourceId, string? paddleocrModelSourceId,
+        string? environmentId, string? paddleocrModelSourceId,
         string? mineruModelSourceId,
         CancellationToken cancellationToken) => RunAsync(async () =>
     {
         ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
-            environmentId, packageSourceId, paddleocrModelSourceId, mineruModelSourceId, cancellationToken);
+            environmentId, paddleocrModelSourceId, mineruModelSourceId, cancellationToken);
         Snapshot = updated;
         // 来源配置变化使旧预览/兼容结果失效（confirm 时管理器也会拒绝旧计划）。
         InvalidateSelectionPlans();

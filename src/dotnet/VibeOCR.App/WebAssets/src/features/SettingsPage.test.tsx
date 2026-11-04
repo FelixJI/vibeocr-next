@@ -16,90 +16,29 @@ import { SettingsPage } from "./SettingsPage";
 
 afterEach(cleanup);
 
-// 与 e2e/environment-sources.spec.ts 同源的目录投影：Paddle 三种 ONNX 后端
-// 覆盖文字/表格/结构（仅模型与管线不同），MinerU 独立 CPU/CUDA 闭包。
+// 与 e2e/environment-sources.spec.ts 同源的目录投影：统一推理闭包
+// paddleocr-ort-directml 是唯一可安装配方（Paddle ONNX + MinerU 同一
+// 闭包，DirectML 安装档 + CPU 同闭包设备切换）。
 const recipes = [
-  {
-    id: "paddleocr-ort-cpu",
-    engine: "paddle",
-    family: "paddle-onnx",
-    familyDisplayName: "PaddleOCR ONNX",
-    provider: "CPUExecutionProvider",
-    defaultRemoteHost: true,
-    displayName: "PaddleOCR ONNX · CPU",
-    configuredRecognitionTypes: ["text", "table", "structure"],
-    accelerator: "cpu",
-    targetDevice: "cpu",
-    pythonVersion: "3.12",
-    dependencies: ["paddleocr==3.2.0", "onnxruntime==1.23.0"],
-    dependencyOrigin: "bundled_pack",
-  },
   {
     id: "paddleocr-ort-directml",
     engine: "paddle",
     family: "paddle-onnx",
-    familyDisplayName: "PaddleOCR ONNX",
+    familyDisplayName: "PaddleOCR ONNX + MinerU",
     provider: "DmlExecutionProvider",
-    displayName: "PaddleOCR ONNX · Windows DirectML",
-    configuredRecognitionTypes: ["text", "table", "structure"],
+    defaultRemoteHost: true,
+    displayName: "PaddleOCR ONNX + MinerU · Windows DirectML",
+    configuredRecognitionTypes: ["text", "table", "structure", "document"],
     accelerator: "cpu",
     targetDevice: "directml",
-    pythonVersion: "3.12",
-    dependencies: ["paddleocr==3.2.0", "onnxruntime-directml==1.23.0"],
+    supportedDevices: ["directml", "cpu"],
+    pythonVersion: "3.13",
+    dependencies: ["paddleocr==3.7.0", "onnxruntime-directml==1.24.4"],
     dependencyOrigin: "bundled_pack",
-  },
-  {
-    id: "paddleocr-ort-cuda",
-    engine: "paddle",
-    family: "paddle-onnx",
-    familyDisplayName: "PaddleOCR ONNX",
-    provider: "CUDAExecutionProvider",
-    displayName: "PaddleOCR ONNX · NVIDIA CUDA",
-    configuredRecognitionTypes: ["text", "table", "structure"],
-    accelerator: "nvidia_cuda",
-    targetDevice: "cuda",
-    pythonVersion: "3.12",
-    dependencies: ["paddleocr==3.2.0", "onnxruntime-gpu==1.23.0"],
-    dependencyOrigin: "online_index",
-  },
-  {
-    id: "mineru-cpu",
-    engine: "mineru",
-    family: "mineru",
-    familyDisplayName: "MinerU",
-    provider: "CPUExecutionProvider",
-    displayName: "MinerU · CPU",
-    configuredRecognitionTypes: ["document"],
-    accelerator: "cpu",
-    targetDevice: "cpu",
-    pythonVersion: "3.12",
-    dependencies: ["mineru==4.0.10"],
-    dependencyOrigin: "online_index",
-  },
-  {
-    id: "mineru-cuda",
-    engine: "mineru",
-    family: "mineru",
-    familyDisplayName: "MinerU",
-    provider: "CUDAExecutionProvider",
-    displayName: "MinerU · NVIDIA CUDA",
-    configuredRecognitionTypes: ["document"],
-    accelerator: "nvidia_cuda",
-    targetDevice: "cuda",
-    pythonVersion: "3.12",
-    dependencies: ["mineru==4.0.10", "torch==2.6.0"],
-    dependencyOrigin: "online_index",
   },
 ];
 
 const sources = [
-  {
-    kind: "package_index",
-    id: "tuna-pypi",
-    displayName: "TUNA PyPI 镜像",
-    endpoint: "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/",
-    isDefault: true,
-  },
   {
     kind: "paddleocr_model_registry",
     id: "paddleocr-modelscope",
@@ -109,6 +48,13 @@ const sources = [
     isDefault: true,
   },
   {
+    kind: "paddleocr_model_registry",
+    id: "paddleocr-huggingface",
+    provider: "huggingface",
+    displayName: "Hugging Face",
+    endpoint: "https://huggingface.co",
+  },
+  {
     kind: "mineru_model_registry",
     id: "mineru-modelscope",
     provider: "modelscope",
@@ -116,12 +62,19 @@ const sources = [
     endpoint: "https://www.modelscope.cn",
     isDefault: true,
   },
+  {
+    kind: "mineru_model_registry",
+    id: "mineru-huggingface",
+    provider: "huggingface",
+    displayName: "Hugging Face",
+    endpoint: "https://huggingface.co",
+  },
 ];
 
 const mineruEnvironments = [
   {
     id: "mineru-active",
-    name: "MinerU · CPU",
+    name: "PaddleOCR ONNX + MinerU · Windows DirectML",
     revision: 3,
     kind: "venv",
     status: "installed",
@@ -130,12 +83,12 @@ const mineruEnvironments = [
     engineState: "ready",
     modelState: "ready",
     serviceState: "ready",
-    configuredRecognitionTypes: ["document"],
-    targetDevice: "cpu",
+    configuredRecognitionTypes: ["text", "table", "structure", "document"],
+    targetDevice: "directml",
   },
   {
     id: "mineru-old",
-    name: "MinerU · NVIDIA CUDA",
+    name: "统一推理闭包（CPU 档）",
     revision: 1,
     kind: "venv",
     status: "installed",
@@ -144,8 +97,8 @@ const mineruEnvironments = [
     engineState: "unverified",
     modelState: "not_checked",
     serviceState: "not_started",
-    configuredRecognitionTypes: ["document"],
-    targetDevice: "cuda",
+    configuredRecognitionTypes: ["text", "table", "structure", "document"],
+    targetDevice: "cpu",
   },
 ];
 
@@ -227,19 +180,22 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentRecipes: recipes,
       environmentSources: sources,
       environments: [],
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
     render(
       <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
     );
-    // Paddle 分区：单一后端选择，不再出现“识别组件/加速方式”双下拉。
+    // Paddle 分区：单一后端选择（统一闭包 = DirectML 安装档 + CPU 切换），
+    // 不再出现“识别组件/加速方式”双下拉。
     const backend = screen.getByLabelText("Paddle 推理后端");
-    expect(backend).toHaveValue("cpu");
-    expect(within(backend).getAllByRole("option")).toHaveLength(3);
+    expect(backend).toHaveValue("directml");
+    expect(within(backend).getAllByRole("option")).toHaveLength(2);
     expect(screen.queryByLabelText("识别组件")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("加速方式")).not.toBeInTheDocument();
-    expect(screen.getByText(/依赖随包提供，可离线安装/)).toBeVisible();
+    // 统一闭包同时命中两个分区：两分区都如实呈现随包依赖来源。
+    expect(
+      screen.getAllByText(/依赖随包提供，可离线安装/).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByText(/文字、表格与版面结构识别共用同一套 PaddleOCR 依赖/),
     ).toBeVisible();
@@ -247,22 +203,20 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-cpu",
+        recipe: "paddleocr-ort-directml",
       }),
     );
-    expect(actions.run).not.toHaveBeenCalledWith({
-      type: "settings.findCompatibleEnvironment",
-      recipe: "mineru-cpu",
-    });
     const mineruSection = screen.getByLabelText("MinerU 本地引擎");
     expect(
       within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
     ).toBeVisible();
-    // 切换后端是显式选择：先失效旧计划，再对新配方发起只读查询。
-    await user.selectOptions(backend, "directml");
+    // 切换设备是显式选择：先失效旧计划，再对新设备档发起只读查询；
+    // 同闭包切换不另装配方。
+    await user.selectOptions(backend, "cpu");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
+    expect(screen.getByText(/设备 cpu，Python 3\.13/)).toBeVisible();
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
@@ -276,25 +230,8 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     const actions = buildActions();
     // 统一闭包形态：目录只剩 paddleocr-ort-directml，document 能力随
     // 共享闭包声明；MinerU 分区必须识别该闭包而不是提示没有可用配方。
-    const unifiedRecipes = [
-      {
-        id: "paddleocr-ort-directml",
-        engine: "paddle",
-        family: "paddle-onnx",
-        familyDisplayName: "PaddleOCR ONNX + MinerU",
-        provider: "DmlExecutionProvider",
-        displayName: "PaddleOCR ONNX + MinerU · Windows DirectML",
-        configuredRecognitionTypes: ["text", "table", "structure", "document"],
-        accelerator: "cpu",
-        targetDevice: "directml",
-        supportedDevices: ["directml", "cpu"],
-        pythonVersion: "3.13",
-        dependencies: ["paddleocr==3.7.0", "onnxruntime-directml==1.24.4"],
-        dependencyOrigin: "bundled_pack",
-      },
-    ];
     const settings = {
-      environmentRecipes: unifiedRecipes,
+      environmentRecipes: recipes,
       environmentSources: sources,
       environments: [
         {
@@ -321,7 +258,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         recipe: "paddleocr-ort-directml",
         selectedEnvironmentId: "unified-installed",
       },
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
     render(
@@ -377,7 +313,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentRecipes: recipes,
       environmentSources: sources,
       environments: [],
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
     const view = render(
@@ -390,10 +325,10 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "mineru-cpu",
+        recipe: "paddleocr-ort-directml",
       }),
     );
-    // 迟到的他配方结果（Paddle）不得投影进 MinerU 分区：无命中结论不出现，
+    // 迟到的他配方结果（退役配方）不得投影进当前选择：无命中结论不出现，
     // 只如实提示本次查询未收到结果，可重试。
     view.rerender(
       <SettingsPage
@@ -422,20 +357,22 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         viewState={buildViewState({
           ...settings,
           environmentCompatibility: {
-            recipe: "mineru-cpu",
+            recipe: "paddleocr-ort-directml",
             selectedEnvironmentId: null,
           },
         })}
         actions={actions}
       />,
     );
-    expect(screen.getByText(/没有可直接复用的已安装环境/)).toBeVisible();
+    expect(
+      within(sectionAfterLateResult).getByText(/没有可直接复用的已安装环境/),
+    ).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "安装 MinerU 本地引擎" }),
     );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.prepareEnvironment",
-      recipe: "mineru-cpu",
+      recipe: "paddleocr-ort-directml",
     });
   });
 
@@ -447,7 +384,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentSources: sources,
       environments: mineruEnvironments,
       activeEnvironmentId: "mineru-active",
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
     render(
@@ -455,7 +391,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     );
     const mineruSection = screen.getByLabelText("MinerU 本地引擎");
     const activeRow = within(mineruSection)
-      .getByText("MinerU · CPU")
+      .getByText("PaddleOCR ONNX + MinerU · Windows DirectML")
       .closest("div") as HTMLElement;
     expect(activeRow).not.toBeNull();
     // 活动环境不提供移除按钮，只引导先切换到其他环境。
@@ -465,9 +401,9 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(
       within(activeRow).getByText(/当前使用中：请先切换到其他环境后再移除/),
     ).toBeVisible();
-    // 非活动 MinerU 环境走既有安全删除路径：两步确认后才发命令。
+    // 非活动环境走既有安全删除路径：两步确认后才发命令。
     const oldRow = within(mineruSection)
-      .getByText("MinerU · NVIDIA CUDA")
+      .getByText("统一推理闭包（CPU 档）")
       .closest("div") as HTMLElement;
     await user.click(within(oldRow).getByRole("button", { name: "移除环境" }));
     expect(actions.run).not.toHaveBeenCalledWith({
@@ -488,14 +424,14 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
   it("显式查询取得主导权：覆盖导航恢复的计划选择且不作废待确认计划", async () => {
     const user = userEvent.setup();
     const actions = buildActions();
-    // 导航回来：待确认 Paddle CUDA 计划驱动只读恢复（hasExplicitChoice=false）。
+    // 导航回来：待确认统一闭包计划驱动只读恢复（hasExplicitChoice=false）。
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
       environments: [
         {
-          id: "prepared-cuda",
-          name: "PaddleOCR ONNX · NVIDIA CUDA",
+          id: "prepared-dml",
+          name: "PaddleOCR ONNX + MinerU · Windows DirectML",
           revision: 1,
           kind: "venv",
           status: "empty",
@@ -503,25 +439,27 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
           dependencyState: "empty",
         },
       ],
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentPlan: {
-        planId: "p-cuda",
-        environmentId: "prepared-cuda",
+        planId: "p-dml",
+        environmentId: "prepared-dml",
         environmentRevision: 1,
-        requestedRecipe: "paddleocr-ort-cuda",
-        recipe: "paddleocr-ort-cuda",
-        sourceIds: ["tuna-pypi"],
+        requestedRecipe: "paddleocr-ort-directml",
+        recipe: "paddleocr-ort-directml",
+        sourceIds: ["paddleocr-modelscope"],
         requestedSourceIds: null,
-        dependencies: ["paddleocr==3.2.0"],
+        dependencies: ["paddleocr==3.7.0"],
       },
       environmentBusy: false,
     };
     render(
       <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
     );
-    // 恢复选择：Paddle 分区回显 CUDA 后端与待确认计划。
-    expect(screen.getByLabelText("Paddle 推理后端")).toHaveValue("nvidia_cuda");
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
+    // 恢复选择：Paddle 分区回显 DirectML 后端与待确认计划；统一闭包下
+    // 计划卡只渲染一次（归属 Paddle 分区），不出现重复确认入口。
+    expect(screen.getByLabelText("Paddle 推理后端")).toHaveValue("directml");
+    expect(
+      screen.getAllByRole("button", { name: "确认安装依赖" }),
+    ).toHaveLength(1);
     // 点击 MinerU 显式查询：焦点必须真正切换（不被恢复选择持续覆盖）。
     const mineruSection = screen.getByLabelText("MinerU 本地引擎");
     await user.click(
@@ -530,123 +468,69 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "mineru-cpu",
+        recipe: "paddleocr-ort-directml",
       }),
     );
     // 取得主导权不等于失效：仍绑定原配方的计划继续可确认。
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
+    expect(
+      screen.getAllByRole("button", { name: "确认安装依赖" }),
+    ).toHaveLength(1);
     expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
   });
 
-  it("单槽被占用后往返切回：显式查询推进查询代并重新发起", async () => {
+  it("晚到的旧计划不能绕过本地失效重新确认", async () => {
     const user = userEvent.setup();
     const actions = buildActions();
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
       environments: [],
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
     };
+    const plan = (planId: string) => ({
+      planId,
+      environmentId: "env-1",
+      environmentRevision: 1,
+      requestedRecipe: "paddleocr-ort-directml",
+      recipe: "paddleocr-ort-directml",
+      sourceIds: ["paddleocr-modelscope"],
+      requestedSourceIds: null,
+      dependencies: ["paddleocr==3.7.0"],
+    });
     const view = render(
       <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
     );
-    const paddleQuery = {
-      type: "settings.findCompatibleEnvironment",
-      recipe: "paddleocr-ort-cpu",
-    } as const;
-    // Paddle 自动查询得到结果。
-    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(paddleQuery));
+    // 显式设备选择绑定当前配方：随后到达的计划可确认。
+    await user.selectOptions(screen.getByLabelText("MinerU 安装设备"), "cpu");
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.invalidateEnvironmentPlan",
+    });
     view.rerender(
       <SettingsPage
         viewState={buildViewState({
           ...settings,
-          environmentCompatibility: {
-            recipe: "paddleocr-ort-cpu",
-            selectedEnvironmentId: null,
-          },
+          environmentPlan: plan("plan-a"),
         })}
         actions={actions}
       />,
     );
-    // MinerU 显式查询后宿主单槽被 MinerU 结果占用。
-    const mineruSection = screen.getByLabelText("MinerU 本地引擎");
-    await user.click(
-      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
-    );
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentCompatibility: {
-            recipe: "mineru-cpu",
-            selectedEnvironmentId: null,
-          },
-        })}
-        actions={actions}
-      />,
-    );
-    // Paddle 分区切回：同配方、同指纹但查询代已推进，去重不得阻拦重查。
-    const paddleSection = screen.getByLabelText("PaddleOCR 推理后端");
-    await user.click(
-      within(paddleSection).getByRole("button", { name: "查询可复用环境" }),
-    );
-    const paddleDispatches = actions.run.mock.calls.filter(
-      (call) => JSON.stringify(call[0]) === JSON.stringify({ ...paddleQuery }),
-    );
-    expect(paddleDispatches.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("晚到的他配方旧计划不能绕过失效跨分区确认", async () => {
-    const user = userEvent.setup();
-    const actions = buildActions();
-    const settings = {
-      environmentRecipes: recipes,
-      environmentSources: sources,
-      environments: [],
-      environmentHardware: { nvidiaDriverStatus: "ok" },
-      environmentBusy: false,
-    };
-    const view = render(
-      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
-    );
-    // 显式安装选择切到 MinerU CUDA：选择变化即失效旧计划。
+    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
+    // 再次显式设备切换：选择变化即失效旧计划。
     await user.selectOptions(
       screen.getByLabelText("MinerU 安装设备"),
-      "nvidia_cuda",
+      "directml",
     );
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.invalidateEnvironmentPlan",
     });
-    const environments = [
-      {
-        id: "env-1",
-        name: "旧目标",
-        revision: 1,
-        kind: "venv",
-        status: "empty",
-        pythonState: "ready",
-        dependencyState: "empty",
-      },
-    ];
-    // 换 planId 迟到的旧 Paddle 计划：即使 Paddle 分区仍选 CPU 也不得确认。
+    // 失效后同 planId 的迟到重放不得再次进入确认。
     view.rerender(
       <SettingsPage
         viewState={buildViewState({
           ...settings,
-          environments,
-          environmentPlan: {
-            planId: "late-paddle",
-            environmentId: "env-1",
-            environmentRevision: 1,
-            requestedRecipe: "paddleocr-ort-cpu",
-            recipe: "paddleocr-ort-cpu",
-            sourceIds: ["tuna-pypi"],
-            requestedSourceIds: null,
-            dependencies: ["paddleocr==3.2.0"],
-          },
+          environmentPlan: plan("plan-a"),
         })}
         actions={actions}
       />,
@@ -654,22 +538,12 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(
       screen.queryByRole("button", { name: "确认安装依赖" }),
     ).not.toBeInTheDocument();
-    // 绑定当前安装选择（mineru-cuda）的计划恢复可确认。
+    // 换 planId 的新计划（绑定当前选择）恢复可确认。
     view.rerender(
       <SettingsPage
         viewState={buildViewState({
           ...settings,
-          environments,
-          environmentPlan: {
-            planId: "mineru-plan",
-            environmentId: "env-1",
-            environmentRevision: 1,
-            requestedRecipe: "mineru-cuda",
-            recipe: "mineru-cuda",
-            sourceIds: ["tuna-pypi"],
-            requestedSourceIds: null,
-            dependencies: ["mineru==4.0.10"],
-          },
+          environmentPlan: plan("plan-b"),
         })}
         actions={actions}
       />,
@@ -683,7 +557,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
       environmentSources: sources,
       environments: mineruEnvironments,
       activeEnvironmentId: "mineru-active",
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentSupportsCleanup: false,
       environmentBusy: false,
       maintenanceStatus: "旧运行时维护投影不得混入 managed 页面",
@@ -747,7 +620,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
           environmentStatus: "运行环境状态已更新",
           environmentSnapshotLoaded: true,
           environmentRecipes: recipes,
-          environmentHardware: { nvidiaDriverStatus: "ok" },
         })}
         actions={actions}
       />,
@@ -755,7 +627,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith({
         type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-cpu",
+        recipe: "paddleocr-ort-directml",
       }),
     );
     rerender(
@@ -869,10 +741,10 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
             planId: "plan-a",
             environmentId: "env-1",
             environmentRevision: 1,
-            requestedRecipe: "paddleocr-ort-cpu",
-            recipe: "paddleocr-ort-cpu",
+            requestedRecipe: "paddleocr-ort-directml",
+            recipe: "paddleocr-ort-directml",
             sourceIds: [],
-            dependencies: ["paddleocr==3.2.0"],
+            dependencies: ["paddleocr==3.7.0"],
           },
         })}
         actions={actions}
@@ -888,32 +760,28 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
 
 it("uses explicit metadata when recipe identifiers and display names change", async () => {
   const actions = buildActions();
-  const renamed = recipes.map((recipe, index) => ({
+  const renamed = recipes.map((recipe) => ({
     ...recipe,
-    id: `custom.engine_${index}`,
-    displayName: `名称 ${index}`,
+    id: "custom.engine_0",
+    displayName: "名称 0",
   }));
   render(
     <SettingsPage
       viewState={buildViewState({
         environmentRecipes: renamed,
         environments: [],
-        environmentHardware: { nvidiaDriverStatus: "ok" },
       })}
       actions={actions}
     />,
   );
   const section = screen.getByLabelText("PaddleOCR 推理后端");
-  await userEvent.selectOptions(
-    within(section).getByRole("combobox"),
-    "nvidia_cuda",
-  );
+  await userEvent.selectOptions(within(section).getByRole("combobox"), "cpu");
   await userEvent.click(
     within(section).getByRole("button", { name: "重新查询兼容环境" }),
   );
   expect(actions.run).toHaveBeenCalledWith({
     type: "settings.findCompatibleEnvironment",
-    recipe: "custom.engine_2",
+    recipe: "custom.engine_0",
   });
 });
 
@@ -933,81 +801,31 @@ it("saves model source identifiers from provider metadata", async () => {
       actions={actions}
     />,
   );
-  // #294：来源设置在常规页面直接可见，无需先展开折叠区。
+  // #294：来源设置在常规页面直接可见，无需先展开折叠区；依赖已全部
+  // 随包离线安装，不再有“依赖包来源”下拉。
   expect(screen.getByLabelText("模型来源")).toHaveValue("modelscope");
+  expect(screen.queryByLabelText("依赖包来源")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
   expect(actions.run).toHaveBeenCalledWith({
     type: "settings.setEnvironmentSources",
-    packageSourceId: "source-0",
-    paddleocrModelSourceId: "source-1",
+    paddleocrModelSourceId: "source-0",
     mineruModelSourceId: "source-2",
   });
-  view.rerender(
-    <SettingsPage
-      viewState={buildViewState({
-        environmentRecipes: recipes,
-        environmentSources: renamed.map((source) => ({
-          ...source,
-          provider: undefined,
-        })),
-        environments: [],
-      })}
-      actions={actions}
-    />,
+  // 选择另一提供方后保存：两类引擎统一为该提供方的来源 id。
+  await userEvent.selectOptions(
+    screen.getByLabelText("模型来源"),
+    "huggingface",
   );
-  actions.run.mockClear();
   await userEvent.click(screen.getByRole("button", { name: "保存下载来源" }));
   expect(actions.run).toHaveBeenCalledWith({
     type: "settings.setEnvironmentSources",
-    packageSourceId: "source-0",
     paddleocrModelSourceId: "source-1",
-    mineruModelSourceId: "source-2",
+    mineruModelSourceId: "source-3",
   });
   expect(actions.run).not.toHaveBeenCalledWith(
     expect.objectContaining({ type: "settings.prepareEnvironment" }),
   );
-});
-
-it("CUDA 七包增量在确认摘要中显示实际新增组件", () => {
-  const dependencies = [
-    "nvidia-cuda-runtime==13.4.92",
-    "nvidia-cuda-nvrtc==13.4.92",
-    "nvidia-cudnn-cu13==9.27.0.42",
-    "nvidia-curand==10.4.4.72",
-    "nvidia-cufft==12.4.0.43",
-    "nvidia-cublas==13.8.0.4",
-    "nvidia-nvjitlink==13.4.92",
-  ];
-  render(
-    <SettingsPage
-      actions={buildActions()}
-      viewState={buildViewState({
-        environmentRecipes: recipes,
-        environmentSources: sources,
-        environmentHardware: { nvidiaDriverStatus: "ok" },
-        environments: [
-          { id: "shared", name: "Paddle", status: "installed", revision: 2 },
-        ],
-        environmentPlan: {
-          planId: "cuda-delta",
-          environmentId: "shared",
-          environmentRevision: 2,
-          recipe: "paddleocr-ort-cuda",
-          requestedRecipe: "paddleocr-ort-cuda",
-          sourceIds: ["tuna-pypi"],
-          dependencies,
-          requiresServiceStop: true,
-          cudaPluginAction: "prepare",
-        },
-      })}
-    />,
-  );
-  const summary = screen.getByText(/本次新增或替换组件/);
-  expect(summary).not.toHaveTextContent("无需新增组件");
-  for (const pin of dependencies) expect(summary).toHaveTextContent(pin);
-  expect(
-    screen.getByText(/同时准备锁定的 ONNX Runtime CUDA 13 执行插件/),
-  ).toBeVisible();
+  view.unmount();
 });
 
 it.each(["device", "service", "active"] as const)(
@@ -1020,28 +838,27 @@ it.each(["device", "service", "active"] as const)(
       revision: 3,
       kind: "venv",
       status: "installed",
-      recipe: "paddleocr-ort-cuda",
-      targetDevice: change === "device" ? "cuda" : "cpu",
+      recipe: "paddleocr-ort-directml",
+      targetDevice: change === "device" ? "cpu" : "directml",
       serviceState: change === "service" ? "not_started" : "ready",
     };
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
-      environmentHardware: { nvidiaDriverStatus: "ok" },
       environmentBusy: false,
       activeEnvironmentId: change === "active" ? "other" : "shared",
       environments: [environment],
     };
     const query = {
       type: "settings.findCompatibleEnvironment",
-      recipe: "paddleocr-ort-cpu",
+      recipe: "paddleocr-ort-directml",
     };
     const view = render(
       <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
     );
     await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
     const compatibility = {
-      recipe: "paddleocr-ort-cpu",
+      recipe: "paddleocr-ort-directml",
       selectedEnvironmentId: "shared",
     };
     view.rerender(
@@ -1067,7 +884,7 @@ it.each(["device", "service", "active"] as const)(
       ...settings,
       activeEnvironmentId: "shared",
       environments: [
-        { ...environment, targetDevice: "cpu", serviceState: "ready" },
+        { ...environment, targetDevice: "directml", serviceState: "ready" },
       ],
     };
     view.rerender(
@@ -1087,8 +904,9 @@ it.each(["device", "service", "active"] as const)(
       />,
     );
     expect(
-      screen.getByText("该兼容环境已是当前环境并通过启动验证，无需重装。"),
-    ).toBeVisible();
+      screen.getAllByText("该兼容环境已是当前环境并通过启动验证，无需重装。")
+        .length,
+    ).toBeGreaterThan(0);
     expect(
       actions.run.mock.calls.filter(([command]) => command.type === query.type),
     ).toHaveLength(1);
