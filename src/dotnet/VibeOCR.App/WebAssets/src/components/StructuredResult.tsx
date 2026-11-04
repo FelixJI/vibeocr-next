@@ -475,9 +475,12 @@ function LinesBlock({
   const modeText = modes[mode];
   // 跳转请求消费在 render 期派生调整（同页级 hover 绑定先例）：新对象
   // 即新请求，越界下标忽略；编辑框由 LineEditor 自行聚焦全选。
+  // 与行内双击/Enter 入口同一编辑保护：正在编辑（含保存请求进行中）
+  // 时不切换目标行，静默保留当前草稿；请求仍消费并滚动定位目标行。
   if (activateLineRequest && activateLineRequest !== consumedRequest) {
     setConsumedRequest(activateLineRequest);
     if (
+      editing === undefined &&
       activateLineRequest.index >= 0 &&
       activateLineRequest.index < lines.length
     ) {
