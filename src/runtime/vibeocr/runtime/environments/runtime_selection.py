@@ -282,7 +282,9 @@ class RuntimeSelectionPolicy:
         requested_sources = (
             None
             if download_source_ids is None
-            else self._resolve_source_ids(tuple(download_source_ids))
+            # 仅含历史 package index 的请求等效未请求（与
+            # normalize_download_source_ids 同语义：继承默认来源）。
+            else (self._resolve_source_ids(tuple(download_source_ids)) or None)
         )
         default_sources = (
             self._resolve_source_ids(tuple(default_download_source_ids))
@@ -291,7 +293,7 @@ class RuntimeSelectionPolicy:
         )
         effective_source_ids = (
             default_sources
-            if requested_sources is None
+            if not requested_sources
             else self._overlay_source_ids(default_sources, requested_sources)
         )
         selected = set(effective_source_ids)
@@ -309,17 +311,16 @@ class RuntimeSelectionPolicy:
 
     def _resolve_source_ids(self, requested: tuple[str, ...]) -> tuple[str, ...]:
         # 历史 package index 选择在读取层静默忽略（依赖全部离线随包后
-        # 不再有任何 pip 索引语义）。
+        # 不再有任何 pip 索引语义）。过滤后为空 = 没有有效来源请求，
+        # 由调用方按继承/默认来源处理（例如历史冻结计划只记录了纯
+        # 包源 effective 集合时回退产品默认），而不是拒绝整个选择。
         requested = tuple(
             source_id
             for source_id in requested
             if source_id not in _RETIRED_PACKAGE_SOURCE_IDS
         )
         if not requested:
-            raise RuntimeSelectionError(
-                ErrorCode.VALIDATION_ERROR,
-                "download_source_ids must contain at least one source",
-            )
+            return ()
         if len(set(requested)) != len(requested):
             raise RuntimeSelectionError(
                 ErrorCode.VALIDATION_ERROR,

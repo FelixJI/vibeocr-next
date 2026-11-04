@@ -679,6 +679,18 @@ async def test_http_preview_distinguishes_inherited_and_explicit_download_source
                 "paddleocr-bos",
                 "mineru-modelscope",
             ]
+            # 仅含历史 package index 的请求：等效未显式指定，回退继承的
+            # 默认来源而不是整个预览被拒绝。
+            retired = await http.post(
+                "/v2/runtime/install-plan",
+                json={**request, "download_source_ids": ["pypi"]},
+            )
+            assert retired.status_code == 200, retired.text
+            assert retired.json()["plan"]["requested_download_source_ids"] is None
+            assert retired.json()["plan"]["effective_download_source_ids"] == [
+                "paddleocr-modelscope",
+                "mineru-modelscope",
+            ]
             receipt = await http.post(
                 "/v2/runtime/maintenance",
                 json={

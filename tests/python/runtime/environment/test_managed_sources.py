@@ -328,6 +328,15 @@ def test_preview_binds_requested_effective_and_config_revision(
     )
     assert refreshed["source_config_revision"] == 1
 
+    # 仅含历史 package index 的请求：依赖安装已退役，等效继承默认来源
+    # 而不是拒绝预览（历史计划/意图只记录纯包源集合时同样回退）。
+    retired = manager.preview_install(a["id"], "paddleocr-ort-directml", ("tuna-pypi",))
+    assert retired["source_ids"] == [
+        "paddleocr-huggingface",
+        "mineru-huggingface",
+    ]
+    assert all(entry["requested"] is False for entry in retired["sources"])
+
 
 def test_install_freezes_sources_and_failure_evidence_is_durable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

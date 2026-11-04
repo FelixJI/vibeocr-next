@@ -346,6 +346,54 @@ def test_selection_policy_ignores_legacy_package_index_ids() -> None:
     )
 
 
+def test_selection_policy_retired_only_request_inherits_defaults() -> None:
+    """仅含历史 package index 的请求等效未请求：继承默认来源而不是拒绝。
+
+    与 normalize_download_source_ids 同语义（纯历史请求回默认），历史
+    冻结计划只记录纯包源 effective 集合时同样回退；真正未知的 id 仍拒绝。
+    """
+    policy = RuntimeSelectionPolicy(
+        profiles=_selection_profiles(),
+        sources=(
+            {
+                "kind": "model_registry",
+                "id": "modelscope",
+                "endpoint": "https://www.modelscope.cn",
+            },
+            {
+                "kind": "paddleocr_model_registry",
+                "id": "paddleocr-modelscope",
+                "endpoint": "https://www.modelscope.cn",
+            },
+        ),
+        default_download_source_ids=("modelscope",),
+    )
+    retired_only = policy.plan_start(
+        accelerator="cpu",
+        install_component_ids=None,
+        download_source_ids=("tuna-pypi", "pypi"),
+    )
+    inherited = policy.plan_start(
+        accelerator="cpu",
+        install_component_ids=None,
+        download_source_ids=None,
+    )
+    assert retired_only.requested_download_source_ids is None
+    assert retired_only.effective_download_source_ids == ("modelscope",)
+    assert (
+        retired_only.effective_download_source_ids
+        == inherited.effective_download_source_ids
+    )
+
+    with pytest.raises(RuntimeSelectionError) as excinfo:
+        policy.plan_start(
+            accelerator="cpu",
+            install_component_ids=None,
+            download_source_ids=("tsinghua-mirror",),
+        )
+    assert excinfo.value.code is ErrorCode.DOWNLOAD_SOURCE_UNKNOWN
+
+
 def test_normalize_download_source_ids_resolves_omission_to_backend_default() -> None:
     model_defaults = ("paddleocr-modelscope", "mineru-modelscope")
     assert normalize_download_source_ids(None) == model_defaults
