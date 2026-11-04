@@ -146,16 +146,6 @@ def build_asset_url_pairs(
     ]
 
 
-# PyTorch CUDA 镜像源
-PYTORCH_MIRROR_SOURCES = {
-    "nju": "https://mirrors.nju.edu.cn/pytorch/whl",
-    "sjtu": "https://mirror.sjtu.edu.cn/pytorch-wheels",
-    "official": "https://download.pytorch.org/whl",
-}
-
-# 默认 PyTorch 镜像源（国内）
-DEFAULT_PYTORCH_MIRROR = "nju"
-
 # 便携式 Python 目录名（与运行时实际使用的 project_root/python/ 一致）
 PORTABLE_PYTHON_DIR = "python"
 
@@ -349,27 +339,6 @@ def validate_dep_check_consistency(project_root: Path) -> list[str]:
         )
 
     return warnings
-
-
-def get_pytorch_mirror(
-    name: str = DEFAULT_PYTORCH_MIRROR,
-    cuda_tag: str = "",
-) -> str:
-    """获取 PyTorch CUDA 镜像源 URL
-
-    Args:
-        name: 镜像源名称
-        cuda_tag: CUDA 版本标签，如 "cu126"
-
-    Returns:
-        镜像源完整 URL，如 "https://mirrors.nju.edu.cn/pytorch/whl/cu126"
-    """
-    base = PYTORCH_MIRROR_SOURCES.get(
-        name, PYTORCH_MIRROR_SOURCES[DEFAULT_PYTORCH_MIRROR]
-    )
-    if cuda_tag:
-        return f"{base}/{cuda_tag}"
-    return base
 
 
 def is_windows() -> bool:

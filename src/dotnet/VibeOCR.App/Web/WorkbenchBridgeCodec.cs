@@ -93,13 +93,13 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> PlanIdArgumentFields = ["planId", "sourceId"];
   private static readonly HashSet<string> PlanIdOnlyArgumentFields = ["planId"];
   private static readonly HashSet<string> EnvironmentSourceDefaultsArgumentFields =
-    ["packageSourceId", "modelSourceId"];
+    ["modelSourceId"];
   private static readonly HashSet<string> EnvironmentSourcesArgumentFields =
-    ["environmentId", "packageSourceId", "modelSourceId"];
+    ["environmentId", "modelSourceId"];
   private static readonly HashSet<string> IndependentSourceDefaultsArgumentFields =
-    ["packageSourceId", "paddleocrModelSourceId", "mineruModelSourceId"];
+    ["paddleocrModelSourceId", "mineruModelSourceId"];
   private static readonly HashSet<string> IndependentEnvironmentSourcesArgumentFields =
-    ["environmentId", "packageSourceId", "paddleocrModelSourceId", "mineruModelSourceId"];
+    ["environmentId", "paddleocrModelSourceId", "mineruModelSourceId"];
   private static readonly HashSet<string> MineruModeArgumentFields = ["mode"];
   private static readonly HashSet<string> MineruRemoteUrlArgumentFields =
     ["mode", "apiUrl"];
@@ -1097,7 +1097,6 @@ public static class WorkbenchBridgeCodec
         string? sourceEnvironmentId = scoped ? ParseEnvironmentId(arguments) : null;
         return new SetEnvironmentSourcesCommand(
           sourceEnvironmentId,
-          ParseSourceId(arguments.GetProperty("packageSourceId")),
           independent ? null : ParseSourceId(arguments.GetProperty("modelSourceId")),
           independent ? ParseSourceId(arguments.GetProperty("paddleocrModelSourceId")) : null,
           independent ? ParseSourceId(arguments.GetProperty("mineruModelSourceId")) : null,
@@ -1118,7 +1117,7 @@ public static class WorkbenchBridgeCodec
             throw new WorkbenchBridgeProtocolException("运行设备无效。");
           requestedDevice = selectedDevice.GetString();
         }
-        if (requestedDevice is not (null or "cpu" or "cuda" or "directml"))
+        if (requestedDevice is not (null or "cpu" or "directml"))
           throw new WorkbenchBridgeProtocolException("运行设备无效。");
         return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments), requestedDevice);
       case ("settings", "setEnvironmentCleanupPage"):
@@ -2054,7 +2053,6 @@ public static class WorkbenchBridgeCodec
       environmentDefaultSourceIds = settings.EnvironmentDefaultSourceIds ?? [],
       environmentResolvedDefaultSources = settings.EnvironmentResolvedDefaultSources ?? [],
       environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
-      environmentPackageSourceIds = settings.EnvironmentPackageSourceIds ?? [],
       settings.EnvironmentCanCancelInstall,
       settings.EnvironmentInstallProgress,
       settings.EnvironmentInstallLog,
@@ -2066,12 +2064,6 @@ public static class WorkbenchBridgeCodec
       settings.EnvironmentCleanupPage,
       settings.EnvironmentCleanupPageCount,
       environmentRecipes = settings.EnvironmentRecipes ?? [],
-      environmentHardware = settings.EnvironmentHardware is null ? null : new
-      {
-        nvidiaDriverStatus = settings.EnvironmentHardware.NvidiaDriverStatus,
-        nvidiaDriverReason = settings.EnvironmentHardware.NvidiaDriverReason,
-        nvidiaDriverVersion = settings.EnvironmentHardware.NvidiaDriverVersion,
-      },
       environmentCompatibility = settings.EnvironmentCompatibility is null ? null : new
       {
         settings.EnvironmentCompatibility.Recipe,

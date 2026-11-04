@@ -339,8 +339,8 @@ class TestStartApi:
 class TestStartApiDeviceVisibility:
     """_start_api 的子进程设备可见性契约（Backend #99）。
 
-    CPU 意图时仅在子进程 env 副本内隐藏 GPU；accelerator 权威、缺失时回退
-    legacy VIBEOCR_USE_GPU；父进程 os.environ 不被改写。
+    CUDA 档位退役后 MinerU 本地服务恒隐藏 GPU 设备（llama-cpp 抢占防护）；
+    仅在子进程 env 副本内生效，父进程 os.environ 不被改写。
     """
 
     def setup_method(self):
@@ -369,19 +369,21 @@ class TestStartApiDeviceVisibility:
         assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
         assert self._parent_visibility() == parent_before
 
-    def test_legacy_gpu_without_accelerator_preserves_visibility(
+    def test_legacy_gpu_flag_no_longer_preserves_visibility(
         self, monkeypatch, tmp_path
     ):
-        """legacy：仅 VIBEOCR_USE_GPU=true（ocr_service 同样只读它）→ 保留可见性。"""
+        """CUDA 档位已退役：即使 legacy VIBEOCR_USE_GPU=true 也恒隐藏设备。"""
         monkeypatch.delenv("VIBEOCR_RUNTIME_ACCELERATOR", raising=False)
         monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
         monkeypatch.setenv("GGML_VK_VISIBLE_DEVICES", "0")
+        parent_before = self._parent_visibility()
 
         captured = _run_start_api_capture_env(monkeypatch, tmp_path)
 
-        assert captured["CUDA_VISIBLE_DEVICES"] == "0,1"
-        assert captured["GGML_VK_VISIBLE_DEVICES"] == "0"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
+        assert self._parent_visibility() == parent_before
 
     def test_accelerator_cpu_wins_over_legacy_gpu_flag(self, monkeypatch, tmp_path):
         """冲突时 accelerator 权威：cpu 压过 use_gpu=true 与继承可见性。"""
@@ -396,10 +398,10 @@ class TestStartApiDeviceVisibility:
         assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
         assert self._parent_visibility() == parent_before
 
-    def test_accelerator_nvidia_cuda_wins_over_legacy_cpu_flag(
+    def test_historical_nvidia_cuda_accelerator_also_hides_devices(
         self, monkeypatch, tmp_path
     ):
-        """accelerator=nvidia_cuda 压过 use_gpu=false：保留用户设备可见性。"""
+        """历史 accelerator=nvidia_cuda 只是被读取的旧值：不再保留设备可见性。"""
         monkeypatch.setenv("VIBEOCR_RUNTIME_ACCELERATOR", "nvidia_cuda")
         monkeypatch.setenv("VIBEOCR_USE_GPU", "false")
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
@@ -408,8 +410,8 @@ class TestStartApiDeviceVisibility:
 
         captured = _run_start_api_capture_env(monkeypatch, tmp_path)
 
-        assert captured["CUDA_VISIBLE_DEVICES"] == "0,1"
-        assert captured["GGML_VK_VISIBLE_DEVICES"] == "0"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
         assert self._parent_visibility() == parent_before
 
 

@@ -140,7 +140,6 @@ interface ManagedEnvironmentPlanState {
   readonly runtimeWheelOrigin?: string | null;
   readonly removedDependencies?: readonly string[];
   readonly requiresServiceStop?: boolean;
-  readonly cudaPluginAction?: "prepare" | "remove" | null;
 }
 
 function sourceKindLabel(kind: string): string {
@@ -151,7 +150,7 @@ function sourceKindLabel(kind: string): string {
         mineru_model_registry: "MinerU 模型来源",
         model_registry: "模型来源",
       } as Record<string, string>
-    )[kind] ?? "依赖包来源"
+    )[kind] ?? "来源"
   );
 }
 
@@ -177,13 +176,6 @@ interface ManagedEnvironmentRecipeState {
   readonly runtimeWheelOrigin?: string | null;
 }
 
-interface ManagedEnvironmentHardwareState {
-  /** ok/unsupported/unknown；缺失按 unknown（未探测）呈现，不臆造可用性。 */
-  readonly nvidiaDriverStatus: string;
-  readonly nvidiaDriverReason?: string | null;
-  readonly nvidiaDriverVersion?: string | null;
-}
-
 interface ManagedEnvironmentCompatibilityState {
   readonly recipe: string;
   readonly selectedEnvironmentId?: string | null;
@@ -205,18 +197,6 @@ function managedEnvironmentRecipes(
       typeof (entry as Partial<ManagedEnvironmentRecipeState>).displayName ===
         "string",
   );
-}
-
-function managedEnvironmentHardware(
-  value: unknown,
-): ManagedEnvironmentHardwareState {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    return { nvidiaDriverStatus: "unknown" };
-  const candidate = value as Partial<ManagedEnvironmentHardwareState>;
-  return typeof candidate.nvidiaDriverStatus === "string" &&
-    candidate.nvidiaDriverStatus.length > 0
-    ? (candidate as ManagedEnvironmentHardwareState)
-    : { nvidiaDriverStatus: "unknown" };
 }
 
 function managedEnvironmentCompatibility(
@@ -275,23 +255,20 @@ function recipeChoice(
     !recipe.familyDisplayName ||
     !recipe.provider ||
     (recipe.engine !== "paddle" && recipe.engine !== "mineru") ||
-    !["cpu", "cuda", "directml"].includes(recipe.targetDevice ?? "")
+    !["cpu", "directml"].includes(recipe.targetDevice ?? "")
   )
     return null;
   return {
     engine: recipe.engine,
     base: recipe.family,
-    device:
-      recipe.targetDevice === "cuda" ? "nvidia_cuda" : recipe.targetDevice!,
+    device: recipe.targetDevice!,
   };
 }
 
-// 依赖来源分类只消费目录 dependency_origin（随包离线包 / 在线索引）；
+// 依赖来源分类只消费目录 dependency_origin（依赖全部随包离线提供）；
 // Runtime 尚未提供精确新增下载字节数，界面不硬编码任何体积估算。
 function dependencyOriginNote(origin: string | null | undefined): string {
   if (origin === "bundled_pack") return "依赖随包提供，可离线安装";
-  if (origin === "online_index")
-    return "依赖需在线下载（当前无精确下载量预估）";
   return "依赖来源待目录同步";
 }
 
@@ -320,8 +297,7 @@ function recipeComponentGroups(
       entries.length !== 1 ||
       recipe.accelerator !==
         (device.device === "directml" ? "cpu" : device.device) ||
-      recipe.targetDevice !==
-        (device.device === "nvidia_cuda" ? "cuda" : device.device)
+      recipe.targetDevice !== device.device
     ) {
       problems.push(`配方 ${key} 重复或设备信息冲突，已拒绝该组合。`);
       continue;
@@ -344,15 +320,12 @@ function recipeComponentGroups(
       purposeKey,
       modes: [...(recipe.configuredRecognitionTypes ?? [])],
       // 设备全集来自目录 supported_devices（统一闭包 = 安装档 + CPU 切换），
-      // 缺失时回落安装档；统一映射到选择键空间（cuda → nvidia_cuda），
-      // 设备选择由此驱动，安装配方仍按 byDevice 绑定。
+      // 缺失时回落安装档；设备选择由此驱动，安装配方仍按 byDevice 绑定。
       devices: [
         ...new Set([
           ...(group?.devices ?? []),
           ...(recipe.supportedDevices?.length
-            ? recipe.supportedDevices.map((item) =>
-                item === "cuda" ? "nvidia_cuda" : item,
-              )
+            ? recipe.supportedDevices
             : [device.device]),
         ]),
       ],
@@ -407,20 +380,8 @@ function dependencyName(pin: string): string {
 
 function mainDependencies(
   dependencies: readonly string[] | null | undefined,
-  includeCuda = false,
 ): readonly string[] {
-  const names = includeCuda
-    ? [
-        ...mainDependencyNames,
-        "nvidia-cuda-runtime",
-        "nvidia-cuda-nvrtc",
-        "nvidia-cudnn-cu13",
-        "nvidia-curand",
-        "nvidia-cufft",
-        "nvidia-cublas",
-        "nvidia-nvjitlink",
-      ]
-    : mainDependencyNames;
+  const names = mainDependencyNames;
   const whitelist = new Set(names.map(normalizeDependencyName));
   const byName = new Map(
     (dependencies ?? [])
@@ -446,13 +407,7 @@ function managedEnvironmentSummary(
   if (environment.configuredRecognitionTypes?.length)
     parts.push(recognitionPurposeLabel(environment.configuredRecognitionTypes));
   if (environment.targetDevice)
-    parts.push(
-      environment.targetDevice === "directml"
-        ? "DirectML"
-        : environment.targetDevice === "cuda"
-          ? "GPU"
-          : "CPU",
-    );
+    parts.push(environment.targetDevice === "directml" ? "DirectML" : "CPU");
   if (parts.length === 0)
     parts.push(environment.status === "empty" ? "空环境" : "已安装依赖");
   return parts.join(" · ");
@@ -1142,7 +1097,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     environments.length > 0;
   const defaultRuntimeRecipe =
     recipes.find((recipe) => recipe.defaultRemoteHost)?.displayName ??
-    "PaddleOCR ONNX · CPU";
+    "PaddleOCR ONNX + MinerU · Windows DirectML";
   // 远程 MinerU 面板门禁：目录未加载时区分“正在启动”与“无已安装环境
   // 承载识别服务”。后者刷新永远无效，如实指路（随包离线基础配置即可），
   // 不暗示需要本地 MinerU 组件；旧宿主（无运行环境 capability）保留等待语义。
@@ -1198,7 +1153,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   // 让聚焦分区在宿主单槽被他配方结果占用后能重新发起只读查询；
   // 不作废仍绑定原配方的待确认计划（失效仍只由选择变化触发）。
   const takeEngineFocus = (engine: "paddle" | "mineru") => {
-    // 取得主导权前先固化当前有效设备（可能来自恢复计划，如 CUDA/DML）：
+    // 取得主导权前先固化当前有效设备（可能来自恢复计划，如 DirectML/CPU）：
     // 否则清掉 restoredChoice 后会回落默认 CPU，绑定旧计划的待确认卡失配。
     setEngineDevices({ paddle: paddleDevice, mineru: mineruDevice });
     setExplicitlySelectedRecipeId((current) => current ?? restoredRecipeId);
@@ -1225,6 +1180,9 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     mineruRecipe?.id === selectedRecipeId && mineruRecipe
       ? planFor(mineruRecipe.id)
       : undefined;
+  // 统一推理闭包下两个分区共享同一配方：待确认计划只渲染一次（归属
+  // engine 声明的 Paddle 分区），不产生两张可同时确认的重复卡。
+  const mineruPlanCard = paddlePlan ? undefined : mineruPlan;
   const previewEnvironment = (environmentId: string, recipe: string) => {
     const family = recipeChoice(recipes.find((entry) => entry.id === recipe));
     if (family) onEngineDeviceChange(family.engine, family.device);
@@ -1372,9 +1330,10 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                       : "运行环境状态尚未读取"}
                 </strong>
                 <p>
-                  本产品默认随附 PaddleOCR ONNX · CPU 文字识别环境（含默认 small
-                  文字模型，离线可用）；Paddle 推理后端与 MinerU 本地引擎在下方
-                  分别按需选择，当前运行任务不受选择影响。
+                  本产品默认随附 PaddleOCR ONNX + MinerU 统一推理环境（DirectML
+                  与 CPU 设备切换，含默认 small 文字模型，离线可用）；Paddle
+                  推理后端与 MinerU 本地引擎在下方分别按需选择，当前运行任务
+                  不受选择影响。
                 </p>
               </>
             ) : (
@@ -1471,7 +1430,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 queryGeneration={queryGeneration}
                 onCancelPlan={invalidateSelectionPlan}
                 onPrepare={() => onEngineDeviceChange("mineru", mineruDevice)}
-                plan={mineruPlan}
+                plan={mineruPlanCard}
                 onPreview={previewEnvironment}
               />
               {/* 安装进度是操作状态而非设置项，保留在折叠区外可见；空闲时
@@ -1706,27 +1665,22 @@ function EnvironmentPlanPanel({
       </p>
       <p className="form-note">
         本次新增或替换组件：
-        {mainDependencies(plan.dependencies, true).join("、") ||
+        {mainDependencies(plan.dependencies).join("、") ||
           (plan.dependencies.length === 0
             ? "无需新增组件"
             : "详见完整依赖明细")}
         ； 共 {plan.dependencies.length} 项依赖。
         {plan.dependencyOrigin === "bundled_pack"
           ? "依赖来自随包离线包，无需下载。"
-          : "依赖按所选来源安装。"}
+          : "依赖来源待目录同步。"}
       </p>
       <p className="form-note">
         {plan.requiresServiceStop
           ? "确认后暂停当前识别服务，完整候选验证后换入；失败恢复原环境。运行中任务需先结束。"
           : "依赖安装只写入此目标环境。"}
-        {plan.cudaPluginAction === "prepare"
-          ? "同时准备锁定的 ONNX Runtime CUDA 13 执行插件。"
-          : plan.cudaPluginAction === "remove"
-            ? "同时移除 ONNX Runtime CUDA 13 执行插件。"
-            : ""}
         模型在需要时从所选来源下载，已缓存模型直接复用。
         {(plan.removedDependencies?.length ?? 0) > 0
-          ? `本次明确移除 CUDA 附加依赖：${plan.removedDependencies?.join("、")}。`
+          ? `本次明确移除依赖：${plan.removedDependencies?.join("、")}。`
           : ""}
       </p>
       <div className="setting-row">
@@ -1739,9 +1693,7 @@ function EnvironmentPlanPanel({
             })
           }
         >
-          {(plan.removedDependencies?.length ?? 0) > 0
-            ? "确认移除 CUDA"
-            : "确认安装依赖"}
+          确认安装依赖
         </Button>
         <Button disabled={busy} onClick={onCancel}>
           取消
@@ -2131,9 +2083,9 @@ function CleanupSelection({
   );
 }
 
-// 来源收敛为单一简单设置：依赖包与模型各选一个来源，语义仅“安装依赖”
-// 与“下载模型”；不暴露产品默认/全局默认/环境覆盖三层，也不提供按次
-// 或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
+// 来源收敛为单一简单设置：依赖已全部随包离线安装，可配置的只剩
+// “下载模型”的来源；不暴露产品默认/全局默认/环境覆盖三层，也不提供
+// 按次或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
 interface EnvironmentInstallProgress {
   readonly attempt_id: string;
   readonly seq: number;
@@ -2153,8 +2105,8 @@ interface EnvironmentInstallProgress {
   readonly download_files_completed: number;
   // 当前依赖下载批次的字节累计（bytes_current 跨待下载工件累加，
   // bytes_total 为全部待下载工件 Content-Length 之和；任一未知则为
-  // null）。只覆盖依赖工件下载，不含模型、CUDA 插件与隔离构建临时
-  // 依赖；未知分母不造百分比。
+  // null）。只覆盖依赖工件下载，不含模型与隔离构建临时依赖；未知分母
+  // 不造百分比。
   readonly bytes_current?: number;
   readonly bytes_total?: number | null;
 }
@@ -2263,9 +2215,8 @@ function EnvironmentInstallDetails({
       <p className="form-note">
         包数与下载文件数分别统计；Python 和内部 Runtime wheel
         随产品提供，模型尚未下载。字节是当前依赖下载批次的累计（跨待下载
-        工件累加），不含模型、CUDA 插件与源分发包隔离构建临时依赖；总量
-        未知时不显示百分比。安装批次成功后才确认依赖，整体完成须通过验证
-        与提交。
+        工件累加），不含模型与源分发包隔离构建临时依赖；总量未知时不显示
+        百分比。安装批次成功后才确认依赖，整体完成须通过验证与提交。
       </p>
       <details>
         <summary>依赖状态（只读）</summary>
@@ -2309,15 +2260,6 @@ function EnvironmentSourceSettings({
   readonly onInvalidate: () => void;
 }) {
   const catalog = managedSourceOptions(state.environmentSources);
-  const packageSources = catalog.length
-    ? catalog.filter((source) => source.kind === "package_index")
-    : stringValues(state.environmentPackageSourceIds).map((id) => ({
-        id,
-        kind: "package_index",
-        displayName: id,
-        endpoint: "",
-        isDefault: false,
-      }));
   const paddleSources = catalog.filter(
     (source) => source.kind === "paddleocr_model_registry",
   );
@@ -2346,10 +2288,8 @@ function EnvironmentSourceSettings({
     catalog.find((source) => source.kind === kind && source.isDefault)?.id ??
     "";
   const [edit, setEdit] = useState<{
-    packageId?: string;
     modelProvider?: string;
   }>({});
-  const packageValue = edit.packageId ?? resolvedId("package_index");
   // 模型统一选择“提供方”（魔搭/Hugging Face）：两类引擎的解析默认一致时
   // 直接回显；不一致时如实标注，保存后统一为所选提供方。
   const resolvedProviders = [
@@ -2392,7 +2332,6 @@ function EnvironmentSourceSettings({
       independent
         ? {
             type: "settings.setEnvironmentSources",
-            packageSourceId: packageValue || null,
             paddleocrModelSourceId:
               paddleSources.find((source) => source.provider === modelValue)
                 ?.id ??
@@ -2408,76 +2347,56 @@ function EnvironmentSourceSettings({
           }
         : {
             type: "settings.setEnvironmentSources",
-            packageSourceId: packageValue || null,
             modelSourceId: modelValue || null,
           },
     );
     if (ok) setEdit({});
   };
+  const modelSourcesAvailable =
+    (independent
+      ? providerOptions.length > 0
+      : sharedModelSources.length > 0) || modelMixed;
   return (
     <section className="environment-source-settings" aria-label="下载来源">
-      <h3>下载来源（依赖与模型）</h3>
+      <h3>下载来源（模型）</h3>
       <p className="form-note">
-        仅用于安装依赖与下载模型：保存只写配置，不影响已安装环境与
-        当前运行的服务。
+        仅用于下载模型：依赖已随包离线提供。保存只写配置，不影响已安装
+        环境与当前运行的服务。
       </p>
-      {packageSources.length === 0 ? (
+      {!modelSourcesAvailable ? (
         <p className="form-note">
           下载源目录尚未同步；可点击“重新检查状态”后再配置。
         </p>
       ) : (
         <>
-          <div className="setting-row">
-            <label htmlFor="settings-package-source">依赖包来源</label>
-            <Select
-              id="settings-package-source"
-              value={packageValue}
-              disabled={busy}
-              onChange={(_, data) =>
-                setEdit((current) => ({
-                  ...current,
-                  packageId: String(data.value),
-                }))
-              }
-            >
-              {packageSources.map((source) => (
-                <option key={source.id} value={source.id}>
-                  {source.displayName}
-                  {source.isDefault ? "（默认）" : ""}
-                </option>
-              ))}
-            </Select>
-          </div>
           {independent ? (
-            providerOptions.length > 0 && (
-              <div className="setting-row">
-                <label htmlFor="settings-model-source">模型来源</label>
-                <Select
-                  id="settings-model-source"
-                  value={modelValue}
-                  disabled={busy}
-                  onChange={(_, data) =>
-                    setEdit((current) => ({
-                      ...current,
-                      modelProvider: String(data.value),
-                    }))
-                  }
-                >
-                  {modelMixed ? (
-                    <option value="">当前不一致（保存后统一）</option>
-                  ) : null}
-                  {providerOptions.map((source) => (
-                    <option
-                      key={modelProviderOf(source.id)}
-                      value={modelProviderOf(source.id)}
-                    >
-                      {providerLabel(source.id, source.displayName)}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-            )
-          ) : sharedModelSources.length > 0 ? (
+            <div className="setting-row">
+              <label htmlFor="settings-model-source">模型来源</label>
+              <Select
+                id="settings-model-source"
+                value={modelValue}
+                disabled={busy}
+                onChange={(_, data) =>
+                  setEdit((current) => ({
+                    ...current,
+                    modelProvider: String(data.value),
+                  }))
+                }
+              >
+                {modelMixed ? (
+                  <option value="">当前不一致（保存后统一）</option>
+                ) : null}
+                {providerOptions.map((source) => (
+                  <option
+                    key={modelProviderOf(source.id)}
+                    value={modelProviderOf(source.id)}
+                  >
+                    {providerLabel(source.id, source.displayName)}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : (
             <div className="setting-row">
               <label htmlFor="settings-model-source">模型来源</label>
               <Select
@@ -2498,7 +2417,7 @@ function EnvironmentSourceSettings({
                 ))}
               </Select>
             </div>
-          ) : null}
+          )}
           {modelMixed ? (
             <p className="form-note" role="note">
               当前 PaddleOCR 与 MinerU
@@ -2520,7 +2439,6 @@ type EngineSelection = "paddle" | "mineru";
 
 function engineDeviceOptionLabel(device: string): string {
   if (device === "directml") return "Windows GPU（DirectML）";
-  if (device === "nvidia_cuda") return "NVIDIA GPU（CUDA）";
   return "CPU（通用）";
 }
 
@@ -2561,7 +2479,6 @@ function EngineEnvironmentSection({
   // 安装配方按安装档设备绑定；统一闭包选 CPU 等非安装档设备时回落组内
   // 唯一配方（同闭包设备切换，不另装配方）。
   const target = recipeForDevice(group, device) ?? undefined;
-  const hardware = managedEnvironmentHardware(state.environmentHardware);
   const environments = managedEnvironments(state.environments);
   const activeId = stringValue(state.activeEnvironmentId);
   const busy = state.environmentBusy === true;
@@ -2569,16 +2486,6 @@ function EngineEnvironmentSection({
   const compatibility = managedEnvironmentCompatibility(
     state.environmentCompatibility,
   );
-  const blockedReason =
-    target?.accelerator !== "nvidia_cuda"
-      ? null
-      : hardware.nvidiaDriverStatus === "ok"
-        ? null
-        : hardware.nvidiaDriverStatus === "unsupported"
-          ? hardware.nvidiaDriverReason === "nvidia_driver_incompatible"
-            ? "不支持：当前 NVIDIA 驱动不满足安装要求"
-            : "不支持：未检测到可用的 NVIDIA 驱动"
-          : "暂不可选：NVIDIA 驱动状态未探测（可稍后重新检查状态）";
   const targetId = target?.id ?? "";
   const compatibilityRecipe = compatibility?.recipe ?? "";
   const queryResult =
@@ -2625,7 +2532,7 @@ function EngineEnvironmentSection({
   const queryKey = `${targetId}|${environmentsFingerprint}|${queryGeneration}`;
   useEffect(() => {
     // 单槽闸门：只有聚焦分区自动查询；未聚焦分区不在 mount 时发请求，避免两卡互相覆盖宿主唯一的 compatibility 结果。
-    if (!focused || !targetId || busy || blockedReason) return;
+    if (!focused || !targetId || busy) return;
     if (compatibilityRecipe === targetId) return;
     if (
       dispatchedQuery?.recipe === targetId &&
@@ -2653,7 +2560,6 @@ function EngineEnvironmentSection({
     focused,
     targetId,
     busy,
-    blockedReason,
     compatibilityRecipe,
     environmentsFingerprint,
     queryGeneration,
@@ -2689,14 +2595,12 @@ function EngineEnvironmentSection({
     !!targetId &&
     focused &&
     !busy &&
-    !blockedReason &&
     compatibilityRecipe !== targetId &&
     (dispatchedQuery?.recipe !== targetId ||
       dispatchedQuery.fingerprint !== environmentsFingerprint ||
       dispatchedQuery.generation !== queryGeneration);
   // 未聚焦分区不自动查询：显式入口把焦点接到本分区后由同一 effect 单次补发，不产生第二条并发查询路径。
-  const manualQueryVisible =
-    !!targetId && !focused && !busy && !blockedReason && !queryResult;
+  const manualQueryVisible = !!targetId && !focused && !busy && !queryResult;
   const mineruEnvironments =
     family === "mineru"
       ? environments.filter((environment) =>
@@ -2790,17 +2694,7 @@ function EngineEnvironmentSection({
               </p>
             </>
           ) : null}
-          <p className="environment-hardware-note">
-            NVIDIA 驱动（Runtime 探测，仅 CUDA 需要，不代表满足所选后端）：
-            {hardware.nvidiaDriverStatus === "ok"
-              ? `已检测到（${hardware.nvidiaDriverVersion ?? "版本未知"}）`
-              : hardware.nvidiaDriverStatus === "unsupported"
-                ? "不满足要求"
-                : "未探测"}
-          </p>
-          {blockedReason ? (
-            <p role="alert">{blockedReason}；该配置当前不可选。</p>
-          ) : target ? (
+          {target ? (
             <>
               {queryResult ? (
                 compatibleEnvironment ? (
@@ -3036,16 +2930,6 @@ function EnvironmentRow({
             {environment.id === activeId
               ? "启动并验证当前环境"
               : "切换到此环境"}
-          </Button>
-        ) : null}
-        {environment.recipe === "paddleocr-ort-cuda" && onPreview ? (
-          <Button
-            disabled={
-              busy || Boolean(environment.operationBlocks?.preview_install)
-            }
-            onClick={() => onPreview(environment.id, "paddleocr-ort-cpu")}
-          >
-            预览移除 CUDA（保留 CPU）
           </Button>
         ) : null}
         {continueRecipe && onPreview ? (

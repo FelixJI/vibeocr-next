@@ -751,10 +751,6 @@ input {
 .environment-recommendation details {
   overflow-wrap: anywhere;
 }
-.environment-hardware-note {
-  color: var(--colorNeutralForeground3);
-  font-size: 12px;
-}
 .managed-environment-advanced > summary {
   cursor: pointer;
   color: var(--colorNeutralForeground3);

@@ -8,8 +8,6 @@ never dependency names, index URLs or package-manager arguments.
 from __future__ import annotations
 
 import argparse
-import asyncio
-import hashlib
 import json
 import os
 import platform
@@ -22,7 +20,6 @@ import sys
 import tarfile
 import threading
 import time
-import tomllib
 import urllib.parse
 import urllib.request
 import zipfile
@@ -34,13 +31,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 from uuid import uuid4
 
-import httpx
-from packaging.markers import InvalidMarker, Marker, default_environment
+from packaging.markers import default_environment
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.tags import compatible_tags, cpython_tags
-from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from vibeocr.runtime.environments.bundled_uv import (
-    UV_VERSION,
     uv_environment,
     uv_pip_command,
 )
@@ -75,7 +68,6 @@ from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeOperationStore,
     RuntimeSourceIdentityMismatch,
     StartupCancellation,
-    _replace_transient_windows_lock,
     declared_installed_closure,
     probe_runtime_components,
     profile_descriptor,
@@ -94,7 +86,6 @@ from vibeocr.runtime.environments.runtime_manifest import (
 )
 from vibeocr.runtime.environments.runtime_selection import (
     BASE_PROFILE,
-    BoundDownloadSource,
     RuntimeSelectionError,
     RuntimeSelectionPolicy,
 )
@@ -642,227 +633,6 @@ def _parse_resolve_document(
     return tuple(artifacts)
 
 
-def _content_length(headers: httpx.Headers) -> int | None:
-    try:
-        value = int(headers.get("Content-Length", ""))
-        return value if value > 0 else None
-    except ValueError:
-        return None
-
-
-def _download_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        follow_redirects=True,
-        timeout=_DOWNLOAD_HTTP_TIMEOUT_SECONDS,
-        headers={"Accept-Encoding": "identity"},
-    )
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(_DOWNLOAD_CHUNK_BYTES), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _download_resolved_artifacts(
-    artifacts: tuple[_ResolvedArtifact, ...],
-    allowed_hashes: dict[str, set[str]],
-    download_root: Path,
-    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
-) -> Path:
-    """Fetch each verified artifact once; progress counts this batch's network bytes."""
-    download_root.mkdir(parents=True, exist_ok=True)
-    unique: dict[str, _ResolvedArtifact] = {}
-    for artifact in artifacts:
-        previous = unique.setdefault(artifact.filename, artifact)
-        if previous != artifact and (
-            previous.name != artifact.name
-            or previous.sha256 is None
-            or previous.sha256 != artifact.sha256
-        ):
-            raise RuntimeInstallError("conflicting download artifact filename")
-    identities: set[tuple[str, str]] = set()
-    distinct = []
-    for artifact in unique.values():
-        identity = (
-            _normalize_dist_name(artifact.name),
-            artifact.sha256 or artifact.url,
-        )
-        if identity not in identities:
-            identities.add(identity)
-            distinct.append(artifact)
-    artifacts = tuple(distinct)
-    received = 0
-    total: int | None = None
-
-    def report(code: str, **details: str) -> None:
-        if reporter is not None:
-            reporter.advance_measured(
-                phase="install_profile",
-                unit="bytes",
-                current=received,
-                total=total,
-                message_code=code,
-                message_args={"step": code, **details},
-            )
-
-    async def download() -> None:
-        nonlocal received, total
-        pending = []
-        for artifact in artifacts:
-            if reporter is not None:
-                reporter.check_cancelled()
-            report("runtime.verify_download_cache", package=artifact.name)
-            destination = download_root / artifact.filename
-            expected = allowed_hashes.get(_normalize_dist_name(artifact.name), set())
-            if artifact.sha256 is not None:
-                expected = expected & {artifact.sha256}
-            cached_digest = None
-            if destination.is_file():
-                digest = hashlib.sha256()
-                with destination.open("rb") as stream:
-                    while chunk := stream.read(_DOWNLOAD_CHUNK_BYTES):
-                        if reporter is not None:
-                            reporter.check_cancelled()
-                            reporter.record_activity()
-                        digest.update(chunk)
-                        await asyncio.sleep(0)
-                cached_digest = digest.hexdigest()
-            if cached_digest in expected:
-                report(
-                    "runtime.download_cache_hit",
-                    package=artifact.name,
-                    cache_bytes=str(destination.stat().st_size),
-                )
-            else:
-                if cached_digest is not None:
-                    report("runtime.download_cache_invalid", package=artifact.name)
-                pending.append((artifact, expected))
-        if isinstance(reporter, ManagedInstallObserver):
-            reporter.download_total = len(pending)
-            reporter.emit()
-        if not pending:
-            return
-        async with _download_client() as client:
-            sizes: list[int | None] = []
-            for artifact, _ in pending:
-                report("runtime.probe_package_metadata", package=artifact.name)
-                if urllib.parse.urlsplit(artifact.url).scheme not in {"https", "http"}:
-                    raise RuntimeInstallError(
-                        "verified local artifact is unavailable",
-                        reason_code="cache_invalid",
-                        next_action="retry_operation",
-                    )
-                try:
-                    response = await client.head(artifact.url)
-                    sizes.append(
-                        _content_length(response.headers)
-                        if response.status_code == 200
-                        else None
-                    )
-                except httpx.RequestError:
-                    # HEAD is optional; the GET remains authoritative and bounded.
-                    sizes.append(None)
-            total = (
-                sum(size for size in sizes if size is not None)
-                if all(size is not None for size in sizes)
-                else None
-            )
-            for index, (artifact, expected) in enumerate(pending):
-                report("runtime.download_package", package=artifact.name)
-                destination = download_root / artifact.filename
-                temporary = destination.with_suffix(destination.suffix + ".part")
-                digest = hashlib.sha256()
-                last_event_bytes = received
-                try:
-                    async with client.stream("GET", artifact.url) as response:
-                        response.raise_for_status()
-                        if _content_length(response.headers) != sizes[index]:
-                            total = None
-                            report("runtime.download_package", package=artifact.name)
-                        with temporary.open("wb") as stream:
-                            async for chunk in response.aiter_raw():
-                                if reporter is not None:
-                                    reporter.check_cancelled()
-                                    reporter.record_activity()
-                                stream.write(chunk)
-                                digest.update(chunk)
-                                received += len(chunk)
-                                if total is not None and received > total:
-                                    total = None
-                                # Never announce 100% before the lock digest is accepted.
-                                if (
-                                    received != total
-                                    and received - last_event_bytes
-                                    >= _DOWNLOAD_EVENT_MIN_BYTES
-                                ):
-                                    report(
-                                        "runtime.download_package",
-                                        package=artifact.name,
-                                    )
-                                    last_event_bytes = received
-                    if digest.hexdigest() not in expected:
-                        raise RuntimeInstallError(
-                            f"downloaded artifact hash mismatch: {artifact.name}",
-                            reason_code="hash_mismatch",
-                            next_action="check_source_and_retry",
-                        )
-                    if reporter is not None:
-                        reporter.check_cancelled()
-                    os.replace(temporary, destination)
-                    report("runtime.download_verified", package=artifact.name)
-                finally:
-                    temporary.unlink(missing_ok=True)
-
-    async def supervise() -> None:
-        task = asyncio.create_task(download())
-        last_heartbeat = time.monotonic()
-        try:
-            while not task.done():
-                await asyncio.wait({task}, timeout=0.1)
-                if reporter is not None:
-                    reporter.check_cancelled()
-                    # The wait above can return with the task just completed;
-                    # a trailing heartbeat would overwrite the terminal
-                    # runtime.download_verified progress event.
-                    if (
-                        not task.done()
-                        and time.monotonic() - last_heartbeat
-                        >= _CHILD_HEARTBEAT_INTERVAL_SECONDS
-                    ):
-                        reporter.heartbeat(message_code="runtime.download_wait")
-                        last_heartbeat = time.monotonic()
-            await task
-        finally:
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    try:
-        asyncio.run(supervise())
-    except httpx.TimeoutException:
-        raise RuntimeInstallError(
-            "package download timed out",
-            reason_code="network_timeout",
-            next_action="check_source_and_retry",
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeInstallError(
-            f"package download HTTP status {exc.response.status_code}",
-            reason_code="http_error",
-            next_action="check_source_and_retry",
-        ) from None
-    except httpx.RequestError:
-        raise RuntimeInstallError(
-            "package download connection failed",
-            reason_code="network_error",
-            next_action="check_source_and_retry",
-        ) from None
-    return download_root
-
-
 def _uv_command(python: Path, action: str) -> list[str]:
     try:
         return uv_pip_command(python, action)
@@ -930,325 +700,10 @@ def _applicable_lock(lock: Path, python_version: str) -> dict[str, Requirement]:
     return requirements
 
 
-def _validate_resolved_lock(
-    lock: Path, artifacts: tuple[_ResolvedArtifact, ...], python_version: str
-) -> None:
-    requirements = _applicable_lock(lock, python_version)
-    allowed = _lock_allowed_hashes(lock)
-    names = [_normalize_dist_name(artifact.name) for artifact in artifacts]
-    if len(names) != len(set(names)) or set(names) != requirements.keys():
-        raise RuntimeInstallError(
-            "resolved local target closure does not match the applicable lock"
-        )
-    for artifact in artifacts:
-        name = _normalize_dist_name(artifact.name)
-        requirement = requirements[name]
-        if not artifact.sha256 or artifact.sha256 not in allowed.get(name, set()):
-            raise RuntimeInstallError(
-                "local target artifact hash is not accepted by the lock"
-            )
-        if not isinstance(artifact.version, str) or (
-            requirement.specifier
-            and not requirement.specifier.contains(artifact.version, prereleases=True)
-        ):
-            raise RuntimeInstallError(
-                "resolved local target version is not accepted by the lock"
-            )
-        if (
-            requirement.url
-            and not artifact.url.startswith("file://")
-            and artifact.url != requirement.url
-        ):
-            raise RuntimeInstallError(
-                "resolved direct artifact URL differs from the lock"
-            )
-
-
-def _pylock_report(
-    pylock: Path, lock: Path, python_version: str, downloads: Path
-) -> dict[str, object]:
-    try:
-        document = tomllib.loads(pylock.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise RuntimeInstallError("uv pylock report is unreadable") from None
-    packages = document.get("packages")
-    if (
-        document.get("lock-version") != "1.0"
-        or not isinstance(packages, list)
-        or not packages
-    ):
-        raise RuntimeInstallError("uv pylock report has no supported artifacts")
-    tags = list(cpython_tags((3, 13), abis=["cp313"], platforms=["win_amd64"])) + list(
-        compatible_tags((3, 13), interpreter="cp313", platforms=["win_amd64"])
-    )
-    ranks = {tag: rank for rank, tag in enumerate(tags)}
-    allowed = _lock_allowed_hashes(lock)
-    items = []
-    for package in packages:
-        if not isinstance(package, dict):
-            raise RuntimeInstallError("uv pylock target package is invalid")
-        name, version = package.get("name"), package.get("version")
-        if not isinstance(name, str) or not isinstance(version, str):
-            raise RuntimeInstallError("uv pylock target package is invalid")
-        marker = package.get("marker")
-        if marker is not None:
-            try:
-                if not Marker(marker).evaluate(_target_markers(python_version)):
-                    continue
-            except (InvalidMarker, TypeError):
-                raise RuntimeInstallError(
-                    "uv pylock target marker is invalid"
-                ) from None
-        wheels = package.get("wheels", [])
-        if not isinstance(wheels, list):
-            raise RuntimeInstallError("uv pylock wheels are invalid")
-        archive = package.get("archive")
-        if isinstance(archive, dict) and "path" in archive:
-            path = archive["path"]
-            if not isinstance(path, str) or not Path(path).is_absolute():
-                raise RuntimeInstallError("uv pylock archive path is invalid")
-            archive = {**archive, "url": Path(path).resolve().as_uri()}
-        if isinstance(archive, dict) and str(archive.get("url", "")).endswith(".whl"):
-            wheels = [*wheels, archive]
-            archive = None
-        candidates = []
-        for wheel in wheels:
-            if (
-                not isinstance(wheel, dict)
-                or not isinstance(wheel.get("url"), str)
-                or not isinstance(wheel.get("hashes"), dict)
-            ):
-                raise RuntimeInstallError("uv pylock wheel is invalid")
-            url = wheel["url"]
-            try:
-                wheel_name, wheel_version, _, wheel_tags = parse_wheel_filename(
-                    urllib.parse.unquote(
-                        urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
-                    )
-                )
-            except (InvalidWheelFilename, ValueError):
-                raise RuntimeInstallError(
-                    "uv pylock wheel filename is invalid"
-                ) from None
-            matching = [ranks[tag] for tag in wheel_tags if tag in ranks]
-            if (
-                matching
-                and _normalize_dist_name(str(wheel_name)) == _normalize_dist_name(name)
-                and str(wheel_version) == version
-                and wheel["hashes"].get("sha256")
-                in allowed.get(_normalize_dist_name(name), set())
-            ):
-                candidates.append((min(matching), url, wheel))
-        if candidates:
-            artifact = min(candidates, key=lambda value: (value[0], value[1]))[2]
-        else:
-            artifact = package.get("sdist", archive)
-        if not isinstance(artifact, dict):
-            raise RuntimeInstallError("uv pylock has no lock-allowed target artifact")
-        items.append(
-            {
-                "metadata": {"name": name, "version": version},
-                "download_info": {
-                    "url": artifact.get("url"),
-                    "archive_info": {"hashes": artifact.get("hashes")},
-                },
-            }
-        )
-    report = {"executor": f"uv-{UV_VERSION}", "install": items}
-    _validate_resolved_lock(
-        lock, _parse_resolve_document(report, downloads), python_version
-    )
-    return report
-
-
-def _resolve_online_report(
-    python: Path,
-    lock: Path,
-    endpoint: str,
-    cache: Path,
-    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
-    env: dict[str, str],
-) -> Path:
-    """Derive artifacts with uv; the bound requirements lock stays authoritative."""
-    env = _uv_install_environment(env, cache)
-    target_output = _run_install_command(
-        [
-            str(python),
-            "-I",
-            "-c",
-            "import json,sys,sysconfig; print(json.dumps({'version': '.'.join(map(str,sys.version_info[:3])), 'platform': sysconfig.get_platform(), 'implementation':sys.implementation.name, 'gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}))",
-        ],
-        timeout=60,
-        env=env,
-        reporter=reporter,
-        heartbeat_code="runtime.resolve_target",
-    )
-    try:
-        target = json.loads(target_output)
-    except ValueError:
-        raise RuntimeInstallError("target Python identity is unreadable") from None
-    if (
-        target.get("implementation") != "cpython"
-        or target.get("platform") != "win-amd64"
-        or not target.get("version", "").startswith("3.13.")
-        or target.get("gil_disabled")
-    ):
-        raise RuntimeInstallError(
-            "installer requires the bound Windows x64 CPython 3.13"
-        )
-    report_path = cache / "resolve" / f"{lock.stem}-report.json"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    inputs_path = report_path.with_suffix(".inputs.json")
-    inputs = {
-        "lock": lock.read_text(encoding="utf-8"),
-        "endpoint": endpoint,
-        "ignore_installed": True,
-        "executor": f"uv-{UV_VERSION}",
-        "target": target,
-    }
-    downloads = cache / "downloads" / "artifacts"
-    downloads.mkdir(parents=True, exist_ok=True)
-    try:
-        if json.loads(inputs_path.read_text(encoding="utf-8")) == inputs:
-            artifacts = _parse_resolve_report(report_path, downloads)
-            _validate_resolved_lock(lock, artifacts, target["version"])
-            for artifact in artifacts:
-                if artifact.url.startswith("file://"):
-                    local = downloads / artifact.filename
-                    if not local.is_file() or _file_sha256(local) != artifact.sha256:
-                        break
-            else:
-                return report_path
-    except (OSError, ValueError, RuntimeInstallError):
-        pass
-    # Unique output prevents an obsolete derived lock from becoming a resolver preference.
-    pylock = report_path.with_name(f"pylock.{uuid4().hex}.toml")
-    try:
-        _run_install_command(
-            _uv_command(python, "compile")
-            + [
-                "--no-sources",
-                "--python-platform",
-                "x86_64-pc-windows-msvc",
-                "--generate-hashes",
-                "--format",
-                "pylock.toml",
-                "--output-file",
-                str(pylock),
-                "--find-links",
-                str(downloads),
-                "--default-index",
-                endpoint,
-                "--index-strategy",
-                "first-index",
-                str(lock),
-            ],
-            timeout=_RESOLVE_TOTAL_TIMEOUT_SECONDS,
-            idle_timeout=_RESOLVE_IDLE_TIMEOUT_SECONDS,
-            env=env,
-            reporter=reporter,
-            heartbeat_code="runtime.resolve_packages",
-            gate_python=python,
-        )
-        document = _pylock_report(pylock, lock, target["version"], downloads)
-        report_path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
-        inputs_path.write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
-    finally:
-        pylock.unlink(missing_ok=True)
-    return report_path
-
-
-def _prepare_online_artifacts(
-    python: Path,
-    lock: Path,
-    endpoint: str,
-    cache: Path,
-    reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None,
-    env: dict[str, str],
-) -> Path:
-    """Resolve and download the online lock closure; return the artifact dir."""
-    allowed = _lock_allowed_hashes(lock)
-    downloads = cache / "downloads" / "artifacts"
-    downloads.mkdir(parents=True, exist_ok=True)
-    # Reuse only original wheels whose bytes the target lock already accepts.
-    # Wheels built from sdists remain bound to their original offline pack.
-    for wheel in (cache / "runtime-packs").glob("*/*.whl"):
-        name = _normalize_dist_name(wheel.name.split("-", 1)[0])
-        if (
-            name in allowed
-            and not (downloads / wheel.name).exists()
-            and _file_sha256(wheel) in allowed[name]
-        ):
-            shutil.copyfile(wheel, downloads / wheel.name)
-    artifacts = _parse_resolve_report(
-        _resolve_online_report(python, lock, endpoint, cache, reporter, env),
-        downloads,
-    )
-    if isinstance(reporter, ManagedInstallObserver):
-        reporter.set_phase("download", "核验缓存并下载缺失依赖")
-    return _download_resolved_artifacts(artifacts, allowed, downloads, reporter)
-
-
-def _local_install_requirements(
-    lock: Path, downloads: Path, report: Path, python_version: str
-) -> Path:
-    """Bind the resolved target closure to the verified local artifacts.
-
-    The original lock remains authoritative: uv rechecks its allowed hashes.
-    Explicit local targets plus --no-deps prevent an index or @HTTPS pin from
-    downloading targets again. The selected index remains available only to
-    uv's isolated sdist build requirements, outside the target package counts.
-    """
-    requirements = _applicable_lock(lock, python_version)
-    artifacts: dict[str, _ResolvedArtifact] = {}
-    for artifact in _parse_resolve_report(report, downloads):
-        name = _normalize_dist_name(artifact.name)
-        if name in artifacts and artifacts[name] != artifact:
-            raise RuntimeInstallError(
-                "local target closure has conflicting resolved artifacts"
-            )
-        artifacts[name] = artifact
-    if artifacts.keys() != requirements.keys():
-        raise RuntimeInstallError(
-            "resolved local target closure does not match the applicable lock"
-        )
-    allowed = _lock_allowed_hashes(lock)
-    lines = []
-    for name, artifact in artifacts.items():
-        hashes = allowed.get(name, set())
-        if artifact.sha256 is not None:
-            hashes = hashes & {artifact.sha256}
-        if not hashes:
-            raise RuntimeInstallError(
-                "local target artifact hash is not accepted by the lock"
-            )
-        local = downloads / artifact.filename
-        if not local.is_file():
-            raise RuntimeInstallError("verified local target artifact is missing")
-        extras = requirements[name].extras
-        project = name + ("[" + ",".join(sorted(extras)) + "]" if extras else "")
-        lines.append(
-            f"{project} @ {local.resolve().as_uri()} "
-            + " ".join(f"--hash=sha256:{digest}" for digest in sorted(hashes))
-        )
-    local_lock = report.with_name(f"{lock.stem}-local.txt")
-    temporary = local_lock.with_name(f".{local_lock.name}.{uuid4().hex}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as stream:
-            stream.write("\n".join(lines) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        _replace_transient_windows_lock(temporary, local_lock)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return local_lock
-
-
 def _default_install_runner(
     partial_root: Path,
     manifest: RuntimeManifest,
     install_scope: RuntimeInstallScope,
-    download_sources: tuple[BoundDownloadSource, ...],
     reporter: RuntimeMaintenanceReporter | ManagedInstallObserver | None = None,
     *,
     cache_root: Path | None = None,
@@ -1292,7 +747,6 @@ def _default_install_runner(
     python = _python_in(partial_root)
     if not python.is_file():
         raise RuntimeInstallError("Python archive has no python.exe")
-    lock = install_scope.lock_path
     runtime_pack = install_scope.runtime_pack
     portable_env = uv_environment(dict(os.environ))
     cache = cache_root or partial_root.parent.parent / "state" / "installer-cache"
@@ -1320,73 +774,33 @@ def _default_install_runner(
     install_command = _uv_command(python, "install")
     pack_files = [manifest.path.parent / name for name in runtime_pack]
     pack_present = bool(pack_files) and all(path.is_file() for path in pack_files)
-    base_ids = {
-        component.component_id
-        for component in manifest.profiles[BASE_PROFILE].components
-    }
-    is_base_scope = set(install_scope.component_ids) == base_ids
-    if runtime_pack and not pack_present and is_base_scope:
-        # base 是随 Portable 携带的必备闭包：缺失即产品不完整，fail closed
-        # 而不是静默联网安装（计划 §4.1）。full 闭包的 pack 由用户按需下载，
-        # 未到位时回退在线安装是合法状态（cu126 因 torch 单 wheel 超过
-        # Release 资产上限，长期保持在线直链路径）。
+    if not pack_present:
+        # 在线依赖安装已退役：manifest 绑定的 runtime pack 提供完整 wheel
+        # 闭包，缺失即发布闭包错误，fail closed 而不是回退公网（原 cu126
+        # 因 torch 单 wheel 超 Release 资产上限保留的在线直链路径已随
+        # CUDA 退役一并删除）。
         raise RuntimeInstallError(f"runtime pack is missing: {runtime_pack[0]}")
-    if pack_present:
-        # 离线路径（计划 §4.2）：manifest 绑定的 runtime pack 提供完整
-        # wheel 闭包，安装禁止回退公网。pack 整体字节完整性由
-        # runtime_pack_sha256 在 manifest 加载时验证；解析输入用 pack 自带
-        # 的无哈希 requirements 清单——原 lock 的哈希行覆盖 sdist 工件，
-        # 对 pack 内由 sdist 构建的 wheel 必然不匹配。
-        pack_dir = _extract_runtime_pack(
-            pack_files,
-            cache / "runtime-packs",
-            expected_sha256=install_scope.runtime_pack_sha256,
-            reporter=reporter,
-        )
-        requirements_file = pack_dir / "pack-requirements.txt"
-        install_command += [
-            "--offline",
-            "--no-index",
-            "--find-links",
-            str(pack_dir),
-            # pack 是纯 wheel 闭包，only-binary 保证离线安装永不触发本机构建。
-            "--only-binary=:all:",
-            "-r",
-            str(requirements_file),
-        ]
-    else:
-        package_indexes = tuple(
-            source for source in download_sources if source.kind == "package_index"
-        )
-        if len(package_indexes) != 1:
-            raise RuntimeInstallError(
-                "online Runtime install requires one package_index source"
-            )
-        # 目标闭包只消费自管下载的本地工件（包括直链 wheel 与 sdist）。
-        # 索引只供 sdist 的隔离构建临时依赖使用，不参与目标包重新选取。
-        endpoint = package_indexes[0].endpoint
-        download_root = _prepare_online_artifacts(
-            python, lock, endpoint, cache, reporter, portable_env
-        )
-        install_command += [
-            "--default-index",
-            endpoint,
-            "--index-strategy",
-            "first-index",
-            "--find-links",
-            str(download_root),
-            "--no-deps",
-            "--require-hashes",
-            "-r",
-            str(
-                _local_install_requirements(
-                    lock,
-                    download_root,
-                    cache / "resolve" / f"{lock.stem}-report.json",
-                    manifest.python.version,
-                )
-            ),
-        ]
+    # 离线路径（计划 §4.2）：安装禁止回退公网。pack 整体字节完整性由
+    # runtime_pack_sha256 在 manifest 加载时验证；解析输入用 pack 自带
+    # 的无哈希 requirements 清单——原 lock 的哈希行覆盖 sdist 工件，
+    # 对 pack 内由 sdist 构建的 wheel 必然不匹配。
+    pack_dir = _extract_runtime_pack(
+        pack_files,
+        cache / "runtime-packs",
+        expected_sha256=install_scope.runtime_pack_sha256,
+        reporter=reporter,
+    )
+    requirements_file = pack_dir / "pack-requirements.txt"
+    install_command += [
+        "--offline",
+        "--no-index",
+        "--find-links",
+        str(pack_dir),
+        # pack 是纯 wheel 闭包，only-binary 保证离线安装永不触发本机构建。
+        "--only-binary=:all:",
+        "-r",
+        str(requirements_file),
+    ]
     _run_install_command(
         install_command,
         timeout=3600,
@@ -1595,73 +1009,6 @@ def _extract_runtime_pack(
     return destination
 
 
-def probe_nvidia_driver(
-    *, minimum_version: tuple[int, int] = (528, 33)
-) -> dict[str, str | None]:
-    """只读探测 NVIDIA 驱动；默认 CUDA 12.x，Paddle ONNX CUDA 13 要求 R580。
-
-    - ``_installation_blockers``：安装预检 fail-closed 真值（非 ok 即阻断）；
-    - managed environments ``list()`` 的 ``hardware`` 投影：前台据此如实
-      禁用不支持的 CUDA 配方，CPU 配方始终可选。
-
-    status 语义：``ok``＝命令可用且全部驱动版本≥下限；``unsupported``＝
-    命令明确无驱动/驱动过旧（``reason_code`` 给出原因）；``unknown``＝探测
-    超时，不得当作已支持或已否定。探测只在 Runtime 侧进行一次，C#/TS
-    只消费投影，不自行检测硬件。
-    """
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=driver_version",
-                "--format=csv,noheader",
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "unknown",
-            "reason_code": None,
-            "driver_version": None,
-        }
-    except OSError:
-        # nvidia-smi 不存在/无法执行：命令层面明确没有可用 NVIDIA 驱动。
-        return {
-            "status": "unsupported",
-            "reason_code": "nvidia_driver_unavailable",
-            "driver_version": None,
-        }
-    # CUDA 12.x Windows minor compatibility has a 528.33 floor:
-    # docs.nvidia.com/cuda/archive/12.6.0/cuda-toolkit-release-notes/
-    versions = [
-        tuple(int(part) for part in line.strip().split("."))
-        for line in result.stdout.splitlines()
-        if re.fullmatch(r"[0-9]+\.[0-9]+", line.strip())
-    ]
-    if result.returncode != 0 or not versions:
-        return {
-            "status": "unsupported",
-            "reason_code": "nvidia_driver_unavailable",
-            "driver_version": None,
-        }
-    driver_version = next(
-        line.strip()
-        for line in result.stdout.splitlines()
-        if re.fullmatch(r"[0-9]+\.[0-9]+", line.strip())
-    )
-    if any(version < minimum_version for version in versions):
-        return {
-            "status": "unsupported",
-            "reason_code": "nvidia_driver_incompatible",
-            "driver_version": driver_version,
-        }
-    return {"status": "ok", "reason_code": None, "driver_version": driver_version}
-
-
 class RuntimeInstaller:
     def __init__(
         self,
@@ -1796,7 +1143,6 @@ class RuntimeInstaller:
                     partial,
                     manifest,
                     self._scope_for_ids(self._active_install_ids),
-                    self._selection.effective_download_sources,
                     self._reporter,
                 )
             )
@@ -1916,10 +1262,9 @@ class RuntimeInstaller:
         )
         if requested is not None and not set(requested_ids).issubset(previous_ids):
             raise RuntimeInstallError("unusable installed marker for startup selection")
-        suffix = "cuda" if self.accelerator == "nvidia_cuda" else "cpu"
-        mapped = tuple(
-            re.sub(r"-(cpu|cuda)$", f"-{suffix}", item) for item in requested_ids
-        )
+        # CUDA 档位已退役：历史 marker 的分设备组件 id 统一按 CPU 档位
+        # 归类（base 闭包组件无设备后缀，映射保持恒等）。
+        mapped = tuple(re.sub(r"-(cpu|cuda)$", "-cpu", item) for item in requested_ids)
         known_ids = {
             item.component_id for item in self.manifest.profiles[self.plan].components
         }
@@ -2204,11 +1549,9 @@ class RuntimeInstaller:
             "VIBEOCR_COMPONENT_LOCK": str(self.component_lock_path),
             "VIBEOCR_RUNTIME_ACCELERATOR": self.accelerator,
             # Backend inference/cache consumers still read this compatibility
-            # flag.  Derive it from the Installer-owned profile instead of
-            # asking a frontend shell to infer or inject the Runtime device.
-            "VIBEOCR_USE_GPU": (
-                "true" if self.accelerator == "nvidia_cuda" else "false"
-            ),
+            # flag.  CUDA 档位已退役：GPU 推理统一由 DirectML 承载，legacy
+            # Runtime 宿主恒按 CPU 档位投影。
+            "VIBEOCR_USE_GPU": "false",
             "VIBEOCR_RUNTIME_STATE_ROOT": str(state),
             "VIBEOCR_SUPERVISOR_SETTINGS": str(
                 self.product_root / "state" / "supervisor-settings.json"
@@ -2293,9 +1636,8 @@ class RuntimeInstaller:
                 blockers.append(
                     {"code": "platform_unsupported", "next_action": "use_windows_x64"}
                 )
-            # NVIDIA 驱动安装门槛已随分设备档位退役：统一推理闭包走
-            # DirectML（不要求 NVIDIA 驱动），probe_nvidia_driver 仅保留在
-            # managed environments list() 的 hardware 投影里供前台展示。
+            # NVIDIA 驱动安装门槛已随 CUDA 支持退役：统一推理闭包走
+            # DirectML（不要求 NVIDIA 驱动），不再探测或投影驱动状态。
             destinations = (
                 self.product_root,
                 self.paths.store_root,
@@ -2778,7 +2120,6 @@ def _request(value: object) -> dict[str, Any]:
             "source_ids",
             "plan_id",
             "item_ids",
-            "package_source_id",
             "model_source_id",
             "paddleocr_model_source_id",
             "mineru_model_source_id",
@@ -2872,7 +2213,7 @@ def _request(value: object) -> dict[str, Any]:
             "list": set(),
             "initialize_default": set(),
             "create": {"name"},
-            "set_sources": {"package_source_id"},
+            "set_sources": set(),
             "preview_install": {"environment_id", "recipe"},
             "find_compatible": {"recipe"},
             "prepare_target": {"recipe"},
@@ -2935,7 +2276,7 @@ def _request(value: object) -> dict[str, Any]:
             raise RuntimeInstallError("Runtime cleanup selection is invalid")
         if "device" in value and (
             not isinstance(value["device"], str)
-            or value["device"] not in {"cpu", "cuda", "directml"}
+            or value["device"] not in {"cpu", "directml"}
         ):
             raise RuntimeInstallError("Runtime environment device is invalid")
         for field in ("name", "environment_id", "recipe", "plan_id"):
@@ -2966,7 +2307,6 @@ def _request(value: object) -> dict[str, Any]:
         ):
             raise RuntimeInstallError("Runtime environment source_ids are invalid")
         for field in (
-            "package_source_id",
             "model_source_id",
             "paddleocr_model_source_id",
             "mineru_model_source_id",
@@ -3453,7 +2793,6 @@ def main(argv: list[str] | None = None) -> int:
             elif action == "set_sources":
                 payload = manager.set_sources(
                     request.get("environment_id"),
-                    request.get("package_source_id"),
                     **{
                         field: request[field]
                         for field in (

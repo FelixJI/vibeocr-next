@@ -519,7 +519,7 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     }
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-      string? environmentId, string? packageSourceId, string? modelSourceId,
+      string? environmentId, string? modelSourceId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(

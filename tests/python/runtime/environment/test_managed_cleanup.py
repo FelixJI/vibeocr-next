@@ -102,7 +102,7 @@ def test_pending_before_unregister_is_not_healthy(tmp_path, monkeypatch):
 
 
 def test_failed_install_candidate_is_recoverable(tmp_path, monkeypatch):
-    def fail(_python, _scope, _endpoint):
+    def fail(_python, _scope):
         raise RuntimeInstallError("fixture install failure")
 
     store, _ = _manager(tmp_path, monkeypatch, install=fail)

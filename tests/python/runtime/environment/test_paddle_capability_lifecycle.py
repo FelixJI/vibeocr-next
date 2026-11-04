@@ -210,7 +210,7 @@ def test_child_process_cancellation_records_terminal_state_and_keeps_cpu(
 
     manager._event_sink = observe
 
-    def install(python, _scope, _endpoint):
+    def install(python, _scope):
         _run_install_command(
             [
                 sys._base_executable,

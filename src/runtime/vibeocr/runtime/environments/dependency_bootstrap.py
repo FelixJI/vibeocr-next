@@ -13,11 +13,11 @@ from vibeocr.runtime.environments.env_manager import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="原生 Paddle 后端安装已退役，请通过受管理环境准备 ONNX 或独立 MinerU 配方",
+        description="原生 Paddle 后端安装已退役，请通过受管理环境准备统一推理闭包（DirectML）",
     )
     parser.add_argument(
         "--profile",
-        choices=("auto", "cpu", "gpu-cu126"),
+        choices=("auto", "cpu"),
         default="auto",
     )
     parser.add_argument(

@@ -70,13 +70,13 @@ class TestMainArgv:
             dependency_bootstrap, "install_backend_dependencies", fake_install
         )
 
-        code = dependency_bootstrap.main(["--profile", "gpu-cu126"])
+        code = dependency_bootstrap.main(["--profile", "cpu"])
 
         assert code == 0
         out = capsys.readouterr().out
         assert "[resolve] starting" in out
         assert "[install] done" in out
-        assert captured_stages == ["gpu-cu126"]
+        assert captured_stages == ["cpu"]
 
     def test_explicit_python_path_forwarded(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -105,10 +105,10 @@ class TestMainArgv:
         """旧 auto 参数只透传诊断，不为退役请求探测 GPU。"""
         from vibeocr.runtime.environments import env_manager
 
-        def forbidden():
+        def forbidden(*args, **kwargs):
             raise AssertionError("retired CLI probed GPU")
 
-        monkeypatch.setattr(env_manager, "detect_gpu", forbidden)
+        monkeypatch.setattr(env_manager, "subprocess", forbidden, raising=False)
         seen_profile: list[str] = []
 
         def fake_install(python_exe, *, profile, network_type, progress_callback):
@@ -155,7 +155,9 @@ def test_retired_native_entrypoints_reject_before_environment_side_effects(
             tmp_path / "python.exe"
         )
     else:
-        success, message = env_manager.switch_paddle_backend(tmp_path, "cpu")
+        success, message = env_manager.install_backend_dependencies(
+            tmp_path / "python.exe"
+        )
     assert not success
     assert "已退役" in message and "ONNX" in message
     assert marker.read_text(encoding="utf-8") == "old healthy environment"

@@ -58,12 +58,12 @@ def _manager(
         with_base_pack=with_base_pack,
         with_paddle_packs=with_base_pack,
     )
-    calls: list[tuple[str, tuple[str, ...], str]] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def runner(python: Path, scope, endpoint: str):
-        calls.append((scope.scope_id, scope.runtime_pack, endpoint))
+    def runner(python: Path, scope):
+        calls.append((scope.scope_id, scope.runtime_pack))
         if install is not None:
-            install(python, scope, endpoint)
+            install(python, scope)
 
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "product",
@@ -111,7 +111,7 @@ def test_default_environment_reserves_readable_purpose_directory(
 def test_user_environments_use_readable_slug_directories_with_collisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     work = manager.create("工作环境")
     assert work["id"] == "工作环境"
     assert (manager.root / "工作环境").is_dir()
@@ -145,7 +145,7 @@ def test_user_environments_use_readable_slug_directories_with_collisions(
 def test_legacy_uuid_environment_records_stay_usable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     env_id = "f" * 8 + "8adbc0de" + "0" * 16
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
@@ -216,10 +216,10 @@ def test_velopack_current_layout_resolves_product_code_root_from_manifest(
 ) -> None:
     _omit_unused_pip_bootstrap(monkeypatch)
     manifest, component, layout = _velopack_bundle(tmp_path)
-    calls: list[tuple[str, tuple[str, ...], str]] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def runner(python: Path, scope, endpoint: str) -> None:
-        calls.append((scope.scope_id, scope.runtime_pack, endpoint))
+    def runner(python: Path, scope) -> None:
+        calls.append((scope.scope_id, scope.runtime_pack))
 
     manager = ManagedEnvironmentStore(
         product_root=tmp_path / "bundle",
@@ -279,7 +279,7 @@ def test_default_install_probe_failure_is_not_committed_as_ready(
         tmp_path / "release", with_base_pack=True, with_paddle_packs=True
     )
 
-    def noop_runner(_python: Path, _scope, _endpoint: str) -> None:
+    def noop_runner(_python: Path, _scope) -> None:
         return None
 
     manager = ManagedEnvironmentStore(
@@ -312,7 +312,7 @@ def test_retired_split_device_recipes_rejected_and_directml_binds_unified_closur
     # 退役，preview/install 明确拒绝；唯一可安装配方 paddleocr-ort-directml
     # 绑定统一闭包锁（paddleocr/paddlex + onnxruntime-directml + mineru/onnx），
     # 不绑定 NVIDIA 专属加速器计划。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     created = manager.create("统一闭包")
     for recipe in (
         "paddleocr-ort-cpu",
@@ -345,7 +345,7 @@ def test_retired_split_device_recipes_rejected_and_directml_binds_unified_closur
 def test_global_source_save_clears_matching_environment_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
 
     def write_env(env_id: str, name: str, overrides: list[str]) -> dict:
         with RuntimeStoreLock(manager._lock):
@@ -366,20 +366,18 @@ def test_global_source_save_clears_matching_environment_overrides(
             manager._registry.write_text(json.dumps(data), encoding="utf-8")
             return record
 
-    a = write_env("a" * 32, "A", ["pypi", "paddleocr-bos", "mineru-modelscope"])
-    b = write_env("b" * 32, "B", ["tuna-pypi", "mineru-huggingface"])
+    a = write_env("a" * 32, "A", ["paddleocr-bos", "mineru-modelscope"])
+    b = write_env("b" * 32, "B", ["paddleocr-huggingface", "mineru-huggingface"])
 
-    # 显式保存全局模型来源（提交 package + 两个引擎 kinds）：所有环境的
-    # 同 kind override 被同一原子提交清除，统一回新全局默认。
-    listed = manager.set_sources(None, "tuna-pypi", "modelscope")
+    # 显式保存全局模型来源（两个引擎 kinds）：所有环境的同 kind override
+    # 被同一原子提交清除，统一回新全局默认。
+    listed = manager.set_sources(None, "modelscope")
     assert listed["source_config_revision"] == 1
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
     env_b = next(item for item in listed["environments"] if item["id"] == b["id"])
     assert env_a["override_source_ids"] == []
     assert env_b["override_source_ids"] == []
     resolved = env_b["resolved_sources"]
-    package = next(item for item in resolved if item["kind"] == "package_index")
-    assert package["id"] == "tuna-pypi" and package["origin"] == "global_default"
     model = next(
         item for item in resolved if item["kind"] == "paddleocr_model_registry"
     )
@@ -389,7 +387,7 @@ def test_global_source_save_clears_matching_environment_overrides(
     plan = manager.preview_install(a["id"], "paddleocr-ort-directml")
     assert plan["source_config_revision"] == 1
 
-    # 只提交 package kind 时不清除模型 override。
+    # 只提交单引擎 kind 时不清除另一引擎 override。
     with RuntimeStoreLock(manager._lock):
         data = manager._read()
         data["environments"][a["id"]]["override_source_ids"] = [
@@ -397,13 +395,15 @@ def test_global_source_save_clears_matching_environment_overrides(
             "gone-model",
         ]
         manager._registry.write_text(json.dumps(data), encoding="utf-8")
-    listed = manager.set_sources(None, "pypi")
+    listed = manager.set_sources(None, paddleocr_model_source_id="paddleocr-modelscope")
     assert listed["source_config_revision"] == 2
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
-    assert env_a["override_source_ids"] == ["paddleocr-bos", "gone-model"]
+    assert env_a["override_source_ids"] == ["gone-model"]
     resolved = env_a["resolved_sources"]
-    package = next(item for item in resolved if item["kind"] == "package_index")
-    assert package["id"] == "pypi" and package["origin"] == "global_default"
+    model = next(
+        item for item in resolved if item["kind"] == "paddleocr_model_registry"
+    )
+    assert model["id"] == "paddleocr-modelscope" and model["origin"] == "global_default"
 
     # 历史共享模型 id 先展开再判 kind：保存全局模型来源时同样被清除，
     # 且剩余 override 以展开后的标准形式保存。
@@ -411,16 +411,14 @@ def test_global_source_save_clears_matching_environment_overrides(
         data = manager._read()
         data["environments"][a["id"]]["override_source_ids"] = [
             "modelscope",
-            "pypi",
+            "gone-model",
         ]
         manager._registry.write_text(json.dumps(data), encoding="utf-8")
-    listed = manager.set_sources(None, "tuna-pypi", "huggingface")
+    listed = manager.set_sources(None, "huggingface")
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
-    # package 与两个引擎 kinds 均已提交：共享模型 id 与 pypi override 都被清除。
-    assert env_a["override_source_ids"] == []
+    # 两个引擎 kinds 均已提交：共享模型 id 展开后被清除。
+    assert env_a["override_source_ids"] == ["gone-model"]
     resolved = env_a["resolved_sources"]
-    package = next(item for item in resolved if item["kind"] == "package_index")
-    assert package["id"] == "tuna-pypi" and package["origin"] == "global_default"
     model = next(item for item in resolved if item["kind"] == "mineru_model_registry")
     assert model["id"] == "mineru-huggingface" and model["origin"] == "global_default"
 
@@ -432,7 +430,7 @@ def test_global_source_save_clears_matching_environment_overrides(
             "gone-model",
         ]
         manager._registry.write_text(json.dumps(data), encoding="utf-8")
-    listed = manager.set_sources(None, "tuna-pypi", "huggingface")
+    listed = manager.set_sources(None, "huggingface")
     env_a = next(item for item in listed["environments"] if item["id"] == a["id"])
     assert env_a["override_source_ids"] == ["gone-model"]
     assert env_a["unknown_source_ids"] == ["gone-model"]
@@ -447,14 +445,21 @@ def test_installs_keep_one_fixed_path_with_bounded_swap_slots(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     item = manager.create("短目录")
     assert item["path"] == str(manager.root / item["id"])
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        item["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
     installed = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        item["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["status"] == "installed"
     assert installed["revision"] == 2
@@ -464,9 +469,11 @@ def test_installs_keep_one_fixed_path_with_bounded_swap_slots(
     assert not (manager.root / ".staging" / item["id"]).exists()
 
     # 同一环境再次安装：固定路径不变，退役槽位被替换而不是累积。
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("pypi",))
+    plan = manager.preview_install(
+        item["id"], "paddleocr-ort-directml", ("paddleocr-modelscope",)
+    )
     upgraded = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("pypi",)
+        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("paddleocr-modelscope",)
     )
     assert upgraded["revision"] == 3
     assert upgraded["path"] == str(manager.root / item["id"])
@@ -485,20 +492,27 @@ def test_failed_install_retry_keeps_old_env_and_reuses_staging_slot(
     # 可用；重试回收同槽位重建，修订号继续递增。
     attempts: list[int] = []
 
-    def install(_python: Path, _scope, _endpoint: str) -> None:
+    def install(_python: Path, _scope) -> None:
         attempts.append(len(attempts))
         if len(attempts) == 1:
             raise ManagedEnvironmentError("synthetic install failure")
 
     manager, _calls = _manager(
-        tmp_path, monkeypatch, with_base_pack=False, install=install
+        tmp_path, monkeypatch, with_base_pack=True, install=install
     )
     item = manager.create("重试")
     staging = manager.root / ".staging" / item["id"]
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        item["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
     with pytest.raises(ManagedEnvironmentError, match="synthetic install failure"):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+            plan["plan_id"],
+            item["id"],
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
         )
     surviving = manager.list()["environments"][0]
     assert surviving["revision"] == 1
@@ -507,7 +521,10 @@ def test_failed_install_retry_keeps_old_env_and_reuses_staging_slot(
     assert staging.is_dir(), "失败候选 venv 已落盘"
 
     installed = manager.install(
-        plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        item["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["revision"] == 2
     assert installed["path"] == str(manager.root / item["id"])
@@ -522,7 +539,7 @@ def test_failed_install_retry_keeps_old_env_and_reuses_staging_slot(
 def test_repair_empty_rebuilds_at_fixed_path_and_retires_broken_venv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     item = manager.create("修复")
     env_id = item["id"]
     registry = manager.paths.state_root / "environments.json"
@@ -547,8 +564,8 @@ def test_legacy_revision_suffix_paths_remain_readable_and_migrate_on_reinstall(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "f" * 8 + "8adbc0de" + "0" * 16
     with RuntimeStoreLock(manager._lock):
@@ -575,9 +592,14 @@ def test_legacy_revision_suffix_paths_remain_readable_and_migrate_on_reinstall(
     unknown = revisions / "999-unknown"
     unknown.mkdir()
     (unknown / "private.txt").write_text("retain", encoding="utf-8")
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     installed = manager.install(
-        plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        env_id,
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["revision"] == 2
     assert installed["path"] == str(manager.root / env_id)
@@ -592,9 +614,13 @@ def test_legacy_revision_suffix_paths_remain_readable_and_migrate_on_reinstall(
     assert not (manager.root / env_id / "revisions").exists()
     # 本测试手工写入记录、无 ledger 归属：退役槽位里全部是未登记数据，
     # 后续重装必须 fail closed 而不是删除未知内容。
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+    )
     with pytest.raises(RuntimeInstallError, match="退役槽位包含未记录数据"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
+        manager.install(
+            plan["plan_id"], env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+        )
     assert (retired / "999-unknown" / "private.txt").exists()
     # 清理预览继续保护未知目录：退役槽位内未登记内容作为 unknown 受保护。
     items = manager.preview_cleanup()["items"]
@@ -642,8 +668,8 @@ def test_legacy_migration_probe_failure_rollback_keeps_unknown_siblings(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     original = manager._probe
     diagnostic = "CalledProcessError after 1.2s: native relocation import failed"
@@ -663,12 +689,17 @@ def test_legacy_migration_probe_failure_rollback_keeps_unknown_siblings(
     env_id = _legacy_environment_with_unknown_sibling(manager)
     unknown = manager.root / env_id / "revisions" / "999-unknown"
 
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     with pytest.raises(
         ManagedEnvironmentError, match="engine_import_failed"
     ) as excinfo:
         manager.install(
-            plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+            plan["plan_id"],
+            env_id,
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
         )
     assert diagnostic in str(excinfo.value)
     failed = next(
@@ -688,10 +719,15 @@ def test_legacy_migration_probe_failure_rollback_keeps_unknown_siblings(
     assert all("999-unknown" not in path for path in env_item["paths"])
 
     # 重装重试：换入→复检失败→回滚，不变量保持。
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
         manager.install(
-            plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+            plan["plan_id"],
+            env_id,
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
         )
     ledger = managed_cleanup.read_ledger(manager)
     assert str(Path(env_id)) not in ledger["paths"]
@@ -707,8 +743,8 @@ def test_rollback_ledger_restore_crash_reconverges(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = _legacy_environment_with_unknown_sibling(manager)
     unknown = manager.root / env_id / "revisions" / "999-unknown"
@@ -820,9 +856,13 @@ def test_rollback_ledger_restore_crash_reconverges(
     with RuntimeStoreLock(manager._lock):
         managed_cleanup.remember_path(manager, env_id, 1, staging)
         managed_cleanup.remember_path(manager, env_id, 1, retired / "revisions" / "1")
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+    )
     with pytest.raises(RuntimeInstallError, match="退役槽位包含未记录数据"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
+        manager.install(
+            plan["plan_id"], env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+        )
     assert (retired / "revisions" / "999-unknown" / "private.txt").exists()
 
 
@@ -836,8 +876,8 @@ def test_rollback_crash_without_mirrors_revokes_candidate_root(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "d" * 8 + "8adbc0de" + "0" * 16
     legacy_root = manager.root / env_id / "revisions" / "1"
@@ -948,8 +988,8 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     original = manager._probe
 
@@ -1011,9 +1051,14 @@ def test_probe_failure_without_old_copy_returns_candidate_and_allows_retry(
     assert str(Path(env_id)) not in ledger["paths"], "候选整树归属已撤销"
 
     # 无旧副本场景重试安装：槽位回收复用后正常成功。
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     installed = manager.install(
-        plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        env_id,
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["status"] == "installed"
     assert installed["path"] == str(live)
@@ -1030,8 +1075,8 @@ def test_unknown_retired_recovery_failure_does_not_block_listing_and_cleanup(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "未知退役"
     live = manager.root / env_id
@@ -1084,7 +1129,7 @@ def test_registry_non_string_paths_fail_structured(
 ) -> None:
     # path 为 null/数字时必须保持结构化 invalid 契约，而不是在
     # Path(record["path"]) 上抛 TypeError（旧实现在此抛 TypeError）。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     for bad in (None, 123):
         with RuntimeStoreLock(manager._lock):
             data = manager._read()
@@ -1122,8 +1167,8 @@ def test_no_old_copy_rollback_restore_crash_reconverges(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "中断恢复"
     staging = manager._staging_path(env_id)
@@ -1196,7 +1241,7 @@ def test_create_refuses_unowned_preexisting_fixed_directory(
     # 显式 environment_id（默认初始化）绕过磁盘碰撞检查：未归属的预存
     # 固定目录必须拒绝，remember_path 不得把未知数据变成可删除归属
     # （旧实现在此登记整树归属）。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     pre = manager.root / "paddleocr-ort-directml"
     pre.mkdir(parents=True)
     (pre / "keep.txt").write_text("retain", encoding="utf-8")
@@ -1211,7 +1256,7 @@ def test_create_reuses_owned_creation_leftover(
 ) -> None:
     # 失败创建的遗留（ledger 已登记 revision 1）可续用，支持默认环境
     # 失败可续建。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     pre = manager.root / "paddleocr-ort-directml"
     pre.mkdir(parents=True)
     with RuntimeStoreLock(manager._lock):
@@ -1232,8 +1277,8 @@ def test_journal_unlink_failure_keeps_protection_and_converges(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "占用日志"
     live = manager.root / env_id
@@ -1289,8 +1334,8 @@ def test_post_rename_crash_recovery_rolls_back_and_allows_reinstalls(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "补写归属"
     live = manager.root / env_id
@@ -1341,7 +1386,9 @@ def test_post_rename_crash_recovery_rolls_back_and_allows_reinstalls(
     assert not live.exists(), "固定路径复位为事务前缺失状态"
 
     # 无旧副本场景重试安装：槽位回收复用后正常成功，连续重装不卡。
-    for index, source in enumerate(("tuna-pypi", "pypi"), start=2):
+    for index, source in enumerate(
+        ("paddleocr-huggingface", "paddleocr-modelscope"), start=2
+    ):
         plan = manager.preview_install(env_id, "paddleocr-ort-directml", (source,))
         installed = manager.install(
             plan["plan_id"], env_id, "paddleocr-ort-directml", (source,)
@@ -1361,13 +1408,20 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "回收占用"
     item = manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
+    manager.install(
+        plan["plan_id"],
+        env_id,
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
     retired = manager._retired_path(env_id)
     assert retired.is_dir(), "首轮安装已产生退役槽位"
 
@@ -1379,9 +1433,13 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
         return original_rmtree(path, *args, **kwargs)
 
     monkeypatch.setattr(_shutil, "rmtree", busy_rmtree)
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+    )
     with pytest.raises(PermissionError, match="retired in use"):
-        manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",))
+        manager.install(
+            plan["plan_id"], env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
+        )
     # 归属未被逆映射，journal 已随回滚清除。
     ledger = managed_cleanup.read_ledger(manager)
     assert str(Path(".retired") / env_id) in ledger["paths"]
@@ -1390,7 +1448,7 @@ def test_reclaim_failure_keeps_retired_ownership_for_retry(
 
     monkeypatch.setattr(_shutil, "rmtree", original_rmtree)
     installed = manager.install(
-        plan["plan_id"], env_id, "paddleocr-ort-directml", ("pypi",)
+        plan["plan_id"], env_id, "paddleocr-ort-directml", ("paddleocr-modelscope",)
     )
     assert installed["status"] == "installed"
     assert installed["path"] == str(manager.root / env_id)
@@ -1420,8 +1478,8 @@ def test_retired_container_junction_cannot_capture_old_copy(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "junction"
     live = manager.root / env_id
@@ -1487,8 +1545,8 @@ def test_reclaim_empty_parent_rmdir_failure_keeps_evidence_for_retry(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "f" * 8 + "8adbc0de" + "0" * 16
     retired = manager._retired_path(env_id)
@@ -1536,8 +1594,8 @@ def test_reclaim_retired_preserves_unknown_empty_siblings(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     from vibeocr.runtime.environments.runtime_installer import RuntimeInstallError
 
@@ -1584,8 +1642,8 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     original = manager._probe
 
@@ -1598,7 +1656,9 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
     monkeypatch.setattr(manager, "_probe", probe)
     env_id = "回滚意图"
     item = manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
     original_unlink = Path.unlink
 
     def busy_unlink(self: Path, missing_ok: bool = False) -> None:
@@ -1610,7 +1670,10 @@ def test_rollback_journal_unlink_failure_preserves_error_and_intent(
     try:
         with pytest.raises(ManagedEnvironmentError, match="engine_import_failed"):
             manager.install(
-                plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",)
+                plan["plan_id"],
+                env_id,
+                "paddleocr-ort-directml",
+                ("paddleocr-modelscope", "mineru-modelscope"),
             )
     finally:
         monkeypatch.setattr(Path, "unlink", original_unlink)
@@ -1640,13 +1703,20 @@ def test_pending_delete_occupies_id_for_recreate_and_slots(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "!id"
     manager.create(env_id)
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
+    manager.install(
+        plan["plan_id"],
+        env_id,
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
     retired = manager._retired_path(env_id)
 
     original_rmtree = shutil.rmtree
@@ -1668,10 +1738,15 @@ def test_pending_delete_occupies_id_for_recreate_and_slots(
     recreated = manager.create(env_id)
     assert recreated["id"] != env_id, "待删除 id 不得被复用"
     plan = manager.preview_install(
-        recreated["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        recreated["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     manager.install(
-        plan["plan_id"], recreated["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        recreated["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert managed_cleanup.read_ledger(manager)["schema_version"] == 1
     assert manager.list()["environments"][0]["id"] == recreated["id"]
@@ -1685,8 +1760,8 @@ def test_delete_environment_recycles_owned_empty_parents(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
 
     def legacy(env_id: str, unknown: bool) -> None:
@@ -1732,7 +1807,7 @@ def test_scan_treats_slot_container_regular_file_as_protected_unknown(
 ) -> None:
     # .staging 为普通文件时预览不得对文件 iterdir 抛错，应作为受保护
     # unknown 返回（旧实现 NotADirectoryError）。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     manager.root.mkdir(parents=True, exist_ok=True)
     (manager.root / ".staging").write_text("not a directory", encoding="utf-8")
     preview = manager.preview_cleanup()
@@ -1755,8 +1830,8 @@ def test_recovery_rollback_rename_failure_keeps_journal_and_protection(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "回滚占用"
     staging = manager._staging_path(env_id)
@@ -1824,8 +1899,8 @@ def test_failed_install_journal_occupancy_never_recommits(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "占用提交"
     item = manager.create(env_id)
@@ -1890,8 +1965,8 @@ def test_delete_prune_keeps_shared_slot_containers(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "i" * 8 + "8adbc0de" + "0" * 16
     legacy_root = manager.root / env_id / "revisions" / "1"
@@ -1911,18 +1986,30 @@ def test_delete_prune_keeps_shared_slot_containers(
         }
         _atomic_json(manager._registry, data)
         managed_cleanup.remember_path(manager, env_id, 1, legacy_root)
-    plan = manager.preview_install(env_id, "paddleocr-ort-directml", ("tuna-pypi",))
-    manager.install(plan["plan_id"], env_id, "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        env_id, "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
+    )
+    manager.install(
+        plan["plan_id"],
+        env_id,
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
     manager.delete(env_id)
     assert not (manager.root / env_id).exists(), "环境目录完整回收"
     assert (manager.root / ".retired").is_dir(), "公共槽位容器不得被删除"
 
     fresh = manager.create("新环境")
     plan = manager.preview_install(
-        fresh["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        fresh["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     installed = manager.install(
-        plan["plan_id"], fresh["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+        plan["plan_id"],
+        fresh["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
     )
     assert installed["status"] == "installed"
     assert installed["path"] == str(manager.root / fresh["id"])
@@ -1936,8 +2023,8 @@ def test_delete_empty_parent_occupied_keeps_evidence_then_completes(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "j" * 8 + "8adbc0de" + "0" * 16
     legacy_root = manager.root / env_id / "revisions" / "1"
@@ -1988,8 +2075,8 @@ def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     env_id = "保护"
     staging = manager._staging_path(env_id)
@@ -2079,11 +2166,15 @@ def test_interrupted_fixed_path_swap_rolls_back_uncommitted(
     manager, _calls = _manager(
         tmp_path,
         monkeypatch,
-        with_base_pack=False,
-        install=lambda _python, _scope, _endpoint: None,
+        with_base_pack=True,
+        install=lambda _python, _scope: None,
     )
     item = manager.create("恢复")
-    plan = manager.preview_install(item["id"], "paddleocr-ort-directml", ("tuna-pypi",))
+    plan = manager.preview_install(
+        item["id"],
+        "paddleocr-ort-directml",
+        ("paddleocr-modelscope", "mineru-modelscope"),
+    )
 
     def crash_after_swap(env_id, expected, candidate, latest):
         from vibeocr.runtime.environments.runtime_maintenance import _atomic_json
@@ -2112,7 +2203,10 @@ def test_interrupted_fixed_path_swap_rolls_back_uncommitted(
     original_swap = ManagedEnvironmentStore._swap_fixed_candidate
     with pytest.raises(KeyboardInterrupt):
         manager.install(
-            plan["plan_id"], item["id"], "paddleocr-ort-directml", ("tuna-pypi",)
+            plan["plan_id"],
+            item["id"],
+            "paddleocr-ort-directml",
+            ("paddleocr-modelscope", "mineru-modelscope"),
         )
     monkeypatch.setattr(manager, "_swap_fixed_candidate", original_swap)
     assert manager._journal_path(item["id"]).is_file()
@@ -2131,7 +2225,7 @@ def test_interrupted_fixed_path_swap_rolls_back_on_registry_divergence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 直接构造换入后崩溃现场；真实 venv 的安装和迁移由相邻测试覆盖。
-    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=False)
+    manager, _calls = _manager(tmp_path, monkeypatch, with_base_pack=True)
     env_id = "回滚"
     live = manager.root / env_id
     retired = manager._retired_path(env_id)

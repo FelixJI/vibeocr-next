@@ -190,7 +190,7 @@ public sealed class DefaultModeRequestContractTests
   public async Task PaddleTableDeviceOptionSubmitsOnPdfWire()
   {
     // PDF 入口与单次/批量共享同一选项冻结链：显式 paddle_table 任务携带
-    // options.device=cuda，不静默改 CPU。
+    // options.device=directml，不静默改 CPU。
     var fake = new RecordingClient
     {
       Health = DeviceHealth(),
@@ -210,9 +210,9 @@ public sealed class DefaultModeRequestContractTests
       if (state is PdfWorkbenchState pdfState) deviceState = pdfState;
     };
     Assert.Null((await harness.Handler.ExecuteAsync(
-      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "cuda" }),
+      new SetRecognitionOptionsCommand("paddle_table", new PaddleModeOptions { Device = "directml" }),
       TestContext.Current.CancellationToken)).Error);
-    Assert.Equal("cuda", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
+    Assert.Equal("directml", deviceState!.Engines!.Single(mode => mode.Engine == "paddle_table")
       .Options!["device"].GetString());
     Assert.Null((await harness.Handler.ExecuteAsync(
       new SetPdfTaskEngineCommand("paddle_table"),
@@ -229,7 +229,7 @@ public sealed class DefaultModeRequestContractTests
     SubmitRequest request = Assert.Single(fake.Submissions);
     Assert.Equal("TABLE_RECOGNITION", request.Pipeline.PipelineId);
     Assert.Null(request.Pipeline.Engine);
-    Assert.Equal("cuda", request.Pipeline.Options["device"].GetString());
+    Assert.Equal("directml", request.Pipeline.Options["device"].GetString());
   }
 
   [Fact]

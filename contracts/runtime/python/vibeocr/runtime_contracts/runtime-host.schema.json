@@ -45,7 +45,7 @@
           "minLength": 1,
           "description": "Locked engine recipe id (authoritative Runtime catalog) for preview_install/install/find_compatible/prepare_target. prepare_target reserves an owned reusable target and creates only an empty interpreter; it never installs business dependencies."
         },
-        "device": { "type": "string", "enum": ["cpu", "cuda", "directml"], "description": "prepare_switch only: desired execution device, independent of the installed closure." },
+        "device": { "type": "string", "enum": ["cpu", "directml"], "description": "prepare_switch only: desired execution device, independent of the installed closure. The CUDA variant is retired; DirectML is the only GPU backend." },
         "source_ids": {
           "anyOf": [
             {
@@ -56,12 +56,7 @@
             },
             { "type": "null" }
           ],
-          "description": "This-operation explicit download source ids for preview_install/install. Null means inherit: environment override, then global default, then product default per source kind. install requires the key; its value must match the frozen plan intent."
-        },
-        "package_source_id": {
-          "type": ["string", "null"],
-          "minLength": 1,
-          "description": "set_sources only: package_index source id to persist, or null to clear that kind and fall back to inheritance."
+          "description": "This-operation explicit download source ids for preview_install/install. Null means inherit: environment override, then global default, then product default per source kind. install requires the key; its value must match the frozen plan intent. Legacy package index ids are ignored when read; the catalog only carries model registries."
         },
         "model_source_id": {
           "type": ["string", "null"],
