@@ -249,6 +249,32 @@ describe("recognition page result actions", () => {
     expect(screen.getByLabelText("第一段行二")).not.toHaveClass("hovered");
   });
 
+  it("双击 bbox 跳转结果区对应行编辑：切每行模式且图上不开原位编辑器", async () => {
+    // jsdom 未实现 scrollIntoView：跳转滚动用 stub 兜底。
+    Element.prototype.scrollIntoView = vi.fn();
+    const { viewState, actions } = setup(true);
+    render(<RecognitionPage viewState={viewState} actions={actions} />);
+    const image = await screen.findByRole("img", {
+      name: "识别结果参考图",
+    });
+    Object.defineProperties(image, {
+      naturalWidth: { value: 800, configurable: true },
+      naturalHeight: { value: 400, configurable: true },
+    });
+    fireEvent.load(image);
+
+    // 默认 raw：结果区是整段原文；双击第二行 bbox 后切每行模式，
+    // 对应行（宿主下标 1）直接进入编辑。
+    expect(document.querySelector(".result-document")).not.toBeNull();
+    await fireEvent.dblClick(screen.getByLabelText("第一段行二"));
+    const list = document.querySelector(".result-lines-list");
+    expect(list).not.toBeNull();
+    const editor = screen.getByRole("textbox", { name: "编辑第 2 行" });
+    expect(list!.contains(editor)).toBe(true);
+    // 图上不再打开原位编辑器（跳转语义由结果区承载）。
+    expect(document.querySelector(".overlay-line-editor")).toBeNull();
+  });
+
   it("hides the bbox proofreading view when resultImage is absent", async () => {
     const { viewState, actions } = setup(false);
     render(<RecognitionPage viewState={viewState} actions={actions} />);

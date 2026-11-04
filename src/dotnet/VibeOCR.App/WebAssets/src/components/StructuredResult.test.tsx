@@ -807,6 +807,126 @@ it("edits a line in place via double-click or Enter through the host handler", a
   ).not.toBeInTheDocument();
 });
 
+it("跳转编辑请求让对应行滚动到位并直接进入编辑", async () => {
+  // jsdom 未实现 scrollIntoView：stub 记录调用以断言滚动定位发生。
+  const scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  const onUpdateLine = vi.fn(async () => true);
+  const { rerender } = render(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+    />,
+  );
+
+  // 新对象即新请求：目标行（宿主下标 1）进入编辑并滚动到最近位置。
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 1 }}
+    />,
+  );
+  expect(
+    screen.getByRole("textbox", { name: "编辑第 2 行" }),
+  ).toBeInTheDocument();
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+  // 行下标越界时忽略，不抛错不进入编辑。
+  rerender(
+    <StructuredResult
+      source={JSON.stringify([linesBlock(fixtureLines, fixtureModes)])}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 99 }}
+    />,
+  );
+  expect(
+    screen.queryByRole("textbox", { name: "编辑第 100 行" }),
+  ).not.toBeInTheDocument();
+});
+
+it("跳转编辑请求不抢占进行中的行编辑与未保存草稿", async () => {
+  // jsdom 未实现 scrollIntoView：stub 记录调用以断言滚动定位发生。
+  const scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  // 保存请求可挂起：后段验证保存进行中同样受编辑保护。
+  let resolveSave: (applied: boolean) => void = () => {};
+  const onUpdateLine = vi.fn(
+    () =>
+      new Promise<boolean>((resolve) => {
+        resolveSave = resolve;
+      }),
+  );
+  const source = JSON.stringify([linesBlock(fixtureLines, fixtureModes)]);
+  const { rerender } = render(
+    <StructuredResult
+      source={source}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+    />,
+  );
+
+  // 打开第 1 行编辑并输入未保存草稿。
+  await fireEvent.dblClick(
+    document.querySelectorAll(".result-lines-list .result-line")[0]!,
+  );
+  await fireEvent.change(screen.getByRole("textbox", { name: "编辑第 1 行" }), {
+    target: { value: "未保存草稿" },
+  });
+
+  // 双击其他 bbox 的跳转请求：与行内入口同一编辑保护——不切换目标
+  // 行、草稿与编辑器原样保留；请求仍消费并滚动定位目标行。
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 2 }}
+    />,
+  );
+  const kept = screen.getByRole("textbox", {
+    name: "编辑第 1 行",
+  }) as HTMLTextAreaElement;
+  expect(kept.value).toBe("未保存草稿");
+  expect(
+    screen.queryByRole("textbox", { name: "编辑第 3 行" }),
+  ).not.toBeInTheDocument();
+  expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+
+  // 保存请求进行中：新跳转请求同样不切换；保存完成后 setEditing 只
+  // 关闭本行编辑器，不误关目标行。
+  await fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  rerender(
+    <StructuredResult
+      source={source}
+      mode="line"
+      onCopy={vi.fn(async () => true)}
+      onUpdateLine={onUpdateLine}
+      activateLineRequest={{ index: 1 }}
+    />,
+  );
+  expect(
+    screen.queryByRole("textbox", { name: "编辑第 2 行" }),
+  ).not.toBeInTheDocument();
+  resolveSave(true);
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("textbox", { name: "编辑第 1 行" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByRole("textbox", { name: "编辑第 2 行" }),
+  ).not.toBeInTheDocument();
+});
+
 it("copies a selected cell range with merged cells by anchor through the host handler", async () => {
   const onCopyCells = vi.fn(async () => true);
   const onCopy = vi.fn(async () => true);

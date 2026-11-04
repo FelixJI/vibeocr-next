@@ -109,6 +109,11 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   const [resultTextMode, setResultTextMode] = useState<ResultTextMode>("raw");
   // OCR 双向高亮：左侧图上行框与右侧结果行悬停任一侧，两侧同步加亮。
   const [hoveredLine, setHoveredLine] = useState<number | undefined>(undefined);
+  // 双击左侧 bbox 的跳转编辑请求：每次双击生成新对象触发结果区行进入
+  // 编辑并滚动到位；行编辑随后由结果区 LinesBlock 承载。
+  const [activateLineRequest, setActivateLineRequest] = useState<
+    { index: number } | undefined
+  >(undefined);
   const state = feature(viewState, "recognition");
   const input = resource(state.input);
   const result = resource(state.result);
@@ -124,6 +129,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
   if (hoverBinding !== hoverBindingKey) {
     setHoverBinding(hoverBindingKey);
     if (hoveredLine !== undefined) setHoveredLine(undefined);
+    if (activateLineRequest !== undefined) setActivateLineRequest(undefined);
   }
   // 识别时真实冻结的参考图（随结果原子替换/失效）：校对视图唯一图源；
   // 缺失时不渲染 bbox，不用会话基准图冒充。
@@ -173,6 +179,13 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
               : Promise.resolve(false),
           highlightIndex: hoveredLine,
           onHoverLine: setHoveredLine,
+          // 双击 bbox → 结果区对应行承载编辑：先切“每行”模式（宿主合成
+          // lines 区块时 line 模式必发布），再发起跳转请求；图上不再原位
+          // 打开编辑器。
+          onActivateLine: (index: number) => {
+            setResultTextMode("line");
+            setActivateLineRequest({ index });
+          },
         }
       : undefined;
   // 仅结果身份变化时恢复默认校对；同一结果的宿主更新不打断编辑。
@@ -592,6 +605,7 @@ export function RecognitionPage({ viewState, actions }: FeatureProps) {
                   mode={effectiveMode}
                   highlightLineIndex={hoveredLine}
                   onHoverLine={setHoveredLine}
+                  activateLineRequest={activateLineRequest}
                   onCopy={(blockIndex, format) =>
                     actions.run({
                       type: "recognition.copyStructured",

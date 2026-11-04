@@ -770,6 +770,8 @@ interface ImageCanvasEditorProps {
     readonly bindingKey: string;
     readonly lines: readonly IndexedResultLine[];
     readonly onUpdateLine?: OverlayLineEditHandler;
+    /** 双击/Enter 跳转回调：转发给校对层，由结果区对应行承载编辑。 */
+    readonly onActivateLine?: (index: number) => void;
     /** 双向高亮：右侧结果行悬停时对应行框加亮。 */
     readonly highlightIndex?: number;
     readonly onHoverLine?: (index: number | undefined) => void;
@@ -8429,6 +8431,7 @@ export function ImageCanvasEditor({
             imageUrl={proofread?.imageUrl ?? source ?? ""}
             lines={proofread?.lines ?? []}
             onUpdateLine={proofread?.onUpdateLine}
+            onActivateLine={proofread?.onActivateLine}
             highlightIndex={proofread?.highlightIndex}
             onHoverLine={proofread?.onHoverLine}
             fit
