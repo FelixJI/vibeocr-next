@@ -215,8 +215,8 @@ class PythonRuntime:
     abi: str
     platform: str
     source_url: str
-    archive_path: Path
-    sha256: str
+    archive_path: Path | None
+    sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +225,21 @@ class PaddleModelPack:
 
     archive_path: Path
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEnvBinding:
+    """预构建运行时树绑定（PR2）：依赖已在构建期装配进树，运行时零安装。
+
+    树本体以展开目录随产品分发（product_layout 置于 ``runtime/env/<root>``），
+    manifest 只绑定确定性树清单的字节摘要；wheel/python 归档载荷在该形态
+    下不再随 backend 分发（loader 对应字段读兼容为 None）。
+    """
+
+    root: str
+    manifest_name: str
+    manifest_path: Path
+    manifest_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,8 +264,9 @@ class RuntimeManifest:
     path: Path
     sha256: str
     backend_version: str
-    runtime_wheel: str
-    runtime_sha256: str
+    runtime_wheel: str | None
+    runtime_sha256: str | None
+    runtime_env: RuntimeEnvBinding | None
     python: PythonRuntime
     installer: InstallerArtifact
     profiles: dict[str, RuntimeProfile]
@@ -559,10 +575,39 @@ def load_runtime_manifest(
     version = product.get("version")
     if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
         raise ManifestError("product.version must be stable SemVer")
-    wheel = _relative_filename(data.get("runtime_wheel"), field="runtime_wheel")
-    if wheel != f"vibeocr_next_runtime-{version}-py3-none-any.whl":
-        raise ManifestError("runtime_wheel does not match product.version")
-    runtime_sha = _sha256(data.get("runtime_sha256"), field="runtime_sha256")
+    runtime_env_data = data.get("runtime_env")
+    prebuilt = runtime_env_data is not None
+    if not prebuilt and (
+        data.get("runtime_wheel") is None or data.get("runtime_sha256") is None
+    ):
+        raise ManifestError("runtime wheel binding is required")
+    if prebuilt and not isinstance(runtime_env_data, dict):
+        raise ManifestError("runtime_env must be an object")
+    wheel: str | None = None
+    runtime_sha: str | None = None
+    if not prebuilt:
+        wheel = _relative_filename(data.get("runtime_wheel"), field="runtime_wheel")
+        if wheel != f"vibeocr_next_runtime-{version}-py3-none-any.whl":
+            raise ManifestError("runtime_wheel does not match product.version")
+        runtime_sha = _sha256(data.get("runtime_sha256"), field="runtime_sha256")
+    runtime_env: RuntimeEnvBinding | None = None
+    if prebuilt:
+        env_root = _relative_filename(
+            runtime_env_data.get("root"), field="runtime_env.root"
+        )
+        env_manifest_name = _relative_filename(
+            runtime_env_data.get("manifest"), field="runtime_env.manifest"
+        )
+        env_manifest_sha = _sha256(
+            runtime_env_data.get("manifest_sha256"),
+            field="runtime_env.manifest_sha256",
+        )
+        runtime_env = RuntimeEnvBinding(
+            root=env_root,
+            manifest_name=env_manifest_name,
+            manifest_path=manifest_path.parent / env_manifest_name,
+            manifest_sha256=env_manifest_sha,
+        )
     python_data = data.get("python")
     if not isinstance(python_data, dict):
         raise ManifestError("python runtime binding is required")
@@ -588,17 +633,30 @@ def load_runtime_manifest(
         or not python_source_url.endswith(expected_python_suffix)
     ):
         raise ManifestError("python.source_url must bind the approved CPython asset")
-    python_archive = _relative_filename(
-        python_data.get("archive"),
-        field="python.archive",
+    python_archive = (
+        _relative_filename(python_data.get("archive"), field="python.archive")
+        if python_data.get("archive") is not None
+        else None
     )
-    python_sha = _sha256(python_data.get("sha256"), field="python.sha256")
+    python_sha = (
+        _sha256(python_data.get("sha256"), field="python.sha256")
+        if python_data.get("sha256") is not None
+        else None
+    )
+    if prebuilt and (python_archive is None) != (python_sha is None):
+        raise ManifestError(
+            "python archive binding must be omitted together in runtime_env form"
+        )
+    if not prebuilt and python_archive is None:
+        raise ManifestError("python.archive is required")
     python_runtime = PythonRuntime(
         version=python_version,
         abi="cp313",
         platform="win_amd64",
         source_url=python_source_url,
-        archive_path=manifest_path.parent / python_archive,
+        archive_path=(
+            manifest_path.parent / python_archive if python_archive else None
+        ),
         sha256=python_sha,
     )
     installer_data = data.get("installer")
@@ -935,11 +993,21 @@ def load_runtime_manifest(
     if not isinstance(workflow, str) or not workflow.strip():
         raise ManifestError("build_workflow is required")
     if verify_artifacts:
-        wheel_path = manifest_path.parent / wheel
-        if sha256_file(wheel_path) != runtime_sha:
-            raise ManifestError("Runtime wheel SHA-256 mismatch")
-        if sha256_file(python_runtime.archive_path) != python_runtime.sha256:
+        if wheel is not None and runtime_sha is not None:
+            wheel_path = manifest_path.parent / wheel
+            if sha256_file(wheel_path) != runtime_sha:
+                raise ManifestError("Runtime wheel SHA-256 mismatch")
+        if (
+            python_runtime.archive_path is not None
+            and python_runtime.sha256 is not None
+            and sha256_file(python_runtime.archive_path) != python_runtime.sha256
+        ):
             raise ManifestError("Python archive SHA-256 mismatch")
+        if (
+            runtime_env is not None
+            and sha256_file(runtime_env.manifest_path) != runtime_env.manifest_sha256
+        ):
+            raise ManifestError("runtime env manifest SHA-256 mismatch")
         if installer_artifact.archive_path is not None:
             archive_sha = installer_artifact.archive_sha256
             member_path = installer_artifact.archive_executable_path
@@ -1023,6 +1091,7 @@ def load_runtime_manifest(
         backend_version=version,
         runtime_wheel=wheel,
         runtime_sha256=runtime_sha,
+        runtime_env=runtime_env,
         python=python_runtime,
         installer=installer_artifact,
         profiles=profiles,
@@ -1043,6 +1112,7 @@ __all__ = [
     "InstallerArtifact",
     "ManifestError",
     "PaddleModelPack",
+    "RuntimeEnvBinding",
     "PythonRuntime",
     "RuntimeManifest",
     "RuntimeComponent",

@@ -173,9 +173,9 @@ def _independent_scopes(
 
 def build_runtime_manifest(
     *,
-    runtime_wheel: Path,
+    runtime_wheel: Path | None,
     base_lock: Path,
-    python_archive: Path,
+    python_archive: Path | None,
     python_version: str,
     python_source_url: str,
     installer_executable: Path,
@@ -188,6 +188,8 @@ def build_runtime_manifest(
     paddle_onnx_locks: dict[str, Path] | None = None,
     paddle_onnx_packs: dict[str, list[Path]] | None = None,
     paddle_model_pack: Path | None = None,
+    runtime_env_tree: Path | None = None,
+    runtime_env_manifest: Path | None = None,
 ) -> Path:
     if not _STABLE_SEMVER.fullmatch(version):
         raise ValueError("version must be stable SemVer")
@@ -198,11 +200,23 @@ def build_runtime_manifest(
     if not capabilities or any(not item.strip() for item in capabilities):
         raise ValueError("at least one non-empty capability is required")
 
-    runtime_wheel = runtime_wheel.resolve(strict=True)
-    python_archive = python_archive.resolve(strict=True)
+    prebuilt = runtime_env_tree is not None
+    if prebuilt != (runtime_env_manifest is not None):
+        raise ValueError(
+            "runtime_env_tree and runtime_env_manifest must be provided together"
+        )
+    if prebuilt and (runtime_wheel is not None or python_archive is not None):
+        raise ValueError(
+            "the prebuilt runtime env replaces the wheel/python archive payloads"
+        )
+    if not prebuilt and (runtime_wheel is None or python_archive is None):
+        raise ValueError("runtime wheel and python archive are required")
+    if runtime_wheel is not None:
+        runtime_wheel = runtime_wheel.resolve(strict=True)
+        if not runtime_wheel.name.startswith(f"vibeocr_next_runtime-{version}-"):
+            raise ValueError("Runtime wheel filename does not match product version")
     installer_executable = installer_executable.resolve(strict=True)
-    if not runtime_wheel.name.startswith(f"vibeocr_next_runtime-{version}-"):
-        raise ValueError("Runtime wheel filename does not match product version")
+    runtime_env = None
 
     # 统一推理闭包后仅构建 base profile；推理栈（Paddle ONNX + MinerU）全部
     # 由 paddle_onnx_environments 的 directml 绑定承载。
@@ -223,9 +237,31 @@ def build_runtime_manifest(
         validate_requirements_lock(lock, profile=f"win-x64-paddle-ort-{device}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    copied_runtime = _copy_exact(runtime_wheel, output_dir)
-    _extract_product_runtime_code(copied_runtime, output_dir, version)
-    copied_python = _copy_exact(python_archive, output_dir)
+    if prebuilt:
+        tree = runtime_env_tree.resolve(strict=True)
+        if not (tree / "python.exe").is_file():
+            raise ValueError("runtime env tree has no python.exe at its root")
+        copied_env_manifest = _copy_exact(
+            runtime_env_manifest.resolve(strict=True),
+            output_dir,
+            destination_name="runtime-env-manifest.json",
+        )
+        # 树整目录随 bundle 自包含分发：product_layout 从 backend 复制到
+        # 产品的 runtime/env/<root>/，运行时零解包。
+        shutil.copytree(tree, output_dir / "runtime-env")
+        runtime_env = {
+            "root": "runtime-env",
+            "manifest": copied_env_manifest.name,
+            "manifest_sha256": sha256_file(copied_env_manifest),
+        }
+    copied_runtime = (
+        _copy_exact(runtime_wheel, output_dir) if runtime_wheel is not None else None
+    )
+    if copied_runtime is not None:
+        _extract_product_runtime_code(copied_runtime, output_dir, version)
+    copied_python = (
+        _copy_exact(python_archive, output_dir) if python_archive is not None else None
+    )
     # 冻结安装器只分发一次：产品内 exe 位于 runtime/installer/，manifest
     # 直接绑定其字节摘要（不再随 backend 携带重复的 zip 副本）。
     copied_installer = _copy_exact(
@@ -295,15 +331,28 @@ def build_runtime_manifest(
             "version": version,
             "source_sha": source_commit,
         },
-        "runtime_wheel": copied_runtime.name,
-        "runtime_sha256": sha256_file(copied_runtime),
+        **(
+            {
+                "runtime_wheel": copied_runtime.name,
+                "runtime_sha256": sha256_file(copied_runtime),
+            }
+            if copied_runtime is not None
+            else {"runtime_wheel": None, "runtime_sha256": None}
+        ),
+        **({"runtime_env": runtime_env} if runtime_env is not None else {}),
         "python": {
             "version": python_version,
             "abi": "cp313",
             "platform": "win_amd64",
             "source_url": python_source_url,
-            "archive": copied_python.name,
-            "sha256": sha256_file(copied_python),
+            **(
+                {
+                    "archive": copied_python.name,
+                    "sha256": sha256_file(copied_python),
+                }
+                if copied_python is not None
+                else {}
+            ),
         },
         "installer": {
             "executable": copied_installer.name,
@@ -355,7 +404,7 @@ def build_runtime_manifest(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime-wheel", type=Path, required=True)
+    parser.add_argument("--runtime-wheel", type=Path, default=None)
     parser.add_argument("--base-lock", type=Path, required=True)
     parser.add_argument("--paddle-ort-directml-lock", type=Path, required=True)
     for device in ("directml",):
@@ -375,7 +424,22 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Offline bundle of the default Paddle ONNX models.",
     )
-    parser.add_argument("--python-archive", type=Path, required=True)
+    parser.add_argument("--python-archive", type=Path, default=None)
+    parser.add_argument(
+        "--runtime-env-tree",
+        type=Path,
+        default=None,
+        help=(
+            "Prebuilt runtime env tree (expanded directory with python.exe); "
+            "replaces the wheel/python archive payloads."
+        ),
+    )
+    parser.add_argument(
+        "--runtime-env-manifest",
+        type=Path,
+        default=None,
+        help="Deterministic per-file manifest of the prebuilt runtime env tree.",
+    )
     parser.add_argument("--python-version", default="3.13.16")
     parser.add_argument(
         "--python-source-url",
@@ -427,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         capabilities=tuple(args.capabilities or DEFAULT_CAPABILITIES),
         runtime_packs={"win-x64-base": args.base_runtime_pack or []},
+        runtime_env_tree=args.runtime_env_tree,
+        runtime_env_manifest=args.runtime_env_manifest,
     )
     print(path)
     return 0

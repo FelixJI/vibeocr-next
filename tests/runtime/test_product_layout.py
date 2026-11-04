@@ -513,3 +513,108 @@ def test_stage_product_layout_still_carries_legacy_zip_bound_installer(
     assert installer.read_bytes() == b"installer"
     # 历史产品形态保留：backend 目录携带绑定的 zip（新 manifest 不再产生）。
     assert (product_root / "runtime/backend" / legacy_zip.name).is_file()
+
+
+def _prebuilt_release_inputs(tmp_path: Path) -> dict[str, Path]:
+    """预构建运行时树形态的最小 bundle 输入（PR2）。"""
+    from scripts.build_runtime_pack import write_runtime_env_manifest
+    from scripts.build_runtime_manifest import build_runtime_manifest
+
+    tree = tmp_path / "runtime-env"
+    (tree / "Lib").mkdir(parents=True)
+    (tree / "python.exe").write_bytes(b"python-bin")
+    (tree / "Lib" / "os.py").write_bytes(b"os")
+    env_manifest = tmp_path / "runtime-env-manifest.json"
+    write_runtime_env_manifest(tree, env_manifest)
+
+    installer = tmp_path / "vibeocr-runtime-installer.exe"
+    installer.write_bytes(b"installer")
+    model_pack = tmp_path / "vibeocr-paddle-models-9.9.9.zip"
+    with zipfile.ZipFile(model_pack, "w") as archive:
+        archive.writestr("seed.txt", "model")
+    base_lock = tmp_path / "requirements-win-x64-base.lock"
+    base_lock.write_text(
+        "fastapi==1.0.0 \\n  --hash=sha256:" + "1" * 64 + "\n"
+        "winrt-runtime==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-foundation==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-foundation-collections==3.2.1 \\n  --hash=sha256:"
+        + "6" * 64
+        + "\n",
+        encoding="utf-8",
+    )
+    dml_lock = tmp_path / "requirements-win-x64-paddle-ort-directml.lock"
+    dml_lock.write_text(
+        base_lock.read_text(encoding="utf-8")
+        + "paddleocr==3.7.0 \\n  --hash=sha256:" + "7" * 64 + "\n"
+        "paddlex==3.7.2 \\n  --hash=sha256:" + "7" * 64 + "\n"
+        "opencv-contrib-python==5.0.0.93 \\n  --hash=sha256:" + "7" * 64 + "\n"
+        "fastapi==1.0.0 \\n  --hash=sha256:" + "1" * 64 + "\n"
+        "winrt-runtime==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-foundation==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-foundation-collections==3.2.1 \\n  --hash=sha256:"
+        + "6" * 64
+        + "\n"
+        "winrt-windows-globalization==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-graphics-imaging==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-media-ocr==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "winrt-windows-storage-streams==3.2.1 \\n  --hash=sha256:" + "6" * 64 + "\n"
+        "onnxruntime-directml==1.24.4 \\n  --hash=sha256:" + "7" * 64 + "\n"
+        "mineru==4.1.3 \\n  --hash=sha256:" + "2" * 64 + "\n"
+        "onnx==1.23.2 \\n  --hash=sha256:" + "2" * 64 + "\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "runtime-bundle"
+    build_runtime_manifest(
+        runtime_wheel=None,
+        base_lock=base_lock,
+        python_archive=None,
+        python_version="3.13.16",
+        python_source_url=(
+            "https://github.com/astral-sh/python-build-standalone/releases/"
+            "download/20261001/"
+            "cpython-3.13.16+20261001-x86_64-pc-windows-msvc"
+            "-install_only.tar.gz"
+        ),
+        installer_executable=installer,
+        version="9.9.9",
+        source_commit="a" * 40,
+        build_workflow="test",
+        output_dir=output_dir,
+        paddle_onnx_locks={"directml": dml_lock},
+        paddle_model_pack=model_pack,
+        runtime_env_tree=tree,
+        runtime_env_manifest=env_manifest,
+    )
+
+    inputs = _release_inputs(tmp_path)
+    # 重建 app/bootstrapper 等输入被 build_runtime_manifest 共用 tmp_path；
+    # backend 指向新 bundle。
+    inputs["backend_release_dir"] = output_dir
+    return inputs
+
+
+def test_stage_product_layout_ships_prebuilt_runtime_env_tree(
+    tmp_path: Path,
+) -> None:
+    inputs = _prebuilt_release_inputs(tmp_path)
+    product_root = tmp_path / "VibeOCR"
+
+    stage_product_layout(product_root=product_root, **inputs)
+
+    env_root = product_root / "runtime" / "env" / "runtime-env"
+    assert (env_root / "python.exe").read_bytes() == b"python-bin"
+    assert (env_root / "Lib" / "os.py").is_file()
+    backend = product_root / "runtime" / "backend"
+    assert (backend / "runtime-env-manifest.json").is_file()
+    # 预构建形态：backend 不再携带 wheel/python 归档/runtime-code/pack。
+    assert not list(backend.glob("*.whl"))
+    assert not list(backend.glob("*.tar.gz"))
+    assert not (backend / "runtime-code").exists()
+    assert not list(backend.glob("vibeocr-runtime-pack*.zip"))
+    assert not list(backend.glob("vibeocr-runtime-pool*.zip"))
+    manifest = json.loads(
+        (backend / "runtime-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["runtime_env"]["root"] == "runtime-env"
+    assert manifest["runtime_wheel"] is None
+    assert "archive" not in manifest["python"]
