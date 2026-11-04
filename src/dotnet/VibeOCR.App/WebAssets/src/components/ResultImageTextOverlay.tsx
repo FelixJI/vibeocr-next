@@ -43,6 +43,7 @@ export function ResultImageTextOverlay({
   fit = false,
   lines,
   onUpdateLine,
+  onActivateLine,
   highlightIndex,
   onHoverLine,
 }: {
@@ -50,6 +51,9 @@ export function ResultImageTextOverlay({
   readonly fit?: boolean;
   readonly lines: readonly IndexedResultLine[];
   readonly onUpdateLine?: OverlayLineEditHandler;
+  /** 双击/Enter 的跳转回调：传入了即由结果区对应行承载编辑，不再
+   * 在图上原位打开编辑器；未传入时保持图上原位编辑（组件层能力）。 */
+  readonly onActivateLine?: (index: number) => void;
   /** 双向高亮：右侧结果行悬停时对应行框加亮（同一宿主行下标）。 */
   readonly highlightIndex?: number;
   readonly onHoverLine?: (index: number | undefined) => void;
@@ -156,6 +160,10 @@ export function ResultImageTextOverlay({
             const trigger = editable
               ? startEditOnEnterOrDoubleActivate(() => {
                   if (editing !== undefined) return;
+                  if (onActivateLine) {
+                    onActivateLine(index);
+                    return;
+                  }
                   setEditing(index);
                 })
               : undefined;
@@ -221,8 +229,9 @@ export function ResultImageTextOverlay({
       </div>
       {onUpdateLine && (
         <figcaption className="form-note">
-          双击或聚焦后按 Enter
-          在图上校对并修改文本；低置信（&lt;80%）行以红色标记。
+          {onActivateLine
+            ? "双击或聚焦后按 Enter 跳转到右侧识别结果对应行修改；低置信（<80%）行以红色标记。"
+            : "双击或聚焦后按 Enter 在图上校对并修改文本；低置信（<80%）行以红色标记。"}
         </figcaption>
       )}
     </figure>

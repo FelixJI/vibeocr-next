@@ -269,6 +269,13 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
   );
 }
 
+// 镜像前缀模式的预置快捷填入清单：仅把常用 GitHub 加速前缀填入输入框，
+// 保存仍走宿主的 http/https 边界校验，默认选择保持官方直连，不因预置
+// 存在而静默切源或自动回退。
+const PRESET_URL_PREFIX_MIRRORS = [
+  { label: "ghfast.top", url: "https://ghfast.top/" },
+] as const;
+
 // 更新源分段控制：官方直连/自定义源；自定义支持镜像前缀与正向代理，
 // 检查与下载始终绑定同一选定源；忙时禁止切换。
 function UpdateSourceControl({
@@ -297,6 +304,7 @@ function UpdateSourceControl({
     configuredCustom?.kind === "forward_proxy" ? "forward_proxy" : "url_prefix",
   );
   const [customUrl, setCustomUrl] = useState("");
+  const [presetUrl, setPresetUrl] = useState("");
   // 分段只反映已保存选择；点击“自定义源”展开编辑器，保存成功后才切换。
   const openEditor = () => {
     if (configuredCustom?.kind === "forward_proxy")
@@ -304,6 +312,7 @@ function UpdateSourceControl({
     else if (configuredCustom?.kind === "url_prefix")
       setCustomKind("url_prefix");
     setCustomUrl("");
+    setPresetUrl("");
     setEditorOpen(true);
   };
   const selectDirect = () => {
@@ -385,6 +394,28 @@ function UpdateSourceControl({
               </option>
             </Select>
           </div>
+          {customKind === "url_prefix" ? (
+            <div className="setting-row">
+              <label htmlFor="update-source-preset">常用镜像</label>
+              <Select
+                id="update-source-preset"
+                value={presetUrl}
+                onChange={(_, data) => {
+                  const url = typeof data.value === "string" ? data.value : "";
+                  setPresetUrl(url);
+                  // 只在选中具体镜像时填入；“手动输入”不打扰已填内容。
+                  if (url) setCustomUrl(url);
+                }}
+              >
+                <option value="">手动输入</option>
+                {PRESET_URL_PREFIX_MIRRORS.map((preset) => (
+                  <option key={preset.url} value={preset.url}>
+                    {preset.label}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
           <div className="setting-row">
             <label htmlFor="update-source-url">
               {customKind === "forward_proxy" ? "代理地址" : "镜像前缀"}
@@ -398,7 +429,11 @@ function UpdateSourceControl({
                   : "https://mirror.example.com/vibeocr"
               }
               value={customUrl}
-              onChange={(_, data) => setCustomUrl(data.value)}
+              onChange={(_, data) => {
+                setCustomUrl(data.value);
+                // 手动编辑视为放弃预置选择，下拉如实回到“手动输入”。
+                setPresetUrl("");
+              }}
             />
           </div>
           <p className="form-note">
