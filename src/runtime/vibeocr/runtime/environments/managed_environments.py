@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1682,7 +1683,8 @@ class ManagedEnvironmentStore:
                     and active.get("recipe") in _RETIRED_ENGINE_RECIPES
                 )
                 previous_selection = (data["active_id"], data["active_revision"])
-                if data["environments"].get(env_id) is None:
+                record = data["environments"].get(env_id)
+                if record is None:
                     data["environments"][env_id] = {
                         "id": env_id,
                         "name": "默认环境",
@@ -1697,6 +1699,22 @@ class ManagedEnvironmentStore:
                         "selected_device": "directml",
                     }
                     _atomic_json(self._registry, data)
+                else:
+                    # 产品更新（如 CPython 补丁版本变化）后同步刷新已有
+                    # product 记录的随包绑定：树随产品整体替换，记录若仍
+                    # 持旧版本/ABI/锁，_probe 会判 base_or_abi_changed 并
+                    # 拒绝切换。用户偏好（名称/设备/来源 override）保留；
+                    # 绑定变化时递增 revision 使旧会话失效。
+                    refreshed = {
+                        **record,
+                        "python_version": self.manifest.python.version,
+                        "abi": self.manifest.python.abi,
+                        "recipe_lock": scope.sha256,
+                    }
+                    if refreshed != record:
+                        refreshed["revision"] = record["revision"] + 1
+                        data["environments"][env_id] = refreshed
+                        _atomic_json(self._registry, data)
             if retired_default and previous_selection[0] not in (None, env_id):
                 _atomic_json(
                     self.paths.state_root / "default-environment-migration.json",
@@ -1725,13 +1743,39 @@ class ManagedEnvironmentStore:
                 )
             ):
                 self._reject_referenced(data)
+                previous_active = data["active_id"]
                 data["active_id"] = env_id
                 data["active_revision"] += 1
+                if previous_active is not None and previous_active != env_id:
+                    self._migrate_supervisor_settings(previous_active, env_id)
                 _atomic_json(self._registry, data)
         # 退役默认环境的目录回收不在初始化时执行：迁移 marker 留给
         # switch_reservation/commit_switch 在 Supervisor 健康提交成功后
         # 由 _finish_default_migration 收敛，保留回滚语义。
         return self.list()
+
+    def _migrate_supervisor_settings(self, source_id: str, target_id: str) -> None:
+        """首次迁移 active 时把原环境的 Supervisor 设置安全迁入 product。
+
+        _launch 的设置路径按环境隔离：venv 记录位于
+        ``state/environments/<id>/supervisor-settings.json``，legacy 记录
+        位于 ``<product>/state/supervisor-settings.json``。不迁移会使
+        MinerU 远程连接等用户配置在新环境回落默认本地模式；旧文件保留，
+        product 侧已有设置不覆盖。
+        """
+        environments_root = self.paths.state_root / "environments"
+        candidates = [
+            environments_root / source_id / "supervisor-settings.json",
+            self.product_root / "state" / "supervisor-settings.json",
+        ]
+        target = environments_root / target_id / "supervisor-settings.json"
+        if target.exists():
+            return
+        for source in candidates:
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                return
 
     def _staging_path(self, env_id: str) -> Path:
         return self.root / _SWAP_STAGING_ROOT / env_id

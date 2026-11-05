@@ -606,3 +606,56 @@ def test_status_scope_resolves_product_environment(tmp_path: Path, monkeypatch) 
     assert scope is not None and scope.sha256 == record["recipe_lock"]
     assert closure is None
     assert accelerator == "cpu"
+
+
+def test_product_record_refreshes_runtime_binding_after_update(
+    tmp_path, monkeypatch
+) -> None:
+    # 产品更新（CPython 补丁版本变化）后：已有 product 记录随包绑定刷新，
+    # 用户偏好保留，revision 递增使旧会话失效，probe 不再判版本漂移。
+    manager = _manager(tmp_path, monkeypatch)
+    manager.initialize_default()
+    scope, _accelerator = manager._recipe("paddleocr-ort-directml")
+    with RuntimeStoreLock(manager._lock):
+        data = manager._read()
+        stale = data["environments"][_PRODUCT_ID]
+        stale.update(
+            python_version="3.13.15",
+            abi="cp313",
+            recipe_lock="0" * 64,
+            selected_device="cpu",
+            override_source_ids=["paddleocr-modelscope"],
+        )
+        _atomic_json(manager._registry, data)
+
+    manager.initialize_default()
+    record = manager._read()["environments"][_PRODUCT_ID]
+    assert record["python_version"] == manager.manifest.python.version
+    assert record["recipe_lock"] == scope.sha256
+    assert record["revision"] == 2
+    # 用户偏好不随绑定刷新丢失。
+    assert record["selected_device"] == "cpu"
+    assert record["override_source_ids"] == ["paddleocr-modelscope"]
+
+
+def test_active_migration_carries_supervisor_settings(tmp_path, monkeypatch) -> None:
+    # 迁移 active 到 product 时把原环境的 supervisor-settings.json 安全
+    # 迁入（旧文件保留，product 已有设置不覆盖）：MinerU 远程连接等
+    # 用户配置不得在新环境回落默认本地模式。
+    manager, old = _retired_default(tmp_path, monkeypatch)
+    environments_root = manager.paths.state_root / "environments"
+    legacy_settings = environments_root / old["id"] / "supervisor-settings.json"
+    legacy_settings.parent.mkdir(parents=True, exist_ok=True)
+    legacy_settings.write_text('{"mineru": "remote"}', encoding="utf-8")
+
+    manager.initialize_default()
+
+    product_settings = environments_root / _PRODUCT_ID / "supervisor-settings.json"
+    assert product_settings.read_text(encoding="utf-8") == '{"mineru": "remote"}'
+    assert legacy_settings.read_text(encoding="utf-8") == '{"mineru": "remote"}'
+
+    # product 侧已有设置时迁移不覆盖（重放防护）。
+    product_settings.write_text('{"mineru": "local"}', encoding="utf-8")
+    legacy_settings.write_text('{"mineru": "changed"}', encoding="utf-8")
+    manager._migrate_supervisor_settings(old["id"], _PRODUCT_ID)
+    assert product_settings.read_text(encoding="utf-8") == '{"mineru": "local"}'
