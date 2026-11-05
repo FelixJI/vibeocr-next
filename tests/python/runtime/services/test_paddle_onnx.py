@@ -26,6 +26,11 @@ def runner_constructor_seam(monkeypatch):
     )
 
 
+def _device_options(device_option):
+    """None 表示省略 device 键（与显式 auto 等价）；否则为显式值。"""
+    return {} if device_option is None else {"device": device_option}
+
+
 def test_admission_snapshot_keeps_source_models_environment_and_device(monkeypatch):
     from vibeocr.runtime.recognition import directml_devices
 
@@ -53,34 +58,39 @@ def test_admission_snapshot_keeps_source_models_environment_and_device(monkeypat
     assert onnx.current_snapshot()["environment_revision"] == "5"
 
 
-def test_auto_resolves_to_cpu_without_dml_hardware_and_is_observable(monkeypatch):
-    """F2 回归（7487 失败）：auto 无 DirectML 硬件时回退 CPU，且在快照
-    中可观察（auto_device_fallback），不得静默；已有 CPU provider 被选用。"""
+@pytest.mark.parametrize("device_option", [None, "auto"])
+def test_auto_resolves_to_cpu_without_dml_hardware_and_is_observable(
+    monkeypatch, device_option
+):
+    """F2 回归：省略与显式 auto 等价——无 DirectML 硬件时回退 CPU 且在
+    快照可观察（auto_device_fallback），不得静默；已有 CPU provider 被选用。"""
     from vibeocr.runtime.recognition import directml_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setattr(directml_devices, "hardware_adapters", lambda: [])
-    snapshot = onnx.freeze_request({"device": "auto"})
+    snapshot = onnx.freeze_request(_device_options(device_option))
     assert snapshot["device"] == "cpu"
     assert snapshot["provider"] == "CPUExecutionProvider"
     assert snapshot["auto_device_fallback"] is True
 
 
-def test_auto_prefers_dml_when_hardware_present(monkeypatch):
+@pytest.mark.parametrize("device_option", [None, "auto"])
+def test_auto_prefers_dml_when_hardware_present(monkeypatch, device_option):
     from vibeocr.runtime.recognition import directml_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
     monkeypatch.setattr(
         directml_devices, "hardware_adapters", lambda: [{"device_id": 2}]
     )
-    snapshot = onnx.freeze_request({"device": "auto"})
+    snapshot = onnx.freeze_request(_device_options(device_option))
     assert snapshot["device"] == "directml"
     assert snapshot["provider"] == "DmlExecutionProvider"
     assert snapshot["auto_device_fallback"] is False
 
 
-def test_auto_explicit_cpu_default_stays_cpu_without_hardware_probe(monkeypatch):
-    """生效默认已是 CPU（设备切换快照）时 auto 直接跟随，不探测硬件。"""
+@pytest.mark.parametrize("device_option", [None, "auto"])
+def test_auto_cpu_default_stays_cpu_without_hardware_probe(monkeypatch, device_option):
+    """生效默认已是 CPU（设备切换快照）时省略/auto 直接跟随，不探测硬件。"""
     from vibeocr.runtime.recognition import directml_devices
 
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
@@ -91,13 +101,14 @@ def test_auto_explicit_cpu_default_stays_cpu_without_hardware_probe(monkeypatch)
         "hardware_adapters",
         lambda: probed.append(1) or [{"device_id": 0}],
     )
-    snapshot = onnx.freeze_request({"device": "auto"})
+    snapshot = onnx.freeze_request(_device_options(device_option))
     assert snapshot["device"] == "cpu"
     assert snapshot["auto_device_fallback"] is False
     assert probed == []
 
 
-def test_auto_does_not_swallow_hardware_probe_errors(monkeypatch):
+@pytest.mark.parametrize("device_option", [None, "auto"])
+def test_auto_does_not_swallow_hardware_probe_errors(monkeypatch, device_option):
     """F2：闭包/系统级探测失败不得伪装“无硬件”的静默 CPU 回退。"""
     from vibeocr.runtime.recognition import directml_devices
 
@@ -108,7 +119,7 @@ def test_auto_does_not_swallow_hardware_probe_errors(monkeypatch):
 
     monkeypatch.setattr(directml_devices, "hardware_adapters", _boom)
     with pytest.raises(RuntimeError, match="DXGI factory unavailable"):
-        onnx.freeze_request({"device": "auto"})
+        onnx.freeze_request(_device_options(device_option))
 
 
 def test_directml_uses_dxgi_hardware_ordinal_without_cuda(monkeypatch):

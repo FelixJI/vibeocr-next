@@ -95,7 +95,10 @@ def freeze_request(
     default_device = os.environ.get(
         "VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", installed_device
     )
-    requested_device = options.get("device", default_device)
+    # 省略与显式 auto 等价（docs 契约）：一律经 auto resolver 按真实
+    # 可用性解析（cpu 默认不探测；探测异常不吞）；显式 cpu/directml
+    # 保持原值，显式 directml 缺硬件仍明确失败。
+    requested_device = options.get("device", "auto")
     if requested_device == "auto":
         device, auto_device_fallback = _resolve_auto_device(default_device)
         if auto_device_fallback:
