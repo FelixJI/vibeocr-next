@@ -307,9 +307,15 @@ _MINERU_PARSE_METHODS = ("auto", "txt", "ocr")
 _MINERU_BACKENDS = ("hybrid-engine", "vlm-engine", "pipeline")
 _MINERU_EFFORTS = ("medium", "high")
 
-# Paddle 系设备选项（auto/cpu/cuda/directml）：cuda 必须真实 provider 就绪，
-# auto 仅在就绪时选 GPU，否则 CPU；directml 仅 Paddle ONNX 环境支持。
-DEVICE_VALUES = ("auto", "cpu", "cuda")
+# Paddle 系设备选项（auto/cpu）：auto 仅在 DirectML 就绪时选 GPU，否则
+# CPU；directml 仅 Paddle ONNX 统一闭包支持。CUDA 执行分支已整体退役：
+# 新请求携带 device=cuda 在 parser 枚举校验处明确拒绝，历史持久化偏好
+# 只在客户端设置读取边界安全迁移（回退默认），不进入执行解析。
+DEVICE_VALUES = ("auto", "cpu")
+#: 已退役 RAPID_TABLE 管道的历史 device 词表（随 RapidOCR 退役冻结）：
+#: 仅供历史请求的严格解析，使其抵达模式门禁时得到结构化的
+#: RECOGNITION_MODE_RETIRED 拒绝，而不是裸枚举解析错误。
+RETIRED_RAPID_TABLE_DEVICE_VALUES = ("auto", "cpu", "cuda")
 
 
 def _bool_spec(name: str) -> PipelineOptionSpec:
@@ -400,7 +406,9 @@ _PIPELINE_OPTION_SPECS: dict[OCRPipeline, dict[str, PipelineOptionSpec]] = {
         ),
     },
     OCRPipeline.RAPID_TABLE: {
-        "device": PipelineOptionSpec("device", _ENUM, choices=DEVICE_VALUES)
+        "device": PipelineOptionSpec(
+            "device", _ENUM, choices=RETIRED_RAPID_TABLE_DEVICE_VALUES
+        )
     },
     OCRPipeline.FORMULA_RECOGNITION: {
         "use_doc_orientation_classify": _bool_spec("use_doc_orientation_classify"),
@@ -448,7 +456,7 @@ _RECOGNITION_MODE_DEFINITIONS: dict[RecognitionMode, RecognitionModeDefinition] 
         short_name="通用文字",
         description=(
             "随基础运行时离线提供的通用文字识别（默认 small 模型）；"
-            "更大模型与 CUDA 按需准备。"
+            "更大模型按需准备，GPU 走 DirectML。"
         ),
         supported_options=(
             "model_preset",
@@ -616,6 +624,7 @@ def is_option_supported(pipeline: OCRPipeline, option_name: str) -> bool:
 
 __all__ = [
     "DEVICE_VALUES",
+    "RETIRED_RAPID_TABLE_DEVICE_VALUES",
     "FORMULA_RECOGNITION_BATCH_SIZE_RANGE",
     "FORMULA_RECOGNITION_MODEL_NAMES",
     "OCRPipeline",

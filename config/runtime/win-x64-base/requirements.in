@@ -5,7 +5,7 @@
 # base-offline 闭包：随 Next Portable 携带、禁网可安装的必备闭包。只含
 # Runtime 服务环境（HTTP/PDF/导出/二维码/字体）与 Windows Media OCR adapter；
 # RapidOCR/RapidTable 已随引擎退役移除，Paddle OCR/表格/结构由 managed
-# paddleocr-ort-* 环境承载，MinerU/CUDA 等重型组件属于显式选择的附加闭包，
+# paddleocr-ort-* 环境承载，MinerU 等重型组件属于显式选择的附加闭包，
 # 不进入 base。
 pillow>=12.3.0,<13
 # 与 PaddleX 的 numpy<2.4 约束共用离线 wheel。
@@ -23,7 +23,6 @@ openpyxl>=3.1.5
 qrcode[pil]>=8.2
 python-barcode>=0.16.1
 pyzbar>=0.1.9
-pynvml>=11.5.0
 packaging>=26.0
 python-multipart>=0.0.32
 # Windows Media OCR adapter（pywinrt projection）；系统 OCR/语言包由

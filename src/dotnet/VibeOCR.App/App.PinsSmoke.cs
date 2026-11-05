@@ -21,7 +21,7 @@ public sealed partial class App
     public bool SetEnabled(bool enabled) => true;
   }
 
-  private async Task VerifyPinsUiAsync(PortableLayout layout)
+  private async Task VerifyPinsUiAsync(PortableLayout layout, bool lifecycle)
   {
     layout = layout with { WebAssetsRoot = Path.Combine(AppContext.BaseDirectory, "WebAssets") };
     var decodeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -65,7 +65,7 @@ public sealed partial class App
         throw new InvalidOperationException("Main window activation waited for history decoding.");
       await main.VerifyLoadingHistoryQueryAsync(() => decodeReleased.TrySetResult(true));
       await main.SmokeHistoryInitialization;
-      await main.VerifyPinsSelfCheckAsync();
+      await main.VerifyPinsSelfCheckAsync(lifecycle);
     }
     finally
     {

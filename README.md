@@ -70,7 +70,7 @@ worker 仍在独立进程运行。
   “查看环境清单”仅只读检查已有环境，不初始化默认环境或启动计算服务。
   默认环境使用固定目录 `state/environments/paddleocr-ort-cpu`，按需准备的环境自动命名，重装不再新增 revision 路径。
   已有名称和 UUID 环境继续兼容，旧 revision 布局在重装时迁移；详见[环境路径与迁移说明](docs/managed-environment-paths.md)。
-- 在“设置 → 运行环境”选择 PaddleOCR 推理后端（CPU / DirectML / CUDA），或单独安装、移除 MinerU 本地引擎。
+- 在“设置 → 运行环境”选择 PaddleOCR 推理后端（CPU / DirectML），或单独安装、移除 MinerU 本地引擎。
   Paddle 文字、表格与版面结构共用推理依赖，额外模型按需下载。选择只查询兼容环境，
   不改变识别默认模式或当前任务。已有兼容环境可直接切换并启动验证；没有时，“准备此后端”
   自动准备目标环境并在常规页面展示简短确认，明确确认后才安装。完整包清单和路径是可选只读详情，
@@ -87,7 +87,7 @@ worker 仍在独立进程运行。
   已准备的依赖。有运行任务时拒绝切换，验证失败保留旧健康服务；任务记录绑定提交时的环境修订。
 - 配方区分 PaddleOCR 与 MinerU，支持的设备以
   当前配方为准。每个环境独立管理可写依赖目录，基础解释器和可信下载缓存可复用。
-  选择 CUDA 配方不代表已完成 GPU 实际推理，界面分别展示目标设备与实际执行设备。
+  Paddle 的 Windows GPU 路线统一走 DirectML；MinerU 的 ONNX 线路仅部分模型走 DirectML（如 Windows 端检测仍为 CPU），VLM 由 llama.cpp 承载。能否实际 GPU 执行取决于本机设备与驱动，界面分别展示目标设备与实际执行设备，不以安装完成代替设备就绪。
 - 环境列表展示解释器、依赖、引擎、模型与服务状态。可修复异常解释器，或删除未活动且
   未被任务占用的环境；兼容旧环境会登记保留，不因新界面自动清空重装。
 - “空间清理”先检查并分页展示可清理项和保护原因，仅执行本页明确选择并确认的项目。
@@ -123,7 +123,7 @@ worker 仍在独立进程运行。
 
 ### Paddle 模式退役与旧设置
 
-Paddle 仅保留文字、表格和非 VLM 文档结构识别，使用 CPU、CUDA 或 DirectML 的 ONNX Runtime 环境；
+Paddle 仅保留文字、表格和非 VLM 文档结构识别，使用 CPU 或 DirectML 的 ONNX Runtime 环境（CUDA 执行分支已退役）；
 模型提供 tiny、small（默认）、medium 三档。PaddleOCR-VL、独立 Paddle 公式和结构内专用公式/VLM 推理
 已退役，这是本产品迁移范围，不表示 ONNX Runtime 不能运行任何 VLM 或公式模型。MinerU 能力继续保留。
 

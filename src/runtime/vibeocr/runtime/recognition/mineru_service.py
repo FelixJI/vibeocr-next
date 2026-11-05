@@ -235,17 +235,32 @@ class MinerUService(metaclass=SingletonMeta):
         if "MINERU_CONFIG" in env and not config_path.is_file():
             raise ValueError("MINERU_CONFIG must reference an existing config file")
         if not config_path.exists():
-            # MinerU 4.1 配置结构：small_backend 嵌套在 model 下，vlm 是顶层
-            # 段（4.0 的 model.vlm 已上提）。
+            # 锁定 mineru 4.1.3：vlm 嵌套在 model 下，顶层写法会被静默忽略。
             config_path.write_text(
-                "model:\n  small_backend: onnx\nvlm:\n  engine: llama-cpp\n",
+                "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
                 encoding="utf-8",
             )
         env["MINERU_HOME"] = str(home)
         env["MINERU_CONFIG"] = str(config_path)
+        # 设备意图绑定：VIBEOCR_MANAGED_ENVIRONMENT_DEVICE 是已提交 worker
+        # 的设备快照（cpu/directml）。锁定 MinerU 4.1.3 的 ONNX 设备经
+        # model.onnx_device（env MINERU_MODEL_ONNX_DEVICE：auto/cpu/gpu；
+        # 其 gpu 即 onnxruntime-directml 的 DmlExecutionProvider）。仅投射
+        # child env：env 来源的选择不回写用户 Config 文件（SDK 仅在
+        # source!=env 的 auto 时持久化）；未知/缺失不投射，保持 SDK 默认
+        # auto 的历史读取语义。
+        managed_device = (
+            (env.get("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE") or "").strip().lower()
+        )
+        if managed_device == "cpu":
+            env["MINERU_MODEL_ONNX_DEVICE"] = "cpu"
+        elif managed_device == "directml":
+            env["MINERU_MODEL_ONNX_DEVICE"] = "gpu"
         # 设备意图：CUDA 档位已退役，MinerU 本地服务恒隐藏 GPU 设备
         # （llama-cpp 默认 n_gpu_layers=99 会抢占 GPU，VlmConfig 无该字段）；
         # GGML 空设备列表须用单空格（空串在 Windows 等于删除）。
+        # 注意：上述 ONNX 设备绑定只作用于 MinerU 的 ONNX 线路，VLM 仍由
+        # llama.cpp 承载并保持隐藏，两者不混同。
         env["CUDA_VISIBLE_DEVICES"] = "-1"
         env["GGML_VK_VISIBLE_DEVICES"] = " "
 
@@ -266,10 +281,13 @@ class MinerUService(metaclass=SingletonMeta):
         _logger.info(f"[MinerU] 启动 mineru-api 服务 @ {url}...")
 
         # MinerU 4 api_server CLI 无 --language（传入即退出码 2），语言不经 CLI 传递。
+        # 经自有入口启动：先应用锁定 SDK 公开策略（NVIDIA layout
+        # metacommands 关闭，见 mineru_api_entry）再转发官方 api_server；
+        # CLI 参数/端点不变。
         cmd = [
             str(python_exe),
             "-m",
-            "mineru.parser.api_server",
+            "vibeocr.runtime.recognition.mineru_api_entry",
             "--host",
             "127.0.0.1",
             "--port",

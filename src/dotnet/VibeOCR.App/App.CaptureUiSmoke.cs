@@ -30,8 +30,9 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
-        case "PinsSaveSwitchRecoverAndRenderFormula":
-          await VerifyPinsUiAsync(layout);
+        case "PinsSaveSwitchAndRecover":
+        case "PinsFormulaWindowLifecycleAndExitRecovery":
+          await VerifyPinsUiAsync(layout, lifecycle: scenario == "PinsFormulaWindowLifecycleAndExitRecovery");
           break;
         case "WebResourceResponseStopsAfterWebViewCloses":
           await VerifyClosedWebResourceResponseAsync(layout, disposeBeforeResponse: true);

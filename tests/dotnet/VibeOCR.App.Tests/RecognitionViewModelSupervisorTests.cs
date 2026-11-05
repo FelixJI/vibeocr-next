@@ -238,6 +238,30 @@ public sealed class RecognitionViewModelSupervisorTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Fact]
+  public void LegacyCudaDevicePreferenceFallsBackToDefaultAtLoadBoundary()
+  {
+    // #317：CUDA 档位已退役；历史存储记录里的 device:"cuda" 在 Load 兼容
+    // 副本中回退默认（不迁移到其他设备），同记录其余合法设置保留，
+    // 配置文件本身不被重写（读取不写回）。
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-cuda-options-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+      PortableLayout layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.Next.exe"), "production");
+      layout.EnsurePortableState();
+      string original = "{\"other_setting\":\"keep\",\"recognition_options\":{\"paddle_text\":{"
+        + "\"model_preset\":\"medium\",\"device\":\"cuda\",\"use_doc_unwarping\":true}}}";
+      File.WriteAllText(layout.ConfigFile, original);
+      PaddleModeOptions loaded = PaddleModeOptions.Load(layout, "paddle_text");
+      Assert.Null(loaded.Device);
+      Assert.Equal("medium", loaded.ModelPreset);
+      Assert.True(loaded.UseDocUnwarping);
+      Assert.Equal(original, File.ReadAllText(layout.ConfigFile));
+    }
+    finally { Directory.Delete(root, recursive: true); }
+  }
+
   [Theory]
   [InlineData("paddle_text", "text", "OCR")]
   [InlineData("paddle_table", "specialized", "TABLE_RECOGNITION")]

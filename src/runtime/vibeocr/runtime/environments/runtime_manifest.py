@@ -472,6 +472,8 @@ def validate_requirements_lock(
             "mineru",
             "torch",
             "cu126",
+            "pynvml",
+            "nvidia-ml-py",
             "opencv-python",
             "opencv-contrib-python",
         ):
@@ -516,6 +518,9 @@ def validate_requirements_lock(
             "transformers",
             "paddle2onnx",
             "rapidocr",
+            # #317：NVML 专用预算已退役，闭包不再携带 NVIDIA 探测栈。
+            "pynvml",
+            "nvidia-ml-py",
         }
         if device != "directml":
             # cpu 仅作为历史锁读取校验：旧闭包不含 MinerU/onnx，混入

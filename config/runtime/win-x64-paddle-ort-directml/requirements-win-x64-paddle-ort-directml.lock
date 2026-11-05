@@ -3,11 +3,15 @@
 aiofiles==25.1.0 \
     --hash=sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2 \
     --hash=sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695
-    # via mineru-vl-utils
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru-vl-utils
 aiohappyeyeballs==2.7.1 \
     --hash=sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d \
     --hash=sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
-    # via aiohttp
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   aiohttp
 aiohttp==3.14.5 \
     --hash=sha256:0133c3c3b54a0bf1e71fa5c1ad95c93f07fd54e24ef1fe182f5122e1573d2bf1 \
     --hash=sha256:038c2c7e8caa26b6c8423779b5eaf1893904048a512c19b32fe841ffa5592b50 \
@@ -170,32 +174,44 @@ aiohttp==3.14.5 \
     --hash=sha256:fbdc5ec49f9ca3cd24955cf3520b10a4d4c901ba2572094c84274e9e7eb30534 \
     --hash=sha256:fce9523df31cea6284f3e2c479876750d7687cf671d7b25d32b19effc0e86441 \
     --hash=sha256:ff75a7537413a86e7cafe98e0e1d6e3dc4b15c6349896e7d5c6b881bfdb6d550
-    # via paddleocr
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddleocr
 aiosignal==1.4.0 \
     --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e \
     --hash=sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7
-    # via aiohttp
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   aiohttp
 aiosqlite==0.22.1 \
     --hash=sha256:043e0bd78d32888c0a9ca90fc788b38796843360c855a7262a532813133a0650 \
     --hash=sha256:21c002eb13823fad740196c5a2e9d8e62f6243bd9e7e4a1f87fb5e44ecb4fceb
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 aistudio-sdk==0.3.9 \
     --hash=sha256:41621d052ddb7a58643438a7ca541f58ef0ab94a2acdfff0a71db81bf68dc027
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 annotated-doc==0.0.5 \
     --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101 \
     --hash=sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   fastapi
     #   typer
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
-    # via pydantic
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   pydantic
 anyio==4.16.0 \
     --hash=sha256:59bb03251907983d1603d27c3087ddb1e93299ea2163adcdba37899a4fb12ffb \
     --hash=sha256:c66ae634e0b8228396b801741beb3294326d4b6102f7bba4041c0dfb58c29026
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   httpx
     #   httpx2
@@ -206,6 +222,7 @@ attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309 \
     --hash=sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aiohttp
     #   jsonschema
     #   referencing
@@ -259,15 +276,20 @@ audioop-lts==0.2.2 \
     --hash=sha256:f9ee9b52f5f857fbaf9d605a360884f034c92c1c23021fb90b2e39b8e64bede6 \
     --hash=sha256:fbdd522624141e40948ab3e8cdae6e04c748d78710e9f0f8d4dae2750831de19 \
     --hash=sha256:fd3d4602dc64914d462924a08c1a9816435a2155d74f325853c1f1ac3b2d9800
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 bce-python-sdk==0.9.79 \
     --hash=sha256:71799ac8740505e0759d30873f6f1a478fa8f83aedf425d511f1419a5f30082e \
     --hash=sha256:cd77476b43347ed28d0211d5ad557e524e1ec648bd093d57c6a6d3de075a7508
-    # via aistudio-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   aistudio-sdk
 beautifulsoup4==4.15.0 \
     --hash=sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7 \
     --hash=sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   mineru
     #   paddlex
@@ -415,15 +437,20 @@ brotli==1.2.1 \
     --hash=sha256:fb5df75d1b1c42d997adbb39eac61f2cdb48efa26304a0cb9c0b757c9bc20732 \
     --hash=sha256:fb6a4d400aa531c73a718b337116fad77ba8dc6df34fa615c808bfc55ffb19ca \
     --hash=sha256:ff02e697d947f518e9e99f2b25698045a5ddffa95049c4d95b5a8cf3618d9008
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 cachetools==7.2.8 \
     --hash=sha256:09b04a85741d0019b3fb7d02b7ee9933a422fa6923af92a0fd63b893b695830c \
     --hash=sha256:3f9b146b2160975da273e7c23ec882f3996b65df608150d52083c07de0682075
-    # via premailer
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   premailer
 certifi==2026.10.23 \
     --hash=sha256:a9895e6e2758b371e0545e321a3a8fd1fcfd9829ada8824a936dfb16aaaf36cd \
     --hash=sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   httpcore
     #   httpx
     #   requests
@@ -528,7 +555,9 @@ cffi==2.1.1 \
     --hash=sha256:f8ec5e643a9a937f64e1999eb9f75d072263751912dc5cd06d3c85f8f44be7c3 \
     --hash=sha256:fb92203a88b3d3053034db775110081c49d28be6551923805e039924093761e4 \
     --hash=sha256:fcd22650c908d7b7da162bbfaab594a1227a15d1643a98c68b122ac642fa2264
-    # via cryptography
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   cryptography
 chardet==7.7.0 \
     --hash=sha256:074a5b6efd46bd35059f53a3b385349e9b9e38111063c8d2c5b36923e2e07de6 \
     --hash=sha256:091f50d3567b1a066f797835ee5367dbcf3cb77c5e56993b3f61b28264b8e6f8 \
@@ -577,6 +606,7 @@ chardet==7.7.0 \
     --hash=sha256:f8783b6e24a044ed9b53aa130ffafac4286aaf4a953f7843a3c1a261d7c77971 \
     --hash=sha256:feb66c96264e3e6a9ff0c7318ce0028800b6c18ad07c8000d2404a108d1ef767
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   encutils
     #   paddlex
 charset-normalizer==3.5.2 \
@@ -753,12 +783,14 @@ charset-normalizer==3.5.2 \
     --hash=sha256:fd1fbe0f116b6e55da77aca2c6ddcddcfac2186cbf78bdebf40fc156efca389d \
     --hash=sha256:fe9753dfee015c570d73df76f899f18444d41388bffcde097deba51c4fadbb9f
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   reportlab
     #   requests
 click==8.5.0 \
     --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
     --hash=sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aistudio-sdk
     #   docvortex
     #   huggingface-hub
@@ -768,15 +800,20 @@ click==8.5.0 \
 cloudpickle==3.1.2 \
     --hash=sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414 \
     --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
-    # via joblib
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   joblib
 cobble==0.1.4 \
     --hash=sha256:36c91b1655e599fd428e2b95fdd5f0da1ca2e9f1abb0bc871dec21a0e78a2b44 \
     --hash=sha256:de38be1539992c8a06e569630717c485a5f91be2192c461ea2b220607dfa78aa
-    # via mammoth
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mammoth
 colorama==0.4.6 \
     --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   colorlog
     #   loguru
     #   qrcode
@@ -785,7 +822,9 @@ colorama==0.4.6 \
 colorlog==6.12.0 \
     --hash=sha256:2a7924c1dadf18b22a0eb8b06d1c7b01d5341707ec1641eb6fcc4fde0c3e8e5f \
     --hash=sha256:30d392604e9110045a2c2aeefc27d7a017abbab63f3a8aee594eac0801df784e
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 crc32c==2.9.post0 \
     --hash=sha256:0006c8b71066c81fed655bd24ef7f2749a7a58c1457ac228f9cc928467f8d1c2 \
     --hash=sha256:01a47fe1149c649a44ec63a3934b468d2561a96e80aad65cfcac90fd3a759c46 \
@@ -901,7 +940,9 @@ crc32c==2.9.post0 \
     --hash=sha256:f9d838e95284eee955e50c75c806b5c566c3206c731c4b47e6af5bc136eaee38 \
     --hash=sha256:fb8bab3a7c63353a5d904e71a4bbb1d3c4584830f634b448cd62fd3b0ba97d66 \
     --hash=sha256:fe2baba912a8aa2e73567b2559c4343e1a205b316c200358223ec5bd860ca1ab
-    # via bce-python-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   bce-python-sdk
 cryptography==50.0.2 \
     --hash=sha256:0ddc924c04591c2811ca024d62ecad4f7f6f08af8939c211438f48a16bd23602 \
     --hash=sha256:0ec5f09541743261e66e291b4a0cbf0fb2997aeaab6d9e9c740b9dba1b58d1c2 \
@@ -962,42 +1003,59 @@ cryptography==50.0.2 \
     --hash=sha256:f9f6143a8c75945eb960d9eb98905a441394abfa24afaae239d514ffb2586480 \
     --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb \
     --hash=sha256:fdd28f912fccfec1846a94e2e1e8f9b0012f557f0c46fe4f3eb0d7a87afcf90b
-    # via modelscope-hub
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   modelscope-hub
 cssselect==1.6.0 \
     --hash=sha256:6df6eab9b264c0f2092a6e386b33610e1684a25e27925ecebe25e3d97cbf3525 \
     --hash=sha256:8c83a7139e97b93aa5ebdc0f46e785f7056a08a8bf201e597a6a2629d7eb11db
-    # via premailer
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   premailer
 cssutils==2.15.0 \
     --hash=sha256:207faa466810a1aef109261673f2458356d0839ddedaebc0ee553376290fb6a9 \
     --hash=sha256:e9739237f3915037dacba787c4b58f280e3ec5d9864953e185bf23d40ff7d021
-    # via premailer
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   premailer
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
-    # via openai
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   openai
 docvortex==0.6.9 \
     --hash=sha256:2ef8920f04c2db2f72165ac5162a3e74b3688de553ad3babc0160614e0ea4890 \
     --hash=sha256:55a130ba2d667b7cf09e5f5f56b1898eb3ba7820e5e5a689a3b3dfb127385442 \
     --hash=sha256:8c8f0b92a5686569366231aeb34180e567b31a3e7ff227012e7efe009be3931a \
     --hash=sha256:b720cf83a0b9bc9db969f113c81d4d29417c01a17a1f116dd2e3112fd2456279 \
     --hash=sha256:e60627351ec40113c3f9805d5c13a86bea5daf1b7e88b6b91109f037d1fc62fe
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 einops==0.8.2 \
     --hash=sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193 \
     --hash=sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 encutils==1.0.0 \
     --hash=sha256:38eca5af18cebabd8be43c17f14c9d3fbba83cc5f7ac8e3ab1c86e24c4b2b91a \
     --hash=sha256:605297da19a23d1b2da7d3b9bd75513acc979e9facf03aa7ec7ba04b5f567a79
-    # via cssutils
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   cssutils
 et-xmlfile==2.0.0 \
     --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa \
     --hash=sha256:dab3f4764309081ce75662649be815c4c9081e88f0837825f90fd28317d4da54
-    # via openpyxl
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   openpyxl
 fastapi==0.162.0 \
     --hash=sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c \
     --hash=sha256:6a22c1e2e6e32e0633ee7e170f00009a29b8228b16feb219ee42f32fd8d88a8f
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   fastapi-offline
     #   gradio
@@ -1005,11 +1063,14 @@ fastapi==0.162.0 \
 fastapi-offline==1.7.7 \
     --hash=sha256:60c8399fd7d3e3b01510e14468709e3dea1a0e773ef920372d057392d736a1f9 \
     --hash=sha256:aeeabe67dd40f867ab0fe64dd8de742949e36ba5f3ac6aeb055baef274ed91d0
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 filelock==4.2.6 \
     --hash=sha256:ee7af8ede36dcaf12e1016d9f7c3a63ecd5497d46f85dab21b8c779b8f944e97 \
     --hash=sha256:fd7d4fca497bf3e3d0945a13261f8e684f2aef12ce7cf76aef26e13bf7388b88
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   huggingface-hub
     #   mineru
     #   modelscope
@@ -1017,7 +1078,9 @@ filelock==4.2.6 \
     #   paddlex
 flatbuffers==25.12.19 \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
-    # via onnxruntime-directml
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   onnxruntime-directml
 fonttools==4.68.0 \
     --hash=sha256:039142b75a068c93f8596ef68787f82c74940b9153d24c224ab31e750eb083a2 \
     --hash=sha256:03c9ef1272e464747f67c623f76449b888da6d5de7fb46275bb36488b9ceedba \
@@ -1085,6 +1148,7 @@ fonttools==4.68.0 \
     --hash=sha256:fe80d05dd85e6ac58d0cd4fa10ddb96252a6f1046ee0fd00cd1d48f0c25921ac \
     --hash=sha256:fedc183bdbc3fdbfbdca26e0e04566d089cbb404712509a4e824608e9304cc77
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
 frozenlist==1.8.0 \
@@ -1219,50 +1283,63 @@ frozenlist==1.8.0 \
     --hash=sha256:fb30f9626572a76dfe4293c7194a09fb1fe93ba94c7d4f720dfae3b646b45027 \
     --hash=sha256:fe3c58d2f5db5fbd18c2987cba06d51b0529f52bc3a6cdc33d3f4eab725104bd
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aiohttp
     #   aiosignal
 fsspec==2026.9.0 \
     --hash=sha256:0f08147951c8cb31d844c3547d631053b127863b60be04cf06e121333ee0e2fe \
     --hash=sha256:8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio-client
     #   huggingface-hub
 ftfy==6.3.1 \
     --hash=sha256:7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083 \
     --hash=sha256:9b3c3d90f84fb267fe64d375a07b7f8912d817cf86009ae134aa03e1819506ec
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   mineru
     #   paddlex
 future==1.0.0 \
     --hash=sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216 \
     --hash=sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05
-    # via bce-python-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   bce-python-sdk
 gradio==6.31.0 \
     --hash=sha256:40cf094fe8ea1b8ada0fc4c10b685c4c5f09c4061d34c073be25bab342e14e22 \
     --hash=sha256:7b50b9b6a2d23cd02851ad4c8b1c8312c88d8b911d1f29c93f9761c98348a64a
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 gradio-client==2.7.2 \
     --hash=sha256:12c9d2d940df28eb8dce58eef61f5e808265ad87bbbca53704d1330aa701e5e2 \
     --hash=sha256:5b568b8189b86cfdacab39fecc2ee66900348cdd83a1c0bb968a98c83eafc198
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   hf-gradio
 groovy==0.1.2 \
     --hash=sha256:25c1dc09b3f9d7e292458aa762c6beb96ea037071bf5e917fc81fb78d2231083 \
     --hash=sha256:7f7975bab18c729a257a8b1ae9dcd70b7cafb1720481beae47719af57c35fa64
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   httpcore
     #   httpcore2
     #   uvicorn
 hf-gradio==0.4.1 \
     --hash=sha256:76b8cb8be6abe62d74c1ad2d35b42f0629db89aa9e1a8d033cecfe7c856eeab3 \
     --hash=sha256:a017d942618f0d495a58ee4563047fa04bef614c00e0cb789a9a6d0633cffa7b
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 hf-xet==1.8.0 \
     --hash=sha256:07a06d7481702616726c2d8578cfb00052a5b3f21beed6a674592bc837a10330 \
     --hash=sha256:10ed23b51dacf7917d64f335c25048deb470efa755e9989b218fc0531386138e \
@@ -1281,19 +1358,26 @@ hf-xet==1.8.0 \
     --hash=sha256:c74e3751cbcdae9222c5170e8d788e83201a03dc5e5f4308a20f17a5b6023b56 \
     --hash=sha256:e00d8f60170cd3dd55d98306e41dbaf28b27ff1bcfefbfa84279d197221be83e \
     --hash=sha256:f42940869572dc2b05dfe06f4cc398c6291503e086ddc4eddfb7a6ab9409ad01
-    # via huggingface-hub
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   huggingface-hub
 httpcore==1.0.9 \
     --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55 \
     --hash=sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8
-    # via httpx
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   httpx
 httpcore2==2.16.0 \
     --hash=sha256:5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f \
     --hash=sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643
-    # via httpx2
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   httpx2
 httpx==0.28.1 \
     --hash=sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   gradio
     #   gradio-client
@@ -1305,15 +1389,20 @@ httpx==0.28.1 \
 httpx-retries==0.6.0 \
     --hash=sha256:3e0b404969a564829d368417964fd21e6b400a10d17c92d29b8bc247ce8186e3 \
     --hash=sha256:d1e52a8f68a5df42de75ab89049d5020b2d0ab2f5f8bceacda008d12aa1257a3
-    # via mineru-vl-utils
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru-vl-utils
 httpx2==2.16.0 \
     --hash=sha256:0d54c98128e8f2ff7fbbde0fca8c359e5f032edeaaaac443cdb7f31f685bcd7f \
     --hash=sha256:fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a
-    # via huggingface-hub
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   huggingface-hub
 huggingface-hub==2.4.0 \
     --hash=sha256:13a6158b9e3393d9d3f248ce99074d50c2a0a1449fb9d8e2f710751e2084c188 \
     --hash=sha256:42ecfd93ede47bdd333daebbf66a32d7bfe2e18752754fe4d2d4f98a0179d801
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   gradio-client
     #   mineru
@@ -1323,6 +1412,7 @@ idna==3.20 \
     --hash=sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44 \
     --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   anyio
     #   httpx
     #   httpx2
@@ -1331,14 +1421,19 @@ idna==3.20 \
 imagesize==2.0.1 \
     --hash=sha256:b2ba6a4dea487a7ebcd53248d3476aca449d30db12a2dde5e0c5ca9624fd77e5 \
     --hash=sha256:ea0c9a0384df69ed86a943a15cde37d0360b82491b3910dc2215e202e62b5b02
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 jieba==0.42.1 \
     --hash=sha256:055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 jinja2==3.1.6 \
     --hash=sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d \
     --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   paddlex
 jiter==0.18.0 \
@@ -1461,27 +1556,38 @@ jiter==0.18.0 \
     --hash=sha256:f9083a7c2a4ee6358bc0401c46b4d5090f208f6fadfb6275c7b5fe3217e13506 \
     --hash=sha256:fe42726d7fe171cd8fc1966d4457a6aae03bd408d519d2cc5e7726805460b51e \
     --hash=sha256:feadebdfee32c61e91066433f4aa74c891752e26e43032c1feef08dda6d9b6ed
-    # via openai
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   openai
 joblib==1.6.0 \
     --hash=sha256:2ccc96785b12046c08fd6d55839c12857831b54a3c1673ffadd2f04bfc4eda03 \
     --hash=sha256:3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba
-    # via scikit-learn
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   scikit-learn
 json-repair==0.64.3 \
     --hash=sha256:0066a1ac03953fd802cc5f2fc7c208b5aee33def2448a9cf619f60c461440a1e \
     --hash=sha256:6424e8242449cd504a66137c56f774579e41b8a98c278351ded21996350fb57a
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 jsonschema==4.26.0 \
     --hash=sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 jsonschema-specifications==2025.9.1 \
     --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe \
     --hash=sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d
-    # via jsonschema
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   jsonschema
 latex2mathml==3.81.1 \
     --hash=sha256:c337668441b71c819b6733905a8058ba9a9d767bae11a0c5fdacb3aff31361bd \
     --hash=sha256:c95add0c0fcdecad2d70567e0643050d5ea1149fb2e98a5d5792fb1c8eea2ed5
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   paddlex
     #   ziamath
@@ -1489,6 +1595,7 @@ loguru==0.7.3 \
     --hash=sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6 \
     --hash=sha256:31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   mineru
     #   mineru-vl-utils
@@ -1670,6 +1777,7 @@ lxml==6.1.3 \
     --hash=sha256:febd35ef45f603c2d74b74655efdbf45e14f55fc0aef4ac82b663ca829b283e0 \
     --hash=sha256:ff88a92cafde90888511242d1c54afcc1a8adbb6dc0a88fa7f87e29e92400d4a
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   paddlex
     #   premailer
@@ -1678,15 +1786,21 @@ lxml==6.1.3 \
 mammoth==1.13.0 \
     --hash=sha256:b359bee7bc00caba47dacc64286928133dd947917bab852eea01d0c8d8997296 \
     --hash=sha256:dd7629fa9d0a5e82207b3f481a9dcb8308fb43f6206258e062f11121efba9991
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 markdown==3.11.2 \
     --hash=sha256:87bf5d90f2d2882e2c02fcda182c2800456b985bff38913867c49706481514b0 \
     --hash=sha256:f80390747a2a0ff2ba54da074ce4f862f72a6685f608cd2637b646a6d83993f5
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 markdown-it-py==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
-    # via rich
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   rich
 markupsafe==3.0.4 \
     --hash=sha256:007e1ffd9bf65bb6ee96df7b258fc632a4868dd5566037986c64781f35a36e98 \
     --hash=sha256:02fa4acbc6a3fc5c693c34d4dd8c1130b7fe99cc915181b0ddd6f72aeb296002 \
@@ -1840,41 +1954,56 @@ markupsafe==3.0.4 \
     --hash=sha256:fd9f8797427910198f95bced71ddfed61130d7e349213bfb8466c9c99e2c46a8 \
     --hash=sha256:fdb4ca07ab75ffadab4a8b135ad59cdbb3156b99310f3d565370da74a15d6bd3
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   jinja2
 mathml2omml==0.0.2 \
     --hash=sha256:6a2a1a10e90d7d8a672a1b37b6b49a6187e6720439aeb922949d254bb4656f25 \
     --hash=sha256:c67b289cd09208c4b6f3c4f74653f6d86edfd8fff4c18e6c95a7afa9994e7323
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
-    # via markdown-it-py
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   markdown-it-py
 metafile-render==0.4.1 \
     --hash=sha256:0ec423f3a7c08fdda5e59f607889ae527d862d79b9439afe87d2c934d0297a7a \
     --hash=sha256:4ab36dda32d1464118c1798bd48e84ab95c42b93a8fb088ccae47b5f4049ae6e \
     --hash=sha256:a700f049527e3123c6e385f7dc8086e54013437c277491c70f046725dbfd6476 \
     --hash=sha256:b0aaa0315824908273f77aa8cc7210070f43f22d5463a288e788121175cb523e \
     --hash=sha256:f909ff39ab61f1b452a89a6e6317bec516566634478517470f3465c91aefbe5b
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 mineru==4.1.3 \
     --hash=sha256:cd077510ccd259e034832c9c704aa85ce8c34f1e286323574d4c08b8cbf7420a
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 mineru-llama-cpp==0.2.0 \
     --hash=sha256:0e1f835695c82e0f7e434adc19f00a0b51c1579c26e773dbf1a9e60c55727c18 \
     --hash=sha256:45b73833b2829888ebf2df1a96a264959908052f8f6eb90eecd00ec9f0461820 \
     --hash=sha256:668b7e8284031897b82f4699dc9ae0b15571eab22efd47ff1db7abd803021d84 \
     --hash=sha256:9b9f6049fb54a215f9e76e596ce32f64ba78ce2360e9f9bbb59184e237adfc01 \
     --hash=sha256:dc30e1e254a8d24932917c92ef2fd2572d465ebfa5d8259bf359d690adcb53e9
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 mineru-magika==1.0.3 \
     --hash=sha256:1b67e05769f48c28d4d5dda0869ece4f4acce769ec7ab6ed169ed34ee5b58343 \
     --hash=sha256:228351299e8a8c3f8523e58a8d4c3726f176be906420a5598bf791929f66860e
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 mineru-vl-utils==2.0.8 \
     --hash=sha256:e418c28bfc04a92296569c33a6819f4ca1a00fda8159521b5b9af6f7337c228f \
     --hash=sha256:fa5ce0014b2c220189218ed60fa89213fa44f89365afe7292e174493d4260132
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 ml-dtypes==0.6.0 \
     --hash=sha256:008382aeab529df5d3f00501ad9a7dcd64494d4b5b1971fc4c79019e6c1f5010 \
     --hash=sha256:03ce583adfce34ad33aa9e1fc7a8344dcf90ea776cc4ef0e5a48d4eae84e5d20 \
@@ -1916,27 +2045,35 @@ ml-dtypes==0.6.0 \
     --hash=sha256:f4f59f83c82ab480e924b988e7b1b4eb4de836dfcf5390c6f59148d1a00e1d02 \
     --hash=sha256:f6cb525101b6b903779188c1e9e9490c343b455ab822883e02cf01e5547338d2 \
     --hash=sha256:fb87f46b4f7ad7b5d3ad8f4b452b024bd4229d44c8ff934798c1fe656210387a
-    # via onnx
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   onnx
 modelscope==1.40.1 \
     --hash=sha256:6f135fe80903e7bfcd6ccc707f4f6f85c8e445cf497b624bd07299582486e2c1 \
     --hash=sha256:7b46d74fc3905a0a34a60bdefe774677d709d9ee2ada8cf85401a50ea533f9ae
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   mineru
     #   paddlex
 modelscope-hub==0.4.5 \
     --hash=sha256:9157bbc34d93a70d099c8ab87a113fc9a4149e31ab79e8eb8f7563884043f082 \
     --hash=sha256:b8606176af5be9b6437e2dcb119bd3de9f25862b32e56ff71096af99e545aaaf
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   modelscope
 more-itertools==11.2.1 \
     --hash=sha256:35a7377edd1dd6608dcb2cdf534ded55ea32d49448875ad042cd3f879fb1ded0 \
     --hash=sha256:cbf08fd0af284dc69718b9b76a8e6203df624d70209ea511e4219d350c856f63
-    # via cssutils
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   cssutils
 mpmath==1.3.0 \
     --hash=sha256:7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f \
     --hash=sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
-    # via sympy
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   sympy
 multidict==7.2.1 \
     --hash=sha256:02009b402129a73e1f3da68f48eb999afbacd29f25aef0d5052b84ff5c2786a2 \
     --hash=sha256:02d9c04d395a36eeebe89e45f2269614a4675b8e83fddcba15bba2be903971e5 \
@@ -2090,12 +2227,15 @@ multidict==7.2.1 \
     --hash=sha256:fcfebcb537f419e415b6e2bfc77ddbd33abe3c036f0105410a25a14741df9c31 \
     --hash=sha256:fd24c4425fdb8e822601335602375c6d0cb020f7a368e1d5842eb7925a9c8748
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aiohttp
     #   yarl
 narwhals==2.28.0 \
     --hash=sha256:1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f \
     --hash=sha256:2d9860c80d6610820826e94c6e42ce4b1d92d89cdd479586e652a8d211dab345
-    # via scikit-learn
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   scikit-learn
 nh3==0.3.7 \
     --hash=sha256:157ec1eb7a62f3d9a7badb8d82d89aa810e3e24e097eedfa481a25d0c8a99877 \
     --hash=sha256:15f5fbf090f5c88d61c820e1fc1fceecb6520cca9fe85649c06b57ef9dc9ff62 \
@@ -2124,7 +2264,9 @@ nh3==0.3.7 \
     --hash=sha256:f04b7d333b27f13ca439da3cf1c75c2fba34f104969f6ce4ac8e7079699c2f4a \
     --hash=sha256:f266d3f1b3647449923a8e406524632220dd5d8b647078dfe45b885d33d10479 \
     --hash=sha256:fd4a70efb45d5372174f718878eb7a35c12677626a63b2f103b23b833457dcac
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 numpy==2.3.5 \
     --hash=sha256:00dc4e846108a382c5869e77c6ed514394bdeb3403461d25a829711041217d5b \
     --hash=sha256:0472f11f6ec23a74a906a00b48a4dcf3849209696dff7c189714511268d103ae \
@@ -2201,6 +2343,7 @@ numpy==2.3.5 \
     --hash=sha256:ffe22d2b05504f786c867c8395de703937f934272eb67586817b46188b4ded6d \
     --hash=sha256:fffe29a1ef00883599d1dc2c51aa2e5d80afe49523c261a74933df395c15c520
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
     #   gradio
@@ -2214,14 +2357,12 @@ numpy==2.3.5 \
     #   scikit-learn
     #   scipy
     #   shapely
-nvidia-ml-py==13.615.71 \
-    --hash=sha256:959bf4adf6fe1308e4bd739e722236b0d1ec8392e2cefad33ff70c311380b9b6 \
-    --hash=sha256:bebe4e48f51b1dc75028c0815cb7bfa14a31a5bb80be70c9d980c6036953fc3d
-    # via pynvml
 olefile==0.47 \
     --hash=sha256:543c7da2a7adadf21214938bb79c83ea12b473a4b6ee4ad4bf854e7715e13d1f \
     --hash=sha256:599383381a0bf3dfbd932ca0ca6515acd174ed48870cbf7fee123d698c192c1c
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 onnx==1.23.2 \
     --hash=sha256:008cb0467b2bbee41448acc7da8b6f4e704624cb0d327a2d5adafc7ce19bc5b8 \
     --hash=sha256:0100e6c3f30db8ff10876d8cfd0cb27296166d5a612ab37c3998e07e83b3fde8 \
@@ -2247,20 +2388,25 @@ onnx==1.23.2 \
     --hash=sha256:f8b9a5e25a390cc291600e5fd619f4b79708287a6bbc41a37209f364e08a63da \
     --hash=sha256:fb3e892f19f3a793b9722587349941b074f74091ad33e794a7798fe03fdc0c9c \
     --hash=sha256:fcbbd53e3482434dbf2c27f4a8727ad4865e21bbc0b5530e7557669f8d8f587b
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 onnxruntime-directml==1.24.4 \
     --hash=sha256:2f1031cb2281e5b27cca9efe0b9399317c7286e4d226f7a79d4ab79bbd94d19e \
     --hash=sha256:51d86bb949488e572b00422f344990a4a81d982416d73b6c0e4ced2bcd423d19 \
     --hash=sha256:96642a787e5a6f33bf043521c0f06eb1eb663f6b830e5862a2026d03f9c90543 \
     --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
     #   mineru
 openai==2.54.0 \
     --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b \
     --hash=sha256:e3e6f8bc1ba30ddf381ace1a14340eed381cb984a1a59bd0f34b5be3b5d49cfa
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 opencv-contrib-python==4.10.0.84 \
     --hash=sha256:040575b69e4f3aa761676bace4e3d1b8485fbfaf77ef77b266ab6bda5a3b5e9b \
     --hash=sha256:2a36257ec1375d1bec2a62177ea39828ff9804de6831ee39646bdc875c343cec \
@@ -2269,18 +2415,23 @@ opencv-contrib-python==4.10.0.84 \
     --hash=sha256:a261223db41f6e512d76deaf21c8fcfb4fbbcbc2de62ca7f74a05f2c9ee489ef \
     --hash=sha256:dea80d4db73b8acccf9e16b5744bf3654f47b22745074263f0a6c10de26c5ef5 \
     --hash=sha256:ee4b0919026d8c533aeb69b16c6ec4a891a2f6844efaa14121bf68838753209c
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2 \
     --hash=sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
     #   paddlex
 opentelemetry-api==1.45.2 \
     --hash=sha256:2cbd737377e710ee740d261c94e93fa0f08e6d037c18f17513cc0a2d94479a34 \
     --hash=sha256:d7b0008e21e5fd61cbe7a7f34ca3b6905a78ab677d9bc395e299359c75cda6b4
-    # via fastapi
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   fastapi
 orjson==3.13.0 \
     --hash=sha256:0526a3456db67b264c6d661b5f090077f326b6cd074d0ef53a72763595dec5d7 \
     --hash=sha256:08bf722f923d2100bc5e5a5dcf72c656db557049c1bea26582fdd5dd9d5395a1 \
@@ -2341,11 +2492,14 @@ orjson==3.13.0 \
     --hash=sha256:f5c05a8fee59309f537590a1ff12d3c1009c485e96a50a9ac60dd085c09d0fc0 \
     --hash=sha256:fb8644dc6d705e1269ed2842bf4dbe2b4e50d670de503bf79d5cef3a5148a4c7 \
     --hash=sha256:fbbad6b9b1da43f25c1f5b20cd5a268e028a2fc95d5a8d1ade6059973bc71584
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 packaging==26.3 \
     --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   gradio
     #   gradio-client
@@ -2357,11 +2511,14 @@ packaging==26.3 \
 paddleocr==3.7.0 \
     --hash=sha256:9b81eb62cf37e590d4873e60262ff56f968ff9de6ce1f565749760ceb1c422e2 \
     --hash=sha256:c0f0a81ad4112727f30c6fcf986ac0ef6a120d31ee0991a01fae0357ee32d338
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 paddlex==3.7.2 \
     --hash=sha256:6a60b4595e2d51460f7f51326672adca86b89ff9ecfd02ac348fb69739e0093c \
     --hash=sha256:f1678bf650bbaccfd8f0d4e49d0ae631b4685c829fdae6e802ccd90d4fcb9a7f
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   paddleocr
 pandas==3.1.0 \
@@ -2424,6 +2581,7 @@ pandas==3.1.0 \
     --hash=sha256:f1a93c24175129bfc9922ef748ddae1d8137c743ed835e2615be329f606fed4d \
     --hash=sha256:f4772320b7735d96dbbef437129f840dec4175f8a18a2391bd1222ed8943825c
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   paddlex
 pillow==12.3.0 \
@@ -2515,6 +2673,7 @@ pillow==12.3.0 \
     --hash=sha256:fe3cca2e4e8a592be0f269a1ca4835c25199d9f3ce815c8491048f785b0a0198 \
     --hash=sha256:ffd0c5368496f41b0944be820fcb7a838aa6e623d250b01acf2643939c3f99d7
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
     #   gradio
@@ -2528,11 +2687,14 @@ pillow==12.3.0 \
 premailer==3.10.0 \
     --hash=sha256:021b8196364d7df96d04f9ade51b794d0b77bcc19e998321c515633a2273be1a \
     --hash=sha256:d1875a8411f5dc92b53ef9f193db6c0f879dc378d618e0ad292723e388bfe4c2
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 prettytable==3.18.0 \
     --hash=sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680 \
     --hash=sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aistudio-sdk
     #   paddlex
 propcache==0.5.4 \
@@ -2675,6 +2837,7 @@ propcache==0.5.4 \
     --hash=sha256:fc2461ecc45f17893f8207e73b46ea8ba93e33630e51cf4af3fbc21d47462b1a \
     --hash=sha256:ff6b113f50bc066a698db5d944d2c6dc7507168dd3341e255a8892fd0715a558
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aiohttp
     #   yarl
 protobuf==7.36.2 \
@@ -2687,6 +2850,7 @@ protobuf==7.36.2 \
     --hash=sha256:e11e1f0180583a2af89db6a2ecd9e8dc40aa6d2988ca175bfd0e6d12ea72d74e \
     --hash=sha256:f4fee11ec330d238b34a05c9b675f693c20415d1c5bd7d5320cc2f8a798eb9cf
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   onnx
     #   onnxruntime-directml
 psutil==7.2.2 \
@@ -2711,11 +2875,15 @@ psutil==7.2.2 \
     --hash=sha256:ed0cace939114f62738d808fdcecd4c869222507e266e574799e9c0faa17d486 \
     --hash=sha256:eed63d3b4d62449571547b60578c5b2c4bcccc5387148db46e0c2313dad0ee00 \
     --hash=sha256:fd04ef36b4a6d599bbdb225dd1d3f51e00105f6d48a28f006da7f9822f2606d8
-    # via aistudio-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   aistudio-sdk
 py-cpuinfo==9.0.0 \
     --hash=sha256:3cdbbf3fac90dc6f118bfd64384f309edeadd902d7c8fb17f02ffa1fc3f49690 \
     --hash=sha256:859625bc251f64e21f077d099d4162689c762b5d6a4c3c97553d56241c9674d5
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 pyclipper==1.4.0 \
     --hash=sha256:0a4d2736fb3c42e8eb1d38bf27a720d1015526c11e476bded55138a977c17d9d \
     --hash=sha256:0b74a9dd44b22a7fd35d65fb1ceeba57f3817f34a97a28c3255556362e491447 \
@@ -2754,13 +2922,16 @@ pyclipper==1.4.0 \
     --hash=sha256:f3672dbafbb458f1b96e1ee3e610d174acb5ace5bd2ed5d1252603bb797f2fc6 \
     --hash=sha256:fd24849d2b94ec749ceac7c34c9f01010d23b6e9d9216cf2238b8481160e703d
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   metafile-render
     #   mineru
     #   paddlex
 pycparser==3.12 \
     --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e \
     --hash=sha256:f03387877eab82ce01bbdfd0ba7252ee55a90b1c708d5129e2ce915475cf1db6
-    # via cffi
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   cffi
 pycryptodome==4.2.0 \
     --hash=sha256:0106af8684e1d73c93bc39a2f1cb4ae2f2636d1f80e6291caddcc37b4efc5dc1 \
     --hash=sha256:20cb4a489f7a5150a882901884b84ee0df77a47b9a6eb6e2dd8e98997b7b826f \
@@ -2789,11 +2960,14 @@ pycryptodome==4.2.0 \
     --hash=sha256:f104dc1a38aa1172a166ebe3716f2666f785bfa015b7ca13bb808c12c902e455 \
     --hash=sha256:f1482a7d9ceed7beadbb0853f83d4d44406a9f9fa8ee596d637618f095869e14 \
     --hash=sha256:f6f30a457bd83a3074747d11bcb95375397a2e9b9a6b9179ab001e0cdd8ed0c5
-    # via bce-python-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   bce-python-sdk
 pydantic==2.14.2 \
     --hash=sha256:7efbf7507b937931cd32a5755acb00ea1cf5ccb1d4e8067a5850d5069e382118 \
     --hash=sha256:fb7b2db6cefe8414dd612edeede49c4c433acb0432b0f92b95024e45f66c505d
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
     #   fastapi
@@ -2944,19 +3118,27 @@ pydantic-core==2.50.2 \
     --hash=sha256:f73930dacad5e611fe019e18df6f53c30629b1843d038d303b8dec86a32493bd \
     --hash=sha256:f81df206b937d0dca5efb38c25fc99037d82dbcd3740e34c3f81997d2322ac1c \
     --hash=sha256:fd9aa71a800c87c0f7ab53fa38009169a23a82c685989626ca74a4bd483e1b67
-    # via pydantic
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   pydantic
 pydub==0.25.1 \
     --hash=sha256:65617e33033874b59d87db603aa1ed450633288aefead953b30bded59cb599a6 \
     --hash=sha256:980a33ce9949cab2a569606b65674d748ecbca4f0796887fd6f46173a7b0d30f
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
     --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
-    # via rich
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   rich
 pylatexenc==2.11 \
     --hash=sha256:305a072a99ce736246049c9da05841b9d718c0f7ea8888f5f596cf15cb621053 \
     --hash=sha256:e78e7391d6c104f1ed150e21cfaa58016cdb50aa54406a2eecb793649ffdfdd0
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 pymupdf-lite==2.0 \
     --hash=sha256:0ea6581ac3d52bd2f1bf60191fe0a8f980b40a63ddd58a5df1de40e4c5ae175f \
     --hash=sha256:0fb0700e9c0c031b998cfe2a65b6c673cf07a6b7db814510885873a1d4ee3ec2 \
@@ -2970,15 +3152,15 @@ pymupdf-lite==2.0 \
     --hash=sha256:d8c858b20199bd38e5b8da887c03133c230c6be8e3ca32419016074503559969 \
     --hash=sha256:f0b34b790a2d1a3985adfff190173324d42b0e5aa876602f2c94bcbb16d8c6e2 \
     --hash=sha256:fa883ba3c88be81d2baf34c58e859c83098b5f459c6533869b88375dab990c31
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
-pynvml==13.0.1 \
-    --hash=sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f \
-    --hash=sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 pypdf==6.21.4 \
     --hash=sha256:33e4fb41ca352810eb4e9838aa0d82d6888a5f8bf682f43e99cce5faa666255c \
     --hash=sha256:c8817e3f888d47a087872ded69812c1ef30cacb871d6e053e0c00bbaf0bc2163
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 pypdfium2==5.14.0 \
     --hash=sha256:09b99c8f0cb427eb17fec13c0862ed598bba34b4843df153f70fff806a2820bc \
     --hash=sha256:11f281613fa22313d9c7ab89947665e84eccf8ebe40e1198a84a88352305648d \
@@ -3004,17 +3186,22 @@ pypdfium2==5.14.0 \
     --hash=sha256:f1b696e6901e16f114a2ec6332e5e3f8f5033a901614ead28499ab18ca6024f5 \
     --hash=sha256:f6f13bbcc5f4adabc2676e52f662c6cb375de86b314790b0ae08f3ab62eb116a
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   docvortex
     #   mineru
     #   paddlex
 pypptx-with-oxml==1.0.3 \
     --hash=sha256:4b3ccf51185e0f9e60ebf2884e74153d7fcb00e7e4f0461404e96e0260d7bba1 \
     --hash=sha256:a093d8c8e99dfcd0131ea98b4dbc0a0a40adf44869edbb74c57d0cb87b8e4208
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 python-barcode==0.16.1 \
     --hash=sha256:5776567478c9a0dae473374bb86631ba0b5ea99aaf302763b364e367ac51f367 \
     --hash=sha256:665ed09516b0088b5593061c5ac8662caa0b08d56bdad328388b1cab39939ac5
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 python-bidi==0.6.12 \
     --hash=sha256:0312a644c1f68e697bcc48a76646d447d1376604381df1fece1efafe683f5360 \
     --hash=sha256:03ad1730d0d0ac97cce70f086b27e225fd122cd9cd7db99791dc89efb6c7260e \
@@ -3141,28 +3328,36 @@ python-bidi==0.6.12 \
     --hash=sha256:f7760b4fafeb86f08368729ef5d8fce16b3f3506007460fbb301d68430d22f97 \
     --hash=sha256:fba1d22260c14259be50c1ca58bab8b90e976a8ee9e645c56ee64b2430b2c484 \
     --hash=sha256:ff0376483e1114334a1ad59305aa313045655f5e7495e79517cc40e38c9a281c
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 python-dateutil==4.0.0 \
     --hash=sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c \
     --hash=sha256:d7295ff14fdc0f92f662100bfb6c551d160ca090f2939f1ec5b9794265c03f06
-    # via pandas
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   pandas
 python-docx==1.2.0 \
     --hash=sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7 \
     --hash=sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   docvortex
 python-multipart==0.0.33 \
     --hash=sha256:8f16c07b36add9da6b2ee87d3efcaf0a45a6de9c3d0a5dd94e9ccf7675a7bc45 \
     --hash=sha256:b8112424a6abd162ec08d390565dd113ad699f2fe6fef3c987b8bbcbfe9e390d
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   gradio
     #   mineru
 pytz==2026.6 \
     --hash=sha256:3b0fc2727707663d6e517936f444fd8a8b240f1fc32f4bf7ee03274245945284 \
     --hash=sha256:7fed3fee8fd6bd4a2b7b75a8d56021d0624127bf69bd5691f115db929ac570b3
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 pyyaml==6.0.2 \
     --hash=sha256:01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff \
     --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 \
@@ -3218,6 +3413,7 @@ pyyaml==6.0.2 \
     --hash=sha256:f753120cb8181e736c57ef7636e83f31b9c0d1722c516f7e86cf15b7aa57ff12 \
     --hash=sha256:ff3824dc5261f50c9b0dfb3be22b4567a6f938ccce4587b38952d85fd9e9afe4
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   huggingface-hub
     #   mineru
@@ -3227,15 +3423,20 @@ pyzbar==0.1.9 \
     --hash=sha256:13e3ee5a2f3a545204a285f41814d5c0db571967e8d4af8699a03afc55182a9c \
     --hash=sha256:4559628b8192feb25766d954b36a3753baaf5c97c03135aec7e4a026036b475d \
     --hash=sha256:8f4c5264c9c7c6b9f20d01efc52a4eba1ded47d9ba857a94130afe33703eb518
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 qrcode==8.2 \
     --hash=sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f \
     --hash=sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   jsonschema
     #   jsonschema-specifications
 regex==2026.9.29 \
@@ -3370,16 +3571,20 @@ regex==2026.9.29 \
     --hash=sha256:fdd88ed5e20b1bcdd234421e454962c971aa44b653bdb7f1ea9ef683e90fb649 \
     --hash=sha256:fe3fa1dd453ed5c7f5ea23a26218329790ed7197a99b90e94330e313959a7f52
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   paddlex
     #   tiktoken
 reportlab==5.1.0 \
     --hash=sha256:59fdbaec5efe437095ad1d7292ec9a271c8ca2d3ec75e889c6e61400929b90df \
     --hash=sha256:6878200464527e87672d19e9f7cfc6bb890e3a6931e74ac6a1a8d1754aa55671
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aistudio-sdk
     #   mineru
     #   modelscope
@@ -3447,11 +3652,14 @@ resvg-py==0.5.0 \
     --hash=sha256:f0c834262db96eac4d5767e1025c21efefa0ed0359bded8dfd4b79fc7549694f \
     --hash=sha256:f322d7bf0ddab60156d6cf1883718b726c1c210bd7623e253756986798c5c83e \
     --hash=sha256:feee1ee6c2c0b64018c046a7604240c233c6cf14496e475238370c7d9a9db455
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex
 rich==15.0.0 \
     --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \
     --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   mineru
     #   typer
 rl-accel==0.9.1 \
@@ -3472,7 +3680,9 @@ rl-accel==0.9.1 \
     --hash=sha256:ce947b8473a075763fe66f53ec91a441a0c5d38cf4dfad952a8ce276e563b8f6 \
     --hash=sha256:da8ca0fcf5dc0827950fcc5421276243a5d78566f8cf7e7b974ffff69bda3200 \
     --hash=sha256:fe6a1b0d852fb992c5c51a3644527e689a0cf59172def6ffc8502419f5c45500
-    # via reportlab
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   reportlab
 rpds-py==2026.9.1 \
     --hash=sha256:00ba2d8c7dd4ee537978ddf4b3fbd712bef2d8751603f7f3146b3f4287768e25 \
     --hash=sha256:01445c8d194aa032a08e944f16567672da1c62dbdbefd8b6d0693032e290cf68 \
@@ -3603,16 +3813,21 @@ rpds-py==2026.9.1 \
     --hash=sha256:fdcd198979b4ecffcc1beba366a7fbcf4eb41243691a82fe52ceb0b902f09c12 \
     --hash=sha256:fe5ad0664ec772b02c45859041aa17655709cced7a31005817fbbbd988c25567
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   jsonschema
     #   referencing
 ruamel-yaml==0.19.1 \
     --hash=sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93 \
     --hash=sha256:53eb66cd27849eff968ebf8f0bf61f46cdac2da1d1f3576dd4ccee9b25c31993
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 safehttpx==0.1.7 \
     --hash=sha256:c4f4a162db6993464d7ca3d7cc4af0ffc6515a606dfd220b9f82c6945d869cde \
     --hash=sha256:db201c0978c41eddb8bb480f3eee59dd67304fdd91646035e9d9a720049a9d23
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 safetensors==0.8.0 \
     --hash=sha256:040070828e36dc8e122178bbbd5830ff9e97920affb84cbe0f46442497bed358 \
     --hash=sha256:096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f \
@@ -3631,7 +3846,9 @@ safetensors==0.8.0 \
     --hash=sha256:fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d \
     --hash=sha256:fcdd41ec4628fee5799f807c73c353629130fbd942aa23d83c623dd6c9d52d78 \
     --hash=sha256:fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 scikit-learn==1.9.1 \
     --hash=sha256:09f4d73049cd63575157f6b1060e06a8c83a4bd3488dbfaeedf35ccba7aad712 \
     --hash=sha256:0c0f8b5d09b44101cea2767f300680bada1ea27f976fe4b48b83950a4f55a49a \
@@ -3676,7 +3893,9 @@ scikit-learn==1.9.1 \
     --hash=sha256:e4c20a6c017d820faa7ac8c783e3d0c6a9a2e297bf9f55332ca17cdf7fd4d04d \
     --hash=sha256:e5d7b18a5b9dca241a74695f3275fa4c895a9dadc72b3d8df5fa9d1083c9b83e \
     --hash=sha256:ffbcbbbb44202fbe9bc64bced25a145759adb9ef010b3d37a8064958ac13df2a
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 scipy==1.18.1 \
     --hash=sha256:011413b7426b75012840e35649e00fe0a2c3bae89fed433876e3a99251572efc \
     --hash=sha256:0ac49ea97594532dd44b7136094d35f5440fa06e6d9c6384a74c01764df388c5 \
@@ -3740,12 +3959,15 @@ scipy==1.18.1 \
     --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218 \
     --hash=sha256:fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   paddlex
     #   scikit-learn
 semantic-version==2.10.0 \
     --hash=sha256:bdabb6d336998cbb378d4b9db3a4b56a1e3235701dc05ea2690d9a997ed5041c \
     --hash=sha256:de78a3b8e0feda74cabc54aab2da702113e33ac9d9eb9d2389bcf1f58b7d9177
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 sentencepiece==0.2.2 \
     --hash=sha256:046b15ea22d8042e2e173561d464ec3b64a9c2081324df70ebce7bf7ebb3e497 \
     --hash=sha256:0e2aae42960392d6dcb9a72d8e1e65a97294c965071b43c7b3429a42f350250e \
@@ -3804,11 +4026,15 @@ sentencepiece==0.2.2 \
     --hash=sha256:f7c06c751c19d923435a54bff4f7e66e728fad160e8da28254f133abc9725820 \
     --hash=sha256:fa9f5ef0e2a82233dd0b8b32ea3f5710e0c44afbc07ed3620219f32601e56090 \
     --hash=sha256:fd523c4992041faa5c2b3cde62253d11a96c30d73a34afe48a486e8e2254cd1c
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 setuptools==84.2.1 \
     --hash=sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc \
     --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
-    # via modelscope
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   modelscope
 shapely==2.2.0 \
     --hash=sha256:000c0ce2a3ba49427e6288b7add9de5d8525d4e65d6ebc8840103040d4d57b86 \
     --hash=sha256:0a63e6b68ec785ef3aae3935c4aa9fb8edccced94e23c79d5d85276442c60859 \
@@ -3875,38 +4101,52 @@ shapely==2.2.0 \
     --hash=sha256:fdb599ec540cea5b635ac47bf24fca4cdfd1c39730ffc0b6cf0d2666b0dd9a33 \
     --hash=sha256:ff9e87b534edf35af65758fafb31ad3b797354cba9323899e263f450c69a2ff2
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   mineru
     #   paddlex
 shellingham==1.5.4 \
     --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
     --hash=sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de
-    # via typer
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   typer
 six==1.17.0 \
     --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274 \
     --hash=sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
-    # via bce-python-sdk
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   bce-python-sdk
 sniffio==1.3.1 \
     --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2 \
     --hash=sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc
-    # via openai
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   openai
 soupsieve==3.0.4 \
     --hash=sha256:8412826614f9c632227067d0985aeb9f584bd15efc852955430e097a9fe7afbf \
     --hash=sha256:924fab84ae21604c19e175e1f39815eb6fa83ba23836e09e9de180925e5bc4c0
-    # via beautifulsoup4
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   beautifulsoup4
 starlette==1.10.0 \
     --hash=sha256:478c0ab3b4ced6e82719849c118fa406f0278a3499c1a898cd15cd31bdc38ce4 \
     --hash=sha256:b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   fastapi
     #   gradio
 sympy==1.14.0 \
     --hash=sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517 \
     --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
-    # via onnxruntime-directml
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   onnxruntime-directml
 threadpoolctl==3.7.0 \
     --hash=sha256:61348cfb77d53b9242e0017029244b559b810c142ced65b4e21eeca1843959a7 \
     --hash=sha256:cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be
-    # via scikit-learn
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   scikit-learn
 tiktoken==0.14.0 \
     --hash=sha256:087538c080e5ff421abd3a0785ed63c5111d06af98e6cd0d374dbe5969147ca3 \
     --hash=sha256:10f31e63e40313f2e518d87f7086cfa44e45f64cc14d8ae14103b41220c30a14 \
@@ -3972,11 +4212,15 @@ tiktoken==0.14.0 \
     --hash=sha256:f3d6cf93fbe2e7117eb7bedca684216fbe328a41f0843ce34245451d8eb2df1c \
     --hash=sha256:f5e7665f6624e052e5e7f6a36919ab69279decdc976d7b16b4fa15e1897d0513 \
     --hash=sha256:f702e0aeeb6506e57687e881c59e844ebe8f0a6a097ddafe20e3ab25f387be4e
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 tinycss2==1.5.1 \
     --hash=sha256:3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661 \
     --hash=sha256:d339d2b616ba90ccce58da8495a78f46e55d4d25f9fd71dfd526f07e7d53f957
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 tokenizers==0.23.3 \
     --hash=sha256:114e2b55ed177179d59f4ab98200a4471e11e78f9e4b5a922d146740f96fcf52 \
     --hash=sha256:1554a6eed34d9d6a78d23360f4e06df8dffab1ae08c7e8488e0b3e3b36cc266f \
@@ -4003,16 +4247,20 @@ tokenizers==0.23.3 \
     --hash=sha256:ec82e80e65a862275b97c3d90b7a523df8d9519ee48aeb4e9625b2cc909274e0 \
     --hash=sha256:efa3d7318406b4d115dce61ad5061953f1f44b128e79c020ce4615d763e23b6e
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   mineru
     #   paddlex
 tomlkit==0.14.0 \
     --hash=sha256:592064ed85b40fa213469f81ac584f67a4f2992509a7c3ea2d632208623a3680 \
     --hash=sha256:cf00efca415dbd57575befb1f6634c4f42d2d87dbba376128adb42c121b87064
-    # via gradio
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   gradio
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73 \
     --hash=sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   aistudio-sdk
     #   huggingface-hub
     #   mineru
@@ -4024,12 +4272,14 @@ truststore==0.10.5 \
     --hash=sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd \
     --hash=sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   httpcore2
     #   httpx2
 typer==0.27.3 \
     --hash=sha256:d0396f770a560ab1b0a8504e13b5f254b728cedb05c61cf0359e944e50ce8901 \
     --hash=sha256:e50022f28b82a86313e54501317a1db64bf8f8d036ff8cfe5ca7e47675454aff
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   gradio
     #   hf-gradio
     #   mineru
@@ -4037,6 +4287,7 @@ typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   anyio
     #   beautifulsoup4
     #   fastapi
@@ -4059,12 +4310,14 @@ typing-inspection==0.4.4 \
     --hash=sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47 \
     --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   fastapi
     #   pydantic
 tzdata==2026.6 \
     --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec \
     --hash=sha256:85d2cd9c09f81f0bb29db27759fc83af4f1e620efb814f8c5bf8b4cc4feece6d
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   pandas
     #   python-dateutil
 ujson==6.0.0 \
@@ -4187,11 +4440,14 @@ ujson==6.0.0 \
     --hash=sha256:fc115cca04dbdfd98a67ec89ba5ffd8a87f3201171af54980cfd550997611c41 \
     --hash=sha256:fd26d4b182b7138fc948cda55fe2e91b70d987731e169e628f42ba22cc6e3cce \
     --hash=sha256:ff3b33d8c8dbbe32936d2056296324371a07ed0b29177e2eb8ec46569436817f
-    # via paddlex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   paddlex
 urllib3==2.8.0 \
     --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
     --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   modelscope
     #   modelscope-hub
     #   requests
@@ -4199,6 +4455,7 @@ uvicorn==0.54.0 \
     --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf \
     --hash=sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   gradio
     #   mineru
@@ -4236,7 +4493,9 @@ watchfiles==1.3.0 \
     --hash=sha256:eb94e40b9a0db19636b5e3fed0a9803452ecc7381df13b385272abb779ee83ca \
     --hash=sha256:ec3cd4bb181a7b6329134204c2277c7144ab5f62cce9c5335d6f901ee7ce8d6a \
     --hash=sha256:f0c9865240e065a2247f4b5248528ae3d01e0e8ae071462c250c884dc16e3ee3
-    # via mineru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   mineru
 wcwidth==0.9.4 \
     --hash=sha256:093469e01d881bff3db93ff3f56c364dc87c441ea01f9f41c22de0c0bdf5c6ef \
     --hash=sha256:12786620375dc83fabf4b2b2aa52416fef2bc6094522ea29c8a53c75b0dfe9b6 \
@@ -4268,16 +4527,21 @@ wcwidth==0.9.4 \
     --hash=sha256:f28d77153303450ee13ebbe888297e75cf532c754555b6cabafc9bdda16c421c \
     --hash=sha256:fd8d57d3cdfe570e3265c8fab1885c24e34ef40889c0759c0c304a19e9835954
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   ftfy
     #   prettytable
 webencodings==0.6.1 \
     --hash=sha256:565f9ad031c702dae404e27a099e3e09186a3ab1b9520f06d215502b651fd910 \
     --hash=sha256:7fab6269c8bf237c657876b52058ccb182e861518d1c695c1a9aaa8c1c105d5b
-    # via tinycss2
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   tinycss2
 win32-setctime==1.2.1 \
     --hash=sha256:077b35471bf1ff1d71e165c919ddc0cecf51b8e1802f5d820d33a96e2f6717dd \
     --hash=sha256:a9edc685b35414bec69392c866ed82456ad125ac4a6a4b703ec1d8b462d4f477
-    # via loguru
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   loguru
 winrt-runtime==3.2.1 \
     --hash=sha256:06510db215d4f0dc45c00fbb1251c6544e91742a0ad928011db33b30677e1576 \
     --hash=sha256:07c0cb4a53a4448c2cb7597b62ae8c94343c289eeebd8f83f946eb2c817bde01 \
@@ -4299,6 +4563,7 @@ winrt-runtime==3.2.1 \
     --hash=sha256:e36e587ab5fd681ee472cd9a5995743f75107a1a84d749c64f7e490bc86bc814 \
     --hash=sha256:e94f3cb40ea2d723c44c82c16d715c03c6b3bd977d135b49535fdd5415fd9130
     # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
     #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
     #   winrt-windows-foundation
     #   winrt-windows-foundation-collections
@@ -4326,7 +4591,9 @@ winrt-windows-foundation==3.2.1 \
     --hash=sha256:de5e4f61d253a91ba05019dbf4338c43f962bdad935721ced5e7997933994af5 \
     --hash=sha256:ebbf6e8168398c9ed0c72c8bdde95a406b9fbb9a23e3705d4f0fe28e5a209705 \
     --hash=sha256:f3762be2f6e0f2aedf83a0742fd727290b397ffe3463d963d29211e4ebb53a7e
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 winrt-windows-foundation-collections==3.2.1 \
     --hash=sha256:0eff1ad0d8d763ad17e9e7bbd0c26a62b27215016393c05b09b046d6503ae6d5 \
     --hash=sha256:15704eef3125788f846f269cf54a3d89656fa09a1dc8428b70871f717d595ad6 \
@@ -4347,7 +4614,9 @@ winrt-windows-foundation-collections==3.2.1 \
     --hash=sha256:d4cfece7e9c0ead2941e55a1da82f20d2b9c8003bb7a8853bb7f999b539f80a4 \
     --hash=sha256:e4c6bddb1359d5014ceb45fe2ecd838d4afeb1184f2ea202c2d21037af0d08a3 \
     --hash=sha256:e9739775320ac4c0238e1775d94a54e886d621f9995977e65d4feb8b3778c111
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 winrt-windows-globalization==3.2.1 \
     --hash=sha256:0978ab32a0e485d877d31251229c74cdf21918a39f2b0cb537db0db04c7de8f6 \
     --hash=sha256:487772ddae211ad5dbe0364edc5443e1a091b713ed4cf67d753fb20e212065b4 \
@@ -4368,7 +4637,9 @@ winrt-windows-globalization==3.2.1 \
     --hash=sha256:dd6ced887ec39ca502a96640e1563f89515c505d32bad51939d8b6c78855477a \
     --hash=sha256:e03c3339a9632bf855c7f24479d6014627dc15882a12a712f2706c2380e094cf \
     --hash=sha256:fa4dbf6b18586e435bdd5d40b8536fe1dfd95810a264a135d121b34e33d39aa5
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 winrt-windows-graphics-imaging==3.2.1 \
     --hash=sha256:066038a96df12c23d6da6a591472436ada50103f575d8a1f802778a044f668c8 \
     --hash=sha256:0d9230d6414fafe5b441f7eb179c40eb35b7b0453bf96a4db8727aa72e755e4a \
@@ -4389,7 +4660,9 @@ winrt-windows-graphics-imaging==3.2.1 \
     --hash=sha256:c6f9bf94f41335b184bf165569012bef6f4819fb7da057b153e5f8f7d1536c85 \
     --hash=sha256:c9ed3f4805c205e15696993a4ee099ae36ccb4c4cbaa05415e8db1bf71d5ccc6 \
     --hash=sha256:fa349bb85d69b75ee05a223e4383eecb74c82df50db9b450d4d3b174f98577a6
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 winrt-windows-media-ocr==3.2.1 \
     --hash=sha256:0b3046adb48478dd3c65a1e63f104668d40f0b026d33a0d6ea337f4705a6796f \
     --hash=sha256:20a1bc66461eaa6004261cad83226ca3df2e43e0fedff6fff08646844b772fd0 \
@@ -4410,7 +4683,9 @@ winrt-windows-media-ocr==3.2.1 \
     --hash=sha256:dd2a8f427f18c122cbeb9f556999650bd8bf55402f648005efc29a2972878f5b \
     --hash=sha256:e1d44b85875643b4718d1094dbe75cee72b3cecedafe37c3f27b738f53bef96c \
     --hash=sha256:e731cf200a4731f53c0e40fba72e0312e895f80ab4e3574dc45ef3b1e35509ef
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 winrt-windows-storage-streams==3.2.1 \
     --hash=sha256:040cb94e6fb26b0d00a00e8b88b06fadf29dfe18cf24ed6cb3e69709c3613307 \
     --hash=sha256:1c630cfdece58fcf82e4ed86c826326123529836d6d4d855ae8e9ceeff67b627 \
@@ -4431,11 +4706,15 @@ winrt-windows-storage-streams==3.2.1 \
     --hash=sha256:e4508ee135af53e4fc142876abbf4bc7c2a95edfc7d19f52b291a8499cacd6dc \
     --hash=sha256:efdf250140340a75647e8e8ad002782d91308e9fdd1e19470a5b9cc969ae4780 \
     --hash=sha256:fa90244191108f85f6f7afb43a11d365aca4e0722fe8adc62fb4d2c678d0993d
-    # via -r config/runtime/win-x64-paddle-ort-directml/requirements.in
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   -r config/runtime/win-x64-paddle-ort-directml/requirements.in
 xlsxwriter==3.3.1 \
     --hash=sha256:0867761912cceac76f97ffa76eeda18c623ae9217f601be8512f55b1af4bdb6e \
     --hash=sha256:8e2c89e59d733fe59e112317218c64fbbc276d90a8c144ebd6f7fa15e7ab184a
-    # via pypptx-with-oxml
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   pypptx-with-oxml
 yarl==1.25.1 \
     --hash=sha256:0136d640dfa9b0523853e411430a99f8a91eca85774c6420285a33b755bc6de3 \
     --hash=sha256:03dd38de09bc213e9a8b29761eec33ee1d5318dac0e49d8af36e4d27830e23a7 \
@@ -4575,12 +4854,18 @@ yarl==1.25.1 \
     --hash=sha256:f53dcd26694f148f738edc052b5a69234833e739f10f4c3287bdfd8ec0f7b326 \
     --hash=sha256:f61964f235a43738bfac50da46fc4254943a7eea3051aeb0b6fc7c992c29fadc \
     --hash=sha256:fe01645169a2112aa1d4ebc3e4c5f029c5c8f97adfc32e5d37c993b39a994d75
-    # via aiohttp
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   aiohttp
 ziafont==0.11 \
     --hash=sha256:b2a9991948b232640215236efdf603f372403b0e000598971a84cae35880d50c \
     --hash=sha256:b62132be3da9667a80d048ab5498f107e49761722b69965788c2c747a38e7373
-    # via ziamath
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   ziamath
 ziamath==0.13 \
     --hash=sha256:4f56e9d0b6489f01bcf19c05d68e6da84ed6601d2e1262a62d3a9a7e7c33a171 \
     --hash=sha256:67a9b9714101fc90c2d6d0328e578f3ac311fb007644f2bbb9314ba2bc1c1459
-    # via docvortex
+    # via
+    #   -c config/runtime/win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock
+    #   docvortex

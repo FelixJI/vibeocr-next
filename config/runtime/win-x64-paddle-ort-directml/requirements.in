@@ -16,7 +16,6 @@ openpyxl>=3.1.5
 qrcode[pil]>=8.2
 python-barcode>=0.16.1
 pyzbar>=0.1.9
-pynvml>=11.5.0
 packaging>=26.0
 python-multipart>=0.0.32
 

@@ -157,11 +157,27 @@ def _result_from_provider_fixture(fixture: dict):
             _FixtureService([response]), None, PPStructureV3Options()
         )
     if provider == "paddleocr-vl":
-        from vibeocr.runtime.recognition.core.pipelines.pipeline_paddlocr_vl import (
-            project_historical_paddlocr_vl_payloads,
+        # #317：PaddleOCR-VL 推理输出的投影实现已随退役删除；历史结果在
+        # 存储侧已是投影后的序列化 payload。此分支复用夹具的 expected
+        # canonical 表格（含 VL provenance）构造一份历史序列化结果，经
+        # ocr_result_from_payload 存储/transport 读取 seam 验证旧数据
+        # 仍可读、可 roundtrip、可导出；不恢复任何生产投影执行链。
+        canonical = fixture["expected"]["canonical_table"]
+        return ocr_result_from_payload(
+            {
+                "pipeline_type": "PaddleOCR-VL",
+                "raw_text": "",
+                "markdown_text": "",
+                "html_text": "",
+                "content_list": [
+                    {
+                        "block_id": canonical["table_id"],
+                        "type": "table",
+                        "table": canonical,
+                    }
+                ],
+            }
         )
-
-        return project_historical_paddlocr_vl_payloads([payload])
     raise AssertionError(f"unhandled provider fixture: {provider}")
 
 
