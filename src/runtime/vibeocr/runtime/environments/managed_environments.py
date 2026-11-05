@@ -118,6 +118,24 @@ _RECIPE_METADATA = {
 }
 
 
+def _rename_with_transient_lock_retry(
+    source: Path, target: Path, attempts: int = 5
+) -> None:
+    """目录改名在 Windows 上可能被杀软/索引器瞬时锁定（WinError 5）。
+
+    环境目录树在写入后立刻交换槽位时该竞态呈间歇性；短退避重试消除
+    瞬时锁，持续失败仍抛出原异常，由调用方的回滚/恢复逻辑收敛。
+    """
+    for attempt in range(attempts):
+        try:
+            os.rename(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def _recipe_metadata(recipe: str) -> dict:
     metadata = _RECIPE_METADATA.get(recipe)
     if metadata is None:
@@ -1602,6 +1620,8 @@ class ManagedEnvironmentStore:
     def list(self) -> dict:
         # CUDA 支持已退役：不再探测 NVIDIA 驱动（DirectML 由引擎按设备
         # 可用性自行回退），列表不携带硬件投影。
+        # 先收敛升级前遗留的历史换入 journal，探针/路径才是真值。
+        self._recover_all_swaps()
         with RuntimeStoreLock(self._lock):
             data = self._read()
             catalog = self._source_catalog()
@@ -1753,6 +1773,299 @@ class ManagedEnvironmentStore:
         # switch_reservation/commit_switch 在 Supervisor 健康提交成功后
         # 由 _finish_default_migration 收敛，保留回滚语义。
         return self.list()
+
+    def _load_swap_journal(self, env_id: str) -> dict:
+        """读取并结构校验换入 journal；损坏时 fail closed，不做推断。"""
+        try:
+            journal = json.loads(self._journal_path(env_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ManagedEnvironmentError(
+                "pending environment swap journal is unreadable"
+            ) from exc
+        expected = journal.get("expected_record") if isinstance(journal, dict) else None
+        candidate = (
+            journal.get("candidate_record") if isinstance(journal, dict) else None
+        )
+        if (
+            not isinstance(journal, dict)
+            or set(journal)
+            != {
+                "schema_version",
+                "environment_id",
+                "expected_record",
+                "candidate_record",
+            }
+            or journal.get("schema_version") != 1
+            or journal.get("environment_id") != env_id
+            or not isinstance(expected, dict)
+            or expected.get("id") != env_id
+            or expected.get("kind") != "venv"
+            or type(expected.get("revision")) is not int
+            or not isinstance(candidate, dict)
+            or candidate.get("id") != env_id
+            or candidate.get("kind") != "venv"
+            or candidate.get("path") != env_id
+            or type(candidate.get("revision")) is not int
+            or candidate["revision"] != expected["revision"] + 1
+        ):
+            raise ManagedEnvironmentError("pending environment swap journal is invalid")
+        return journal
+
+    def _guard_swap_slots(self, env_id: str) -> None:
+        """换入改名前验证槽位容器与目标路径不含 symlink/reparse point。
+
+        .staging/.retired 容器或对应 <id> 目标叶（含 rollback 场景中已存在
+        的叶）若为 junction/symlink，改名会把目录移出管理存储；必须在
+        任何改名（含 journal 写入）之前发现，并复用既有边界校验。
+        """
+        boundary = self.paths.store_root.resolve()
+        for container, leaf in (
+            (self.root / _SWAP_STAGING_ROOT, self._staging_path(env_id)),
+            (self.root / _SWAP_RETIRED_ROOT, self._retired_path(env_id)),
+        ):
+            for path in (container, leaf):
+                # dangling junction：exists/is_symlink 均为 False，但 lstat
+                # 属性含 reparse 位；_is_reparse 对缺失路径安全返回 False。
+                if path.is_symlink() or self._is_reparse(path):
+                    raise ManagedEnvironmentError(
+                        "swap slot path contains reparse point"
+                    )
+            current = leaf
+            while current != boundary:
+                parent = current.parent
+                if parent == current or not parent.resolve().is_relative_to(boundary):
+                    raise ManagedEnvironmentError("environment path escapes store")
+                current = parent
+
+    def _rollback_swap(self, env_id: str, candidate_revision: int) -> None:
+        """把换入事务的目录与归属改动恢复到事务前状态（可重入）。
+
+        仅移动本事务自己移动过的目录，不删除任何数据；回滚改名完成后
+        归属恢复可被中断重跑：凭 ledger 中的退役镜像区分“未开始”与
+        “已复位待恢复”。失败时保留 journal，由 _recover_pending_swap
+        继续收敛。
+        """
+        live = self.root / env_id
+        staging = self._staging_path(env_id)
+        retired = self._retired_path(env_id)
+        journal_path = self._journal_path(env_id)
+        operation = "guard_swap_slots"
+        try:
+            self._guard_swap_slots(env_id)
+            if staging.exists() or staging.is_symlink():
+                # live 缺失：回滚改名已完成（或无旧副本场景），幂等恢复
+                # 归属——按 candidate revision 撤销候选整树归属、逆映射镜像。
+                if not (live.exists() or live.is_symlink()):
+                    if retired.exists() or retired.is_symlink():
+                        # 崩溃发生在旧 venv 已移入 retired 之后：旧 venv 复位。
+                        operation = "restore_retired"
+                        _rename_with_transient_lock_retry(retired, live)
+                    operation = "restore_ownership"
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                elif not (retired.exists() or retired.is_symlink()):
+                    # 回滚 retired→live 改名已完成、retired 已消失：补齐被
+                    # 中断的归属恢复。
+                    operation = "restore_ownership"
+                    managed_cleanup.restore_owned_paths(
+                        self, env_id, candidate_revision
+                    )
+                # staging+live+retired 并存：换入未开始（如退役回收因占用
+                # 失败）：retired 归属仍有效，不逆映射，ledger 不变。
+                try:
+                    journal_path.unlink(missing_ok=True)
+                except OSError as error:
+                    logging.getLogger(__name__).warning(
+                        "Environment swap rollback pending: operation=remove_journal "
+                        "error_type=%s errno=%s winerror=%s",
+                        type(error).__name__,
+                        error.errno,
+                        getattr(error, "winerror", None),
+                    )
+                return
+            if retired.exists() or retired.is_symlink():
+                if live.exists() or live.is_symlink():
+                    # 换入已完成但注册表未提交：候选退回 staging 作残留，
+                    # 旧 venv 回到固定路径。
+                    operation = "restore_staging"
+                    _rename_with_transient_lock_retry(live, staging)
+                operation = "restore_retired"
+                _rename_with_transient_lock_retry(retired, live)
+                operation = "restore_ownership"
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            elif live.exists() or live.is_symlink():
+                # 无任何旧副本（空环境原目录缺失）：失败候选同样退回
+                # staging 并撤销其整树归属，固定路径复位为事务前缺失状态；
+                # 只有状态收敛才清除 journal。
+                operation = "prepare_staging"
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                operation = "restore_staging"
+                _rename_with_transient_lock_retry(live, staging)
+                operation = "restore_ownership"
+                managed_cleanup.restore_owned_paths(self, env_id, candidate_revision)
+            else:
+                return
+        except OSError as error:
+            logging.getLogger(__name__).warning(
+                "Environment swap rollback pending: operation=%s "
+                "error_type=%s errno=%s winerror=%s",
+                operation,
+                type(error).__name__,
+                error.errno,
+                getattr(error, "winerror", None),
+            )
+            return
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError as error:
+            logging.getLogger(__name__).warning(
+                "Environment swap rollback pending: operation=remove_journal "
+                "error_type=%s errno=%s winerror=%s",
+                type(error).__name__,
+                error.errno,
+                getattr(error, "winerror", None),
+            )
+
+    def _swap_fixed_candidate(
+        self, env_id: str, expected: dict, candidate: dict, latest: dict
+    ) -> dict:
+        """把已验证的候选 venv 换入固定路径 environments/<env_id>。
+
+        调用方持有目标 operation 锁与 store 锁，且注册表 staleness 已复核。
+        顺序：journal 落盘 → 陈旧 retired 回收 → 旧 venv 移入 .retired/<id>
+        → 候选从 .staging/<id> 换入固定路径 → 在最终位置复检探针 → 注册表
+        原子提交 → 清除 journal。venv 随目录迁移：入口按 ``python -m``
+        启动不依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；最终位置的
+        导入闭包复检兑底 relocation 破损。任一步失败：目录回滚、journal
+        清除、注册表保持旧记录（旧环境可用）；崩溃中断由 journal 在
+        _recover_pending_swap 中以注册表提交分界回滚收敛。
+        """
+        live = self.root / env_id
+        staging = self._staging_path(env_id)
+        retired = self._retired_path(env_id)
+        if not staging.is_dir() or self._is_reparse(staging):
+            raise ManagedEnvironmentError("swap candidate is missing or unsafe")
+        # 任何改名（含 journal 写入）前验证槽位容器与目标，防止目录被移出
+        # 存储。
+        self._guard_swap_slots(env_id)
+        journal = {
+            "schema_version": 1,
+            "environment_id": env_id,
+            "expected_record": expected,
+            "candidate_record": candidate,
+        }
+        _atomic_json(self._journal_path(env_id), journal)
+        try:
+            retired.parent.mkdir(parents=True, exist_ok=True)
+            managed_cleanup.reclaim_retired(self, env_id)
+            if live.exists() or live.is_symlink():
+                if self._is_reparse(live):
+                    raise ManagedEnvironmentError(
+                        "environment path contains reparse point"
+                    )
+                _rename_with_transient_lock_retry(live, retired)
+                # 只镜像既有归属：未知/未登记数据随目录移动但不获得
+                # 可删除归属（legacy 树可能含未知 siblings）。
+                managed_cleanup.retire_owned_paths(self, env_id, candidate["revision"])
+            _rename_with_transient_lock_retry(staging, live)
+            # 迁移环境首次获得固定路径归属；新布局环境刷新同路径归属。
+            managed_cleanup.remember_path(self, env_id, candidate["revision"], live)
+            # venv 随目录迁移后在最终固定路径复检：入口按 python -m 启动不
+            # 依赖控制台脚本，pyvenv.cfg 只锚定基础解释器；导入闭包复检
+            # 兑底 relocation 破损（长路径 DLL load failed 等）。
+            relocated = (
+                self._probe_device(
+                    candidate, _recipe_metadata(candidate["recipe"])["target_device"]
+                )
+                if candidate.get("recipe")
+                else self._probe(candidate)
+            )
+            if not relocated["healthy"]:
+                raise ManagedEnvironmentError(
+                    f"installed environment failed probe: {relocated['reason']}; "
+                    "check native dependencies and Portable path length"
+                    + (f"\n{relocated['detail']}" if relocated.get("detail") else ""),
+                    reason_code=relocated["reason"],
+                    next_action="repair_environment",
+                )
+        except BaseException:
+            try:
+                self._rollback_swap(env_id, candidate["revision"])
+            except ManagedEnvironmentError:
+                # 回滚无法安全进行（如槽位路径为 reparse）：保留 journal，
+                # 不遮蔽原始错误，交由恢复逻辑收敛。
+                pass
+            raise
+        latest["environments"][env_id] = candidate
+        if latest["active_id"] == env_id:
+            latest["active_revision"] += 1
+        # 注册表提交失败时不回滚目录：journal 保留，恢复逻辑按
+        # record==candidate 收尾、否则回滚，均可收敛。
+        _atomic_json(self._registry, latest)
+        try:
+            self._journal_path(env_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return relocated
+
+    def _recover_pending_swap(self, env_id: str) -> None:
+        """收敛升级前遗留的历史换入 journal；调用方持有目标 operation 锁。
+
+        预构建运行时树后不再产生新换入事务；本恢复入口只服务历史
+        journal（安装/修复中断残留），恢复目录与归属后解除清理保护。
+        """
+        if not self._journal_path(env_id).exists():
+            return
+        with RuntimeStoreLock(self._lock):
+            if not self._journal_path(env_id).exists():
+                return
+            journal = self._load_swap_journal(env_id)
+            candidate = journal["candidate_record"]
+            data = self._read()
+            record = data["environments"].get(env_id)
+            if record is None:
+                # 环境已删除：目录归 cleanup ledger 处理，journal 无效；
+                # unlink 失败保留 journal 与保护，下次扫描重试。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
+            if record == candidate:
+                # 提交已完成，仅剩收尾；清除失败保留保护，下次重试。
+                try:
+                    self._journal_path(env_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return
+            # 注册表是提交分界：未提交（无论注册表是否被外部修改）一律
+            # 保守回滚，不前滚候选；guard 先验证、数据保全，journal 仅由
+            # _rollback_swap 在收敛成功后清除，失败保留证据与保护，下次
+            # 扫描重试。
+            if environment_has_services(self._references, env_id):
+                raise ManagedEnvironmentError("pending swap has a live service lease")
+            self._rollback_swap(env_id, candidate["revision"])
+            raise ManagedEnvironmentError(
+                "a legacy environment swap was rolled back; the previous "
+                "environment data is preserved for cleanup"
+            )
+
+    def _recover_all_swaps(self) -> None:
+        """list/清理前收敛全部历史换入 journal。
+
+        恢复失败按环境隔离：RuntimeInstallError（含 ManagedEnvironmentError，
+        例如退役槽位存在未登记数据）保留 journal 与保护后跳过该环境，
+        不阻塞其余环境的 list/清理；无关编程错误照常上抛。
+        """
+        if not self._swap_journal_root.is_dir():
+            return
+        for journal in sorted(self._swap_journal_root.iterdir()):
+            try:
+                with self._target_operation(journal.stem):
+                    self._recover_pending_swap(journal.stem)
+            except RuntimeInstallError:
+                continue
 
     def _migrate_supervisor_settings(self, source_id: str, target_id: str) -> None:
         """首次迁移 active 时把原环境的 Supervisor 设置安全迁入 product。
@@ -1907,6 +2220,7 @@ class ManagedEnvironmentStore:
             if self._switch_guarded == env_id
             else self._target_operation(env_id)
         ):
+            self._recover_pending_swap(env_id)
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 self._reject_referenced(data)
@@ -1981,6 +2295,7 @@ class ManagedEnvironmentStore:
             if self._switch_guarded == prepared["environment_id"]
             else self._target_operation(prepared["environment_id"])
         ):
+            self._recover_pending_swap(prepared["environment_id"])
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 self._reject_referenced(data)
@@ -2124,9 +2439,11 @@ class ManagedEnvironmentStore:
         )
 
     def preview_cleanup(self) -> dict:
+        self._recover_all_swaps()
         return managed_cleanup.preview_cleanup(self)
 
     def run_cleanup(self, plan_id: str, item_ids: list[str]) -> dict:
+        self._recover_all_swaps()
         return managed_cleanup.run_cleanup(self, plan_id, item_ids)
 
     def cancel_cleanup(self, acknowledge: Callable[[bool], None]) -> None:

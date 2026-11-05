@@ -659,3 +659,48 @@ def test_active_migration_carries_supervisor_settings(tmp_path, monkeypatch) -> 
     legacy_settings.write_text('{"mineru": "changed"}', encoding="utf-8")
     manager._migrate_supervisor_settings(old["id"], _PRODUCT_ID)
     assert product_settings.read_text(encoding="utf-8") == '{"mineru": "local"}'
+
+
+def test_legacy_swap_journal_recovers_on_list_and_unblocks_cleanup(
+    tmp_path, monkeypatch
+) -> None:
+    # 升级前安装/修复在换入期间中断：state 遗留 environment-swaps/<id>.json
+    # 与 .retired/<id>。list() 必须收敛历史 journal（旧目录复位、journal
+    # 清除），环境回到可清理/可删除状态，不再被"换入未收敛"永久保护。
+    manager, old = _retired_default(tmp_path, monkeypatch)
+    env_root = manager.root / old["id"]
+    retired = manager.root / ".retired" / old["id"]
+    staging = manager.root / ".staging" / old["id"]
+    retired.parent.mkdir(parents=True, exist_ok=True)
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    # 中断形态：旧环境已移入 retired、候选在 staging、journal 未清。
+    shutil.move(str(env_root), str(retired))
+    shutil.move(str(_materialize_venv(manager, ".fixture-candidate")), str(staging))
+    journal_path = manager._journal_path(old["id"])
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_json(
+        journal_path,
+        {
+            "schema_version": 1,
+            "environment_id": old["id"],
+            "expected_record": old,
+            # 换入契约：候选固定路径 environments/<id>（journal 校验要求）。
+            "candidate_record": {
+                **old,
+                "revision": old["revision"] + 1,
+                "path": old["id"],
+            },
+        },
+    )
+
+    # list 触发恢复：旧目录复位到固定路径，journal 清除。
+    manager.list()
+    assert not journal_path.exists()
+    assert env_root.is_dir()
+    assert not retired.exists()
+
+    # 恢复后环境不再受"换入未收敛"保护：可生成环境清理项（记录保护或
+    # 可清理取决于引用状态，但不再出现 swap 保护 reason）。
+    plan = manager.preview_cleanup()
+    swap_items = [item for item in plan["items"] if "换入事务未收敛" in item["reason"]]
+    assert not swap_items

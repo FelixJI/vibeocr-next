@@ -528,8 +528,12 @@ def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
                 "candidate_record": candidate,
             },
         )
+    # 恢复语义（PR2）：清理预览先收敛历史 journal——注册表未提交候选，
+    # 唯一旧副本从退役槽位复位到固定路径，journal 清除，归属恢复。
     preview = manager.preview_cleanup()
-    assert manager._journal_path(env_id).is_file()
+    assert not manager._journal_path(env_id).is_file()
+    assert (manager._venv_python(manager.root / env_id)).is_file()
+    assert not retired.exists()
     touched = [
         item
         for item in preview["items"]
@@ -537,9 +541,11 @@ def test_pending_swap_journal_protects_unique_old_copy_from_cleanup(
         or any(env_id in path for path in item["paths"])
     ]
     assert touched, "该环境至少出现在 environment/residual 项中"
-    assert all(not item["can_clean"] for item in touched)
-    assert any("换入事务未收敛" in item["reason"] for item in touched)
-    with pytest.raises(RuntimeInstallError, match="protected resources"):
-        manager.run_cleanup(preview["plan_id"], [f"environment:{env_id}"])
-    # 唯一旧副本仍在退役槽位。
-    assert (manager._venv_python(retired)).is_file()
+    assert not any("换入事务未收敛" in item["reason"] for item in touched)
+    # 恢复后回到普通环境语义：无引用、非 active，用户显式选择才删除。
+    assert any(
+        item["can_clean"] for item in touched if item["id"] == f"environment:{env_id}"
+    )
+    result = manager.run_cleanup(preview["plan_id"], [f"environment:{env_id}"])
+    assert result["items"][0]["state"] == "deleted"
+    assert not (manager.root / env_id).exists()
