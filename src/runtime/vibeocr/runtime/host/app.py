@@ -41,16 +41,9 @@ if TYPE_CHECKING:
 from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_maintenance import (
     RuntimeCapabilityError,
-    RuntimeCommandConflict,
-    RuntimeCursorExpired,
     RuntimeInstallFailure,
     RuntimeInstallPlanBlocked,
     RuntimeInstallPlanStale,
-    RuntimeOperationCancelled,
-    RuntimeOperationConflict,
-    RuntimeOperationNotCancellable,
-    RuntimeOperationNotFound,
-    RuntimeOperationNotRetryable,
     RuntimeSourceIdentityMismatch,
     runtime_status_from_environment,
 )
@@ -271,28 +264,10 @@ def _runtime_exception_response(exc: Exception, instance_id: str) -> JSONRespons
         code = ErrorCode.RUNTIME_INSTALL_PLAN_STALE
     elif isinstance(exc, RuntimeInstallPlanBlocked):
         code = ErrorCode.RUNTIME_INSTALL_PLAN_BLOCKED
-    elif isinstance(exc, RuntimeCursorExpired):
-        code = ErrorCode.RUNTIME_CURSOR_EXPIRED
-        detail = {
-            "oldest_sequence": exc.oldest_sequence,
-            "snapshot": exc.snapshot,
-        }
-    elif isinstance(exc, RuntimeOperationNotFound):
-        code = ErrorCode.RUNTIME_OPERATION_NOT_FOUND
-    elif isinstance(exc, RuntimeCommandConflict):
-        code = ErrorCode.RUNTIME_COMMAND_ID_CONFLICT
-    elif isinstance(exc, RuntimeOperationConflict):
-        code = ErrorCode.RUNTIME_OPERATION_ID_CONFLICT
-    elif isinstance(exc, RuntimeOperationNotCancellable):
-        code = ErrorCode.RUNTIME_OPERATION_NOT_CANCELLABLE
-    elif isinstance(exc, RuntimeOperationNotRetryable):
-        code = ErrorCode.RUNTIME_OPERATION_NOT_RETRYABLE
-    elif isinstance(exc, RuntimeCapabilityError):
-        code = ErrorCode.RUNTIME_CAPABILITY_UNAVAILABLE
     elif isinstance(exc, RuntimeSourceIdentityMismatch):
         code = ErrorCode.RUNTIME_IDENTITY_MISMATCH
-    elif isinstance(exc, RuntimeOperationCancelled):
-        code = ErrorCode.CANCELLED
+    elif isinstance(exc, RuntimeCapabilityError):
+        code = ErrorCode.RUNTIME_CAPABILITY_UNAVAILABLE
     elif isinstance(exc, RuntimeLockTimeout):
         code = ErrorCode.RUNTIME_BUSY
         retry_after = 1

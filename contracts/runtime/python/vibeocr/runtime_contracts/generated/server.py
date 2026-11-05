@@ -428,13 +428,12 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                      'persists at most one selected source per kind; array order '
                                      'has no priority meaning. Each present id overrides the '
                                      'source for its kind, while kinds not present use the '
-                                     'Backend-declared default for that kind. Maintenance start '
-                                     'snapshots this preference into its operation intent. Clients '
-                                     'SHOULD send the current selection when the capability is '
-                                     'declared and MUST omit it otherwise; an empty in-memory '
-                                     'selection MUST serialize as omission. Omission delegates all '
-                                     'kinds to Backend-declared defaults and unknown ids fail '
-                                     'closed with DOWNLOAD_SOURCE_UNKNOWN.',
+                                     'Backend-declared default for that kind. Clients SHOULD send '
+                                     'the current selection when the capability is declared and '
+                                     'MUST omit it otherwise; an empty in-memory selection MUST '
+                                     'serialize as omission. Omission delegates all kinds to '
+                                     'Backend-declared defaults and unknown ids fail closed with '
+                                     'DOWNLOAD_SOURCE_UNKNOWN.',
                       'properties': {'download_source_ids': {'items': {'minLength': 1,
                                                                        'type': 'string'},
                                                              'minItems': 1,
@@ -2253,10 +2252,8 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                            'qrcode.v2',
                                                                                            'export.document.v1',
                                                                                            'runtime.settings.v2',
-                                                                                           'runtime.maintenance.v1',
                                                                                            'task.progress.v1',
                                                                                            'runtime.maintenance.v2',
-                                                                                           'runtime.component-repair.v1',
                                                                                            'runtime.capability-metadata.v1',
                                                                                            'runtime.events.sse.v1',
                                                                                            'runtime.events.ndjson.v1',
@@ -3945,103 +3942,6 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
  'getRuntimeStatus': {'additionalProperties': False,
                       'properties': {'backend_version': {'minLength': 1, 'type': 'string'},
                                      'instance_id': {'minLength': 1, 'type': 'string'},
-                                     'maintenance': {'anyOf': [{'additionalProperties': False,
-                                                                'properties': {'component_id': {'type': ['string',
-                                                                                                         'null']},
-                                                                               'effective_component_ids': {'items': {'minLength': 1,
-                                                                                                                     'type': 'string'},
-                                                                                                           'type': 'array',
-                                                                                                           'uniqueItems': True},
-                                                                               'effective_download_source_ids': {'items': {'minLength': 1,
-                                                                                                                           'type': 'string'},
-                                                                                                                 'minItems': 1,
-                                                                                                                 'type': 'array',
-                                                                                                                 'uniqueItems': True},
-                                                                               'message_code': {'type': ['string',
-                                                                                                         'null']},
-                                                                               'operation': {'enum': ['inspect',
-                                                                                                      'ensure',
-                                                                                                      'repair'],
-                                                                                             'type': 'string'},
-                                                                               'operation_id': {'minLength': 1,
-                                                                                                'type': 'string'},
-                                                                               'operation_state': {'enum': ['queued',
-                                                                                                            'running',
-                                                                                                            'succeeded',
-                                                                                                            'failed',
-                                                                                                            'cancelled'],
-                                                                                                   'type': 'string'},
-                                                                               'phase': {'enum': ['validate_binding',
-                                                                                                  'wait_for_lock',
-                                                                                                  'prepare_runtime',
-                                                                                                  'install_profile',
-                                                                                                  'install_backend',
-                                                                                                  'verify_runtime',
-                                                                                                  'commit_runtime'],
-                                                                                         'type': 'string'},
-                                                                               'plan_id': {'minLength': 1,
-                                                                                           'type': 'string'},
-                                                                               'profile_id': {'minLength': 1,
-                                                                                              'type': 'string'},
-                                                                               'progress': {'anyOf': [{'additionalProperties': False,
-                                                                                                       'allOf': [{'if': {'required': ['estimated_remaining_seconds']},
-                                                                                                                  'then': {'properties': {'total': {'minimum': 1,
-                                                                                                                                                    'type': 'integer'},
-                                                                                                                                          'unit': {'enum': ['items',
-                                                                                                                                                            'bytes']}},
-                                                                                                                           'required': ['total']}}],
-                                                                                                       'properties': {'current': {'format': 'int64',
-                                                                                                                                  'minimum': 0,
-                                                                                                                                  'type': 'integer'},
-                                                                                                                      'estimated_remaining_seconds': {'minimum': 0,
-                                                                                                                                                      'type': 'number'},
-                                                                                                                      'total': {'format': 'int64',
-                                                                                                                                'minimum': 0,
-                                                                                                                                'type': 'integer'},
-                                                                                                                      'unit': {'enum': ['steps',
-                                                                                                                                        'items',
-                                                                                                                                        'bytes'],
-                                                                                                                               'type': 'string'}},
-                                                                                                       'required': ['unit',
-                                                                                                                    'current'],
-                                                                                                       'type': 'object'},
-                                                                                                      {'type': 'null'}]},
-                                                                               'requested_component_ids': {'items': {'minLength': 1,
-                                                                                                                     'type': 'string'},
-                                                                                                           'type': 'array',
-                                                                                                           'uniqueItems': True},
-                                                                               'requested_download_source_ids': {'items': {'minLength': 1,
-                                                                                                                           'type': 'string'},
-                                                                                                                 'minItems': 1,
-                                                                                                                 'type': 'array',
-                                                                                                                 'uniqueItems': True},
-                                                                               'sequence': {'minimum': 0,
-                                                                                            'type': 'integer'},
-                                                                               'source': {'additionalProperties': False,
-                                                                                          'properties': {'backend_source_sha': {'pattern': '^[0-9a-f]{40}$',
-                                                                                                                                'type': 'string'},
-                                                                                                         'backend_version': {'minLength': 1,
-                                                                                                                             'type': 'string'},
-                                                                                                         'runtime_manifest_sha256': {'pattern': '^[0-9a-f]{64}$',
-                                                                                                                                     'type': 'string'}},
-                                                                                          'required': ['backend_version',
-                                                                                                       'backend_source_sha',
-                                                                                                       'runtime_manifest_sha256'],
-                                                                                          'type': 'object'},
-                                                                               'source_operation_id': {'minLength': 1,
-                                                                                                       'type': ['string',
-                                                                                                                'null']},
-                                                                               'updated_at': {'format': 'date-time',
-                                                                                              'type': 'string'}},
-                                                                'required': ['operation_id',
-                                                                             'sequence',
-                                                                             'operation',
-                                                                             'operation_state',
-                                                                             'phase',
-                                                                             'profile_id',
-                                                                             'updated_at'],
-                                                                'type': 'object'},
-                                                               {'type': 'null'}]},
                                      'profile': {'additionalProperties': False,
                                                  'properties': {'accelerator': {'enum': ['cpu',
                                                                                          'nvidia_cuda'],
@@ -4093,7 +3993,7 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                               'components'],
                                                  'type': 'object'},
                                      'schema_version': {'const': 2},
-                                     'service_state': {'enum': ['ready', 'degraded', 'maintenance'],
+                                     'service_state': {'enum': ['ready', 'degraded'],
                                                        'type': 'string'},
                                      'source': {'additionalProperties': False,
                                                 'properties': {'backend_source_sha': {'pattern': '^[0-9a-f]{40}$',
@@ -4110,20 +4010,18 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                    'instance_id',
                                    'service_state',
                                    'backend_version',
-                                   'profile',
-                                   'maintenance'],
+                                   'profile'],
                       'type': 'object'},
  'getSettings': {'additionalProperties': False,
                  'description': 'Backend settings snapshot/exchange. download_source_ids persists '
                                 'at most one selected source per kind; array order has no priority '
                                 'meaning. Each present id overrides the source for its kind, while '
                                 'kinds not present use the Backend-declared default for that kind. '
-                                'Maintenance start snapshots this preference into its operation '
-                                'intent. Clients SHOULD send the current selection when the '
-                                'capability is declared and MUST omit it otherwise; an empty '
-                                'in-memory selection MUST serialize as omission. Omission '
-                                'delegates all kinds to Backend-declared defaults and unknown ids '
-                                'fail closed with DOWNLOAD_SOURCE_UNKNOWN.',
+                                'Clients SHOULD send the current selection when the capability is '
+                                'declared and MUST omit it otherwise; an empty in-memory selection '
+                                'MUST serialize as omission. Omission delegates all kinds to '
+                                'Backend-declared defaults and unknown ids fail closed with '
+                                'DOWNLOAD_SOURCE_UNKNOWN.',
                  'properties': {'download_source_ids': {'items': {'minLength': 1, 'type': 'string'},
                                                         'minItems': 1,
                                                         'type': 'array',
@@ -6944,12 +6842,11 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                 'at most one selected source per kind; array order has no priority '
                                 'meaning. Each present id overrides the source for its kind, while '
                                 'kinds not present use the Backend-declared default for that kind. '
-                                'Maintenance start snapshots this preference into its operation '
-                                'intent. Clients SHOULD send the current selection when the '
-                                'capability is declared and MUST omit it otherwise; an empty '
-                                'in-memory selection MUST serialize as omission. Omission '
-                                'delegates all kinds to Backend-declared defaults and unknown ids '
-                                'fail closed with DOWNLOAD_SOURCE_UNKNOWN.',
+                                'Clients SHOULD send the current selection when the capability is '
+                                'declared and MUST omit it otherwise; an empty in-memory selection '
+                                'MUST serialize as omission. Omission delegates all kinds to '
+                                'Backend-declared defaults and unknown ids fail closed with '
+                                'DOWNLOAD_SOURCE_UNKNOWN.',
                  'properties': {'download_source_ids': {'items': {'minLength': 1, 'type': 'string'},
                                                         'minItems': 1,
                                                         'type': 'array',

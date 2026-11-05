@@ -36,26 +36,17 @@ public sealed class RuntimeComponentItem : INotifyPropertyChanged
 }
 
 /// <summary>
-/// Shared projection of installer NDJSON events and the authenticated HTTP
-/// runtime status endpoint. Views consume one stable model regardless of the
-/// transport available at the current lifecycle phase.
+/// Shared projection of the authenticated HTTP runtime status endpoint.
+/// Views consume one stable model regardless of the transport available at
+/// the current lifecycle phase.
 /// </summary>
 public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
 {
-    private string? _operationId;
-    private long _sequence = -1;
-    private bool _terminal;
     private string _serviceStatus = "等待运行时检查";
     private string _profile = "正在识别运行时配置";
     private string _backendVersion = "未知";
     private string _status = "等待运行时检查";
-    private string _phase = "尚未开始";
-    private string _progressText = "";
-    private string _progressDetail = "";
     private string _sourceIdentity = "";
-    private double _progressValue;
-    private bool _isProgressIndeterminate = true;
-    private bool _isOperationActive;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -68,34 +59,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     }
     public string ServiceStatus { get => _serviceStatus; private set => SetField(ref _serviceStatus, value); }
     public string Status { get => _status; private set => SetField(ref _status, value); }
-    public string Phase { get => _phase; private set => SetField(ref _phase, value); }
-    public string ProgressText
-    {
-        get => _progressText;
-        private set => SetField(ref _progressText, value);
-    }
-    public double ProgressValue
-    {
-        get => _progressValue;
-        private set => SetField(ref _progressValue, value);
-    }
-    public bool IsProgressIndeterminate
-    {
-        get => _isProgressIndeterminate;
-        private set => SetField(ref _isProgressIndeterminate, value);
-    }
-
-    /// <summary>
-    /// 是否存在真实进行中的运行环境维护操作。空闲、成功、失败、取消等
-    /// 终态都必须退出活动进度动画；不确定进度只表示“无总量的进行中
-    /// 操作”，不得作为空闲默认。
-    /// </summary>
-    public bool IsOperationActive
-    {
-        get => _isOperationActive;
-        private set => SetField(ref _isOperationActive, value);
-    }
-    public string ProgressDetail { get => _progressDetail; private set => SetField(ref _progressDetail, value); }
     public string SourceIdentity
     {
         get => _sourceIdentity;
@@ -108,31 +71,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     public void ReportServiceUnavailable()
     {
         ServiceStatus = "运行环境暂不可用，请重新检查或打开诊断与修复。";
-        if (_operationId is null) Status = ServiceStatus;
-    }
-
-    public void CompleteMaintenance(string state)
-    {
-        _terminal = true;
-        IsOperationActive = false;
-        Status = state switch
-        {
-            "succeeded" => "维护操作已完成",
-            "cancelled" => "运行时安装已取消",
-            "failed" => "运行时安装失败",
-            _ => "维护结果待核实",
-        };
-        if (state == "succeeded") { ProgressValue = 100; IsProgressIndeterminate = false; }
-        else { ProgressValue = 0; IsProgressIndeterminate = true; }
-    }
-
-    private bool Accept(string operationId, long sequence)
-    {
-        if (_operationId is not null && _operationId != operationId) return false;
-        if (_terminal || sequence <= _sequence) return false;
-        _operationId = operationId;
-        _sequence = sequence;
-        return true;
+        Status = ServiceStatus;
     }
 
     public void ApplySnapshot(Http.RuntimeStatusSnapshot snapshot)
@@ -152,30 +91,9 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         {
             Http.RuntimeServiceState.Ready => "运行时已就绪",
             Http.RuntimeServiceState.Degraded => "运行时降级",
-            Http.RuntimeServiceState.Maintenance => "正在维护运行时",
             _ => "运行时状态未知",
         };
-        if (_operationId is null) Status = ServiceStatus;
-        if (snapshot.Maintenance is { } maintenance &&
-            Accept(maintenance.OperationId, maintenance.Sequence))
-        {
-            IsOperationActive = true;
-            Status = OperationStateText(maintenance.OperationState);
-            Phase = PhaseText(maintenance.Phase);
-            ApplyProgress(maintenance.Progress);
-            if (maintenance.OperationState is Http.RuntimeOperationState.Succeeded or Http.RuntimeOperationState.Failed or Http.RuntimeOperationState.Cancelled)
-                CompleteMaintenance(maintenance.OperationState.ToString().ToLowerInvariant());
-        }
-        else if (snapshot.ServiceState == Http.RuntimeServiceState.Maintenance && _operationId is null)
-        {
-            // Backend 自身处于维护态且本地无在途操作：这是真实活动，保持
-            // 活动进度；其余无维护快照的终局都退出活动动画。
-            IsOperationActive = true;
-        }
-        else if (_operationId is null || _terminal)
-        {
-            IsOperationActive = false;
-        }
+        Status = ServiceStatus;
     }
 
     private void ReplaceComponents(IEnumerable<RuntimeComponentItem> components)
@@ -185,55 +103,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         {
             Components.Add(component);
         }
-    }
-
-    private void ApplyProgress(Http.ProgressSnapshot? progress)
-    {
-        if (progress is null)
-        {
-            ProgressText = "";
-            ProgressValue = 0;
-            IsProgressIndeterminate = true;
-            return;
-        }
-        string unit = progress.Unit == Http.ProgressUnit.Bytes ? "bytes"
-            : progress.Unit == Http.ProgressUnit.Steps ? "步" : "项";
-        if (progress.Unit == Http.ProgressUnit.Steps || progress.Total is not > 0)
-        {
-            ProgressText = progress.Total is > 0
-                ? $"{progress.Current} / {progress.Total.Value} {unit}"
-                : $"已完成 {progress.Current} {unit} · 总量未知";
-            ProgressValue = 0;
-            IsProgressIndeterminate = true;
-            return;
-        }
-        ProgressValue = Math.Clamp(progress.Current * 100d / progress.Total.Value, 0, 100);
-        ProgressText = MeasuredProgressText(
-            progress.Current,
-            progress.Total.Value,
-            progress.Unit == Http.ProgressUnit.Bytes ? "bytes" : "项",
-            EstimatedRemainingSeconds(progress));
-        IsProgressIndeterminate = false;
-    }
-
-    private static string MeasuredProgressText(
-        long current,
-        long total,
-        string unit,
-        double? estimatedRemainingSeconds)
-    {
-        string text = $"{current} / {total} {unit}";
-        return estimatedRemainingSeconds is >= 0
-            ? $"{text} · 预计剩余 {Math.Ceiling(estimatedRemainingSeconds.Value)} 秒"
-            : text;
-    }
-
-    private static double? EstimatedRemainingSeconds(object progress)
-    {
-        object? value = progress.GetType()
-            .GetProperty("EstimatedRemainingSeconds")?
-            .GetValue(progress);
-        return value is null ? null : Convert.ToDouble(value);
     }
 
     private static string? ActualVersion(Http.RuntimeComponentStatus component) =>
@@ -255,28 +124,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         Http.RuntimeAccelerator.Cpu => "CPU",
         Http.RuntimeAccelerator.NvidiaCuda => "NVIDIA CUDA",
         _ => "未知",
-    };
-
-    private static string OperationStateText(Http.RuntimeOperationState state) => state switch
-    {
-        Http.RuntimeOperationState.Queued => "维护任务排队中",
-        Http.RuntimeOperationState.Running => "正在准备识别服务运行时",
-        Http.RuntimeOperationState.Succeeded => "维护操作已完成",
-        Http.RuntimeOperationState.Failed => "运行时维护失败",
-        Http.RuntimeOperationState.Cancelled => "运行时维护已取消",
-        _ => "运行时状态未知",
-    };
-
-    private static string PhaseText(Http.RuntimeMaintenancePhase phase) => phase switch
-    {
-        Http.RuntimeMaintenancePhase.ValidateBinding => "验证正式组件绑定",
-        Http.RuntimeMaintenancePhase.WaitForLock => "等待安装锁",
-        Http.RuntimeMaintenancePhase.PrepareRuntime => "准备 Python 运行时",
-        Http.RuntimeMaintenancePhase.InstallProfile => "安装重依赖",
-        Http.RuntimeMaintenancePhase.InstallBackend => "安装识别服务运行时",
-        Http.RuntimeMaintenancePhase.VerifyRuntime => "验证运行时",
-        Http.RuntimeMaintenancePhase.CommitRuntime => "提交运行时切换",
-        _ => "处理运行时",
     };
 
     private static string ComponentStateText(Http.RuntimeComponentState state) => state switch

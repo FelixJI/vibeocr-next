@@ -4,7 +4,6 @@ import {
   Button,
   Checkbox,
   Input,
-  ProgressBar,
   Select,
   Switch,
 } from "@fluentui/react-components";
@@ -356,20 +355,6 @@ const environmentRecoveryActions: Readonly<Record<string, string>> = {
   wait: "等待当前安装完成",
 };
 
-interface MaintenanceState {
-  readonly failureReason?: string;
-  readonly failureCode?: string;
-  readonly isRunning: boolean;
-  readonly statusCode: string;
-  readonly operationId?: string | null;
-  readonly requestedComponentIds: readonly string[];
-  readonly effectiveComponentIds: readonly string[];
-  readonly requestedSourceIds: readonly string[];
-  readonly effectiveSourceIds: readonly string[];
-  readonly canCancel: boolean;
-  readonly canRetry: boolean;
-}
-
 function sourceOptions(value: unknown): readonly SourceOptionState[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is SourceOptionState => {
@@ -466,24 +451,6 @@ function toolbarVisibilityLabel(visibility: string): string {
     suspended: "截图避让中，结束后恢复原状",
   };
   return labels[visibility] ?? "等待宿主同步";
-}
-
-function maintenanceState(value: unknown): MaintenanceState | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    return undefined;
-  const state = value as Partial<MaintenanceState>;
-  if (
-    typeof state.isRunning !== "boolean" ||
-    typeof state.statusCode !== "string" ||
-    !Array.isArray(state.requestedComponentIds) ||
-    !Array.isArray(state.effectiveComponentIds) ||
-    !Array.isArray(state.requestedSourceIds) ||
-    !Array.isArray(state.effectiveSourceIds) ||
-    typeof state.canCancel !== "boolean" ||
-    typeof state.canRetry !== "boolean"
-  )
-    return undefined;
-  return state as MaintenanceState;
 }
 
 interface MineruConnectionState {
@@ -836,8 +803,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     backend === "cpu" || backend === "nvidia_cuda"
       ? acceleratorLabel(backend)
       : null;
-  const maintenance = maintenanceState(state.maintenance);
-  const busy = maintenance?.isRunning === true;
   const sources = sourceOptions(state.sources);
   const statusMessage =
     typeof state.statusMessage === "string" ? state.statusMessage : "";
@@ -851,15 +816,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
       statusMessage !== "正在读取模型驻留状态");
   // 通用设置只显示本地状态；“重新检查状态”是显式计算准备入口。
   const serviceText = stringValue(state.serviceStatus) ?? "等待宿主同步";
-  const maintenanceParts = [
-    stringValue(state.maintenanceStatus),
-    stringValue(state.maintenancePhase),
-  ].filter((part): part is string => part !== undefined);
-  const maintenanceLine =
-    maintenanceParts.length > 0
-      ? maintenanceParts.join(" · ")
-      : "尚未执行维护操作";
-  const progressText = stringValue(state.progressText);
   const mineru = mineruConnection(state.mineruConnection);
   const recognition = mineruRecognition(state.mineruRecognition);
   const defaultMode = defaultRecognitionMode(state.defaultRecognitionMode);
@@ -930,7 +886,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             key={defaultMode?.modeId ?? ""}
             mode={defaultMode}
             modes={recognitionModeOptions(state.recognitionModes)}
-            locked={busy}
+            locked={false}
             hostBusy={booleanValue(state.isBusy)}
             actions={actions}
           />
@@ -982,32 +938,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               </>
             )}
             <p>当前服务：{serviceText}</p>
-            {/* #294：旧 RuntimeStatus 维护投影只在 legacy 分支渲染，
-                避免 legacy 健康/idle 被当成 managed 环境维护结果。 */}
-            {!managedEnvironmentsAvailable ? (
-              <>
-                <p>本次维护：{maintenanceLine}</p>
-                {/* 只有真实进行中的维护操作才渲染进度；设置刷新不是维护。 */}
-                {state.progressActive === true ? (
-                  <ProgressBar
-                    value={
-                      typeof state.progressPercent === "number" &&
-                      Number.isFinite(state.progressPercent)
-                        ? state.progressPercent / 100
-                        : undefined
-                    }
-                    aria-label="运行环境维护进度"
-                  />
-                ) : null}
-                {progressText ? <p>{progressText}</p> : null}
-                {stringValue(state.progressDetail) ? (
-                  <details>
-                    <summary>进度明细</summary>
-                    <p>{stringValue(state.progressDetail)}</p>
-                  </details>
-                ) : null}
-              </>
-            ) : null}
           </div>
           <CapabilityGate
             capability="runtime.refresh"
@@ -1086,9 +1016,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             key={`${mineru?.mode ?? ""}|${mineru?.apiUrl ?? ""}`}
             connection={mineru}
             locked={
-              busy ||
-              state.environmentBusy === true ||
-              booleanValue(state.isBusy)
+              state.environmentBusy === true || booleanValue(state.isBusy)
             }
             hostBusy={booleanValue(state.isBusy)}
             serviceHostReady={mineruServiceHostReady}
@@ -1112,9 +1040,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             recognition={recognition}
             connection={mineru}
             locked={
-              busy ||
-              state.environmentBusy === true ||
-              booleanValue(state.isBusy)
+              state.environmentBusy === true || booleanValue(state.isBusy)
             }
             actions={actions}
           />
@@ -1127,7 +1053,7 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
               sources={sources}
               loaded={sourcesLoaded}
               enabled={viewState.capabilities.includes("settings.selection")}
-              locked={busy}
+              locked={false}
               actions={actions}
             />
             <p className="form-note">

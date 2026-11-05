@@ -39,23 +39,6 @@ public sealed class ComponentSelectionContractTests
     }
 
     [Fact]
-    public void InstallSelectionRoundTripsThroughHttpV2Mirror()
-    {
-        JsonElement fixture = LoadGolden().RootElement.GetProperty("install_selection");
-
-        var request = new RuntimeMaintenanceRequest
-        {
-            Operation = RuntimeMaintenanceOperation.Ensure,
-            InstallComponentIds = JsonSerializer.Deserialize<string[]>(fixture.GetRawText())!,
-        };
-
-        var node = JsonNode.Parse(HttpV2Json.Serialize(request, typeof(RuntimeMaintenanceRequest)))!;
-        Assert.True(JsonNode.DeepEquals(
-            JsonNode.Parse(fixture.GetRawText()), node!["install_component_ids"]));
-    }
-
-
-    [Fact]
     public void CapabilityDescriptorCarriesOptionalVariantCatalog()
     {
         var catalog = new Wire.ComponentVariantCatalog

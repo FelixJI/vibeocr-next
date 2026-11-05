@@ -312,7 +312,6 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
         using Process process = Process.Start(startInfo) ??
             throw new RuntimeInstallerException("Could not start Runtime Installer.");
         bool environmentCancellation = startInfo.ArgumentList.Contains("--environment-cancel-control");
-        bool maintenanceCancellation = startInfo.ArgumentList.Contains("--maintenance-cancel-control");
         var receipt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var stdoutBuffer = new StringBuilder();
         using var streamsLifetime = new CancellationTokenSource();
@@ -321,7 +320,7 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
             stdoutBuffer,
             standardOutputLine,
             streamsLifetime.Token,
-            environmentCancellation || maintenanceCancellation ? receipt : null);
+            environmentCancellation ? receipt : null);
         Task<string> stderr = ReadBoundedErrorAsync(process.StandardError, streamsLifetime.Token);
         Task exited = process.WaitForExitAsync();
         try
@@ -347,15 +346,6 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
                         await StopProcessAsync(process).ConfigureAwait(false);
                         throw new RuntimeInstallerException($"运行环境取消未获确认：{error.Message}");
                     }
-                }
-                else if (maintenanceCancellation)
-                {
-                    // A timeout or failed control pipe carries no safe
-                    // confirmation: never terminate a possibly committing run.
-                    // Keep the process, drain its output, and await its real
-                    // exit so the authoritative outcome survives.
-                    safeToTerminate = await ConfirmMaintenanceStartupCancellationAsync(
-                        process, exited, stdout, receipt).ConfigureAwait(false);
                 }
                 if (safeToTerminate)
                 {
@@ -386,45 +376,6 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
             {
             }
         }
-    }
-
-    private static async Task<bool> ConfirmMaintenanceStartupCancellationAsync(
-        Process process,
-        Task exited,
-        Task stdout,
-        TaskCompletionSource<bool> safeToTerminate)
-    {
-        if (!process.HasExited)
-        {
-            try
-            {
-                await process.StandardInput.WriteLineAsync("cancel").ConfigureAwait(false);
-                await process.StandardInput.FlushAsync().ConfigureAwait(false);
-            }
-            catch (Exception error) when (
-                error is IOException or
-                ObjectDisposedException or
-                InvalidOperationException)
-            {
-                // 控制通道不可用不丢弃可能在途的回执：继续同时观察回执与
-                // 真实退出；未确认状态始终不授权终止。
-            }
-        }
-        // 持续同时观察回执与真实退出（不设握手超时）：初始化/锁等待可能让
-        // 回执晚于任意固定窗口，迟到有效 pre_registration 仍执行既有
-        // bounded kill/reap；未确认/registered 始终不授权终止。
-        Task first = await Task.WhenAny(safeToTerminate.Task, exited)
-            .ConfigureAwait(false);
-        if (first == safeToTerminate.Task && safeToTerminate.Task.IsCompletedSuccessfully)
-        {
-            // pre_registration → true（fence 已封死，可终止）；
-            // registered → false（只能协作 durable 取消）。
-            return safeToTerminate.Task.Result;
-        }
-        // A receipt can still be in flight after exit. The caller also awaits
-        // stdout, so drain it before deciding instead of dropping a late receipt.
-        await stdout.ConfigureAwait(false);
-        return safeToTerminate.Task.IsCompletedSuccessfully && safeToTerminate.Task.Result;
     }
 
     private static async Task<bool> ConfirmEnvironmentCancellationAsync(
@@ -490,14 +441,6 @@ public sealed class RuntimeInstallerCommandRunner(Action<string>? commandStartin
                             receipt.GetString() is "accepted" or "rejected")
                         {
                             cancellationReceipt.TrySetResult(receipt.GetString() == "accepted");
-                            continue;
-                        }
-                        if (root.TryGetProperty("maintenance_cancel", out JsonElement startup) &&
-                            startup.ValueKind == JsonValueKind.String &&
-                            startup.GetString() is "pre_registration" or "registered")
-                        {
-                            cancellationReceipt.TrySetResult(
-                                startup.GetString() == "pre_registration");
                             continue;
                         }
                     }

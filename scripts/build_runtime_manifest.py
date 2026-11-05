@@ -84,8 +84,6 @@ DEFAULT_CAPABILITIES = (
     "pdf.edit.v2",
     "qrcode.v2",
     "runtime.settings.v2",
-    "runtime.maintenance.v1",
-    "runtime.component-repair.v1",
     "runtime.capability-metadata.v1",
     "runtime.events.sse.v1",
     "runtime.events.ndjson.v1",

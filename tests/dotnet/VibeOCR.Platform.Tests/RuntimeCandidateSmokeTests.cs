@@ -297,9 +297,8 @@ public sealed class RuntimeCandidateSmokeTests
     }
 
     /// <summary>
-    /// Mirrors the production base-profile convention used by
-    /// <see cref="RuntimeInstallerClient.ReadStartupSelectionAsync"/>: the
-    /// win-x64-base profile declares the base-only component closure.
+    /// Mirrors the production base-profile convention: the win-x64-base
+    /// profile declares the base-only component closure.
     /// </summary>
     private static HashSet<string> ReadBaseComponentIds(string runtimeManifestPath)
     {

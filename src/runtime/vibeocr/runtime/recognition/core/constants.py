@@ -139,7 +139,7 @@ class Constants:
         MINERU_API_START = 120.0  # mineru-api 启动轮询上限
         MINERU_HTTP_TOTAL = 1800.0  # file_parse httpx 总超时（30 分钟）
         MINERU_HTTP_CONNECT = 30.0  # file_parse httpx 连接超时
-        MINERU_MODEL_DOWNLOAD = 1800.0  # ensure_mineru_models 下载超时
+        MINERU_MODEL_DOWNLOAD = 1800.0  # MinerU 模型按需下载超时
         MINERU_MODEL_PROBE = 30.0  # 模型可用性探测子进程超时
 
         # —— 通用 ——

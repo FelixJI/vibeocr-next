@@ -83,8 +83,6 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
   private static readonly HashSet<string> SourceIdOnlyArgumentFields = ["sourceId"];
   private static readonly HashSet<string> UpdateSourceArgumentFields = ["sourceId", "kind", "url"];
-  private static readonly HashSet<string> AcceleratorArgumentFields = ["accelerator"];
-  private static readonly HashSet<string> FeatureArgumentFields = ["featureId", "enabled"];
   private static readonly HashSet<string> EnvironmentIdArgumentFields = ["environmentId"];
   private static readonly HashSet<string> EnvironmentSourceDefaultsArgumentFields =
     ["modelSourceId"];
@@ -1208,25 +1206,6 @@ public static class WorkbenchBridgeCodec
           throw new WorkbenchBridgeProtocolException("Workbench source id is invalid.");
         }
         return new SetDownloadSourceCommand(kind, sourceId);
-      case ("settings", "setAccelerator"):
-        EnsureObjectWithFields(arguments, AcceleratorArgumentFields, "command arguments");
-        string? accelerator = arguments.GetProperty("accelerator").GetString();
-        if (accelerator is not ("cpu" or "nvidia_cuda"))
-        {
-          throw new WorkbenchBridgeProtocolException(
-            "Workbench accelerator is invalid.");
-        }
-        return new SetAcceleratorCommand(accelerator);
-      case ("settings", "setFeature"):
-        EnsureObjectWithFields(arguments, FeatureArgumentFields, "command arguments");
-        string? featureId = arguments.GetProperty("featureId").GetString();
-        if (string.IsNullOrWhiteSpace(featureId) || featureId.Length > 64)
-        {
-          throw new WorkbenchBridgeProtocolException("Workbench feature is invalid.");
-        }
-        return new SetRuntimeFeatureCommand(
-          featureId,
-          arguments.GetProperty("enabled").GetBoolean());
       case ("settings", "setWorkerIdle"):
         EnsureObjectWithFields(arguments, new HashSet<string> { "paddleSeconds", "mineruSeconds" }, "command arguments");
         JsonElement paddleIdleElement = arguments.GetProperty("paddleSeconds");
@@ -1910,9 +1889,6 @@ public static class WorkbenchBridgeCodec
       settings.MinimizeToTray,
       settings.ShellSettingsError,
       sources = settings.Sources ?? [],
-      settings.PendingBackend,
-      settings.CanSwitchBackend,
-      features = settings.Features ?? [],
       hotkeyActions = settings.HotkeyActions is null ? [] : settings.HotkeyActions.Select(action => new
       {
         action.ActionId,
@@ -1940,12 +1916,6 @@ public static class WorkbenchBridgeCodec
       workers = settings.Workers ?? [],
       settings.WorkerSettingsWarning,
       settings.ServiceStatus,
-      settings.MaintenanceStatus,
-      settings.MaintenancePhase,
-      settings.ProgressText,
-      settings.ProgressDetail,
-      settings.ProgressPercent,
-      progressActive = settings.ProgressActive,
       environments = settings.Environments ?? [],
       settings.ActiveEnvironmentId,
       settings.EnvironmentStatus,

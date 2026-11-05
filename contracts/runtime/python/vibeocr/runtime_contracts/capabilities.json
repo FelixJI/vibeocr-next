@@ -6,9 +6,7 @@
     "qrcode.v2",
     "export.document.v1",
     "runtime.settings.v2",
-    "runtime.maintenance.v1",
     "task.progress.v1",
-    "runtime.component-repair.v1",
     "runtime.capability-metadata.v1",
     "runtime.events.sse.v1",
     "runtime.events.ndjson.v1",
@@ -64,26 +62,10 @@
       "sunset_at": null,
       "replacement": null
     },
-    "runtime.maintenance.v1": {
-      "description": "Observe Runtime Host maintenance over opt-in NDJSON and inspect the authenticated HTTP runtime status snapshot.",
-      "lifecycle": "active",
-      "introduced_in": "2.2.0",
-      "deprecated_in": null,
-      "sunset_at": null,
-      "replacement": null
-    },
     "task.progress.v1": {
       "description": "Consume typed units and determinate or indeterminate progress on Runtime jobs and stage events.",
       "lifecycle": "active",
       "introduced_in": "2.2.0",
-      "deprecated_in": null,
-      "sunset_at": null,
-      "replacement": null
-    },
-    "runtime.component-repair.v1": {
-      "description": "Inspect desired and actual component drift and request repair by stable component id.",
-      "lifecycle": "active",
-      "introduced_in": "2.3.0",
       "deprecated_in": null,
       "sunset_at": null,
       "replacement": null

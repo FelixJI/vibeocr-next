@@ -73,10 +73,6 @@ public sealed class RuntimeSelectionServiceTests
             () => service.SelectEngine(OcrEngine.PaddleOcr));
         Assert.Equal(RuntimeSelectionErrorKind.CapabilityMissing, engineError.Kind);
 
-        RuntimeSelectionException componentError = Assert.Throws<RuntimeSelectionException>(
-            () => service.SelectComponentIds("cpu", ["document_parsing"]));
-        Assert.Equal(RuntimeSelectionErrorKind.CapabilityMissing, componentError.Kind);
-
         RuntimeSelectionException sourceError = Assert.Throws<RuntimeSelectionException>(
             () => service.NormalizeSourceSelection(["tuna-pypi"]));
         Assert.Equal(RuntimeSelectionErrorKind.CapabilityMissing, sourceError.Kind);
@@ -335,34 +331,6 @@ public sealed class RuntimeSelectionServiceTests
         RuntimeSelectionException unknown = Assert.Throws<RuntimeSelectionException>(
             () => service.NormalizeSourceSelection(["aliyun-pypi"]));
         Assert.Equal(RuntimeSelectionErrorKind.UnknownSource, unknown.Kind);
-    }
-
-    [Fact]
-    public void FeatureSelectionMapsThroughVariantBusinessKey()
-    {
-        RuntimeSelectionService service = new(Health(
-            [VariantCapability],
-            variants: VariantCatalog(
-                ("document_parsing", "cpu", "doc-parser-cpu"),
-                ("document_parsing", "nvidia_cuda", "doc-parser-cuda"),
-                ("gpu_runtime", "nvidia_cuda", "doc-parser-cuda"))));
-
-        Assert.Empty(service.SelectComponentIds("cpu", null));
-        Assert.Equal(
-            ["doc-parser-cpu"],
-            service.SelectComponentIds("cpu", ["document_parsing"]));
-        // 两个 feature 映射到同一 component 时去重,wire 不接受重复 id。
-        Assert.Equal(
-            ["doc-parser-cuda"],
-            service.SelectComponentIds("nvidia_cuda", ["document_parsing", "gpu_runtime"]));
-
-        RuntimeSelectionException wrongAccelerator = Assert.Throws<RuntimeSelectionException>(
-            () => service.SelectComponentIds("cpu", ["gpu_runtime"]));
-        Assert.Equal(RuntimeSelectionErrorKind.UnknownFeature, wrongAccelerator.Kind);
-
-        RuntimeSelectionException unknownFeature = Assert.Throws<RuntimeSelectionException>(
-            () => service.SelectComponentIds("cpu", ["quantum_parsing"]));
-        Assert.Equal(RuntimeSelectionErrorKind.UnknownFeature, unknownFeature.Kind);
     }
 
     [Fact]

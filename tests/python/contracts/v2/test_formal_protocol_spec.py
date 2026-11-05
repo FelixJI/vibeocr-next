@@ -170,18 +170,22 @@ def test_capabilities_are_versioned_and_generated_bindings_are_current() -> None
 def test_capability_registry_formalizes_lifecycle_and_negotiation_metadata() -> None:
     registry = json.loads((V2 / "capabilities.json").read_text(encoding="utf-8"))
     assert registry["version"] == 2
-    # 预构建运行时树零安装：runtime.maintenance.v2 与 runtime.install-plan.v1
-    # 已从能力目录退役，维护命令/游标重放面不再声明。
+    # 预构建运行时树零安装：runtime.maintenance.v1/.v2、
+    # runtime.component-repair.v1 与 runtime.install-plan.v1 已从能力目录
+    # 退役，维护命令/游标重放面与维护投影不再声明。
     expected = {
-        "runtime.maintenance.v1",
-        "runtime.component-repair.v1",
         "runtime.capability-metadata.v1",
         "runtime.events.sse.v1",
         "runtime.events.ndjson.v1",
     }
     assert expected.issubset(registry["capabilities"])
-    assert "runtime.maintenance.v2" not in registry["capabilities"]
-    assert "runtime.install-plan.v1" not in registry["capabilities"]
+    for retired in (
+        "runtime.maintenance.v1",
+        "runtime.maintenance.v2",
+        "runtime.component-repair.v1",
+        "runtime.install-plan.v1",
+    ):
+        assert retired not in registry["capabilities"]
     for name, definition in registry["definitions"].items():
         assert definition["lifecycle"] in {"active", "deprecated"}, name
         assert definition["introduced_in"].startswith("2."), name
@@ -243,8 +247,6 @@ def test_runtime_status_exposes_verified_identity_component_drift_and_real_eta()
         "drift_reason",
         "repairable",
     }.issubset(component)
-    maintenance = schemas["RuntimeMaintenanceStatus"]["properties"]
-    assert {"requested_component_ids", "effective_component_ids"}.issubset(maintenance)
 
     progress_schema = {
         "$ref": "#/components/schemas/ProgressSnapshot",

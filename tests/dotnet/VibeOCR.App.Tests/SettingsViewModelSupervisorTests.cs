@@ -119,8 +119,7 @@ public sealed class SettingsViewModelSupervisorTests
     {
         var viewModel = new SettingsViewModel(new FakeSettingsInferenceClient());
         Assert.Null(viewModel.Backend);
-        // 默认目标 cpu 只是待选值，未读取真实快照前不得冒充当前设备。
-        Assert.False(viewModel.CanSwitchBackend);
+        // 未读取真实快照前不得冒充当前设备。
     }
 
     [Fact]

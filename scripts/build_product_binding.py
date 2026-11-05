@@ -13,7 +13,6 @@ REQUIRED_CAPABILITIES = (
     "pdf.edit.v2",
     "qrcode.v2",
     "export.document.v1",
-    "runtime.maintenance.v1",
     "runtime.settings.v2",
     "task.progress.v1",
     "ocr.engine-selection.v1",

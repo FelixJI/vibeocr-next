@@ -15,7 +15,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, RecoverableLazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or SetEnvironmentSourcesCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetAcceleratorCommand or SetRuntimeFeatureCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or SetEnvironmentSourcesCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -64,8 +64,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetDownloadSourceCommand source => await SetSourceAsync(
       source,
       cancellationToken),
-    SetAcceleratorCommand accelerator => SetAccelerator(accelerator),
-    SetRuntimeFeatureCommand feature => SetFeature(feature),
     SetMineruConnectionCommand mineru => await SetMineruConnectionAsync(
       mineru,
       cancellationToken),
@@ -389,20 +387,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     return SettingsState(settings);
   }
 
-  private SettingsWorkbenchState SetAccelerator(SetAcceleratorCommand command)
-  {
-    settings ??= CreateSettings();
-    settings.SetPendingAccelerator(command.Accelerator);
-    return SettingsState(settings);
-  }
-
-  private SettingsWorkbenchState SetFeature(SetRuntimeFeatureCommand command)
-  {
-    settings ??= CreateSettings();
-    settings.SetFeatureEnabled(command.FeatureId, command.Enabled);
-    return SettingsState(settings);
-  }
-
   private async Task<SettingsWorkbenchState> SetWorkerIdleAsync(
     SetWorkerIdleCommand command, CancellationToken cancellationToken)
   {
@@ -641,13 +625,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
       source.Id,
       source.DisplayName,
       source.Selected))],
-    viewModel.PendingBackend,
-    viewModel.CanSwitchBackend,
-    [.. viewModel.Features.Select(feature => new SettingsFeatureOptionState(
-      feature.FeatureId,
-      feature.DisplayName,
-      feature.Accelerator,
-      feature.Selected))],
     MinimizeToTray: shell.Value.MinimizeToTray, ShellSettingsError: shell.Value.SettingsError,
     HotkeyActions: HotkeyActionStates(),
     FloatingToolbar: ToolbarProjection(toolbarError),
@@ -658,12 +635,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     WorkerSettingsWarning: viewModel.WorkerSettingsWarning,
     StatusMessage: viewModel.Status,
     ServiceStatus: viewModel.RuntimeStatus.ServiceStatus,
-    MaintenanceStatus: viewModel.RuntimeStatus.Status,
-    MaintenancePhase: viewModel.RuntimeStatus.Phase,
-    ProgressActive: viewModel.RuntimeStatus.IsOperationActive,
-    ProgressText: viewModel.RuntimeStatus.ProgressText,
-    ProgressDetail: viewModel.RuntimeStatus.ProgressDetail,
-    ProgressPercent: viewModel.RuntimeStatus.IsProgressIndeterminate ? null : viewModel.RuntimeStatus.ProgressValue,
     MineruConnection: viewModel.MineruConnection is { } connection
       ? new SettingsMineruConnectionState(
         connection.Supported,

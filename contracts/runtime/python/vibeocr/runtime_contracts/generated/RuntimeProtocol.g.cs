@@ -10,9 +10,7 @@ public static class RuntimeProtocol
     public const string QRCODE_V2 = "qrcode.v2";
     public const string EXPORT_DOCUMENT_V1 = "export.document.v1";
     public const string RUNTIME_SETTINGS_V2 = "runtime.settings.v2";
-    public const string RUNTIME_MAINTENANCE_V1 = "runtime.maintenance.v1";
     public const string TASK_PROGRESS_V1 = "task.progress.v1";
-    public const string RUNTIME_COMPONENT_REPAIR_V1 = "runtime.component-repair.v1";
     public const string RUNTIME_CAPABILITY_METADATA_V1 = "runtime.capability-metadata.v1";
     public const string RUNTIME_EVENTS_SSE_V1 = "runtime.events.sse.v1";
     public const string RUNTIME_EVENTS_NDJSON_V1 = "runtime.events.ndjson.v1";
@@ -37,9 +35,7 @@ public static class RuntimeProtocol
         "qrcode.v2",
         "export.document.v1",
         "runtime.settings.v2",
-        "runtime.maintenance.v1",
         "task.progress.v1",
-        "runtime.component-repair.v1",
         "runtime.capability-metadata.v1",
         "runtime.events.sse.v1",
         "runtime.events.ndjson.v1",

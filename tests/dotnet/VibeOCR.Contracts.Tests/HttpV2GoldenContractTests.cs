@@ -69,7 +69,7 @@ public sealed class HttpV2GoldenContractTests
         var status = new RuntimeStatusSnapshot
         {
             InstanceId = "runtime-1",
-            ServiceState = RuntimeServiceState.Maintenance,
+            ServiceState = RuntimeServiceState.Degraded,
             BackendVersion = "0.9.0",
             Profile = new RuntimeProfileStatus
             {
@@ -92,27 +92,6 @@ public sealed class HttpV2GoldenContractTests
                     },
                 ],
             },
-            Maintenance = new RuntimeMaintenanceStatus
-            {
-                OperationId = "install-1",
-                Sequence = 2,
-                Operation = RuntimeMaintenanceOperation.Ensure,
-                OperationState = RuntimeOperationState.Running,
-                Phase = RuntimeMaintenancePhase.InstallProfile,
-                ProfileId = "win-x64-cpu",
-                ComponentId = "ocr_engine",
-                RequestedComponentIds = ["ocr_engine"],
-                EffectiveComponentIds = ["ocr_engine", "runtime_base"],
-                UpdatedAt = "2026-08-05T12:00:00Z",
-                Progress = new ProgressSnapshot
-                {
-                    Unit = ProgressUnit.Bytes,
-                    Current = 50,
-                    Total = 100,
-                    EstimatedRemainingSeconds = 2.5,
-                },
-                MessageCode = "runtime.install.profile",
-            },
             Source = new RuntimeSourceIdentity
             {
                 BackendVersion = "0.9.0",
@@ -124,11 +103,8 @@ public sealed class HttpV2GoldenContractTests
         RuntimeStatusSnapshot parsed =
             HttpV2Json.Deserialize<RuntimeStatusSnapshot>(json)!;
         Assert.Equal("ocr_engine", parsed.Profile.Components.Single().ComponentId);
-        Assert.Equal(100, parsed.Maintenance!.Progress!.Total);
-        Assert.Equal(2.5, parsed.Maintenance.Progress.EstimatedRemainingSeconds);
         Assert.Equal(RuntimeDriftReason.VersionMismatch,
             parsed.Profile.Components.Single().DriftReason);
-        Assert.Equal(2, parsed.Maintenance.EffectiveComponentIds!.Count);
         Assert.Equal(new string('a', 40), parsed.Source!.BackendSourceSha);
     }
 

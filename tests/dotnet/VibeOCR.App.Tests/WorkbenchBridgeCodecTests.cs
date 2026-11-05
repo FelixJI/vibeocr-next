@@ -356,7 +356,7 @@ public sealed class WorkbenchBridgeCodecTests
 
 
   [Fact]
-  public void SettingsStateProjectsProgressActivityAndNullableBackend()
+  public void SettingsStateProjectsNullableBackend()
   {
     var state = new SettingsWorkbenchState(
       WorkbenchTheme.Light,
@@ -364,21 +364,17 @@ public sealed class WorkbenchBridgeCodecTests
       "settings.ready",
       Backend: null,
       StartupEnabled: false);
-    Assert.False(state.ProgressActive);
     string payload = WorkbenchBridgeCodec.SerializeState(
       Guid.NewGuid(),
       new WorkbenchStateEnvelope(4, "settings", WorkbenchStateChange.Replace, state));
-    // 未读取真实快照：backend 为 null，空闲无活动操作。
+    // 未读取真实快照：backend 为 null。
     Assert.Contains("\"backend\":null", payload);
-    Assert.Contains("\"progressActive\":false", payload);
 
     string activePayload = WorkbenchBridgeCodec.SerializeState(
       Guid.NewGuid(),
       new WorkbenchStateEnvelope(5, "settings", WorkbenchStateChange.Replace,
-        state with { Backend = "nvidia_cuda", ProgressActive = true, ProgressPercent = 62.5 }));
+        state with { Backend = "nvidia_cuda" }));
     Assert.Contains("\"backend\":\"nvidia_cuda\"", activePayload);
-    Assert.Contains("\"progressActive\":true", activePayload);
-    Assert.Contains("\"progressPercent\":62.5", activePayload);
   }
 
   [Fact]

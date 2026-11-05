@@ -60,7 +60,6 @@ public sealed class DesktopWorkbenchCommandHandler :
       "settings.hotkeys",
       "settings.floatingToolbar",
       "settings.selection",
-      "runtime.maintenance",
       "recognition.engine",
       "recognition.options",
       "update.check",

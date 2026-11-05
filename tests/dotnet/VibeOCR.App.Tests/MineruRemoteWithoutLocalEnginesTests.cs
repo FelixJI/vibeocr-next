@@ -293,12 +293,6 @@ public sealed class MineruRemoteWithoutLocalEnginesTests
     Assert.DoesNotContain("upstream said", status);
   }
 
-  [Fact]
-  public void LocalMineruInstallHintIsRetained()
-  {
-    Assert.Contains("远程模式无需安装", SettingsViewModel.FeatureDisplayName("mineru"));
-  }
-
   // ------------------------------------------------------------------
   // Helpers
   // ------------------------------------------------------------------

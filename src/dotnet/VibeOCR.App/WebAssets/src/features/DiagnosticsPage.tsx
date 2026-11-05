@@ -71,7 +71,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
       : "";
   const sources = sourceOptions(update.sources);
   const updateBusy = booleanValue(update.isBusy);
-  // 修复入口不另造能力：运行环境状态检查在设置页，这里只导航过去；
+  // 设置入口不另造能力：运行环境状态检查在设置页，这里只导航过去；
   // 演示模式（无宿主桥）用本地哈希跳转保持入口可用。
   const openSettings = () => {
     if (viewState.connected) {
@@ -214,7 +214,7 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
               onClick={openSettings}
               icon={<Settings aria-hidden="true" size={16} />}
             >
-              打开设置的修复入口
+              打开设置的运行环境分区
             </Button>
           </div>
           {/* 技术详情默认折叠：原生 details 可键盘展开；内部协议与实例证据
