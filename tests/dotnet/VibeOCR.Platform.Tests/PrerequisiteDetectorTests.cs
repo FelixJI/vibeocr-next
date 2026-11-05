@@ -21,7 +21,7 @@ public sealed class PrerequisiteDetectorTests
             PrerequisiteKind.DotNetRuntime,
                 PrerequisiteKind.WindowsAppRuntime,
                 PrerequisiteKind.WebView2Runtime,
-                PrerequisiteKind.RuntimeInstaller,
+                PrerequisiteKind.RuntimePython,
             ],
         report.Missing.Select(item => item.Kind));
   }

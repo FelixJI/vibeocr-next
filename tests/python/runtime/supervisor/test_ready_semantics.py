@@ -5,7 +5,7 @@ envelope before importing uvicorn, building the FastAPI app and starting to
 listen: the parent (``InferenceSupervisorProcess.StartAsync`` followed by the
 switch coordinator's health check) then blocked on a dropped SYN for the whole
 import window. The contracts pinned here, through the real production spawn
-arguments (``python -I -B -c runpy vibeocr.runtime.host.main``):
+arguments (``python -I -B -m vibeocr.runtime.host.main``):
 
 * once the first stdout line (the ready envelope) is readable, the loopback
   socket must already be listening (connect succeeds within a short budget);
@@ -20,14 +20,12 @@ import json
 import os
 import socket
 import subprocess
-import sys
 import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 import pytest
-import vibeocr.runtime
 
 # The old implementation starts importing uvicorn only after emitting ready, so
 # a connect issued right after the envelope hits a port that is bound but not
@@ -42,22 +40,19 @@ STARTUP_DEADLINE_SECONDS = 60.0
 HEALTH_TIMEOUT_SECONDS = 5.0
 
 
-def _spawn_supervisor(token: str, sup_root: str) -> subprocess.Popen[str]:
-    code_root = Path(vibeocr.runtime.__file__).resolve().parents[1]
-    argv = [
-        sys.executable,
-        "-I",
-        "-B",
-        "-c",
-        "import os,runpy,sys;"
-        "sys.path.insert(0,os.environ['VIBEOCR_PRODUCT_CODE_ROOT']);"
-        "runpy.run_module('vibeocr.runtime.host.main',run_name='__main__')",
-    ]
+def _spawn_supervisor(
+    token: str, sup_root: str, product_fixture
+) -> subprocess.Popen[str]:
+    product, runtime, manifest, binding, _ = product_fixture
+    argv = [str(runtime / "python.exe"), "-I", "-B", "-m", "vibeocr.runtime.host.main"]
     env = dict(os.environ)
     env.update(
         {
             "VIBEOCR_SUP_TOKEN": token,
-            "VIBEOCR_PRODUCT_CODE_ROOT": str(code_root),
+            "VIBEOCR_PRODUCT_RUNTIME": "1",
+            "VIBEOCR_PRODUCT_ROOT": str(product),
+            "VIBEOCR_RUNTIME_MANIFEST": str(manifest),
+            "VIBEOCR_COMPONENT_LOCK": str(binding),
             "VIBEOCR_SUP_ROOT": sup_root,
             "PYTHONIOENCODING": "utf-8",
         }
@@ -120,9 +115,12 @@ def _get_health(port: int, token: str) -> dict:
 
 def test_ready_envelope_means_listening_and_health_serves(
     tmp_path: Path,
+    staged_runtime_product,
 ) -> None:
     token = "r" * 64
-    with _spawn_supervisor(token, str(tmp_path / "sup-root")) as proc:
+    with _spawn_supervisor(
+        token, str(tmp_path / "sup-root"), staged_runtime_product
+    ) as proc:
         try:
             ready = json.loads(_read_ready_line(proc))
             with socket.create_connection(
@@ -130,6 +128,11 @@ def test_ready_envelope_means_listening_and_health_serves(
             ):
                 pass
             health = _get_health(ready["port"], token)
+            assert "runtime.component-selection.v1" not in ready["capabilities"]
+            assert set(health["capabilities"]) == set(ready["capabilities"])
+            assert {"ocr.engine-selection.v1", "runtime.download-sources.v1"} <= set(
+                ready["capabilities"]
+            )
             assert health["ready"] is True
             assert health["instance_id"] == ready["instance_id"]
         finally:
@@ -139,6 +142,7 @@ def test_ready_envelope_means_listening_and_health_serves(
 
 def test_real_startup_failure_exits_without_ready_envelope(
     tmp_path: Path,
+    staged_runtime_product,
 ) -> None:
     # A real assembly failure (stager root cannot be created because the
     # configured VIBEOCR_SUP_ROOT is an existing file) must exit non-zero
@@ -146,7 +150,7 @@ def test_real_startup_failure_exits_without_ready_envelope(
     # line" as the serving contract, so a dead server must stay silent.
     stager_root = tmp_path / "sup-root-is-a-file"
     stager_root.write_text("not a directory", encoding="utf-8")
-    with _spawn_supervisor("f" * 64, str(stager_root)) as proc:
+    with _spawn_supervisor("f" * 64, str(stager_root), staged_runtime_product) as proc:
         try:
             stdout, _ = proc.communicate(timeout=STARTUP_DEADLINE_SECONDS)
         except subprocess.TimeoutExpired:

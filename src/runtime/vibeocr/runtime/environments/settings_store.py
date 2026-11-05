@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 from vibeocr.runtime_contracts import SettingsSnapshot, parse_pipeline_spec
 
 
@@ -40,6 +41,7 @@ class RuntimeSettingsStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._observed: bytes | None = None
         self._read_failed = False
 
     def load(self, default: SettingsSnapshot) -> SettingsSnapshot:
@@ -50,11 +52,30 @@ class RuntimeSettingsStore:
             self._read_failed = True
             raise
 
-    def _load(self, default: SettingsSnapshot) -> SettingsSnapshot:
-        if not self.path.exists():
-            return default
+    def require_current(self) -> None:
+        """Fence a stale product session at job admission and at settings commit."""
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            current = self.path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current != self._observed:
+            raise RuntimeSettingsStoreError(
+                "设置已被另一进程更新，请重新打开识别服务。"
+            )
+
+    def read_legacy(self, default: SettingsSnapshot) -> SettingsSnapshot:
+        """Read the old profile without migrating or writing its file."""
+        return self._load(default, migrate=False)
+
+    def _load(
+        self, default: SettingsSnapshot, *, migrate: bool = True
+    ) -> SettingsSnapshot:
+        try:
+            self._observed = self.path.read_bytes()
+            value = json.loads(self._observed)
+        except FileNotFoundError:
+            self._observed = None
+            return default
         except (OSError, ValueError) as exc:
             raise RuntimeSettingsStoreError("invalid supervisor settings file") from exc
         if (
@@ -75,7 +96,9 @@ class RuntimeSettingsStore:
         if not isinstance(payload, dict):
             raise RuntimeSettingsStoreError("invalid supervisor settings payload")
         snapshot = _snapshot_from_payload(payload)
-        if "paddle_idle_seconds" not in payload or "mineru_idle_seconds" not in payload:
+        if migrate and (
+            "paddle_idle_seconds" not in payload or "mineru_idle_seconds" not in payload
+        ):
             backup = self.path.with_name(self.path.name + ".worker-idle.bak")
             try:
                 if backup.exists() and backup.read_bytes() != self.path.read_bytes():
@@ -116,7 +139,11 @@ class RuntimeSettingsStore:
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            with RuntimeStoreLock(self.path.with_suffix(".lock")):
+                self.require_current()
+                new_value = temporary.read_bytes()
+                os.replace(temporary, self.path)
+                self._observed = new_value
         except (OSError, TypeError, ValueError) as exc:
             raise RuntimeSettingsStoreError(
                 "could not replace supervisor settings"
@@ -144,6 +171,8 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             "default_ttl_seconds",
             "extra",
             "download_source_ids",
+            "revision",
+            "recognition_device",
             "paddle_idle_seconds",
             "mineru_idle_seconds",
         }
@@ -191,6 +220,8 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             raise ValueError("settings shape")
         return SettingsSnapshot(
             default_ttl_seconds=ttl,
+            revision=payload.get("revision", 0),
+            recognition_device=payload.get("recognition_device", "auto"),
             paddle_idle_seconds=payload["paddle_idle_seconds"]
             if "paddle_idle_seconds" in payload
             else _worker_timeout(residency, "PaddleOCR")

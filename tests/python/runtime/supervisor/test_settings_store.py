@@ -126,7 +126,8 @@ def test_settings_survive_a_supervisor_module_restart(tmp_path) -> None:
     first = _module(tmp_path, first_executor, store)
     expected = _snapshot(ttl=600, sources=("paddleocr-modelscope",))
 
-    first.update_settings(expected)
+    expected = first.update_settings(expected)
+    assert expected.revision == 1
 
     second_executor = _RecordingExecutor()
     second = _module(tmp_path, second_executor, RuntimeSettingsStore(store.path))
@@ -157,26 +158,14 @@ def test_failed_persist_keeps_module_memory_and_restores_executor(tmp_path) -> N
     assert executor.configured == [previous]
 
 
-def test_supervisor_settings_path_prefers_explicit_environment(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    explicit = tmp_path / "explicit.json"
-    monkeypatch.setenv("VIBEOCR_SUPERVISOR_SETTINGS", str(explicit))
-    monkeypatch.setenv("VIBEOCR_SUP_ROOT", str(tmp_path / "root"))
-
-    assert supervisor_main._settings_store_from_environment().path == explicit
-
-
-def test_supervisor_settings_path_falls_back_to_supervisor_root(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "root"
-    monkeypatch.delenv("VIBEOCR_SUPERVISOR_SETTINGS", raising=False)
-    monkeypatch.setenv("VIBEOCR_SUP_ROOT", str(root))
-
-    assert supervisor_main._settings_store_from_environment().path == (
-        root / "supervisor-settings.json"
+def test_supervisor_rejects_nonproduct_before_binding_socket(monkeypatch, capsys):
+    monkeypatch.setenv("VIBEOCR_SUP_TOKEN", "synthetic")
+    monkeypatch.delenv("VIBEOCR_PRODUCT_RUNTIME", raising=False)
+    monkeypatch.setattr(
+        supervisor_main, "bind_loopback_socket", lambda: pytest.fail("opened socket")
     )
+    assert supervisor_main.run_supervisor() == 3
+    assert "随包产品 Runtime" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("valid_connection", [True, False])

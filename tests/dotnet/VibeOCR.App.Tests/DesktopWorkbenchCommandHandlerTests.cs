@@ -29,179 +29,28 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
   [Fact]
-  public async Task SwitchEnvironmentPublishesNewRecognitionCatalogToAllPages()
+  public async Task DeviceCommandVerifiesOnceAndKeepsPreviousSelectionUntilCommit()
   {
-    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-catalog-{Guid.NewGuid():N}");
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-device-command-{Guid.NewGuid():N}");
     Directory.CreateDirectory(root);
-    try
-    {
-      var inference = new SwitchCatalogInferenceClient { Health = SwitchHealth(Wire.OcrEngineId.Windows) };
-      var manager = new SwitchCatalogManager();
-      var environments = new ManagedEnvironmentSettings(manager, (id, _) =>
-      {
-        manager.ActiveId = id;
-        inference.Health = SwitchHealth(Wire.OcrEngineId.Paddleocr);
-        return Task.CompletedTask;
-      }, () => null, new ProductMaintenanceCoordinator());
-      var settings = new SettingsViewModel(inference, environments: environments);
-      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
-      RuntimeSelectionService previous = Assert.IsType<RuntimeSelectionService>(settings.Selection);
-      using var broker = new WorkbenchResourceBroker(root);
-      using var annotations = new WorkbenchAnnotationStore(root);
-      await using var handler = new DesktopWorkbenchCommandHandler(
-        () => new RecognitionViewModel(inference, new SignallingInputService()),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        () => settings, CreateShellViewModel,
-        static () => throw new InvalidOperationException(),
-        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-        broker, root, static () => 0, annotations);
-      var published = new List<WorkbenchState>();
-      var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-      handler.StateChanged += state =>
-      {
-        published.Add(state);
-        if (state is PdfWorkbenchState { Engines: { } engines } &&
-            engines.Any(choice => choice.Engine == "paddleocr"))
-          refreshed.TrySetResult();
-      };
-
-      await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
-        TestContext.Current.CancellationToken);
-      await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-      Assert.NotSame(previous, settings.Selection);
-      Assert.Contains(published, state => state is RecognitionWorkbenchState { Engines: { } engines } &&
-        engines.Any(choice => choice.Engine == "paddleocr"));
-      Assert.Contains(published, state => state is BatchWorkbenchState { Engines: { } engines } &&
-        engines.Any(choice => choice.Engine == "paddleocr"));
-    }
-    finally { Directory.Delete(root, recursive: true); }
-  }
-
-  [Fact]
-  public async Task SwitchRemainsBusyUntilAttachedServiceSnapshotFinishes()
-  {
-    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-ready-{Guid.NewGuid():N}");
-    Directory.CreateDirectory(root);
-    try
-    {
-      var inference = new SwitchSnapshotBlockingClient();
-      var manager = new SwitchCatalogManager();
-      bool attached = false;
-      var environments = new ManagedEnvironmentSettings(manager, (id, _) =>
-      {
-        manager.ActiveId = id;
-        attached = true;
-        return Task.CompletedTask;
-      }, () => null, new ProductMaintenanceCoordinator());
-      var settings = new SettingsViewModel(inference, environments: environments);
-      using var broker = new WorkbenchResourceBroker(root);
-      using var annotations = new WorkbenchAnnotationStore(root);
-      await using var handler = new DesktopWorkbenchCommandHandler(
-        () => new RecognitionViewModel(inference, new SignallingInputService()),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        () => settings, CreateShellViewModel,
-        static () => throw new InvalidOperationException(),
-        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-        broker, root, static () => 0, annotations, inferenceAttached: () => attached);
-      var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-      handler.StateChanged += state =>
-      {
-        if (attached && state is SettingsWorkbenchState { EnvironmentBusy: false } &&
-            inference.Released.Task.IsCompleted)
-          finished.TrySetResult();
-      };
-      try
-      {
-        await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
-          TestContext.Current.CancellationToken);
-        await inference.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        Assert.True(attached);
-        Assert.False(environments.IsBusy);
-        var captured = new TaskCompletionSource<RecognitionWorkbenchState>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        handler.StateChanged += state =>
-        {
-          if (state is RecognitionWorkbenchState { IsBusy: false, ScreenshotSession: not null } scene)
-            captured.TrySetResult(scene);
-          if (state is RecognitionWorkbenchState { StatusCode: "recognition.cancelled" })
-            cancelled.TrySetResult();
-        };
-        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), TestContext.Current.CancellationToken);
-        Guid sessionId = Guid.Parse((await captured.Task.WaitAsync(TimeSpan.FromSeconds(5),
-          TestContext.Current.CancellationToken)).ScreenshotSession!.SessionId);
-        WorkbenchAnnotationLease exported = await annotations.UploadPngAsync(new MemoryStream(AnnotationPng),
-          TestContext.Current.CancellationToken);
-        await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(exported.ResourceUri.AbsoluteUri,
-          sessionId, 0, []), TestContext.Current.CancellationToken);
-        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        Assert.Equal(0, inference.SubmitCalls);
-        Assert.True(handler.InitialStates.OfType<SettingsWorkbenchState>().Single().EnvironmentBusy);
-        inference.Released.TrySetResult();
-        await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-        Assert.False(handler.InitialStates.OfType<SettingsWorkbenchState>().Single().EnvironmentBusy);
-      }
-      finally { inference.Released.TrySetResult(); }
-    }
-    finally { Directory.Delete(root, recursive: true); }
-  }
-
-  [Fact]
-  public async Task SwitchEnvironmentFailureReReadsSnapshotFromCurrentService()
-  {
-    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-switch-failure-{Guid.NewGuid():N}");
-    Directory.CreateDirectory(root);
-    try
-    {
-      var inference = new SwitchFailureInferenceClient
-      {
-        Health = SwitchHealth(Wire.OcrEngineId.Windows),
-      };
-      var manager = new SwitchCatalogManager();
-      var environments = new ManagedEnvironmentSettings(manager, (_, _) =>
-        throw new InvalidOperationException("切换失败：目标环境不存在。"),
-        () => null, new ProductMaintenanceCoordinator());
-      var settings = new SettingsViewModel(inference, environments: environments);
-      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
-      Assert.NotNull(settings.Selection);
-      using var broker = new WorkbenchResourceBroker(root);
-      using var annotations = new WorkbenchAnnotationStore(root);
-      await using var handler = new DesktopWorkbenchCommandHandler(
-        () => new RecognitionViewModel(inference, new SignallingInputService()),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        static () => throw new InvalidOperationException(),
-        () => settings, CreateShellViewModel,
-        static () => throw new InvalidOperationException(),
-        new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-        broker, root, static () => 0, annotations);
-      // 开始前的预刷新与失败终态的重投影各发布一轮 Pdf 状态：第二次
-      // 到达即切换失败终态已落定。
-      int pdfStates = 0;
-      var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-      handler.StateChanged += state =>
-      {
-        if (state is PdfWorkbenchState && Interlocked.Increment(ref pdfStates) == 2)
-          finished.TrySetResult();
-      };
-
-      await handler.ExecuteAsync(new SwitchEnvironmentCommand("paddle"),
-        TestContext.Current.CancellationToken);
-      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-      // 失败同样按实际当前服务回读：Backend/状态不得停留在开始失效后的
-      // 空投影，也不得声称实例已更换；选择沿既有刷新路径重建。
-      Assert.Equal("cpu", settings.Backend);
-      Assert.DoesNotContain("服务实例已更换", settings.Status);
-      Assert.NotNull(settings.Selection);
-      // 切换失败根因保留在环境管理器状态里，不被刷新的成功文案覆盖。
-      Assert.Equal("切换失败：目标环境不存在。", environments.Status);
-    }
-    finally { Directory.Delete(root, recursive: true); }
+    var inference = new DeviceSettingsClient();
+    var settings = new SettingsViewModel(inference);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = new DesktopWorkbenchCommandHandler(
+      () => new RecognitionViewModel(inference, new SignallingInputService()),
+      static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(), () => settings, CreateShellViewModel,
+      static () => throw new InvalidOperationException(), new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+      broker, root, static () => 0, annotations);
+    Task pending = handler.ExecuteAsync(new SetRecognitionDeviceCommand("directml"), TestContext.Current.CancellationToken).AsTask();
+    await inference.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Null(settings.RecognitionDevice);
+    await handler.ExecuteAsync(new SetRecognitionDeviceCommand("cpu"), TestContext.Current.CancellationToken);
+    Assert.Equal(1, inference.Writes);
+    inference.Released.SetResult();
+    await pending;
+    Assert.Equal("directml", settings.RecognitionDevice);
   }
 
   [Fact]
@@ -2263,100 +2112,21 @@ public sealed class DesktopWorkbenchCommandHandlerTests
   private static ShellViewModel CreateShellViewModel() =>
     new(new NoopHotkeyRegistrar(), new NoopStartupRegistrar());
 
-  private static Wire.Health SwitchHealth(Wire.OcrEngineId engine) => new()
+  private sealed class DeviceSettingsClient : InferenceClientStub
   {
-    SchemaVersion = 2,
-    InstanceId = engine.ToString(),
-    ProtocolVersion = 2,
-    Ready = true,
-    Draining = false,
-    Capabilities = [RuntimeSelectionService.EngineSelectionCapability],
-    CapabilityDescriptors = [new Wire.CapabilityDescriptor
-    {
-      Name = RuntimeSelectionService.EngineSelectionCapability,
-      Lifecycle = "active", IntroducedIn = "2.6.0",
-      DeprecatedIn = null, SunsetAt = null, Replacement = null,
-      OcrEngineCatalog = new Wire.OcrEngineCatalog { Engines = [new Wire.OcrEngineDescriptor
-      {
-        Id = engine, Availability = Wire.OcrEngineAvailability.Ready,
-        IncludedInBase = true, ReasonCode = null, RequiredComponent = null,
-      }] },
-    }],
-  };
-
-  private sealed class SwitchCatalogInferenceClient : InferenceClientStub
-  {
-    public required Wire.Health Health { get; set; }
-    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(Health);
-    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new SettingsSnapshot());
-  }
-
-  /// <summary>提供真实 runtime/residency 读数；必须重列 IInferenceClient 才能占住
-  /// GetRuntimeStatusAsync 接口槽，否则走接口默认实现抛 NotSupportedException。</summary>
-  private sealed class SwitchFailureInferenceClient : InferenceClientStub, IInferenceClient
-  {
-    public required Wire.Health Health { get; set; }
-    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(Health);
-    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new SettingsSnapshot());
-    public override Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new ResidencyStatus());
-    public Task<RuntimeStatusSnapshot> GetRuntimeStatusAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new RuntimeStatusSnapshot
-      {
-        InstanceId = "sup-switch-failure",
-        ServiceState = RuntimeServiceState.Ready,
-        BackendVersion = "0.14.0",
-        Profile = new RuntimeProfileStatus
-        {
-          ProfileId = "win-x64-cpu",
-          Accelerator = RuntimeAccelerator.Cpu,
-          Components = [],
-        },
-      });
-  }
-
-  private sealed class SwitchSnapshotBlockingClient : InferenceClientStub
-  {
-    public int SubmitCalls;
-    public override Task<JobRef> SubmitAsync(SubmitRequest request,
-      IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken cancellationToken)
-    {
-      SubmitCalls++;
-      throw new InvalidOperationException("Switching service must not receive recognition.");
-    }
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(SwitchHealth(Wire.OcrEngineId.Windows));
+    public int Writes { get; private set; }
     public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new SettingsSnapshot());
-    public override async Task<ResidencyStatus> GetResidencyAsync(CancellationToken cancellationToken)
+      Task.FromResult(new SettingsSnapshot { RecognitionDevice = "cpu", Revision = 7 });
+    public override async Task<SettingsSnapshot> UpdateSettingsAsync(SettingsSnapshot settings, CancellationToken cancellationToken)
     {
+      Assert.Equal(7, settings.Revision);
+      Writes++;
       Started.TrySetResult();
       await Released.Task.WaitAsync(cancellationToken);
-      return new ResidencyStatus();
+      return settings with { Revision = 8 };
     }
-  }
-
-  private sealed class SwitchCatalogManager : IManagedEnvironmentClient
-  {
-    public string ActiveId { get; set; } = "paddle";
-    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentList(ActiveId, 1, []));
-    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(string? environmentId,
-      string? modelSourceId, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(PreparedEnvironmentSwitch prepared,
-      StartedEnvironmentHealth? startedHealth = null, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-    public Task DeleteEnvironmentAsync(string environmentId,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
   }
 
   private static (ShellActionDispatcher Dispatcher, WindowsHotkeyRegistrar Registrar, List<FloatingToolbarSettings> Applied, TrackingSuspension Suspension, DispatchRecorder Dispatched) CreateShellActions(

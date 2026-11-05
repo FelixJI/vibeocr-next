@@ -151,6 +151,8 @@
     "vram_used_mb": 2000
   },
   "settings_snapshot": {
+    "recognition_device": "auto",
+    "revision": 0,
     "schema_version": 2,
     "paddle_idle_seconds": 600,
     "mineru_idle_seconds": 600,
@@ -164,6 +166,8 @@
     "extra": {}
   },
   "settings_snapshot_empty_selection": {
+    "recognition_device": "auto",
+    "revision": 0,
     "schema_version": 2,
     "paddle_idle_seconds": 600,
     "mineru_idle_seconds": 600,

@@ -685,7 +685,7 @@ def test_mineru_lifecycle_start_invokes_singleton(
         calls.append("constructor")
         or types.SimpleNamespace(_ensure_api_running=lambda: calls.append("ensure"))
     )
-    fake_module.MinerUService.bind_owner = lambda owner: None
+    fake_module.MinerUService.bind_owner = lambda owner, *, model_source: None
     monkeypatch.setitem(
         sys.modules, "vibeocr.runtime.recognition.mineru_service", fake_module
     )

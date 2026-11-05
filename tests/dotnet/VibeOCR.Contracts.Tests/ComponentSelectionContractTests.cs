@@ -10,7 +10,6 @@ using System.Text.Json.Nodes;
 using VibeOCR.Contracts.HttpV2;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.Contracts.Tests;
 
@@ -80,19 +79,19 @@ public sealed class ComponentSelectionContractTests
     }
 
     [Fact]
-    public void GeneratedHostBindingTypesTheAcceleratorEnum()
+    public void GeneratedHttpBindingRoundTripsAccelerator()
     {
-        var descriptor = new Host.ComponentVariantDescriptor
+        var descriptor = new Wire.ComponentVariantDescriptor
         {
             FeatureId = "paddleocr",
-            Accelerator = Host.Accelerator.NvidiaCuda,
+            Accelerator = "nvidia_cuda",
             ComponentId = "paddleocr-cuda",
         };
         string json = JsonSerializer.Serialize(descriptor);
         Assert.Contains("\"nvidia_cuda\"", json);
 
-        var parsed = JsonSerializer.Deserialize<Host.ComponentVariantDescriptor>(json)!;
-        Assert.Equal(Host.Accelerator.NvidiaCuda, parsed.Accelerator);
+        var parsed = JsonSerializer.Deserialize<Wire.ComponentVariantDescriptor>(json)!;
+        Assert.Equal("nvidia_cuda", parsed.Accelerator);
     }
 
 

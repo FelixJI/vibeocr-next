@@ -5,18 +5,17 @@ Paddle 三种保留 ORT 模式的隔离候选实机冒烟。
 .DESCRIPTION
 只复制全新候选到新的隔离根（不删除/复用任何已有 state，不读取真实
 桌面内容），用仓库 Python 生成合成 fixture，然后按阶段启动候选应用：
-  install   —— 通过既有宿主命令创建 ASCII 空环境 paddle-smoke-cpu，再从常规组件入口预览 paddleocr-ort-cpu
-               配方并确认安装（与 managed-environment 冒烟同一公共 UI）。
-  recognize —— 每模式一次独立进程：切换环境、公共 UI 选模式、设置真实
+  device    —— 通过设置连接真实产品服务、选择目标设备，核对已保存值和同一服务实例。
+  recognize —— 每模式一次独立进程：选择已验证设备、公共 UI 选模式、设置真实
                非默认选项并保存、纯截图（合成 fixture 选区器）+显式
-               "识别当前图"、校验 job/环境/管线/选项归属、结构化预览、
+               "识别当前图"、校验 job/设备/管线/选项归属、结构化预览、
                复制与 UI 保存导出。提交被拒 = blocked，真实 job 失败 =
                failed；两者都不是 passed，不盲重试。
-隔离环境固定使用 ASCII 名，避免验收依赖卷的 8.3 短名称设置；生产非 ASCII 路径策略不变。
+隔离候选使用 ASCII 目录名，避免验收依赖卷的 8.3 短名称设置；生产非 ASCII 路径策略不变。
 证据保留在隔离根；ORT 按所选 Provider 验证公开入口，真实 EP 节点另由原生 profile 证据确认。
 
 .PARAMETER ProductRoot
-候选目录（含 app\runtime\installer 布局，且不含 state/）。
+候选目录（含 app 与 runtime/env 布局，且不含 state/）。
 
 .PARAMETER WorkRoot
 隔离工作根（不得与 ProductRoot 相互嵌套）。
@@ -54,7 +53,7 @@ param(
     # 恢复模式：复用本脚本已创建的隔离根（与 ProductRoot/WorkRoot 互斥）。
     # 已有 health 证据不覆盖：passed 保留跳过，failed/blocked 保留并计入退出码。
     [string]$ResumeRoot,
-    # 显式新尝试保留旧 health/导出；仅复用已安装成功的合成环境。
+    # 显式新尝试保留旧 health/导出；仅复用已验证目标设备的合成候选。
     [ValidatePattern("^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")]
     [string]$Attempt,
     [ValidateSet("paddle_text", "paddle_table", "paddle_structure")]
@@ -63,19 +62,19 @@ param(
     ),
     [ValidateSet("file", "batch", "pdf", "pdf_text_layer", "pdf_operations", "pdf_editing", "pdf_workspace")]
     [string[]]$InputKinds = @(),
-    [ValidateSet("cpu", "cuda", "directml")]
+    [ValidateSet("cpu", "directml")]
     [string]$Provider = 'cpu',
     [ValidateSet("tiny", "small", "medium")]
     [string]$ModelPreset = 'small',
     [int]$ModeTimeoutMinutes = 40,
-    [int]$InstallTimeoutMinutes = 60,
+    [Alias('InstallTimeoutMinutes')][int]$DeviceTimeoutMinutes = 60,
     [switch]$IncludeWireless
 )
 
 $ErrorActionPreference = 'Stop'
 if ($Attempt -and -not $ResumeRoot) { throw 'Attempt 只能与 ResumeRoot 一起使用' }
 $attemptSuffix = if ($Attempt) { "-$Attempt" } else { '' }
-if ($ModeTimeoutMinutes -le 0 -or $InstallTimeoutMinutes -le 0) {
+if ($ModeTimeoutMinutes -le 0 -or $DeviceTimeoutMinutes -le 0) {
     throw 'All timeout parameters must be positive'
 }
 if ($ResumeRoot) {
@@ -89,7 +88,7 @@ $candidateMarkers = @(
     'app\VibeOCR.WinUI.exe',
     'app\metadata\product-layout.json',
     'runtime\backend\runtime-manifest.json',
-    'runtime\installer\vibeocr-runtime-installer.exe'
+    'runtime\env\runtime-env\python.exe'
 )
 $isResume = [bool]$ResumeRoot
 if ($isResume) {
@@ -202,7 +201,7 @@ if (-not $isResume) {
 $previous = @{}
 foreach ($name in @(
     'VIBEOCR_SELF_TEST_SMOKE', 'VIBEOCR_SELF_TEST_INSTANCE',
-    'VIBEOCR_PADDLE_SMOKE_RECIPE', 'VIBEOCR_PADDLE_SMOKE_PRESET',
+    'VIBEOCR_PADDLE_SMOKE_DEVICE', 'VIBEOCR_PADDLE_SMOKE_PRESET',
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
     'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE',
@@ -211,7 +210,7 @@ foreach ($name in @(
     'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE', 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND',
     'VIBEOCR_PADDLE_SMOKE_TOKENS', 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS',
     'VIBEOCR_PADDLE_SMOKE_EXPORT_DIR', 'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES',
-    'VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES', 'WEBVIEW2_USER_DATA_FOLDER'
+    'WEBVIEW2_USER_DATA_FOLDER'
 )) { $previous[$name] = [Environment]::GetEnvironmentVariable($name) }
 
 function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinutes) {
@@ -219,7 +218,7 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
     $env:VIBEOCR_SELF_TEST_SMOKE = 'paddle-modes-e2e'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_PADDLE_SMOKE_HEALTH = $healthPath
-    $env:VIBEOCR_PADDLE_SMOKE_RECIPE = 'paddleocr-ort-' + $Provider
+    $env:VIBEOCR_PADDLE_SMOKE_DEVICE = $Provider
     $env:VIBEOCR_PADDLE_SMOKE_PRESET = $ModelPreset
     $env:WEBVIEW2_USER_DATA_FOLDER = $webViewData
     foreach ($key in $extra.Keys) {
@@ -259,7 +258,7 @@ function Invoke-PaddlePhase([hashtable]$extra, [string]$phaseName, [int]$capMinu
     return $health
 }
 
-# 安装阶段缺退出证据须换新隔离根；-Attempt 仅能重验已具安装证据的模式/输入阶段。
+# 设备准备阶段缺退出证据须换新隔离根；-Attempt 仅能重验已具设备证据的模式/输入阶段。
 function Test-PaddlePhaseReceipt([string]$phaseName) {
     $receiptPath = Join-Path (Join-Path $smokeRoot 'receipts') "$phaseName.json"
     if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { return $false }
@@ -275,27 +274,29 @@ function Set-PaddleOutcome([string]$state) {
     elseif ($state -eq 'blocked' -and $script:exitCode -eq 0) { $script:exitCode = 3 }
 }
 try {
-    $installHealthPath = Join-Path $smokeRoot 'paddle-install.json'
-    $installReused = $false
-    if (Test-Path -LiteralPath $installHealthPath -PathType Leaf) {
-        # 已有 install 证据不覆盖：passed 直接复用；非 passed 拒绝恢复
+    $deviceHealthPath = Join-Path $smokeRoot 'paddle-device.json'
+    $deviceReused = $false
+    if (Test-Path -LiteralPath $deviceHealthPath -PathType Leaf) {
+        # 已有设备证据不覆盖：passed 直接复用；非 passed 拒绝恢复
         # （重跑需要覆盖 health，与固定输出不可覆盖规则冲突）。
-        $kept = Get-Content -LiteralPath $installHealthPath -Raw | ConvertFrom-Json
-        if ($kept.state -ne 'passed' -or -not (Test-PaddlePhaseReceipt 'paddle-install')) {
-            throw "paddle-install 既有证据非 passed（$($kept.state)）或缺 exit0 receipt，不可覆盖拒绝复用（现场保留；安装阶段须新隔离根重验，-Attempt 不适用）"
+        $kept = Get-Content -LiteralPath $deviceHealthPath -Raw | ConvertFrom-Json
+        if ($kept.state -ne 'passed' -or -not (Test-PaddlePhaseReceipt 'paddle-device')) {
+            throw "paddle-device 既有证据非 passed（$($kept.state)）或缺 exit0 receipt，不可覆盖拒绝复用（现场保留；设备准备阶段须新隔离根重验，-Attempt 不适用）"
         }
-        $installReused = $true
-        Write-Host "Install evidence reused (kept): $installHealthPath"
+        if ($kept.evidence.device -ne $Provider) {
+            throw "Retained device $($kept.evidence.device) differs from requested $Provider. Use a fresh isolated candidate."
+        }
+        $deviceReused = $true
+        Write-Host "Device evidence reused (kept): $deviceHealthPath"
     }
-    if (-not $installReused) {
-        $install = Invoke-PaddlePhase @{
-            'VIBEOCR_PADDLE_SMOKE_PHASE' = 'install'
-            'VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES' = "$InstallTimeoutMinutes"
-        } 'paddle-install' ([Math]::Max($InstallTimeoutMinutes + 15, 30))
-        if ($install.state -ne 'passed') {
-            throw "Paddle $Provider install failed: $($install.error)"
+    if (-not $deviceReused) {
+        $devicePhase = Invoke-PaddlePhase @{
+            'VIBEOCR_PADDLE_SMOKE_PHASE' = 'device'
+        } 'paddle-device' ([Math]::Max($DeviceTimeoutMinutes + 15, 30))
+        if ($devicePhase.state -ne 'passed') {
+            throw "Paddle $Provider device preparation failed: $($devicePhase.error)"
         }
-        Write-Host "Install phase OK: environment=$($install.evidence.environment.name) recipe=$($install.evidence.environment.recipe)"
+        Write-Host "Device preparation OK: device=$($devicePhase.evidence.device) Supervisor=$($devicePhase.evidence.InstanceId)"
     }
 
     foreach ($mode in $Modes) {

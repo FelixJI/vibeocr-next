@@ -33,7 +33,7 @@ public sealed class WebWorkbenchHostPolicyTests
       Assert.Equal(WorkbenchRoute.ImageEdit,
         Assert.IsType<ShellWorkbenchState>(scene.ProjectState(navigation).State).Route);
       var settings = new WorkbenchStateEnvelope(2, "settings", WorkbenchStateChange.Replace,
-        new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "settings.ready", "cpu", false, EnvironmentStatus: "安装环境", EnvironmentBusy: true));
+        new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "settings.ready", "cpu", false, RecognitionDevice: "directml"));
       string sceneSettings = WorkbenchBridgeCodec.SerializeState(Guid.Empty, scene.ProjectState(settings));
       using (JsonDocument projectedSettings = JsonDocument.Parse(sceneSettings))
       {

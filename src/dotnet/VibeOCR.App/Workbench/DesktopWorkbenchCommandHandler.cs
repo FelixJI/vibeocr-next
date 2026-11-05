@@ -54,7 +54,7 @@ public sealed class DesktopWorkbenchCommandHandler :
       "qrcode.openUrl",
       "about.openProject",
       "runtime.refresh",
-      "runtime.environments",
+      "settings.recognition-device",
       "settings.shell",
       "settings.tray",
       "settings.hotkeys",
@@ -448,7 +448,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     catch (Exception error) when (
       error is IOException or UnauthorizedAccessException or InvalidOperationException or
-        WorkbenchAnnotationAccessException or WorkbenchResourceAccessException or RuntimeInstallerException)
+        WorkbenchAnnotationAccessException or WorkbenchResourceAccessException)
     {
       if (command is SetFloatingToolbarPreferencesCommand)
         AppLog.Error("Floating toolbar preferences failed", error);

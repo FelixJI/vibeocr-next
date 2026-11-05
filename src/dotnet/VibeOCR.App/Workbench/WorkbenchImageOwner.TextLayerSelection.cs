@@ -8,7 +8,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed partial class WorkbenchImageOwner
 {
   internal sealed record TextLayerSelection(string ModeId, PaddleModeOptions? Options,
-    string ServiceInstance, string? EnvironmentId, int? EnvironmentRevision, string Sources);
+    string ServiceInstance, string? Device, string Sources);
 
   private TextLayerSelection? FreezeTextLayerSelection(RecognitionModeOption? mode)
   {
@@ -16,12 +16,10 @@ internal sealed partial class WorkbenchImageOwner
     PaddleModeOptions? options = mode.Id == "paddle_text" &&
       mode.SupportedOptions.Contains("model_preset", StringComparer.Ordinal)
       ? selectionPolicy.GetTaskModeOptions(mode, selectionPolicy.TaskModelPreset) : null;
-    ManagedEnvironmentList? environments = settingsOwner.CurrentModel?.Environments?.Snapshot;
-    ManagedEnvironment? environment = environments?.Environments.FirstOrDefault(item => item.Id == environments.ActiveId);
     string sources = string.Join(",", settingsOwner.CurrentModel?.Sources.Where(source => source.Selected)
       .Select(source => source.Id).Order(StringComparer.Ordinal).ToArray() ?? []);
     return new(mode.Id, options, supervisorInstanceId() ?? string.Empty,
-      environment?.Id, environment?.Revision, sources);
+      settingsOwner.CurrentModel?.RecognitionDevice, sources);
   }
 
   private bool TextLayerSelectionMatches(TextLayerSelection? frozen)

@@ -27,12 +27,8 @@ public sealed partial class MainWindow
       {
         throw new InvalidOperationException("Screenshot smoke dependencies are missing.");
       }
-      for (int attempt = 0; !smokeInferenceAttached(); attempt++)
-      {
-        if (attempt >= 21000)
-          throw new TimeoutException("Real Supervisor did not attach within 35 minutes.");
-        await Task.Delay(100);
-      }
+      if (smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
+        throw new InvalidOperationException("Cold capture attached or started a Runtime before OCR demand.");
       int submitsBefore = smokeSubmitAttempts();
       if (submitsBefore != 0)
         throw new InvalidOperationException("OCR was submitted before screenshot capture.");
@@ -45,7 +41,7 @@ public sealed partial class MainWindow
         screenshotSmokePicker.Evidence ??
         throw new InvalidOperationException("GDI synthetic capture has no evidence.");
       if (captured.Result is not null || captured.Input is null ||
-          smokeSubmitAttempts() != 0 ||
+          smokeSubmitAttempts() != 0 || smokeInferenceAttached() ||
           smokeStartupEnsureAttempts() != ensureBeforeCapture)
       {
         throw new InvalidOperationException("Pure screenshot started OCR or lacks an input.");
@@ -123,7 +119,7 @@ public sealed partial class MainWindow
       if (recognizedSession.SessionId != editedSession.SessionId ||
           recognizedSession.Revision != editedSession.Revision ||
           smokeSubmitAttempts() != submitsBeforeRecognition + 1 ||
-          smokeStartupEnsureAttempts() != ensureAfterCapture ||
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensureAfterCapture + 1 ||
           string.IsNullOrWhiteSpace(smokeLastJobId()))
       {
         throw new InvalidOperationException("Explicit OCR session or operation counts mismatch.");

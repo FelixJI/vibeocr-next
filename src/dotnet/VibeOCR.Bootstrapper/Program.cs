@@ -138,7 +138,7 @@ internal static class Program
   private static bool HasBoundRuntimeAssets(ResolvedProductLayout layout) =>
       File.Exists(layout.ComponentLock) &&
       File.Exists(layout.RuntimeManifest) &&
-      File.Exists(layout.RuntimeInstaller);
+      File.Exists(layout.RuntimePython);
 
   // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
   // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.

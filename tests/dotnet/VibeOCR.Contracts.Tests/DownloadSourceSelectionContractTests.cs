@@ -9,7 +9,6 @@ using System.Text.Json.Nodes;
 using VibeOCR.Contracts.HttpV2;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.Contracts.Tests;
 

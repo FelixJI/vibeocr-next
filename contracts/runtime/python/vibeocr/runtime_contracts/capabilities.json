@@ -12,7 +12,6 @@
     "runtime.events.ndjson.v1",
     "ocr.engine-selection.v1",
     "runtime.download-sources.v1",
-    "runtime.component-selection.v1",
     "ocr.recognition-modes.v1",
     "ocr.mineru-config.v1",
     "ocr.mineru-remote-api.v1",
@@ -104,14 +103,6 @@
     },
     "runtime.download-sources.v1": {
       "description": "Select dependency package indexes and native-engine model-source preferences from the Backend-declared catalog, carried by capability descriptors and exchanged as stable source ids without transferring model-file lifecycle ownership to VibeOCR.",
-      "lifecycle": "active",
-      "introduced_in": "2.7.0",
-      "deprecated_in": null,
-      "sunset_at": null,
-      "replacement": null
-    },
-    "runtime.component-selection.v1": {
-      "description": "Manually select the install scope of optional feature dependencies from the Backend-declared variant catalog, exchanged as install_component_ids with the dependency closure reported honestly.",
       "lifecycle": "active",
       "introduced_in": "2.7.0",
       "deprecated_in": null,

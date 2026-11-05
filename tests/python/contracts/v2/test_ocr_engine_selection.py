@@ -162,20 +162,14 @@ def test_engine_catalog_covers_all_availability_states_on_health() -> None:
     assert "ocr_engine_catalog" not in schema["CapabilityDescriptor"]["required"]
 
 
-def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    assert host["$defs"]["OcrEngineId"]["enum"] == list(STABLE_ENGINE_IDS)
-    assert host["$defs"]["OcrEngineAvailability"]["enum"] == [
+def test_http_ocr_catalog_binds_availability_states() -> None:
+    schema = _spec()["components"]["schemas"]
+    assert schema["OcrEngineAvailability"]["enum"] == [
         "ready",
         "preparation_required",
         "unavailable",
     ]
-    # Runtime Host 面已缩为 environment 侍者：引擎 catalog defs 仍在 host
-    # schema 上，不再挂在已删除的 CapabilityDescriptor 下。
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert hasattr(runtime_host_types, "OcrEngineCatalog")
-    assert hasattr(runtime_host_types, "OcrEngineDescriptor")
+    assert schema["OcrEngineId"]["enum"] == list(STABLE_ENGINE_IDS)
 
 
 def test_engine_selection_capability_is_registered_everywhere() -> None:

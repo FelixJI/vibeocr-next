@@ -14,7 +14,6 @@ using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
@@ -3909,7 +3908,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
-  public async Task EnvironmentSwitchWindowCancelsScreenshotSelectionRecognitionWithoutSubmit()
+  public async Task PendingDeviceChangeCancelsScreenshotSelectionRecognitionWithoutSubmit()
   {
     string root = TemporaryRoot();
     try
@@ -3922,19 +3921,18 @@ public sealed class ScreenshotSessionWorkbenchTests
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
+      using var changeCancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+      Task Prepare(CancellationToken ct) => ct == changeCancellation.Token
+        ? Task.Delay(Timeout.InfiniteTimeSpan, ct) : Task.CompletedTask;
       await using var handler = CreateHandler(
         recognition, root, broker, annotationStore, settings,
-        inferenceAttached: () => true);
-      // 与 DefaultModeRequestContractTests 同一真实状态位：环境切换窗口
-      // 内提交必须取消，不能继续使用切换前的目录发出请求。
-      System.Reflection.FieldInfo switching = typeof(WorkbenchSettingsOwner)
-        .GetField("environmentSwitching",
-          System.Reflection.BindingFlags.NonPublic |
-          System.Reflection.BindingFlags.Instance)!;
+        inferenceAttached: () => true, ensureRuntimeReady: Prepare);
       int terminalShown = 0;
       handler.ScreenshotSelectionRecognized += () => terminalShown++;
 
-      switching.SetValue(handler.Settings, 1);
+      Task<WorkbenchCommandOutcome> change = handler.ExecuteAsync(
+        new SetRecognitionDeviceCommand("directml"), changeCancellation.Token).AsTask();
+      Assert.True(handler.Settings.IsDeviceChanging);
       RecognitionWorkbenchState cancelled;
       using (var completed = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.StatusCode == "recognition.cancelled" &&
@@ -3949,8 +3947,10 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Null(handler.CurrentImageSessionId);
       await UntilAsync(() => terminalShown == 1);
 
-      // 退出切换窗口后同一链路恢复：仅一次显式模式提交，无默认回退。
-      switching.SetValue(handler.Settings, 0);
+      // 取消设备更改后同一链路恢复：仅一次显式模式提交，无默认回退。
+      await changeCancellation.CancelAsync();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => change);
+      Assert.False(handler.Settings.IsDeviceChanging);
       RecognitionWorkbenchState done;
       using (var recovered = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.Result is not null))

@@ -401,15 +401,8 @@ def test_capability_descriptor_carries_optional_mineru_catalog() -> None:
     }
     assert "mineru_config_catalog" not in schema["CapabilityDescriptor"]["required"]
 
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    # Runtime Host 面已缩为 environment 侍者：MinerU catalog defs 仍在 host
-    # schema 上，不再挂在已删除的 CapabilityDescriptor 下。
-    assert host["$defs"]["MineruTierId"]["enum"] == list(STABLE_TIER_IDS)
-    assert host["$defs"]["MineruTierAvailability"]["enum"] == list(TIER_AVAILABILITIES)
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert hasattr(runtime_host_types, "MineruConfigCatalog")
-    assert hasattr(runtime_host_types, "MineruTierDescriptor")
+    assert schema["MineruTierId"]["enum"] == list(STABLE_TIER_IDS)
+    assert schema["MineruTierAvailability"]["enum"] == list(TIER_AVAILABILITIES)
 
 
 def test_golden_catalog_and_health_validate_and_cover_all_states() -> None:
@@ -442,14 +435,6 @@ def test_golden_catalog_and_health_validate_and_cover_all_states() -> None:
     assert "ocr.mineru-config.v1" in golden_health["capabilities"]
     # Legacy descriptors keep their original wire shape.
     assert "mineru_config_catalog" not in descriptors["ocr.recognition.v2"]
-
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    jsonschema.Draft202012Validator(
-        {
-            "$ref": "#/$defs/MineruConfigCatalog",
-            "$defs": host["$defs"],
-        }
-    ).validate(catalog)
 
 
 def test_job_interface_schema_carries_the_same_mineru_block() -> None:

@@ -13,16 +13,16 @@ public sealed class WorkbenchBridgeCodecTests
   [Theory]
   [InlineData("cpu")]
   [InlineData("directml")]
-  public void EnvironmentSwitchCarriesAnIndependentExplicitDevice(string device)
+  [InlineData("auto")]
+  public void RecognitionDeviceIsIndependentOfAnyEnvironment(string device)
   {
     Guid session = Guid.NewGuid();
-    var command = Assert.IsType<SwitchEnvironmentCommand>(ParseForTest(CommandJson(session,
-      "settings", "switchEnvironment", JsonSerializer.Serialize(new { environmentId = "shared", device })), session).Command);
-    Assert.Equal("shared", command.EnvironmentId);
+    var command = Assert.IsType<SetRecognitionDeviceCommand>(ParseForTest(CommandJson(session,
+      "settings", "setRecognitionDevice", JsonSerializer.Serialize(new { device })), session).Command);
     Assert.Equal(device, command.Device);
-    foreach (object invalid in new object[] { "auto", 1, new[] { "cpu" } })
+    foreach (object invalid in new object[] { "cuda", 1, new[] { "cpu" } })
       Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session,
-        "settings", "switchEnvironment", JsonSerializer.Serialize(new { environmentId = "shared", device = invalid })), session));
+        "settings", "setRecognitionDevice", JsonSerializer.Serialize(new { device = invalid })), session));
   }
 
   [Fact]
@@ -194,113 +194,15 @@ public sealed class WorkbenchBridgeCodecTests
     Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "pdf", "rotate", "{\"degrees\":90,\"range\":\"implicit\"}"), session));
   }
   [Theory]
-  [InlineData("{\"page\":0}", true)]
-  [InlineData("{\"page\":2}", true)]
-  [InlineData("{\"page\":-1}", false)]
-  [InlineData("{\"page\":1.5}", false)]
-  [InlineData("{\"page\":\"2\"}", false)]
-  public void CleanupPageCommandRequiresNonNegativeInteger(string arguments, bool valid)
+  [InlineData("switchEnvironment")]
+  [InlineData("refreshEnvironmentList")]
+  [InlineData("deleteEnvironment")]
+  [InlineData("runEnvironmentCleanup")]
+  [InlineData("setEnvironmentSources")]
+  public void RetiredEnvironmentCommandsAreRejected(string command)
   {
     Guid session = Guid.NewGuid();
-    string command = CommandJson(session, "settings", "setEnvironmentCleanupPage", arguments);
-    if (valid) Assert.IsType<SetEnvironmentCleanupPageCommand>(ParseForTest(command, session).Command);
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(command, session));
-  }
-  [Theory]
-  [InlineData("[\"residual:a\"]", true)]
-  [InlineData("[]", false)]
-  [InlineData("[\"a\",\"a\"]", false)]
-  [InlineData("[3]", false)]
-  public void CleanupBridgeAcceptsOnlyExplicitUniqueSelection(string ids, bool valid)
-  {
-    Guid session = Guid.NewGuid();
-    string command = CommandJson(session, "settings", "runEnvironmentCleanup", "{\"planId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"itemIds\":" + ids + "}");
-    if (valid) Assert.IsType<RunEnvironmentCleanupCommand>(ParseForTest(command, session).Command);
-    else Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(command, session));
-  }
-
-
-  [Theory]
-  [InlineData("../environment")]
-  [InlineData("..")]
-  [InlineData("environment\\other")]
-  [InlineData("C:environment")]
-  [InlineData("environment.")]
-  public void EnvironmentCommandsRejectPathSegments(string environmentId)
-  {
-    Guid sessionId = Guid.NewGuid();
-    string arguments = JsonSerializer.Serialize(new { environmentId, recipe = "paddleocr-ort-cpu" });
-    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      ParseForTest(CommandJson(sessionId, "settings", "previewEnvironmentInstall", arguments), sessionId));
-  }
-
-
-
-  [Fact]
-  public void SetEnvironmentSourcesRoutesGlobalAndScopedSaves()
-  {
-    Guid sessionId = Guid.NewGuid();
-    string environmentId = Guid.NewGuid().ToString("N");
-    string globalJson = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "setEnvironmentSources",
-            "arguments": {
-              "modelSourceId": null
-            }
-          }
-        }
-      }
-      """;
-    var global = Assert.IsType<SetEnvironmentSourcesCommand>(
-      ParseForTest(globalJson, sessionId).Command);
-    Assert.Null(global.EnvironmentId);
-    Assert.Null(global.ModelSourceId);
-    string independentJson = globalJson.Replace("\"modelSourceId\": null",
-      "\"paddleocrModelSourceId\": \"paddleocr-bos\", \"mineruModelSourceId\": \"mineru-modelscope\"");
-    var independent = Assert.IsType<SetEnvironmentSourcesCommand>(
-      ParseForTest(independentJson, sessionId).Command);
-    Assert.True(independent.IndependentModelSources);
-    Assert.Equal("paddleocr-bos", independent.PaddleocrModelSourceId);
-    Assert.Equal("mineru-modelscope", independent.MineruModelSourceId);
-    Assert.Null(independent.ModelSourceId);
-
-
-    string scopedJson = $$"""
-      {
-        "version": 2,
-        "kind": "request",
-        "id": "{{Guid.NewGuid()}}",
-        "type": "app.command",
-        "payload": {
-          "sessionId": "{{sessionId}}",
-          "command": {
-            "scope": "settings",
-            "action": "setEnvironmentSources",
-            "arguments": {
-              "environmentId": "{{environmentId}}",
-              "modelSourceId": "modelscope"
-            }
-          }
-        }
-      }
-      """;
-    var scoped = Assert.IsType<SetEnvironmentSourcesCommand>(
-      ParseForTest(scopedJson, sessionId).Command);
-    Assert.Equal(environmentId, scoped.EnvironmentId);
-    Assert.Equal("modelscope", scoped.ModelSourceId);
-
-    Assert.Throws<WorkbenchBridgeProtocolException>(() =>
-      ParseForTest(
-        scopedJson.Replace("\"modelscope\"", "\"bad id\""),
-        sessionId));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, "settings", command, "{}"), session));
   }
 
   [Fact]
@@ -657,7 +559,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("qrcode", "cancel", "{}", typeof(CancelQrCodeCommand)),
       ("about", "openProject", "{}", typeof(OpenProjectPageCommand)),
       ("settings", "refreshRuntime", "{}", typeof(RefreshRuntimeCommand)),
-      ("settings", "refreshEnvironmentList", "{}", typeof(RefreshEnvironmentListCommand)),
+      ("settings", "setRecognitionDevice", "{\"device\":\"cpu\"}", typeof(SetRecognitionDeviceCommand)),
       ("settings", "beginHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(BeginHotkeyRecordingCommand)),
       ("settings", "endHotkeyRecording", "{\"recordingId\":\"12345678-1234-1234-1234-123456789abc\"}", typeof(EndHotkeyRecordingCommand)),
       ("settings", "setTheme", "{\"theme\":\"dark\"}", typeof(SetThemeCommand)),

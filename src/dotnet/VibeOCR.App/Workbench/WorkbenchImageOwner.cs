@@ -1816,8 +1816,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
 
   private FrozenImageRecognitionSelection FreezeImageRecognitionSelection(string? modeId, bool explicitMode)
   {
-    if (explicitMode && (string.IsNullOrWhiteSpace(modeId) || settingsOwner.IsEnvironmentSwitching))
-      throw new RecognitionModeUnavailableException("所选识别模式无效或运行环境正在切换；请稍后重试。");
+    if (explicitMode && (string.IsNullOrWhiteSpace(modeId) || settingsOwner.IsDeviceChanging))
+      throw new RecognitionModeUnavailableException("所选识别模式无效或计算设备正在更改，请稍后重试。");
     RecognitionSelectionSnapshot? snapshot = settingsOwner.EnsureModel().RecognitionSelection;
     if (snapshot?.Catalog.SupportsRecognitionModes is true)
     {
@@ -1830,7 +1830,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           snapshot.MineruConfigFor(mode?.Id), selectionPolicy.GetWireOptions(mode)));
     }
     if (explicitMode)
-      throw new RecognitionModeUnavailableException("识别目录未就绪；请在设置中连接并准备运行环境。");
+      throw new RecognitionModeUnavailableException("识别目录未就绪；请在设置中检查识别服务。");
     OcrEngine? engine = OcrEngineWire.Parse(modeId);
     if (modeId is not null && engine is null)
       throw new RecognitionModeUnavailableException("任务识别模式尚未绑定 Runtime catalog，已拒绝回退。");

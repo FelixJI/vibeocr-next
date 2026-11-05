@@ -617,25 +617,7 @@ public sealed record OpenQrCodeUrlCommand(string Url) : WorkbenchCommand;
 public sealed record OpenProjectPageCommand : WorkbenchCommand;
 
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
-public sealed record RefreshEnvironmentListCommand : WorkbenchCommand;
-
-public sealed record SetEnvironmentSourcesCommand(
-  string? EnvironmentId, string? ModelSourceId,
-  string? PaddleocrModelSourceId = null, string? MineruModelSourceId = null,
-  bool IndependentModelSources = false) : WorkbenchCommand;
-public sealed record SwitchEnvironmentCommand(string EnvironmentId, string? Device = null) : WorkbenchCommand;
-public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
-public sealed record SetEnvironmentCleanupPageCommand(int Page) : WorkbenchCommand;
-public sealed record PreviewEnvironmentCleanupCommand : WorkbenchCommand;
-public sealed record RunEnvironmentCleanupCommand(string PlanId, IReadOnlyList<string> ItemIds) : WorkbenchCommand;
-public sealed record CancelEnvironmentCleanupCommand : WorkbenchCommand;
-
-/// <summary>
-/// 远程模式宿主入口：随包预构建环境一键就绪。找到随包基础配方对应的
-/// 已安装环境后直接切换启动承载识别服务；不新建、不安装、不触碰用户
-/// 已有环境，也不下载识别模型。
-/// </summary>
-public sealed record PrepareRemoteHostCommand : WorkbenchCommand;
+public sealed record SetRecognitionDeviceCommand(string Device) : WorkbenchCommand;
 
 public sealed record SetThemeCommand(WorkbenchTheme Theme) : WorkbenchCommand;
 
@@ -1042,117 +1024,17 @@ public sealed record SettingsWorkbenchState(
   SettingsDefaultRecognitionModeState? DefaultRecognitionMode = null,
   SettingsMineruRecognitionState? MineruRecognition = null,
   IReadOnlyList<SettingsRecognitionModeOptionState>? RecognitionModes = null,
-  IReadOnlyList<SettingsEnvironmentState>? Environments = null,
-  string? ActiveEnvironmentId = null,
-  string EnvironmentStatus = "",
-  bool EnvironmentBusy = false,
-  IReadOnlyList<SettingsEnvironmentSourceState>? EnvironmentSources = null,
-  IReadOnlyList<string>? EnvironmentDefaultSourceIds = null,
-  IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
-  IReadOnlyList<SettingsEnvironmentResolvedSourceState>? EnvironmentResolvedDefaultSources = null,
-  IReadOnlyList<SettingsEnvironmentRecipeState>? EnvironmentRecipes = null,
+  string? RecognitionDevice = null,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null,
-  bool EnvironmentSupportsCleanup = false,
-  VibeOCR.Platform.Bootstrap.ManagedCleanupPlan? EnvironmentCleanupPlan = null,
-  VibeOCR.Platform.Bootstrap.ManagedCleanupResult? EnvironmentCleanupResult = null,
-  bool EnvironmentCanCancelCleanup = false,
-  int EnvironmentCleanupPage = 0,
-  int EnvironmentCleanupPageCount = 1,
   EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
   bool MinimizeToTray = false, string ShellSettingsError = "",
-  bool EnvironmentSnapshotLoaded = false, bool EnvironmentListFetchAttempted = false,
   int PaddleIdleSeconds = 600, int MineruIdleSeconds = 600,
   IReadOnlyList<VibeOCR.Contracts.HttpV2.ResidencyEntry>? Workers = null,
   string WorkerSettingsWarning = "") : WorkbenchState
 {
   public override string Scope => "settings";
 }
-
-public sealed record SettingsEnvironmentState(
-  string Id,
-  string Name,
-  int Revision,
-  string Kind,
-  string Status,
-  string PythonState,
-  string DependencyState,
-  string EngineState,
-  string ModelState,
-  string ServiceState,
-  IReadOnlyList<string> ConfiguredRecognitionTypes,
-  string? TargetDevice,
-  string? ActualDevice,
-  string? Reason,
-  string? PythonVersion,
-  string? Abi,
-  string? Python,
-  string? Path,
-  long DiskBytes,
-  IReadOnlyList<string>? SourceIds = null,
-  IReadOnlyList<string>? OverrideSourceIds = null,
-  IReadOnlyList<string>? UnknownSourceIds = null,
-  IReadOnlyList<SettingsEnvironmentResolvedSourceState>? ResolvedSources = null,
-  SettingsEnvironmentInstallFailureState? LastInstallFailure = null,
-  IReadOnlyDictionary<string, string?>? OperationBlocks = null,
-  string? Recipe = null);
-
-/// <summary>目录内下载源投影：展示名 + 脱敏端点。</summary>
-public sealed record SettingsEnvironmentSourceState(
-  string Id,
-  string Kind,
-  string DisplayName,
-  string Endpoint,
-  bool IsDefault = false,
-  string? TaskModelPreset = null,
-  string? DefaultModelPreset = null,
-  string? Provider = null);
-
-/// <summary>
-/// Runtime 权威配方目录投影（list.recipes）：用途/设备分组与 GPU 门禁在
-/// 前端仅消费本投影；目录未同步时为空，不回落臆造组合。
-/// </summary>
-public sealed record SettingsEnvironmentRecipeState(
-  string Id,
-  string DisplayName,
-  IReadOnlyList<string>? ConfiguredRecognitionTypes = null,
-  string? Accelerator = null,
-  string? TargetDevice = null,
-  IReadOnlyList<string>? SupportedDevices = null,
-  string? PythonVersion = null,
-  string? Abi = null,
-  string? Platform = null,
-  string? ScopeId = null,
-  IReadOnlyList<string>? ComponentIds = null,
-  string? RecipeLock = null,
-  IReadOnlyList<string>? Dependencies = null,
-  string? DependencyOrigin = null,
-  string? PythonOrigin = null,
-  string? RuntimeWheelOrigin = null,
-  string? Engine = null,
-  string? Family = null,
-  string? FamilyDisplayName = null,
-  string? Provider = null,
-  bool SupportsRemoteHost = false,
-  bool DefaultRemoteHost = false);
-
-/// <summary>每 kind 解析：Id 为 null 表示产品默认（模型源无覆盖时官方原生默认，端点未知）。</summary>
-public sealed record SettingsEnvironmentResolvedSourceState(
-  string Kind,
-  string? Id,
-  string? DisplayName,
-  string Origin);
-
-/// <summary>环境记录回放的历史安装失败证据（Runtime 持久保存，仅诊断展示）。</summary>
-public sealed record SettingsEnvironmentInstallFailureState(
-  string Phase,
-  int EnvironmentRevision,
-  string Recipe,
-  string ReasonCode,
-  string NextAction,
-  string Detail,
-  IReadOnlyList<string>? RequestedSourceIds = null,
-  IReadOnlyList<string>? EffectiveSourceIds = null);
 
 public sealed record SettingsHotkeyActionState(
   string ActionId,

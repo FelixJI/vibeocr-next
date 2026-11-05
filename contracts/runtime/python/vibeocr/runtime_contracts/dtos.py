@@ -956,8 +956,14 @@ class SettingsSnapshot:
     download_source_ids: tuple[str, ...] = ()
     paddle_idle_seconds: int = 600
     mineru_idle_seconds: int = 600
+    revision: int = 0
+    recognition_device: str = "auto"
 
     def __post_init__(self) -> None:
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("invalid settings revision")
+        if self.recognition_device not in ("auto", "cpu", "directml"):
+            raise ValueError("invalid recognition device")
         for value in (self.paddle_idle_seconds, self.mineru_idle_seconds):
             if type(value) is not int or not 0 <= value <= 2147483647:
                 raise ValueError(
@@ -967,6 +973,8 @@ class SettingsSnapshot:
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "schema_version": self.schema_version,
+            "revision": self.revision,
+            "recognition_device": self.recognition_device,
             "paddle_idle_seconds": self.paddle_idle_seconds,
             "mineru_idle_seconds": self.mineru_idle_seconds,
             "residency": {

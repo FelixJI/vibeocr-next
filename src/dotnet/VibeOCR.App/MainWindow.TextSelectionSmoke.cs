@@ -28,12 +28,8 @@ public sealed partial class MainWindow
       if (screenshotSmokePicker is null || smokeSubmitAttempts is null ||
           smokeStartupEnsureAttempts is null || smokeInferenceAttached is null)
         throw new InvalidOperationException("Text selection smoke dependencies are missing.");
-      for (int attempt = 0; !smokeInferenceAttached(); attempt++)
-      {
-        if (attempt >= 21000)
-          throw new TimeoutException("Real Supervisor did not attach within 35 minutes.");
-        await Task.Delay(100);
-      }
+      if (smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
+        throw new InvalidOperationException("Cold capture attached or started a Runtime before OCR demand.");
       if (smokeSubmitAttempts() != 0)
         throw new InvalidOperationException("OCR was submitted before capture.");
       int ensuresBefore = smokeStartupEnsureAttempts();
@@ -55,7 +51,8 @@ public sealed partial class MainWindow
       await WaitForPinCountAsync(1);
       PinnedImageWindow purePin = pinnedImages.Single();
       string purePath = purePin.SmokeImagePath;
-      if (!File.Exists(purePath) || smokeSubmitAttempts() != 0)
+      if (!File.Exists(purePath) || smokeSubmitAttempts() != 0 ||
+          smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
         throw new InvalidOperationException("Pure pin submitted OCR or lost its PNG.");
       purePin.Close();
       await WaitForPinCountAsync(0);
@@ -78,7 +75,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Text capture has no synthetic evidence.");
       RecognitionTextLayerState firstLayer = await WaitForReadyTextLayerAsync(0);
       if (smokeSubmitAttempts() != 1 ||
-          smokeStartupEnsureAttempts() != ensuresBefore ||
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1 ||
           firstLayer.Lines is not { Count: > 0 } ||
           !firstLayer.Lines.Any(line => line.Text.Any(c => c is >= '一' and <= '龥')) ||
           !firstLayer.Lines.Any(line => line.Text.Contains("Vibe", StringComparison.OrdinalIgnoreCase)))
@@ -118,7 +115,7 @@ public sealed partial class MainWindow
       if (pinnedPaths.Distinct().Count() != 2 ||
           pinnedPaths.Any(path => !File.Exists(path)) ||
           smokeSubmitAttempts() != 1 ||
-          smokeStartupEnsureAttempts() != ensuresBefore)
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1)
         throw new InvalidOperationException("Text pins did not reuse the OCR layer and independent PNG leases.");
 
       foreach (PinnedImageWindow pin in oldPins)
@@ -216,7 +213,7 @@ public sealed partial class MainWindow
       if (secondBinding.SessionId != firstLayer.Binding?.SessionId ||
           secondBinding.Revision != edited.ScreenshotSession?.Revision ||
           smokeSubmitAttempts() != 2 ||
-          smokeStartupEnsureAttempts() != ensuresBefore)
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1)
         throw new InvalidOperationException("Edited PNG did not get one new bound OCR layer.");
       foreach (PinnedImageWindow pin in oldPins) await WaitForPinTextAsync(pin, present: false);
 

@@ -514,6 +514,29 @@ async def test_preload_rejects_unknown_pipeline(pdf_app, supervisor_token: str) 
 # ---------------------------------------------------------------------------
 
 
+async def test_cancelled_device_probe_keeps_committed_settings(
+    pdf_app, supervisor_token, monkeypatch
+):
+    from starlette.requests import Request
+    from vibeocr.runtime.recognition import device_probe
+
+    prepared = []
+    monkeypatch.setattr(device_probe, "prepare_device", prepared.append)
+
+    async def disconnected(_request):
+        return True
+
+    monkeypatch.setattr(Request, "is_disconnected", disconnected)
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        response = await http.put(
+            "/v2/settings", json={**before, "recognition_device": "cpu"}
+        )
+        assert response.status_code == 400
+        assert prepared == ["cpu"]
+        assert (await http.get("/v2/settings")).json() == before
+
+
 async def test_put_settings_rejects_invalid_json(
     pdf_app, supervisor_token: str
 ) -> None:
@@ -1578,7 +1601,7 @@ async def test_http_preserves_validated_engine_for_paddle_model_and_provider_opt
     )
     # 统一推理闭包：受管配方恒为 directml，device 只是请求内设备选择
     # （cpu/directml 同闭包切换）。
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
     monkeypatch.setattr(
         directml_devices,
         "hardware_adapters",
@@ -1634,7 +1657,7 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
             RecognitionModeAvailability.READY
         )
     )
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-cpu")
+    monkeypatch.delenv("VIBEOCR_PRODUCT_RUNTIME", raising=False)
     manifest = {
         "schema_version": 2,
         "request_id": "legacy-must-not-fallback",
@@ -1662,7 +1685,7 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
             files={"f": ("a.png", b"synthetic", "image/png")},
         )
     assert response.status_code == 400
-    assert "matching managed ONNX environment" in response.text
+    assert "product ONNX runtime" in response.text
 
 
 async def test_worker_settings_round_trip_and_old_client_omission_preserve_values(
@@ -1680,7 +1703,7 @@ async def test_worker_settings_round_trip_and_old_client_omission_preserve_value
         assert saved.status_code == 200
         legacy = {
             key: value
-            for key, value in changed.items()
+            for key, value in saved.json().items()
             if not key.endswith("idle_seconds")
         }
         old_client = await http.put("/v2/settings", json=legacy)
@@ -1689,10 +1712,11 @@ async def test_worker_settings_round_trip_and_old_client_omission_preserve_value
         assert old_client.json()["mineru_idle_seconds"] == 2147483647
         for value in [-1, True, 1.5, "600", 2147483648]:
             rejected = await http.put(
-                "/v2/settings", json={**changed, "paddle_idle_seconds": value}
+                "/v2/settings", json={**old_client.json(), "paddle_idle_seconds": value}
             )
             assert rejected.status_code == 400
-        assert (await http.get("/v2/settings")).json() == saved.json()
+        assert old_client.json()["revision"] == saved.json()["revision"] + 1
+        assert (await http.get("/v2/settings")).json() == old_client.json()
 
 
 async def test_release_busy_reports_accepted_work_protection(

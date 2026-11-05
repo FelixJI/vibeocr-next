@@ -33,17 +33,13 @@ foreach ($tool in @('dotnet', 'uv')) {
         throw "Runtime candidate smoke requires '$tool' on PATH"
     }
 }
-if ($env:VIBEOCR_RUNTIME_INSTALLER) {
-    throw 'VIBEOCR_RUNTIME_INSTALLER is set; refusing to smoke against a redirected runtime installer'
-}
-
 $sourceRoot = (Resolve-Path -LiteralPath $ProductRoot).Path
 foreach ($marker in @(
         'app\metadata\product-layout.json',
         'app\metadata\component-lock.json',
         'app\VibeOCR.WinUI.exe',
         'runtime\backend\runtime-manifest.json',
-        'runtime\installer\vibeocr-runtime-installer.exe'
+        'runtime\env\runtime-env\python.exe'
     )) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $marker) -PathType Leaf)) {
         throw "Runtime candidate is missing required marker '$marker': $sourceRoot"

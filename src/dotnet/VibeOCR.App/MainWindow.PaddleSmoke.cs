@@ -23,27 +23,14 @@ namespace VibeOCR.App;
 
 /// <summary>
 /// Goal #110 隔离候选专用五模式冒烟入口（VIBEOCR_SELF_TEST_SMOKE=paddle-modes-e2e）。
-/// 复用 ManagedEnvironmentSmoke/ScreenshotSmoke 的真实 helpers 与公共按钮/
+/// 复用 SmokeDom/ScreenshotSmoke 的真实 helpers 与公共按钮/
 /// 选择入口；截图输入来自本进程创建的置顶合成窗口，文件/批量/PDF 输入
-/// 来自隔离根内的合成 fixture，不读取真实桌面内容。配方由隔离参数选择，环境/模型拒绝按 blocked/failed 如实记录，
+/// 来自隔离根内的合成 fixture，不读取真实桌面内容。设备由隔离参数选择，设备/模型拒绝按 blocked/failed 如实记录，
 /// 不伪造通过；请求设备不等于 GPU 执行，须核对真实 worker session 诊断。
 /// </summary>
 public sealed partial class MainWindow
 {
-  // 隔离验收环境使用 ASCII 名，避免依赖所在卷是否启用 8.3 短名称。
-  private static string PaddleSmokeRecipe => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_RECIPE") ?? "paddleocr-ort-cpu";
-  private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
-    ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
-  private static bool PaddleSmokeInstalledRecipeMatches(ManagedEnvironment environment) =>
-    environment.Status == "installed" && environment.Recipe == PaddleSmokeRecipe;
-
-  private static ManagedEnvironment? FindPaddleSmokeEnvironment(ManagedEnvironmentList list) =>
-    list.Environments.FirstOrDefault(item => item.Id == list.ActiveId && PaddleSmokeInstalledRecipeMatches(item))
-    ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches)
-    ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName);
-
-  private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
-    ? "directml" : "cpu";
+  private static string PaddleSmokeDevice => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_DEVICE") ?? "cpu";
 
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
@@ -73,7 +60,7 @@ public sealed partial class MainWindow
   {
     string? path = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_HEALTH");
     string? phase = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PHASE");
-    // 仿 ManagedEnvironmentSmoke：health 文件必须位于本次候选父目录
+    // health 文件必须位于本次候选父目录
     // （隔离根）内，否则不是本进程的冒烟请求；固定输出拒绝覆盖已存在文件。
     string? healthPath = null;
     if (path is not null)
@@ -96,7 +83,7 @@ public sealed partial class MainWindow
       }
       healthPath = full;
     }
-    if (healthPath is null || phase is not ("install" or "recognize" or "inputs"))
+    if (healthPath is null || phase is not ("device" or "recognize" or "inputs"))
     {
       Close();
       return;
@@ -104,15 +91,14 @@ public sealed partial class MainWindow
     path = healthPath;
     try
     {
-      if (smokeEnvironmentSnapshot is null ||
-          smokeManagedSession is null || smokeInferenceAttached is null ||
+      if (smokeManagedSession is null || smokeInferenceAttached is null ||
           smokeSubmitAttempts is null || smokeLastJobId is null)
         throw new InvalidOperationException("Paddle smoke dependencies are missing.");
-      object evidence = phase == "install"
-        ? await RunPaddleSmokeInstallAsync()
+      object evidence = phase == "device"
+        ? await RunPaddleDeviceSmokeAsync()
         : await RunPaddleSmokeRecognizeAsync(phase == "inputs");
       string? previewPath = null;
-      if (phase != "install")
+      if (phase != "device")
       {
         previewPath = Path.ChangeExtension(path, ".png");
         using (new FileStream(previewPath, FileMode.CreateNew)) { }
@@ -129,7 +115,7 @@ public sealed partial class MainWindow
         phase,
         stage = paddleSmokeStage,
         mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
-        recipe = PaddleSmokeRecipe,
+        requested_device = PaddleSmokeDevice,
         model_preset = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET"),
         preview_path = previewPath,
         evidence,
@@ -141,7 +127,7 @@ public sealed partial class MainWindow
       // 失败路径保全：尽力保留本次合成输入已获取的证据与 workbench 预览
       // PNG；预览/写盘的任何异常都不掩盖原始失败（不新增报告框架）。
       string? failurePreviewPath = null;
-      if (phase != "install")
+      if (phase != "device")
       {
         try
         {
@@ -185,47 +171,27 @@ public sealed partial class MainWindow
 
   // ------------------------- phase: install -------------------------
 
-  private async Task<object> RunPaddleSmokeInstallAsync()
+  private async Task<object> RunPaddleDeviceSmokeAsync()
   {
-    RecordPaddleSmokeStage("wait environments");
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    int timeoutMinutes = ParsePaddleSmokeMinutes(
-      "VIBEOCR_PADDLE_SMOKE_INSTALL_TIMEOUT_MINUTES", 60);
-    // 等待启动与安装共享同一超时预算。
-    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
-    RecordPaddleSmokeStage("wait install executable");
-    await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    // 预构建运行时树：随包产品环境已安装就绪，本阶段只验证复用，不再驱动安装。
-    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
-      ?? throw new InvalidOperationException("Paddle smoke environment is missing.");
-    if (!PaddleSmokeInstalledRecipeMatches(environment))
-      throw new InvalidOperationException(
-        $"Prebuilt environment is not installed with {PaddleSmokeRecipe}: {environment.Status} ({environment.Reason}).");
+    ProductRuntimeSession session = await SelectPaddleSmokeDeviceAsync();
     paddleSmokeOutcome = "passed";
-    return new { reused = true, environment = SmokeEnvironmentEvidence(environment) };
+    return new { session.InstanceId, device = PaddleSmokeDevice, python = layout.RuntimePython };
   }
 
-  private async Task<SettingsWorkbenchState> PaddleSmokeSettingsStateAsync(
-    CancellationToken cancellation) =>
-    (await application.BootstrapAsync(cancellation))
-      .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
-
-  // 默认初始化完成、设置投影退出忙碌后才继续；单看会话附着不足以判断就绪。
-  private async Task WaitForPaddleSmokeInstallExecutableAsync(
-    CancellationToken cancellation)
+  private async Task<ProductRuntimeSession> SelectPaddleSmokeDeviceAsync()
   {
-    while (true)
-    {
-      if (smokeInferenceAttached!())
-      {
-        SettingsWorkbenchState settings = await PaddleSmokeSettingsStateAsync(cancellation);
-        if (!settings.EnvironmentBusy)
-          return;
-      }
-      await Task.Delay(500, cancellation);
-    }
+    RecordPaddleSmokeStage("prepare product device");
+    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
+    await ClickWorkbenchSmokeButtonAsync("检查识别服务");
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+    while (smokeManagedSession!() is null || !smokeInferenceAttached!()) await Task.Delay(100, timeout.Token);
+    ProductRuntimeSession session = smokeManagedSession()!;
+    await SelectSmokeValueAsync("#recognition-device", PaddleSmokeDevice);
+    while ((await session.Client.GetSettingsAsync(timeout.Token)).RecognitionDevice != PaddleSmokeDevice)
+      await Task.Delay(100, timeout.Token);
+    if (smokeManagedSession()?.InstanceId != session.InstanceId)
+      throw new InvalidOperationException("设备设置意外更换了 Supervisor。");
+    return session;
   }
 
   // ------------------------ phase: recognize ------------------------
@@ -252,41 +218,8 @@ public sealed partial class MainWindow
       .Split('|', StringSplitOptions.RemoveEmptyEntries);
     int timeoutMinutes = ParsePaddleSmokeMinutes("VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES", 40);
 
-    RecordPaddleSmokeStage("switch environment");
-    // 稳定 runtime 面板作导航证明：冷启动清单未到时不渲染环境 Select。
-    await NavigateSmokeAsync("设置", ".settings-runtime-panel");
-    await ClickManagedSmokeButtonAsync("查看环境清单");
-    ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(2));
-    ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
-      ?? throw new InvalidOperationException("No installed compatible Paddle smoke environment.");
-    if (!PaddleSmokeInstalledRecipeMatches(environment))
-      throw new InvalidOperationException(
-        $"Environment is not installed with {PaddleSmokeRecipe}: {environment.Status}.");
-    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
-    // Use the public backend action: the advanced row intentionally preserves
-    // the current selection, while this action carries the requested device.
-    await WaitForSmokeDomAsync(
-      "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
-      "if (!root) return false; if(root.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。')) return true; " +
-      "const b=Array.from(root.querySelectorAll('button')).find(b => " +
-      "['启动并验证当前环境','切换到此环境并启动验证'].includes(b.textContent?.trim()) && !b.disabled); " +
-      "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
-    // The id can stay the same while the provider changes. Wait for the
-    // device-aware public projection before accepting the new service session.
-    await WaitForSmokeDomAsync(
-      "document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section')" +
-      "?.textContent.includes('该兼容环境已是当前环境并通过启动验证，无需重装。') === true",
-      TimeSpan.FromMinutes(2));
-    await WaitForSmokeSessionAsync(environment.Id, requireProjection: false);
-    await WaitForSmokeDomAsync(
-      "document.querySelector('.settings-runtime-panel')?.textContent.includes('运行时已就绪') === true",
-      TimeSpan.FromMinutes(2));
-
-    // 离开设置页以结束只读兼容查询，再核对同一会话的完整就绪投影。
+    ProductRuntimeSession session = await SelectPaddleSmokeDeviceAsync();
     await NavigateSmokeAsync("单次识别", "button");
-    ManagedEnvironmentSession session = await WaitForSmokeSessionAsync(environment.Id);
-
-    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
     {
       WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand(mode)), CancellationToken.None);
@@ -326,10 +259,9 @@ public sealed partial class MainWindow
     {
       await SelectSmokeValueAsync(optionSelector, optionValue);
     }
-    if (PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal))
-      await SelectSmokeValueAsync($"#{mode}-model-preset",
+    await SelectSmokeValueAsync($"#{mode}-model-preset",
         PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small");
-    await ClickManagedSmokeButtonAsync("保存参数");
+    await ClickWorkbenchSmokeButtonAsync("保存参数");
     await WaitForSmokeDomAsync(
       "document.querySelector('details.recognition-options output')?.textContent" +
       ".includes('参数已保存') === true",
@@ -423,7 +355,7 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddleSmokeInputsAsync(
     string mode, string pipeline, string fixture, string optionName,
     string optionValue, string availability, string[] tokens,
-    string[] exportButtons, ManagedEnvironmentSession session,
+    string[] exportButtons, ProductRuntimeSession session,
     int timeoutMinutes)
   {
     string kind = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_INPUT_KIND");
@@ -444,14 +376,14 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddleFileInputAsync(
     string mode, string pipeline, string fixture, string optionName,
     string optionValue, string availability, string[] tokens,
-    string[] exportButtons, ManagedEnvironmentSession session,
+    string[] exportButtons, ProductRuntimeSession session,
     int timeoutMinutes)
   {
     if (Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
       throw new InvalidOperationException("Single-file input requires an image fixture.");
     int before = smokeSubmitAttempts!();
     RecordPaddleSmokeStage("select image via public picker");
-    await ClickManagedSmokeButtonAsync("选择图片");
+    await ClickWorkbenchSmokeButtonAsync("选择图片");
     await CompletePaddleOpenPickerAsync(fixture);
     RecordPaddleSmokeStage($"wait file recognition {mode}");
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
@@ -463,7 +395,7 @@ public sealed partial class MainWindow
 
   private async Task<object> RunPaddleBatchInputAsync(
     string mode, string pipeline, string fixture, string optionName,
-    string optionValue, ManagedEnvironmentSession session, int timeoutMinutes)
+    string optionValue, ProductRuntimeSession session, int timeoutMinutes)
   {
     string second = ValidatePaddleSmokeOwnedPath(
       RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE"),
@@ -478,7 +410,7 @@ public sealed partial class MainWindow
     foreach (string path in new[] { fixture, second })
     {
       RecordPaddleSmokeStage($"batch add {Path.GetFileName(path)}");
-      await ClickManagedSmokeButtonAsync("添加文件");
+      await ClickWorkbenchSmokeButtonAsync("添加文件");
       await CompletePaddleOpenPickerAsync(path);
     }
     BatchWorkbenchState queued = await WaitForPaddleBatchAsync(
@@ -489,7 +421,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Public batch queue does not contain both fixtures.");
     int before = smokeSubmitAttempts!();
     RecordPaddleSmokeStage($"batch recognize {mode}");
-    await ClickManagedSmokeButtonAsync("开始识别");
+    await ClickWorkbenchSmokeButtonAsync("开始识别");
     BatchWorkbenchState terminal = await WaitForPaddleBatchAsync(
       state => !state.IsRunning && state.CompletedCount + state.FailedCount == 2,
       TimeSpan.FromMinutes(timeoutMinutes));
@@ -531,7 +463,7 @@ public sealed partial class MainWindow
 
   private async Task<object> RunPaddlePdfInputAsync(
     string mode, string pipeline, string fixture, string optionName,
-    string optionValue, ManagedEnvironmentSession session, int timeoutMinutes)
+    string optionValue, ProductRuntimeSession session, int timeoutMinutes)
   {
     if (!Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
       throw new InvalidOperationException("PDF input requires a PDF fixture.");
@@ -540,7 +472,7 @@ public sealed partial class MainWindow
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     RecordPaddleSmokeStage("open PDF via public picker");
-    await ClickManagedSmokeButtonAsync("打开 PDF");
+    await ClickWorkbenchSmokeButtonAsync("打开 PDF");
     await CompletePaddleOpenPickerAsync(fixture);
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(
       state => !state.IsBusy && state.PageCount > 0,
@@ -552,7 +484,7 @@ public sealed partial class MainWindow
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const e=document.querySelector('input[name=renderDpi]'); e.closest('details').open=true; })()");
       await EnterSmokeTextAsync("input[name=renderDpi]", "216");
-      await ClickManagedSmokeButtonAsync("保存 PDF 参数");
+      await ClickWorkbenchSmokeButtonAsync("保存 PDF 参数");
       opened = await WaitForPaddlePdfAsync(
         state => !state.IsBusy && state.ProcessingSettings?.RenderDpi == 216 &&
           state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
@@ -562,7 +494,7 @@ public sealed partial class MainWindow
     if (structurePages)
     {
       RecordPaddleSmokeStage("pdf select both pages");
-      await ClickManagedSmokeButtonAsync("全选页面");
+      await ClickWorkbenchSmokeButtonAsync("全选页面");
       opened = await WaitForPaddlePdfAsync(PaddleSmokePdfHasBothPages, TimeSpan.FromSeconds(30));
     }
     else if (opened.SelectedPages?.Contains(0) != true)
@@ -578,7 +510,7 @@ public sealed partial class MainWindow
     bool textLayer = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER") == "1";
     if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
     RecordPaddleSmokeStage($"pdf recognize selected pages {mode}");
-    await ClickManagedSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
+    await ClickWorkbenchSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
       state => !state.IsBusy &&
         pageIndexes.All(index => state.Pages?.FirstOrDefault(page => page.Index == index)?.StatusCode
@@ -696,7 +628,7 @@ public sealed partial class MainWindow
     double scale = WindowGeometryPolicy.GetWindowScale(WinRT.Interop.WindowNative.GetWindowHandle(this));
     AppWindow.Resize(new SizeInt32(WindowGeometryPolicy.ScaleToPhysical(640, scale), WindowGeometryPolicy.ScaleToPhysical(768, scale)));
     await WaitForSmokeDomAsync("document.querySelectorAll('.pdf-text-box.ocr').length >= 2 && !!document.querySelector('.pdf-inspection-sheet img')?.naturalWidth", TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("适应页面");
+    await ClickWorkbenchSmokeButtonAsync("适应页面");
     string indicesJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
       (() => [...document.querySelectorAll('.pdf-text-box.ocr')]
         .sort((a,b) => b.getBoundingClientRect().width*b.getBoundingClientRect().height-a.getBoundingClientRect().width*a.getBoundingClientRect().height)
@@ -725,15 +657,15 @@ public sealed partial class MainWindow
     }
     await SelectBlockAsync(indices[0]);
     await SetDraftAsync("CANCELLED_DRAFT201");
-    await ClickManagedSmokeButtonAsync("取消校正");
+    await ClickWorkbenchSmokeButtonAsync("取消校正");
     PdfWorkbenchState cancelled = await WaitForPaddlePdfAsync(state => !state.IsBusy, TimeSpan.FromSeconds(30));
     if (cancelled.Revision != layered.Revision) throw new InvalidOperationException("Cancelling a draft changed PDF revision.");
-    await ClickManagedSmokeButtonAsync("插入空白页");
+    await ClickWorkbenchSmokeButtonAsync("插入空白页");
     PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == layered.PageCount + 1, TimeSpan.FromSeconds(30));
     await SelectBlockAsync(indices[0]); await SetDraftAsync("PAGE_SWITCH_DRAFT201");
-    await ClickManagedSmokeButtonAsync("下一页");
+    await ClickWorkbenchSmokeButtonAsync("下一页");
     await WaitForSmokeDomAsync("!document.querySelector('textarea[aria-label=\"校正文字\"]') && document.querySelector('.pdf-inspection-sheet img')?.alt.includes('第 2 页')", TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("上一页");
+    await ClickWorkbenchSmokeButtonAsync("上一页");
     await WaitForPaddlePdfAsync(state => state.SelectedPage == 0 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     string[] replacements = [
       "中文校正长句：高清检查中的可搜索文字应完整保存，保留扫描图形与其他文字块，并在重新打开后找到末尾标记CNTAIL201。",
@@ -754,7 +686,7 @@ public sealed partial class MainWindow
         """);
       if (reachable != "true") throw new InvalidOperationException("Correction button is unreachable in the narrow viewport.");
       long before = edited.Revision;
-      await ClickManagedSmokeButtonAsync("提交校正");
+      await ClickWorkbenchSmokeButtonAsync("提交校正");
       edited = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.SessionId == inserted.SessionId && state.SelectedPage == 0 && state.Revision > before && state.PageInspectStatusCode == "pdf.inspect.ready" && state.PagePreview is not null && state.PageInspect is not null, TimeSpan.FromSeconds(30));
       string expectedPreview = JsonSerializer.Serialize(edited.PagePreview!.Url);
       await WaitForSmokeDomAsync($"(() => {{ const image=document.querySelector('.pdf-inspection-sheet img'); return image?.src === {expectedPreview} && image.complete && image.naturalWidth > 160 && image.naturalHeight > 0 && document.querySelectorAll('.pdf-text-box.ocr').length >= 2; }})()", TimeSpan.FromSeconds(30));
@@ -790,16 +722,16 @@ public sealed partial class MainWindow
       string continuedText = replacements[0] + " AFTER_SAVE_AS202";
       await SetDraftAsync(continuedText);
       long savedRevision = edited.Revision;
-      await ClickManagedSmokeButtonAsync("提交校正");
+      await ClickWorkbenchSmokeButtonAsync("提交校正");
       PdfWorkbenchState continued = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > savedRevision && state.IsModified && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
       edits.Add(new { block_index = indices[0], old_text = replacements[0], new_text = continuedText, continued.Revision, continued.IsModified });
-      await ClickManagedSmokeButtonAsync("保存");
+      await ClickWorkbenchSmokeButtonAsync("保存");
       await WaitForPaddlePdfAsync(state => !state.IsBusy && !state.IsModified && state.DocumentId == continued.DocumentId, TimeSpan.FromMinutes(2));
       return new { edits, saved, continued_revision = continued.Revision, continued.DocumentId, continued.PageCount, editing_screenshot = editingScreenshot, window_scale = scale, viewport = viewportEvidence };
     }
-    await ClickManagedSmokeButtonAsync("关闭文档");
+    await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(state => state.PageCount == 0, TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(outputPath);
+    await ClickWorkbenchSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(outputPath);
     PdfWorkbenchState reopened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 2 && state.DetectedCount == 2 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     await WaitForSmokeDomAsync("document.querySelectorAll('.pdf-text-box.native').length > 0", TimeSpan.FromSeconds(30));
     string reopenedJson = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("[...document.querySelectorAll('.pdf-text-box')].map(e=>e.getAttribute('aria-label'))");
@@ -833,7 +765,7 @@ public sealed partial class MainWindow
     }
     async Task SelectPageAsync(int page)
     {
-      await ClickManagedSmokeButtonAsync("取消选择");
+      await ClickWorkbenchSmokeButtonAsync("取消选择");
       string selector = $"input[aria-label='选择第 {page + 1} 页']";
       await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({JsonSerializer.Serialize(selector)}).click()");
@@ -863,7 +795,7 @@ public sealed partial class MainWindow
           """);
         if (armed != "true") throw new InvalidOperationException("Export cancellation observer was not armed.");
       }
-      await ClickManagedSmokeButtonAsync(retry ? "重试未完成项" : "选择目录并导出");
+      await ClickWorkbenchSmokeButtonAsync(retry ? "重试未完成项" : "选择目录并导出");
       nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
       try { await CompletePaddlePickerAsync(dialog, directory, isFolder: true); }
       catch { CancelPaddleDialog(dialog); throw; }
@@ -884,17 +816,17 @@ public sealed partial class MainWindow
       """);
     if (overwritten != "true") throw new InvalidOperationException("Explicit overwrite was not enabled through its public checkbox.");
     long revision = layered.Revision;
-    await ClickManagedSmokeButtonAsync("添加选中页文字层");
+    await ClickWorkbenchSmokeButtonAsync("添加选中页文字层");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > revision && state.AddedCount == 1, TimeSpan.FromMinutes(timeoutMinutes));
     await SelectPageAsync(1);
-    await ClickManagedSmokeButtonAsync("删除选中文字层");
-    await ClickManagedSmokeButtonAsync("确认删除文字层");
+    await ClickWorkbenchSmokeButtonAsync("删除选中文字层");
+    await ClickWorkbenchSmokeButtonAsync("确认删除文字层");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages?.FirstOrDefault(page => page.Index == 1)?.HasTextLayer == false, TimeSpan.FromSeconds(30));
     await SelectPageAsync(0);
-    await ClickManagedSmokeButtonAsync("自动文字朝向");
+    await ClickWorkbenchSmokeButtonAsync("自动文字朝向");
     PdfWorkbenchState oriented = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("失败 0 页", StringComparison.Ordinal) && state.Summary.Contains("未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
     await EnterSmokeTextAsync("#pdf-insert-after", "75");
-    await ClickManagedSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
+    await ClickWorkbenchSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
     PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 76, TimeSpan.FromSeconds(30));
     // Reorder within the active window, then restore the first OCR page for HD editing.
     RecordPaddleSmokeStage("workspace move first page backward");
@@ -907,25 +839,25 @@ public sealed partial class MainWindow
     object editing = await RunPaddlePdfEditingAsync(ready, workspace: true);
     JsonElement editEvidence = JsonSerializer.SerializeToElement(editing);
     string saveTarget = editEvidence.GetProperty("saved").GetProperty("file").GetString()!;
-    await ClickManagedSmokeButtonAsync("下一组");
+    await ClickWorkbenchSmokeButtonAsync("下一组");
     await WaitForPaddlePdfAsync(state => state.WindowStart == 64 && state.Pages?.Count == 13, TimeSpan.FromSeconds(30));
     await SampleResourcesAsync("tail-window-77");
-    await ClickManagedSmokeButtonAsync("上一组");
+    await ClickWorkbenchSmokeButtonAsync("上一组");
     await WaitForPaddlePdfAsync(state => state.WindowStart == 0 && state.Pages?.Count == 64, TimeSpan.FromSeconds(30));
     await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("document.querySelector('button[aria-label=\"放大页面\"]').click()");
-    await ClickManagedSmokeButtonAsync("添加 PDF"); await CompletePaddleOpenPickerAsync(second);
+    await ClickWorkbenchSmokeButtonAsync("添加 PDF"); await CompletePaddleOpenPickerAsync(second);
     PdfWorkbenchState b = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 3 && state.Documents?.Count == 2 && state.DocumentId != layered.DocumentId && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     string bId = b.DocumentId!;
     await SampleResourcesAsync("active-b-3");
-    await ClickManagedSmokeButtonAsync("顺时针 90°");
+    await ClickWorkbenchSmokeButtonAsync("顺时针 90°");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.IsModified, TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("逆时针 90°");
+    await ClickWorkbenchSmokeButtonAsync("逆时针 90°");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages![0].Rotation == 0, TimeSpan.FromSeconds(30));
     await ActivateAsync(0, layered.DocumentId);
     await SampleResourcesAsync("reactivate-a-77");
-    await ClickManagedSmokeButtonAsync("顺时针 90°");
+    await ClickWorkbenchSmokeButtonAsync("顺时针 90°");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.IsModified, TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("逆时针 90°");
+    await ClickWorkbenchSmokeButtonAsync("逆时针 90°");
     PdfWorkbenchState beforeCopies = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages![0].Rotation == 0, TimeSpan.FromSeconds(30));
     if (beforeCopies.Documents!.Any(document => !document.IsModified)) throw new InvalidOperationException("Both source entries must remain dirty before copy export.");
     RecordPaddleSmokeStage("workspace real window exit confirmation cancelled");
@@ -973,14 +905,14 @@ public sealed partial class MainWindow
     object aSaved = await SaveCurrentWorkspaceTargetAsync(saveTarget);
     await ActivateAsync(1, bId);
     object bSaved = await RunPaddlePdfSaveAsync("workspace-b");
-    await ClickManagedSmokeButtonAsync("关闭文档");
+    await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(state => state.Documents?.Count == 1, TimeSpan.FromSeconds(30));
-    await ClickManagedSmokeButtonAsync("关闭文档");
+    await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(state => state.PageCount == 0, TimeSpan.FromSeconds(30));
     string reopenedTarget = completedBatch.ExportItems!.First(item => item.DocumentId == layered.DocumentId).Output!;
     // Public state exposes basenames; resolve only inside the synthetic export directory.
     reopenedTarget = Path.Combine(cancelDirectory, reopenedTarget);
-    await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(reopenedTarget);
+    await ClickWorkbenchSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(reopenedTarget);
     PdfWorkbenchState reopened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 77 && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     await SampleResourcesAsync("reopened-copy-a");
     return new { editing, oriented.Summary, original_paths = new[] { fixture, second }, a_saved = aSaved, b_saved = bSaved,
@@ -993,7 +925,7 @@ public sealed partial class MainWindow
 
   private async Task<object> SaveCurrentWorkspaceTargetAsync(string target)
   {
-    await ClickManagedSmokeButtonAsync("保存");
+    await ClickWorkbenchSmokeButtonAsync("保存");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && !state.IsModified, TimeSpan.FromMinutes(2));
     if (!File.Exists(target)) throw new InvalidOperationException("Current target disappeared after save.");
     return new { file = target, bytes = new FileInfo(target).Length, saved_via = "current-target" };
@@ -1012,56 +944,56 @@ public sealed partial class MainWindow
     }
   }
 
-  private async Task<object> RunPaddlePdfOperationsAsync(string mode, string fixture, ManagedEnvironmentSession session, int timeoutMinutes)
+  private async Task<object> RunPaddlePdfOperationsAsync(string mode, string fixture, ProductRuntimeSession session, int timeoutMinutes)
   {
     if (mode != "paddle_text") throw new InvalidOperationException("PDF operations smoke requires Paddle text OCR.");
     await NavigateSmokeAsync("PDF", "button");
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     RecordPaddleSmokeStage("open eight orientation pages via public picker");
-    await ClickManagedSmokeButtonAsync("打开 PDF");
+    await ClickWorkbenchSmokeButtonAsync("打开 PDF");
     await CompletePaddleOpenPickerAsync(fixture);
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 8, TimeSpan.FromMinutes(2));
-    await ClickManagedSmokeButtonAsync("全选页面");
+    await ClickWorkbenchSmokeButtonAsync("全选页面");
     await SelectSmokeValueAsync("#pdf-operation-range", "all");
     int before = smokeSubmitAttempts!();
     RecordPaddleSmokeStage("correct all eight orientation pages through public UI");
-    await ClickManagedSmokeButtonAsync("自动文字朝向");
+    await ClickWorkbenchSmokeButtonAsync("自动文字朝向");
     PdfWorkbenchState corrected = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("已纠正 6 页、无需处理 2 页、失败 0 页、未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
     int[] expectedRotations = [0, 0, 270, 270, 180, 180, 90, 90];
     if (corrected.Pages is null || !corrected.Pages.Select(page => page.Rotation).SequenceEqual(expectedRotations) || smokeSubmitAttempts!() - before != 8)
       throw new InvalidOperationException($"Orientation page/job mapping failed: {JsonSerializer.Serialize(corrected)}");
     object correctedJob = await ObservePaddleInputJobAsync(session, "OCR", "local_models_only", "true", smokeSubmitAttempts!() - 1, 1);
     RecordPaddleSmokeStage("repeat orientation and verify all eight pages are skipped");
-    await ClickManagedSmokeButtonAsync("自动文字朝向");
+    await ClickWorkbenchSmokeButtonAsync("自动文字朝向");
     PdfWorkbenchState repeated = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Summary.Contains("已纠正 0 页、无需处理 8 页、失败 0 页、未处理 0 页", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
     object repeatedJob = await ObservePaddleInputJobAsync(session, "OCR", "local_models_only", "true", smokeSubmitAttempts!() - 1, 1);
     object orientationSaved = await RunPaddlePdfSaveAsync("orientation");
     paddleSmokePartialEvidence = new { opened, corrected, repeated, corrected_job = correctedJob, repeated_job = repeatedJob, orientation_saved = orientationSaved };
 
-    await ClickManagedSmokeButtonAsync("关闭文档");
+    await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 0, TimeSpan.FromMinutes(2));
     string fixtures = Path.GetDirectoryName(fixture)!;
     string scanned = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "document_scan.pdf"), "PDF operations scan fixture");
     string external = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "document_mixed.pdf"), "PDF operations insertion fixture");
     RecordPaddleSmokeStage("add T1 text layer before structure operations");
-    await ClickManagedSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(scanned);
+    await ClickWorkbenchSmokeButtonAsync("打开 PDF"); await CompletePaddleOpenPickerAsync(scanned);
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 1 && state.CanAddTextLayer, TimeSpan.FromMinutes(2));
     // Recognition mode belongs to each document; the newly opened scan has no task override.
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.TaskEngine == mode, TimeSpan.FromMinutes(2));
-    await ClickManagedSmokeButtonAsync("添加选中页文字层");
+    await ClickWorkbenchSmokeButtonAsync("添加选中页文字层");
     PdfWorkbenchState layered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.AddedCount == 1 && state.IsModified, TimeSpan.FromMinutes(timeoutMinutes));
     long revision = layered.Revision;
-    await ClickManagedSmokeButtonAsync("顺时针 90°");
+    await ClickWorkbenchSmokeButtonAsync("顺时针 90°");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > revision, TimeSpan.FromMinutes(2));
     await EnterSmokeTextAsync("#pdf-insert-after", "1");
     await EnterSmokeTextAsync("#pdf-blank-width", "640");
     await EnterSmokeTextAsync("#pdf-blank-height", "480");
-    await ClickManagedSmokeButtonAsync("插入空白页");
+    await ClickWorkbenchSmokeButtonAsync("插入空白页");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 2, TimeSpan.FromMinutes(2));
-    await ClickManagedSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
+    await ClickWorkbenchSmokeButtonAsync("插入其他 PDF"); await CompletePaddleOpenPickerAsync(external);
     PdfWorkbenchState inserted = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.PageCount == 3, TimeSpan.FromMinutes(2));
     if (inserted.Pages is not { Count: 3 } insertedPages || insertedPages[0].AddedThisSession != true || insertedPages[1].HasTextLayer != true || insertedPages[2].Width != 640 || insertedPages[2].Height != 480)
       throw new InvalidOperationException("Inserted PDF/page metadata did not preserve the original OCR page.");
@@ -1075,7 +1007,7 @@ public sealed partial class MainWindow
     PdfWorkbenchState reordered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages?[2].AddedThisSession == true, TimeSpan.FromMinutes(2));
     if (reordered.SelectedPages is null || !reordered.SelectedPages.SequenceEqual([2])) throw new InvalidOperationException("Page selection did not follow OCR page identity.");
     RecordPaddleSmokeStage("continue OCR on current rotated revision");
-    await ClickManagedSmokeButtonAsync("提取/解析选中页");
+    await ClickWorkbenchSmokeButtonAsync("提取/解析选中页");
     PdfWorkbenchState continued = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Pages?[2].StatusCode == "pdf.page.done" && state.Summary.StartsWith("已提取/解析", StringComparison.Ordinal), TimeSpan.FromMinutes(timeoutMinutes));
     object combinedSaved = await RunPaddlePdfSaveAsync("operations");
     paddleSmokeOutcome = "passed";
@@ -1115,7 +1047,7 @@ public sealed partial class MainWindow
   }
 
   private async Task<object> ObservePaddleInputJobAsync(
-    ManagedEnvironmentSession session, string pipeline, string optionName,
+    ProductRuntimeSession session, string pipeline, string optionName,
     string optionValue, int before, int itemCount)
   {
     string? jobId = smokeLastJobId!();
@@ -1129,8 +1061,7 @@ public sealed partial class MainWindow
       options.TryGetValue(optionName, out JsonElement value) &&
       NormalizePaddleSmokeJson(value) == optionValue;
     if (selection?.PipelineId.ToString() != pipeline ||
-        snapshot.EnvironmentId != session.EnvironmentId ||
-        snapshot.EnvironmentRevision != session.Revision ||
+        snapshot.InstanceId != session.InstanceId ||
         !optionRecorded ||
         snapshot.Items.Count != itemCount || snapshot.Summary.Succeeded != itemCount ||
         snapshot.Summary.Failed != 0)
@@ -1139,7 +1070,7 @@ public sealed partial class MainWindow
     return new
     {
       task_id = jobId, snapshot.State, snapshot.Pipeline,
-      snapshot.EnvironmentId, snapshot.EnvironmentRevision,
+      snapshot.InstanceId,
       snapshot.Summary, snapshot.Items,
       // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
       // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
@@ -1226,7 +1157,7 @@ public sealed partial class MainWindow
     string availability,
     string[] tokens,
     string[] exportButtons,
-    ManagedEnvironmentSession session,
+    ProductRuntimeSession session,
     int submitsBefore,
     RecognitionWorkbenchState terminal,
     string? jobId,
@@ -1257,8 +1188,7 @@ public sealed partial class MainWindow
       if (mode == "paddle_structure" && options is not null &&
           new[] { "use_formula_recognition", "use_seal_recognition", "use_chart_recognition" }.Any(options.ContainsKey))
         throw new InvalidOperationException("Retired structure options were submitted.");
-      if (observed.Snapshot.EnvironmentId != session.EnvironmentId ||
-          observed.Snapshot.EnvironmentRevision != session.Revision)
+      if (observed.Snapshot.InstanceId != session.InstanceId)
         throw new InvalidOperationException($"Job environment binding mismatch for {jobId}.");
       if (mode == "paddle_structure" &&
           Path.GetFileName(PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_FIXTURE")) == "document_mixed.png")
@@ -1286,8 +1216,7 @@ public sealed partial class MainWindow
         // 明确局限：这里是 job 请求侧 wire 记录，证明选项随请求到达
         // supervisor 并归属该 job；不等于 worker 内部消费证据。
         options_evidence_note = "request-side wire record; worker-side consumption not proven by this smoke",
-        environment_id = observed.Snapshot.EnvironmentId,
-        environment_revision = observed.Snapshot.EnvironmentRevision,
+        instance_id = observed.Snapshot.InstanceId,
         summary = observed.Snapshot.Summary,
         // 仅合成输入：ItemOutcome 原始返回（ItemId/PayloadType/Payload），
         // broker JSON 随 App 退出被清理，证据落 health 文件供核对上游结构。
@@ -1424,9 +1353,7 @@ public sealed partial class MainWindow
       ui,
       environment = new
       {
-        id = session.EnvironmentId,
-        revision = session.Revision,
-        recipe = PaddleSmokeRecipe,
+        instance_id = session.InstanceId,
         requested_device = requestedDevice,
         // 请求和配方不能单独证明 GPU 执行，需核对真实 worker session。
         gpu = "UNVERIFIED",
@@ -1629,7 +1556,7 @@ public sealed partial class MainWindow
 
   private async Task ClickPaddleExportMenuAsync(string triggerLabel, string itemLabel)
   {
-    await ClickManagedSmokeButtonAsync(triggerLabel);
+    await ClickWorkbenchSmokeButtonAsync(triggerLabel);
     // Fluent MenuItem renders a menuitem, not a button; use the public open menu.
     await WaitForSmokeDomAsync("(() => { const item = Array.from(" +
       "document.querySelectorAll('[role=menu] [role=menuitem]')).find(item => " +
@@ -1707,7 +1634,7 @@ public sealed partial class MainWindow
     if (File.Exists(target))
       throw new InvalidOperationException($"PDF save target already exists: {target}");
     RecordPaddleSmokeStage("save PDF via public picker");
-    await ClickManagedSmokeButtonAsync("另存为并切换保存目标");
+    await ClickWorkbenchSmokeButtonAsync("另存为并切换保存目标");
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
@@ -1939,17 +1866,6 @@ public sealed partial class MainWindow
   {
     string? raw = PaddleSmokeEnv(name);
     return int.TryParse(raw, out int value) && value > 0 ? value : fallback;
-  }
-
-  private async Task<ManagedEnvironmentList> WaitForPaddleSmokeSnapshotAsync(TimeSpan timeout)
-  {
-    using var cancellation = new CancellationTokenSource(timeout);
-    while (true)
-    {
-      ManagedEnvironmentList? list = smokeEnvironmentSnapshot!();
-      if (list is not null) return list;
-      await Task.Delay(100, cancellation.Token);
-    }
   }
 
   /// <summary>

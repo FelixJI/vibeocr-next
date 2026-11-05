@@ -87,11 +87,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
 
     public SettingsViewModel(
         IInferenceClient inference,
-        RuntimeStatusViewModel? runtimeStatus = null,
-        ManagedEnvironmentSettings? environments = null)
+        RuntimeStatusViewModel? runtimeStatus = null)
     {
         _inference = inference ?? throw new ArgumentNullException(nameof(inference));
-        Environments = environments;
         RuntimeStatus = runtimeStatus ?? new RuntimeStatusViewModel();
     }
 
@@ -103,7 +101,20 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public ObservableCollection<ResidencyEntry> ResidencyEntries { get; } = [];
     public ObservableCollection<PipelineSpec> ResidencyPipelines { get; } = [];
     public RuntimeStatusViewModel RuntimeStatus { get; }
-    public ManagedEnvironmentSettings? Environments { get; }
+    public string? RecognitionDevice { get; private set; }
+
+    public async Task SetRecognitionDeviceAsync(string device, CancellationToken cancellationToken)
+    {
+        await _settingsGate.WaitAsync(cancellationToken);
+        try
+        {
+            SettingsSnapshot current = await _inference.GetSettingsAsync(cancellationToken);
+            SettingsSnapshot updated = await _inference.UpdateSettingsAsync(current with { RecognitionDevice = device }, cancellationToken);
+            RecognitionDevice = updated.RecognitionDevice;
+            Status = "已保存计算设备。";
+        }
+        finally { _settingsGate.Release(); }
+    }
     public string WorkerSettingsWarning { get; private set; } = "";
     public int PaddleIdleSeconds { get; private set; } = 600;
     public int MineruIdleSeconds { get; private set; } = 600;
@@ -186,14 +197,8 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     internal RecognitionSelectionSnapshot? RecognitionSelection =>
         Volatile.Read(ref _recognitionSelection);
 
-    public Task LoadSnapshotAsync(CancellationToken cancellationToken) =>
-        LoadSnapshotAsync(refreshEnvironments: true, cancellationToken);
-
-    /// <summary>refreshEnvironments=false 不刷环境列表，保留其根因失败文案。</summary>
-    public async Task LoadSnapshotAsync(bool refreshEnvironments, CancellationToken cancellationToken)
+    public async Task LoadSnapshotAsync(CancellationToken cancellationToken)
     {
-        if (refreshEnvironments && Environments is not null)
-            await Environments.RefreshAsync(cancellationToken);
         long generation = BeginBusy("正在读取模型驻留状态");
         try
         {
@@ -220,7 +225,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 PropertyChanged?.Invoke(this, new(nameof(DefaultTtlSeconds)));
                 PropertyChanged?.Invoke(this, new(nameof(VramTotalMb)));
                 PropertyChanged?.Invoke(this, new(nameof(VramUsedMb)));
-                Status = "Worker 状态已刷新；磁盘模型与已安装环境保持不变。";
+                Status = "Worker 状态已刷新。";
             }
             catch (NotSupportedException)
             {
@@ -646,18 +651,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// 但设置与目录服务运行在已安装的运行环境里。环境证据来自 Runtime
     /// 权威快照，宿主不自行推断依赖图，也不默认安装任何引擎。
     /// </summary>
-    internal string MineruCatalogUnavailableStatus()
-    {
-        ManagedEnvironmentList? snapshot = Environments?.Snapshot;
-        if (snapshot is null)
-            return "运行时目录尚未加载，请先刷新运行时";
-        bool hasInstalledActive = snapshot.ActiveId is { } activeId &&
-            snapshot.Environments.Any(item => item.Id == activeId &&
-                string.Equals(item.Status, "installed", StringComparison.Ordinal));
-        return hasInstalledActive
-            ? "运行时目录尚未加载，识别服务可能正在启动，请稍后重新检查状态。"
-            : "当前没有已启动的运行环境承载识别服务。远程 MinerU 不需要本地 MinerU/PaddleOCR 依赖，但连接配置由识别服务保存：可在 MinerU 连接区启用远程模式，自动从安装包准备基础服务。";
-    }
+    internal string MineruCatalogUnavailableStatus() => "运行时目录尚未加载，请先启动识别服务。";
 
     /// <summary>
     /// 远程准备失败的本地化：仅对 Runtime 白名单化的 ValidationError
@@ -727,6 +721,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // succeeds. Concurrent bootstrap/execution callers then observe the
             // same selection instead of a partially projected catalog.
             WorkerSettingsWarning = settings.Extra.TryGetValue("worker_settings_error", out JsonElement workerError) && workerError.ValueKind == JsonValueKind.String ? workerError.GetString() ?? "" : "";
+            RecognitionDevice = settings.RecognitionDevice;
             PaddleIdleSeconds = settings.PaddleIdleSeconds;
             MineruIdleSeconds = settings.MineruIdleSeconds;
             _selectedSourceIds = selectedSourceIds;

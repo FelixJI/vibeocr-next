@@ -1,17 +1,4 @@
-"""Contract tests for the runtime.component-selection.v1 protocol extension.
-
-Wire decisions under test:
-
-* The variant catalog groups optional feature dependencies by feature and
-  accelerator; feature ids never appear in requests and plain-text OCR
-  features reuse the OcrEngineId wire values.
-* The manual install scope is a capability-protected ``install_component_ids``
-  field, distinct from the repair-scope ``component_ids``; unknown ids fail
-  closed with ``RUNTIME_COMPONENT_UNKNOWN`` and the dependency closure is
-  reported honestly through requested/effective component ids.
-* Omitting the field selects the server default set (clients must omit it
-  entirely when the runtime does not declare the capability).
-"""
+"""Read compatibility for historical HTTP component-selection descriptors and errors."""
 
 from __future__ import annotations
 
@@ -21,9 +8,6 @@ from pathlib import Path
 
 import jsonschema
 from vibeocr.runtime_contracts.generated import ALL_CAPABILITIES, wire_types
-from vibeocr.runtime_contracts.generated.capabilities import (
-    RUNTIME_COMPONENT_SELECTION_V1,
-)
 from vibeocr.runtime_contracts.generated.error_codes import (
     ERROR_REGISTRY,
     RuntimeErrorCode,
@@ -39,10 +23,6 @@ COMPONENT_SELECTION_ERRORS = {
 
 def _spec() -> dict:
     return json.loads((V2 / "openapi.yaml").read_text(encoding="utf-8"))
-
-
-def _host_schema() -> dict:
-    return json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
 
 
 def _runtime_api_golden() -> dict:
@@ -71,16 +51,6 @@ def test_variant_shapes_are_single_sourced_across_layers() -> None:
         "component_id",
     }
     assert descriptor["properties"]["accelerator"]["enum"] == list(ACCELERATORS)
-
-    host = _host_schema()["$defs"]
-    assert set(host["ComponentVariantDescriptor"]["required"]) == {
-        "feature_id",
-        "accelerator",
-        "component_id",
-    }
-    assert host["ComponentVariantDescriptor"]["properties"]["accelerator"] == {
-        "$ref": "#/$defs/Accelerator"
-    }
 
     hints = typing.get_type_hints(wire_types.ComponentVariantDescriptor)
     assert hints["feature_id"] is str
@@ -130,30 +100,17 @@ def test_component_variant_catalog_rides_on_health_descriptor() -> None:
     assert "base runtime components" in catalog_description
 
 
-def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
-    host = _host_schema()
-    # Runtime Host 面已缩为 environment 侍者：变体目录 defs 仍在 host schema
-    # 上，不再挂在已删除的 CapabilityDescriptor 下。
-    assert host["$defs"]["ComponentVariantCatalog"]["properties"]["variants"][
-        "items"
-    ] == {"$ref": "#/$defs/ComponentVariantDescriptor"}
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert hasattr(runtime_host_types, "ComponentVariantCatalog")
-    assert hasattr(runtime_host_types, "ComponentVariantDescriptor")
-    host_hints = typing.get_type_hints(runtime_host_types.ComponentVariantDescriptor)
-    assert host_hints["accelerator"] == runtime_host_types.Accelerator
+def test_http_catalog_descriptors_use_the_product_wire_shape() -> None:
+    schema = _spec()["components"]["schemas"]["ComponentVariantCatalog"]
+    assert schema["properties"]["variants"]["items"] == {
+        "$ref": "#/components/schemas/ComponentVariantDescriptor"
+    }
 
 
-def test_component_selection_capability_is_registered_everywhere() -> None:
+def test_component_selection_is_readable_but_no_longer_advertised() -> None:
     registry = json.loads((V2 / "capabilities.json").read_text(encoding="utf-8"))
-    assert "runtime.component-selection.v1" in registry["capabilities"]
-    definition = registry["definitions"]["runtime.component-selection.v1"]
-    assert definition["lifecycle"] == "active"
-    assert definition["introduced_in"].startswith("2.")
-
-    assert RUNTIME_COMPONENT_SELECTION_V1 == "runtime.component-selection.v1"
-    assert RUNTIME_COMPONENT_SELECTION_V1 in ALL_CAPABILITIES
+    assert "runtime.component-selection.v1" not in registry["capabilities"]
+    assert "runtime.component-selection.v1" not in ALL_CAPABILITIES
 
     health_values = _spec()["components"]["schemas"]["Health"]["properties"][
         "capabilities"
@@ -199,11 +156,3 @@ def test_generated_bindings_expose_strongly_typed_variant_catalog() -> None:
     assert "public required string FeatureId { get; init; }" in descriptor_record
     assert "public required string Accelerator { get; init; }" in descriptor_record
     assert "public required string ComponentId { get; init; }" in descriptor_record
-
-    host_wire = (V2 / "generated/RuntimeHostWireTypes.g.cs").read_text(encoding="utf-8")
-    # Runtime Host 的安装选择请求面已退役；host wire 只保留目录结构类型。
-    assert "RuntimeHostRequest" not in host_wire
-    host_descriptor = host_wire.split(
-        "public sealed record ComponentVariantDescriptor", 1
-    )[1].split("\n}", 1)[0]
-    assert "public required Accelerator Accelerator { get; init; }" in host_descriptor

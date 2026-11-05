@@ -75,12 +75,14 @@ def test_binding_rejects_wrong_checkout_and_missing_capability(tmp_path: Path) -
         )
 
 
-def test_binding_rejects_tampered_or_missing_runtime_wheel(tmp_path: Path) -> None:
+def test_binding_rejects_tampered_or_missing_runtime_tree_descriptor(
+    tmp_path: Path,
+) -> None:
     inputs, manifest_path = _candidate(tmp_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    wheel = manifest_path.parent / manifest["runtime_wheel"]
+    wheel = manifest_path.parent / manifest["runtime_env"]["manifest"]
     wheel.write_bytes(b"tampered")
-    with pytest.raises(ValueError, match="Runtime wheel SHA-256 mismatch"):
+    with pytest.raises(ValueError, match="runtime env manifest SHA-256 mismatch"):
         build_bindings(
             manifest_path.parent,
             version="0.7.0",

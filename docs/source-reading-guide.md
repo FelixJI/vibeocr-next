@@ -25,15 +25,13 @@
 | 二维码/条码生成、本地解码与 PNG/JPEG 保存 | C#（`VibeOCR.App/Features/QrCode`、`VibeOCR.App/Inference/LocalQrCodeClient`） | WebView 命令 → 本地 ZXing.Net 与 Windows 图片编码/BitmapDecoder（≤4096 有界缩放，有界趟次）；不等待 Supervisor | 无需识别运行环境即可生成与解码，文件授权留在宿主 |
 | OCR/MinerU 推理、PDF/表格/导出、二维码兼容生成/解码 route | Python/CPython（`runtime/recognition`、`documents`、`codes`） | Desktop↔Runtime 唯一 v2 内部 HTTP wire（`contracts/runtime` + `VibeOCR.Runtime.Client`）；桌面已不消费解码 route | 直接消费 OCR/PDF 生态；worker 隔离与引擎生命周期同源；保留的兼容 wire 面不构成桌面依赖；本地 MinerU 4 无 language 上行通道，OCR 恒用内置 ch 模型（覆盖中英） |
 | 任务调度与共享子进程 | Python（`runtime/jobs`、`processes`） | 入口是 host 暴露的 v2 内部 HTTP 路由；Paddle/MinerU/PDF worker 是 Runtime 内部管理的子进程，不经桌面直接调用 | 跨 job 状态与进程复用集中在 Runtime |
-| 运行环境安装事务（组件选择、安装计划、设备就绪、回滚） | Python/CPython（`runtime/environments`，经产品内冻结 Installer 可执行文件交付） | C# 侧由 `Platform/Bootstrap/RuntimeInstallerClient` 以子进程调用冻结 Installer：inspect/ensure/repair/install_plan 与 cancel/retry/observe 都是独立子进程命令（`--request-json` 参数），进度走 stdout NDJSON 事件流（`ndjson.v1/v2`），结果为单个 JSON envelope；安装计划/设备就绪真值只在 Runtime，C#/TS 不复制包依赖推导 | 依赖解析与 manifest 绑定在事务内保持一致 |
+| 产品 Runtime 与识别设备 | `Platform/Inference/ProductRuntimeSession`、`runtime/environments/product_runtime.py`、`runtime/jobs/module.py` | 桌面从产品 layout 定位解释器，Python 验证 manifest、迁入识别设置并冻结任务的设备与模型来源 | 设备探测通过且任务与 worker 租约允许时原子提交 |
 | Windows 构建/打包/安装前置 | PowerShell（`scripts/build-release.ps1`、`build_internal_runtime.ps1`、`install_windows_app_runtime.ps1`） | 本地/CI 命令行 | Windows SDK、Velopack 与 App Runtime 适配 |
 | 通用生成/验证/自动化 | Python（`scripts/check_quality.py`、`generate_runtime_protocol.py`、`automation.py`） | 本地/CI 命令行 | 锁定工具链与稳定 CLI，不为语言统一翻译脚本 |
 
 两个跨边界协议不要混淆：WebView 消息桥（React ↔ `App/Web`/`App/Workbench`）与 Desktop↔Runtime 内部 HTTP
 wire 都有 v2 命名，但编号相同不代表同一协议；前者是浏览器内容与桌面权限的边界，后者是进程间契约
-（`contracts/runtime` 的 schema、golden 与生成物）。安装事务又是另一条边界：桌面通过 Runtime Installer
-子进程命令（NDJSON 事件流 + 最终 envelope）驱动，既不是 WebView 桥也不是 loopback HTTP。修改任一侧
-必须同步对应两侧类型与测试。
+（`contracts/runtime` 的 schema、golden 与生成物）。产品 Runtime 使用随包 CPython 和既有 HTTP wire，设备准备通过 settings 路由。
 
 二维码公开入口只暴露文本 QR：300×300、UTF-8、纠错 M、四模块静区和 PNG 预览，保存支持真实 PNG/JPEG。
 #97 的 C# 本地生成在 Runtime 未启动、启动失败、断开或维护时仍可使用；#213 起图片解码同样在本地完成
@@ -46,36 +44,13 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 `components/ImageCanvasEditor.tsx`、`annotationGeometry.ts` 与 `annotationHandoff.ts`，bridge 使用
 `bridge/client.ts` 和 `bridge/runtime.ts`，并由编译期类型契约与运行时消息测试共同校验。
 二者均不引入 Python.NET/IronPython、第二套 IPC 或全量原生 UI 重写，不移除 Python OCR/PDF 能力、
-已证明的 worker 隔离、Runtime 安装事务与内部 wire。
+已证明的 worker 隔离、任务租约与内部 wire。
 
-## 用户环境安装执行器
+## 产品 Runtime 与设置
 
-首启与受管理环境安装统一调用固定 **uv 0.13.6** 的 `uv pip` 接口，目标为 manifest 绑定的
-Windows x64 CPython 3.13；具名候选由标准 `venv --without-pip` 创建。用户无需 PATH 中的 uv、pip 或系统 Python。
-`bundled_uv.py` 在冻结 Installer 中仅定位 `_MEIPASS/uv/uv.exe` 并核实版本；源码开发入口仅使用根
-`pyproject.toml` / `uv.lock` 安装的 uv distribution，缺失或版本不符明确失败。运行时不下载/bootstrap 工具。
+`ProductRuntimeSession` 从产品 layout 和 component lock 定位运行时，验证随包解释器与 DLL，再通过既有启动 envelope 和 HTTP 握手绑定服务实例。`prepare_product_runtime` 验证同一份产品 manifest，再读取识别设置。旧注册表只作为已选择配置的迁入来源。[旧设置与路径](managed-environment-paths.md)
 
-工具来自 [Astral 官方 PyPI uv 0.13.6](https://pypi.org/project/uv/0.13.6/)，Windows wheel 来源与既有摘要
-由 `uv.lock` 记录。`build_runtime_installer.py` 将其 uv.exe 和 wheel 中的 `LICENSE-MIT` / `LICENSE-APACHE`
-一起嵌入现有 onefile EXE；许可证为 [MIT 或 Apache-2.0](https://github.com/astral-sh/uv/tree/0.13.6)。
-Installer 以单一可执行文件随产品 `runtime/installer/` 分发一次；manifest 直接绑定其字节摘要
-（历史单成员 zip 绑定仍可读），沿用产品现有 installer / manifest 完整性链。
-
-各 profile/recipe requirements lock 仍是唯一用户依赖权威，用户环境不消费根开发 `uv.lock`。
-在线解析的 pylock 只是临时派生结果：按真实目标解释器的版本/平台/ABI筛选，再核对原锁适用包集合、版本、
-marker、direct URL 与工件摘要，输出现有下载/清理模型可读的统一报告。原锁 extras保留在本地安装输入中。
-自管下载器继续统计目标闭包下载字节、缓存命中及安装批次；uv 为元数据解析或 sdist 隔离构建读取的网络数据和
-临时构建依赖不计为目标包已下载/已安装。已核验目标使用本地显式工件并禁止重解析依赖，sdist 构建临时依赖仅用
-计划确认的单一索引。完整随包闭包、Runtime wheel 与最终一致性检查使用 `--offline`。
-
-安装命令屏蔽继承的 `UV_` / `PIP_`、VIRTUAL_ENV / CONDA 与 Python路径覆盖，禁用 uv 用户/父目录配置和
-Python自动下载；产品设置及冻结计划是唯一目标/来源输入。Windows 门控仍先归属 Job 再启动 uv 与构建后代。
-新报告缓存按执行器、目标、原锁及来源失效；旧 pip 报告保留可读的清理归属证据，自管工件只按已有锁验证复用。
-uv 内部缓存由 uv 管理，清理器不遍历删除其内部结构；已健康环境不会只因更换执行器重建。
-
-`env_manager.py` 的历史安装/重装/卸载函数没有当前产品调用方（仓内其他命中仅是历史注释），本次保留历史代码；
-当前产品安装入口在 `runtime_installer.py` 与 `ManagedEnvironmentStore._install_scope`。
-`scripts/build_runtime_pack.py` 的固定 pip download/wheel 是开发构建工具，继续由仓库 build group 管理。
+`jobs/module.py` 在提交任务时冻结设备与模型来源。设备更改先运行独立 ORT 探测，再在任务及 worker 空闲时提交。`product_job_leases.py` 在进程之间互斥设备变更与任务提交。模型由提供方按需准备，Paddle、MinerU、PDF 的进程取消和回收保持独立。
 
 ## 20 分钟启动链
 
@@ -100,7 +75,7 @@ flowchart TD
     G --> H["ViewModels 可提交任务"]
 ```
 
-主窗口可交互不依赖计算服务。首次计算先取得就绪实例的权威目录和默认模式，随后构造任务；ready 仍不表示模型已经加载。恢复跳过默认环境初始化，维护结束只恢复先前启用的连接。
+主窗口可交互不依赖计算服务。首次计算先取得就绪实例的权威目录和默认模式，随后构造任务；ready 仍不表示模型已经加载。恢复绑定产品服务实例，维护结束只恢复先前启用的连接。
 
 ## 第一条纵向链：提交识别
 
@@ -180,9 +155,9 @@ typecheck、test、build；不要用 `any` 或跳过 codec 掩盖跨边界类型
 
 从 `.ci/project.json`、`scripts/build-release.ps1`、`scripts/build_internal_runtime.ps1` 与
 `scripts/automation.py` 阅读。单产品候选全部由本仓当前源码构建：C# 以 ProjectReference 编译，
-内部 Runtime 从当前源码产出 wheel、冻结 installer、offline base pack 与 runtime manifest。
+内部 Runtime 使用当前源码的 wheel 构建随包解释器树并绑定 runtime manifest。
 Release 外部 `product-identity.json` 以 `project:{component,repository,version,source_sha}`
-绑定候选；`runtime-manifest.json` 的 `product` 同为这四字段，installer 摘要、profile 与
+绑定候选；`runtime-manifest.json` 的 `product` 同为这四字段，预构建树清单、profile 与
 capabilities 在 manifest 顶层；`app/metadata/component-lock.json` 的 `product` 追加
 `runtime_manifest_sha256` 与 `accelerator`，`required_capabilities` 在 lock 顶层。默认不解析
 旧仓 Backend/Protocol Release。

@@ -40,19 +40,14 @@ if TYPE_CHECKING:
 
 from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_maintenance import (
-    RuntimeCapabilityError,
-    RuntimeInstallFailure,
-    RuntimeInstallPlanBlocked,
-    RuntimeInstallPlanStale,
-    RuntimeSourceIdentityMismatch,
     runtime_status_from_environment,
 )
 from vibeocr.runtime.environments.runtime_selection import (
     RuntimeSelectionError,
-    component_variant_catalog_payload,
     download_source_catalog_payload,
     normalize_download_source_ids,
 )
+from vibeocr.runtime.environments.settings_store import RuntimeSettingsStoreError
 from vibeocr.runtime.host.auth import (
     check_bearer_token,
     check_loopback,
@@ -89,7 +84,6 @@ from vibeocr.runtime_contracts.errors import error_registry
 from vibeocr.runtime_contracts.generated.capabilities import (
     OCR_ENGINE_SELECTION_V1,
     OCR_RECOGNITION_MODES_V1,
-    RUNTIME_COMPONENT_SELECTION_V1,
     RUNTIME_DOWNLOAD_SOURCES_V1,
 )
 
@@ -210,12 +204,6 @@ def _capability_descriptors(
             from vibeocr.runtime.recognition.mineru_readiness import catalog_payload
 
             descriptor["mineru_config_catalog"] = catalog_payload()
-        elif name == RUNTIME_COMPONENT_SELECTION_V1:
-            # 可选组件目录由 manifest/profile 派生：feature+accelerator ->
-            # component_id；base 必备组件不进入可选目录。
-            descriptor["component_variant_catalog"] = (
-                component_variant_catalog_payload()
-            )
         descriptors.append(descriptor)
     return descriptors
 
@@ -255,39 +243,6 @@ def _extract_engine_selection(
     if pipeline.get("pipeline_id") == "OCR":
         pipeline["engine"] = engine.value
     return payload, engine
-
-
-def _runtime_exception_response(exc: Exception, instance_id: str) -> JSONResponse:
-    detail: dict[str, Any] = {"reason": str(exc)}
-    retry_after: int | None = None
-    if isinstance(exc, RuntimeInstallPlanStale):
-        code = ErrorCode.RUNTIME_INSTALL_PLAN_STALE
-    elif isinstance(exc, RuntimeInstallPlanBlocked):
-        code = ErrorCode.RUNTIME_INSTALL_PLAN_BLOCKED
-    elif isinstance(exc, RuntimeSourceIdentityMismatch):
-        code = ErrorCode.RUNTIME_IDENTITY_MISMATCH
-    elif isinstance(exc, RuntimeCapabilityError):
-        code = ErrorCode.RUNTIME_CAPABILITY_UNAVAILABLE
-    elif isinstance(exc, RuntimeLockTimeout):
-        code = ErrorCode.RUNTIME_BUSY
-        retry_after = 1
-    elif isinstance(exc, OSError):
-        code = ErrorCode.RUNTIME_IO_ERROR
-        retry_after = 1
-    elif isinstance(exc, RuntimeInstallFailure):
-        code = ErrorCode.RUNTIME_INSTALL_FAILED
-    elif isinstance(exc, RuntimeSelectionError):
-        code = exc.code
-    elif isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
-        code = ErrorCode.VALIDATION_ERROR
-    else:
-        code = ErrorCode.INTERNAL_ERROR
-    return _error_response(
-        code,
-        instance_id,
-        detail=detail,
-        retry_after=retry_after,
-    )
 
 
 class _PdfUnavailable(Exception):
@@ -651,7 +606,12 @@ def create_app(
         except MineruConfigError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RuntimeLockTimeout as exc:
-            return _runtime_exception_response(exc, instance_id)
+            return _error_response(
+                ErrorCode.RUNTIME_BUSY,
+                instance_id,
+                detail={"reason": str(exc)},
+                retry_after=1,
+            )
         except RecognitionModeError as exc:
             return _recognition_mode_error_response(exc, instance_id)
         except OcrEngineError as exc:
@@ -719,6 +679,10 @@ def create_app(
                 normalize_download_source_ids(raw_sources) if raw_sources else ()
             )
             snapshot = SettingsSnapshot(
+                revision=body.get("revision", 0),
+                recognition_device=body.get(
+                    "recognition_device", module.settings().recognition_device
+                ),
                 default_ttl_seconds=default_ttl,
                 paddle_idle_seconds=body.get(
                     "paddle_idle_seconds", module.settings().paddle_idle_seconds
@@ -730,7 +694,16 @@ def create_app(
                 extra=extra,
                 download_source_ids=source_ids,
             )
-            return module.update_settings(snapshot).to_payload()
+            prepared = await asyncio.to_thread(
+                module.prepare_recognition_device, snapshot
+            )
+            if await request.is_disconnected():
+                raise ValueError("设置保存已取消。")
+            return module.update_settings(snapshot, prepared=prepared).to_payload()
+        except RuntimeSettingsStoreError as exc:
+            return _error_response(
+                ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
+            )
         except RuntimeSelectionError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RecognitionModeError as exc:

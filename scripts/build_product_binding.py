@@ -1,4 +1,4 @@
-"""Bind the internal installer to one verified Next runtime candidate."""
+"""Bind the bundled Runtime to one verified Next product candidate."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ REQUIRED_CAPABILITIES = (
     "ocr.mineru-config.v1",
     "ocr.mineru-remote-api.v1",
     "runtime.download-sources.v1",
-    "runtime.component-selection.v1",
 )
 
 

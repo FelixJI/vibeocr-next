@@ -8,13 +8,12 @@ namespace VibeOCR.App.Inference;
 /// <summary>Owns the single active session, its clients and Supervisor Job.
 /// Runtime remains authoritative for environment selection and switch commit.</summary>
 internal sealed class ManagedRuntimeConnection(
-  IManagedEnvironmentClient manager,
   PortableLayout layout,
   RuntimeStatusViewModel status,
-  Action<ManagedEnvironmentSession?, ManagedEnvironmentSession?> publish)
+  Action<ProductRuntimeSession?, ProductRuntimeSession?> publish)
 {
   private readonly SemaphoreSlim gate = new(1, 1);
-  public ManagedEnvironmentSession? Session { get; private set; }
+  public ProductRuntimeSession? Session { get; private set; }
   public event Action<string>? Milestone;
 
   private async Task EnterAsync(CancellationToken cancellationToken)
@@ -28,58 +27,27 @@ internal sealed class ManagedRuntimeConnection(
     }
   }
 
-  public async Task<bool> ConnectAsync(bool initialize, CancellationToken cancellationToken, bool injectSoakCrash = false)
+  public async Task<bool> ConnectAsync(CancellationToken cancellationToken, bool injectSoakCrash = false)
   {
     await EnterAsync(cancellationToken);
     try
     {
       if (Session is not null) return true;
-      ManagedEnvironmentList environments;
-      if (initialize)
-      {
-        AppLog.Info("Runtime demand: initialize_default begin");
-        environments = await manager.InitializeDefaultEnvironmentAsync(cancellationToken);
-      }
-      else
-        environments = await manager.ListEnvironmentsAsync(cancellationToken);
       Milestone?.Invoke("T3");
+      AppLog.Info("Runtime demand: starting product Supervisor");
       Milestone?.Invoke("T4");
-      if (environments.ActiveId is null) return false;
-      await ActivateCoreAsync(environments.ActiveId, cancellationToken, injectSoakCrash);
+      ProductRuntimeSession session = await ProductRuntimeSession.StartAsync(layout, cancellationToken, injectSoakCrash);
+      Publish(session);
+      status.ApplySnapshot(session.Status);
       Milestone?.Invoke("T5");
       return Session is not null;
     }
     finally { gate.Release(); }
   }
 
-  public async Task SwitchAsync(string environmentId, CancellationToken cancellationToken, Action? committed = null, string? device = null)
+  private void Publish(ProductRuntimeSession? next)
   {
-    await EnterAsync(cancellationToken);
-    try { await ActivateCoreAsync(environmentId, cancellationToken, committed: committed, device: device); }
-    finally { gate.Release(); }
-  }
-
-  private async Task ActivateCoreAsync(string environmentId, CancellationToken cancellationToken, bool injectSoakCrash = false, Action? committed = null, string? device = null)
-  {
-    AppLog.Info("Runtime demand: activate begin");
-    var coordinator = new ManagedEnvironmentSwitchCoordinator(manager);
-    ManagedEnvironmentSession? session = await coordinator.SwitchAsync(
-      environmentId, Session, next =>
-      {
-        // Platform invokes this only after Runtime reservation commit succeeds.
-        // Notify before App publication callbacks can cancel the command.
-        committed?.Invoke();
-        Publish(next);
-      },
-      Path.Combine(layout.DataRoot, "supervisor.log"), TimeSpan.FromSeconds(90),
-      RuntimeCapabilityRequirements.Read(layout.ComponentLock), cancellationToken, injectSoakCrash, device);
-    if (session is null) status.ReportServiceUnavailable();
-    else status.ApplySnapshot(session.Status);
-  }
-
-  private void Publish(ManagedEnvironmentSession? next)
-  {
-    ManagedEnvironmentSession? previous = Session;
+    ProductRuntimeSession? previous = Session;
     Session = next;
     publish(previous, next);
   }

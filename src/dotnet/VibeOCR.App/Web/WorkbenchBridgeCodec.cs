@@ -83,15 +83,7 @@ public static class WorkbenchBridgeCodec
   private static readonly HashSet<string> SourceArgumentFields = ["kind", "sourceId"];
   private static readonly HashSet<string> SourceIdOnlyArgumentFields = ["sourceId"];
   private static readonly HashSet<string> UpdateSourceArgumentFields = ["sourceId", "kind", "url"];
-  private static readonly HashSet<string> EnvironmentIdArgumentFields = ["environmentId"];
-  private static readonly HashSet<string> EnvironmentSourceDefaultsArgumentFields =
-    ["modelSourceId"];
-  private static readonly HashSet<string> EnvironmentSourcesArgumentFields =
-    ["environmentId", "modelSourceId"];
-  private static readonly HashSet<string> IndependentSourceDefaultsArgumentFields =
-    ["paddleocrModelSourceId", "mineruModelSourceId"];
-  private static readonly HashSet<string> IndependentEnvironmentSourcesArgumentFields =
-    ["environmentId", "paddleocrModelSourceId", "mineruModelSourceId"];
+  private static readonly HashSet<string> DeviceArgumentFields = ["device"];
   private static readonly HashSet<string> MineruModeArgumentFields = ["mode"];
   private static readonly HashSet<string> MineruRemoteUrlArgumentFields =
     ["mode", "apiUrl"];
@@ -1031,66 +1023,13 @@ public static class WorkbenchBridgeCodec
       case ("settings", "refreshRuntime"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new RefreshRuntimeCommand();
-      case ("settings", "refreshEnvironmentList"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new RefreshEnvironmentListCommand();
-      case ("settings", "setEnvironmentSources"):
-      {
-        bool independent = arguments.TryGetProperty("paddleocrModelSourceId", out _) ||
-          arguments.TryGetProperty("mineruModelSourceId", out _);
-        HashSet<string> defaultsFields = independent
-          ? IndependentSourceDefaultsArgumentFields : EnvironmentSourceDefaultsArgumentFields;
-        HashSet<string> scopedFields = independent
-          ? IndependentEnvironmentSourcesArgumentFields : EnvironmentSourcesArgumentFields;
-        bool scoped = !HasExactFields(arguments, defaultsFields);
-        EnsureObjectWithFields(arguments, scoped ? scopedFields : defaultsFields, "command arguments");
-        string? sourceEnvironmentId = scoped ? ParseEnvironmentId(arguments) : null;
-        return new SetEnvironmentSourcesCommand(
-          sourceEnvironmentId,
-          independent ? null : ParseSourceId(arguments.GetProperty("modelSourceId")),
-          independent ? ParseSourceId(arguments.GetProperty("paddleocrModelSourceId")) : null,
-          independent ? ParseSourceId(arguments.GetProperty("mineruModelSourceId")) : null,
-          independent);
-      }
-      case ("settings", "switchEnvironment"):
-        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "environmentId", "device" }, "command arguments");
-        string? requestedDevice = null;
-        if (arguments.TryGetProperty("device", out JsonElement selectedDevice))
-        {
-          if (selectedDevice.ValueKind != JsonValueKind.String)
-            throw new WorkbenchBridgeProtocolException("运行设备无效。");
-          requestedDevice = selectedDevice.GetString();
-        }
-        if (requestedDevice is not (null or "cpu" or "directml"))
-          throw new WorkbenchBridgeProtocolException("运行设备无效。");
-        return new SwitchEnvironmentCommand(ParseEnvironmentId(arguments), requestedDevice);
-      case ("settings", "setEnvironmentCleanupPage"):
-        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "page" }, "command arguments");
-        JsonElement cleanupPage = arguments.GetProperty("page");
-        if (cleanupPage.ValueKind != JsonValueKind.Number || !cleanupPage.TryGetInt32(out int page) || page < 0)
-          throw new WorkbenchBridgeProtocolException("清理页码无效。");
-        return new SetEnvironmentCleanupPageCommand(page);
-      case ("settings", "previewEnvironmentCleanup"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new PreviewEnvironmentCleanupCommand();
-      case ("settings", "cancelEnvironmentCleanup"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new CancelEnvironmentCleanupCommand();
-      case ("settings", "runEnvironmentCleanup"):
-        EnsureObjectWithFields(arguments, new HashSet<string>(StringComparer.Ordinal) { "planId", "itemIds" }, "command arguments");
-        string? cleanupPlanId = arguments.GetProperty("planId").GetString();
-        JsonElement cleanupIds = arguments.GetProperty("itemIds");
-        if (cleanupPlanId is null || cleanupPlanId.Length != 32 || !cleanupPlanId.All(Uri.IsHexDigit) ||
-            cleanupIds.ValueKind != JsonValueKind.Array || cleanupIds.GetArrayLength() is < 1 or > 2048 ||
-            cleanupIds.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()) || item.GetString()!.Length > 1024))
-          throw new WorkbenchBridgeProtocolException("空间清理选择无效。");
-        string[] selectedCleanupIds = cleanupIds.EnumerateArray().Select(item => item.GetString()!).ToArray();
-        if (selectedCleanupIds.Distinct(StringComparer.Ordinal).Count() != selectedCleanupIds.Length)
-          throw new WorkbenchBridgeProtocolException("空间清理选择包含重复项目。");
-        return new RunEnvironmentCleanupCommand(cleanupPlanId, selectedCleanupIds);
-      case ("settings", "deleteEnvironment"):
-        EnsureObjectWithFields(arguments, EnvironmentIdArgumentFields, "command arguments");
-        return new DeleteEnvironmentCommand(ParseEnvironmentId(arguments));
+      case ("settings", "setRecognitionDevice"):
+        EnsureObjectWithFields(arguments, DeviceArgumentFields, "command arguments");
+        JsonElement deviceField = arguments.GetProperty("device");
+        string? device = deviceField.ValueKind == JsonValueKind.String ? deviceField.GetString() : null;
+        return device is "auto" or "cpu" or "directml"
+          ? new SetRecognitionDeviceCommand(device)
+          : throw new WorkbenchBridgeProtocolException("未知的识别计算设备。");
       case ("settings", "setTheme"):
         EnsureObjectWithFields(arguments, ThemeArgumentFields, "command arguments");
         return new SetThemeCommand(ParseTheme(
@@ -1223,9 +1162,6 @@ public static class WorkbenchBridgeCodec
       case ("settings", "prepareMineruConnection"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PrepareMineruConnectionCommand();
-      case ("settings", "prepareRemoteHost"):
-        EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
-        return new PrepareRemoteHostCommand();
       case ("recognition", "setOptions"):
         EnsureObjectWithFields(arguments, RecognitionOptionsFields, "command arguments");
         string? modeId = arguments.GetProperty("modeId").GetString();
@@ -1547,16 +1483,7 @@ public static class WorkbenchBridgeCodec
     return new SetDefaultRecognitionModeCommand(mode);
   }
 
-  private static string ParseEnvironmentId(JsonElement arguments)
-  {
-    string? value = arguments.GetProperty("environmentId").GetString();
-    // 环境标识由 Runtime 分配，支持可读名称及历史 UUID；这里仅约束
-    // 单个目录段的消息形状，目录成员、重名与保留名由 Runtime 校验。
-    if (value is { Length: > 0 and <= 64 } && value == value.Trim().TrimEnd('.') &&
-        value is not ("." or "..") && value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0)
-      return value;
-    throw new WorkbenchBridgeProtocolException("运行环境标识无效。");
-  }
+
 
   /// <summary>来源 id：null（清除/跟随）或形状合法的目录 id；目录成员由管理器校验。</summary>
   private static string? ParseSourceId(JsonElement element) =>
@@ -1916,23 +1843,7 @@ public static class WorkbenchBridgeCodec
       workers = settings.Workers ?? [],
       settings.WorkerSettingsWarning,
       settings.ServiceStatus,
-      environments = settings.Environments ?? [],
-      settings.ActiveEnvironmentId,
-      settings.EnvironmentStatus,
-      settings.EnvironmentSnapshotLoaded,
-      settings.EnvironmentListFetchAttempted,
-      settings.EnvironmentBusy,
-      environmentSources = settings.EnvironmentSources ?? [],
-      environmentDefaultSourceIds = settings.EnvironmentDefaultSourceIds ?? [],
-      environmentResolvedDefaultSources = settings.EnvironmentResolvedDefaultSources ?? [],
-      environmentUnknownDefaultSourceIds = settings.EnvironmentUnknownDefaultSourceIds ?? [],
-      settings.EnvironmentSupportsCleanup,
-      settings.EnvironmentCleanupPlan,
-      settings.EnvironmentCleanupResult,
-      settings.EnvironmentCanCancelCleanup,
-      settings.EnvironmentCleanupPage,
-      settings.EnvironmentCleanupPageCount,
-      environmentRecipes = settings.EnvironmentRecipes ?? [],
+      settings.RecognitionDevice,
       mineruConnection = settings.MineruConnection is null ? null : new
       {
         settings.MineruConnection.Supported,

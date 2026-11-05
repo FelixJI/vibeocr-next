@@ -8,14 +8,11 @@
 // closed on timeout, non-success terminal state, or an empty recognition
 // result. Nothing under the smoke root is deleted: the isolated state is the
 // acceptance evidence.
-using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Runtime.Contracts.Generated;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
@@ -29,8 +26,6 @@ public sealed class RuntimeCandidateSmokeTests
     private const string ExpectedWord = "VibeOCR";
     private const string ExpectedDigits = "123";
 
-    private static readonly TimeSpan EnsureTimeout = TimeSpan.FromMinutes(30);
-    private static readonly TimeSpan SupervisorStartupTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan RecognitionTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ObservePollInterval = TimeSpan.FromMilliseconds(250);
 
@@ -44,7 +39,7 @@ public sealed class RuntimeCandidateSmokeTests
         Skip = "Runtime candidate smoke 仅由 scripts/smoke_runtime_candidate.ps1 以隔离 "
             + "VIBEOCR_RUNTIME_CANDIDATE_SMOKE_ROOT 与合成图片环境启用。",
         SkipUnless = nameof(SmokeEnvironmentConfigured))]
-    public async Task CandidateInstallsBaseRuntimeAndRecognizesSyntheticImage()
+    public async Task CandidateStartsProductRuntimeAndRecognizesSyntheticImage()
     {
         string smokeRoot = RequireEnvironmentVariable(SmokeRootVariable);
         string imagePath = RequireEnvironmentVariable(SmokeImageVariable);
@@ -73,208 +68,83 @@ public sealed class RuntimeCandidateSmokeTests
         layout.EnsurePortableState();
         Assert.True(File.Exists(layout.ComponentLock), $"缺少组件锁: {layout.ComponentLock}");
         Assert.True(File.Exists(layout.RuntimeManifest), $"缺少运行时清单: {layout.RuntimeManifest}");
-        Assert.True(
-            File.Exists(layout.RuntimeInstaller),
-            $"缺少 Runtime Installer: {layout.RuntimeInstaller}");
+        Assert.True(File.Exists(layout.RuntimePython), $"缺少随包 Python：{layout.RuntimePython}");
+        AssertIsUnder(productRoot, layout.RuntimePython, "product python");
+        IReadOnlySet<string> requiredCapabilities = RuntimeCapabilityRequirements.Read(layout.ComponentLock);
+        await using var session = await ProductRuntimeSession.StartAsync(layout, TestContext.Current.CancellationToken);
+        InferenceHttpClient inference = session.Client;
+        // health 必须是 wire 2,并真实上报组件锁要求的能力集。
+        Wire.Health health = await inference.GetHealthAsync(
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HttpV2Schema.Version, health.SchemaVersion);
+        Assert.Equal(RuntimeProtocol.ProtocolVersion, health.ProtocolVersion);
+        Assert.True(health.Ready, "Supervisor health 未就绪。");
+        Assert.False(health.Draining, "Supervisor health 处于 draining。");
+        Assert.Equal(session.InstanceId, health.InstanceId);
+        Assert.Subset(
+            health.Capabilities.ToHashSet(StringComparer.Ordinal),
+            requiredCapabilities.ToHashSet(StringComparer.Ordinal));
 
-        RuntimeInstallerConfiguration configuration =
-            RuntimeInstallerConfiguration.ForNext(layout, accelerator: "cpu");
-        Assert.Equal(Path.GetFullPath(productRoot), configuration.ProductRoot);
-        var client = new RuntimeInstallerClient(configuration, new DiagnosticInstallerRunner(smokeRoot));
+        using CancellationTokenSource recognition = CancellationTokenSource
+            .CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        recognition.CancelAfter(RecognitionTimeout);
+        byte[] imageBytes = await File.ReadAllBytesAsync(imagePath, recognition.Token);
+        var request = new SubmitRequest
+        {
+            RequestId = $"smoke-{Guid.NewGuid():N}",
+            Kind = JobKind.Recognition,
+            Priority = JobPriority.Interactive,
+            Pipeline = new PipelineSelection { PipelineId = "OCR" },
+            Items =
+            [
+                new SubmitItem
+                {
+                    ClientItemKey = ClientItemKey,
+                    Ordinal = 0,
+                    DisplayName = Path.GetFileName(imagePath),
+                    Source = new Dictionary<string, JsonElement>
+                    {
+                        ["type"] = JsonSerializer.SerializeToElement("upload.v1"),
+                        ["attachment"] = JsonSerializer.SerializeToElement(ClientItemKey),
+                    },
+                },
+            ],
+        };
+        JobRef referral = await inference.SubmitAsync(
+            request,
+            new Dictionary<string, SubmitUpload>
+            {
+                [ClientItemKey] = new("image/png", imageBytes),
+            },
+            recognition.Token);
 
-        using CancellationTokenSource ensureCancellation =
-            CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
-        ensureCancellation.CancelAfter(EnsureTimeout);
-        CancellationToken ensureToken = ensureCancellation.Token;
-
-        // 真实生产启动路径：预构建运行时树（PR2）零安装，默认具名环境
-        // 由 initialize_default 幂等注册，并可重复调用。
-        ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
-        ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
-        Assert.Equal("product", defaultEnvironment.Id);
-        Assert.Equal("默认环境", defaultEnvironment.Name);
-        Assert.Equal("paddleocr-ort-directml", defaultEnvironment.Recipe);
-        Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);
-        Assert.Equal("installed", defaultEnvironment.Status);
-        ManagedEnvironmentList repeated = await client.InitializeDefaultEnvironmentAsync(ensureToken);
-        Assert.Equal(defaultEnvironment.Id, Assert.Single(repeated.Environments).Id);
-        Assert.Equal(defaultEnvironment.Revision, Assert.Single(repeated.Environments).Revision);
-        await using IManagedEnvironmentSwitchReservation reservation = await client.BeginEnvironmentSwitchAsync(
-            defaultEnvironment.Id, ensureToken);
-        PreparedEnvironmentSwitch prepared = reservation.Prepared;
-        Assert.NotNull(prepared.Launch);
-        RuntimeLaunch launch = prepared.Launch;
-        Assert.True(File.Exists(launch.PythonExecutable), $"缺少 Python: {launch.PythonExecutable}");
-        Assert.True(
-            Directory.Exists(launch.WorkingDirectory),
-            $"缺少工作目录: {launch.WorkingDirectory}");
-        // 具名环境的模型根只声明私有路径；Paddle ONNX 默认 small 文字模型
-        // 随包离线就绪，其余模型按需下载。
-        Assert.NotEmpty(launch.Environment);
-        // Python/模型/运行时存储必须锚定在隔离的 state 存储内。
-        AssertIsUnder(layout.DataRoot, launch.PythonExecutable, "python executable");
-        AssertIsUnder(layout.DataRoot, launch.ModelRoot, "model root");
-        Assert.True(
-            launch.Environment.TryGetValue("VIBEOCR_RUNTIME_ROOT", out string? runtimeRootValue),
-            "launch 环境缺少 VIBEOCR_RUNTIME_ROOT。");
-        Assert.NotNull(runtimeRootValue);
-        AssertIsUnder(layout.DataRoot, runtimeRootValue, "runtime root");
-        // 后端身份校验:launch 环境声明的产品根必须就是隔离副本。
-        Assert.True(
-            launch.Environment.TryGetValue("VIBEOCR_PRODUCT_ROOT", out string? launchProductRoot) &&
-                !string.IsNullOrWhiteSpace(launchProductRoot) &&
-                string.Equals(
-                    Path.GetFullPath(launchProductRoot),
-                    Path.GetFullPath(productRoot),
-                    StringComparison.Ordinal),
-            $"launch 环境 VIBEOCR_PRODUCT_ROOT 未指向隔离副本: {launchProductRoot}");
-        // 生产 launch 契约:installer 把 supervisor cwd 固定为产品根本身
-        // (working_directory = product_root),完整路径相等才是准确预期,
-        // 不是其子目录。
-        Assert.Equal(
-            Path.GetFullPath(productRoot),
-            Path.GetFullPath(launch.WorkingDirectory));
-
-        // 与 ManagedEnvironmentSwitchCoordinator 相同:launch.Environment 全量继承,
-        // 会话令牌仅经环境变量传递。
-        IReadOnlySet<string> requiredCapabilities =
-            RuntimeCapabilityRequirements.Read(layout.ComponentLock);
-        string sessionToken = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-        var supervisor = new InferenceSupervisorProcess(
-            new InferenceSupervisorOptions(
-                launch.PythonExecutable,
-                ["-m", launch.SupervisorModule],
-                launch.WorkingDirectory,
-                Path.Combine(layout.LogsRoot, "supervisor-smoke.log"),
-                SupervisorStartupTimeout,
-                requiredCapabilities,
-                launch.Environment.ToDictionary(
-                    pair => pair.Key,
-                    pair => pair.Value,
-                    StringComparer.OrdinalIgnoreCase)),
-            sessionToken);
+        ItemOutcome outcome;
         try
         {
-            SupervisorReadyEnvelope ready = await supervisor.StartAsync(
-                TestContext.Current.CancellationToken);
-            await using var inference = new InferenceHttpClient(ready.BaseUrl, sessionToken);
-
-            // health 必须是 wire 2,并真实上报组件锁要求的能力集。
-            Wire.Health health = await inference.GetHealthAsync(
-                TestContext.Current.CancellationToken);
-            Assert.Equal(HttpV2Schema.Version, health.SchemaVersion);
-            Assert.Equal(RuntimeProtocol.ProtocolVersion, health.ProtocolVersion);
-            Assert.True(health.Ready, "Supervisor health 未就绪。");
-            Assert.False(health.Draining, "Supervisor health 处于 draining。");
-            CommittedEnvironmentSwitch committed = await reservation.CommitAsync(
-                new StartedEnvironmentHealth(ready.Port, ready.InstanceId), ensureToken);
-            Assert.Equal(defaultEnvironment.Id, committed.ActiveId);
-            Assert.Subset(
-                health.Capabilities.ToHashSet(StringComparer.Ordinal),
-                requiredCapabilities.ToHashSet(StringComparer.Ordinal));
-
-            using CancellationTokenSource recognition = CancellationTokenSource
-                .CreateLinkedTokenSource(TestContext.Current.CancellationToken);
-            recognition.CancelAfter(RecognitionTimeout);
-            byte[] imageBytes = await File.ReadAllBytesAsync(imagePath, recognition.Token);
-            var request = new SubmitRequest
-            {
-                RequestId = $"smoke-{Guid.NewGuid():N}",
-                Kind = JobKind.Recognition,
-                Priority = JobPriority.Interactive,
-                Pipeline = new PipelineSelection { PipelineId = "OCR" },
-                Items =
-                [
-                    new SubmitItem
-                    {
-                        ClientItemKey = ClientItemKey,
-                        Ordinal = 0,
-                        DisplayName = Path.GetFileName(imagePath),
-                        Source = new Dictionary<string, JsonElement>
-                        {
-                            ["type"] = JsonSerializer.SerializeToElement("upload.v1"),
-                            ["attachment"] = JsonSerializer.SerializeToElement(ClientItemKey),
-                        },
-                    },
-                ],
-            };
-            JobRef referral = await inference.SubmitAsync(
-                request,
-                new Dictionary<string, SubmitUpload>
-                {
-                    [ClientItemKey] = new("image/png", imageBytes),
-                },
-                recognition.Token);
-
-            ItemOutcome outcome;
-            try
-            {
-                outcome = await ObserveTerminalOutcomeAsync(inference, referral, recognition.Token);
-            }
-            catch (OperationCanceledException) when (
-                !TestContext.Current.CancellationToken.IsCancellationRequested)
-            {
-                throw new TimeoutException($"OCR 任务未在 {RecognitionTimeout} 内完成。");
-            }
-
-            Assert.Equal(ItemState.Succeeded, outcome.State);
-            IDictionary<string, JsonElement>? payloadValue = outcome.Payload;
-            Assert.NotNull(payloadValue);
-            IDictionary<string, JsonElement> payload = payloadValue;
-            if (!payload.TryGetValue("raw_text", out JsonElement rawTextElement) ||
-                rawTextElement.ValueKind != JsonValueKind.String ||
-                rawTextElement.GetString() is not { } rawText ||
-                string.IsNullOrWhiteSpace(rawText))
-            {
-                throw new InvalidOperationException("OCR 结果缺少非空 raw_text 字符串,按 fail closed 处理。");
-            }
-            Assert.Contains(ExpectedWord, rawText, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains(ExpectedDigits, rawText, StringComparison.Ordinal);
-            File.WriteAllText(
-                Path.Combine(layout.OutputRoot, "runtime-candidate-smoke-raw-text.txt"),
-                rawText);
+            outcome = await ObserveTerminalOutcomeAsync(inference, referral, recognition.Token);
         }
-        finally
+        catch (OperationCanceledException) when (
+            !TestContext.Current.CancellationToken.IsCancellationRequested)
         {
-            // 仅处置本次 smoke 拉起的子进程树;隔离证据全部保留。
-            supervisor.Dispose();
+            throw new TimeoutException($"OCR 任务未在 {RecognitionTimeout} 内完成。");
         }
-    }
 
-    private sealed class DiagnosticInstallerRunner(string smokeRoot) : IRuntimeInstallerCommandRunner
-    {
-        private readonly RuntimeInstallerCommandRunner inner = new();
-        private int initializationCount;
-
-        public Task<RuntimeInstallerProcessResult> RunAsync(
-            ProcessStartInfo startInfo, CancellationToken cancellationToken) =>
-            RunAsync(startInfo, null, cancellationToken);
-
-        public async Task<RuntimeInstallerProcessResult> RunAsync(
-            ProcessStartInfo startInfo, Action<string>? standardOutputLine,
-            CancellationToken cancellationToken)
+        Assert.Equal(ItemState.Succeeded, outcome.State);
+        IDictionary<string, JsonElement>? payloadValue = outcome.Payload;
+        Assert.NotNull(payloadValue);
+        IDictionary<string, JsonElement> payload = payloadValue;
+        if (!payload.TryGetValue("raw_text", out JsonElement rawTextElement) ||
+            rawTextElement.ValueKind != JsonValueKind.String ||
+            rawTextElement.GetString() is not { } rawText ||
+            string.IsNullOrWhiteSpace(rawText))
         {
-            // Preserve the production executable binding, streams, cancellation
-            // handshake and arguments. Record only initialization diagnostics;
-            // supervisor launch responses and process environments may contain secrets.
-            RuntimeInstallerProcessResult result = await inner.RunAsync(
-                startInfo, standardOutputLine, cancellationToken);
-            int requestIndex = startInfo.ArgumentList.IndexOf("--request-json");
-            if (requestIndex >= 0 && requestIndex + 1 < startInfo.ArgumentList.Count)
-            {
-                using JsonDocument request = JsonDocument.Parse(startInfo.ArgumentList[requestIndex + 1]);
-                if (request.RootElement.TryGetProperty("action", out JsonElement action) &&
-                    action.GetString() == "initialize_default")
-                {
-                    string directory = Path.Combine(smokeRoot, "installer-diagnostics");
-                    Directory.CreateDirectory(directory);
-                    int sequence = Interlocked.Increment(ref initializationCount);
-                    File.WriteAllText(Path.Combine(directory, $"initialize-default-{sequence}.json"),
-                        JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
-                }
-            }
-            return result;
+            throw new InvalidOperationException("OCR 结果缺少非空 raw_text 字符串,按 fail closed 处理。");
         }
+        Assert.Contains(ExpectedWord, rawText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(ExpectedDigits, rawText, StringComparison.Ordinal);
+        File.WriteAllText(
+            Path.Combine(layout.OutputRoot, "runtime-candidate-smoke-raw-text.txt"),
+            rawText);
     }
 
     private static string RequireEnvironmentVariable(string name)
@@ -294,25 +164,6 @@ public sealed class RuntimeCandidateSmokeTests
         Assert.True(
             fullPath.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal),
             $"{field} 未锚定在隔离副本内: {fullPath}");
-    }
-
-    /// <summary>
-    /// Mirrors the production base-profile convention: the win-x64-base
-    /// profile declares the base-only component closure.
-    /// </summary>
-    private static HashSet<string> ReadBaseComponentIds(string runtimeManifestPath)
-    {
-        using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(runtimeManifestPath));
-        HashSet<string> ids = document.RootElement
-            .GetProperty("profiles")
-            .GetProperty("win-x64-base")
-            .GetProperty("components")
-            .EnumerateArray()
-            .Select(component => component.GetProperty("component_id").GetString()
-                ?? throw new InvalidDataException("runtime manifest 的 component_id 必须是字符串。"))
-            .ToHashSet(StringComparer.Ordinal);
-        Assert.NotEmpty(ids);
-        return ids;
     }
 
     /// <summary>

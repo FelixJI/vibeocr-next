@@ -117,20 +117,15 @@ public sealed class HttpV2GoldenContractTests
         JsonElement fixture = LoadGolden().RootElement.GetProperty(key);
         string json = fixture.GetRawText();
         var typed = HttpV2Json.Deserialize<ProgressSnapshot>(json)!;
-        var host = JsonSerializer.Deserialize<VibeOCR.Runtime.Contracts.Generated.Host.ProgressSnapshot>(json)!;
         var wire = JsonSerializer.Deserialize<VibeOCR.Runtime.Contracts.Generated.Wire.ProgressSnapshot>(json)!;
         long current = fixture.GetProperty("current").GetInt64();
         long? total = fixture.TryGetProperty("total", out JsonElement value) ? value.GetInt64() : null;
         Assert.Equal(current, typed.Current);
-        Assert.Equal(current, host.Current);
         Assert.Equal(current, wire.Current);
         Assert.Equal(total, typed.Total);
-        Assert.Equal(total, host.Total);
         Assert.Equal(total, wire.Total);
-        Assert.Equal(typed.EstimatedRemainingSeconds, host.EstimatedRemainingSeconds);
         Assert.Equal(typed.EstimatedRemainingSeconds, wire.EstimatedRemainingSeconds);
         Assert.True(JsonNode.DeepEquals(JsonNode.Parse(json), JsonNode.Parse(HttpV2Json.Serialize(typed))));
-        Assert.Equal(current, JsonSerializer.Deserialize<VibeOCR.Runtime.Contracts.Generated.Host.ProgressSnapshot>(JsonSerializer.Serialize(host))!.Current);
         Assert.Equal(total, JsonSerializer.Deserialize<VibeOCR.Runtime.Contracts.Generated.Wire.ProgressSnapshot>(JsonSerializer.Serialize(wire))!.Total);
     }
 
