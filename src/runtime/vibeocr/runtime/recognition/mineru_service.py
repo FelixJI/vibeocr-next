@@ -235,10 +235,9 @@ class MinerUService(metaclass=SingletonMeta):
         if "MINERU_CONFIG" in env and not config_path.is_file():
             raise ValueError("MINERU_CONFIG must reference an existing config file")
         if not config_path.exists():
-            # MinerU 4.1 配置结构：small_backend 嵌套在 model 下，vlm 是顶层
-            # 段（4.0 的 model.vlm 已上提）。
+            # 锁定 mineru 4.1.3：vlm 嵌套在 model 下，顶层写法会被静默忽略。
             config_path.write_text(
-                "model:\n  small_backend: onnx\nvlm:\n  engine: llama-cpp\n",
+                "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
                 encoding="utf-8",
             )
         env["MINERU_HOME"] = str(home)

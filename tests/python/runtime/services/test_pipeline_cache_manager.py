@@ -8,44 +8,55 @@ from unittest.mock import MagicMock
 
 import pytest
 from vibeocr.runtime.recognition.pipeline_cache_manager import (
-    FALLBACK_MAX_HEAVY,
-    VRAM_TIER_8GB,
+    MAX_HEAVY_PIPELINES,
     PipelineCacheManager,
-    compute_max_heavy_by_vram,
 )
 from vibeocr.runtime_contracts import PipelineSpec
 
-# --- compute_max_heavy_by_vram ---
+# --- 有界安全限额（#317：NVML 预算已退役） ---
 
 
-def test_compute_max_heavy_under_8gb():
-    """≤8G 显存 → 上限 1。"""
-    assert compute_max_heavy_by_vram(4096) == 1  # 4G
-    assert compute_max_heavy_by_vram(8192) == 1  # 8G
+def test_max_heavy_is_a_bounded_safe_limit():
+    """不再探测显存：固定保守限额 1，与厂商/NVIDIA 可探测性无关。"""
+    assert MAX_HEAVY_PIPELINES == 1
 
 
-def test_compute_max_heavy_over_8gb():
-    """>8G 显存 → 上限 2。"""
-    assert compute_max_heavy_by_vram(8193) == 2  # 刚过 8G
-    assert compute_max_heavy_by_vram(24576) == 2  # 24G
+def test_default_budget_ignores_gpu_env_flags(monkeypatch):
+    """VIBEOCR_USE_GPU 不再参与预算（历史变量无读取方），默认限额恒为 1。"""
+    monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
+    service = MagicMock()
+    service._pipelines = {}
+    mgr = PipelineCacheManager(service, {})
+    try:
+        assert mgr.max_heavy == MAX_HEAVY_PIPELINES
+    finally:
+        mgr.shutdown()
 
 
-def test_compute_max_heavy_zero_vram_returns_default():
-    """显存读取失败（0）→ 回退默认 1。"""
-    assert compute_max_heavy_by_vram(0) == FALLBACK_MAX_HEAVY
+def test_no_gpu_env_returns_safe_limit(monkeypatch):
+    """无 VIBEOCR_USE_GPU 环境变量时同样返回安全限额。"""
+    monkeypatch.delenv("VIBEOCR_USE_GPU", raising=False)
+    service = MagicMock()
+    service._pipelines = {}
+    mgr = PipelineCacheManager(service, {})
+    try:
+        assert mgr.max_heavy == MAX_HEAVY_PIPELINES
+    finally:
+        mgr.shutdown()
 
 
-def test_tier_constants():
-    """分档阈值常量正确。"""
-    assert VRAM_TIER_8GB == 8192
+def test_manual_override(monkeypatch):
+    """max_heavy 手动指定时优先于默认限额。"""
+    service = MagicMock()
+    service._pipelines = {}
+    mgr = PipelineCacheManager(service, {}, max_heavy=3)
+    try:
+        assert mgr.max_heavy == 3
+    finally:
+        mgr.shutdown()
 
 
-def test_fallback_max_heavy_is_1():
-    """回退并存上限为 1（保守，防 OOM）。"""
-    assert FALLBACK_MAX_HEAVY == 1
-
-
-# --- 辅助构造 ---
+# --- 构造 ---
 
 
 def _make_legacy_manager(
@@ -69,45 +80,6 @@ def _make_legacy_manager(
     mgr._wakeup_event = threading.Event()
     mgr._thread = None
     return mgr
-
-
-# --- _detect_max_heavy (CPU/GPU 分档) ---
-
-
-def test_detect_max_heavy_cpu_mode_returns_1(monkeypatch):
-    """CPU 模式（VIBEOCR_USE_GPU != true）固定返回 1。"""
-    monkeypatch.setenv("VIBEOCR_USE_GPU", "false")
-    service = MagicMock()
-    service._pipelines = {}
-    mgr = PipelineCacheManager(service, {}, max_heavy=None)  # 自动检测
-    try:
-        assert mgr.max_heavy == 1
-    finally:
-        mgr.shutdown()
-
-
-def test_detect_max_heavy_no_env_returns_1(monkeypatch):
-    """无 VIBEOCR_USE_GPU 环境变量时（默认 CPU）返回 1。"""
-    monkeypatch.delenv("VIBEOCR_USE_GPU", raising=False)
-    service = MagicMock()
-    service._pipelines = {}
-    mgr = PipelineCacheManager(service, {})
-    try:
-        assert mgr.max_heavy == 1
-    finally:
-        mgr.shutdown()
-
-
-def test_detect_max_heavy_manual_override(monkeypatch):
-    """max_heavy 手动指定时优先于自动检测。"""
-    monkeypatch.setenv("VIBEOCR_USE_GPU", "false")
-    service = MagicMock()
-    service._pipelines = {}
-    mgr = PipelineCacheManager(service, {}, max_heavy=3)
-    try:
-        assert mgr.max_heavy == 3
-    finally:
-        mgr.shutdown()
 
 
 # --- enforce_capacity (FIFO) ---
@@ -464,19 +436,6 @@ def test_release_paddle_closes_ort_pipeline_without_native_allocator(
     assert runner.session is None
     native.close.assert_called_once()
     fake_paddle.device.cuda.empty_cache.assert_not_called()
-
-
-def test_compute_max_heavy_by_vram_8gb_threshold() -> None:
-    """≤8GB=1, >8GB=2, 未知=1。"""
-    from vibeocr.runtime.recognition.pipeline_cache_manager import (
-        compute_max_heavy_by_vram,
-    )
-
-    assert compute_max_heavy_by_vram(0) == 1  # 未知
-    assert compute_max_heavy_by_vram(4096) == 1  # 4GB
-    assert compute_max_heavy_by_vram(8192) == 1  # 8GB 边界
-    assert compute_max_heavy_by_vram(8193) == 2  # 刚过 8GB
-    assert compute_max_heavy_by_vram(24576) == 2  # 24GB
 
 
 # =============================================================================

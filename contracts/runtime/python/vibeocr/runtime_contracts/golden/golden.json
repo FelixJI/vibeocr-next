@@ -182,13 +182,6 @@
   "ocr_engine_catalog": {
     "engines": [
       {
-        "id": "rapidocr",
-        "availability": "unavailable",
-        "included_in_base": false,
-        "reason_code": "engine_retired",
-        "required_component": null
-      },
-      {
         "id": "windows",
         "availability": "preparation_required",
         "included_in_base": false,

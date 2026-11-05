@@ -433,8 +433,8 @@ class TestOmittedEngineFreezeParity:
     async def test_omitted_engine_rejects_wrong_device_at_submit(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """缺省 engine（解析为 paddleocr）携带环境不匹配设备时，提交期即
-        拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
+        """缺省 engine（解析为 paddleocr）携带已退役 cuda 设备时，在入口
+        枚举校验处拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
         monkeypatch.setenv(
             "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
         )
@@ -454,7 +454,9 @@ class TestOmittedEngineFreezeParity:
             )
         assert rejected.status_code == 400, rejected.text
         assert rejected.json()["code"] == "VALIDATION_ERROR"
-        assert "matching Paddle ONNX environment" in rejected.text
+        # #317：cuda 已从活跃 device 契约移除，拒绝发生在 parser 枚举校验
+        # （入口），不再依赖环境匹配门禁。
+        assert "pipeline option device" in rejected.text
         # 提交被拒：任务从未进入 executor，也没有任何冻结快照。
         assert executor.pipelines == []
         assert all(record.paddle_snapshot is None for record in module.registry)
@@ -475,10 +477,9 @@ class TestReadyEngineCatalog:
         )
         catalog = engine_descriptor["ocr_engine_catalog"]
         entries = {entry["id"]: entry for entry in catalog["engines"]}
-        assert set(entries) == {"rapidocr", "windows", "paddleocr"}
-        # 已退休的 rapidocr 固定投影 unavailable/engine_retired。
-        assert entries["rapidocr"]["availability"] == "unavailable"
-        assert entries["rapidocr"]["reason_code"] == "engine_retired"
+        # #317：目录只列活跃 id；rapidocr 已从能力目录移除，显式提交
+        # 仍以 engine_retired 结构化拒绝（见上方提交测试）。
+        assert set(entries) == {"windows", "paddleocr"}
         assert entries["windows"]["availability"] == "unavailable"
         assert entries["paddleocr"]["availability"] == "ready"
         assert entries["paddleocr"]["included_in_base"] is True

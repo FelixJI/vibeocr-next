@@ -2,6 +2,7 @@
 
 import threading
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -73,10 +74,22 @@ def test_legacy_document_entrypoints_delegate_to_registry(
 
 
 def test_retired_paddlocr_vl_entrypoint_rejects_with_diagnostics():
-    """#270：PaddleOCR-VL 旧入口不再委托注册表，直接可诊断拒绝。"""
-    service = OCRService.__new__(OCRService)
-    with pytest.raises(ValueError, match="退役"):
-        service._recognize_paddlocr_vl("image", OCROptions(pipeline="PaddleOCR-VL"))
+    """#270/#317：PaddleOCR-VL 旧入口与投影实现已删除；新构造请求在注册表
+    边界得到可诊断拒绝，不再有独立入口方法。"""
+    service = OCRService()
+    service._pipelines = {}
+    assert not hasattr(service, "_recognize_paddlocr_vl")
+
+    mock_registry = MagicMock()
+    mock_registry.has.return_value = False
+    with (
+        patch(
+            "vibeocr.runtime.recognition.core.pipelines.get_registry",
+            return_value=mock_registry,
+        ),
+        pytest.raises(ValueError, match="已退役"),
+    ):
+        service.get_or_create_pipeline("PaddleOCR-VL")
 
 
 class TestOCRServiceSingleton:

@@ -4,7 +4,8 @@
 
 * ``GeneralTextOcrEngine`` 是 application/core 边界上与具体库无关的接口；
   Windows Media OCR / PaddleOCR 两个活跃 adapter 在接口之后实现；
-  RapidOCR 引擎已退役，仅保留 wire 枚举 id 供历史记录反序列化与明确拒绝。
+  RapidOCR 引擎已退役：wire 枚举 id 仅保留供历史记录反序列化，解析后
+  一律以 engine_retired 结构化拒绝，不再出现在活跃能力目录中。
 * ``OcrEngineRegistry`` 负责注册、探测和缓存；engine 目录来自实际探针和
   已安装 component，不从静态依赖列表猜测。
 * ``OcrEngineResolver`` 只按 Protocol 的显式 engine ID 选择：缺省时使用
@@ -39,11 +40,10 @@ logger = logging.getLogger(__name__)
 # 运行时离线提供；windows 为操作系统可选能力）。
 DEFAULT_OCR_ENGINE = OcrEngine.PADDLEOCR
 
-# catalog 必须覆盖全部稳定 engine id（每个 id 恰好一个 descriptor）。
-# rapidocr 已退役：不再注册 adapter，探针目录固定投影为
-# unavailable/engine_retired（退休兼容，非活跃能力）。
+# 目录只覆盖活跃 engine id（每个 id 恰好一个 descriptor）。rapidocr 已
+# 退役：不再注册 adapter，也不再进入稳定目录/能力目录投影；历史值只
+# 经 parse_wire_engine 解析后在 resolve 处 fail closed（engine_retired）。
 _STABLE_ENGINE_ORDER: tuple[OcrEngine, ...] = (
-    OcrEngine.RAPIDOCR,
     OcrEngine.WINDOWS,
     OcrEngine.PADDLEOCR,
 )
@@ -194,8 +194,9 @@ def ensure_engine_valid_for_pipeline(
 class OcrEngineRegistry:
     """注册、探测并缓存各引擎 adapter；目录来自实际探针。
 
-    未注册实现的稳定 engine id 以 ``engine_not_installed`` 的
-    unavailable descriptor 出现在目录中，保证 catalog 覆盖全部 id。
+    未注册实现的活跃 engine id 以 ``engine_not_installed`` 的
+    unavailable descriptor 出现在目录中，保证 catalog 覆盖全部活跃 id；
+    已退休 id（rapidocr）不在目录内，仅在 resolve 处 fail closed。
     """
 
     def __init__(
@@ -245,10 +246,10 @@ class OcrEngineResolver:
     )
 
     def probe_descriptors(self) -> list[EngineDescriptor]:
-        """Return one cached descriptor for every stable engine id.
+        """Return one cached descriptor for every active engine id.
 
-        已退休引擎（rapidocr）没有 adapter：目录固定投影
-        unavailable/engine_retired，绝不重新出现为活跃能力。
+        已退休引擎（rapidocr）不在目录中：不再作为能力投影给客户端，
+        绝不重新出现为活跃能力；显式选择在 resolve 处结构化拒绝。
         """
         descriptors: list[EngineDescriptor] = []
         for engine_id in _STABLE_ENGINE_ORDER:

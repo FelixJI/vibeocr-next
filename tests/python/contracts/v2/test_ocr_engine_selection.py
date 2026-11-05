@@ -33,6 +33,8 @@ from vibeocr.runtime_contracts.generated.error_codes import (
 ROOT = Path(__file__).resolve().parents[4]
 V2 = ROOT / "contracts/runtime/python/vibeocr/runtime_contracts"
 STABLE_ENGINE_IDS = ("rapidocr", "windows", "paddleocr")
+# #317：wire 枚举保留历史 rapidocr（反序列化+拒绝）；能力目录只列活跃 id。
+ACTIVE_ENGINE_IDS = ("windows", "paddleocr")
 ENGINE_SELECTION_ERRORS = {
     "OCR_ENGINE_UNKNOWN": ("validation", 400, False),
     "OCR_ENGINE_UNAVAILABLE": ("capability", 426, False),
@@ -133,7 +135,10 @@ def test_engine_catalog_covers_all_availability_states_on_health() -> None:
     }
     catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
     engines = {engine["id"]: engine for engine in catalog["engines"]}
-    assert set(engines) == set(STABLE_ENGINE_IDS)
+    assert set(engines) == set(ACTIVE_ENGINE_IDS)
+    # 退休 rapidocr 仍在 wire 枚举中，但不再是能力目录条目。
+    assert "rapidocr" in set(STABLE_ENGINE_IDS)
+    assert "rapidocr" not in engines
     assert {engine["availability"] for engine in engines.values()} <= {
         "ready",
         "preparation_required",

@@ -1,7 +1,4 @@
-"""pipeline_cache_manager 覆盖补充：聚焦未覆盖分支。
-
-不导入 paddle/pynvml；GPU 相关路径通过 monkeypatch 环境变量 + 模块属性覆盖。
-"""
+"""pipeline_cache_manager 覆盖补充：聚焦未覆盖分支。"""
 
 from __future__ import annotations
 
@@ -11,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from vibeocr.runtime.recognition.pipeline_cache_manager import (
-    FALLBACK_MAX_HEAVY,
+    MAX_HEAVY_PIPELINES,
     PipelineCacheManager,
 )
 from vibeocr.runtime_contracts import PipelineSpec
@@ -59,72 +56,22 @@ class TestEnsureRuntimeFields:
         assert hasattr(mgr, "_tick_interval")
 
 
-# ---- _detect_max_heavy GPU 路径 ---------------------------------------
+# ---- 默认预算（#317：NVML 探测路径已删除） ------------------------------
 
 
-class TestDetectMaxHeavyGpu:
-    def test_gpu_mode_uses_gpu_memory_monitor(self, monkeypatch):
-        """GPU 模式 + GPUMemoryMonitor 可用 → 按显存分档（lines 114-119）。"""
+class TestDefaultBudget:
+    def test_budget_is_bounded_without_gpu_probe(self, monkeypatch):
+        """默认预算不导入任何 GPU 探测栈：历史 VIBEOCR_USE_GPU=true 也返回
+        有界安全限额（AMD/Intel/NVIDIA 无差别，不以可探测性定预算）。"""
         monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-
-        fake_info = MagicMock()
-        fake_info.available = True
-        fake_info.total = 16384  # 16GB → 2
-
-        fake_monitor_cls = MagicMock()
-        fake_monitor_cls.return_value.get_status.return_value = fake_info
-
-        import vibeocr.runtime.processes.utils.gpu_memory_monitor as gmm
-
-        monkeypatch.setattr(gmm, "GPUMemoryMonitor", fake_monitor_cls)
+        import sys
 
         service = MagicMock()
         service._pipelines = {}
         mgr = PipelineCacheManager(service, {}, max_heavy=None)
         try:
-            assert mgr.max_heavy == 2
-        finally:
-            mgr.shutdown()
-
-    def test_gpu_mode_monitor_exception_falls_back(self, monkeypatch):
-        """GPU 模式 + GPUMemoryMonitor 抛异常 → 回退（lines 120-126）。"""
-        monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-
-        fake_monitor_cls = MagicMock()
-        fake_monitor_cls.return_value.get_status.side_effect = RuntimeError("nvml boom")
-
-        import vibeocr.runtime.processes.utils.gpu_memory_monitor as gmm
-
-        monkeypatch.setattr(gmm, "GPUMemoryMonitor", fake_monitor_cls)
-
-        service = MagicMock()
-        service._pipelines = {}
-        mgr = PipelineCacheManager(service, {}, max_heavy=None)
-        try:
-            assert mgr.max_heavy == FALLBACK_MAX_HEAVY
-        finally:
-            mgr.shutdown()
-
-    def test_gpu_mode_unavailable_falls_back(self, monkeypatch):
-        """GPU 模式 + info.available=False → 回退（line 118 False）。"""
-        monkeypatch.setenv("VIBEOCR_USE_GPU", "true")
-
-        fake_info = MagicMock()
-        fake_info.available = False
-        fake_info.total = 0
-
-        fake_monitor_cls = MagicMock()
-        fake_monitor_cls.return_value.get_status.return_value = fake_info
-
-        import vibeocr.runtime.processes.utils.gpu_memory_monitor as gmm
-
-        monkeypatch.setattr(gmm, "GPUMemoryMonitor", fake_monitor_cls)
-
-        service = MagicMock()
-        service._pipelines = {}
-        mgr = PipelineCacheManager(service, {}, max_heavy=None)
-        try:
-            assert mgr.max_heavy == FALLBACK_MAX_HEAVY
+            assert mgr.max_heavy == MAX_HEAVY_PIPELINES
+            assert not any(name.endswith("gpu_memory_monitor") for name in sys.modules)
         finally:
             mgr.shutdown()
 
@@ -364,9 +311,6 @@ class TestReleaseOnePinned:
 class TestReleaseOwner:
     def test_release_one_paddle_removes_owned_pipeline(self, monkeypatch):
         """_release_one 释放目标管道并移除其使用记录。"""
-        monkeypatch.setenv(
-            "VIBEOCR_USE_GPU", "false"
-        )  # CPU 模式，_empty_cache 跳过 paddle
         mgr = _make_legacy_manager()
         mgr._service._pipelines = {"PP-StructureV3": object()}
         mgr._last_used = {"PP-StructureV3": 100.0}

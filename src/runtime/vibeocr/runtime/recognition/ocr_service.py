@@ -827,14 +827,6 @@ class OCRService(metaclass=SingletonMeta):
         provider_options = spec.options_class.from_dict(options.to_dict())
         return spec.recognize(self, image, provider_options)
 
-    def _recognize_paddlocr_vl(
-        self,
-        image: Image.Image | np.ndarray | str,
-        options: OCROptions,
-    ) -> OCRResult:
-        """#270：PaddleOCR-VL 已退役；仅保留可诊断拒绝，不再有实现。"""
-        raise ValueError("PaddleOCR-VL 文档解析已退役：请改用其他文档识别模式")
-
     @staticmethod
     def _extract_bbox(
         rec_boxes, index: int

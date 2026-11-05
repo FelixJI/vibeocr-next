@@ -494,6 +494,10 @@ def test_mineru_prepare_uses_product_code_and_service_configuration(
     assert env["GGML_VK_VISIBLE_DEVICES"] == " "
     assert "small_backend: onnx" in Path(env["MINERU_CONFIG"]).read_text()
     assert "engine: llama-cpp" in Path(env["MINERU_CONFIG"]).read_text()
+    # 回归：vlm 必须嵌套在 model 下（旧顶层写法会被 Config 静默忽略）。
+    generated = Path(env["MINERU_CONFIG"]).read_text(encoding="utf-8")
+    assert "\n  vlm:\n    engine: llama-cpp\n" in generated
+    assert "\nvlm:" not in generated
     assert env.get("MINERU_MODEL_BASE_DIR") != "old-generation"
     assert module.MinerUService._model_root == str(prepared)
     assert shutdowns == []
@@ -524,9 +528,10 @@ from vibeocr.runtime.recognition.mineru_service import MinerUService
 service = object.__new__(MinerUService)
 service._prepare_cached_models('basic', lambda: False)
 root = Path(service._model_root)
-from mineru.config import config
+from mineru.config import get_config
 from mineru.model.registry import model_repos_for_tier
 from mineru.model.download import MODEL_COMPLETE_MARKER, verify_model_repo
+config = get_config()
 config.model.base_dir = str(root)
 repos = model_repos_for_tier('basic')
 assert all(verify_model_repo(repo).ready for repo in repos)

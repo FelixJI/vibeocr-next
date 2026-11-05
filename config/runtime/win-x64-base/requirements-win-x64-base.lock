@@ -395,10 +395,6 @@ numpy==2.3.5 \
     --hash=sha256:ffe22d2b05504f786c867c8395de703937f934272eb67586817b46188b4ded6d \
     --hash=sha256:fffe29a1ef00883599d1dc2c51aa2e5d80afe49523c261a74933df395c15c520
     # via -r config/runtime/win-x64-base/requirements.in
-nvidia-ml-py==13.615.71 \
-    --hash=sha256:959bf4adf6fe1308e4bd739e722236b0d1ec8392e2cefad33ff70c311380b9b6 \
-    --hash=sha256:bebe4e48f51b1dc75028c0815cb7bfa14a31a5bb80be70c9d980c6036953fc3d
-    # via pynvml
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2 \
     --hash=sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050
@@ -664,10 +660,6 @@ pymupdf-lite==2.0 \
     --hash=sha256:d8c858b20199bd38e5b8da887c03133c230c6be8e3ca32419016074503559969 \
     --hash=sha256:f0b34b790a2d1a3985adfff190173324d42b0e5aa876602f2c94bcbb16d8c6e2 \
     --hash=sha256:fa883ba3c88be81d2baf34c58e859c83098b5f459c6533869b88375dab990c31
-    # via -r config/runtime/win-x64-base/requirements.in
-pynvml==13.0.1 \
-    --hash=sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f \
-    --hash=sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8
     # via -r config/runtime/win-x64-base/requirements.in
 python-barcode==0.16.1 \
     --hash=sha256:5776567478c9a0dae473374bb86631ba0b5ea99aaf302763b364e367ac51f367 \

@@ -271,15 +271,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nvidia-ml-py"
-version = "13.615.71"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fd/30/b25216758be3d3e2834825d8193609e2d71c770a8bd7984438c058c90268/nvidia_ml_py-13.615.71.tar.gz", hash = "sha256:bebe4e48f51b1dc75028c0815cb7bfa14a31a5bb80be70c9d980c6036953fc3d", size = 57485, upload-time = "2026-09-25T15:15:28.226Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/a1/1681dfa1c904d4e3e72e51b55a0ff012d50b766843ef832d584abe2113c6/nvidia_ml_py-13.615.71-py3-none-any.whl", hash = "sha256:959bf4adf6fe1308e4bd739e722236b0d1ec8392e2cefad33ff70c311380b9b6", size = 58132, upload-time = "2026-09-25T15:15:26.54Z" },
-]
-
-[[package]]
 name = "openpyxl"
 version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
@@ -464,18 +455,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7f/23/d8c4b56e013efb6dd9f93d25df0c2fa3e67fab6969d3ccfff5962d5b4b07/pymupdf_lite-2.0-cp311-abi3-win_amd64.whl", hash = "sha256:8919c4cdb129b51e462bffc707c5ea625fd65210c217a52078bae97565b574f1", size = 19860876, upload-time = "2026-10-19T09:50:19.977Z" },
     { url = "https://files.pythonhosted.org/packages/29/47/fd339d84f1573a33f4c67867cded23dea5c570f55b5bba16cf22f463a586/pymupdf_lite-2.0-cp311-abi3-win_arm64.whl", hash = "sha256:184d1932f248e09c241f4cb38ce7d4b7e987cedef0e8e015ccabe448e0aa3e59", size = 19418301, upload-time = "2026-10-19T09:50:42.29Z" },
     { url = "https://files.pythonhosted.org/packages/f1/49/d74571b68f23d50cfdd69babbac03358dfd0665cbf4a0c9403df51a40e33/pymupdf_lite-2.0-cp313-abi3-pyemscripten_2025_0_wasm32.whl", hash = "sha256:23539f86c9a85776cc5d3d83f952b7a64a6eadbe5d7005523aba9edfcc433913", size = 18428139, upload-time = "2026-10-19T09:51:03.134Z" },
-]
-
-[[package]]
-name = "pynvml"
-version = "13.0.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nvidia-ml-py" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/57/da7dc63a79f59e082e26a66ac02d87d69ea316b35b35b7a00d82f3ce3d2f/pynvml-13.0.1.tar.gz", hash = "sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f", size = 35226, upload-time = "2025-09-05T20:33:25.377Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/4a/cac76c174bb439a0c46c9a4413fcbea5c6cabfb01879f7bbdb9fdfaed76c/pynvml-13.0.1-py3-none-any.whl", hash = "sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8", size = 28810, upload-time = "2025-09-05T20:33:24.13Z" },
 ]
 
 [[package]]
@@ -704,7 +683,6 @@ dependencies = [
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pymupdf-lite" },
-    { name = "pynvml" },
     { name = "python-barcode" },
     { name = "python-docx" },
     { name = "python-multipart" },
@@ -738,7 +716,6 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.3.0,<13" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "pymupdf-lite", specifier = ">=2.0" },
-    { name = "pynvml", specifier = ">=11.5.0" },
     { name = "python-barcode", specifier = ">=0.16.1" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-multipart", specifier = ">=0.0.32" },
