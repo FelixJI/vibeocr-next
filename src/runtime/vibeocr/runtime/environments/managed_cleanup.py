@@ -15,7 +15,6 @@ from vibeocr.runtime.environments.managed_references import (
     environment_has_references,
     environment_has_services,
 )
-from vibeocr.runtime.environments.runtime_install_plan import RuntimeInstallPlanStale
 from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
     _lock_allowed_hashes,
@@ -27,6 +26,7 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeStoreLock,
 )
 from vibeocr.runtime.environments.runtime_maintenance import (
+    RuntimeInstallPlanStale,
     _atomic_json,
     safe_runtime_detail,
 )
@@ -474,6 +474,11 @@ def _scan(store: ManagedEnvironmentStore, *, held: bool = False) -> dict:
     for env_id, record in environments.items():
         if env_id in ledger["pending"]:
             continue
+        if record["kind"] == "product":
+            # 产品树随产品载荷分发（runtime/env，在受管存储之外），由
+            # Velopack 更新整体替换：不生成可清理项，也不能按受管存储的
+            # 相对路径表示（relative_to 会失配）。
+            continue
         path = store._safe_path(record)
         owned = [
             store.root / relative
@@ -880,10 +885,9 @@ def _unregister(
             "detail": "",
         }
         _atomic_json(_ledger_path(store), ledger)
-        # 删除即终结该对象的旧计划生命周期：随注册表记录一并撤销落盘
-        # 安装计划与准备归属，同 id 同名重建的新对象不会被旧 plan 的
-        # revision/CAS 冒认；失败时记录仍在注册表，删除重试会重做。
-        store._forget_install_plan(env_id)
+        # 删除即终结该对象的准备归属：同 id 同名重建的新对象不会被旧
+        # prepare_targets 冒认；失败时记录仍在注册表，删除重试会重做。
+        # （预构建树后无安装计划：落盘 plan 生命周期已随安装事务退役。）
         targets = data.get("prepare_targets")
         if targets is not None:
             for recipe in [

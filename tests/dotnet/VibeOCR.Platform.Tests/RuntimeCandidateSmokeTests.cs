@@ -87,26 +87,13 @@ public sealed class RuntimeCandidateSmokeTests
         ensureCancellation.CancelAfter(EnsureTimeout);
         CancellationToken ensureToken = ensureCancellation.Token;
 
-        // 安装预览限定基础组件:空 install 列表显式选择 base-only 范围,
-        // 绝不做 GPU/Paddle/MinerU 全量重装。
-        Assert.True(
-            client.SupportsInstallPlan,
-            "候选 Runtime 不支持安装预览(runtime.install-plan.v1)。");
-        Host.RuntimeInstallPlan plan = await client.PreviewInstallAsync(
-            new RuntimeInstallSelection { InstallComponentIds = [] },
-            "cpu",
-            ensureToken);
-        Assert.Empty(plan.Blockers);
-        Assert.Subset(
-            ReadBaseComponentIds(layout.RuntimeManifest),
-            plan.EffectiveComponentIds.ToHashSet(StringComparer.Ordinal));
-
-        // 真实生产启动路径：默认具名环境由随包离线配方初始化，并可重复调用。
+        // 真实生产启动路径：预构建运行时树（PR2）零安装，默认具名环境
+        // 由 initialize_default 幂等注册，并可重复调用。
         ManagedEnvironmentList initialized = await client.InitializeDefaultEnvironmentAsync(ensureToken);
         ManagedEnvironment defaultEnvironment = Assert.Single(initialized.Environments);
-        Assert.Equal("paddleocr-ort-cpu", defaultEnvironment.Id);
+        Assert.Equal("product", defaultEnvironment.Id);
         Assert.Equal("默认环境", defaultEnvironment.Name);
-        Assert.Equal("paddleocr-ort-cpu", defaultEnvironment.Recipe);
+        Assert.Equal("paddleocr-ort-directml", defaultEnvironment.Recipe);
         Assert.Equal(defaultEnvironment.Id, initialized.ActiveId);
         Assert.Equal("installed", defaultEnvironment.Status);
         ManagedEnvironmentList repeated = await client.InitializeDefaultEnvironmentAsync(ensureToken);

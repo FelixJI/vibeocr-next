@@ -165,9 +165,8 @@ def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
         "preparation_required",
         "unavailable",
     ]
-    assert host["$defs"]["CapabilityDescriptor"]["properties"][
-        "ocr_engine_catalog"
-    ] == {"$ref": "#/$defs/OcrEngineCatalog"}
+    # Runtime Host 面已缩为 environment 侍者：引擎 catalog defs 仍在 host
+    # schema 上，不再挂在已删除的 CapabilityDescriptor 下。
     from vibeocr.runtime_contracts.generated import runtime_host_types
 
     assert hasattr(runtime_host_types, "OcrEngineCatalog")

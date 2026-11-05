@@ -8,7 +8,6 @@ EXPORT_DOCUMENT_V1 = "export.document.v1"
 RUNTIME_SETTINGS_V2 = "runtime.settings.v2"
 RUNTIME_MAINTENANCE_V1 = "runtime.maintenance.v1"
 TASK_PROGRESS_V1 = "task.progress.v1"
-RUNTIME_MAINTENANCE_V2 = "runtime.maintenance.v2"
 RUNTIME_COMPONENT_REPAIR_V1 = "runtime.component-repair.v1"
 RUNTIME_CAPABILITY_METADATA_V1 = "runtime.capability-metadata.v1"
 RUNTIME_EVENTS_SSE_V1 = "runtime.events.sse.v1"
@@ -18,7 +17,6 @@ RUNTIME_DOWNLOAD_SOURCES_V1 = "runtime.download-sources.v1"
 RUNTIME_COMPONENT_SELECTION_V1 = "runtime.component-selection.v1"
 OCR_RECOGNITION_MODES_V1 = "ocr.recognition-modes.v1"
 OCR_MINERU_CONFIG_V1 = "ocr.mineru-config.v1"
-RUNTIME_INSTALL_PLAN_V1 = "runtime.install-plan.v1"
 OCR_MINERU_REMOTE_API_V1 = "ocr.mineru-remote-api.v1"
 OCR_DEFAULT_RECOGNITION_MODE_V1 = "ocr.default-recognition-mode.v1"
 PDF_PAGE_INSPECT_V1 = "pdf.page-inspect.v1"
@@ -33,7 +31,6 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'runtime.settings.v2',
     'runtime.maintenance.v1',
     'task.progress.v1',
-    'runtime.maintenance.v2',
     'runtime.component-repair.v1',
     'runtime.capability-metadata.v1',
     'runtime.events.sse.v1',
@@ -43,7 +40,6 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'runtime.component-selection.v1',
     'ocr.recognition-modes.v1',
     'ocr.mineru-config.v1',
-    'runtime.install-plan.v1',
     'ocr.mineru-remote-api.v1',
     'ocr.default-recognition-mode.v1',
     'pdf.page-inspect.v1',

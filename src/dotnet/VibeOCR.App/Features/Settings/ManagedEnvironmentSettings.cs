@@ -1,4 +1,3 @@
-using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.App.Features.Maintenance;
 using VibeOCR.App.Services;
@@ -15,57 +14,11 @@ public sealed class ManagedEnvironmentSettings(
     Func<(string Id, int Revision)?> runningSession,
     ProductMaintenanceCoordinator productMaintenance,
     Func<ManagedEnvironmentSession?>? currentSession = null,
-    Action? installAttempted = null,
-    Func<string, string?, CancellationToken, Task>? activateDevice = null,
-    Func<CancellationToken, Task>? stopService = null,
-    Func<Task>? restoreService = null)
+    Func<string, string?, CancellationToken, Task>? activateDevice = null)
 {
     private readonly SemaphoreSlim gate = new(1, 1);
-    private CancellationTokenSource? activeInstall;
     private CancellationTokenSource? activeCleanup;
-    private int restoringService;
-    public bool IsRestoringService => Volatile.Read(ref restoringService) != 0;
-    private readonly object progressLock = new();
-    private ManagedEnvironmentInstallProgress? installProgress;
-    private string[] installLog = [];
-    private int installGeneration;
-  private int progressNotificationQueued;
-  private long progressNotificationVersion;
-    public ManagedEnvironmentInstallProgress? InstallProgress { get { lock (progressLock) return installProgress; } }
-    public IReadOnlyList<string> InstallLog { get { lock (progressLock) return installLog; } }
-    public bool SupportsInstallProgress => manager.SupportsEnvironmentInstallProgress;
 
-  private void NotifyInstallProgress(SynchronizationContext? context)
-  {
-    Interlocked.Increment(ref progressNotificationVersion);
-    if (context is null) { StateChanged?.Invoke(); return; }
-    QueueInstallProgressNotification(context);
-  }
-
-  private void QueueInstallProgressNotification(SynchronizationContext context)
-  {
-    if (Interlocked.CompareExchange(ref progressNotificationQueued, 1, 0) != 0) return;
-    try
-    {
-      context.Post(_ =>
-      {
-        long version = Volatile.Read(ref progressNotificationVersion);
-        try { StateChanged?.Invoke(); }
-        catch (Exception) { /* UI observers cannot change the install result. */ }
-        finally
-        {
-          Volatile.Write(ref progressNotificationQueued, 0);
-          if (Volatile.Read(ref progressNotificationVersion) != version)
-            QueueInstallProgressNotification(context);
-        }
-      }, null);
-    }
-    catch (Exception)
-    {
-      Volatile.Write(ref progressNotificationQueued, 0);
-      // A closing UI context cannot affect the installation transaction.
-    }
-  }
     public bool SupportsCleanup => manager.SupportsEnvironmentCleanup;
     public ManagedCleanupPlan? CleanupPlan { get; private set; }
     public ManagedCleanupResult? CleanupResult { get; private set; }
@@ -101,15 +54,8 @@ public sealed class ManagedEnvironmentSettings(
     public Task PreviewCleanupAsync(CancellationToken cancellationToken) => RunAsync(async () =>
     {
         if (!SupportsCleanup) throw new NotSupportedException("当前 Runtime 不支持空间清理。");
-        if (CanCancelInstall || CanCancelCleanup) throw new InvalidOperationException("请等待当前操作结束后再检查清理项。");
+        if (CanCancelCleanup) throw new InvalidOperationException("请等待当前操作结束后再检查清理项。");
         ManagedCleanupPlan preview = await manager.PreviewEnvironmentCleanupAsync(cancellationToken);
-        // Explicitly entering cleanup ends the previous installation display flow.
-        // Durable environment/failure records remain in Snapshot; a live attempt is never discarded.
-        InvalidateSelectionPlans();
-        lock (progressLock)
-        {
-            if (installProgress?.State != "running") { installProgress = null; installLog = []; }
-        }
         CleanupPage = 0;
         CleanupPlan = preview;
         CleanupResult = preview.LastResult;
@@ -143,7 +89,6 @@ public sealed class ManagedEnvironmentSettings(
             Volatile.Write(ref activeCleanup, null);
             CleanupPlan = null;
             CleanupPage = 0;
-            InvalidateSelectionPlans();
             await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false);
         }
     }, cancellationToken);
@@ -155,9 +100,6 @@ public sealed class ManagedEnvironmentSettings(
         Status = "正在取消清理；待清理记录会保留。";
         StateChanged?.Invoke();
     }
-
-    // 准备目标归属由 Runtime 持久保存；选择代阻止迟到结果覆盖当前计划。
-    private int selectionGeneration;
 
     private const string RunningEvidenceUnavailableMessage =
         "无法读取活动环境状态，请刷新或重新切换环境。";
@@ -171,20 +113,12 @@ public sealed class ManagedEnvironmentSettings(
     /// 读一次；失败后交还显式重试，不自动循环，也不随文案变化失效。</summary>
     public bool ListFetchAttempted => Volatile.Read(ref listFetchAttempted) != 0;
     private int listFetchAttempted;
-    public ManagedEnvironmentPlan? Plan { get; private set; }
-    /// <summary>当前选择配方的兼容查询结果；仅由 FindCompatibleAsync 写入，
-    /// 任何环境变更/失效都清空，防止旧结果覆盖新选择。</summary>
-    public ManagedEnvironmentQueryResult? Compatibility { get; private set; }
     public bool IsBusy { get; private set; }
-    public bool CanCancelInstall => Volatile.Read(ref activeInstall) is not null;
     public string Status { get; private set; } = "尚未读取运行环境";
 
     public bool IsRunning(ManagedEnvironment environment) =>
         runningSession() is { } session && session.Id == environment.Id &&
         session.Revision == environment.Revision;
-
-    /// <summary>取消后读取持久终态的有界预算；测试可缩短以同步验证超时分支。</summary>
-    internal TimeSpan InstallCancelConfirmTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     public Task RefreshAsync(CancellationToken cancellationToken) => RunAsync(async () =>
     {
@@ -195,318 +129,7 @@ public sealed class ManagedEnvironmentSettings(
             : "运行环境状态已更新。";
     }, cancellationToken);
 
-    public Task<ManagedEnvironment> CreateAsync(string name, CancellationToken cancellationToken) => RunAsync(async () =>
-    {
-        ManagedEnvironment created = await manager.CreateEnvironmentAsync(name, cancellationToken);
-        InvalidateSelectionPlans();
-        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        Status = "空环境已创建；未安装识别依赖。";
-        return created;
-    }, cancellationToken);
-
-    public Task PreviewAsync(string environmentId, string recipe, string? sourceId, CancellationToken cancellationToken)
-    {
-        int generation = Volatile.Read(ref selectionGeneration);
-        return RunAsync(async () =>
-        {
-            if (IsSelectionStale(generation)) return;
-            await EnsureCatalogAsync(recipe, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            Plan = null;
-            ManagedEnvironmentPlan plan = await manager.PreviewEnvironmentInstallAsync(
-                environmentId, recipe,
-                sourceId is null ? null : [sourceId], cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            Plan = plan;
-            Status = $"已预览 {plan.Recipe} 锁定配方；下载来源：{string.Join("、", plan.SourceIds)}。确认后才会安装。";
-        }, cancellationToken);
-    }
-
-    /// <summary>
-    /// 推荐配置选择：按 Runtime 权威目录核验配方后只读查询可直接复用的
-    /// 已安装环境；不创建、不安装、不切换，也不占用运行中的任务。
-    /// </summary>
-    public Task FindCompatibleAsync(string recipe, CancellationToken cancellationToken)
-    {
-        int generation = Volatile.Read(ref selectionGeneration);
-        return RunAsync(async () =>
-        {
-            if (IsSelectionStale(generation)) return;
-            await EnsureCatalogAsync(recipe, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            ManagedEnvironmentQueryResult result =
-                await manager.FindCompatibleEnvironmentAsync(recipe, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            Compatibility = result;
-            Status = Compatibility.Selected is { } selected
-                ? $"{recipe} 有可直接复用的环境（{SelectionSummary(selected)}）；切换前不会安装任何内容。"
-                : $"{recipe} 暂无可直接复用的环境；可自动创建空环境并预览依赖，确认后才会安装。";
-        }, cancellationToken);
-    }
-
-    /// <summary>
-    /// 兼容时只返回切换目标；否则由 Runtime 持久复用或创建准备目标并预览。
-    /// 失败、双击与导航重挂载都复用同一目标，不按名称猜归属。
-    /// </summary>
-    public Task PrepareAsync(string recipe, CancellationToken cancellationToken)
-    {
-        int generation = Volatile.Read(ref selectionGeneration);
-        return RunAsync(async () =>
-        {
-            if (IsSelectionStale(generation)) return;
-            await EnsureCatalogAsync(recipe, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            ManagedEnvironmentQueryResult compatible =
-                await manager.FindCompatibleEnvironmentAsync(recipe, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            Compatibility = compatible;
-            if (compatible.Selected is { } selected)
-            {
-                Plan = null;
-                Status = $"{recipe} 有可直接复用的环境（{SelectionSummary(selected)}）；" +
-                    "切换即可使用，本次准备未创建或安装任何内容。";
-                return;
-            }
-            ManagedEnvironment? target = await EnsurePrepareEnvironmentAsync(recipe, generation, cancellationToken);
-            if (IsSelectionStale(generation) || target is null) return;
-            string environmentId = target.Id;
-            if (target.Status == "installed")
-            {
-                ManagedEnvironmentQueryResult refreshed = await manager.FindCompatibleEnvironmentAsync(recipe, cancellationToken);
-                if (IsSelectionStale(generation)) return;
-                Compatibility = refreshed;
-                if (refreshed.Selected is not null)
-                {
-                    Plan = null;
-                    Status = "已找到可直接复用的环境；本次准备未安装任何内容。";
-                    return;
-                }
-            }
-            Plan = null;
-            ManagedEnvironmentPlan plan = await manager.PreviewEnvironmentInstallAsync(
-                environmentId, recipe, null, cancellationToken);
-            if (IsSelectionStale(generation)) return;
-            Plan = plan;
-            string environmentName = Snapshot?.Environments
-                .FirstOrDefault(item => item.Id == environmentId)?.Name ?? environmentId;
-            Status = $"已准备 {recipe} 安装计划（{(plan.Dependencies?.Count ?? 0)} 项依赖，目标环境「{environmentName}」）；" +
-                "确认后才会安装。";
-        }, cancellationToken);
-    }
-
-    /// <summary>
-    /// 创建后刷新失败时，旧快照可能缺少已创建 ID；先权威读取再判缺失。
-    /// </summary>
-    private async Task<ManagedEnvironment?> EnsurePrepareEnvironmentAsync(
-        string recipe, int generation, CancellationToken cancellationToken)
-    {
-        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        if (IsSelectionStale(generation)) return null;
-        ManagedEnvironment target = await manager.PrepareEnvironmentTargetAsync(recipe, cancellationToken);
-        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        return target;
-    }
-
-    private bool IsSelectionStale(int generation) =>
-        Volatile.Read(ref selectionGeneration) != generation;
-
-    private static string SelectionSummary(ManagedEnvironmentSelection selection) =>
-        selection.SelectionReason == "active_environment"
-            ? "当前活动环境"
-            : "按稳定顺序选中";
-
-    /// <summary>
-    /// 宿主对 Runtime 目录的核验：桥的配方 id 协议类型不是目录真值，未知
-    /// 配方在这里 fail closed 拒绝（Runtime 端 _recipe 仍会再拒绝一次）。
-    /// 快照尚未加载时先只读补一次列表，不依赖前端刷新时序。
-    /// </summary>
-    private async Task EnsureCatalogAsync(string recipe, CancellationToken cancellationToken)
-    {
-        if (Snapshot?.Recipes is not { Count: > 0 })
-            await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        if (Snapshot?.Recipes is not { Count: > 0 } recipes ||
-            recipes.All(item => !string.Equals(item.Id, recipe, StringComparison.Ordinal)))
-            throw new InvalidOperationException(
-                "配方不在当前 Runtime 目录中，请刷新后重试。");
-    }
-
-    public Task InstallAsync(string planId, string? sourceId, CancellationToken cancellationToken)
-    {
-        int generation = Volatile.Read(ref selectionGeneration);
-        if (CanCancelInstall)
-            return Task.FromException(new InvalidOperationException("安装正在进行，请等待或取消当前安装。"));
-        return RunAsync(async () =>
-        {
-            if (IsSelectionStale(generation))
-                throw new InvalidOperationException("安装计划已变化，请重新预览。");
-            ManagedEnvironmentPlan plan = Plan
-                ?? throw new InvalidOperationException("请先预览此环境的锁定配方。");
-            // 确认与预览一致：继承预览只能以继承确认，显式预览只能以同源确认。
-            if (plan.PlanId != planId ||
-                (plan.RequestedSourceIds is null) != (sourceId is null) ||
-                (sourceId is not null &&
-                 (plan.RequestedSourceIds?.Count != 1 || plan.RequestedSourceIds[0] != sourceId)))
-                throw new InvalidOperationException("安装计划已变化，请重新预览。");
-            // 保留冻结计划供导航/取消展示，同时使先前排队请求过期。
-            Interlocked.Increment(ref selectionGeneration);
-            Compatibility = null;
-            CleanupResult = null;
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            using IDisposable lease = productMaintenance.Acquire(
-                ProductMaintenanceOwner.RuntimeMaintenance, linked.Cancel);
-            Volatile.Write(ref activeInstall, linked);
-            int attemptGeneration = Interlocked.Increment(ref installGeneration);
-            SynchronizationContext? context = SynchronizationContext.Current;
-            lock (progressLock) { installProgress = null; installLog = []; }
-            void Progress(ManagedEnvironmentInstallProgress update)
-            {
-                void Apply()
-                {
-          lock (progressLock)
-          {
-                    if (attemptGeneration != Volatile.Read(ref installGeneration) ||
-                        update.PlanId != plan.PlanId || update.EnvironmentId != plan.EnvironmentId ||
-                        update.EnvironmentRevision != plan.EnvironmentRevision) return;
-                        if (installProgress is { } previous &&
-                            (previous.AttemptId != update.AttemptId || update.Seq <= previous.Seq || previous.State != "running")) return;
-                        installProgress = update;
-                        if (update.Log is { } log)
-                        {
-                            string entry = $"{update.Timestamp} [{update.Phase}/{log.Stream}] {log.Text}" +
-                                (log.Truncated ? " [输出已截断]" : "");
-                            string[] next = [.. installLog, entry];
-                            int start = Math.Max(0, next.Length - 200);
-                            int chars = 0;
-                            for (int index = next.Length - 1; index >= start; index--)
-                            {
-                                chars += next[index].Length;
-                                if (chars > 64000) { start = index + 1; break; }
-                            }
-                            installLog = start == 0 ? next : ["[较早输出已截断]", .. next[start..]];
-                        }
-                    }
-          NotifyInstallProgress(context);
-                }
-        Apply();
-            }
-            bool cancelled = false;
-            IAsyncDisposable? maintenance = null;
-            bool stopped = false;
-            Exception? installError = null;
-            try
-            {
-                StateChanged?.Invoke();
-                // Runtime freezes admission and checks job leases before we stop any process.
-                if (plan.RequiresServiceStop)
-                {
-                    if (stopService is null || restoreService is null)
-                        throw new InvalidOperationException("当前宿主不支持活动环境维护，请更新应用。");
-                    maintenance = await manager.BeginEnvironmentMaintenanceAsync(plan.EnvironmentId, linked.Token);
-                    stopped = true;
-                    await stopService(linked.Token);
-                }
-                installAttempted?.Invoke();
-                await manager.InstallEnvironmentAsync(
-                    plan, sourceId is null ? null : [sourceId], Progress, linked.Token);
-                // The final managed response proves commit, even if observation failed.
-                Interlocked.Increment(ref installGeneration);
-                lock (progressLock)
-                    if (installProgress is { } observed)
-                        installProgress = observed with
-                        {
-                            State = "succeeded",
-                            Phase = "complete",
-                            Current = "依赖已验证并提交；模型与服务尚未启动",
-                            Log = null
-                        };
-            }
-            catch (OperationCanceledException) when (linked.IsCancellationRequested)
-            {
-                cancelled = true;
-            }
-            catch (Exception error)
-            {
-                installError = error;
-                Interlocked.Increment(ref installGeneration);
-                lock (progressLock)
-                    if (installProgress is { State: "running" } observed)
-                        installProgress = observed with { State = "failed", Current = error.Message, Log = null };
-                try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
-                catch (Exception) { /* Preserve the original installation error. */ }
-                throw;
-            }
-            finally
-            {
-                // Installation has reached a terminal outcome. Restoration is a
-                // separate, non-cancellable phase, still owned by the settings gate.
-                Volatile.Write(ref restoringService, stopped ? 1 : 0);
-                Volatile.Write(ref activeInstall, null);
-                StateChanged?.Invoke();
-                Exception? recoveryError = null;
-                try
-                {
-                    try { if (maintenance is not null) await maintenance.DisposeAsync(); }
-                    catch (Exception error) { recoveryError = error; }
-                    // Even a reservation disposal failure must not skip the bounded restore.
-                    try { if (stopped && restoreService is not null) await restoreService(); }
-                    catch (Exception error)
-                    {
-                        recoveryError = recoveryError is null ? error : new AggregateException(recoveryError, error);
-                    }
-                    if (recoveryError is not null)
-                        throw installError is null ? recoveryError : new AggregateException(
-                            "环境维护失败，释放维护或恢复原服务也失败。", installError, recoveryError);
-                    // App 侧刷新因 IsRestoringService 跳过：恢复完成后由本 gate
-                    // 所有者叠加运行证据；安装失败终态与原异常保持不变。
-                    if (installError is not null && stopped)
-                    {
-                        try { await ReloadEnvironmentsAsync(CancellationToken.None, strictEvidence: false); }
-                        catch (Exception) { /* 展示刷新失败不影响原安装错误传播。 */ }
-                    }
-                }
-                finally
-                {
-                    Volatile.Write(ref restoringService, 0);
-                    StateChanged?.Invoke();
-                }
-            }
-            if (cancelled)
-            {
-                await ConfirmCancelledInstallAsync(plan);
-                Interlocked.Increment(ref installGeneration);
-                ManagedEnvironmentInstallFailure? evidence = Snapshot?.Environments
-                    .FirstOrDefault(item => item.Id == plan.EnvironmentId)?.LastInstallFailure;
-                lock (progressLock)
-                    if (installProgress is { State: "running" } observed)
-                        installProgress = observed with
-                        {
-                            State = evidence is { Phase: "failed" } && evidence.PlanId == plan.PlanId
-                                ? evidence.ReasonCode == "install_interrupted" ? "cancelled" : "failed" : "running",
-              Current = Status,
-              Log = null,
-                        };
-                return;
-            }
-            Plan = null;
-            try
-            {
-                await ReloadEnvironmentsAsync(linked.Token, strictEvidence: false);
-                Status = plan.RequiresServiceStop ? "依赖已更新，已恢复识别服务。"
-                    : "依赖已安装；请切换环境以验证并启动服务。";
-            }
-            catch (OperationCanceledException)
-            {
-                // 事务已提交成功；刷新取消只影响展示，不得改判为安装取消/失败。
-                Status = "依赖已安装；结果刷新已取消，请刷新列表查看最新状态。";
-            }
-            catch (Exception)
-            {
-                Status = "依赖已安装；结果刷新失败，请刷新列表查看最新状态。";
-            }
-        }, cancellationToken, "安装未完成；失败原因请查看该环境记录。");
-    }
-
-    /// <summary>保存全局默认或单环境 override 来源偏好：只写配置，不下载/不安装/不重启。</summary>
+    /// <summary>保存全局默认或单环境 override 来源偏好：只写配置，不下载/不重启。</summary>
     public Task SetSourcesAsync(
         string? environmentId, string? modelSourceId,
         CancellationToken cancellationToken) => RunAsync(async () =>
@@ -514,20 +137,18 @@ public sealed class ManagedEnvironmentSettings(
         ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
             environmentId, modelSourceId, cancellationToken);
         Snapshot = updated;
-        // 来源配置变化使旧预览/兼容结果失效（confirm 时管理器也会拒绝旧计划）。
-        InvalidateSelectionPlans();
         await ApplyRunningEvidenceAsync(cancellationToken);
-        bool touchesModel = modelSourceId is not null;
         // 全局保存（environmentId=null）也会改变运行中环境的模型来源解析，
         // 只要有活动会话就如实提示下次启动生效。
         bool targetRunning = currentSession?.Invoke() is { } session &&
             (environmentId is null || session.EnvironmentId == environmentId);
-        // 单产品语义：来源仅用于安装依赖与下载模型；全局保存由 Runtime
-        // 原子清除各环境旧 override，界面所示即实际解析值。
+        // 单产品语义：来源仅用于下载模型；全局保存由 Runtime 原子清除各环境
+        // 旧 override，界面所示即实际解析值。
         string scope = environmentId is null ? "下载来源已保存并统一所有环境" : "该环境的来源已保存";
-        Status = $"{scope}；仅用于安装依赖与下载模型，不会下载或安装任何内容。";
-        if (touchesModel && targetRunning)
-            Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
+        Status = $"{scope}；仅用于模型下载，不会改变当前运行中的服务。";
+        // 提交了模型来源且目标在运行才提示下次启动生效；纯清除不叠加。
+        if (targetRunning && modelSourceId is not null)
+            Status += "模型来源将在该环境下次启动时生效。";
     }, cancellationToken);
 
     public Task SetSourcesAsync(
@@ -538,113 +159,19 @@ public sealed class ManagedEnvironmentSettings(
         ManagedEnvironmentList updated = await manager.SetEnvironmentSourcesAsync(
             environmentId, paddleocrModelSourceId, mineruModelSourceId, cancellationToken);
         Snapshot = updated;
-        // 来源配置变化使旧预览/兼容结果失效（confirm 时管理器也会拒绝旧计划）。
-        InvalidateSelectionPlans();
         await ApplyRunningEvidenceAsync(cancellationToken);
         // 全局保存（environmentId=null）也会改变运行中环境的模型来源解析，
         // 只要有活动会话就如实提示下次启动生效。
         bool targetRunning = currentSession?.Invoke() is { } session &&
             (environmentId is null || session.EnvironmentId == environmentId);
-        // 单产品语义：来源仅用于安装依赖与下载模型；全局保存由 Runtime
-        // 原子清除各环境旧 override，界面所示即实际解析值。
+        // 单产品语义：来源仅用于下载模型；全局保存由 Runtime 原子清除各环境
+        // 旧 override，界面所示即实际解析值。
         string scope = environmentId is null ? "下载来源已保存并统一所有环境" : "该环境的来源已保存";
-        Status = $"{scope}；仅用于安装依赖与下载模型，不会下载或安装任何内容。";
-        if (targetRunning)
-            Status += "模型来源将在该环境下次启动时生效，不会改变当前运行中的服务。";
+        Status = $"{scope}；仅用于模型下载，不会改变当前运行中的服务。";
+        // 提交了任一模型来源且目标在运行才提示下次启动生效；纯清除不叠加。
+        if (targetRunning && (paddleocrModelSourceId is not null || mineruModelSourceId is not null))
+            Status += "模型来源将在该环境下次启动时生效。";
     }, cancellationToken);
-
-    // #123：取消后以 plan_id 绑定读取持久终态；无法归属的结果一律未确认，
-    // 不凭 revision 增长宣布成功，不把自然失败改写成取消，不把中断归因用户。
-    private async Task ConfirmCancelledInstallAsync(ManagedEnvironmentPlan plan)
-    {
-        using var deadline = new CancellationTokenSource(InstallCancelConfirmTimeout);
-        while (true)
-        {
-            try
-            {
-                await ReloadEnvironmentsAsync(deadline.Token, strictEvidence: false);
-            }
-            catch (Exception error)
-            {
-                Status = $"已请求取消；最终状态读取失败（{error.Message}），结果未确认，请稍后刷新查看。";
-                return;
-            }
-            ManagedEnvironment? environment = Snapshot?.Environments
-                .FirstOrDefault(item => item.Id == plan.EnvironmentId);
-            if (environment is null)
-            {
-                Status = "已请求取消；目标环境已不存在，本次结果未确认。";
-                return;
-            }
-            if (environment.LastInstallFailure is { PlanId: string failurePlanId } failure &&
-                failurePlanId == plan.PlanId)
-            {
-                if (failure.Phase == "installing")
-                {
-                    // 操作锁尚未释放；有界重读，超时转未确认。
-                    try { await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token); }
-                    catch (OperationCanceledException)
-                    {
-                        Status = "已请求取消；安装可能仍在进行或已中断，结果未确认，请稍后刷新查看。";
-                        return;
-                    }
-                    continue;
-                }
-                if (failure.Phase == "failed" &&
-                    failure.EnvironmentRevision == plan.EnvironmentRevision)
-                {
-                    if (failure.ReasonCode == "install_interrupted")
-                    {
-                        if (environment.Revision == plan.EnvironmentRevision)
-                        {
-                            Status = "安装已中断；原环境保持不变，详情可在该环境记录中查看。";
-                            return;
-                        }
-                    }
-                    else
-                    {
-                        Status = $"安装已经失败（{failure.ReasonCode}）；失败详情保留在该环境记录中，取消未改变该结果。";
-                        return;
-                    }
-                }
-            }
-            break;
-        }
-        Status = "已请求取消；本次安装结果未确认，请刷新列表查看。";
-    }
-
-    public void CancelInstall()
-    {
-        CancellationTokenSource? install = Volatile.Read(ref activeInstall);
-        if (install is null) return;
-        try { install.Cancel(); }
-        catch (ObjectDisposedException) { return; }
-        Status = "正在取消环境安装…";
-        StateChanged?.Invoke();
-    }
-
-    public async Task CancelAndWaitForInstallAsync()
-    {
-        CancellationTokenSource? install = Volatile.Read(ref activeInstall);
-        try { Volatile.Read(ref activeCleanup)?.Cancel(); install?.Cancel(); }
-        catch (ObjectDisposedException) { }
-        await gate.WaitAsync();
-        gate.Release();
-    }
-
-    public void InvalidatePlan()
-    {
-        InvalidateSelectionPlans();
-        StateChanged?.Invoke();
-    }
-
-    private void InvalidateSelectionPlans()
-    {
-        Interlocked.Increment(ref selectionGeneration);
-        Plan = null;
-        CleanupPlan = null;
-        Compatibility = null;
-    }
 
     /// <summary>
     /// 后台编排步骤失败时写入用户可见状态并触发投影：供不在 RunAsync
@@ -665,7 +192,6 @@ public sealed class ManagedEnvironmentSettings(
             await activateDevice(environmentId, device, cancellationToken);
         }
         else await activate(environmentId, cancellationToken);
-        InvalidateSelectionPlans();
         try
         {
             await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: true);
@@ -813,17 +339,8 @@ public sealed class ManagedEnvironmentSettings(
     public Task DeleteAsync(string environmentId, CancellationToken cancellationToken) => RunAsync(async () =>
     {
         await manager.DeleteEnvironmentAsync(environmentId, cancellationToken);
-        InvalidateSelectionPlans();
         await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
         Status = "环境已删除。";
-    }, cancellationToken);
-
-    public Task RepairEmptyAsync(string environmentId, CancellationToken cancellationToken) => RunAsync(async () =>
-    {
-        await manager.RepairEmptyEnvironmentAsync(environmentId, cancellationToken);
-        InvalidateSelectionPlans();
-        await ReloadEnvironmentsAsync(cancellationToken, strictEvidence: false);
-        Status = "空环境解释器已修复；仍未安装识别依赖。";
     }, cancellationToken);
 
     private Task RunAsync(Func<Task> action, CancellationToken cancellationToken,

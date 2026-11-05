@@ -48,8 +48,6 @@ public sealed partial class MainWindow
   private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
     ? "directml" : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
 
-  // 安装预检失败可能只出现在公开状态中，不生成持久失败记录。
-  private const string PaddleSmokeInstallRejectedStatus = "安装未完成；失败原因请查看该环境记录。";
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
   private string paddleSmokeStage = "starting";
@@ -109,7 +107,7 @@ public sealed partial class MainWindow
     path = healthPath;
     try
     {
-      if (smokeEnvironmentSnapshot is null || smokeInstallAttempts is null ||
+      if (smokeEnvironmentSnapshot is null ||
           smokeManagedSession is null || smokeInferenceAttached is null ||
           smokeSubmitAttempts is null || smokeLastJobId is null)
         throw new InvalidOperationException("Paddle smoke dependencies are missing.");
@@ -202,94 +200,14 @@ public sealed partial class MainWindow
     await WaitForPaddleSmokeInstallExecutableAsync(timeout.Token);
     await ClickManagedSmokeButtonAsync("查看环境清单");
     ManagedEnvironmentList list = await WaitForPaddleSmokeSnapshotAsync(TimeSpan.FromMinutes(1));
-    if (FindPaddleSmokeEnvironment(list) is null)
-    {
-      RecordPaddleSmokeStage("create isolated environment");
-      // 公共一键准备按配方展示名自动命名；先用既有宿主命令创建 ASCII 测试容器。
-      WorkbenchCommandReceipt created = await application.ExecuteAsync(
-        new WorkbenchCommandEnvelope(Guid.NewGuid(), new CreateEnvironmentCommand(PaddleSmokeEnvironmentName)),
-        timeout.Token);
-      if (!created.Ok)
-        throw new InvalidOperationException($"Smoke fixture creation failed: {created.Error?.Code}");
-      list = await WaitForSmokeEnvironmentsAsync(
-        [PaddleSmokeEnvironmentName], TimeSpan.FromMinutes(5));
-    }
+    // 预构建运行时树：随包产品环境已安装就绪，本阶段只验证复用，不再驱动安装。
     ManagedEnvironment environment = FindPaddleSmokeEnvironment(list)
       ?? throw new InvalidOperationException("Paddle smoke environment is missing.");
-    if (PaddleSmokeInstalledRecipeMatches(environment))
-    {
-      paddleSmokeOutcome = "passed";
-      return new { reused = true, environment = SmokeEnvironmentEvidence(environment) };
-    }
-    if (environment.Status != "empty" &&
-        !(environment.Status == "installed" && environment.Recipe == "paddleocr-ort-cpu" &&
-          PaddleSmokeRecipe == "paddleocr-ort-cuda"))
+    if (!PaddleSmokeInstalledRecipeMatches(environment))
       throw new InvalidOperationException(
-        $"Unexpected environment status: {environment.Status} ({environment.Reason}).");
-
-    RecordPaddleSmokeStage("preview install plan");
-    await SelectSmokeEnvironmentAsync(environment.Id);
-    await SelectSmokeValueAsync("#paddle-backend-select", PaddleSmokeDevice);
-    if (environment.Status == "empty")
-      await ClickManagedSmokeButtonAsync("继续准备依赖");
-    else
-    {
-      // A healthy CPU row has no repair button. The public backend preparation
-      // action asks Runtime to reuse the active CPU target for the CUDA upgrade.
-      await WaitForSmokeDomAsync(
-        "(() => { const root=document.querySelector('#paddle-backend-select')?.closest('.engine-backend-section'); " +
-        "const b=Array.from(root?.querySelectorAll('button') ?? []).find(b => " +
-        "b.textContent?.trim() === '准备此后端' && !b.disabled); " +
-        "if(!b) return false; b.click(); return true; })()", TimeSpan.FromMinutes(2));
-    }
-    await WaitForSmokeDomAsync(
-      "!!document.querySelector('.runtime-install-plan button:not(:disabled)') && " +
-      $"document.querySelector('.runtime-install-plan')?.textContent.includes({JsonSerializer.Serialize(PaddleSmokeRecipe)}) && " +
-      "document.querySelector('.runtime-install-plan')?.textContent.includes('TUNA PyPI 镜像')",
-      TimeSpan.FromMinutes(2));
-    SettingsEnvironmentPlanState? preparedPlan =
-      (await PaddleSmokeSettingsStateAsync(timeout.Token)).EnvironmentPlan;
-    if (preparedPlan?.EnvironmentId != environment.Id || preparedPlan.Recipe != PaddleSmokeRecipe)
-      throw new InvalidOperationException("Paddle preparation did not reuse the expected environment and recipe.");
-    string planText = await PaddleSmokeDomTextAsync(".runtime-install-plan") ?? "";
-
-    RecordPaddleSmokeStage("confirm install");
-    await ClickManagedSmokeButtonAsync("确认安装依赖");
-    while (true)
-    {
-      SettingsWorkbenchState settingsState = await PaddleSmokeSettingsStateAsync(timeout.Token);
-      ManagedEnvironment? current = smokeEnvironmentSnapshot!()?.Environments
-        .SingleOrDefault(item => item.Id == environment.Id);
-      if (current?.LastInstallFailure is { Phase: "failed" } failure)
-        throw new InvalidOperationException(
-          $"{PaddleSmokeRecipe} install failed: {failure.ReasonCode}: {failure.Detail}");
-      if (current?.Status == "installed" && current.Revision > environment.Revision)
-      {
-        paddleSmokeOutcome = "passed";
-        return new
-        {
-          reused = false,
-          install_attempts = smokeInstallAttempts!(),
-          public_source_plan_preview = planText,
-          environment = SmokeEnvironmentEvidence(current),
-        };
-      }
-      if (current?.Status is "failed" or "unavailable")
-        throw new InvalidOperationException(
-          $"{PaddleSmokeRecipe} install failed: {current.Reason}");
-      // 预检或安装失败可能没有持久记录，公开失败状态仍须及时结束冒烟。
-      if (!settingsState.EnvironmentBusy && !settingsState.EnvironmentCanCancelInstall &&
-          settingsState.EnvironmentStatus.StartsWith(
-            PaddleSmokeInstallRejectedStatus, StringComparison.Ordinal))
-      {
-        throw new InvalidOperationException(
-          "Install did not complete: " +
-          $"{settingsState.EnvironmentStatus}; maintenance=" +
-          $"{JsonSerializer.Serialize(settingsState.Maintenance)}; progress=" +
-          $"{JsonSerializer.Serialize(settingsState.EnvironmentInstallProgress)}");
-      }
-      await Task.Delay(500, timeout.Token);
-    }
+        $"Prebuilt environment is not installed with {PaddleSmokeRecipe}: {environment.Status} ({environment.Reason}).");
+    paddleSmokeOutcome = "passed";
+    return new { reused = true, environment = SmokeEnvironmentEvidence(environment) };
   }
 
   private async Task<SettingsWorkbenchState> PaddleSmokeSettingsStateAsync(
@@ -297,7 +215,7 @@ public sealed partial class MainWindow
     (await application.BootstrapAsync(cancellation))
       .States.Select(item => item.State).OfType<SettingsWorkbenchState>().Single();
 
-  // 默认初始化释放维护锁后才连接推理；单看设置维护状态不足以判断就绪。
+  // 默认初始化完成、设置投影退出忙碌后才继续；单看会话附着不足以判断就绪。
   private async Task WaitForPaddleSmokeInstallExecutableAsync(
     CancellationToken cancellation)
   {
@@ -306,8 +224,7 @@ public sealed partial class MainWindow
       if (smokeInferenceAttached!())
       {
         SettingsWorkbenchState settings = await PaddleSmokeSettingsStateAsync(cancellation);
-        if (settings.Maintenance is not { IsRunning: true } &&
-            !settings.EnvironmentBusy && !settings.EnvironmentCanCancelInstall)
+        if (!settings.EnvironmentBusy)
           return;
       }
       await Task.Delay(500, cancellation);

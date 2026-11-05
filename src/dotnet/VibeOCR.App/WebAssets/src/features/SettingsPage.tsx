@@ -1,7 +1,6 @@
 import { EditorPreferencesPanel } from "../components/EditorPreferencesPanel";
 import { editorPreferences } from "../components/editorPreferences";
 import {
-  Badge,
   Button,
   Checkbox,
   Input,
@@ -13,11 +12,9 @@ import {
 import {
   Eye,
   EyeOff,
-  Play,
   RefreshCw,
   RotateCcw,
   Save,
-  Square,
   Trash2,
   X,
 } from "lucide-react";
@@ -50,13 +47,6 @@ interface SourceOptionState {
   readonly kind: string;
   readonly id: string;
   readonly displayName: string;
-  readonly selected: boolean;
-}
-
-interface FeatureOptionState {
-  readonly featureId: string;
-  readonly displayName: string;
-  readonly accelerator: string;
   readonly selected: boolean;
 }
 
@@ -114,46 +104,6 @@ interface ManagedResolvedSourceState {
   readonly origin: string;
 }
 
-interface ManagedPlanSourceState {
-  readonly id: string;
-  readonly kind: string;
-  readonly displayName: string;
-  readonly endpoint: string;
-  readonly requested: boolean;
-  readonly inheritedFrom: string;
-  readonly usage: string;
-  readonly actualEndpoint?: string | null;
-}
-
-interface ManagedEnvironmentPlanState {
-  readonly planId: string;
-  readonly environmentId: string;
-  readonly environmentRevision: number;
-  readonly recipe: string;
-  readonly requestedRecipe: string;
-  readonly sourceIds: readonly string[];
-  readonly dependencies: readonly string[];
-  readonly requestedSourceIds?: readonly string[] | null;
-  readonly sources?: readonly ManagedPlanSourceState[] | null;
-  readonly dependencyOrigin?: string | null;
-  readonly pythonOrigin?: string | null;
-  readonly runtimeWheelOrigin?: string | null;
-  readonly removedDependencies?: readonly string[];
-  readonly requiresServiceStop?: boolean;
-}
-
-function sourceKindLabel(kind: string): string {
-  return (
-    (
-      {
-        paddleocr_model_registry: "PaddleOCR 模型来源",
-        mineru_model_registry: "MinerU 模型来源",
-        model_registry: "模型来源",
-      } as Record<string, string>
-    )[kind] ?? "来源"
-  );
-}
-
 interface ManagedEnvironmentRecipeState {
   readonly id: string;
   readonly displayName: string;
@@ -176,13 +126,6 @@ interface ManagedEnvironmentRecipeState {
   readonly runtimeWheelOrigin?: string | null;
 }
 
-interface ManagedEnvironmentCompatibilityState {
-  readonly recipe: string;
-  readonly selectedEnvironmentId?: string | null;
-  readonly selectedEnvironmentRevision?: number | null;
-  readonly selectionReason?: string | null;
-}
-
 function managedEnvironmentRecipes(
   value: unknown,
 ): readonly ManagedEnvironmentRecipeState[] {
@@ -197,16 +140,6 @@ function managedEnvironmentRecipes(
       typeof (entry as Partial<ManagedEnvironmentRecipeState>).displayName ===
         "string",
   );
-}
-
-function managedEnvironmentCompatibility(
-  value: unknown,
-): ManagedEnvironmentCompatibilityState | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const candidate = value as Partial<ManagedEnvironmentCompatibilityState>;
-  return typeof candidate.recipe === "string" && candidate.recipe.length > 0
-    ? (candidate as ManagedEnvironmentCompatibilityState)
-    : undefined;
 }
 
 // 实际支持选项的展示标签：类型来自 Runtime 目录 configured_recognition_types。
@@ -423,34 +356,6 @@ const environmentRecoveryActions: Readonly<Record<string, string>> = {
   wait: "等待当前安装完成",
 };
 
-interface InstallPlanComponentState {
-  readonly componentId: string;
-  readonly action: string;
-  readonly dependencyState: string;
-  readonly reasonCodes: readonly string[];
-}
-
-interface InstallPlanBlockerState {
-  readonly code: string;
-  readonly componentId?: string;
-  readonly nextAction: string;
-}
-
-interface InstallPlanState {
-  readonly planId: string;
-  readonly expiresAt: string;
-  readonly accelerator: string;
-  readonly effectiveComponentIds: readonly string[];
-  readonly effectiveDownloadSourceIds: readonly string[];
-  readonly components: readonly InstallPlanComponentState[];
-  readonly blockers: readonly InstallPlanBlockerState[];
-  readonly cost: {
-    readonly downloadBytes: number | null;
-    readonly additionalDiskBytes: number | null;
-    readonly unknownReasonCodes: readonly string[];
-  };
-}
-
 interface MaintenanceState {
   readonly failureReason?: string;
   readonly failureCode?: string;
@@ -475,21 +380,6 @@ function sourceOptions(value: unknown): readonly SourceOptionState[] {
       typeof option.kind === "string" &&
       typeof option.id === "string" &&
       typeof option.displayName === "string" &&
-      typeof option.selected === "boolean"
-    );
-  });
-}
-
-function featureOptions(value: unknown): readonly FeatureOptionState[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is FeatureOptionState => {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry))
-      return false;
-    const option = entry as Partial<FeatureOptionState>;
-    return (
-      typeof option.featureId === "string" &&
-      typeof option.displayName === "string" &&
-      typeof option.accelerator === "string" &&
       typeof option.selected === "boolean"
     );
   });
@@ -737,149 +627,6 @@ function recognitionModeOptions(
   });
 }
 
-function planComponents(value: unknown): readonly InstallPlanComponentState[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(
-      (entry): entry is Record<string, unknown> =>
-        entry !== null && typeof entry === "object" && !Array.isArray(entry),
-    )
-    .map((entry) => ({
-      componentId: stringValue(entry.componentId) ?? "",
-      action: stringValue(entry.action) ?? "",
-      dependencyState: stringValue(entry.dependencyState) ?? "",
-      reasonCodes: stringValues(entry.reasonCodes),
-    }))
-    .filter((entry) => entry.componentId !== "");
-}
-
-function planBlockers(value: unknown): readonly InstallPlanBlockerState[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter(
-      (entry): entry is Record<string, unknown> =>
-        entry !== null && typeof entry === "object" && !Array.isArray(entry),
-    )
-    .map((entry) => ({
-      code: stringValue(entry.code) ?? "",
-      componentId: stringValue(entry.componentId ?? undefined),
-      nextAction: stringValue(entry.nextAction) ?? "",
-    }))
-    .filter((entry) => entry.code !== "" && entry.nextAction !== "");
-}
-
-function planCost(value: unknown): InstallPlanState["cost"] {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    return {
-      downloadBytes: null,
-      additionalDiskBytes: null,
-      unknownReasonCodes: [],
-    };
-  const cost = value as Record<string, unknown>;
-  return {
-    downloadBytes:
-      typeof cost.downloadBytes === "number" &&
-      Number.isFinite(cost.downloadBytes)
-        ? cost.downloadBytes
-        : null,
-    additionalDiskBytes:
-      typeof cost.additionalDiskBytes === "number" &&
-      Number.isFinite(cost.additionalDiskBytes)
-        ? cost.additionalDiskBytes
-        : null,
-    unknownReasonCodes: stringValues(cost.unknownReasonCodes),
-  };
-}
-
-function installPlan(value: unknown): InstallPlanState | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    return undefined;
-  const plan = value as Record<string, unknown>;
-  const planId = stringValue(plan.planId);
-  const expiresAt = stringValue(plan.expiresAt);
-  const accelerator = stringValue(plan.accelerator);
-  if (!planId || !expiresAt || !accelerator) return undefined;
-  return {
-    planId,
-    expiresAt,
-    accelerator,
-    effectiveComponentIds: stringValues(plan.effectiveComponentIds),
-    effectiveDownloadSourceIds: stringValues(plan.effectiveDownloadSourceIds),
-    components: planComponents(plan.components),
-    blockers: planBlockers(plan.blockers),
-    cost: planCost(plan.cost),
-  };
-}
-
-function isPlanFresh(expiresAt: string): boolean {
-  const expiry = Date.parse(expiresAt);
-  return Number.isFinite(expiry) && expiry > Date.now();
-}
-
-const installActionLabels: Readonly<Record<string, string>> = {
-  retain: "保留",
-  install: "安装",
-  replace: "替换",
-  remove: "移除",
-};
-
-const dependencyStateLabels: Readonly<Record<string, string>> = {
-  satisfied: "依赖已满足",
-  pending: "依赖待安装",
-};
-
-const installReasonLabels: Readonly<Record<string, string>> = {
-  requested: "用户选择",
-  required_dependency: "必要依赖",
-  removed_by_selection: "按选择移除",
-};
-
-const unknownCostLabels: Readonly<Record<string, string>> = {
-  artifact_resolution_required: "下载量待解析",
-  candidate_disk_usage_unknown: "磁盘用量未知",
-  native_model_preparation_not_estimated: "原生模型首次准备另计",
-};
-
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  const exponent = Math.min(
-    units.length - 1,
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-  );
-  const value = bytes / 1024 ** exponent;
-  const text =
-    value >= 100 || Number.isInteger(value)
-      ? value.toFixed(0)
-      : value.toFixed(1);
-  return `${text} ${units[exponent]}`;
-}
-
-function knownLabels(
-  codes: readonly string[],
-  labels: Readonly<Record<string, string>>,
-  unknownCodes: string[],
-): readonly string[] {
-  return codes.flatMap((code) => {
-    const label = labels[code];
-    if (label !== undefined) return [label];
-    unknownCodes.push(code);
-    return [];
-  });
-}
-
-function maintenanceStatusLabel(statusCode: string): string {
-  const labels: Readonly<Record<string, string>> = {
-    idle: "尚未执行维护操作",
-    running: "正在执行维护操作",
-    succeeded: "维护操作已完成",
-    failed: "维护操作失败",
-    cancelled: "维护操作已取消",
-    unavailable: "当前模式不可用",
-  };
-  return labels[statusCode] ?? statusCode;
-}
-
 function acceleratorLabel(accelerator: string): string {
   return accelerator === "nvidia_cuda" ? "CUDA GPU" : "CPU";
 }
@@ -1002,9 +749,9 @@ function WorkerIdleEditor({
 
 export function SettingsPage({ viewState, actions }: FeatureProps) {
   const state = feature(viewState, "settings");
-  // #283：按引擎分区选择（Paddle 推理后端 / MinerU 本地引擎）→准备→确认；
-  // #294：环境清单、来源与清理直接呈现在常规页面，不再藏进折叠高级区。
-  // 选择以目录配方 id 绑定，导航回来时从宿主待确认计划恢复。
+  // 预构建运行时树（PR2）随产品分发，运行时零安装：安装/准备/待确认计划/
+  // 兼容查询入口全部退役。#294 的常规页面形态保留——环境清单、来源与
+  // 清理直接呈现；分区只剩只读闭包状态与设备切换（switchEnvironment）。
   const managedEnvironmentsAvailable = viewState.capabilities.includes(
     "runtime.environments",
   );
@@ -1014,26 +761,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     (environment) => environment.id === activeEnvironmentId,
   );
   const recipes = managedEnvironmentRecipes(state.environmentRecipes);
-  const [hasExplicitChoice, setHasExplicitChoice] = useState(false);
-  const [queryGeneration, setQueryGeneration] = useState(0);
-  const [requestedEnvironmentId, setRequestedEnvironmentId] = useState<
-    string | null
-  >(null);
-  // 选择按引擎分区：Paddle 只记住推理后端，MinerU 单独记住安装设备；
-  // 引擎焦点决定哪个分区驱动兼容性查询（宿主查询结果一次只绑定一个
-  // 配方，两分区不能同时自动轮询互相覆盖）。
-  // 初始无设备偏好：分区默认设备取组内第一个可选设备（目录 devices，
-  // 统一闭包即安装档 directml；历史多配方目录仍按目录顺序默认 CPU）。
-  const [engineDevices, setEngineDevices] = useState({
-    paddle: "",
-    mineru: "",
-  });
-  const [engineFocus, setEngineFocus] = useState<EngineSelection>("paddle");
-  // 本地失效抑制：选择变化→宿主 invalidate 回传之间旧计划不得继续确认。
-  const [invalidatedPlanId, setInvalidatedPlanId] = useState<string | null>(
-    null,
-  );
-  const rawPlan = managedEnvironmentPlan(state.environmentPlan);
   const catalog = recipeComponentGroups(recipes);
   const paddleGroup = catalog.groups.find((group) => group.engine === "paddle");
   // 统一推理闭包没有独立的 mineru 引擎配方：本地 MinerU 分区复用声明
@@ -1041,53 +768,27 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   const mineruGroup = catalog.groups.find(
     (group) => group.engine === "mineru" || group.modes.includes("document"),
   );
-  const restoredChoice =
-    !hasExplicitChoice && rawPlan?.requestedRecipe
-      ? recipeChoice(
-          recipes.find((recipe) => recipe.id === rawPlan.requestedRecipe),
-        )
-      : null;
-  const restoredRecipeId =
-    !hasExplicitChoice && rawPlan?.requestedRecipe
-      ? rawPlan.requestedRecipe
-      : null;
-  const focusedEngine = restoredChoice?.engine ?? engineFocus;
+  // 设备展示以宿主快照为准：当前设备取活动环境 targetDevice，不在目录
+  // 设备集（或缺失）时回落分组首个设备，不维护本地选择状态避免漂移。
   const effectiveDeviceFor = (
     group: RecipeComponentGroup | undefined,
-    preferred: string,
   ): string => {
     const devices = group?.devices ?? [];
-    return preferred && devices.includes(preferred)
-      ? preferred
-      : (devices[0] ?? "");
+    const current = activeEnvironment?.targetDevice ?? "";
+    return current && devices.includes(current) ? current : (devices[0] ?? "");
   };
-  const paddleDevice = effectiveDeviceFor(
-    paddleGroup,
-    restoredChoice?.engine === "paddle"
-      ? restoredChoice.device
-      : engineDevices.paddle,
-  );
-  const mineruDevice = effectiveDeviceFor(
-    mineruGroup,
-    restoredChoice?.engine === "mineru"
-      ? restoredChoice.device
-      : engineDevices.mineru,
-  );
-  const paddleRecipe = paddleGroup?.byDevice.get(paddleDevice);
-  const mineruRecipe = mineruGroup?.byDevice.get(mineruDevice);
-  // 安装选择绑定（#283）：只有显式选择（或导航恢复的计划）的配方可确认；
-  // 只读查询/焦点不改变绑定，另一分区的旧配方计划（含换 planId 迟到）
-  // 一律拒绝，不得绕过失效跨分区确认。
-  const [explicitlySelectedRecipeId, setExplicitlySelectedRecipeId] = useState<
-    string | null
-  >(null);
-  const selectedRecipeId = explicitlySelectedRecipeId ?? restoredRecipeId;
-  const recipeForSelection = (
-    engine: "paddle" | "mineru",
-    device: string,
-  ): string | null =>
-    recipeForDevice(engine === "paddle" ? paddleGroup : mineruGroup, device)
-      ?.id ?? null;
+  const paddleDevice = effectiveDeviceFor(paddleGroup);
+  const mineruDevice = effectiveDeviceFor(mineruGroup);
+  // 设备切换直接发送 switchEnvironment（统一闭包 directml↔cpu 同环境
+  // 切换，沿用现有命令签名），没有待确认计划或只读查询中间态。
+  const switchEnvironmentDevice = (device: string) => {
+    if (!device || !activeEnvironmentId) return;
+    void actions.run({
+      type: "settings.switchEnvironment",
+      environmentId: activeEnvironmentId,
+      device,
+    });
+  };
   // 快照已同步但仍无活动环境（初始化失败或默认环境被删）时，如实展示
   // 默认配置“尚未启动”；加载判定用宿主 typed 事实（快照是否已读到位），
   // 不依赖状态文案，空串/未投影不当作已加载。
@@ -1103,17 +804,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
   // 不暗示需要本地 MinerU 组件；旧宿主（无运行环境 capability）保留等待语义。
   const mineruServiceHostReady =
     !managedEnvironmentsAvailable || activeEnvironment?.status === "installed";
-  const invalidateSelectionPlan = () => {
-    setInvalidatedPlanId(rawPlan?.planId ?? null);
-    setQueryGeneration((current) => current + 1);
-    void actions.run({ type: "settings.invalidateEnvironmentPlan" });
-  };
   // 首次进入 managed 设置页：宿主明确投影 typed 事实（快照未读到位且
   // 清单读取从未尝试，均严格 false）时自动发一次只读清单刷新（与
   // refreshRuntime 不同，不 ensure 服务、无安装/启动副作用）。旧宿主/字段
   // 缺失不自动，保留手动入口；启动初始化期间读取成功会得到中间快照，
   // 终态由宿主激活后补刷；失败后不再自动重试，错误留给显式重试；在途
-  // busy/已有快照/待确认计划都不被触碰，legacy 主机不触发。
+  // busy/已有快照都不被触碰，legacy 主机不触发。
   const initialListRequested = useRef(false);
   useEffect(() => {
     if (
@@ -1133,66 +829,6 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
     state.environmentBusy,
     actions,
   ]);
-  const onEngineDeviceChange = (
-    engine: "paddle" | "mineru",
-    device: string,
-  ) => {
-    setHasExplicitChoice(true);
-    invalidateSelectionPlan();
-    setRequestedEnvironmentId(null);
-    setEngineFocus(engine);
-    // 从导航恢复的计划出发改另一区时，先固化两区当前有效设备（可能
-    // 来自恢复选择），未修改区不得回落默认 CPU。
-    setEngineDevices({
-      paddle: engine === "paddle" ? device : paddleDevice,
-      mineru: engine === "mineru" ? device : mineruDevice,
-    });
-    setExplicitlySelectedRecipeId(recipeForSelection(engine, device));
-  };
-  // 显式查询/选择取得主导权：覆盖导航恢复的只读选择，并推进查询代，
-  // 让聚焦分区在宿主单槽被他配方结果占用后能重新发起只读查询；
-  // 不作废仍绑定原配方的待确认计划（失效仍只由选择变化触发）。
-  const takeEngineFocus = (engine: "paddle" | "mineru") => {
-    // 取得主导权前先固化当前有效设备（可能来自恢复计划，如 DirectML/CPU）：
-    // 否则清掉 restoredChoice 后会回落默认 CPU，绑定旧计划的待确认卡失配。
-    setEngineDevices({ paddle: paddleDevice, mineru: mineruDevice });
-    setExplicitlySelectedRecipeId((current) => current ?? restoredRecipeId);
-    setHasExplicitChoice(true);
-    setEngineFocus(engine);
-    setQueryGeneration((current) => current + 1);
-  };
-  // 确认卡只属于当前分区的选择，晚到的旧目标不能进入环境行继续确认。
-  const planFor = (
-    recipeId: string | undefined,
-  ): ManagedEnvironmentPlanState | undefined =>
-    rawPlan &&
-    rawPlan.planId !== invalidatedPlanId &&
-    rawPlan.requestedRecipe === recipeId &&
-    (!requestedEnvironmentId ||
-      rawPlan.environmentId === requestedEnvironmentId)
-      ? rawPlan
-      : undefined;
-  const paddlePlan =
-    paddleRecipe?.id === selectedRecipeId && paddleRecipe
-      ? planFor(paddleRecipe.id)
-      : undefined;
-  const mineruPlan =
-    mineruRecipe?.id === selectedRecipeId && mineruRecipe
-      ? planFor(mineruRecipe.id)
-      : undefined;
-  // 统一推理闭包下两个分区共享同一配方：待确认计划只渲染一次（归属
-  // engine 声明的 Paddle 分区），不产生两张可同时确认的重复卡。
-  const mineruPlanCard = paddlePlan ? undefined : mineruPlan;
-  const previewEnvironment = (environmentId: string, recipe: string) => {
-    const family = recipeChoice(recipes.find((entry) => entry.id === recipe));
-    if (family) onEngineDeviceChange(family.engine, family.device);
-    setRequestedEnvironmentId(environmentId);
-    void actions.run({
-      type: "settings.previewEnvironmentInstall",
-      environmentId,
-      recipe,
-    });
-  };
   // backend 是运行时 profile 声明的目标加速器，不是实测执行设备；
   // 未读取真实快照前不冒充任何设备。
   const backend = typeof state.backend === "string" ? state.backend : "";
@@ -1403,16 +1039,10 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 group={paddleGroup}
                 problems={catalog.problems}
                 device={paddleDevice}
-                focused={focusedEngine === "paddle"}
-                onTakeFocus={() => takeEngineFocus("paddle")}
                 onDeviceChange={(device) => {
                   if (device === paddleDevice) return;
-                  onEngineDeviceChange("paddle", device);
+                  switchEnvironmentDevice(device);
                 }}
-                queryGeneration={queryGeneration}
-                onCancelPlan={invalidateSelectionPlan}
-                onPrepare={() => onEngineDeviceChange("paddle", paddleDevice)}
-                plan={paddlePlan}
               />
               <EngineEnvironmentSection
                 family="mineru"
@@ -1421,60 +1051,24 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
                 group={mineruGroup}
                 problems={catalog.problems}
                 device={mineruDevice}
-                focused={focusedEngine === "mineru"}
-                onTakeFocus={() => takeEngineFocus("mineru")}
                 onDeviceChange={(device) => {
                   if (device === mineruDevice) return;
-                  onEngineDeviceChange("mineru", device);
+                  switchEnvironmentDevice(device);
                 }}
-                queryGeneration={queryGeneration}
-                onCancelPlan={invalidateSelectionPlan}
-                onPrepare={() => onEngineDeviceChange("mineru", mineruDevice)}
-                plan={mineruPlanCard}
-                onPreview={previewEnvironment}
               />
-              {/* 安装进度是操作状态而非设置项，保留在折叠区外可见；空闲时
-                  自身不渲染。 */}
-              <EnvironmentInstallDetails state={state} />
               {/* #294：环境清单/来源/清理是常规维护能力，直接呈现；技术
                   详情只在各自区块内折叠，必需按钮不随之隐藏。 */}
-              <InstalledEnvironmentList
-                state={state}
-                actions={actions}
-                selectedRecipeId={
-                  focusedEngine === "mineru"
-                    ? (mineruRecipe?.id ?? "")
-                    : (paddleRecipe?.id ?? "")
-                }
-                plan={paddlePlan ?? mineruPlan}
-                onPreview={previewEnvironment}
-              />
+              <InstalledEnvironmentList state={state} actions={actions} />
               <EnvironmentSourceSettings
                 state={state}
                 busy={state.environmentBusy === true}
                 actions={actions}
-                onInvalidate={invalidateSelectionPlan}
               />
             </>
           ) : (
-            <>
-              <AcceleratorFeatures
-                pendingBackend={stringValue(state.pendingBackend) ?? "cpu"}
-                features={featureOptions(state.features)}
-                enabled={viewState.capabilities.includes("settings.selection")}
-                locked={busy}
-                actions={actions}
-              />
-              <MaintenanceActions
-                maintenance={maintenance}
-                plan={installPlan(state.installPlan)}
-                canPreview={state.canPreviewInstall === true}
-                enabled={viewState.capabilities.includes("runtime.maintenance")}
-                sources={sources}
-                features={featureOptions(state.features)}
-                actions={actions}
-              />
-            </>
+            // 预构建运行时树随产品分发：旧宿主（无 runtime.environments
+            // capability）分支不再提供安装/维护入口，只保留上方既有状态行。
+            <p className="form-note">当前版本运行环境随产品内置，无需维护。</p>
           )}
           <p className="form-note">
             {stringValue(state.statusMessage) ??
@@ -1576,24 +1170,6 @@ function managedEnvironments(
   );
 }
 
-function managedEnvironmentPlan(
-  value: unknown,
-): ManagedEnvironmentPlanState | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const plan = value as Record<string, unknown>;
-  if (
-    typeof plan.planId !== "string" ||
-    typeof plan.environmentId !== "string" ||
-    typeof plan.environmentRevision !== "number" ||
-    typeof plan.recipe !== "string" ||
-    typeof plan.requestedRecipe !== "string" ||
-    !Array.isArray(plan.sourceIds) ||
-    !Array.isArray(plan.dependencies)
-  )
-    return undefined;
-  return plan as unknown as ManagedEnvironmentPlanState;
-}
-
 function managedSourceOptions(
   value: unknown,
 ): readonly ManagedSourceOptionState[] {
@@ -1624,132 +1200,21 @@ function managedResolvedSources(
   );
 }
 
-// 简要安装确认卡（#195）：只呈现用户决策需要的概要——准备哪组功能、
-// 主要组件、目标环境/加速、依赖总数、有效下载来源与影响；完整锁清单、
-// 来源端点与目标目录收进只读 details，不成为另一个高级设置区。
-// 确认绑定 planId/目标环境/修订，取消（作废本次计划）与安装中取消均可达。
-function EnvironmentPlanPanel({
-  plan,
-  environments,
-  sourceName,
-  busy,
-  canCancelInstall,
-  onCancel,
-  actions,
-}: {
-  readonly plan: ManagedEnvironmentPlanState;
-  readonly environments: readonly ManagedEnvironmentState[];
-  readonly sourceName: (id: string | null | undefined) => string;
-  readonly busy: boolean;
-  readonly canCancelInstall: boolean;
-  readonly onCancel: () => void;
-  readonly actions: AppActions;
-}) {
-  const target = environments.find(
-    (environment) => environment.id === plan.environmentId,
-  );
-  const targetState =
-    target?.lastInstallFailure?.phase === "failed"
-      ? "失败后重新准备"
-      : target?.status === "empty"
-        ? "空环境准备"
-        : target?.status === "installed"
-          ? "已安装环境准备"
-          : "目标状态尚未确认";
-  return (
-    <div className="runtime-install-plan">
-      <p>
-        计划：{plan.recipe} · 目标
-        {target?.name ?? plan.environmentId}（{targetState}）· 下载来源：
-        {plan.sourceIds.map((id) => sourceName(id)).join("、") || "产品默认"}
-      </p>
-      <p className="form-note">
-        本次新增或替换组件：
-        {mainDependencies(plan.dependencies).join("、") ||
-          (plan.dependencies.length === 0
-            ? "无需新增组件"
-            : "详见完整依赖明细")}
-        ； 共 {plan.dependencies.length} 项依赖。
-        {plan.dependencyOrigin === "bundled_pack"
-          ? "依赖来自随包离线包，无需下载。"
-          : "依赖来源待目录同步。"}
-      </p>
-      <p className="form-note">
-        {plan.requiresServiceStop
-          ? "确认后暂停当前识别服务，完整候选验证后换入；失败恢复原环境。运行中任务需先结束。"
-          : "依赖安装只写入此目标环境。"}
-        模型在需要时从所选来源下载，已缓存模型直接复用。
-        {(plan.removedDependencies?.length ?? 0) > 0
-          ? `本次明确移除依赖：${plan.removedDependencies?.join("、")}。`
-          : ""}
-      </p>
-      <div className="setting-row">
-        <Button
-          disabled={busy}
-          onClick={() =>
-            void actions.run({
-              type: "settings.confirmEnvironmentInstall",
-              planId: plan.planId,
-            })
-          }
-        >
-          确认安装依赖
-        </Button>
-        <Button disabled={busy} onClick={onCancel}>
-          取消
-        </Button>
-        {canCancelInstall ? (
-          <Button
-            onClick={() =>
-              void actions.run({ type: "settings.cancelEnvironmentInstall" })
-            }
-          >
-            取消安装
-          </Button>
-        ) : null}
-      </div>
-      <details>
-        <summary>本次依赖与来源明细（只读）</summary>
-        <p>环境修订：{plan.environmentRevision}</p>
-        <p>锁定依赖（{plan.dependencies.length} 项）</p>
-        <p>{plan.dependencies.join("、")}</p>
-        {(plan.sources ?? []).map((source) => (
-          <p key={source.id}>
-            {source.displayName}（{sourceKindLabel(source.kind)}
-            {source.endpoint ? `；端点 ${source.endpoint}` : ""}）
-          </p>
-        ))}
-        {target ? (
-          <p className="form-note">
-            Python：{target.python || "未定位"}；环境目录：
-            {target.path || "未定位"}
-          </p>
-        ) : null}
-      </details>
-    </div>
-  );
-}
-
-// 已安装环境列表（#195）：常规页面承载必要管理——切换/启动验证、失败
-// 修复、旧空环境继续准备与明确确认后的移除；保护沿用 Runtime（活动/被
-// 引用/legacy 拒删），失败保留旧健康环境，不宣称清理未证实资源。
+// 已安装环境列表（#195 / PR2 预构建运行时树）：常规页面只承载只读健康
+// 展示、切换/启动验证、明确确认后的移除与空间清理；安装/准备/修复入口
+// 已随“依赖闭包构建期随产品分发”退役。保护沿用 Runtime（活动/被引用/
+// legacy/product 拒删，经 operation_blocks 投影），前端只如实呈现并引导
+// 先切换。
 function InstalledEnvironmentList({
   state,
   actions,
-  selectedRecipeId,
-  plan,
-  onPreview,
 }: {
   readonly state: Readonly<Record<string, unknown>>;
   readonly actions: AppActions;
-  readonly selectedRecipeId: string;
-  readonly plan: ManagedEnvironmentPlanState | undefined;
-  readonly onPreview: (environmentId: string, recipe: string) => void;
 }) {
   const environments = managedEnvironments(state.environments);
   const activeId = stringValue(state.activeEnvironmentId);
   const busy = state.environmentBusy === true;
-  const canCancelInstall = state.environmentCanCancelInstall === true;
   const catalog = managedSourceOptions(state.environmentSources);
   const sourceName = (id: string | null | undefined): string =>
     id == null || id === ""
@@ -1759,7 +1224,9 @@ function InstalledEnvironmentList({
     <section className="managed-environment-list" aria-label="已安装环境">
       <h3>已安装环境</h3>
       {environments.length === 0 ? (
-        <p className="form-note">尚无环境；可在上方分区中准备第一个配置。</p>
+        <p className="form-note">
+          尚无环境记录；预构建运行环境由宿主装载，可点击“重新检查状态”。
+        </p>
       ) : (
         environments.map((environment) => (
           <EnvironmentRow
@@ -1768,84 +1235,13 @@ function InstalledEnvironmentList({
             activeId={activeId}
             busy={busy}
             sourceName={sourceName}
-            continueRecipe={
-              environment.status === "empty"
-                ? selectedRecipeId
-                : environment.lastInstallFailure?.phase === "failed"
-                  ? environment.lastInstallFailure.recipe
-                  : ""
-            }
-            onPreview={onPreview}
             actions={actions}
           />
         ))
       )}
-      {canCancelInstall && !plan ? (
-        <Button
-          onClick={() =>
-            void actions.run({ type: "settings.cancelEnvironmentInstall" })
-          }
-        >
-          取消安装
-        </Button>
-      ) : null}
-      <EmptyEnvironmentCreator busy={busy} actions={actions} />
       <EnvironmentCleanup state={state} busy={busy} actions={actions} />
       <p role="status">{stringValue(state.environmentStatus) ?? ""}</p>
     </section>
-  );
-}
-
-// 具名空环境是可选管理操作（#294）：不插入普通安装必经路径（普通准备
-// 自动复用或创建目标环境，无需命名），创建后仍是空环境。
-function EmptyEnvironmentCreator({
-  busy,
-  actions,
-}: {
-  readonly busy: boolean;
-  readonly actions: AppActions;
-}) {
-  const [name, setName] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const trimmed = name.trim();
-  const create = async () => {
-    if (!trimmed || submitting) return;
-    setSubmitting(true);
-    try {
-      if (
-        await actions.run({
-          type: "settings.createEnvironment",
-          name: trimmed,
-        })
-      )
-        setName("");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-  return (
-    <div className="empty-environment-creator" aria-label="创建具名空环境">
-      <h4>创建具名空环境（可选）</h4>
-      <p className="form-note">
-        仅创建空环境记录，不安装依赖；普通安装无需先命名环境。失败会保留
-        在下方状态行，不影响已有环境。
-      </p>
-      <div className="setting-row">
-        <label htmlFor="settings-empty-environment-name">环境名称</label>
-        <Input
-          id="settings-empty-environment-name"
-          value={name}
-          disabled={busy || submitting}
-          onChange={(_, data) => setName(data.value)}
-        />
-        <Button
-          disabled={busy || submitting || trimmed.length === 0}
-          onClick={() => void create()}
-        >
-          创建空环境
-        </Button>
-      </div>
-    </div>
   );
 }
 
@@ -2086,178 +1482,14 @@ function CleanupSelection({
 // 来源收敛为单一简单设置：依赖已全部随包离线安装，可配置的只剩
 // “下载模型”的来源；不暴露产品默认/全局默认/环境覆盖三层，也不提供
 // 按次或按环境的来源覆盖。默认值跟随 Runtime 目录与全局默认解析结果。
-interface EnvironmentInstallProgress {
-  readonly attempt_id: string;
-  readonly seq: number;
-  readonly environment_id: string;
-  readonly timestamp: string;
-  readonly phase: string;
-  readonly state: string;
-  readonly current: string;
-  readonly dependency_total_known: boolean;
-  readonly dependencies: readonly {
-    name: string;
-    version: string | null;
-    download_state: string;
-    install_state: string;
-  }[];
-  readonly download_files_total: number | null;
-  readonly download_files_completed: number;
-  // 当前依赖下载批次的字节累计（bytes_current 跨待下载工件累加，
-  // bytes_total 为全部待下载工件 Content-Length 之和；任一未知则为
-  // null）。只覆盖依赖工件下载，不含模型与隔离构建临时依赖；未知分母
-  // 不造百分比。
-  readonly bytes_current?: number;
-  readonly bytes_total?: number | null;
-}
-
-function EnvironmentInstallDetails({
-  state,
-}: {
-  readonly state: Readonly<Record<string, unknown>>;
-}) {
-  const value = state.environmentInstallProgress;
-  if (!value || typeof value !== "object") {
-    return state.environmentCanCancelInstall === true &&
-      state.environmentSupportsInstallProgress !== true ? (
-      <p role="status">
-        当前运行组件不支持实时明细；安装结果仍以环境记录为准。
-      </p>
-    ) : null;
-  }
-  const progress = value as EnvironmentInstallProgress;
-  if (!Array.isArray(progress.dependencies)) return null;
-  const phases: Readonly<Record<string, string>> = {
-    prepare: "准备",
-    resolve: "解析依赖",
-    unpack: "解包",
-    download: "下载",
-    install: "安装依赖批次",
-    runtime_wheel: "安装内部 Runtime wheel",
-    verify: "验证",
-    complete: "完成",
-  };
-  const states: Readonly<Record<string, string>> = {
-    running: "进行中",
-    succeeded: "已完成",
-    failed: "失败",
-    cancelled: "取消",
-  };
-  const origins: Readonly<Record<string, string>> = {
-    pending: "待处理",
-    bundled: "随包可用",
-    cached: "缓存复用",
-    downloading: "正在下载",
-    downloaded: "已新增下载",
-  };
-  const reused = progress.dependencies.filter((item) =>
-    ["bundled", "cached"].includes(item.download_state),
-  ).length;
-  const installed = progress.dependencies.filter(
-    (item) => item.install_state === "installed",
-  ).length;
-  const logs = Array.isArray(state.environmentInstallLog)
-    ? state.environmentInstallLog.filter(
-        (line): line is string => typeof line === "string",
-      )
-    : [];
-  return (
-    <section
-      className="environment-install-progress"
-      aria-label="依赖安装进度"
-      data-install-state={progress.state}
-      data-install-phase={progress.phase}
-      data-install-attempt={progress.attempt_id}
-      data-install-seq={progress.seq}
-      data-install-environment={progress.environment_id}
-      data-install-installed={installed}
-      data-install-total={
-        progress.dependency_total_known
-          ? progress.dependencies.length
-          : "unknown"
-      }
-      data-install-bytes-current={
-        typeof progress.bytes_current === "number" ? progress.bytes_current : ""
-      }
-      data-install-bytes-total={
-        typeof progress.bytes_total === "number"
-          ? progress.bytes_total
-          : "unknown"
-      }
-    >
-      <h4>
-        {phases[progress.phase] ?? progress.phase} ·{" "}
-        {states[progress.state] ?? progress.state}
-      </h4>
-      <p role="status">
-        共{" "}
-        {progress.dependency_total_known
-          ? progress.dependencies.length
-          : "正在解析 / 未知"}{" "}
-        项依赖｜已复用 {reused} 项｜新增下载文件{" "}
-        {progress.download_files_completed}/
-        {progress.download_files_total ?? "未知"} 个｜批次已安装 {installed}/
-        {progress.dependency_total_known
-          ? progress.dependencies.length
-          : "未知"}{" "}
-        项｜当前依赖下载批次累计{" "}
-        {typeof progress.bytes_current === "number"
-          ? formatBytes(progress.bytes_current)
-          : "未知"}
-        {typeof progress.bytes_total === "number"
-          ? ` / ${formatBytes(progress.bytes_total)}`
-          : "（总量未知）"}
-      </p>
-      <p>
-        当前：{progress.current || "等待安装事件"}；最后事件：
-        {progress.timestamp}
-      </p>
-      <p className="form-note">
-        包数与下载文件数分别统计；Python 和内部 Runtime wheel
-        随产品提供，模型尚未下载。字节是当前依赖下载批次的累计（跨待下载
-        工件累加），不含模型与源分发包隔离构建临时依赖；总量未知时不显示
-        百分比。安装批次成功后才确认依赖，整体完成须通过验证与提交。
-      </p>
-      <details>
-        <summary>依赖状态（只读）</summary>
-        <ul>
-          {progress.dependencies.map((item) => (
-            <li key={`${item.name}==${item.version ?? "unknown"}`}>
-              {item.name} {item.version ?? "版本未知"}：
-              {origins[item.download_state] ?? item.download_state}；
-              {item.install_state === "installed" ? "已安装" : "等待批次成功"}
-            </li>
-          ))}
-        </ul>
-      </details>
-      <details>
-        <summary>实时命令输出（只读，最多保留 200 行，超限截断）</summary>
-        <pre
-          tabIndex={0}
-          style={{
-            maxHeight: "20rem",
-            overflow: "auto",
-            whiteSpace: "pre-wrap",
-            overflowWrap: "anywhere",
-          }}
-        >
-          {logs.join("\n") || "等待命令输出…"}
-        </pre>
-      </details>
-    </section>
-  );
-}
-
 function EnvironmentSourceSettings({
   state,
   busy,
   actions,
-  onInvalidate,
 }: {
   readonly state: Readonly<Record<string, unknown>>;
   readonly busy: boolean;
   readonly actions: AppActions;
-  readonly onInvalidate: () => void;
 }) {
   const catalog = managedSourceOptions(state.environmentSources);
   const paddleSources = catalog.filter(
@@ -2327,7 +1559,6 @@ function EnvironmentSourceSettings({
       ? "ModelScope（魔搭）"
       : displayName;
   const save = async () => {
-    onInvalidate();
     const ok = await actions.run(
       independent
         ? {
@@ -2442,9 +1673,10 @@ function engineDeviceOptionLabel(device: string): string {
   return "CPU（通用）";
 }
 
-// 引擎分区选择卡（#283 用户确认方向）：Paddle 只按推理后端选择（文字/表格/结构同依赖，仅模型与管线不同），MinerU 单独安装/查看状态/移除。
-// 宿主 compatibility 与 install plan 都是单槽状态：同一时刻只有聚焦分区自动发查询，未聚焦分区只提供显式入口；结果按 recipe 绑定才投影，
-// 迟到/他配方结果不会误显示，两卡不会互相覆盖或永久 pending。
+// 引擎分区状态卡（#283 / PR2 预构建运行时树）：Paddle 与 MinerU 共享
+// 统一推理闭包，分区只呈现目录配方状态（display name / modes / devices）
+// 与设备 Select；选择设备直接发送 switchEnvironment（同闭包 directml↔cpu
+// 切换），没有只读兼容查询、待确认计划或准备入口。
 function EngineEnvironmentSection({
   family,
   state,
@@ -2452,14 +1684,7 @@ function EngineEnvironmentSection({
   group,
   problems,
   device,
-  focused,
-  onTakeFocus,
   onDeviceChange,
-  queryGeneration,
-  onCancelPlan,
-  onPrepare,
-  plan,
-  onPreview,
 }: {
   readonly family: EngineSelection;
   readonly state: Readonly<Record<string, unknown>>;
@@ -2467,140 +1692,15 @@ function EngineEnvironmentSection({
   readonly group: RecipeComponentGroup | undefined;
   readonly problems: readonly string[];
   readonly device: string;
-  readonly focused: boolean;
-  readonly onTakeFocus: () => void;
   readonly onDeviceChange: (device: string) => void;
-  readonly queryGeneration: number;
-  readonly onCancelPlan: () => void;
-  readonly onPrepare: () => void;
-  readonly plan: ManagedEnvironmentPlanState | undefined;
-  readonly onPreview?: (environmentId: string, recipe: string) => void;
 }) {
-  // 安装配方按安装档设备绑定；统一闭包选 CPU 等非安装档设备时回落组内
+  // 配方按安装档设备绑定；统一闭包选 CPU 等非安装档设备时回落组内
   // 唯一配方（同闭包设备切换，不另装配方）。
   const target = recipeForDevice(group, device) ?? undefined;
   const environments = managedEnvironments(state.environments);
   const activeId = stringValue(state.activeEnvironmentId);
   const busy = state.environmentBusy === true;
   const sources = managedSourceOptions(state.environmentSources);
-  const compatibility = managedEnvironmentCompatibility(
-    state.environmentCompatibility,
-  );
-  const targetId = target?.id ?? "";
-  const compatibilityRecipe = compatibility?.recipe ?? "";
-  const queryResult =
-    compatibility?.recipe === targetId ? compatibility : undefined;
-  const compatibleEnvironment = queryResult?.selectedEnvironmentId
-    ? environments.find((item) => item.id === queryResult.selectedEnvironmentId)
-    : undefined;
-  const activeReady =
-    compatibleEnvironment?.id === activeId &&
-    compatibleEnvironment?.status === "installed" &&
-    compatibleEnvironment.serviceState === "ready" &&
-    compatibleEnvironment.targetDevice === device;
-  const pendingPlan = plan?.requestedRecipe === targetId ? plan : undefined;
-  const preparing = useRef(false);
-  const prepare = async () => {
-    if (!targetId || preparing.current) return;
-    preparing.current = true;
-    onPrepare();
-    try {
-      await actions.run({
-        type: "settings.prepareEnvironment",
-        recipe: targetId,
-      });
-    } finally {
-      preparing.current = false;
-    }
-  };
-  // Installed revisions stay unchanged on device switches and service attach.
-  // Include the running selection used by activeReady so clearing the host's
-  // compatibility result schedules one fresh query through the existing gate.
-  const environmentsFingerprint = `${activeId ?? ""}|${environments
-    .map(
-      (environment) =>
-        `${environment.id}:${environment.revision}:${environment.status}:${environment.targetDevice ?? ""}:${environment.serviceState ?? ""}`,
-    )
-    .join("|")}`;
-  const [dispatchedQuery, setDispatchedQuery] = useState<{
-    recipe: string;
-    fingerprint: string;
-    generation: number;
-  } | null>(null);
-  // 在途闸门只供 effect/事件处理器读写，不在渲染中读取（react-hooks/refs）。
-  const inFlightQuery = useRef<string | null>(null);
-  const queryKey = `${targetId}|${environmentsFingerprint}|${queryGeneration}`;
-  useEffect(() => {
-    // 单槽闸门：只有聚焦分区自动查询；未聚焦分区不在 mount 时发请求，避免两卡互相覆盖宿主唯一的 compatibility 结果。
-    if (!focused || !targetId || busy) return;
-    if (compatibilityRecipe === targetId) return;
-    if (
-      dispatchedQuery?.recipe === targetId &&
-      dispatchedQuery.fingerprint === environmentsFingerprint &&
-      dispatchedQuery.generation === queryGeneration
-    )
-      return;
-    if (inFlightQuery.current === queryKey) return;
-    setDispatchedQuery({
-      recipe: targetId,
-      fingerprint: environmentsFingerprint,
-      generation: queryGeneration,
-    });
-    inFlightQuery.current = queryKey;
-    const settle = () => {
-      if (inFlightQuery.current === queryKey) inFlightQuery.current = null;
-    };
-    void Promise.resolve(
-      actions.run({
-        type: "settings.findCompatibleEnvironment",
-        recipe: targetId,
-      }),
-    ).then(settle, settle);
-  }, [
-    focused,
-    targetId,
-    busy,
-    compatibilityRecipe,
-    environmentsFingerprint,
-    queryGeneration,
-    queryKey,
-    dispatchedQuery,
-    actions,
-  ]);
-  const retryQuery = () => {
-    if (!targetId || inFlightQuery.current === queryKey) return;
-    setDispatchedQuery({
-      recipe: targetId,
-      fingerprint: environmentsFingerprint,
-      generation: queryGeneration,
-    });
-    inFlightQuery.current = queryKey;
-    const settle = () => {
-      if (inFlightQuery.current === queryKey) inFlightQuery.current = null;
-    };
-    void Promise.resolve(
-      actions.run({
-        type: "settings.findCompatibleEnvironment",
-        recipe: targetId,
-      }),
-    ).then(settle, settle);
-  };
-  const queryPending =
-    !!targetId &&
-    dispatchedQuery?.recipe === targetId &&
-    compatibilityRecipe !== targetId;
-  // 宿主清空结果且环境状态已变（马上会自动补发一次新查询）时，如实显示
-  // “正在查询”，不闪现误导性的“查询未完成”重试入口。
-  const queryDispatchExpected =
-    !!targetId &&
-    focused &&
-    !busy &&
-    compatibilityRecipe !== targetId &&
-    (dispatchedQuery?.recipe !== targetId ||
-      dispatchedQuery.fingerprint !== environmentsFingerprint ||
-      dispatchedQuery.generation !== queryGeneration);
-  // 未聚焦分区不自动查询：显式入口把焦点接到本分区后由同一 effect 单次补发，不产生第二条并发查询路径。
-  const manualQueryVisible = !!targetId && !focused && !busy && !queryResult;
   const mineruEnvironments =
     family === "mineru"
       ? environments.filter((environment) =>
@@ -2627,7 +1727,7 @@ function EngineEnvironmentSection({
       </h3>
       <p className="form-note">
         {family === "paddle"
-          ? "文字、表格与版面结构识别共用同一套 PaddleOCR 依赖，差别只在模型与管线（按需下载，各后端共用）。选择后端只做只读查询，确认后才安装或切换。"
+          ? "文字、表格与版面结构识别共用同一套 PaddleOCR 依赖，差别只在模型与管线（按需下载，各后端共用）。运行环境随产品内置，选择设备即刻切换。"
           : "本地文档解析由统一推理闭包随包携带（与 PaddleOCR 同一环境），模型首次使用时下载。远程模式不安装本地引擎，连接在下方“MinerU 连接”设置。"}
       </p>
       {problems.map((problem) => (
@@ -2649,7 +1749,7 @@ function EngineEnvironmentSection({
                   : "mineru-backend-select"
               }
             >
-              {family === "paddle" ? "Paddle 推理后端" : "MinerU 安装设备"}
+              {family === "paddle" ? "Paddle 推理后端" : "MinerU 运行设备"}
             </label>
             <Select
               id={
@@ -2658,7 +1758,7 @@ function EngineEnvironmentSection({
                   : "mineru-backend-select"
               }
               value={device}
-              disabled={busy}
+              disabled={busy || !activeId}
               onChange={(_, data) => onDeviceChange(String(data.value))}
             >
               {group.devices.map((key) => (
@@ -2694,94 +1794,15 @@ function EngineEnvironmentSection({
               </p>
             </>
           ) : null}
-          {target ? (
-            <>
-              {queryResult ? (
-                compatibleEnvironment ? (
-                  <p>
-                    可直接复用环境「{compatibleEnvironment.name}」
-                    {queryResult.selectionReason === "active_environment"
-                      ? "（当前活动环境）"
-                      : ""}
-                    ；切换前不安装任何内容。
-                  </p>
-                ) : (
-                  <p>没有可直接复用的已安装环境（均为空、不匹配或未验证）。</p>
-                )
-              ) : manualQueryVisible ? (
-                <div className="setting-row">
-                  <span className="form-note">
-                    此配置尚未查询；查询是只读操作。
-                  </span>
-                  <Button onClick={onTakeFocus}>查询可复用环境</Button>
-                </div>
-              ) : queryPending && !busy && !queryDispatchExpected ? (
-                <div className="setting-row">
-                  <span className="form-note">
-                    兼容性查询未完成（未收到结果）；可重试。
-                  </span>
-                  <Button onClick={retryQuery}>重新查询兼容环境</Button>
-                </div>
-              ) : (
-                <p className="form-note">正在查询可复用环境…</p>
-              )}
-              {activeReady ? (
-                <p role="status">
-                  该兼容环境已是当前环境并通过启动验证，无需重装。
-                </p>
-              ) : compatibleEnvironment ? (
-                <>
-                  <Button
-                    disabled={
-                      busy ||
-                      Boolean(compatibleEnvironment.operationBlocks?.switch)
-                    }
-                    onClick={() =>
-                      void actions.run({
-                        type: "settings.switchEnvironment",
-                        environmentId: compatibleEnvironment.id,
-                        // 切换按用户选定设备（统一闭包 directml↔cpu 同闭包切换）。
-                        device,
-                      })
-                    }
-                  >
-                    {compatibleEnvironment.id === activeId
-                      ? "启动并验证当前环境"
-                      : "切换到此环境并启动验证"}
-                  </Button>
-                  <p className="form-note">
-                    切换会重新启动并验证识别服务；有运行中任务时切换会被拒绝。
-                  </p>
-                </>
-              ) : queryResult && !pendingPlan ? (
-                <div className="setting-row">
-                  <Button disabled={busy} onClick={() => void prepare()}>
-                    {family === "mineru"
-                      ? "安装 MinerU 本地引擎"
-                      : "准备此后端"}
-                  </Button>
-                  <span className="form-note">
-                    自动准备目标环境并预览依赖；确认后才会安装，重试复用同一准备环境。
-                  </span>
-                </div>
-              ) : null}
-            </>
-          ) : null}
-          {pendingPlan ? (
-            <EnvironmentPlanPanel
-              plan={pendingPlan}
-              environments={environments}
-              sourceName={(id) =>
-                sources.find((source) => source.id === id)?.displayName ??
-                id ??
-                "产品默认"
-              }
-              busy={busy}
-              canCancelInstall={state.environmentCanCancelInstall === true}
-              onCancel={onCancelPlan}
-              actions={actions}
-            />
-          ) : null}
+          {activeId ? (
+            <p className="form-note">
+              切换设备会重新启动并验证识别服务；有运行中任务时切换会被拒绝。
+            </p>
+          ) : (
+            <p className="form-note">
+              当前没有活动环境；运行环境由宿主装载，可点击“重新检查状态”。
+            </p>
+          )}
           {family === "mineru" ? (
             <div
               className="mineru-environment-list"
@@ -2790,7 +1811,7 @@ function EngineEnvironmentSection({
               <h4>本地 MinerU 环境与移除</h4>
               {mineruEnvironments.length === 0 ? (
                 <p className="form-note">
-                  尚无本地 MinerU 环境；上方选择设备后点“安装 MinerU 本地引擎”。
+                  尚无本地 MinerU 环境记录；统一推理闭包启动后自动可用。
                 </p>
               ) : (
                 mineruEnvironments.map((environment) => (
@@ -2800,14 +1821,6 @@ function EngineEnvironmentSection({
                     activeId={activeId}
                     busy={busy}
                     sourceName={mineruSourceName}
-                    continueRecipe={
-                      environment.status === "empty"
-                        ? targetId
-                        : environment.lastInstallFailure?.phase === "failed"
-                          ? environment.lastInstallFailure.recipe
-                          : ""
-                    }
-                    onPreview={onPreview}
                     actions={actions}
                   />
                 ))
@@ -2826,22 +1839,21 @@ function EngineEnvironmentSection({
   );
 }
 
-// 单个已安装环境行：切换/启动验证、失败修复、空环境继续准备与明确确认后的移除；活动/legacy 拒删由 Runtime 保护，前端只如实呈现并引导先切换。
+// 单个已安装环境行（PR2 预构建运行时树）：健康/状态只读展示、切换/启动
+// 验证与明确确认后的移除；安装准备与空环境修复入口已退役。活动/legacy/
+// product 拒删由 Runtime 经 operation_blocks 投影保护，前端只如实呈现并
+// 引导先切换。
 function EnvironmentRow({
   environment,
   activeId,
   busy,
   sourceName,
-  continueRecipe,
-  onPreview,
   actions,
 }: {
   readonly environment: ManagedEnvironmentState;
   readonly activeId: string | undefined;
   readonly busy: boolean;
   readonly sourceName: (id: string | null | undefined) => string;
-  readonly continueRecipe: string;
-  readonly onPreview?: (environmentId: string, recipe: string) => void;
   readonly actions: AppActions;
 }) {
   const [confirmingRemove, setConfirmingRemove] = useState(false);
@@ -2930,32 +1942,6 @@ function EnvironmentRow({
             {environment.id === activeId
               ? "启动并验证当前环境"
               : "切换到此环境"}
-          </Button>
-        ) : null}
-        {continueRecipe && onPreview ? (
-          <Button
-            disabled={
-              busy || Boolean(environment.operationBlocks?.preview_install)
-            }
-            onClick={() => onPreview(environment.id, continueRecipe)}
-          >
-            {environment.status === "empty" ? "继续准备依赖" : "重新准备依赖"}
-          </Button>
-        ) : null}
-        {environment.status === "empty" &&
-        environment.pythonState !== "ready" ? (
-          <Button
-            disabled={
-              busy || Boolean(environment.operationBlocks?.repair_empty)
-            }
-            onClick={() =>
-              void actions.run({
-                type: "settings.repairEmptyEnvironment",
-                environmentId: environment.id,
-              })
-            }
-          >
-            修复空环境 Python
           </Button>
         ) : null}
         {removeAllowed ? (
@@ -3105,71 +2091,6 @@ function SourceKindSelector({
         ))}
       </Select>
     </div>
-  );
-}
-
-function AcceleratorFeatures({
-  pendingBackend,
-  features,
-  enabled,
-  locked,
-  actions,
-}: {
-  readonly pendingBackend: string;
-  readonly features: readonly FeatureOptionState[];
-  readonly enabled: boolean;
-  readonly locked: boolean;
-  readonly actions: AppActions;
-}) {
-  return (
-    <>
-      <div className="setting-row">
-        <label htmlFor="accelerator">推理设备</label>
-        <Select
-          id="accelerator"
-          value={pendingBackend}
-          disabled={!enabled || locked}
-          onChange={(_, data) =>
-            actions.run({
-              type: "settings.setAccelerator",
-              accelerator: String(data.value),
-            })
-          }
-        >
-          <option value="cpu">CPU</option>
-          <option value="nvidia_cuda">CUDA GPU</option>
-        </Select>
-      </div>
-      <p className="form-note">
-        推理设备只决定运行环境的安装目标；选择 GPU
-        不代表识别引擎已安装，各引擎可用性在识别任务中选择时显示。
-      </p>
-      {features.length > 0 ? (
-        features.map((feature) => (
-          <div className="setting-row" key={feature.featureId}>
-            <Checkbox
-              label={feature.displayName}
-              checked={feature.selected}
-              disabled={!enabled || locked}
-              onChange={(_, data) =>
-                actions.run({
-                  type: "settings.setFeature",
-                  featureId: feature.featureId,
-                  enabled: data.checked === true,
-                })
-              }
-            />
-            <Badge appearance="outline">
-              {acceleratorLabel(feature.accelerator)}
-            </Badge>
-          </div>
-        ))
-      ) : (
-        <p className="form-note">
-          当前推理设备没有需要额外勾选的组件；这不代表识别引擎已全部就绪。
-        </p>
-      )}
-    </>
   );
 }
 
@@ -3721,241 +2642,6 @@ function DefaultRecognitionModeEditor({
         截图工具栏的“文字识别”使用此处保存的文字或文档模式；若选择表格模式，文字识别按钮会提示重新设置文字引擎。
       </p>
     </>
-  );
-}
-
-function MaintenanceActions({
-  maintenance,
-  plan,
-  canPreview,
-  enabled,
-  sources,
-  features,
-  actions,
-}: {
-  readonly maintenance: MaintenanceState | undefined;
-  readonly plan: InstallPlanState | undefined;
-  readonly canPreview: boolean;
-  readonly enabled: boolean;
-  readonly sources: readonly SourceOptionState[];
-  readonly features: readonly FeatureOptionState[];
-  readonly actions: AppActions;
-}) {
-  const busy = maintenance?.isRunning === true;
-  return (
-    <>
-      <div className="setting-row">
-        <span className="setting-actions">
-          <Button
-            disabled={!enabled || busy || !canPreview}
-            onClick={() => actions.run({ type: "settings.installRuntime" })}
-            icon={<Play aria-hidden="true" size={16} />}
-          >
-            预览安装范围
-          </Button>
-          {maintenance?.canCancel === true ? (
-            <Button
-              disabled={!enabled}
-              onClick={() =>
-                actions.run({ type: "settings.cancelRuntimeMaintenance" })
-              }
-              icon={<Square aria-hidden="true" size={16} />}
-            >
-              取消安装
-            </Button>
-          ) : null}
-          {maintenance?.canRetry === true ? (
-            <Button
-              disabled={!enabled || busy}
-              onClick={() =>
-                actions.run({ type: "settings.retryRuntimeMaintenance" })
-              }
-              icon={<RefreshCw aria-hidden="true" size={16} />}
-            >
-              重新预览上次选择
-            </Button>
-          ) : null}
-        </span>
-      </div>
-      {busy ? (
-        <p className="form-note">
-          维护进行中：推理设备、组件与下载来源的修改和确认已暂停。
-        </p>
-      ) : null}
-      {!canPreview ? (
-        <p className="form-note">
-          当前运行环境不支持安装预览，请先更新运行环境。
-        </p>
-      ) : null}
-      {plan ? (
-        <InstallPlanSection
-          plan={plan}
-          sources={sources}
-          features={features}
-          confirmDisabled={
-            !enabled || busy || !canPreview || plan.blockers.length > 0
-          }
-          actions={actions}
-        />
-      ) : null}
-      {maintenance ? (
-        <>
-          <p className="form-note">
-            {maintenanceStatusLabel(maintenance.statusCode)}
-          </p>
-          {maintenance.failureReason ? (
-            <p role="alert">{maintenance.failureReason}</p>
-          ) : null}
-          {maintenance.failureCode ? (
-            <details>
-              <summary>维护技术详情</summary>
-              <p>{maintenance.failureCode}</p>
-            </details>
-          ) : null}
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function displayNameFor(
-  id: string,
-  features: readonly FeatureOptionState[],
-): string {
-  return (
-    features.find((feature) => feature.featureId === id)?.displayName ?? id
-  );
-}
-
-function sourceNameFor(
-  id: string,
-  sources: readonly SourceOptionState[],
-): string {
-  return sources.find((source) => source.id === id)?.displayName ?? id;
-}
-
-function InstallPlanSection({
-  plan,
-  sources,
-  features,
-  confirmDisabled,
-  actions,
-}: {
-  readonly plan: InstallPlanState;
-  readonly sources: readonly SourceOptionState[];
-  readonly features: readonly FeatureOptionState[];
-  readonly confirmDisabled: boolean;
-  readonly actions: AppActions;
-}) {
-  const [clock, setClock] = useState(Date.now);
-  useEffect(() => {
-    const expiry = Date.parse(plan.expiresAt);
-    if (!Number.isFinite(expiry) || expiry <= Date.now()) return;
-    const timer = window.setTimeout(
-      () => setClock(Date.now()),
-      Math.min(Math.max(0, expiry - Date.now() + 1), 2_147_483_647),
-    );
-    return () => window.clearTimeout(timer);
-  }, [plan.expiresAt, clock]);
-  const expired = !isPlanFresh(plan.expiresAt);
-  const unknownCodes: string[] = [];
-  const componentLines = plan.components.map((component) => {
-    const reasons = knownLabels(
-      component.reasonCodes,
-      installReasonLabels,
-      unknownCodes,
-    );
-    const parts = [
-      installActionLabels[component.action] ?? component.action,
-      dependencyStateLabels[component.dependencyState] ??
-        component.dependencyState,
-      ...reasons,
-    ];
-    return `${displayNameFor(component.componentId, features)}：${parts.join("；")}`;
-  });
-  const sourceNames = plan.effectiveDownloadSourceIds.map((id) =>
-    sourceNameFor(id, sources),
-  );
-  const knownUnknownCosts = knownLabels(
-    plan.cost.unknownReasonCodes,
-    unknownCostLabels,
-    unknownCodes,
-  );
-  const downloadText =
-    plan.cost.downloadBytes === null
-      ? "未知"
-      : formatBytes(plan.cost.downloadBytes);
-  const diskText =
-    plan.cost.additionalDiskBytes === null
-      ? "未知"
-      : formatBytes(plan.cost.additionalDiskBytes);
-  const blockerCodes = plan.blockers.map((blocker) => blocker.code);
-  return (
-    <section className="install-plan" aria-label="运行环境安装计划">
-      <h3>核对安装范围</h3>
-      <p className="form-note">
-        推理设备：{plan.accelerator}。以下范围由识别服务
-        预览，确认前不会修改本机组件或停止当前服务。
-      </p>
-      <ul className="plan-components">
-        {componentLines.map((line, index) => (
-          <li key={plan.components[index]?.componentId ?? index}>{line}</li>
-        ))}
-      </ul>
-      <p className="form-note">
-        下载来源：
-        {sourceNames.length > 0 ? sourceNames.join("、") : "跟随识别服务默认"}
-      </p>
-      <p className="form-note">
-        预计下载 {downloadText}；新增磁盘占用 {diskText}。
-      </p>
-      {knownUnknownCosts.length > 0 ? (
-        <ul className="plan-components">
-          {knownUnknownCosts.map((reason) => (
-            <li key={reason}>{reason}</li>
-          ))}
-        </ul>
-      ) : null}
-      {plan.blockers.map((blocker, index) => (
-        <p
-          key={`${blocker.code}-${blocker.componentId ?? index}`}
-          role="alert"
-          className="form-note"
-        >
-          无法安装
-          {blocker.componentId
-            ? ` ${displayNameFor(blocker.componentId, features)}`
-            : ""}
-          ：{blocker.nextAction}
-        </p>
-      ))}
-      {expired ? (
-        <p role="alert" className="form-note">
-          安装计划已过期，请重新预览后确认。
-        </p>
-      ) : null}
-      <Button
-        disabled={confirmDisabled || expired}
-        onClick={() =>
-          actions.run({
-            type: "settings.confirmRuntimeInstall",
-            planId: plan.planId,
-          })
-        }
-      >
-        确认此计划并安装
-      </Button>
-      {unknownCodes.length > 0 || blockerCodes.length > 0 ? (
-        <details className="plan-tech-details">
-          <summary>技术详情</summary>
-          <ul>
-            {[...new Set([...unknownCodes, ...blockerCodes])].map((code) => (
-              <li key={code}>{code}</li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
-    </section>
   );
 }
 

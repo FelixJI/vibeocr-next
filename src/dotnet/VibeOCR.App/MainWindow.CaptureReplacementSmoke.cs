@@ -62,7 +62,6 @@ public sealed partial class MainWindow
         schema_version = 1, smoke = "capture-replacement-e2e", state, error, baseline, rows,
         submit_attempts = smokeSubmitAttempts?.Invoke(),
         startup_ensure_attempts = smokeStartupEnsureAttempts?.Invoke(),
-        installer_attempts = smokeInstallAttempts?.Invoke(),
         inference_attached = smokeInferenceAttached?.Invoke(),
         renderer_failure = "UNVERIFIED: Reload is real; no ProcessFailed was induced by this smoke.",
       }));
@@ -90,7 +89,7 @@ public sealed partial class MainWindow
     try
     {
       Require(screenshotSmokePicker is not null && smokeSubmitAttempts is not null &&
-        smokeStartupEnsureAttempts is not null && smokeInstallAttempts is not null && smokeInferenceAttached is not null,
+        smokeStartupEnsureAttempts is not null && smokeInferenceAttached is not null,
         "Replacement dependencies missing.");
       await Task.Yield();
       baseline = CaptureCounts();
@@ -168,7 +167,7 @@ public sealed partial class MainWindow
             !IsWindow(shutdownWindow) && shutdownRestorations == 1 && pendingImageEditor is null,
             "Shutdown retained a window, resource, subscription or owner callback.");
           Require(smokeSubmitAttempts!() == 0 && smokeStartupEnsureAttempts!() == 0 &&
-            smokeInstallAttempts!() == 0 && !smokeInferenceAttached!(), "Pure lifecycle created Runtime demand.");
+            !smokeInferenceAttached!(), "Pure lifecycle created Runtime demand.");
           rows.Add(new { phase = "shutdown-drained", restorations = shutdownRestorations, counts = closed });
           WriteHealth("passed", null);
         }

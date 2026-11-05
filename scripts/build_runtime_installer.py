@@ -5,10 +5,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from importlib.metadata import distribution
 from pathlib import Path
-
-from vibeocr.runtime.environments.bundled_uv import UV_VERSION, uv_executable
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER_EXECUTABLE_NAME = "vibeocr-runtime-installer.exe"
@@ -22,12 +19,9 @@ def build_runtime_installer(
     """Freeze the installer EXE and stage it once under ``output_dir``.
 
     产品只携带这一份可执行安装器（manifest 直接绑定其字节摘要）；
-    历史“单成员 zip”中间层已随去重移除。
+    历史“单成员 zip”中间层已随去重移除。预构建运行时树（PR2）后
+    安装器不再内嵌 uv：构建期装配依赖闭包，运行时零安装。
     """
-    uv_binary = uv_executable()
-    uv_licenses = distribution("uv").locate_file(f"uv-{UV_VERSION}.dist-info/licenses")
-    if not uv_licenses.is_dir():
-        raise ValueError("locked uv license files are missing")
     dist = work_dir / "dist"
     build = work_dir / "build"
     spec = work_dir / "spec"
@@ -41,10 +35,6 @@ def build_runtime_installer(
             "--noconfirm",
             "--clean",
             "--onefile",
-            "--add-binary",
-            f"{uv_binary};uv",
-            "--add-data",
-            f"{uv_licenses};uv/licenses",
             "--name",
             "vibeocr-runtime-installer",
             "--paths",

@@ -66,41 +66,33 @@ if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
 }
 
 $baseLock = Join-Path $runtimeConfig 'win-x64-base/requirements-win-x64-base.lock'
-# 共享离线 wheel pool：base / 统一推理闭包（DirectML）取并集，每个相同
-# wheel 只随产品分发一次；同名不同版本（冲突 pin）同时保留。pool 只含
-# 去重 wheel；每个成员 lock 另产一个仅含 pack-requirements.txt 的小 zip，
-# 经既有可重复 runtime_pack 元组接口绑定（requirements zip 在首位，各
-# scope 缓存目录独立），安装环境仍彼此隔离。统一推理闭包随包携带 Paddle
-# ONNX 与 MinerU，模型包一次构建由该环境共用。
+# 预构建运行时树（PR2）：构建期把 CPython 归档安全解包，统一闭包
+# （base + DirectML 统一推理闭包，含内部 runtime wheel）用构建机 uv 严格
+# 离线预装进树的 site-packages，并执行 import 冒烟与确定性树清单。产品
+# 直接携带展开树；运行时零 venv、零 uv、零安装。同名依赖在单树环境必须
+# 唯一版本（构建期 fail closed），wheel 池按字节去重只作为预装输入。
 $dmlOrtLock = Join-Path $runtimeConfig 'win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock'
-$poolLockArgs = @(
-    '--pool-lock', "win-x64-base=$baseLock",
-    '--pool-lock', "win-x64-paddle-ort-directml=$dmlOrtLock"
-)
+$runtimeEnvDir = Join-Path $work 'runtime-env'
+$runtimeEnvManifest = Join-Path $work 'runtime-env-manifest.json'
 uv run --frozen --group build python (Join-Path $root 'scripts/build_runtime_pack.py') `
-    --profile win-x64-shared-pool `
-    @poolLockArgs `
-    --work-dir (Join-Path $work 'runtime-pool-work') `
-    --max-part-bytes 1825361100 `
-    --output (Join-Path $work "vibeocr-runtime-pool-win-x64-$Version.zip")
-if ($LASTEXITCODE -ne 0) { throw 'Offline shared wheel pool build failed' }
-$poolStem = "vibeocr-runtime-pool-win-x64-$Version"
-$poolParts = @(Get-ChildItem -LiteralPath $work -Filter "$poolStem.part*.zip" -File | Sort-Object Name)
-if ($poolParts.Count -lt 1) { throw 'Offline shared wheel pool is missing' }
-# 统一用完整路径字符串拼接：Get-ChildItem 返回 FileInfo，Join-Path 返回
-# 字符串，混用 .FullName 会在字符串上取空。
-$poolPartPaths = @($poolParts | ForEach-Object { $_.FullName })
-$basePoolReq = Join-Path $work "$poolStem.requirements-win-x64-base.zip"
-$dmlPoolReq = Join-Path $work "$poolStem.requirements-win-x64-paddle-ort-directml.zip"
-foreach ($requirementsZip in @($basePoolReq, $dmlPoolReq)) {
-    if (-not (Test-Path -LiteralPath $requirementsZip -PathType Leaf)) {
-        throw "Offline shared wheel pool requirements manifest is missing: $requirementsZip"
-    }
+    --profile prebuilt-runtime-env `
+    --pool-lock "win-x64-base=$baseLock" `
+    --pool-lock "win-x64-paddle-ort-directml=$dmlOrtLock" `
+    --python-archive $pythonArchive `
+    --python-sha256 ([string]$pythonLock.sha256) `
+    --python-version ([string]$pythonLock.version) `
+    --runtime-wheel $wheels[0].FullName `
+    --runtime-version $Version `
+    --env-manifest $runtimeEnvManifest `
+    --work-dir (Join-Path $work 'runtime-env-work') `
+    --output $runtimeEnvDir
+if ($LASTEXITCODE -ne 0) { throw 'Prebuilt runtime env build failed' }
+if (-not (Test-Path -LiteralPath (Join-Path $runtimeEnvDir 'python.exe') -PathType Leaf)) {
+    throw 'Prebuilt runtime env is missing python.exe'
 }
-$packArgs = @()
-foreach ($pack in @($basePoolReq) + $poolPartPaths) { $packArgs += @('--base-runtime-pack', $pack) }
-$paddlePackArgs = @()
-foreach ($pack in @($dmlPoolReq) + $poolPartPaths) { $paddlePackArgs += @('--paddle-ort-directml-runtime-pack', $pack) }
+if (-not (Test-Path -LiteralPath $runtimeEnvManifest -PathType Leaf)) {
+    throw 'Prebuilt runtime env manifest is missing'
+}
 
 uv run --frozen --group build python (Join-Path $root 'scripts/build_runtime_pack.py') `
     --profile paddle-onnx-models `
@@ -115,11 +107,11 @@ $sourceSha = (git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve Next source commit' }
 $manifestArgs = @(
     (Join-Path $root 'scripts/build_runtime_manifest.py'),
-    '--runtime-wheel', $wheels[0].FullName,
     '--base-lock', $baseLock,
-    '--paddle-ort-directml-lock', (Join-Path $runtimeConfig 'win-x64-paddle-ort-directml/requirements-win-x64-paddle-ort-directml.lock'),
+    '--paddle-ort-directml-lock', $dmlOrtLock,
     '--paddle-model-pack', $paddleModelPack,
-    '--python-archive', $pythonArchive,
+    '--runtime-env-tree', $runtimeEnvDir,
+    '--runtime-env-manifest', $runtimeEnvManifest,
     '--python-version', [string]$pythonLock.version,
     '--python-source-url', [string]$pythonLock.source_url,
     '--installer-executable', $installer,
@@ -127,7 +119,7 @@ $manifestArgs = @(
     '--source-commit', $sourceSha,
     '--build-workflow', 'github.com/FelixJI/vibeocr-next/.github/workflows/ci.yml',
     '--output-dir', $output
-) + $packArgs + $paddlePackArgs
+)
 uv run --frozen --group build python @manifestArgs
 if ($LASTEXITCODE -ne 0) { throw 'Next Runtime manifest build failed' }
 Write-Output $output

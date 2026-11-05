@@ -31,7 +31,7 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
       }
     }
   }
-  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or CancelRuntimeForUpdateCommand or SetUpdateSourceCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand or RefreshDiagnosticsCommand;
+  internal bool Handles(WorkbenchCommand command) => command is OpenProjectPageCommand or CheckUpdateCommand or DownloadUpdateCommand or CancelUpdateCommand or SetUpdateSourceCommand or ExportDiagnosticsCommand or CopyDiagnosticsCommand or RefreshDiagnosticsCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -39,7 +39,6 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
     CheckUpdateCommand => StartUpdateCheck(cancellationToken),
     DownloadUpdateCommand => StartUpdateDownload(cancellationToken),
     CancelUpdateCommand => CancelUpdate(),
-    CancelRuntimeForUpdateCommand => await CancelRuntimeForUpdateAsync(cancellationToken),
     SetUpdateSourceCommand setSource => SetUpdateSource(setSource),
     RefreshDiagnosticsCommand => await RefreshDiagnosticsAsync(cancellationToken),
     ExportDiagnosticsCommand => await ExportDiagnosticsAsync(cancellationToken),
@@ -176,13 +175,6 @@ internal sealed class WorkbenchSystemOwner(VibeOCR.App.ViewModels.DiagnosticsVie
     // 不推进 generation：取消后完成的检查/下载仍需发布“已取消”终态，
     // 否则 UI 永远停在 busy。终态读取的是 VM 当前状态，不会田旧覆新。
     update.Cancel();
-    return UpdateState();
-  }
-
-  private async Task<UpdateWorkbenchState> CancelRuntimeForUpdateAsync(
-    CancellationToken cancellationToken)
-  {
-    await update.CancelRuntimeMaintenanceAndWaitAsync(cancellationToken);
     return UpdateState();
   }
 

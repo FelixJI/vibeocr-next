@@ -1,10 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Globalization;
-using System.Text.Json;
 using Http = VibeOCR.Contracts.HttpV2;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 
 namespace VibeOCR.App.ViewModels;
 
@@ -105,18 +102,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         private set => SetField(ref _sourceIdentity, value);
     }
 
-    public void ApplyProfile(Host.RuntimeProfileDescriptor? profile)
-    {
-        if (profile is null) return;
-        Profile = $"{profile.ProfileId} · {Accelerator(profile.Accelerator)}";
-        ReplaceComponents(profile.Components.Select(component =>
-            new RuntimeComponentItem(
-                component.ComponentId,
-                component.DisplayName,
-                component.Version,
-                "等待检查")));
-    }
-
     public void ReportServicePausedForMaintenance() =>
         ServiceStatus = "运行环境维护中，识别服务已暂停。";
 
@@ -124,20 +109,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
     {
         ServiceStatus = "运行环境暂不可用，请重新检查或打开诊断与修复。";
         if (_operationId is null) Status = ServiceStatus;
-    }
-
-    public void BeginMaintenance(string operationId)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(operationId);
-        _operationId = operationId;
-        _sequence = -1;
-        _terminal = false;
-        Phase = "尚未开始";
-        ProgressValue = 0;
-        ProgressText = "";
-        ProgressDetail = "";
-        IsProgressIndeterminate = true;
-        IsOperationActive = true;
     }
 
     public void CompleteMaintenance(string state)
@@ -162,44 +133,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         _operationId = operationId;
         _sequence = sequence;
         return true;
-    }
-
-    public void ApplyMaintenance(Host.RuntimeMaintenanceEvent update)
-    {
-        ArgumentNullException.ThrowIfNull(update);
-        Host.RuntimeMaintenanceSnapshot snapshot = update.Snapshot;
-        if (!Accept(snapshot.OperationId, snapshot.Sequence)) return;
-        IsOperationActive = true;
-        Phase = PhaseText(snapshot.Phase);
-        ProgressDetail = ProgressDetailText(update.MessageArgs);
-        Status = OperationStateText(snapshot.OperationState);
-        ApplyProgress(snapshot.Progress);
-        if (snapshot.OperationState is Host.RuntimeOperationState.Succeeded or Host.RuntimeOperationState.Failed or Host.RuntimeOperationState.Cancelled)
-        {
-            CompleteMaintenance(snapshot.OperationState.ToString().ToLowerInvariant());
-            return;
-        }
-
-        if (snapshot.Phase == Host.RuntimeMaintenancePhase.VerifyRuntime)
-        {
-            foreach (RuntimeComponentItem component in Components)
-            {
-                component.UpdateState("正在验证");
-            }
-            return;
-        }
-
-        if (snapshot.ComponentId is not null)
-        {
-            RuntimeComponentItem? component = Components.FirstOrDefault(
-                item => item.ComponentId == snapshot.ComponentId);
-            component?.UpdateState(snapshot.OperationState switch
-            {
-                Host.RuntimeOperationState.Failed => "失败",
-                Host.RuntimeOperationState.Cancelled => "已取消",
-                _ => "正在安装",
-            });
-        }
     }
 
     public void ApplySnapshot(Http.RuntimeStatusSnapshot snapshot)
@@ -227,7 +160,7 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
             Accept(maintenance.OperationId, maintenance.Sequence))
         {
             IsOperationActive = true;
-            Status = OperationStateText(Enum.Parse<Host.RuntimeOperationState>(maintenance.OperationState.ToString()));
+            Status = OperationStateText(maintenance.OperationState);
             Phase = PhaseText(maintenance.Phase);
             ApplyProgress(maintenance.Progress);
             if (maintenance.OperationState is Http.RuntimeOperationState.Succeeded or Http.RuntimeOperationState.Failed or Http.RuntimeOperationState.Cancelled)
@@ -245,31 +178,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         }
     }
 
-    private static string ProgressDetailText(IReadOnlyDictionary<string, JsonElement>? arguments)
-    {
-        if (arguments is null) return "";
-        List<string> parts = [];
-        foreach ((string key, string label) in new[]
-        {
-            ("elapsed_seconds", "已耗时（秒）"), ("last_activity_seconds", "距最近活动（秒）"),
-            ("cache_bytes", "复用缓存（bytes）"), ("download_bytes", "实际下载（bytes）"),
-        })
-        {
-            if (arguments.TryGetValue(key, out JsonElement value) &&
-                double.TryParse(value.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double measured) &&
-                double.IsFinite(measured) && measured >= 0)
-                parts.Add($"{label}：{measured.ToString("0.###", CultureInfo.InvariantCulture)}");
-        }
-        foreach ((string key, string label) in new[] { ("package", "依赖包"), ("step", "子步骤") })
-        {
-            if (arguments.TryGetValue(key, out JsonElement value) && value.ValueKind == JsonValueKind.String &&
-                value.GetString() is { Length: > 0 and <= 120 } identifier &&
-                identifier.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.'))
-                parts.Add($"{label}：{identifier}");
-        }
-        return string.Join("；", parts);
-    }
-
     private void ReplaceComponents(IEnumerable<RuntimeComponentItem> components)
     {
         Components.Clear();
@@ -277,35 +185,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         {
             Components.Add(component);
         }
-    }
-
-    private void ApplyProgress(Host.ProgressSnapshot? progress)
-    {
-        if (progress is null)
-        {
-            ProgressText = "";
-            ProgressValue = 0;
-            IsProgressIndeterminate = true;
-            return;
-        }
-        string unit = progress.Unit == Host.ProgressUnit.Bytes ? "bytes"
-            : progress.Unit == Host.ProgressUnit.Steps ? "步" : "项";
-        if (progress.Unit == Host.ProgressUnit.Steps || progress.Total is not > 0)
-        {
-            ProgressText = progress.Total is > 0
-                ? $"{progress.Current} / {progress.Total.Value} {unit}"
-                : $"已完成 {progress.Current} {unit} · 总量未知";
-            ProgressValue = 0;
-            IsProgressIndeterminate = true;
-            return;
-        }
-        ProgressValue = Math.Clamp(progress.Current * 100d / progress.Total.Value, 0, 100);
-        ProgressText = MeasuredProgressText(
-            progress.Current,
-            progress.Total.Value,
-            progress.Unit == Host.ProgressUnit.Bytes ? "bytes" : "项",
-            EstimatedRemainingSeconds(progress));
-        IsProgressIndeterminate = false;
     }
 
     private void ApplyProgress(Http.ProgressSnapshot? progress)
@@ -371,13 +250,6 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
             $"manifest {manifest[..Math.Min(12, manifest.Length)]}";
     }
 
-    private static string Accelerator(Host.Accelerator accelerator) => accelerator switch
-    {
-        Host.Accelerator.Cpu => "CPU",
-        Host.Accelerator.NvidiaCuda => "NVIDIA CUDA",
-        _ => "未知",
-    };
-
     private static string Accelerator(Http.RuntimeAccelerator accelerator) => accelerator switch
     {
         Http.RuntimeAccelerator.Cpu => "CPU",
@@ -385,26 +257,14 @@ public sealed class RuntimeStatusViewModel : INotifyPropertyChanged
         _ => "未知",
     };
 
-    private static string OperationStateText(Host.RuntimeOperationState state) => state switch
+    private static string OperationStateText(Http.RuntimeOperationState state) => state switch
     {
-        Host.RuntimeOperationState.Queued => "维护任务排队中",
-        Host.RuntimeOperationState.Running => "正在准备识别服务运行时",
-        Host.RuntimeOperationState.Succeeded => "维护操作已完成",
-        Host.RuntimeOperationState.Failed => "运行时安装失败",
-        Host.RuntimeOperationState.Cancelled => "运行时安装已取消",
+        Http.RuntimeOperationState.Queued => "维护任务排队中",
+        Http.RuntimeOperationState.Running => "正在准备识别服务运行时",
+        Http.RuntimeOperationState.Succeeded => "维护操作已完成",
+        Http.RuntimeOperationState.Failed => "运行时维护失败",
+        Http.RuntimeOperationState.Cancelled => "运行时维护已取消",
         _ => "运行时状态未知",
-    };
-
-    private static string PhaseText(Host.RuntimeMaintenancePhase phase) => phase switch
-    {
-        Host.RuntimeMaintenancePhase.ValidateBinding => "验证正式组件绑定",
-        Host.RuntimeMaintenancePhase.WaitForLock => "等待安装锁",
-        Host.RuntimeMaintenancePhase.PrepareRuntime => "准备 Python 运行时",
-        Host.RuntimeMaintenancePhase.InstallProfile => "安装重依赖",
-        Host.RuntimeMaintenancePhase.InstallBackend => "安装识别服务运行时",
-        Host.RuntimeMaintenancePhase.VerifyRuntime => "验证运行时",
-        Host.RuntimeMaintenancePhase.CommitRuntime => "提交运行时切换",
-        _ => "处理运行时",
     };
 
     private static string PhaseText(Http.RuntimeMaintenancePhase phase) => phase switch

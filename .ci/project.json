@@ -241,7 +241,7 @@
         "--label",
         "release-build",
         "--timeout-seconds",
-        "1200",
+        "2400",
         "--",
         "pwsh",
         "-File",

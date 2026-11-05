@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,38 +18,20 @@ from typing import Callable, Iterator
 from urllib.error import URLError
 from urllib.parse import unquote, urlsplit
 from urllib.request import ProxyHandler, build_opener
-from uuid import uuid4
 
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from vibeocr.runtime.environments import managed_cleanup
-from vibeocr.runtime.environments.managed_install_progress import (
-    CAPABILITY as INSTALL_PROGRESS_CAPABILITY,
-)
-from vibeocr.runtime.environments.managed_install_progress import (
-    ManagedInstallObserver,
-)
 from vibeocr.runtime.environments.managed_references import (
-    admission_lock,
     environment_has_references,
     environment_has_services,
-    maintenance_lock,
 )
 from vibeocr.runtime.environments.model_cache import (
     seed_bundled_paddle_onnx_models,
 )
-from vibeocr.runtime.environments.runtime_install_plan import (
-    RuntimeInstallPlanStale,
-)
 from vibeocr.runtime.environments.runtime_installer import (
     RuntimeInstallError,
-    _extract_python_archive,
-    _extract_runtime_pack,
     _load_component_lock,
     _normalize_dist_name,
-    _python_in,
-    _run_install_command,
-    _uv_command,
-    _uv_install_environment,
 )
 from vibeocr.runtime.environments.runtime_layout import resolve_runtime_store
 from vibeocr.runtime.environments.runtime_lock import (
@@ -56,16 +39,14 @@ from vibeocr.runtime.environments.runtime_lock import (
     RuntimeStoreLock,
 )
 from vibeocr.runtime.environments.runtime_maintenance import (
-    RuntimeOperationCancelled,
+    RuntimeInstallPlanStale,
     _atomic_json,
-    failure_guidance,
     safe_runtime_detail,
 )
 from vibeocr.runtime.environments.runtime_manifest import (
     ACCELERATOR_TO_PLAN,
     RuntimeInstallScope,
     load_runtime_manifest,
-    sha256_file,
 )
 from vibeocr.runtime.environments.runtime_selection import (
     DOWNLOAD_SOURCE_KIND_MINERU_MODEL_REGISTRY,
@@ -262,15 +243,22 @@ _DEFAULT_ENVIRONMENT_SLUG = "paddleocr-ort-directml"
 # 旧版默认环境 slug：仅用于识别旧初始化 marker 并迁到新 slug；从未完成
 # 的旧默认环境不迁移数据，只改用新目录名重建。
 _LEGACY_DEFAULT_ENVIRONMENT_SLUGS = ("rapidocr-cpu", "paddleocr-ort-cpu")
-# 固定路径布局：每个环境的 venv 直接位于 environments/<id>，不再嵌套
-# revisions/<N>，路径最短且升级前后不变。安装事务在 .staging/<id> 构建
-# 候选、提交时把旧 venv 移入 .retired/<id>（各一个固定槽位，绝不累积），
-# 再把候选换入固定路径并在最终位置复检探针。环境 id 不能以点开头，
-# 两个管理目录与任何环境目录天然不冲突；历史 <id>/revisions/<N[-hex]>
-# 记录照常读取，重新安装时自动迁移到固定路径，旧目录随 .retired 由
-# 空间清理回收。
+# 固定路径布局：每个历史 venv 环境直接位于 environments/<id>。预构建
+# 运行时树（PR2）随产品分发后不再有安装事务：新环境 kind=product，树
+# 位置以 manifest runtime_env 绑定锚定（backend 的兄弟 env 目录），不进
+# store_root/environments 边界。.staging/.retired 换入槽位与 swap journal
+# 不再产生新写入，常量与路径 helper 保留供历史记录/ledger 校验和空间
+# 清理回收旧残留。
 _SWAP_STAGING_ROOT = ".staging"
 _SWAP_RETIRED_ROOT = ".retired"
+# 预构建树在产品内的固定落点（product_layout 置于 runtime/env/<root>，
+# root 由 manifest runtime_env 绑定声明）；注册表 product 记录的 path
+# 字段固定为该标记值，真实树路径在 _safe_path 里以 manifest 重新锚定。
+_PRODUCT_ENVIRONMENT_PATH = "env/runtime-env"
+# 预构建产品环境的注册表 ID：独立于配方名，避免与历史版本自动创建的
+# 默认 venv（id=paddleocr-ort-directml 等 slug/uuid）冲突——这些记录在
+# 升级后按数据保护原则保留只读。
+_PRODUCT_ENVIRONMENT_ID = "product"
 
 
 def _is_reserved_directory_name(value: str) -> bool:
@@ -308,12 +296,6 @@ class ManagedEnvironmentError(RuntimeInstallError):
     """A named-environment operation cannot safely complete."""
 
 
-class ManagedEnvironmentInstallCancelled(
-    ManagedEnvironmentError, RuntimeOperationCancelled
-):
-    """Cancellation was accepted before the installation's terminal commit."""
-
-
 class ManagedEnvironmentStore:
     def __init__(
         self,
@@ -323,9 +305,6 @@ class ManagedEnvironmentStore:
         runtime_manifest: str | Path,
         layout_manifest: str | Path | None = None,
         product_id: str | None = None,
-        base_python: str | Path | None = None,
-        install_runner: Callable[[Path, RuntimeInstallScope, str], None] | None = None,
-        event_sink: Callable[[dict], None] | None = None,
     ) -> None:
         self.product_root = Path(product_root).resolve()
         self.component_lock_path = Path(component_lock).resolve()
@@ -356,39 +335,11 @@ class ManagedEnvironmentStore:
         self._swap_journal_root = self.paths.state_root / "environment-swaps"
         self._lock = self.paths.locks_root / "runtime-store.lock"
         self._references = self.paths.locks_root / "environment-references"
-        # Tests may supply a synthetic trusted interpreter. Production extracts
-        # the manifest-bound archive into a reusable, read-only base location.
-        self._base_override = Path(base_python).resolve() if base_python else None
-        self._install_runner = install_runner or self._install_scope
         self._cleanup_cancelled = threading.Event()
         self._cleanup_terminal = False
         self._cleanup_cancel_gate = threading.Lock()
         self._switch_guarded: str | None = None
-        self._install_cancelled = False
-        self._install_terminal = False
-        self._event_sink = event_sink
-        self._install_observer: ManagedInstallObserver | None = None
-
-    def cancel_install(self, acknowledge: Callable[[bool], None]) -> None:
-        """Acknowledge before kill, serialized with both terminal registry writes.
-
-        This manager belongs to one CLI process. Accepted cancellation wins until
-        the terminal commit under the same registry lock. The worker records its
-        interrupted failure before returning, while preserving the old environment.
-        """
-        with RuntimeStoreLock(self._lock):
-            accepted = not self._install_terminal
-            if accepted:
-                self._install_cancelled = True
-            acknowledge(accepted)
-
-    def _check_install_cancelled(self) -> None:
-        if self._install_cancelled:
-            raise ManagedEnvironmentInstallCancelled(
-                "environment installation was cancelled",
-                reason_code="install_interrupted",
-                next_action="preview_again",
-            )
+        self._switch_committed = False
 
     @staticmethod
     def _selected_device(record: dict) -> str:
@@ -480,25 +431,10 @@ class ManagedEnvironmentStore:
             "PYTHONNOUSERSITE": "1",
             "PYTHONUTF8": "1",
         }
-        # runtime-code 与 runtime-manifest 由同一构建步骤同目录产出；
-        # Velopack current/ 布局下 product_root 是 bundle 根（只有
-        # current/packages/state），不能从 product_root 硬拼，以已验证的
-        # manifest 位置为权威锚点（与 _install_scope 取 wheel 同一模式）。
-        code_root = self.manifest.path.parent / "runtime-code"
-        if self.layout_manifest or code_root.is_dir():
-            for relative in (
-                "vibeocr/runtime/__init__.py",
-                "vibeocr/runtime/host/main.py",
-                "vibeocr/runtime/recognition/paddle_worker.py",
-                "vibeocr/runtime/documents/pdf_backend_process.py",
-                "vibeocr/runtime/environments/dependency_profiles.json",
-                "vibeocr/runtime_contracts/__init__.py",
-                f"vibeocr_next_runtime-{self.manifest.backend_version}.dist-info/METADATA",
-            ):
-                if not (code_root / relative).is_file():
-                    raise ManagedEnvironmentError("product Runtime code is unavailable")
-            environment["VIBEOCR_PRODUCT_CODE_ROOT"] = str(code_root)
-        if record["kind"] == "venv":
+        # 预构建树自带完整 site-packages（-I 不排除解释器自身 site-packages），
+        # 入口统一 ``python -m``，不再需要产品代码根注入；Runtime code 的
+        # 可用性由树清单与 _probe 的 import 探针兜底。
+        if record["kind"] in {"venv", "product"}:
             environment["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"] = record["recipe"]
             environment["VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"] = self._selected_device(
                 record
@@ -875,7 +811,9 @@ class ManagedEnvironmentStore:
             "environments": {},
         }
         legacy = self.paths.runtime_root
-        if (legacy / ".installed.json").is_file() and _python_in(legacy).is_file():
+        if (legacy / ".installed.json").is_file() and self._interpreter_python(
+            legacy
+        ).is_file():
             data["environments"]["legacy"] = {
                 "id": "legacy",
                 "name": "原有环境",
@@ -903,6 +841,44 @@ class ManagedEnvironmentStore:
         if record["kind"] == "legacy":
             expected = self.paths.runtime_root
             relative = Path("runtime")
+        elif record["kind"] == "product":
+            # 预构建树随产品分发：注册表 path 是固定标记，真实树位置以
+            # 已验证 manifest 的 runtime_env 绑定锚定（backend 的兄弟 env
+            # 目录），不进 store_root/environments 边界，cleanup 也不把
+            # 产品树列为可清理对象。
+            binding = self.manifest.runtime_env
+            if (
+                binding is None
+                or record["path"] != _PRODUCT_ENVIRONMENT_PATH
+                or Path(binding.root).name != binding.root
+                or binding.root in {".", ".."}
+            ):
+                raise ManagedEnvironmentError(
+                    "environment path is outside managed store"
+                )
+            relative = Path(record["path"])
+            expected = self.manifest.path.parent.parent / "env" / binding.root
+            declared = Path(record["path"])
+            if declared.is_absolute() or declared != relative:
+                raise ManagedEnvironmentError(
+                    "environment path is outside managed store"
+                )
+            # 边界锚定产品 runtime 目录（manifest 的父级）：树内任何一级
+            # reparse/symlink 都会把目录语义移出产品树，拒绝。
+            boundary = self.manifest.path.parent.parent.resolve()
+            current = expected
+            while current != boundary:
+                if (current.exists() or current.is_symlink()) and self._is_reparse(
+                    current
+                ):
+                    raise ManagedEnvironmentError(
+                        "environment path contains reparse point"
+                    )
+                parent = current.parent
+                if parent == current or not parent.resolve().is_relative_to(boundary):
+                    raise ManagedEnvironmentError("environment path escapes store")
+                current = parent
+            return expected
         else:
             relative = Path(record["path"])
             parts = relative.parts
@@ -917,8 +893,9 @@ class ManagedEnvironmentStore:
                 and all(parts)
             ):
                 # 换入事务的候选/退役槽位（含退役镜像子路径）：供 cleanup
-                # ledger、staging 探针与恢复逻辑校验；注册表记录由
-                # _validate_registry 显式拒绝槽位路径。
+                # ledger 与 staging 探针校验；注册表记录由
+                # _validate_registry 显式拒绝槽位路径。预构建树后不再有
+                # 新写入，仅历史残留与空间清理读取。
                 pass
             elif (
                 len(parts) != 3
@@ -1031,7 +1008,7 @@ class ManagedEnvironmentStore:
                 or type(record["revision"]) is not int
                 or record["revision"] < 1
                 or not isinstance(record["kind"], str)
-                or record["kind"] not in {"legacy", "venv"}
+                or record["kind"] not in {"legacy", "venv", "product"}
                 or (env_id == "legacy") != (record["kind"] == "legacy")
                 # 注册表记录必须指向存活路径：固定路径或 legacy revisions
                 # 布局；换入槽位只属于事务与 ledger，不得成为环境记录。
@@ -1057,6 +1034,16 @@ class ManagedEnvironmentStore:
                 or record["recipe"] not in _RECIPE_IDS
             ):
                 raise ManagedEnvironmentError("environment recipe is invalid")
+            if record["kind"] == "product" and (
+                env_id != _PRODUCT_ENVIRONMENT_ID
+                or record["status"] != "installed"
+                or record.get("recipe") != _DEFAULT_ENVIRONMENT_SLUG
+                or record["path"] != _PRODUCT_ENVIRONMENT_PATH
+                or "last_install_operation" in record
+            ):
+                # 预构建产品环境：随包分发、零安装，只允许固定形态；
+                # 安装操作证据只属于历史 venv 记录。
+                raise ManagedEnvironmentError("product environment record is invalid")
             if "selected_device" in record:
                 if not isinstance(record["selected_device"], str) or record[
                     "selected_device"
@@ -1159,34 +1146,19 @@ class ManagedEnvironmentStore:
         )
 
     def _expected_base_python(self) -> Path:
-        if self._base_override is not None:
-            return self._base_override
+        """历史 venv 记录探测用的基础解释器位置（只读，不再解包）。"""
         base = self.root / "python-base" / self.manifest.python.version
         return base / "python.exe"
 
-    def _base_python(self) -> Path:
-        python = self._expected_base_python()
-        if python.is_file():
-            return python
-        with RuntimeStoreLock(self.paths.locks_root / "python-base.lock"):
-            if python.is_file():
-                return python
-            base = python.parent
-            archive = self.manifest.python.archive_path
-            if (
-                not archive.is_file()
-                or sha256_file(archive) != self.manifest.python.sha256
-            ):
-                raise ManagedEnvironmentError(
-                    "bound Python archive is missing or invalid"
-                )
-            partial = base.with_name(f".{base.name}.{uuid4().hex}.installing")
-            _extract_python_archive(archive, partial)
-            if not _python_in(partial).is_file():
-                raise ManagedEnvironmentError("bound Python archive has no executable")
-            base.parent.mkdir(parents=True, exist_ok=True)
-            partial.rename(base)
-        return python
+    @staticmethod
+    def _interpreter_python(root: Path) -> Path:
+        """解释器目录布局（legacy 运行时与预构建树）：python.exe 位于根下。"""
+        candidates = (
+            root / "Scripts" / "python.exe",
+            root / "python.exe",
+            root / "bin" / "python",
+        )
+        return next((path for path in candidates if path.is_file()), candidates[1])
 
     @staticmethod
     def _venv_python(root: Path) -> Path:
@@ -1194,17 +1166,52 @@ class ManagedEnvironmentStore:
             "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
         )
 
+    def _record_python(self, record: dict) -> Path:
+        root = self._safe_path(record)
+        if record["kind"] == "venv":
+            return self._venv_python(root)
+        return self._interpreter_python(root)
+
     def _probe(self, record: dict) -> dict:
         if record["id"] in managed_cleanup.read_ledger(self)["pending"]:
             return {
                 "healthy": False,
                 "reason": "cleanup_pending",
-                "python": str(self._venv_python(self._safe_path(record))),
+                "python": str(self._record_python(record)),
             }
         root = self._safe_path(record)
-        python = (
-            _python_in(root) if record["kind"] == "legacy" else self._venv_python(root)
-        )
+        python = self._record_python(record)
+        if (
+            record["kind"] == "venv"
+            and record["status"] == "installed"
+            and self.manifest.runtime_env is not None
+        ):
+            # 历史 venv 环境按数据保护原则保留只读：其 site-packages 内的
+            # 旧 Runtime 代码无法读取预构建 manifest，在本产品形态下不可
+            # 运行，如实投影不可用（切换入口 fail closed）。空环境只是
+            # 占位（不启动 Supervisor），保持可切换语义。
+            return {
+                "healthy": False,
+                "reason": "legacy_venv_unsupported",
+                "python": str(python),
+            }
+        if record["kind"] == "product":
+            # 预构建树的健康门：树目录与确定性树清单随产品分发且必须
+            # 存在（缺失代表发布闭包损坏，fail closed 不重建）；解释器
+            # 与包集合/版本门与历史环境同源校验。
+            binding = self.manifest.runtime_env
+            if binding is None:
+                return {
+                    "healthy": False,
+                    "reason": "product_runtime_env_unbound",
+                    "python": str(python),
+                }
+            if not root.is_dir() or not binding.manifest_path.is_file():
+                return {
+                    "healthy": False,
+                    "reason": "product_runtime_env_missing",
+                    "python": str(python),
+                }
         if (
             record["python_version"] != self.manifest.python.version
             or record["abi"] != self.manifest.python.abi
@@ -1542,31 +1549,22 @@ class ManagedEnvironmentStore:
             for env_id in data["environments"]
         )
         active = data is None or record["id"] == data["active_id"]
-        owned = record["kind"] == "venv"
-        mutation = (
+        switch = (
             "environment_has_active_jobs"
-            if referenced
-            else (
-                "legacy_environment"
-                if not owned
-                else "active_environment"
-                if active and record["status"] != "empty"
-                else None
-            )
-        )
-        return {
-            "preview_install": None
-            if self._paddle_shared(record.get("recipe")) and not referenced
-            else mutation,
-            "switch": "environment_has_active_jobs"
             if busy
             else (
                 probe["reason"] or "environment_unhealthy"
                 if not probe["healthy"]
                 else None
-            ),
-            "repair_empty": mutation
-            or (None if record["status"] == "empty" else "environment_installed"),
+            )
+        )
+        if record["kind"] == "product":
+            # 预构建树随产品分发：随 Velopack 更新整体替换，不可删除、
+            # 无安装/修复语义，只参与健康切换与设备切换。
+            return {"switch": switch, "delete": "product_environment"}
+        owned = record["kind"] == "venv"
+        return {
+            "switch": switch,
             "delete": "legacy_environment"
             if not owned
             else (
@@ -1622,7 +1620,7 @@ class ManagedEnvironmentStore:
     def list(self) -> dict:
         # CUDA 支持已退役：不再探测 NVIDIA 驱动（DirectML 由引擎按设备
         # 可用性自行回退），列表不携带硬件投影。
-        # 先收敛可能被中断的固定路径换入，探针/路径才是真值。
+        # 先收敛升级前遗留的历史换入 journal，探针/路径才是真值。
         self._recover_all_swaps()
         with RuntimeStoreLock(self._lock):
             data = self._read()
@@ -1634,7 +1632,6 @@ class ManagedEnvironmentStore:
                 "active_id": data["active_id"],
                 "active_revision": data["active_revision"],
                 "capabilities": [
-                    INSTALL_PROGRESS_CAPABILITY,
                     managed_cleanup.CAPABILITY,
                     managed_cleanup.SWITCH_CAPABILITY,
                 ],
@@ -1662,24 +1659,39 @@ class ManagedEnvironmentStore:
             }
 
     def initialize_default(self) -> dict:
-        """首次或旧默认引擎退役时准备离线默认环境；失败可续装。
+        """幂等注册随产品分发的预构建默认环境并布置随包默认模型。
 
-        初始化状态独立保存，避免改变旧版仍需读取的注册表格式。独立锁
-        覆盖创建/安装，store 锁只覆盖注册表提交；完成后不自动重建。
-
-        默认环境固定为统一推理闭包（PaddleOCR ONNX + MinerU ·
-        DirectML/CPU），依赖必须来自随包离线 base pack：缺离线包代表发布
-        闭包错误，保持 fail closed，不静默改用网络源。只有真实安装或探针
-        失败才保留可重试的失败证据。
+        预构建运行时树（PR2）零安装：注册只是把固定 product 记录写入
+        注册表；依赖闭包已随产品分发，缺树/缺绑定代表发布闭包错误，
+        fail closed 不重建。旧 venv/退役记录按数据保护原则保留只读；
+        旧退役默认环境的迁移只登记归属并切换 active，不重装，旧目录在
+        健康使用 product 环境后由 _finish_default_migration 回收。
         """
-        marker = self.paths.state_root / "default-environment.json"
+        env_id = _PRODUCT_ENVIRONMENT_ID
+        recipe = _DEFAULT_ENVIRONMENT_SLUG
+        binding = self.manifest.runtime_env
+        if binding is None:
+            raise ManagedEnvironmentError(
+                "product runtime environment tree is not bound by manifest"
+            )
+        tree = self.manifest.path.parent.parent / "env" / binding.root
+        if not self._interpreter_python(tree).is_file():
+            raise ManagedEnvironmentError("product runtime environment tree is missing")
+        scope, _accelerator = self._recipe(recipe)
         with RuntimeStoreLock(self.paths.locks_root / "default-environment.lock"):
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 active = data["environments"].get(data["active_id"])
+                # 历史 venv/legacy 环境在本产品形态下不可运行：其
+                # site-packages/runtime 根内的旧 Runtime 代码无法读取预
+                # 构建 manifest，一律迁移 active 到产品树（数据保留只读，
+                # 可由空间清理回收）。
+                legacy_active = active is not None and active["kind"] in {
+                    "venv",
+                    "legacy",
+                }
                 retired_default = (
-                    active is not None
-                    and active["kind"] == "venv"
+                    legacy_active
                     and active["status"] == "installed"
                     and (
                         active["id"] in _LEGACY_DEFAULT_ENVIRONMENT_SLUGS
@@ -1691,348 +1703,76 @@ class ManagedEnvironmentStore:
                     and active.get("recipe") in _RETIRED_ENGINE_RECIPES
                 )
                 previous_selection = (data["active_id"], data["active_revision"])
-            if marker.is_file():
-                state = json.loads(marker.read_text(encoding="utf-8"))
-                if (
-                    not isinstance(state, dict)
-                    or set(state) != {"environment_id", "created"}
-                    or type(state["created"]) is not bool
-                    or (
-                        state["environment_id"] is not None
-                        and (
-                            not isinstance(state["environment_id"], str)
-                            or not _is_valid_environment_id(state["environment_id"])
-                        )
-                    )
-                ):
-                    raise ManagedEnvironmentError(
-                        "default environment initialization is invalid"
-                    )
-                # 旧版用 RapidOCR / paddleocr-ort-cpu slug 预留过默认环境：
-                # 未完成创建时直接改用新 slug 重建（无数据可迁移）；已完成
-                # 创建的旧环境保留不动。
-                if (
-                    state["environment_id"] in _LEGACY_DEFAULT_ENVIRONMENT_SLUGS
-                    and not state["created"]
-                ):
-                    with RuntimeStoreLock(self._lock):
-                        state = {
-                            "environment_id": self._new_environment_id(
-                                _DEFAULT_ENVIRONMENT_SLUG, self._read()
-                            ),
-                            "created": False,
-                        }
-                        _atomic_json(marker, state)
-            else:
-                with RuntimeStoreLock(self._lock):
-                    existing = bool(self._read()["environments"])
-                    state = {
-                        "environment_id": (
-                            None if existing else _DEFAULT_ENVIRONMENT_SLUG
-                        ),
-                        "created": existing,
+                record = data["environments"].get(env_id)
+                if record is None:
+                    data["environments"][env_id] = {
+                        "id": env_id,
+                        "name": "默认环境",
+                        "revision": 1,
+                        "kind": "product",
+                        "path": _PRODUCT_ENVIRONMENT_PATH,
+                        "status": "installed",
+                        "python_version": self.manifest.python.version,
+                        "abi": self.manifest.python.abi,
+                        "recipe": recipe,
+                        "recipe_lock": scope.sha256,
+                        "selected_device": "directml",
                     }
-                    _atomic_json(marker, state)
-            if retired_default and state["environment_id"] in (
-                None,
-                previous_selection[0],
-            ):
-                # 先准备替代环境，旧环境仅在 Supervisor 健康切换后回收。
-                with RuntimeStoreLock(self._lock):
-                    default_id = self._new_environment_id(
-                        _DEFAULT_ENVIRONMENT_SLUG, self._read()
-                    )
-                    state = {"environment_id": default_id, "created": False}
-                    _atomic_json(marker, state)
-            default_id = state["environment_id"]
-            if default_id is not None:
-                with RuntimeStoreLock(self._lock):
-                    record = self._read()["environments"].get(default_id)
-                if record is None and not state["created"]:
-                    name = "默认环境"
-                    if retired_default:
-                        with RuntimeStoreLock(self._lock):
-                            names = {
-                                item["name"].casefold()
-                                for item in self._read()["environments"].values()
-                            }
-                        name = "默认环境（PaddleOCR）"
-                        suffix = 2
-                        while name.casefold() in names:
-                            name = f"默认环境（PaddleOCR {suffix}）"
-                            suffix += 1
-                    record = self._create(
-                        name,
-                        as_default=not retired_default,
-                        environment_id=default_id,
-                    )
-                if record is not None:
-                    state["created"] = True
-                    _atomic_json(marker, state)
-                    if record["status"] == "empty":
-                        scope, _accelerator = self._recipe(_DEFAULT_ENVIRONMENT_SLUG)
-                        if not scope.runtime_pack:
-                            raise ManagedEnvironmentError(
-                                "default environment requires the bundled offline base pack"
-                            )
-                        plan = self.preview_install(
-                            default_id, _DEFAULT_ENVIRONMENT_SLUG
-                        )
-                        self.install(
-                            plan["plan_id"], default_id, _DEFAULT_ENVIRONMENT_SLUG
-                        )
-                    with RuntimeStoreLock(self._lock):
-                        data = self._read()
-                        record = data["environments"].get(default_id)
-                        if record is not None and record["status"] == "installed":
-                            if data["active_id"] is None or (
-                                retired_default
-                                and (data["active_id"], data["active_revision"])
-                                == previous_selection
-                            ):
-                                self._reject_referenced(data)
-                                if retired_default:
-                                    _atomic_json(
-                                        self.paths.state_root
-                                        / "default-environment-migration.json",
-                                        {
-                                            "retired_id": active["id"],
-                                            "retired_revision": active["revision"],
-                                            "replacement_id": default_id,
-                                        },
-                                    )
-                                data["active_id"] = default_id
-                                data["active_revision"] += 1
-                                _atomic_json(self._registry, data)
-                # 已创建但被用户删除、或创建前已有其他环境时，尊重用户选择。
-                _atomic_json(marker, {"environment_id": None, "created": True})
-        return self.list()
-
-    def create(self, name: str) -> dict:
-        created = self._create(name)
-        assert created is not None
-        return created
-
-    def prepare_target(self, recipe: str) -> dict:
-        """显式准备才创建解释器；持久预留归属支持失败/进程重启后续用。"""
-        self._recipe(recipe)
-        with RuntimeStoreLock(self.paths.locks_root / "environment-preparation.lock"):
-            compatible = self.find_compatible(recipe)
-            if compatible["selected"] is not None:
-                env_id = compatible["selected"]["environment_id"]
-                with RuntimeStoreLock(self._lock):
-                    data = self._read()
-                    record = data["environments"][env_id]
-                    return self._public_record(record, self._probe(record), data)
-            with RuntimeStoreLock(self._lock):
-                data = self._read()
-                targets = data.setdefault("prepare_targets", {})
-                if self._paddle_shared(recipe):
-                    owned_ids = {
-                        item["environment_id"]
-                        for key, item in targets.items()
-                        if self._paddle_shared(key)
-                    }
-                    owned_ids.add(data["active_id"])
-                    candidates = sorted(
-                        data["environments"].values(),
-                        key=lambda item: (item["id"] != data["active_id"], item["id"]),
-                    )
-                    for item in candidates:
-                        if item["id"] in owned_ids and self._paddle_shared(
-                            item.get("recipe")
-                        ):
-                            targets[recipe] = {
-                                "environment_id": item["id"],
-                                "name": item["name"],
-                            }
-                            _atomic_json(self._registry, data)
-                            return self._public_record(item, self._probe(item), data)
-                target = targets.get(recipe)
-                if target is not None:
-                    record = data["environments"].get(target["environment_id"])
-                    if record is not None:
-                        # 与 preview_install 门禁同源：另一能力的闭包，或
-                        # 已成为 find_compatible 未选中的活动已安装环境
-                        # （锁过期/闭包损坏，重试永远命中 active environment
-                        # cannot be modified），都不能作为受控准备目标。
-                        if record.get("recipe") in {None, recipe} and not (
-                            record["id"] == data["active_id"]
-                            and record["status"] != "empty"
-                        ):
-                            return self._public_record(
-                                record, self._probe(record), data
-                            )
-                        # 保留该环境（活动环境原样保留），另分配归属。
-                        target = None
-                    elif (
-                        target["environment_id"]
-                        in managed_cleanup.read_ledger(self)["pending"]
-                    ):
-                        target = None
-                if target is None:
-                    base = _RECIPE_DISPLAY_NAMES[recipe]
-                    names = {
-                        item["name"].casefold()
-                        for item in data["environments"].values()
-                    }
-                    names.update(item["name"].casefold() for item in targets.values())
-                    name = base
-                    ordinal = 1
-                    while name.casefold() in names:
-                        ordinal += 1
-                        name = f"{base} {ordinal}"
-                    target = {
-                        "environment_id": self._new_environment_id(name, data),
-                        "name": name,
-                    }
-                    targets[recipe] = target
                     _atomic_json(self._registry, data)
-            created = self._create(
-                target["name"], environment_id=target["environment_id"]
-            )
-            assert created is not None
-            return created
-
-    def _new_environment_id(self, name: str, data: dict) -> str:
-        """为新环境选择可读目录 id；永不回退 uuid。
-
-        无法从名称派生时用 ``environment``；保留目录名加 ``environment-``
-        前缀；碰撞按 -2/-3 顺序递增并截断保持长度有界。目录名在
-        Windows 大小写不敏感：与既有 id（casefold）与磁盘现状双重判重。
-        """
-        base = _environment_directory_slug(name) or "environment"
-        if _is_reserved_directory_name(base):
-            base = f"environment-{base}"
-        base = base[:_ENVIRONMENT_DIRECTORY_MAX].strip(" .") or "environment"
-        taken = {record_id.casefold() for record_id in data["environments"]}
-        taken.update(
-            target["environment_id"].casefold()
-            for target in data.get("prepare_targets", {}).values()
-        )
-        # 默认初始化在创建前持久预留 id，普通 create 不能抢占该恢复槽位。
-        marker = self.paths.state_root / "default-environment.json"
-        if marker.is_file():
-            state = json.loads(marker.read_text(encoding="utf-8"))
-            if not isinstance(state, dict):
-                raise ManagedEnvironmentError(
-                    "default environment initialization is invalid"
+                else:
+                    # 产品更新（如 CPython 补丁版本变化）后同步刷新已有
+                    # product 记录的随包绑定：树随产品整体替换，记录若仍
+                    # 持旧版本/ABI/锁，_probe 会判 base_or_abi_changed 并
+                    # 拒绝切换。用户偏好（名称/设备/来源 override）保留；
+                    # 绑定变化时递增 revision 使旧会话失效。
+                    refreshed = {
+                        **record,
+                        "python_version": self.manifest.python.version,
+                        "abi": self.manifest.python.abi,
+                        "recipe_lock": scope.sha256,
+                    }
+                    if refreshed != record:
+                        refreshed["revision"] = record["revision"] + 1
+                        data["environments"][env_id] = refreshed
+                        _atomic_json(self._registry, data)
+            if retired_default and previous_selection[0] not in (None, env_id):
+                _atomic_json(
+                    self.paths.state_root / "default-environment-migration.json",
+                    {
+                        "retired_id": active["id"],
+                        "retired_revision": active["revision"],
+                        "replacement_id": env_id,
+                    },
                 )
-            reserved = state.get("environment_id")
-            if isinstance(reserved, str):
-                taken.add(reserved.casefold())
-        # 待完成删除仍占用 id：目录已删但 pending 引用仍在，复用会破坏
-        # ledger 校验，一律跳过。
-        taken.update(
-            pending_id.casefold()
-            for pending_id in managed_cleanup.read_ledger(self)["pending"]
+        # 随包默认模型幂等布置（全命中时走快速路径直接返回）；模型包
+        # 损坏按发布闭包错误 fail closed，传播给调用方。
+        seed_bundled_paddle_onnx_models(
+            self.manifest,
+            self.paths.state_root / "model-cache",
+            lambda: None,
         )
-        candidate = base
-        suffix = 1
-        while (
-            candidate.casefold() in taken
-            or _is_reserved_directory_name(candidate)
-            or (self.root / candidate).exists()
-        ):
-            suffix += 1
-            tail = f"-{suffix}"
-            trimmed = (
-                base[: _ENVIRONMENT_DIRECTORY_MAX - len(tail)].strip(" .")
-                or "environment"
-            )
-            candidate = f"{trimmed}{tail}"
-        return candidate
-
-    def _create(
-        self, name: str, *, as_default: bool = False, environment_id: str | None = None
-    ) -> dict | None:
-        name = name.strip()
-        if not _NAME.fullmatch(name) or name in {".", ".."}:
-            raise ManagedEnvironmentError("environment name is invalid")
         with RuntimeStoreLock(self._lock):
             data = self._read()
-            if as_default and data["environments"]:
-                return None
-            if any(
-                target["name"].casefold() == name.casefold()
-                and target["environment_id"] != environment_id
-                for target in data.get("prepare_targets", {}).values()
+            if data["environments"].get(env_id) is not None and (
+                data["active_id"] is None
+                or (
+                    data["active_id"] != env_id
+                    and legacy_active
+                    and (data["active_id"], data["active_revision"])
+                    == previous_selection
+                )
             ):
-                raise ManagedEnvironmentError(
-                    "environment name is reserved for preparation"
-                )
-            if any(
-                item["name"].casefold() == name.casefold()
-                for item in data["environments"].values()
-            ):
-                raise ManagedEnvironmentError("environment name already exists")
-            env_id = environment_id or self._new_environment_id(name, data)
-            root = self._safe_path(
-                {"id": env_id, "kind": "venv", "path": env_id, "revision": 1}
-            )
-            if root.exists() or root.is_symlink():
-                # 显式 environment_id 绕过磁盘碰撞检查：未归属的预存固定
-                # 目录一律拒绝（不把未知数据变成可删除归属）；仅当 ledger
-                # 已由本创建流程登记（revision 1 遗留）且无待清理删除时
-                # 可续用，支持失败重试续建。
-                ledger = managed_cleanup.read_ledger(self)
-                owner = ledger["paths"].get(env_id)
-                if (
-                    owner is None
-                    or owner["environment_id"] != env_id
-                    or owner["revision"] != 1
-                    or env_id in ledger["pending"]
-                ):
-                    raise ManagedEnvironmentError(
-                        "environment directory already exists"
-                    )
-            managed_cleanup.remember_path(self, env_id, 1, root)
-            base = self._base_python()
-            result = subprocess.run(
-                [str(base), "-I", "-m", "venv", "--copies", "--without-pip", str(root)],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode:
-                raise ManagedEnvironmentError(
-                    "could not create isolated Python environment"
-                )
-            record = {
-                "id": env_id,
-                "name": name,
-                "revision": 1,
-                "kind": "venv",
-                "path": env_id,
-                "status": "empty",
-                "python_version": self.manifest.python.version,
-                "abi": self.manifest.python.abi,
-            }
-            probe = self._probe(record)
-            if not probe["healthy"]:
-                raise ManagedEnvironmentError(
-                    f"new environment failed probe: {probe['reason']}"
-                )
-            data["environments"][env_id] = record
-            _atomic_json(self._registry, data)
-            return self._public_record(record, probe, data)
-
-    def _staging_path(self, env_id: str) -> Path:
-        return self.root / _SWAP_STAGING_ROOT / env_id
-
-    def _retired_path(self, env_id: str) -> Path:
-        return self.root / _SWAP_RETIRED_ROOT / env_id
-
-    def _journal_path(self, env_id: str) -> Path:
-        return self._swap_journal_root / f"{env_id}.json"
-
-    def _plan_path(self, env_id: str) -> Path:
-        return self.paths.state_root / "environment-plans" / f"{env_id}.json"
-
-    def _forget_install_plan(self, env_id: str) -> None:
-        """终结已删除对象的落盘安装计划；失败交由删除事务整体重试。"""
-        self._plan_path(env_id).unlink(missing_ok=True)
+                self._reject_referenced(data)
+                previous_active = data["active_id"]
+                data["active_id"] = env_id
+                data["active_revision"] += 1
+                if previous_active is not None and previous_active != env_id:
+                    self._migrate_supervisor_settings(previous_active, env_id)
+                _atomic_json(self._registry, data)
+        # 退役默认环境的目录回收不在初始化时执行：迁移 marker 留给
+        # switch_reservation/commit_switch 在 Supervisor 健康提交成功后
+        # 由 _finish_default_migration 收敛，保留回滚语义。
+        return self.list()
 
     def _load_swap_journal(self, env_id: str) -> dict:
         """读取并结构校验换入 journal；损坏时 fail closed，不做推断。"""
@@ -2270,7 +2010,11 @@ class ManagedEnvironmentStore:
         return relocated
 
     def _recover_pending_swap(self, env_id: str) -> None:
-        """收敛上一次被中断的固定路径换入；调用方持有目标 operation 锁。"""
+        """收敛升级前遗留的历史换入 journal；调用方持有目标 operation 锁。
+
+        预构建运行时树后不再产生新换入事务；本恢复入口只服务历史
+        journal（安装/修复中断残留），恢复目录与归属后解除清理保护。
+        """
         if not self._journal_path(env_id).exists():
             return
         with RuntimeStoreLock(self._lock):
@@ -2303,16 +2047,16 @@ class ManagedEnvironmentStore:
                 raise ManagedEnvironmentError("pending swap has a live service lease")
             self._rollback_swap(env_id, candidate["revision"])
             raise ManagedEnvironmentError(
-                "a previous environment install was rolled back; retry the operation"
+                "a legacy environment swap was rolled back; the previous "
+                "environment data is preserved for cleanup"
             )
 
     def _recover_all_swaps(self) -> None:
-        """list/清理前收敛全部待恢复换入；在途环境跳过，由其自身流程收敛。
+        """list/清理前收敛全部历史换入 journal。
 
-        恢复失败按环境隔离：换入/清理家族的 RuntimeInstallError（含
-        ManagedEnvironmentError，例如退役槽位存在未登记数据）保留 journal
-        与保护后跳过该环境，不阻塞其余环境的 list/清理；无关编程错误
-        （TypeError 等）照常上抛。
+        恢复失败按环境隔离：RuntimeInstallError（含 ManagedEnvironmentError，
+        例如退役槽位存在未登记数据）保留 journal 与保护后跳过该环境，
+        不阻塞其余环境的 list/清理；无关编程错误照常上抛。
         """
         if not self._swap_journal_root.is_dir():
             return
@@ -2323,62 +2067,37 @@ class ManagedEnvironmentStore:
             except RuntimeInstallError:
                 continue
 
-    def repair_empty(self, env_id: str) -> dict:
-        """Recreate only an empty venv after a Portable path or Python ABI change."""
-        with self._target_operation(env_id):
-            self._recover_pending_swap(env_id)
-            with RuntimeStoreLock(self._lock):
-                data = self._read()
-                if environment_has_references(self._references, env_id):
-                    raise ManagedEnvironmentError("environment has active jobs")
-                record = data["environments"].get(env_id)
-                if (
-                    record is None
-                    or record["kind"] != "venv"
-                    or record["status"] != "empty"
-                ):
-                    raise ManagedEnvironmentError(
-                        "only a managed empty environment can be repaired"
-                    )
-                if self._probe(record)["healthy"]:
-                    return self._public_record(record, self._probe(record), data)
-                revision = record["revision"] + 1
-                staging = self._staging_path(env_id)
-                managed_cleanup.reclaim_slot(self, env_id, staging)
-                managed_cleanup.remember_path(self, env_id, revision, staging)
-                result = subprocess.run(
-                    [
-                        str(self._base_python()),
-                        "-I",
-                        "-m",
-                        "venv",
-                        "--copies",
-                        "--without-pip",
-                        str(staging),
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode:
-                    raise ManagedEnvironmentError("could not repair empty environment")
-                replacement = {
-                    **{
-                        key: value
-                        for key, value in record.items()
-                        if key != "last_install_operation"
-                    },
-                    "revision": revision,
-                    "path": env_id,
-                    "python_version": self.manifest.python.version,
-                    "abi": self.manifest.python.abi,
-                }
-                # 探针在换入事务内于最终固定路径执行。
-                relocated = self._swap_fixed_candidate(
-                    env_id, record, replacement, data
-                )
-                return self._public_record(replacement, relocated, data)
+    def _migrate_supervisor_settings(self, source_id: str, target_id: str) -> None:
+        """首次迁移 active 时把原环境的 Supervisor 设置安全迁入 product。
+
+        _launch 的设置路径按环境隔离：venv 记录位于
+        ``state/environments/<id>/supervisor-settings.json``，legacy 记录
+        位于 ``<product>/state/supervisor-settings.json``。不迁移会使
+        MinerU 远程连接等用户配置在新环境回落默认本地模式；旧文件保留，
+        product 侧已有设置不覆盖。
+        """
+        environments_root = self.paths.state_root / "environments"
+        candidates = [
+            environments_root / source_id / "supervisor-settings.json",
+            self.product_root / "state" / "supervisor-settings.json",
+        ]
+        target = environments_root / target_id / "supervisor-settings.json"
+        if target.exists():
+            return
+        for source in candidates:
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                return
+
+    def _staging_path(self, env_id: str) -> Path:
+        return self.root / _SWAP_STAGING_ROOT / env_id
+
+    def _retired_path(self, env_id: str) -> Path:
+        return self.root / _SWAP_RETIRED_ROOT / env_id
+
+    def _journal_path(self, env_id: str) -> Path:
+        return self._swap_journal_root / f"{env_id}.json"
 
     def _recipe(self, recipe: str) -> tuple[RuntimeInstallScope, str]:
         if _recipe_metadata(recipe).get("family") == "paddle-onnx":
@@ -2421,7 +2140,7 @@ class ManagedEnvironmentStore:
         record = data["environments"].get(env_id)
         if (
             record is None
-            or record["kind"] != "venv"
+            or record["kind"] not in {"venv", "product"}
             or record["status"] != "installed"
             or record["revision"] != revision
             or record.get("recipe") != recipe
@@ -2440,131 +2159,10 @@ class ManagedEnvironmentStore:
             accelerator = "cpu"
         return scope, None, accelerator
 
-    def preview_install(
-        self, env_id: str, recipe: str, source_ids: tuple[str, ...] | None = None
-    ) -> dict:
-        if recipe in _RETIRED_ENGINE_RECIPES:
-            # 原生 Paddle / Rapid 系 / 分设备（CPU/CUDA paddle-ort、独立
-            # MinerU）配方退役，不再提供安装/下载入口；已安装环境与健康
-            # 记录保留，提示改用统一推理闭包（directml）。DirectML 覆盖全
-            # D3D12 GPU 且不要求 NVIDIA 驱动门槛。
-            raise ManagedEnvironmentError(
-                "engine recipe is retired; prepare a Paddle ONNX environment",
-                reason_code="engine_recipe_retired",
-                next_action="prepare_paddle_onnx",
-            )
-        with self._target_operation(env_id), RuntimeStoreLock(self._lock):
-            data = self._read()
-            record = data["environments"].get(env_id)
-            if record is None or record["kind"] != "venv":
-                raise ManagedEnvironmentError(
-                    "target must be a managed virtual environment"
-                )
-            if (
-                env_id == data["active_id"]
-                and record["status"] != "empty"
-                and not self._paddle_shared(record.get("recipe"))
-            ):
-                raise ManagedEnvironmentError("active environment cannot be modified")
-            current = record.get("recipe")
-            if (
-                current is not None
-                and current != recipe
-                and not (self._paddle_shared(current) and self._paddle_shared(recipe))
-            ):
-                # 单 venv 不允许混装引擎闭包：Paddle ONNX 锁与 MinerU 锁各自
-                # 独立解析（含不同 onnxruntime/opencv 发行物），叠加安装会把
-                # 两套推理运行时装进同一环境，未绑定的组合如实拒绝。
-                raise ManagedEnvironmentError(
-                    "engine combination has no compatible locked recipe; "
-                    "create another environment"
-                )
-            scope, accelerator = self._recipe(recipe)
-            selection = self._plan_selection(data, record, accelerator, source_ids)
-            if not scope.runtime_pack:
-                # 统一推理闭包必须绑定随包离线包：缺失代表发布闭包错误，
-                # fail closed 而不是退回在线索引（在线依赖安装已退役）。
-                raise ManagedEnvironmentError("bound offline engine pack is missing")
-            if recipe.startswith("paddleocr-ort-") and any(
-                source.source_id == "paddleocr-bos"
-                for source in selection.effective_download_sources
-            ):
-                raise ManagedEnvironmentError(
-                    "Paddle ONNX requires Hugging Face or ModelScope; BOS assets are not bound"
-                )
-            sources = self._source_entries(data, record, selection)
-            plan = {
-                "plan_id": uuid4().hex,
-                "environment_id": env_id,
-                "environment_revision": record["revision"],
-                "active_revision": data["active_revision"],
-                "requested_recipe": recipe,
-                "recipe": recipe,
-                "recipe_lock": scope.sha256,
-                # 请求源（本次显式）与生效源（显式+继承叠加）分开冻结；
-                # None 表示本次未显式指定、完全继承环境/全局配置。
-                "requested_source_ids": (
-                    None
-                    if selection.requested_download_source_ids is None
-                    else sorted(selection.requested_download_source_ids)
-                ),
-                "source_ids": [
-                    source.source_id for source in selection.effective_download_sources
-                ],
-                "effective_source_ids": [
-                    source.source_id for source in selection.effective_download_sources
-                ],
-                "source_config_revision": int(data.get("source_config_revision") or 0),
-                "runtime_manifest": self.manifest.sha256,
-            }
-            previous_pins = {}
-            installed_versions = {}
-            if self._paddle_shared(current) and self._paddle_shared(recipe):
-                previous_scope, _ = self._recipe(current)
-                # Only a matching installed closure can justify folding the plan
-                # to a delta. An old lock or unavailable probe requires the full
-                # target repair; today's recipe is not evidence of installed bits.
-                previous_pins = {
-                    name: version
-                    for name, _display, version in self._scope_pins(previous_scope)
-                }
-                if record.get("recipe_lock") == previous_scope.sha256:
-                    probe = self._probe(record)
-                    if probe.get("healthy"):
-                        installed_versions = probe.get("versions") or {}
-            target_pins = self._scope_pins(scope)
-            dependencies = [
-                display
-                for name, display, version in target_pins
-                if current == recipe
-                or version is None
-                or installed_versions.get(name) != version
-            ]
-            removed_dependencies = [
-                name
-                for name in previous_pins
-                if name not in {item[0] for item in target_pins}
-            ]
-            _atomic_json(self._plan_path(env_id), plan)
-            return {
-                **plan,
-                "dependencies": dependencies,
-                "removed_dependencies": removed_dependencies,
-                "requires_service_stop": record["status"] == "installed"
-                and data["active_id"] == env_id,
-                "sources": sources,
-                # 资产来源分类：固定解释器归档与内部 wheel 随产品分发；
-                # 依赖来自随包离线包（在线索引已退役）；模型只是偏好，
-                # 实际下载端点未知，缓存命中不计为新下载。
-                "python_origin": "product_bundle",
-                "runtime_wheel_origin": "product_bundle",
-                "dependency_origin": "bundled_pack",
-            }
-
     def recipe_catalog(self) -> list[dict]:
         """唯一权威配方目录：沿当前 manifest 绑定的 scope 锁直接投影。
 
-        未被 manifest 绑定的配方不进入目录（与 preview_install 同一真相源），
+        未被 manifest 绑定的配方不进入目录（唯一真相源），
         前台推荐配置只消费本目录，不得自行推导依赖或来源。
         """
         entries: list[dict] = []
@@ -2601,491 +2199,6 @@ class ManagedEnvironmentStore:
                 }
             )
         return entries
-
-    def find_compatible(self, recipe: str, environment_id: str | None = None) -> dict:
-        """按配方寻找可直接复用的已安装健康环境；只读，不安装/不切换。
-
-        身份只认真实 scope 锁（manifest scope.sha256 字节契约 + 安装时
-        冻结的锁证据）、ABI/Python 基线/平台与设备要求；名称与下载镜像
-        不参与。选择优先当前活动环境，其余按稳定 id 序。旧记录缺少锁
-        证据时如实标记 query 不验证，list/手工切换保持可用。
-        """
-        with RuntimeStoreLock(self._lock):
-            data = self._read()
-            scope, _accelerator = self._recipe(recipe)
-            if (
-                environment_id is not None
-                and environment_id not in data["environments"]
-            ):
-                raise ManagedEnvironmentError("unknown explicit environment")
-            pins = {
-                name: version for name, _display, version in self._scope_pins(scope)
-            }
-            ordered = sorted(
-                data["environments"].values(),
-                key=lambda record: (
-                    record["id"] != environment_id if environment_id else False,
-                    record["id"] != data["active_id"],
-                    record["id"],
-                ),
-            )
-            evaluations: list[dict] = []
-            selected: dict | None = None
-            for record in ordered:
-                evaluation = {
-                    "environment_id": record["id"],
-                    "name": record["name"],
-                    "revision": record["revision"],
-                    "status": record["status"],
-                    "recipe": record.get("recipe")
-                    if record["kind"] == "venv"
-                    else None,
-                    "active": record["id"] == data["active_id"],
-                    "selected": False,
-                    "reason_code": None,
-                }
-                reason: str | None
-                if environment_id is not None and record["id"] != environment_id:
-                    reason = "explicit_target_not_selected"
-                elif record["kind"] == "legacy":
-                    reason = "legacy_environment"
-                elif record["status"] != "installed":
-                    reason = "environment_empty"
-                elif record.get("recipe") != recipe:
-                    # 统一推理闭包只有 directml 一个可安装配方，复用匹配
-                    # 即同一 recipe；分设备配方的跨设备复用已随退役移除。
-                    reason = "recipe_mismatch"
-                elif "recipe_lock" not in record:
-                    reason = "lock_evidence_missing"
-                elif record["recipe_lock"] != self._recipe(record["recipe"])[0].sha256:
-                    reason = "lock_evidence_mismatch"
-                else:
-                    reason = None
-                if reason is None:
-                    probe = self._probe(record)
-                    if not probe["healthy"]:
-                        reason = probe["reason"]
-                    elif probe.get("platform") != self.manifest.python.platform:
-                        reason = "platform_mismatch"
-                    elif any(version is None for version in pins.values()):
-                        reason = "locked_version_unknown"
-                    else:
-                        installed_versions = probe.get("versions") or {}
-                        if any(
-                            installed_versions.get(name) != version
-                            for name, version in pins.items()
-                        ):
-                            reason = "locked_version_mismatch"
-                if reason is None and selected is not None:
-                    reason = "compatible_lower_priority"
-                evaluation["reason_code"] = reason
-                if reason is None:
-                    evaluation["selected"] = True
-                    selection_reason = (
-                        "explicit_environment"
-                        if record["id"] == environment_id
-                        else "active_environment"
-                        if record["id"] == data["active_id"]
-                        else "deterministic_id_order"
-                    )
-                    evaluation["reason_code"] = (
-                        "selected_active_environment"
-                        if selection_reason == "active_environment"
-                        else "selected_compatible_environment"
-                    )
-                    selected = {
-                        "environment_id": record["id"],
-                        "environment_revision": record["revision"],
-                        "recipe": recipe,
-                        "selection_reason": selection_reason,
-                    }
-                evaluations.append(evaluation)
-            return {
-                "recipe": recipe,
-                "recipe_lock": scope.sha256,
-                "recipes": self.recipe_catalog(),
-                "selected": selected,
-                "environments": evaluations,
-            }
-
-    def install(
-        self,
-        plan_id: str,
-        env_id: str,
-        recipe: str,
-        source_ids: tuple[str, ...] | None = None,
-    ) -> dict:
-        if not re.fullmatch(r"[0-9a-f]{32}", plan_id) or not _is_valid_environment_id(
-            env_id
-        ):
-            raise RuntimeInstallPlanStale("invalid environment plan")
-        requested_ids = None if source_ids is None else tuple(sorted(set(source_ids)))
-        with self._target_operation(env_id), maintenance_lock(self._references, env_id):
-            self._recover_pending_swap(env_id)
-            plan_path = self._plan_path(env_id)
-            with RuntimeStoreLock(self._lock):
-                self._check_install_cancelled()
-                self._install_terminal = False
-                try:
-                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as exc:
-                    raise RuntimeInstallPlanStale(
-                        "environment plan is unavailable"
-                    ) from exc
-                if (
-                    not isinstance(plan, dict)
-                    or not isinstance(plan.get("recipe"), str)
-                    or not isinstance(plan.get("environment_id"), str)
-                    or not isinstance(plan.get("source_ids"), list)
-                    or any(not isinstance(item, str) for item in plan["source_ids"])
-                ):
-                    raise RuntimeInstallPlanStale("environment plan is invalid")
-                data = self._read()
-                record = data["environments"].get(plan.get("environment_id"))
-                scope, accelerator = self._recipe(plan["recipe"])
-                if (
-                    plan.get("plan_id") != plan_id
-                    or plan.get("environment_id") != env_id
-                    or plan.get("recipe") != recipe
-                    or plan.get("requested_source_ids")
-                    != (None if requested_ids is None else list(requested_ids))
-                    or record is None
-                    or record["kind"] != "venv"
-                    or record["revision"] != plan.get("environment_revision")
-                    or data["active_revision"] != plan.get("active_revision")
-                    or (
-                        data["active_id"] == env_id
-                        and record["status"] != "empty"
-                        and not self._paddle_shared(record.get("recipe"))
-                    )
-                    or plan.get("recipe_lock") != scope.sha256
-                    or plan.get("runtime_manifest") != self.manifest.sha256
-                    # 来源配置修订变化 → 旧计划失效；在途操作不受影响
-                    # （这里发生在冻结前，配置变化后 confirm 必须重新预览）。
-                    or plan.get("source_config_revision")
-                    != int(data.get("source_config_revision") or 0)
-                ):
-                    raise RuntimeInstallPlanStale(
-                        "environment or recipe changed; preview again"
-                    )
-                if environment_has_references(self._references, env_id):
-                    raise ManagedEnvironmentError("environment has active jobs")
-                if environment_has_services(self._references, env_id):
-                    raise ManagedEnvironmentError(
-                        "environment service must stop before maintenance"
-                    )
-                selection = self._plan_selection(
-                    data, record, accelerator, requested_ids
-                )
-                if [
-                    source.source_id for source in selection.effective_download_sources
-                ] != list(plan["source_ids"]):
-                    raise RuntimeInstallPlanStale(
-                        "source configuration changed; preview again"
-                    )
-                revision = record["revision"] + 1
-                staging = self._staging_path(env_id)
-                # 固定候选槽位被上次失败/中断的候选占用时按 ledger 记录
-                # 回收；退役槽位同步提前回收，存在未登记数据时在下载前
-                # fail closed。未知占用者不做推断归属。
-                managed_cleanup.reclaim_slot(self, env_id, staging)
-                managed_cleanup.reclaim_retired(self, env_id)
-                managed_cleanup.remember_path(self, env_id, revision, staging)
-                operation = {
-                    "environment_revision": record["revision"],
-                    "plan_id": plan_id,
-                    "recipe": recipe,
-                    "phase": "installing",
-                    "reason_code": "",
-                    "next_action": "",
-                    "detail": "",
-                    # 操作启动即冻结请求/生效来源；失败/取消/重启后仍可查。
-                    "requested_source_ids": plan.get("requested_source_ids"),
-                    "effective_source_ids": list(plan["source_ids"]),
-                }
-                record = {**record, "last_install_operation": operation}
-                data["environments"][env_id] = record
-                _atomic_json(self._registry, data)
-            observer = ManagedInstallObserver(
-                self._event_sink,
-                self._check_install_cancelled,
-                plan_id,
-                env_id,
-                record["revision"],
-                list(plan["source_ids"]),
-            )
-            self._install_observer = observer
-            try:
-                observer.requirements(scope.lock_path, self.manifest.python.version)
-                observer.set_phase("prepare", "初始化 Python 解释器（随产品提供）")
-                base = self._base_python()
-                result = subprocess.run(
-                    [
-                        str(base),
-                        "-I",
-                        "-m",
-                        "venv",
-                        "--copies",
-                        "--without-pip",
-                        str(staging),
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode:
-                    raise ManagedEnvironmentError(
-                        "could not prepare candidate environment:\n"
-                        f"{safe_runtime_detail(result.stderr)}\nvenv exit {result.returncode}",
-                        reason_code="venv_creation_failed",
-                        next_action="check_directory_permissions",
-                    )
-                self._check_install_cancelled()
-                self._install_runner(self._venv_python(staging), scope)
-                self._check_install_cancelled()
-                candidate = {
-                    key: value
-                    for key, value in record.items()
-                    if key != "last_install_operation"
-                }
-                candidate.update(
-                    {
-                        "revision": revision,
-                        "path": env_id,
-                        "status": "installed",
-                        "recipe": plan["recipe"],
-                        "selected_device": self._selected_device(record)
-                        if record.get("recipe") == plan["recipe"]
-                        else _recipe_metadata(plan["recipe"])["target_device"],
-                        # 安装时冻结的 scope 锁证据（旧记录缺省该键）。
-                        "recipe_lock": scope.sha256,
-                        "source_ids": plan["source_ids"],
-                        "python_version": self.manifest.python.version,
-                        "abi": self.manifest.python.abi,
-                    }
-                )
-                observer.set_phase("verify", "检查环境解释器与识别依赖；模型尚未下载")
-                # 候选在 staging 槽位先行探针：发生在终态提交之前，可被
-                # 取消；换入后在最终固定路径再复检一次。
-                staged = self._probe_device(
-                    {**candidate, "path": str(Path(_SWAP_STAGING_ROOT) / env_id)},
-                    _recipe_metadata(candidate["recipe"])["target_device"],
-                )
-                if not staged["healthy"]:
-                    raise ManagedEnvironmentError(
-                        f"installed environment failed probe: {staged['reason']}; "
-                        "check native dependencies and Portable path length"
-                        + (f"\n{staged['detail']}" if staged.get("detail") else ""),
-                        reason_code=staged["reason"],
-                        next_action="repair_environment",
-                    )
-                self._check_install_cancelled()
-                with RuntimeStoreLock(self._lock):
-                    self._check_install_cancelled()
-                    latest = self._read()
-                    try:
-                        current_plan = json.loads(plan_path.read_text(encoding="utf-8"))
-                    except (OSError, ValueError) as exc:
-                        raise RuntimeInstallPlanStale(
-                            "environment plan is unavailable"
-                        ) from exc
-                    if (
-                        current_plan != plan
-                        or latest["environments"].get(env_id) != record
-                        or latest["active_revision"] != plan["active_revision"]
-                    ):
-                        raise RuntimeInstallPlanStale(
-                            "environment or recipe changed; preview again"
-                        )
-                    if environment_has_references(self._references, env_id):
-                        raise ManagedEnvironmentError("environment has active jobs")
-                    relocated = self._swap_fixed_candidate(
-                        env_id, record, candidate, latest
-                    )
-                    self._install_terminal = True
-            except Exception as error:
-                original_error = error
-                try:
-                    with RuntimeStoreLock(self._lock):
-                        # Subprocess supervision may wrap the cancellation type,
-                        # or a child may fail after cancellation was accepted.
-                        # Decide the terminal outcome under the acknowledgement
-                        # lock before publishing its event or accepting more input.
-                        if self._install_cancelled:
-                            error = ManagedEnvironmentInstallCancelled(
-                                "environment installation was cancelled",
-                                reason_code="install_interrupted",
-                                next_action="preview_again",
-                            )
-                        self._install_terminal = True
-                        guidance = failure_guidance(error)
-                        if isinstance(error, RuntimeInstallPlanStale):
-                            guidance = {
-                                "reason_code": "plan_stale",
-                                "next_action": "preview_again",
-                            }
-                        reason_code = guidance["reason_code"]
-                        next_action = guidance["next_action"]
-                        failed = {
-                            **operation,
-                            "phase": "failed",
-                            "reason_code": reason_code
-                            if re.fullmatch(r"[a-z0-9_.-]{1,80}", reason_code)
-                            else "unknown",
-                            "next_action": next_action
-                            if re.fullmatch(r"[a-z0-9_.-]{1,80}", next_action)
-                            else "inspect_diagnostics",
-                            "detail": safe_runtime_detail(str(error)),
-                        }
-                        latest = self._read()
-                        if latest["environments"].get(env_id) == record:
-                            latest["environments"][env_id] = {
-                                **record,
-                                "last_install_operation": failed,
-                            }
-                            _atomic_json(self._registry, latest)
-                except OSError:
-                    # A full disk can leave the durable installing marker; the
-                    # existing recovery path reports it as interrupted on reopen.
-                    pass
-                observer.finish(
-                    "cancelled"
-                    if isinstance(error, ManagedEnvironmentInstallCancelled)
-                    else "failed",
-                    str(error),
-                )
-                if error is not original_error:
-                    raise error from original_error
-                raise
-            observer.finish("succeeded", "依赖已验证并提交；模型与服务尚未启动")
-            return self._public_record(candidate, relocated, latest)
-
-    def _install_scope(self, python: Path, scope: RuntimeInstallScope) -> None:
-        if sha256_file(scope.lock_path) != scope.sha256:
-            raise ManagedEnvironmentError("engine recipe lock does not match manifest")
-        wheel = self.manifest.path.parent / self.manifest.runtime_wheel
-        if sha256_file(wheel) != self.manifest.runtime_sha256:
-            raise ManagedEnvironmentError("Runtime wheel does not match manifest")
-        cache = self.paths.state_root / "installer-cache"
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.upper().startswith(("PIP_", "UV_"))
-        }
-        env.update(
-            {
-                "UV_CACHE_DIR": str(cache / "uv"),
-                "HF_HOME": str(cache / "huggingface"),
-                "TEMP": str(cache / "temp"),
-                "TMP": str(cache / "temp"),
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONUTF8": "1",
-                "PYTHONUNBUFFERED": "1",
-            }
-        )
-        (cache / "temp").mkdir(parents=True, exist_ok=True)
-        pack_files = [self.manifest.path.parent / name for name in scope.runtime_pack]
-        # 在线依赖安装已退役：统一推理闭包必须绑定完整随包离线包，
-        # 缺失代表发布闭包错误，fail closed 而不是退回在线索引。
-        if not pack_files or not all(path.is_file() for path in pack_files):
-            raise ManagedEnvironmentError("bound offline engine pack is missing")
-        observer = self._install_observer
-        env = _uv_install_environment(env, cache)
-        command = _uv_command(python, "install")
-        if observer is not None:
-            observer.set_phase("unpack", "解包随产品提供的离线依赖")
-        pack_dir = _extract_runtime_pack(
-            pack_files,
-            cache / "runtime-packs",
-            expected_sha256=scope.runtime_pack_sha256,
-        )
-        if observer is not None:
-            observer.requirements(
-                pack_dir / "pack-requirements.txt", self.manifest.python.version
-            )
-            observer.bundled()
-        command += [
-            "--offline",
-            "--no-index",
-            "--find-links",
-            str(pack_dir),
-            "--only-binary=:all:",
-            "-r",
-            str(pack_dir / "pack-requirements.txt"),
-        ]
-        if observer is not None:
-            observer.set_phase("install", "安装锁定依赖批次")
-        _run_install_command(
-            command,
-            timeout=3600,
-            env=env,
-            reporter=observer,
-            heartbeat_code="runtime.install_profile",
-            gate_python=python,
-        )
-        if observer is not None:
-            observer.installed_batch()
-            observer.set_phase(
-                "runtime_wheel",
-                "安装内部 Runtime wheel（随产品提供，独立于目标依赖计数）",
-            )
-        if scope.scope_id in self.manifest.paddle_onnx_environments:
-            self._check_install_cancelled()
-            if observer is not None:
-                observer.set_phase(
-                    "models",
-                    "布置随包默认 Paddle ONNX 模型（small 检测/识别 + 文档方向）",
-                )
-            seed_bundled_paddle_onnx_models(
-                self.manifest,
-                self.paths.state_root / "model-cache",
-                self._check_install_cancelled,
-            )
-        _run_install_command(
-            _uv_command(python, "install")
-            + ["--offline", "--no-deps", "--reinstall", str(wheel)],
-            timeout=600,
-            env=env,
-            reporter=observer,
-            heartbeat_code="runtime.install_backend",
-            gate_python=python,
-        )
-        if observer is not None:
-            observer.set_phase("verify", "验证 Runtime 导入与依赖一致性")
-        _run_install_command(
-            [str(python), "-c", "import vibeocr.runtime.host.main"],
-            timeout=60,
-            env=env,
-            reporter=observer,
-            heartbeat_code="runtime.verify_runtime",
-            gate_python=python,
-        )
-        _run_install_command(
-            _uv_command(python, "check") + ["--offline"],
-            timeout=60,
-            env=env,
-            reporter=observer,
-            heartbeat_code="runtime.verify_runtime",
-            gate_python=python,
-        )
-
-    @contextmanager
-    def maintenance_reservation(self, env_id: str) -> Iterator[dict]:
-        if not _is_valid_environment_id(env_id):
-            raise ManagedEnvironmentError("unknown environment")
-        with admission_lock(self._references, env_id):
-            with RuntimeStoreLock(self._lock):
-                record = self._read()["environments"].get(env_id)
-                if record is None:
-                    raise ManagedEnvironmentError("unknown environment")
-                if environment_has_references(self._references, env_id):
-                    raise ManagedEnvironmentError("environment has active jobs")
-                prepared = {
-                    "environment_id": env_id,
-                    "environment_revision": record["revision"],
-                }
-            yield prepared
 
     @contextmanager
     def switch_reservation(

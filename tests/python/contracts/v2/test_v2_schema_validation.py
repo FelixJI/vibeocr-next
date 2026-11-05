@@ -38,11 +38,6 @@ BOOTSTRAP_SCHEMA = json.loads(
     .joinpath("bootstrap.schema.json")
     .read_text(encoding="utf-8")
 )
-RUNTIME_HOST_SCHEMA = json.loads(
-    resources.files("vibeocr.runtime_contracts")
-    .joinpath("runtime-host.schema.json")
-    .read_text(encoding="utf-8")
-)
 
 
 # ---------------------------------------------------------------------------
@@ -140,30 +135,6 @@ def test_bootstrap_schema_allows_future_minor_capability() -> None:
     }
 
     jsonschema.validate(payload, BOOTSTRAP_SCHEMA)
-
-
-def test_runtime_host_schema_accepts_legacy_event_without_top_level_sequence() -> None:
-    payload = {
-        "schema_version": 2,
-        "protocol_version": 2,
-        "event_version": 1,
-        "event_type": "progress",
-        "operation": "ensure",
-        "snapshot": {
-            "operation_id": "op-1",
-            "sequence": 1,
-            "operation": "ensure",
-            "operation_state": "running",
-            "phase": "install_profile",
-            "profile_id": "win-x64-cpu",
-            "component_id": None,
-            "updated_at": "2026-08-05T12:00:00Z",
-            "progress": None,
-        },
-        "message_code": "runtime.installing",
-    }
-
-    jsonschema.validate(payload, RUNTIME_HOST_SCHEMA)
 
 
 def test_error_schema_accepts_category_code_combo() -> None:

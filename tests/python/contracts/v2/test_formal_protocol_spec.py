@@ -47,11 +47,11 @@ def test_error_json_schema_matches_the_formal_openapi_component() -> None:
     }
 
 
-def test_formal_spec_is_openapi_31_with_real_43_operation_surface() -> None:
+def test_formal_spec_is_openapi_31_with_real_38_operation_surface() -> None:
     spec = _spec()
     operations = _operations(spec)
     assert spec["openapi"] == "3.1.0"
-    assert len(operations) == 43
+    assert len(operations) == 38
     assert {(method.upper(), path) for method, path, _ in operations} == {
         ("GET", "/v2/health"),
         ("POST", "/v2/jobs"),
@@ -60,11 +60,6 @@ def test_formal_spec_is_openapi_31_with_real_43_operation_surface() -> None:
         ("POST", "/v2/jobs/command"),
         ("GET", "/v2/runtime/residency"),
         ("GET", "/v2/runtime/status"),
-        ("POST", "/v2/runtime/install-plan"),
-        ("POST", "/v2/runtime/maintenance"),
-        ("POST", "/v2/runtime/maintenance/command"),
-        ("GET", "/v2/runtime/operations/{operation_id}/observe"),
-        ("GET", "/v2/runtime/operations/{operation_id}/events"),
         ("POST", "/v2/runtime/release"),
         ("POST", "/v2/runtime/preload"),
         ("GET", "/v2/settings"),
@@ -143,173 +138,6 @@ def test_multipart_binary_ndjson_and_ready_schema_are_explicit() -> None:
     )
 
 
-def test_runtime_host_control_protocol_is_formal_and_strict() -> None:
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    bootstrap = json.loads((V2 / "bootstrap.schema.json").read_text(encoding="utf-8"))
-    jsonschema.Draft202012Validator.check_schema(host)
-    assert (
-        host["$defs"]["RuntimeHostRequest"]["properties"]["protocol_version"]["const"]
-        == bootstrap["properties"]["protocol_version"]["const"]
-    )
-    request = {
-        "protocol_version": 2,
-        "operation": "ensure",
-        "product_root": "C:/VibeOCR",
-        "component_lock": "C:/VibeOCR/component-lock.json",
-        "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json",
-        "accelerator": "nvidia_cuda",
-    }
-    jsonschema.validate(request, host)
-    jsonschema.validate(
-        {
-            "protocol_version": 2,
-            "ok": True,
-            "operation": "inspect",
-            "state": {
-                "runtime_root": "C:/VibeOCR/data/runtime",
-                "accelerator": "cpu",
-                "status": "missing",
-                "integrity": "not-installed",
-                "manifest_sha256": "a" * 64,
-                "backend_version": "0.8.0",
-            },
-            "launch": None,
-        },
-        host,
-    )
-    invalid = dict(request, profile="win-x64-cu126")
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(invalid, host)
-
-
-def test_runtime_host_supports_opt_in_progress_and_profile_descriptors() -> None:
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    request = {
-        "protocol_version": 2,
-        "operation": "ensure",
-        "product_root": "C:/VibeOCR",
-        "component_lock": "C:/VibeOCR/component-lock.json",
-        "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json",
-        "accepted_event_streams": ["ndjson.v1"],
-    }
-    jsonschema.validate(request, host)
-    event = {
-        "protocol_version": 2,
-        "event_version": 1,
-        "event_type": "progress",
-        "sequence": 3,
-        "operation": "ensure",
-        "snapshot": {
-            "operation_id": "install-1",
-            "sequence": 3,
-            "operation": "ensure",
-            "operation_state": "running",
-            "phase": "install_profile",
-            "profile_id": "win-x64-cpu",
-            "component_id": "ocr_engine",
-            "updated_at": "2026-08-05T12:00:00Z",
-            "progress": {"unit": "steps", "current": 2, "total": 5},
-        },
-        "message_code": "runtime.install.profile",
-        "message_args": {"profile_id": "win-x64-cpu"},
-        "fallback_message": "Installing the CPU runtime profile.",
-    }
-    jsonschema.validate(event, host)
-    success = {
-        "protocol_version": 2,
-        "ok": True,
-        "operation": "ensure",
-        "state": {
-            "runtime_root": "C:/VibeOCR/data/runtime",
-            "accelerator": "cpu",
-            "status": "ready",
-            "integrity": "verified",
-            "manifest_sha256": "a" * 64,
-            "backend_version": "0.9.0",
-        },
-        "profile": {
-            "profile_id": "win-x64-cpu",
-            "accelerator": "cpu",
-            "components": [
-                {
-                    "component_id": "ocr_engine",
-                    "display_name": "OCR engine",
-                    "version": "3.3.2",
-                    "state": "ready",
-                    "desired_state": "ready",
-                    "desired_version": "3.3.2",
-                    "actual_state": "ready",
-                    "actual_version": "3.3.2",
-                    "drift_reason": "none",
-                    "repairable": False,
-                }
-            ],
-        },
-        "maintenance": event["snapshot"],
-    }
-    jsonschema.validate(success, host)
-
-
-def test_runtime_host_formalizes_idempotent_commands_and_cursor_replay() -> None:
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    binding = {
-        "product_root": "C:/VibeOCR",
-        "component_lock": "C:/VibeOCR/component-lock.json",
-        "runtime_manifest": "C:/VibeOCR/backend/runtime-manifest.json",
-        "accelerator": "cpu",
-        "layout_manifest": "C:/VibeOCR/portable-layout.json",
-        "product_id": "classic",
-    }
-    start = {
-        "protocol_version": 2,
-        "operation": "repair",
-        "operation_id": "operation-1",
-        "component_ids": ["ocr_engine"],
-        "required_capabilities": [
-            "runtime.maintenance.v2",
-            "runtime.component-repair.v1",
-        ],
-        "accepted_event_streams": ["ndjson.v2"],
-        **binding,
-    }
-    jsonschema.validate(start, host)
-
-    cancel = {
-        "protocol_version": 2,
-        "request_kind": "command",
-        "command": "cancel",
-        "command_id": "command-1",
-        "target_operation_id": "operation-1",
-        "expected_sequence": 7,
-        **binding,
-    }
-    jsonschema.validate(cancel, host)
-
-    retry = {
-        **cancel,
-        "command": "retry",
-        "command_id": "command-2",
-        "new_operation_id": "operation-2",
-    }
-    jsonschema.validate(retry, host)
-
-    observe = {
-        "protocol_version": 2,
-        "request_kind": "observe",
-        "operation_id": "operation-1",
-        "after_sequence": 7,
-        "limit": 128,
-        **binding,
-    }
-    jsonschema.validate(observe, host)
-
-    assert {
-        "RuntimeMaintenanceCommandRequest",
-        "RuntimeMaintenanceObserveRequest",
-        "RuntimeMaintenanceUpdate",
-    }.issubset(host["$defs"])
-
-
 def test_runtime_http_status_and_typed_progress_are_formal() -> None:
     spec = _spec()
     status = spec["paths"]["/v2/runtime/status"]["get"]
@@ -319,46 +147,6 @@ def test_runtime_http_status_and_typed_progress_are_formal() -> None:
     }
     schemas = spec["components"]["schemas"]
     assert schemas["JobSnapshot"]["properties"]["progress"] == {
-        "$ref": "#/components/schemas/ProgressSnapshot"
-    }
-
-
-def test_runtime_http_maintenance_supports_commands_replay_and_streams() -> None:
-    spec = _spec()
-    paths = spec["paths"]
-    assert paths["/v2/runtime/maintenance"]["post"]["operationId"] == (
-        "startRuntimeMaintenance"
-    )
-    assert paths["/v2/runtime/maintenance/command"]["post"]["operationId"] == (
-        "commandRuntimeMaintenance"
-    )
-    observe = paths["/v2/runtime/operations/{operation_id}/observe"]["get"]
-    assert observe["operationId"] == "observeRuntimeMaintenance"
-    assert observe["responses"]["200"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/RuntimeMaintenanceUpdate"
-    }
-    events = paths["/v2/runtime/operations/{operation_id}/events"]["get"]
-    assert events["operationId"] == "streamRuntimeMaintenanceEvents"
-    assert set(events["responses"]["200"]["content"]) == {
-        "text/event-stream",
-        "application/x-ndjson",
-    }
-
-    schemas = spec["components"]["schemas"]
-    command = schemas["RuntimeMaintenanceCommandRequest"]
-    assert {"command_id", "target_operation_id", "expected_sequence"}.issubset(
-        command["properties"]
-    )
-    assert "new_operation_id" in command["properties"]
-    update = schemas["RuntimeMaintenanceUpdate"]
-    assert {
-        "events",
-        "oldest_sequence",
-        "through_sequence",
-        "more",
-        "replay_expires_at",
-    }.issubset(update["properties"])
-    assert schemas["StageEvent"]["properties"]["progress"] == {
         "$ref": "#/components/schemas/ProgressSnapshot"
     }
 
@@ -382,14 +170,18 @@ def test_capabilities_are_versioned_and_generated_bindings_are_current() -> None
 def test_capability_registry_formalizes_lifecycle_and_negotiation_metadata() -> None:
     registry = json.loads((V2 / "capabilities.json").read_text(encoding="utf-8"))
     assert registry["version"] == 2
+    # 预构建运行时树零安装：runtime.maintenance.v2 与 runtime.install-plan.v1
+    # 已从能力目录退役，维护命令/游标重放面不再声明。
     expected = {
-        "runtime.maintenance.v2",
+        "runtime.maintenance.v1",
         "runtime.component-repair.v1",
         "runtime.capability-metadata.v1",
         "runtime.events.sse.v1",
         "runtime.events.ndjson.v1",
     }
     assert expected.issubset(registry["capabilities"])
+    assert "runtime.maintenance.v2" not in registry["capabilities"]
+    assert "runtime.install-plan.v1" not in registry["capabilities"]
     for name, definition in registry["definitions"].items():
         assert definition["lifecycle"] in {"active", "deprecated"}, name
         assert definition["introduced_in"].startswith("2."), name
@@ -405,12 +197,6 @@ def test_capability_registry_formalizes_lifecycle_and_negotiation_metadata() -> 
         "type": "array",
         "items": {"$ref": "#/components/schemas/CapabilityDescriptor"},
     }
-
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    assert "CapabilityDescriptor" in host["$defs"]
-    assert host["$defs"]["RuntimeHostSuccess"]["properties"]["negotiated_capabilities"][
-        "items"
-    ] == {"type": "string", "minLength": 1}
 
 
 def test_runtime_errors_share_canonical_taxonomy_and_retry_after() -> None:
@@ -433,16 +219,6 @@ def test_runtime_errors_share_canonical_taxonomy_and_retry_after() -> None:
 
     retry_after = _spec()["components"]["schemas"]["Error"]["properties"]["retry_after"]
     assert retry_after == {"type": ["integer", "null"], "minimum": 0}
-
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    host_error = host["$defs"]["RuntimeHostError"]["properties"]
-    assert {
-        "canonical_code",
-        "category",
-        "retry_after",
-        "message_code",
-        "detail",
-    }.issubset(host_error)
 
 
 def test_runtime_status_exposes_verified_identity_component_drift_and_real_eta() -> (
@@ -500,15 +276,6 @@ def test_runtime_status_exposes_verified_identity_component_drift_and_real_eta()
                 "estimated_remaining_seconds": 3,
             }
         )
-
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    assert "RuntimeSourceIdentity" in host["$defs"]
-    host_snapshot = host["$defs"]["RuntimeMaintenanceSnapshot"]["properties"]
-    assert {
-        "source",
-        "requested_component_ids",
-        "effective_component_ids",
-    }.issubset(host_snapshot)
 
 
 def test_all_local_refs_resolve_and_permissive_catch_all_schemas_are_gone() -> None:
@@ -646,8 +413,8 @@ def test_codegen_covers_wire_dtos_errors_and_operation_signatures() -> None:
     }
     assert all(hasattr(wire_types, name) for name in object_schemas)
     assert typing.get_type_hints(wire_types.Health)["protocol_version"] is not None
-    assert len(OPERATIONS) == 43
-    assert len({operation.operation_id for operation in OPERATIONS}) == 43
+    assert len(OPERATIONS) == 38
+    assert len({operation.operation_id for operation in OPERATIONS}) == 38
     assert any(
         operation.operation_id == "getJobItemAsset"
         and operation.path == "/v2/jobs/{job_id}/items/{item_id}/assets/{asset_id}"

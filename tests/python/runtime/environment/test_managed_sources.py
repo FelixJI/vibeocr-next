@@ -1,24 +1,22 @@
-"""#105 环境级来源配置：解析链、计划绑定、失败证据与启动投影的定向测试。"""
+"""#105 环境级来源配置：解析链、历史失败证据与启动投影的定向测试。
+
+预构建运行时树（PR2）零安装后，来源面只剩 set_sources/解析链/启动投影
+与历史记录的只读投影；安装计划的来源绑定与安装取消已随安装事务退役。
+"""
 
 from __future__ import annotations
 
 import json
-import re
-import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 from test_runtime_installer import (
-    _omit_unused_pip_bootstrap,
     _release,
 )
 from vibeocr.runtime.environments.managed_environments import (
     ManagedEnvironmentError,
     ManagedEnvironmentStore,
-)
-from vibeocr.runtime.environments.runtime_install_plan import (
-    RuntimeInstallPlanStale,
 )
 from vibeocr.runtime.environments.runtime_installer import main
 from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
@@ -29,7 +27,6 @@ def _open(tmp_path: Path, manifest: Path, component: Path, **kwargs):
         product_root=tmp_path / "product",
         component_lock=component,
         runtime_manifest=manifest,
-        base_python=sys._base_executable,
         **kwargs,
     )
 
@@ -78,9 +75,7 @@ def _stub_installed_probe(
 
 
 def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     b = _write_record(manager, "b" * 32)
@@ -159,9 +154,7 @@ def test_source_resolution_chain_overrides_are_isolated(tmp_path: Path) -> None:
 def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     tmp_path: Path,
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     manager.set_sources(None, "huggingface")
@@ -247,224 +240,10 @@ def test_saved_sources_survive_restart_and_legacy_schema_stays_readable(
     )
 
 
-def test_preview_binds_requested_effective_and_config_revision(
-    tmp_path: Path,
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = _open(tmp_path, manifest, component)
-    a = _write_record(manager, "a" * 32)
-
-    inherited = manager.preview_install(a["id"], "paddleocr-ort-directml")
-    assert inherited["requested_source_ids"] is None
-    assert inherited["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert inherited["effective_source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert inherited["source_config_revision"] == 0
-    assert inherited["python_origin"] == "product_bundle"
-    assert inherited["runtime_wheel_origin"] == "product_bundle"
-    assert inherited["dependency_origin"] == "bundled_pack"
-    assert _entry(inherited["sources"], "paddleocr_model_registry") == {
-        "id": "paddleocr-modelscope",
-        "kind": "paddleocr_model_registry",
-        "display_name": "ModelScope",
-        "endpoint": "https://www.modelscope.cn",
-        "requested": False,
-        "inherited_from": "product_default",
-        "usage": "model_preference",
-        "actual_endpoint": None,
-    }
-
-    explicit = manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-huggingface",)
-    )
-    assert explicit["requested_source_ids"] == ["paddleocr-huggingface"]
-    assert explicit["source_ids"] == [
-        "paddleocr-huggingface",
-        "mineru-modelscope",
-    ]
-    assert _entry(explicit["sources"], "paddleocr_model_registry")["requested"] is True
-
-    # overlay：显式只选 PaddleOCR 源时 MinerU 补齐默认双引擎偏好。
-    combined = manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope",)
-    )
-    assert combined["requested_source_ids"] == ["paddleocr-modelscope"]
-    assert combined["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert _entry(combined["sources"], "paddleocr_model_registry") == {
-        "id": "paddleocr-modelscope",
-        "kind": "paddleocr_model_registry",
-        "display_name": "ModelScope",
-        "endpoint": "https://www.modelscope.cn",
-        "requested": True,
-        "inherited_from": "product_default",
-        "usage": "model_preference",
-        "actual_endpoint": None,
-    }
-    assert _entry(combined["sources"], "mineru_model_registry")["inherited_from"] == (
-        "product_default"
-    )
-
-    # 来源配置变化 → 旧计划 confirm 时 stale；重新预览拿到新修订。
-    manager.set_sources(None, "huggingface")
-    with pytest.raises(RuntimeInstallPlanStale, match="preview again"):
-        manager.install(
-            explicit["plan_id"],
-            a["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-huggingface",),
-        )
-    refreshed = manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-huggingface",)
-    )
-    assert refreshed["source_config_revision"] == 1
-
-    # 仅含历史 package index 的请求：依赖安装已退役，等效继承默认来源
-    # 而不是拒绝预览（历史计划/意图只记录纯包源集合时同样回退）。
-    retired = manager.preview_install(a["id"], "paddleocr-ort-directml", ("tuna-pypi",))
-    assert retired["source_ids"] == [
-        "paddleocr-huggingface",
-        "mineru-huggingface",
-    ]
-    assert all(entry["requested"] is False for entry in retired["sources"])
-
-
-def test_install_freezes_sources_and_failure_evidence_is_durable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    attempts: list[str] = []
-
-    def flaky_install(_python: Path, _scope) -> None:
-        attempts.append(_scope.scope_id)
-        if len(attempts) == 1:
-            raise ManagedEnvironmentError("synthetic download failure")
-
-    manager = _open(tmp_path, manifest, component, install_runner=flaky_install)
-    _stub_installed_probe(manager, monkeypatch)
-    _omit_unused_pip_bootstrap(monkeypatch)
-    a = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
-    )
-    with pytest.raises(ManagedEnvironmentError, match="synthetic download failure"):
-        manager.install(
-            plan["plan_id"],
-            a["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-
-    # 失败终态冻结请求/生效来源，重启（重建 store）后仍可查。
-    failure = next(
-        item
-        for item in _open(tmp_path, manifest, component).list()["environments"]
-        if item["id"] == a["id"]
-    )["last_install_failure"]
-    assert failure["phase"] == "failed"
-    # 请求来源按去重排序冻结，生效来源按目录顺序冻结。
-    assert failure["requested_source_ids"] == [
-        "mineru-modelscope",
-        "paddleocr-modelscope",
-    ]
-    assert failure["effective_source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-
-    # 后续新预览不冲掉旧来源证据。
-    manager.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
-    )
-    assert (
-        next(item for item in manager.list()["environments"] if item["id"] == a["id"])[
-            "last_install_failure"
-        ]
-        == failure
-    )
-    # 旧 plan 已被新预览取代 → confirm 旧计划 stale（重新预览是显式动作）。
-    with pytest.raises(RuntimeInstallPlanStale):
-        manager.install(
-            plan["plan_id"],
-            a["id"],
-            "paddleocr-ort-directml",
-            ("paddleocr-modelscope", "mineru-modelscope"),
-        )
-
-    # 未重新预览时同计划 retry 保留原意图：同来源、同计划成功并留下证据。
-    retryable = _open(tmp_path, manifest, component, install_runner=flaky_install)
-    _stub_installed_probe(retryable, monkeypatch)
-    retry_plan = retryable.preview_install(
-        a["id"], "paddleocr-ort-directml", ("paddleocr-modelscope", "mineru-modelscope")
-    )
-    installed = retryable.install(
-        retry_plan["plan_id"],
-        a["id"],
-        "paddleocr-ort-directml",
-        ("paddleocr-modelscope", "mineru-modelscope"),
-    )
-    assert installed["status"] == "installed"
-    assert installed["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-modelscope",
-    ]
-    assert attempts == ["paddleocr-ort-directml"] * 2
-    assert (
-        next(
-            item for item in retryable.list()["environments"] if item["id"] == a["id"]
-        )["last_install_failure"]
-        is None
-    )
-
-
-def test_inherited_install_uses_resolved_defaults(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    scopes: list[str] = []
-
-    def record_install(_python: Path, _scope) -> None:
-        scopes.append(_scope.scope_id)
-
-    manager = _open(tmp_path, manifest, component, install_runner=record_install)
-    _stub_installed_probe(manager, monkeypatch)
-    _omit_unused_pip_bootstrap(monkeypatch)
-    a = _write_record(manager, "a" * 32)
-    manager.set_sources(None, "huggingface")
-    manager.set_sources(a["id"], paddleocr_model_source_id="paddleocr-modelscope")
-    plan = manager.preview_install(a["id"], "paddleocr-ort-directml")  # 继承环境配置
-    assert plan["requested_source_ids"] is None
-    assert plan["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-huggingface",
-    ]
-    installed = manager.install(plan["plan_id"], a["id"], "paddleocr-ort-directml")
-    assert installed["source_ids"] == [
-        "paddleocr-modelscope",
-        "mineru-huggingface",
-    ]
-    assert scopes == ["paddleocr-ort-directml"]
-
-
 def test_launch_projects_model_source_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32, status="installed", recipe="paddleocr-ort-cpu")
 
@@ -498,9 +277,7 @@ def test_launch_projects_model_source_environment(
 def test_set_sources_rejected_while_environment_operation_in_flight(
     tmp_path: Path,
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     a = _write_record(manager, "a" * 32)
     b = _write_record(manager, "b" * 32)
@@ -559,24 +336,19 @@ def test_sanitize_download_endpoint_strips_credentials_and_survives_bad_input() 
     assert sanitize_download_endpoint("not a url") == ""
 
 
-def test_stdio_set_sources_and_inherited_preview_round_trip(
+def test_stdio_set_sources_round_trip(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
-    a = _write_record(manager, "a" * 32)
-    base = {
-        "product_root": str(tmp_path / "product"),
-        "component_lock": str(component),
-        "runtime_manifest": str(manifest),
-    }
+    _write_record(manager, "a" * 32)
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
         "action": "set_sources",
-        **base,
+        "product_root": str(tmp_path / "product"),
+        "component_lock": str(component),
+        "runtime_manifest": str(manifest),
         "environment_id": None,
         "model_source_id": "huggingface",
     }
@@ -604,24 +376,6 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
     assert endpoint.hostname == "www.modelscope.cn"
     assert "?" not in paddle["endpoint"] and "@" not in paddle["endpoint"]
 
-    preview = {
-        "protocol_version": 2,
-        "request_kind": "environment",
-        "action": "preview_install",
-        **base,
-        "environment_id": a["id"],
-        "recipe": "paddleocr-ort-directml",
-    }
-    assert main(["--request-json", json.dumps(preview)]) == 0
-    payload = json.loads(capsys.readouterr().out)["result"]
-    assert payload["requested_source_ids"] is None
-    assert payload["source_ids"] == [
-        "paddleocr-huggingface",
-        "mineru-huggingface",
-    ]
-    assert payload["sources"][0]["inherited_from"] == "global_default"
-    assert re.fullmatch(r"[0-9a-f]{32}", payload["plan_id"])
-
 
 @pytest.mark.parametrize(
     "requested", [None, ["paddleocr-modelscope", "mineru-modelscope"]]
@@ -629,9 +383,7 @@ def test_stdio_set_sources_and_inherited_preview_round_trip(
 def test_interrupted_install_retains_frozen_sources_after_restart(
     tmp_path: Path, requested: list[str] | None
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     frozen = ["paddleocr-modelscope", "mineru-modelscope"]
     record = _write_record(
@@ -665,45 +417,8 @@ def test_interrupted_install_retains_frozen_sources_after_restart(
         assert running["effective_source_ids"] == frozen
 
 
-@pytest.mark.parametrize("returncode", [1, -1])
-def test_venv_failure_retains_sanitized_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
-) -> None:
-    import subprocess
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = _open(tmp_path, manifest, component)
-    record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
-    diagnostic = (
-        "x" * 5000 + "\nvenv failed\nC:\\private\\fixture\npassword=fixture-secret"
-    )
-
-    def failed_venv(args, **kwargs):
-        assert "venv" in args
-        return subprocess.CompletedProcess(args, returncode, "", diagnostic)
-
-    monkeypatch.setattr(subprocess, "run", failed_venv)
-    with pytest.raises(ManagedEnvironmentError, match=f"exit {returncode}"):
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
-    persisted = manager._read()["environments"][record["id"]]
-    failure = persisted["last_install_operation"]
-    assert failure["reason_code"] == "venv_creation_failed"
-    assert "venv failed" in failure["detail"]
-    assert f"exit {returncode}" in failure["detail"]
-    assert len(failure["detail"]) <= 4000
-    assert "private" not in failure["detail"]
-    assert "fixture-secret" not in failure["detail"]
-    assert persisted["revision"] == record["revision"]
-    assert persisted["path"] == record["path"]
-
-
 def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     record = _write_record(manager, "a" * 32, override_source_ids=["modelscope"])
     with RuntimeStoreLock(manager._lock):
@@ -748,9 +463,7 @@ def test_engine_sources_migrate_legacy_and_clear_independently(tmp_path: Path) -
 
 
 def test_engine_source_kind_mismatch_does_not_write(tmp_path: Path) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     manager = _open(tmp_path, manifest, component)
     with pytest.raises(
         ManagedEnvironmentError, match="unknown paddleocr_model_registry"
@@ -763,9 +476,7 @@ def test_engine_source_kind_mismatch_does_not_write(tmp_path: Path) -> None:
 def test_stdio_independent_engine_sources_preserve_absent_fields(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
+    manifest, component = _release(tmp_path / "release")
     request = {
         "protocol_version": 2,
         "request_kind": "environment",
@@ -800,112 +511,6 @@ def test_stdio_independent_engine_sources_preserve_absent_fields(
         "paddleocr-modelscope",
         "mineru-modelscope",
     }
-
-
-@pytest.mark.parametrize("failure", ["venv", "packages", "probe", "none"])
-def test_accepted_cancellation_records_terminal_failure_before_return(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
-) -> None:
-    import subprocess
-
-    from vibeocr.runtime.environments.managed_environments import (
-        ManagedEnvironmentInstallCancelled,
-    )
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = _open(tmp_path, manifest, component)
-    record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
-    receipts = []
-
-    def venv(args, **kwargs):
-        if failure == "venv":
-            manager.cancel_install(receipts.append)
-        return subprocess.CompletedProcess(
-            args, 3221225794 if failure == "venv" else 0, "", "ensurepip failed"
-        )
-
-    def packages(*args):
-        if failure != "probe":
-            manager.cancel_install(receipts.append)
-        if failure == "packages":
-            raise ManagedEnvironmentError("pip failed after cancellation")
-
-    monkeypatch.setattr(subprocess, "run", venv)
-    monkeypatch.setattr(manager, "_install_runner", packages)
-    _stub_installed_probe(manager, monkeypatch)
-    installed_probe = manager._probe
-
-    def probe(candidate):
-        result = installed_probe(candidate)
-        if failure == "probe" and candidate["status"] == "installed":
-            manager.cancel_install(receipts.append)
-        return result
-
-    monkeypatch.setattr(manager, "_probe", probe)
-    with pytest.raises(ManagedEnvironmentInstallCancelled):
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
-    assert receipts == [True]
-    persisted = manager._read()["environments"][record["id"]]
-    assert persisted["revision"] == record["revision"]
-    assert persisted["path"] == record["path"]
-    assert persisted["last_install_operation"]["phase"] == "failed"
-    assert persisted["last_install_operation"]["reason_code"] == "install_interrupted"
-    assert persisted["last_install_operation"]["next_action"] == "preview_again"
-    late_receipts = []
-    manager.cancel_install(late_receipts.append)
-    assert late_receipts == [False]
-    restarted = _open(tmp_path, manifest, component)
-    interrupted = restarted.list()["environments"][0]["last_install_failure"]
-    assert interrupted["reason_code"] == "install_interrupted"
-    assert interrupted["plan_id"] == plan["plan_id"]
-    assert interrupted["environment_revision"] == record["revision"]
-
-
-@pytest.mark.parametrize("failure", [True, False])
-def test_terminal_commit_rejects_late_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool
-) -> None:
-    import subprocess
-
-    manifest, component = _release(
-        tmp_path / "release", with_base_pack=True, with_paddle_packs=True
-    )
-    manager = _open(tmp_path, manifest, component, install_runner=lambda *_args: None)
-    record = _write_record(manager, "a" * 32)
-    plan = manager.preview_install(record["id"], "paddleocr-ort-directml")
-
-    def run(args, **kwargs):
-        result = subprocess.CompletedProcess(
-            args, 1 if failure else 0, "", "natural failure"
-        )
-        # 成功的 venv 调用需真实落盘候选目录：换入事务依赖其存在。
-        if not failure and "venv" in args:
-            Path(args[-1]).mkdir(parents=True, exist_ok=True)
-        return result
-
-    monkeypatch.setattr(subprocess, "run", run)
-    _stub_installed_probe(manager, monkeypatch)
-    if failure:
-        with pytest.raises(ManagedEnvironmentError, match="natural failure"):
-            manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
-    else:
-        manager.install(plan["plan_id"], record["id"], "paddleocr-ort-directml")
-    before = manager._registry.read_text(encoding="utf-8")
-    receipts = []
-    manager.cancel_install(receipts.append)
-    assert receipts == [False]
-    assert manager._registry.read_text(encoding="utf-8") == before
-    persisted = manager._read()["environments"][record["id"]]
-    if failure:
-        assert (
-            persisted["last_install_operation"]["reason_code"] == "venv_creation_failed"
-        )
-    else:
-        assert persisted["status"] == "installed"
-        assert "last_install_operation" not in persisted
 
 
 @pytest.mark.parametrize("accepted", [True, False])

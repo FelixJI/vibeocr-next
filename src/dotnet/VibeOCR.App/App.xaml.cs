@@ -47,14 +47,12 @@ public sealed partial class App : Application
     private InferenceSupervisorProcess? _supervisorProcess => _managedSession?.Process;
     private string? _supervisorInstanceId => _managedSession?.InstanceId;
     private DiagnosticsViewModel? _supervisorDiagnostics;
-    private IRuntimeInstallerClient? _runtimeInstaller;
     private IManagedEnvironmentClient? _managedEnvironments;
     private ManagedEnvironmentSettings? _environmentSettings;
     private ManagedEnvironmentSession? _managedSession => _runtimeDemand?.Connection?.Session;
     private RuntimeDemandCoordinator? _runtimeDemand;
     private SyntheticScreenRegionPicker? _screenshotSmokePicker;
     private int _startupRuntimeEnsureAttempts = 0;
-    private int _managedEnvironmentInstallAttempts;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
     private TrayMenuOwnerWindow? _trayOwner;
@@ -69,9 +67,7 @@ public sealed partial class App : Application
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
     private ManagedEnvironmentSession? _supervisorRecoveryScheduledSession;
-    private int _runtimeMaintenanceActive;
     // The maintenance lease serializes this stop/restore callback pair.
-    private long? _runtimeMaintenancePauseOwner;
 
     private const uint HotkeyMessage = 0x0312;
     private const uint TrayMessage = 0x8001;
@@ -196,11 +192,9 @@ public sealed partial class App : Application
                 "WEBVIEW2_USER_DATA_FOLDER",
                 layout.WebView2Root);
         }
-        _runtimeInstaller = new RuntimeInstallerClient(
+        _managedEnvironments = new RuntimeInstallerClient(
             RuntimeInstallerConfiguration.ForNext(layout),
             new RuntimeInstallerCommandRunner(action => AppLog.Info($"Runtime Installer command starting action={action}")));
-        _managedEnvironments = (IManagedEnvironmentClient)_runtimeInstaller;
-        _runtimeStatus.ApplyProfile(_runtimeInstaller.ReadProfileDescriptor());
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
         WebReadySmokeStatus.Stage("app-launched");
@@ -227,10 +221,7 @@ public sealed partial class App : Application
             _runtimeStatus,
             () => _managedSession is { } session
                 ? (session.InstanceId, session.Process.LogLines)
-                : (null, Array.Empty<string>()),
-            // 惰性读取当前会话的有界安装日志快照：_environmentSettings
-            // 尚未构造时为 null，文档对应空日志段。
-            environmentInstallLog: () => _environmentSettings?.InstallLog);
+                : (null, Array.Empty<string>()));
         // 可选取证轨迹（默认关闭）：仅显式设置环境变量时才订阅，不引入新配置系统。
         if (!string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("VIBEOCR_SUPERVISOR_HEALTH_TRACE")))
@@ -346,10 +337,6 @@ public sealed partial class App : Application
           () => new SettingsViewModel(
             _inferenceGateway,
             _runtimeStatus,
-            () => _runtimeInstaller
-              ?? throw new InvalidOperationException("Runtime installer is unavailable."),
-            _productMaintenance, StopForMaintenanceAsync, RestoreAfterMaintenanceAsync,
-            Path.Combine(layout.DataRoot, "runtime-maintenance.json"),
             _environmentSettings ??= new ManagedEnvironmentSettings(
               _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
               SwitchManagedEnvironmentAsync,
@@ -357,8 +344,7 @@ public sealed partial class App : Application
                 ? (session.EnvironmentId, session.Revision) : null,
               _productMaintenance,
               () => _managedSession,
-              () => Interlocked.Increment(ref _managedEnvironmentInstallAttempts),
-              SwitchManagedEnvironmentDeviceAsync, StopForMaintenanceAsync, RestoreAfterMaintenanceAsync)),
+              SwitchManagedEnvironmentDeviceAsync)),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -372,7 +358,6 @@ public sealed partial class App : Application
           () => Volatile.Read(ref _startupRuntimeEnsureAttempts),
           () => _environmentSettings?.Snapshot,
           () => _managedSession,
-          () => Volatile.Read(ref _managedEnvironmentInstallAttempts),
           shellActions: _actionDispatcher,
           ensureRuntimeReady: EnsureRuntimeReadyAsync,
           systemImportReader: InputService.CreateImportReader());
@@ -1028,10 +1013,7 @@ public sealed partial class App : Application
             }
             // The attempt token breaks a settings-switch gate dependency: a
             // new switch cancels this attempt before draining its connection.
-            // Managed installation restores while holding the settings gate;
-            // its owner reloads the snapshot after restoration completes.
-            if (_environmentSettings?.IsRestoringService != true)
-                await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
+            await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
         }
         return connected;
     }
@@ -1060,7 +1042,7 @@ public sealed partial class App : Application
                     null, null, injected.Message));
                 return false;
             }
-            if (Volatile.Read(ref _runtimeMaintenanceActive) != 0 || MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
+            if (MaintenanceMutexEarlyExitSelfTestRequested(isRecovery))
             {
                 var maintenance = new InvalidOperationException("运行环境维护尚未结束，识别服务保持暂停。");
                 _inferenceGateway.MarkStartupFailed(maintenance);
@@ -1151,7 +1133,9 @@ public sealed partial class App : Application
     internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
         ManagedEnvironmentSettings? settings, CancellationToken cancellationToken)
     {
-        if (settings?.Snapshot is null) return;
+        // 首次启动时 Snapshot 尚未读取（null）恰恰最需要刷新：否则激活后
+        // 环境列表永远不装载，设置页与冒烟 fixture 都拿不到 product 环境。
+        if (settings is null) return;
         try
         {
             await settings.RefreshAsync(cancellationToken);
@@ -1314,7 +1298,6 @@ public sealed partial class App : Application
     {
         ManagedEnvironmentSession? trigger = _managedSession;
         if (_applicationShutdown.IsCancellationRequested
-            || Volatile.Read(ref _runtimeMaintenanceActive) != 0
             || trigger is null || !ReferenceEquals(sender, trigger.Process)
             || !TryScheduleSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger, () => _managedSession)) return;
 
@@ -1350,7 +1333,7 @@ public sealed partial class App : Application
     private async Task RecoverSupervisorAfterExitAsync(ManagedEnvironmentSession trigger)
     {
         bool IsCurrentSession() => !_applicationShutdown.IsCancellationRequested
-            && Volatile.Read(ref _runtimeMaintenanceActive) == 0 && ReferenceEquals(trigger, _managedSession);
+            && ReferenceEquals(trigger, _managedSession);
         try
         {
             await RunCurrentSupervisorRecoveryAsync(IsCurrentSession, async () =>
@@ -1381,29 +1364,6 @@ public sealed partial class App : Application
         }
     }
 
-    private async Task StopForMaintenanceAsync(CancellationToken cancellationToken)
-    {
-        Interlocked.Exchange(ref _runtimeMaintenanceActive, 1);
-        // 与连接/恢复/切换同一有界门等待：占用方异常滞留时以失败终态
-        // 退出（ConfirmAsync 会把安装置为 failed 并经 Restore 重连）。
-        RuntimeDemandCoordinator.PauseOperation pause = (_runtimeDemand
-            ?? throw new InvalidOperationException("Runtime maintenance context is unavailable.")).BeginPause(cancellationToken);
-        _runtimeMaintenancePauseOwner = pause.Owner;
-        await pause.Completion;
-        _runtimeStatus.ReportServicePausedForMaintenance();
-    }
-
-    private async Task RestoreAfterMaintenanceAsync()
-    {
-        Interlocked.Exchange(ref _runtimeMaintenanceActive, 0);
-        long? owner = _runtimeMaintenancePauseOwner;
-        _runtimeMaintenancePauseOwner = null;
-        if (_runtimeDemand is not null && owner is { } pauseOwner)
-            await _runtimeDemand.RestoreAsync(pauseOwner, maintenanceLeaseHeld: true);
-    }
-
-
-
     private bool _pdfCloseReview;
 
     internal Func<Task>? SmokeBeforePinShutdown { get; set; }
@@ -1430,8 +1390,6 @@ public sealed partial class App : Application
             if (_window is not null && !await _window.PreparePdfExitAsync()) return;
             if (_window is not null && !await _window.PreparePinsExitAsync()) return;
             if (SmokeBeforePinShutdown is { } beforeShutdown) await beforeShutdown();
-            if (_environmentSettings is not null)
-                await _environmentSettings.CancelAndWaitForInstallAsync();
             _actionDispatcher?.EndHotkeyRecording();
             _shutdownStarted = true;
             try { _applicationShutdown.Cancel(); }

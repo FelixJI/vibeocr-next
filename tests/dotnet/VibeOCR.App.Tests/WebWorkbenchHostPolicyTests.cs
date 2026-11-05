@@ -33,8 +33,7 @@ public sealed class WebWorkbenchHostPolicyTests
       Assert.Equal(WorkbenchRoute.ImageEdit,
         Assert.IsType<ShellWorkbenchState>(scene.ProjectState(navigation).State).Route);
       var settings = new WorkbenchStateEnvelope(2, "settings", WorkbenchStateChange.Replace,
-        new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "settings.ready", "cpu", false,
-          EnvironmentInstallLog: [new string('文', 20000)], EnvironmentStatus: "安装环境", EnvironmentBusy: true));
+        new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "settings.ready", "cpu", false, EnvironmentStatus: "安装环境", EnvironmentBusy: true));
       string sceneSettings = WorkbenchBridgeCodec.SerializeState(Guid.Empty, scene.ProjectState(settings));
       using (JsonDocument projectedSettings = JsonDocument.Parse(sceneSettings))
       {
@@ -323,8 +322,7 @@ public sealed class WebWorkbenchHostPolicyTests
       using var annotations = new WorkbenchAnnotationStore(root);
       await using var host = new WebWorkbenchHost(app, broker, annotations, applicationOwner: false, fixedRoute: WorkbenchRoute.ImageEdit, pinEditHost: true);
       EditorPreferences preferences = EditorPreferences.Default with { Output = new(Quality: 0.7, NameTemplate: "custom-{name}") };
-      var settings = new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "ready", "cpu", false,
-        EnvironmentInstallLog: ["private environment log"], EditorPreferences: preferences, ImageOutputDirectory: root);
+      var settings = new SettingsWorkbenchState(WorkbenchTheme.Dark, true, "ready", "cpu", false, EditorPreferences: preferences, ImageOutputDirectory: root);
       string json = WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(), host.ProjectState(new(1, "settings", WorkbenchStateChange.Replace, settings)));
       using JsonDocument document = JsonDocument.Parse(json);
       JsonElement state = document.RootElement.GetProperty("payload").GetProperty("state");

@@ -27,6 +27,15 @@ automation binds ``[requirements zip, *pool parts]`` through the existing
 repeatable ``runtime_pack`` tuple interface, so every install scope picks
 its own closure from the shared wheel directory without any manifest or
 installer protocol change.
+
+``--profile prebuilt-runtime-env`` assembles the prebuilt runtime tree
+(PR2): the CPython install-only archive is safely extracted, the unified
+closure (member locks' deduplicated wheel pool plus the internal runtime
+wheel) is preinstalled into the tree's site-packages with build-machine
+uv strictly offline, an import smoke proves "shipped as healthy", and a
+deterministic per-file manifest is written for release binding. The
+product ships the tree as an expanded directory; the runtime performs no
+venv creation, no uv invocation and no installation.
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -513,6 +523,239 @@ def _parse_pool_locks(entries: list[str]) -> list[tuple[str, Path]]:
     return resolved
 
 
+# ---------------------------------------------------------------------------
+# 预构建运行时树（PR2：构建期装配，运行时零 venv/零 uv/零安装）
+# ---------------------------------------------------------------------------
+
+PREBUILT_RUNTIME_ENV_PROFILE = "prebuilt-runtime-env"
+
+
+def extract_python_archive(
+    archive_path: Path, destination: Path, *, expected_sha256: str
+) -> None:
+    """安全解包 python-build-standalone install_only 归档到目标树根。
+
+    语义与运行时安装器的既有实现一致：剥 ``python/`` 前缀、拒绝
+    symlink/hardlink/设备成员、拒绝路径逃逸与盘符段。构建侧自持一份，
+    不依赖随产品退役的运行时安装代码。
+    """
+    if _sha256_file(archive_path) != expected_sha256:
+        raise RuntimeError("python archive sha256 does not match the lock")
+    import tarfile
+
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        members = archive.getmembers()
+        if not members:
+            raise RuntimeError("python archive is empty")
+        root = destination.resolve()
+        for member in members:
+            parts = Path(member.name.replace("\\", "/")).parts
+            if not parts or parts[0] != "python" or ".." in parts:
+                raise RuntimeError(f"unsafe python archive member: {member.name}")
+            if member.issym() or member.islnk() or member.isdev():
+                raise RuntimeError(f"unsupported python archive member: {member.name}")
+            relative = Path(*parts[1:])
+            if not relative.parts:
+                continue
+            if relative.is_absolute() or any(":" in part for part in relative.parts):
+                raise RuntimeError(f"unsafe python archive member: {member.name}")
+            target = destination / relative
+            try:
+                target.resolve().relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"unsafe python archive member: {member.name}"
+                ) from exc
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise RuntimeError(f"unsupported python archive member: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise RuntimeError(f"unreadable python archive member: {member.name}")
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+
+
+def _dedupe_pool_wheels(
+    *, locks: list[tuple[str, Path]], work_dir: Path, index_url: str
+) -> tuple[Path, dict[tuple[str, str], Path]]:
+    """把各成员锁的哈希校验闭包解到共享 wheel 目录（字节级去重）。
+
+    返回 (wheel 目录, {(name, version): wheel 路径})。同名不同版本在单树
+    环境不可共存，由调用方 fail closed。
+    """
+    pool_dir = work_dir / "env-pool"
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    wheels: dict[tuple[str, str], Path] = {}
+    for _profile, lock in locks:
+        wheel_files, _requirement_set = _closure_wheels(
+            lock=lock.resolve(strict=True),
+            work_dir=work_dir / "closures" / lock.stem,
+            index_url=index_url,
+        )
+        for wheel in wheel_files:
+            match = _WHEEL_FILENAME_RE.match(wheel.name)
+            if match is None:
+                raise RuntimeError(f"invalid wheel filename in pool: {wheel.name}")
+            identity = (
+                _normalize(match.group("name")),
+                match.group("version"),
+            )
+            existing = wheels.get(identity)
+            if existing is not None:
+                if not filecmp.cmp(existing, wheel, shallow=False):
+                    raise RuntimeError(
+                        f"conflicting wheels for {identity[0]}: "
+                        f"{existing.name} vs {wheel.name}"
+                    )
+                continue
+            target = pool_dir / wheel.name
+            if not target.exists():
+                shutil.copyfile(wheel, target)
+            wheels[identity] = target
+    return pool_dir, wheels
+
+
+def build_runtime_env(
+    *,
+    python_archive: Path,
+    python_sha256: str,
+    python_version: str,
+    locks: list[tuple[str, Path]],
+    runtime_wheel: Path,
+    runtime_version: str,
+    work_dir: Path,
+    output: Path,
+    uv_executable: str = "uv",
+    index_url: str | None = None,
+) -> Path:
+    """构建期装配可直接运行的预构建运行时树。
+
+    链路：解包 CPython → uv 离线预装统一闭包与内部 runtime wheel →
+    import 冒烟（版本/ABI 对账）→ 确定性树清单。运行时零 venv、零 uv、
+    零安装：产品直接携带该树并以 ``<tree>/python.exe -m`` 启动。
+    """
+    resolved_index_url = _resolve_package_index(index_url)
+    if output.exists():
+        raise ValueError(f"runtime env output already exists: {output}")
+    pool_dir, wheels = _dedupe_pool_wheels(
+        locks=locks, work_dir=work_dir, index_url=resolved_index_url
+    )
+
+    # 单树环境：同名依赖必须唯一版本（共享 pool 允许共存，树不允许）。
+    names: dict[str, list[str]] = {}
+    for name, version in wheels:
+        names.setdefault(name, []).append(version)
+    conflicts = {
+        name: versions for name, versions in names.items() if len(versions) > 1
+    }
+    if conflicts:
+        raise RuntimeError(f"runtime env requires one version per package: {conflicts}")
+
+    extract_python_archive(python_archive, output, expected_sha256=python_sha256)
+    python_exe = output / "python.exe"
+    if not python_exe.is_file():
+        raise RuntimeError("python archive has no python.exe at the tree root")
+
+    newline = chr(10)
+    requirements_file = work_dir / "env-requirements.txt"
+    requirements_file.parent.mkdir(parents=True, exist_ok=True)
+    requirements_file.write_text(
+        newline.join(f"{name}=={version}" for name, version in sorted(wheels))
+        + newline,
+        encoding="utf-8",
+    )
+
+    uv_cache = work_dir / "uv-cache"
+    uv_temp = work_dir / "temp"
+    uv_cache.mkdir(parents=True, exist_ok=True)
+    uv_temp.mkdir(parents=True, exist_ok=True)
+    child_environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith(("PIP_", "UV_"))
+    }
+    child_environment.update(
+        {
+            "UV_CACHE_DIR": str(uv_cache),
+            "TEMP": str(uv_temp),
+            "TMP": str(uv_temp),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUTF8": "1",
+        }
+    )
+
+    def uv(*arguments: str) -> None:
+        _run(
+            [
+                uv_executable,
+                "--no-config",
+                "--no-progress",
+                "--no-python-downloads",
+                "pip",
+                *arguments,
+                "--python",
+                str(python_exe),
+            ]
+        )
+
+    # 离线预装统一闭包：池内 wheel 即全部输入，禁止回退网络。
+    uv(
+        "install",
+        "--offline",
+        "--no-index",
+        "--find-links",
+        str(pool_dir),
+        "--only-binary=:all:",
+        "-r",
+        str(requirements_file),
+    )
+    uv(
+        "install",
+        "--offline",
+        "--no-deps",
+        "--reinstall",
+        str(runtime_wheel.resolve(strict=True)),
+    )
+    uv("check", "--offline")
+
+    # import 冒烟：随包即健康（树内 site-packages 直接解析 -I 模式）。
+    smoke = (
+        "import importlib.metadata, sys, vibeocr.runtime.host.main, "
+        "vibeocr.runtime_contracts; "
+        f"assert importlib.metadata.version('vibeocr-next-runtime') == "
+        f"{runtime_version!r}, 'runtime wheel version mismatch'; "
+        "assert sys.version_info[:3] == tuple(int(p) for p in "
+        f"{python_version!r}.split('.')), 'python version mismatch'"
+    )
+    _run([str(python_exe), "-I", "-c", smoke])
+    return output
+
+
+def write_runtime_env_manifest(tree: Path, destination: Path) -> dict:
+    """确定性树清单：文件规模锚点；清单文件自身字节摘要由 manifest 的
+    runtime_env.manifest_sha256 绑定并在 verify_artifacts 校验。
+
+    树内容的逐文件完整性由产品发布清单（finalize_product_release 对
+    全部资产的 files 对账）唯一负责；此处不再重复逐文件摘要（无独立
+    校验消费者的 hash 层不叠加）。
+    """
+    file_count = sum(1 for path in tree.rglob("*") if path.is_file())
+    manifest = {
+        "schema_version": 1,
+        "file_count": file_count,
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return manifest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lock", type=Path, required=False)
@@ -546,9 +789,60 @@ def main(argv: list[str] | None = None) -> int:
             "stays under this limit (single wheels may exceed it)."
         ),
     )
+    parser.add_argument("--python-archive", type=Path, default=None)
+    parser.add_argument("--python-sha256", default=None)
+    parser.add_argument("--python-version", default=None)
+    parser.add_argument("--runtime-wheel", type=Path, default=None)
+    parser.add_argument("--runtime-version", default=None)
+    parser.add_argument(
+        "--uv",
+        default="uv",
+        help="uv executable for build-time offline preinstall (default: PATH uv)",
+    )
+    parser.add_argument(
+        "--env-manifest",
+        type=Path,
+        default=None,
+        help="Where to write the deterministic runtime-env tree manifest.",
+    )
     args = parser.parse_args(argv)
     try:
-        if args.profile == "paddle-onnx-models":
+        if args.profile == PREBUILT_RUNTIME_ENV_PROFILE:
+            if args.lock is not None:
+                raise ValueError("prebuilt runtime env does not use --lock")
+            if not args.pool_lock:
+                raise ValueError(
+                    "prebuilt runtime env requires --pool-lock PROFILE=LOCK"
+                )
+            missing = [
+                name
+                for name, value in (
+                    ("--python-archive", args.python_archive),
+                    ("--python-sha256", args.python_sha256),
+                    ("--python-version", args.python_version),
+                    ("--runtime-wheel", args.runtime_wheel),
+                    ("--runtime-version", args.runtime_version),
+                    ("--env-manifest", args.env_manifest),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(f"prebuilt runtime env requires {', '.join(missing)}")
+            build_runtime_env(
+                python_archive=args.python_archive,
+                python_sha256=args.python_sha256,
+                python_version=args.python_version,
+                locks=_parse_pool_locks(args.pool_lock),
+                runtime_wheel=args.runtime_wheel,
+                runtime_version=args.runtime_version,
+                work_dir=args.work_dir,
+                output=args.output,
+                uv_executable=args.uv,
+                index_url=args.index_url,
+            )
+            write_runtime_env_manifest(args.output, args.env_manifest)
+            paths = [args.output, args.env_manifest]
+        elif args.profile == "paddle-onnx-models":
             if args.lock is not None or args.pool_lock:
                 raise ValueError("paddle-onnx-models pack does not use a wheel lock")
             paths = [

@@ -502,70 +502,8 @@ class TestReadyEngineCatalog:
         assert set(entries) == {"rapidocr", "windows", "paddleocr"}
         assert all(entry["availability"] == "unavailable" for entry in entries.values())
 
-    async def test_successful_maintenance_refreshes_cached_engine_catalog(
-        self, tmp_path: Any, engines: list[_FakeOcrEngine]
-    ) -> None:
-        class _SuccessfulMaintenance:
-            def execute(self, **kwargs: Any) -> dict[str, Any]:
-                return {
-                    "schema_version": 2,
-                    "operation_id": "ensure-1",
-                    "snapshot": {
-                        "operation_id": "ensure-1",
-                        "sequence": 1,
-                        "operation": "ensure",
-                        "operation_state": "succeeded",
-                        "phase": "commit_runtime",
-                        "profile_id": "win-x64-cpu",
-                        "updated_at": "2026-08-17T00:00:00Z",
-                    },
-                    "negotiated_capabilities": list(kwargs["required_capabilities"]),
-                }
-
-        module, _ = _module(tmp_path, engines)
-        paddle = next(
-            engine for engine in engines if engine.engine_id is OcrEngine.PADDLEOCR
-        )
-        token = generate_session_token()
-        app = create_app(
-            module,
-            token,
-            runtime_control=_SuccessfulMaintenance(),  # type: ignore[arg-type]
-        )
-
-        async with _client(app, token) as http:
-            before = await http.get("/v2/health")
-            paddle.availability = EngineAvailability.UNAVAILABLE
-            cached = await http.get("/v2/health")
-            maintained = await http.post(
-                "/v2/runtime/maintenance",
-                json={
-                    "operation_id": "ensure-1",
-                    "operation": "ensure",
-                    "profile_id": "win-x64-cpu",
-                    "component_ids": [],
-                    "required_capabilities": [],
-                },
-            )
-            refreshed = await http.get("/v2/health")
-
-        def paddle_availability(response: httpx.Response) -> str:
-            descriptor = next(
-                item
-                for item in response.json()["capability_descriptors"]
-                if item["name"] == "ocr.engine-selection.v1"
-            )
-            entry = next(
-                item
-                for item in descriptor["ocr_engine_catalog"]["engines"]
-                if item["id"] == "paddleocr"
-            )
-            return str(entry["availability"])
-
-        assert paddle_availability(before) == "ready"
-        assert paddle_availability(cached) == "ready"
-        assert maintained.status_code == 200
-        assert paddle_availability(refreshed) == "unavailable"
+    # 维护成功后刷新引擎目录缓存的用例已随 /v2/runtime/maintenance 路由
+    # 退役删除：预构建树零安装后不再有维护事务触发目录缓存失效。
 
 
 async def test_legacy_ocr_preload_is_rejected_instead_of_warming_default_engine(

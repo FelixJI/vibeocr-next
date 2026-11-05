@@ -1,5 +1,3 @@
-using ManagedInstallLog = VibeOCR.Runtime.Contracts.Generated.Host.ManagedInstallLog;
-using ManagedEnvironmentInstallProgress = VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -20,63 +18,6 @@ namespace VibeOCR.App.Tests;
 
 public sealed class ManagedEnvironmentSettingsTests
 {
-  [Theory]
-  [InlineData("success")]
-  [InlineData("stop")]
-  [InlineData("install")]
-  [InlineData("release")]
-  public async Task ActiveInstallationFreezesAdmissionStopsThenRestores(string failure)
-  {
-    List<string> events = [];
-    var manager = new MutableManager { RequiresServiceStop = true, MaintenanceEvents = events, FailMaintenanceDisposal = failure == "release" };
-    manager.BeforeInstall = () =>
-    {
-      events.Add("install");
-      return failure == "install" ? Task.FromException(new InvalidOperationException("install failed")) : Task.CompletedTask;
-    };
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, new ProductMaintenanceCoordinator(), stopService: _ =>
-      {
-        events.Add("stop");
-        return failure == "stop" ? Task.FromException(new InvalidOperationException("stop failed")) : Task.CompletedTask;
-      }, restoreService: () => { events.Add("restore"); return Task.CompletedTask; });
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", null, TestContext.Current.CancellationToken);
-    if (failure == "success")
-      await settings.InstallAsync("plan", null, TestContext.Current.CancellationToken);
-    else
-    {
-      var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-        settings.InstallAsync("plan", null, TestContext.Current.CancellationToken));
-      Assert.Equal($"{failure} failed", error.Message);
-    }
-    Assert.Equal(failure == "stop" ? new[] { "reserve", "stop", "release", "restore" }
-      : new[] { "reserve", "stop", "install", "release", "restore" }, events);
-    Assert.Equal(failure == "stop" ? 0 : 1, manager.InstallCalls);
-    Assert.False(settings.IsBusy);
-  }
-
-  [Fact]
-  public async Task CommittedInstallCannotBeCancelledWhileServiceRestorationIsPending()
-  {
-    var restoring = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var manager = new MutableManager { RequiresServiceStop = true };
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, new ProductMaintenanceCoordinator(), stopService: _ => Task.CompletedTask,
-      restoreService: async () => { restoring.SetResult(); await release.Task; });
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", null, TestContext.Current.CancellationToken);
-    Task install = settings.InstallAsync("plan", null, TestContext.Current.CancellationToken);
-    await restoring.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Assert.True(settings.IsRestoringService);
-    Assert.False(settings.CanCancelInstall);
-    settings.CancelInstall();
-    release.SetResult();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Assert.Equal(1, manager.InstallCalls);
-    Assert.False(settings.IsRestoringService);
-    Assert.Contains("已恢复识别服务", settings.Status, StringComparison.Ordinal);
-  }
-
   [Fact]
   public async Task SameEnvironmentDeviceSelectionReachesLifecycleOwner()
   {
@@ -127,8 +68,7 @@ public sealed class ManagedEnvironmentSettingsTests
   public async Task ReadOnlyEnvironmentListUsesExistingRefreshWithoutPreparingRuntime()
   {
     int lists = 0;
-    var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; },
-      RequiresServiceStop = true, RemovedDependencies = ["nvidia-cudnn-cu13"] };
+    var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
     var environments = new ManagedEnvironmentSettings(manager,
       (_, _) => throw new Xunit.Sdk.XunitException("list must not switch"), () => null,
       new ProductMaintenanceCoordinator());
@@ -153,16 +93,6 @@ public sealed class ManagedEnvironmentSettingsTests
       Assert.Equal(1, lists);
       Assert.NotEmpty(environments.Snapshot!.Environments);
       Assert.False(inference.IsAttached);
-      Assert.Equal(0, manager.CreateCalls);
-      Assert.Equal(0, manager.InstallCalls);
-      WorkbenchCommandOutcome preview = await handler.ExecuteAsync(
-        new PreviewEnvironmentInstallCommand("environment", "paddleocr-ort-directml", null),
-        TestContext.Current.CancellationToken);
-      Assert.Null(preview.Error);
-      SettingsWorkbenchState projected = Assert.Single(preview.States.OfType<SettingsWorkbenchState>());
-      Assert.Equal("paddleocr-ort-directml", Assert.Single(projected.Environments!).Recipe);
-      Assert.True(projected.EnvironmentPlan!.RequiresServiceStop);
-      Assert.Equal(["nvidia-cudnn-cu13"], projected.EnvironmentPlan.RemovedDependencies);
     }
     finally { Directory.Delete(root, recursive: true); }
   }
@@ -287,388 +217,6 @@ public sealed class ManagedEnvironmentSettingsTests
     Assert.Equal("preparation_required", projected.EngineState);
   }
 
-  [Theory]
-  [InlineData(null)]
-  [InlineData("pypi")]
-  public async Task StaleConfirmationCannotInstallTheCurrentPreview(string? sourceId)
-  {
-    var manager = new WaitingManager();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, new ProductMaintenanceCoordinator());
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", sourceId,
-      TestContext.Current.CancellationToken);
-
-    await Assert.ThrowsAsync<InvalidOperationException>(() =>
-      settings.InstallAsync("previous-plan", sourceId, TestContext.Current.CancellationToken));
-
-    Assert.False(manager.Started.Task.IsCompleted);
-    Assert.Equal("plan", settings.Plan?.PlanId);
-  }
-  [Fact]
-  public async Task CancelInstallStopsManagerAndReleasesProductLease()
-  {
-    var manager = new WaitingManager();
-    var maintenance = new ProductMaintenanceCoordinator();
-    int installAttempts = 0;
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance, installAttempted: () => installAttempts++);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Assert.True(settings.CanCancelInstall);
-    Assert.Equal("plan", settings.Plan?.PlanId);
-    await Assert.ThrowsAsync<InvalidOperationException>(() =>
-      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
-    Assert.Equal(ProductMaintenanceOwner.RuntimeMaintenance, maintenance.State.ActiveOwner);
-    await settings.CancelAndWaitForInstallAsync();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    Assert.True(manager.Cancelled);
-    Assert.Equal(1, installAttempts);
-    Assert.False(settings.CanCancelInstall);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.Equal("安装已中断；原环境保持不变，详情可在该环境记录中查看。", settings.Status);
-    Assert.Equal("environment", settings.Snapshot?.Environments[0].Id);
-    Assert.Equal("install_interrupted",
-      settings.Snapshot?.Environments[0].LastInstallFailure?.ReasonCode);
-  }
-
-  [Fact]
-  public async Task FindCompatibleValidatesCatalogAndInvalidationClearsResult()
-  {
-    var manager = new MutableManager();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, new ProductMaintenanceCoordinator());
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-
-    await settings.FindCompatibleAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-
-    Assert.Equal("paddleocr-ort-directml", settings.Compatibility?.Recipe);
-    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
-    Assert.Contains("可直接复用", settings.Status);
-    // 未知配方在宿主按 Runtime 目录 fail closed 拒绝，不透传给管理器。
-    await Assert.ThrowsAsync<InvalidOperationException>(() =>
-      settings.FindCompatibleAsync("made-up-recipe", TestContext.Current.CancellationToken));
-    // 与预览同一失效入口：选择变化后旧兼容结果不得冒充新选择。
-    settings.InvalidatePlan();
-    Assert.Null(settings.Compatibility);
-    Assert.Null(settings.Plan);
-  }
-
-  [Fact]
-  public async Task FindCompatibleIsBusyWithoutChangingEnvironmentSnapshot()
-  {
-    var manager = new MutableManager();
-    var settings = NewSettings(manager);
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-    var snapshot = settings.Snapshot;
-    var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeFind = () => pending.Task;
-
-    Task query = settings.FindCompatibleAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-
-    Assert.True(settings.IsBusy);
-    Assert.Same(snapshot, settings.Snapshot);
-    Assert.Equal(0, manager.CreateCalls);
-    Assert.Equal(0, manager.InstallCalls);
-    pending.SetResult();
-    await query;
-    Assert.False(settings.IsBusy);
-    Assert.Same(snapshot, settings.Snapshot);
-  }
-
-  [Fact]
-  public async Task LateCompatibilityAfterSelectionInvalidationCannotPublishOverCurrentQuery()
-  {
-    var manager = new MutableManager();
-    var settings = NewSettings(manager);
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-    var oldEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var oldRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var currentEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var currentRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    int calls = 0;
-    manager.BeforeFind = () =>
-    {
-      if (++calls == 1) { oldEntered.SetResult(); return oldRelease.Task; }
-      currentEntered.SetResult();
-      return currentRelease.Task;
-    };
-    Task previous = settings.FindCompatibleAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    await oldEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    settings.InvalidatePlan();
-    Task current = settings.FindCompatibleAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    oldRelease.SetResult();
-    await currentEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Assert.Null(settings.Compatibility);
-    currentRelease.SetResult();
-    await Task.WhenAll(previous, current);
-    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
-    Assert.Equal(2, calls);
-    Assert.Equal(0, manager.InstallCalls);
-  }
-
-  [Fact]
-  public async Task PrepareUsesCompatibilityWithoutCreatingOrInstalling()
-  {
-    var manager = new MutableManager();
-    var settings = NewSettings(manager);
-    await settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
-    Assert.Null(settings.Plan);
-    Assert.Equal(0, manager.CreateCalls);
-    Assert.Equal(0, manager.PreviewCalls);
-    Assert.Equal(0, manager.InstallCalls);
-  }
-
-  [Fact]
-  public async Task EnvironmentThatBecomesCompatibleDuringPrepareDoesNotEnterInstaller()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false, BecomesCompatibleDuringPrepare = true };
-    var settings = NewSettings(manager);
-    await settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    Assert.Equal("environment", settings.Compatibility?.Selected?.EnvironmentId);
-    Assert.Null(settings.Plan);
-    Assert.Equal(0, manager.CreateCalls);
-    Assert.Equal(0, manager.PreviewCalls);
-    Assert.Equal(0, manager.InstallCalls);
-  }
-
-  [Fact]
-  public async Task PrepareDoubleClickAndPreviewFailureReuseExactEnvironment()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false };
-    var settings = NewSettings(manager);
-    manager.BeforePreview = () => throw new HttpRequestException("preview unavailable");
-    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "paddleocr-ort-directml", TestContext.Current.CancellationToken));
-    Assert.Equal(1, manager.CreateCalls);
-    manager.BeforePreview = null;
-    await Task.WhenAll(settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken),
-      settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken));
-    Assert.Equal(1, manager.CreateCalls);
-    Assert.Equal("fresh", settings.Plan?.EnvironmentId);
-    Assert.Equal(0, manager.InstallCalls);
-  }
-
-  [Fact]
-  public async Task PrepareAfterSettingsRecreationReusesRuntimeOwnedTarget()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false };
-    var first = NewSettings(manager);
-    await first.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    var reopened = NewSettings(manager);
-    await reopened.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    Assert.Equal(first.Plan?.EnvironmentId, reopened.Plan?.EnvironmentId);
-    Assert.Equal(1, manager.CreateCalls);
-    Assert.Equal(0, manager.InstallCalls);
-  }
-
-  [Fact]
-  public async Task PrepareRetryRequiresAuthoritativeListAfterCreateRefreshFailure()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
-    var settings = NewSettings(manager);
-    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "paddleocr-ort-directml", TestContext.Current.CancellationToken));
-    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "paddleocr-ort-directml", TestContext.Current.CancellationToken));
-    Assert.Equal(1, manager.CreateCalls);
-    Assert.Equal(0, manager.PreviewCalls);
-    manager.FailListAfterCreate = false;
-    await settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    Assert.Equal(1, manager.CreateCalls);
-    Assert.Equal("fresh", settings.Plan?.EnvironmentId);
-  }
-
-  [Fact]
-  public async Task SelectionChangeDuringMappedRefreshCannotRecreateMissingTarget()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false, FailListAfterCreate = true };
-    var settings = NewSettings(manager);
-    await Assert.ThrowsAsync<HttpRequestException>(() => settings.PrepareAsync(
-      "paddleocr-ort-directml", TestContext.Current.CancellationToken));
-    manager.FailListAfterCreate = false;
-    await manager.DeleteEnvironmentAsync("fresh", TestContext.Current.CancellationToken);
-    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeList = () => { entered.TrySetResult(); return release.Task; };
-    Task retry = settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    settings.InvalidatePlan();
-    release.SetResult();
-    await retry;
-    Assert.Equal(1, manager.CreateCalls);
-    Assert.Equal(0, manager.PreviewCalls);
-    Assert.Null(settings.Plan);
-  }
-
-  [Fact]
-  public async Task QueuedAndInFlightPrepareCannotCreateAfterSelectionChanges()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false };
-    var settings = NewSettings(manager);
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeFind = () => { entered.TrySetResult(); return release.Task; };
-    Task inFlight = settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Task queued = settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    settings.InvalidatePlan();
-    Task current = settings.PreviewAsync("environment", "paddleocr-ort-directml", null,
-      TestContext.Current.CancellationToken);
-    release.SetResult();
-    await Task.WhenAll(inFlight, queued, current);
-    Assert.Equal(0, manager.CreateCalls);
-    Assert.Equal(1, manager.PreviewCalls);
-    Assert.Equal("environment", settings.Plan?.EnvironmentId);
-  }
-
-  [Fact]
-  public async Task LatePreviewCannotRestoreInvalidatedPlan()
-  {
-    var manager = new MutableManager();
-    var settings = NewSettings(manager);
-    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforePreview = () => { entered.TrySetResult(); return release.Task; };
-    Task preview = settings.PreviewAsync("environment", "paddleocr-ort-directml", null,
-      TestContext.Current.CancellationToken);
-    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    settings.InvalidatePlan();
-    release.SetResult();
-    await preview;
-    Assert.Null(settings.Plan);
-  }
-
-  [Fact]
-  public async Task InstallPreservesFrozenPlanAndExpiresPreviouslyQueuedPrepare()
-  {
-    var manager = new MutableManager { HasCompatibleEnvironment = false };
-    var settings = NewSettings(manager);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", null,
-      TestContext.Current.CancellationToken);
-    ManagedEnvironmentPlan frozen = settings.Plan!;
-    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeList = () => { entered.TrySetResult(); return release.Task; };
-    Task refresh = settings.RefreshAsync(TestContext.Current.CancellationToken);
-    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Task install = settings.InstallAsync(frozen.PlanId, null, TestContext.Current.CancellationToken);
-    Task queued = settings.PrepareAsync("paddleocr-ort-directml", TestContext.Current.CancellationToken);
-    manager.BeforeInstall = () => { Assert.Same(frozen, settings.Plan); return Task.CompletedTask; };
-    release.SetResult();
-    await Task.WhenAll(refresh, install, queued);
-    Assert.Equal(1, manager.InstallCalls);
-    Assert.Equal(0, manager.CreateCalls);
-    Assert.Null(settings.Plan);
-  }
-
-  [Fact]
-  public async Task InstallObserverKeepsBoundedLogAndCommittedSnapshotAcrossRefresh()
-  {
-    var manager = new MutableManager();
-    var settings = NewSettings(manager);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi", TestContext.Current.CancellationToken);
-    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeInstall = async () => { started.SetResult(); await release.Task; };
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await started.Task;
-    var update = new ManagedEnvironmentInstallProgress
-    {
-      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32), PlanId = "plan",
-      EnvironmentId = "environment", EnvironmentRevision = 1, Seq = 1, Timestamp = "2026-10-08T00:00:00Z",
-      Phase = "install", State = "running", Current = "batch", Dependencies = [], DependencyTotalKnown = true,
-      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
-      Log = new ManagedInstallLog { Stream = "stdout", Text = "Installing collected packages", Truncated = false },
-    };
-    for (int index = 1; index <= 220; index++) manager.Observer!(update with { Seq = index });
-    manager.Observer!(update with { Seq = 500, EnvironmentId = "other", State = "failed" });
-    manager.Observer!(update with { Seq = 221, State = "succeeded", Phase = "complete", Log = null });
-    manager.Observer!(update with { Seq = 999, State = "running" });
-    release.SetResult();
-    await install;
-    for (int count = 0; settings.InstallProgress?.State != "succeeded" && count < 100; count++)
-      await Task.Delay(10, TestContext.Current.CancellationToken);
-    Assert.Equal("succeeded", settings.InstallProgress?.State);
-    Assert.InRange(settings.InstallLog.Count, 1, 201);
-    Assert.Contains("[较早输出已截断]", settings.InstallLog);
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-    Assert.Equal("succeeded", settings.InstallProgress?.State);
-    Assert.Equal(1, manager.InstallCalls);
-    await settings.PreviewCleanupAsync(TestContext.Current.CancellationToken);
-    Assert.Null(settings.InstallProgress);
-    Assert.Empty(settings.InstallLog);
-    Assert.NotNull(settings.CleanupPlan);
-    Assert.Equal("installed", settings.Snapshot!.Environments[0].Status);
-  }
-
-  [Fact]
-  public async Task PausedInstallDisplayKeepsOneNotificationAcrossAttemptsAndPreservesLatestTerminal()
-  {
-    var manager = new MutableManager(); var settings = NewSettings(manager);
-    var context = new PausedProgressContext();
-    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeInstall = () => release.Task;
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi", TestContext.Current.CancellationToken);
-    Task Start()
-    {
-      SynchronizationContext? previous = SynchronizationContext.Current;
-      try { SynchronizationContext.SetSynchronizationContext(context); return settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken); }
-      finally { SynchronizationContext.SetSynchronizationContext(previous); }
-    }
-    Task first = Start();
-    Action<ManagedEnvironmentInstallProgress> oldObserver = manager.Observer!;
-    var update = new ManagedEnvironmentInstallProgress
-    {
-      EventVersion = 1, EventKind = "environment_install", AttemptId = new string('a', 32), PlanId = "plan",
-      EnvironmentId = "environment", EnvironmentRevision = 1, Seq = 1, Timestamp = "2026-10-08T00:00:00Z",
-      Phase = "install", State = "running", Current = "batch", Dependencies = [], DependencyTotalKnown = true,
-      DownloadFilesTotal = 0, DownloadFilesCompleted = 0, BytesCurrent = 0, BytesTotal = null, Heartbeat = false,
-      Log = new ManagedInstallLog { Stream = "stdout", Text = new string('文', 400), Truncated = false },
-    };
-    context.ThrowNext = true;
-    oldObserver(update); // Post rejection releases the display slot, without changing installation.
-    for (int index = 2; index <= 10000; index++) oldObserver(update with { Seq = index });
-    Assert.Equal(1, context.Pending); Assert.Equal(10000, settings.InstallProgress?.Seq);
-    Assert.InRange(settings.InstallLog.Count, 1, 201);
-    Assert.InRange(settings.InstallLog.Sum(line => line.Length), 1, 64000 + 20);
-    release.SetResult(); await first.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    Assert.Equal("succeeded", settings.InstallProgress?.State);
-    oldObserver(update with { Seq = 20000 }); Assert.Equal("succeeded", settings.InstallProgress?.State);
-
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi", TestContext.Current.CancellationToken);
-    release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    manager.BeforeInstall = () => release.Task;
-    Task second = Start();
-    manager.Observer!(update with { AttemptId = new string('b', 32), Seq = 1, Log = null });
-    oldObserver(update with { Seq = 30000 });
-    Assert.Equal(1, context.Pending); Assert.Equal(new string('b', 32), settings.InstallProgress?.AttemptId);
-    Assert.Empty(settings.InstallLog);
-    release.SetResult(); await second.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    string? displayed = null; settings.StateChanged += () => displayed = settings.InstallProgress?.State;
-    context.Resume(); Assert.Equal("succeeded", displayed); Assert.Equal(0, context.Pending);
-  }
-
-  private sealed class PausedProgressContext : SynchronizationContext
-  {
-    private readonly System.Collections.Concurrent.ConcurrentQueue<SendOrPostCallback> queued = new();
-    internal bool ThrowNext { get; set; }
-    internal int Pending => queued.Count;
-    public override void Post(SendOrPostCallback callback, object? state)
-    {
-      // Await continuations still run; only host display notification delivery is paused.
-      if (state is not null) { base.Post(callback, state); return; }
-      if (ThrowNext) { ThrowNext = false; throw new InvalidOperationException("context closing"); }
-      queued.Enqueue(callback);
-    }
-    internal void Resume() { while (queued.TryDequeue(out var callback)) callback(null); }
-  }
-
   [Fact]
   public async Task CleanupRequiresExplicitCurrentSelectionAndKeepsPartialResult()
   {
@@ -753,317 +301,6 @@ public sealed class ManagedEnvironmentSettingsTests
     new(manager, (_, _) => Task.CompletedTask, () => null, new ProductMaintenanceCoordinator());
 
   [Fact]
-  public async Task CancelClickDuringPostInstallRefreshIsIgnoredAndInstallStaysCommitted()
-  {
-    var manager = new RefreshGateManager();
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", CancellationToken.None);
-    await manager.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5),
-      TestContext.Current.CancellationToken);
-
-    // 安装事务一结束取消入口立即关闭；刷新期间的取消点击必须是 no-op。
-    Assert.False(settings.CanCancelInstall);
-    settings.CancelInstall();
-    manager.RefreshGate.SetResult();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    Assert.False(manager.RefreshTokenCancelled);
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Equal("依赖已安装；请切换环境以验证并启动服务。", settings.Status);
-    ManagedEnvironment committed = settings.Snapshot!.Environments[0];
-    Assert.Equal("installed", committed.Status);
-    Assert.Equal(2, committed.Revision);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.False(settings.CanCancelInstall);
-  }
-
-  [Fact]
-  public async Task RefreshCancellationAfterCommittedInstallKeepsInstalledResult()
-  {
-    var manager = new RefreshGateManager { CancelRefreshByToken = true };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    using var user = new CancellationTokenSource();
-    Task install = settings.InstallAsync("plan", "pypi", user.Token);
-    await manager.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5),
-      TestContext.Current.CancellationToken);
-    Assert.False(settings.CanCancelInstall);
-
-    user.Cancel();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // #123：提交成功后的刷新取消不得改判安装结果，也不得拖垮操作。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Equal("依赖已安装；结果刷新已取消，请刷新列表查看最新状态。", settings.Status);
-    Assert.DoesNotContain("安装已取消", settings.Status);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.False(settings.CanCancelInstall);
-    Assert.False(settings.IsBusy);
-  }
-
-  [Fact]
-  public async Task CancelRacingNaturalInstallFailurePreservesDurableFailure()
-  {
-    var manager = new WaitingManager { CancelFailureReasonCode = "venv_creation_failed" };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    await settings.CancelAndWaitForInstallAsync();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // 失败先于取消落盘：真实失败必须保留，不得改称取消或环境未变。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Contains("安装已经失败（venv_creation_failed）", settings.Status);
-    Assert.DoesNotContain("原环境保持不变", settings.Status);
-    Assert.Equal("venv_creation_failed",
-      settings.Snapshot?.Environments[0].LastInstallFailure?.ReasonCode);
-    Assert.Equal("plan", settings.Snapshot?.Environments[0].LastInstallFailure?.PlanId);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.False(settings.CanCancelInstall);
-  }
-
-  [Theory]
-  [InlineData(null)]
-  [InlineData("previous-plan")]
-  public async Task CancelWithoutMatchingDurableRecordStaysUnconfirmed(string? failurePlanId)
-  {
-    var manager = new WaitingManager
-    {
-      CancelFailureReasonCode = null,
-      Failure = failurePlanId is null ? null : new ManagedEnvironmentInstallFailure(
-        "failed", 1, "paddleocr-ort-directml", "install_interrupted", "preview_again", "Previous attempt",
-        PlanId: failurePlanId),
-    };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    await settings.CancelAndWaitForInstallAsync();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // #123：revision 未变但缺本次记录，不能声称“已取消/未提交更改”。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Equal("已请求取消；本次安装结果未确认，请刷新列表查看。", settings.Status);
-    Assert.Equal(failurePlanId, settings.Snapshot?.Environments[0].LastInstallFailure?.PlanId);
-    Assert.Equal(1, settings.Snapshot?.Environments[0].Revision);
-    Assert.True(maintenance.State.IsIdle);
-  }
-
-  [Fact]
-  public async Task CancelAfterCommitDoesNotClaimSuccessOrCancellation()
-  {
-    var manager = new WaitingManager { CommitBeforeCancel = true, CancelFailureReasonCode = null };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    await settings.CancelAndWaitForInstallAsync();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // revision+1/recipe 相同不能证明本次 plan 成功：未关联成功一律未确认。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Equal("已请求取消；本次安装结果未确认，请刷新列表查看。", settings.Status);
-    ManagedEnvironment durable = settings.Snapshot!.Environments[0];
-    Assert.Equal("installed", durable.Status);
-    Assert.Equal(2, durable.Revision);
-    Assert.True(maintenance.State.IsIdle);
-  }
-
-  [Fact]
-  public async Task CancelConfirmReadFailureReportsUnconfirmedResult()
-  {
-    var manager = new WaitingManager { FailListAfterCancel = true };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance);
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    await settings.CancelAndWaitForInstallAsync();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // 读取失败：如实未确认，不虚构环境未变，也不拖垮操作。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Contains("已请求取消", settings.Status);
-    Assert.Contains("最终状态读取失败", settings.Status);
-    Assert.Contains("结果未确认", settings.Status);
-    Assert.DoesNotContain("安装已取消", settings.Status);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.False(settings.CanCancelInstall);
-    Assert.False(settings.IsBusy);
-  }
-
-  [Fact]
-  public async Task CancelConfirmReadIsBoundedByDeadlineAndTimesOutUnconfirmed()
-  {
-    var manager = new WaitingManager { BlockListAfterCancel = true };
-    var maintenance = new ProductMaintenanceCoordinator();
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, maintenance)
-    { InstallCancelConfirmTimeout = TimeSpan.FromMilliseconds(200) };
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    Task install = settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-    await manager.Started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-    // 不用无界的 CancelAndWaitForInstallAsync：旧实现会无限读取，
-    // 测试自身用 WaitAsync 时限保证有界失败。
-    settings.CancelInstall();
-    await install.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-
-    // 读取预算由 deadline 约束：超时转未确认，不无限等下去。
-    Assert.True(install.IsCompletedSuccessfully);
-    Assert.Contains("已请求取消", settings.Status);
-    Assert.Contains("结果未确认", settings.Status);
-    Assert.DoesNotContain("安装已取消", settings.Status);
-    Assert.True(maintenance.State.IsIdle);
-    Assert.False(settings.IsBusy);
-  }
-
-  [Fact]
-  public async Task FailedInstallRefreshesDurableReasonWithoutShowingRawManagerError()
-  {
-    var failure = new ManagedEnvironmentInstallFailure("failed", 1, "paddleocr-ort-directml",
-      "network_error", "check_source_and_retry", "下载源连接失败。");
-    var manager = new WaitingManager
-    {
-      InstallError = new InvalidOperationException("https://user:secret@example.invalid C:/private"),
-      Failure = failure,
-    };
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => null, new ProductMaintenanceCoordinator());
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    await Assert.ThrowsAsync<InvalidOperationException>(() =>
-      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
-    Assert.Equal("安装未完成；失败原因请查看该环境记录。", settings.Status);
-    Assert.Same(failure, settings.Snapshot?.Environments[0].LastInstallFailure);
-    await settings.RefreshAsync(TestContext.Current.CancellationToken);
-    Assert.Same(failure, settings.Snapshot?.Environments[0].LastInstallFailure);
-  }
-
-  [Theory]
-  [InlineData(true)]
-  [InlineData(false)]
-  public async Task FailedInstallOverlaysRestoredServiceWithoutHidingFailure(bool probeHealthy)
-  {
-    string root = CreateReadyEchoScript();
-    InferenceSupervisorProcess process = CreateReadyEchoProcess(root);
-    try
-    {
-      await process.StartAsync(TestContext.Current.CancellationToken);
-      var client = new InferenceHttpClient(
-        new Uri("http://127.0.0.1:1"), "test", new HealthyTransport());
-      var qr = new QrCodeHttpClient(new Uri("http://127.0.0.1:1"), "test");
-      await using var session = new ManagedEnvironmentSession(
-        "environment", 1, process, client, qr, ReadyStatus());
-      // 恢复失败的探针会如实标注未核验，不伪造 ready。
-      await using var disconnected = new ManagedEnvironmentSession(
-        "environment", 1,
-        new InferenceSupervisorProcess(new InferenceSupervisorOptions(
-          "unused", [], root, Path.Combine(root, "unused.log"),
-          TimeSpan.FromSeconds(1), new HashSet<string>()), "test"),
-        new InferenceHttpClient(new Uri("http://127.0.0.1:12345"), "test",
-          new UnavailableTransport()),
-        new QrCodeHttpClient(new Uri("http://127.0.0.1:12345"), "test"),
-        ReadyStatus());
-      // 服务在安装失败期间停止（无会话），恢复完成后才重新可用。
-      ManagedEnvironmentSession? current = null;
-      var failure = new ManagedEnvironmentInstallFailure("failed", 1, "paddleocr-ort-directml",
-        "network_error", "check_source_and_retry", "下载源连接失败。");
-      var manager = new MutableManager
-      {
-        RequiresServiceStop = true,
-        LastInstallFailure = failure,
-        BeforeInstall = () => Task.FromException(new InvalidOperationException("install failed")),
-      };
-      var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-        () => ("environment", 1), new ProductMaintenanceCoordinator(), () => current,
-        stopService: _ => Task.CompletedTask,
-        restoreService: () =>
-        {
-          current = probeHealthy ? session : disconnected;
-          return Task.CompletedTask;
-        });
-      await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-        TestContext.Current.CancellationToken);
-
-      var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-        settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
-
-      // 原安装异常原样传播；恢复后的运行证据如实叠加。
-      Assert.Equal("install failed", error.Message);
-      ManagedEnvironment restored = ActiveEnvironment(settings);
-      Assert.Equal(probeHealthy ? "ready" : "unverified", restored.ServiceState);
-      if (!probeHealthy)
-        Assert.Equal("无法读取活动环境状态，请刷新或重新切换环境。", restored.Reason);
-      // 安装失败终态不被旧健康盖成成功。
-      Assert.Same(failure, restored.LastInstallFailure);
-      Assert.Equal("安装未完成；失败原因请查看该环境记录。", settings.Status);
-      Assert.Null(settings.InstallProgress);
-      Assert.False(settings.IsRestoringService);
-      Assert.False(settings.IsBusy);
-    }
-    finally
-    {
-      process.Dispose();
-      DeleteScriptDirectory(root);
-    }
-  }
-
-  [Fact]
-  public async Task FailedInstallRestoreFailureKeepsNotStartedAndOriginalError()
-  {
-    var manager = new MutableManager
-    {
-      RequiresServiceStop = true,
-      BeforeInstall = () => Task.FromException(new InvalidOperationException("install failed")),
-    };
-    var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
-      () => ("environment", 1), new ProductMaintenanceCoordinator(),
-      stopService: _ => Task.CompletedTask,
-      restoreService: () => Task.FromException(new InvalidOperationException("restore failed")));
-    await settings.PreviewAsync("environment", "paddleocr-ort-directml", "pypi",
-      TestContext.Current.CancellationToken);
-
-    AggregateException error = await Assert.ThrowsAsync<AggregateException>(() =>
-      settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken));
-
-    Assert.StartsWith("环境维护失败，释放维护或恢复原服务也失败。", error.Message,
-      StringComparison.Ordinal);
-    Assert.Contains(error.InnerExceptions, item => item.Message == "install failed");
-    Assert.Contains(error.InnerExceptions, item => item.Message == "restore failed");
-    // 恢复失败不得伪造 ready；快照保持服务停止期间读取的投影。
-    Assert.Equal("not_started", ActiveEnvironment(settings).ServiceState);
-    Assert.False(settings.IsRestoringService);
-  }
-
-  [Fact]
   public async Task DisconnectedRunningProbePreservesEnvironmentAndReturnsRecoverableError()
   {
     var manager = new WaitingManager { ActiveId = "environment" };
@@ -1121,26 +358,11 @@ public sealed class ManagedEnvironmentSettingsTests
       Assert.Equal("not_checked", active.ModelState);
       Assert.Equal("ready", active.ServiceState);
 
-      // 旧代码在 Create/Install/Delete/Repair 后直接重置为管理器列表，
-      // 把仍在运行的活动环境回退成 unverified/not_checked/not_started。
-      await settings.CreateAsync("新建环境", TestContext.Current.CancellationToken);
+      // 变更（删除非活动环境）后的列表重读不得把仍在运行的活动环境
+      // 回退成 unverified/not_checked/not_started。
+      await settings.DeleteAsync("spare", TestContext.Current.CancellationToken);
       Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
-      Assert.Contains(settings.Snapshot!.Environments,
-        item => item.Id == "fresh" && item.ServiceState == "not_started");
-
-      await settings.PreviewAsync("fresh", "paddleocr-ort-directml", "pypi",
-        TestContext.Current.CancellationToken);
-      await settings.InstallAsync("plan", "pypi", TestContext.Current.CancellationToken);
-      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
-      Assert.Equal("installed",
-        settings.Snapshot!.Environments.Single(item => item.Id == "fresh").Status);
-
-      await settings.RepairEmptyAsync("fresh", TestContext.Current.CancellationToken);
-      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
-
-      await settings.DeleteAsync("fresh", TestContext.Current.CancellationToken);
-      Assert.Equal("ready", ActiveEnvironment(settings).ServiceState);
-      Assert.DoesNotContain(settings.Snapshot!.Environments, item => item.Id == "fresh");
+      Assert.DoesNotContain(settings.Snapshot!.Environments, item => item.Id == "spare");
     }
     finally
     {
@@ -1221,18 +443,20 @@ public sealed class ManagedEnvironmentSettingsTests
         ReadyStatus());
       ManagedEnvironmentSession? current = null;
       int lists = 0;
-      var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; },
-      RequiresServiceStop = true, RemovedDependencies = ["nvidia-cudnn-cu13"] };
+      var manager = new MutableManager { BeforeList = () => { lists++; return Task.CompletedTask; } };
       var settings = new ManagedEnvironmentSettings(manager,
         (_, _) => Task.CompletedTask, () => ("environment", 1),
         new ProductMaintenanceCoordinator(), () => current);
 
       await App.RefreshEnvironmentSettingsAfterActivationAsync(settings, TestContext.Current.CancellationToken);
-      Assert.Equal(0, lists);
+      // 首次启动快照尚未读取（null）也必须刷新：否则激活后环境列表
+      // 永不装载（预构建树冒烟回归）。
+      Assert.Equal(1, lists);
 
       // 启动竞争：设置页在 Supervisor 激活前刷新，只有管理器投影。
       await settings.RefreshAsync(TestContext.Current.CancellationToken);
       Assert.Equal("not_started", ActiveEnvironment(settings).ServiceState);
+      Assert.Equal(2, lists);
 
       // 激活完成后的 App 侧刷新补齐真实运行证据。
       current = session;
@@ -1279,17 +503,12 @@ public sealed class ManagedEnvironmentSettingsTests
       var settings = new ManagedEnvironmentSettings(manager, (_, _) => Task.CompletedTask,
         () => ("environment", 1), new ProductMaintenanceCoordinator(), () => session);
 
-      await settings.PreviewAsync("environment", "paddleocr-ort-directml", "modelscope",
-        TestContext.Current.CancellationToken);
-      Assert.NotNull(settings.Plan);
-
-      // 只写配置：不下载/不安装/不重启；运行中环境的模型偏好标注下次启动生效。
+      // 只写配置：不下载/不重启；运行中环境的模型偏好标注下次启动生效。
       await settings.SetSourcesAsync("environment", "modelscope",
         TestContext.Current.CancellationToken);
       Assert.Equal("environment|modelscope", manager.SourceSaves.Single());
-      Assert.Null(settings.Plan);
-      Assert.Contains("仅用于安装依赖与下载模型", settings.Status);
-      Assert.Contains("不会下载或安装", settings.Status);
+      Assert.Contains("仅用于模型下载", settings.Status);
+      Assert.Contains("不会改变当前运行中的服务", settings.Status);
       Assert.Contains("下次启动", settings.Status);
 
       // 全局保存（environmentId=null）同样改变运行中环境的模型来源解析：
@@ -1450,56 +669,27 @@ public sealed class ManagedEnvironmentSettingsTests
 
   /// <summary>
   /// 模拟冻结管理器：每次 list 都返回未叠加运行证据的持久状态，
-  /// 并支持创建/安装/修复/删除变更。
+  /// 并支持来源设置/删除变更。
   /// </summary>
   private sealed class MutableManager : IManagedEnvironmentClient
   {
     public List<string> SourceSaves { get; } = [];
-    public bool HasCompatibleEnvironment { get; set; } = true;
-    public bool BecomesCompatibleDuringPrepare { get; set; }
-    public bool FailListAfterCreate { get; set; }
-    public int CreateCalls { get; private set; }
-    public int PreviewCalls { get; private set; }
-    public int InstallCalls { get; private set; }
-    public bool RequiresServiceStop { get; set; }
-    public List<string>? MaintenanceEvents { get; set; }
-    public bool FailMaintenanceDisposal { get; set; }
-    public IReadOnlyList<string>? RemovedDependencies { get; set; }
-    public Task<IAsyncDisposable> BeginEnvironmentMaintenanceAsync(string environmentId, CancellationToken cancellationToken = default)
-    {
-      MaintenanceEvents?.Add("reserve");
-      return Task.FromResult<IAsyncDisposable>(new MaintenanceReservation(MaintenanceEvents, FailMaintenanceDisposal));
-    }
-    private sealed class MaintenanceReservation(List<string>? events, bool fail) : IAsyncDisposable
-    {
-      public ValueTask DisposeAsync()
-      {
-        events?.Add("release");
-        return fail ? ValueTask.FromException(new InvalidOperationException("release failed")) : ValueTask.CompletedTask;
-      }
-    }
-    public bool SupportsEnvironmentInstallProgress => true;
     public bool SupportsEnvironmentCleanup => true;
     public int CleanupCalls { get; private set; }
     public Func<CancellationToken, Task>? BeforeCleanup { get; set; }
     public ManagedCleanupPlan? CleanupPreview { get; set; }
-    public ManagedEnvironmentInstallFailure? LastInstallFailure { get; set; }
     public Task<ManagedCleanupPlan> PreviewEnvironmentCleanupAsync(CancellationToken cancellationToken = default) =>
       Task.FromResult(CleanupPreview ?? new ManagedCleanupPlan(new string('a', 32),
-      [new ManagedCleanupItem("residual:fixture", "residual", "fixture", null, 12, true, "owned", ["fixture"], PathCount: 1),
-       new ManagedCleanupItem("environment:protected", "environment", "protected", "environment", null, false, "active", [])],
-      "logical_bytes", "不保证物理释放"));
+        [new ManagedCleanupItem("residual:fixture", "residual", "fixture", null, 12, true, "owned", ["fixture"], PathCount: 1),
+         new ManagedCleanupItem("environment:protected", "environment", "protected", "environment", null, false, "active", [])],
+        "logical_bytes", "不保证物理释放"));
     public async Task<ManagedCleanupResult> RunEnvironmentCleanupAsync(string planId, IReadOnlyList<string> itemIds, CancellationToken cancellationToken = default)
     {
       CleanupCalls++;
       if (BeforeCleanup is not null) await BeforeCleanup(cancellationToken);
       return new ManagedCleanupResult(planId, [new ManagedCleanupResultItem(itemIds[0], "failed", "file in use", 12)], "logical_bytes");
     }
-    public Action<ManagedEnvironmentInstallProgress>? Observer { get; private set; }
     public Func<Task>? BeforeList { get; set; }
-    public Func<Task>? BeforeFind { get; set; }
-    public Func<Task>? BeforePreview { get; set; }
-    public Func<Task>? BeforeInstall { get; set; }
 
     // 与生产 list payload 一致：配方目录随列表同步，宿主据此核验未知配方。
     private static readonly IReadOnlyList<ManagedEnvironmentRecipe> Catalog =
@@ -1518,43 +708,16 @@ public sealed class ManagedEnvironmentSettingsTests
           new ManagedEnvironmentResolvedSource("paddleocr_model_registry", "paddleocr-modelscope", "ModelScope", "product_default"),
           new ManagedEnvironmentResolvedSource("mineru_model_registry", "mineru-modelscope", "ModelScope", "product_default"),
         ]),
+      new ManagedEnvironment("spare", "备用环境", 1, "venv", "installed", "python",
+        "ready", "installed", "unverified", "not_checked", "not_started", null,
+        Recipe: "paddleocr-ort-directml", Engine: "paddle", Family: "paddle-onnx"),
     ];
 
     public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
       CancellationToken cancellationToken = default)
     {
       if (BeforeList is not null) await BeforeList();
-      if (FailListAfterCreate && CreateCalls > 0) throw new HttpRequestException("list unavailable");
-      return new ManagedEnvironmentList("environment", 1,
-        [.. environments.Select(item =>
-          item.Id == "environment" && LastInstallFailure is not null
-            ? item with { LastInstallFailure = LastInstallFailure }
-            : item)], Recipes: Catalog);
-    }
-
-    private string? preparedTargetId;
-    public Task<ManagedEnvironment> PrepareEnvironmentTargetAsync(
-      string recipe, CancellationToken cancellationToken = default)
-    {
-      if (BecomesCompatibleDuringPrepare)
-      {
-        HasCompatibleEnvironment = true;
-        return Task.FromResult(environments[0]);
-      }
-      ManagedEnvironment? owned = environments.FirstOrDefault(item => item.Id == preparedTargetId);
-      if (owned is not null) return Task.FromResult(owned);
-      preparedTargetId = "fresh";
-      return CreateEnvironmentAsync("Runtime 准备目标", cancellationToken);
-    }
-
-    public Task<ManagedEnvironment> CreateEnvironmentAsync(
-      string name, CancellationToken cancellationToken = default)
-    {
-      CreateCalls++;
-      var created = new ManagedEnvironment("fresh", name, 1, "venv", "empty", "python",
-        "ready", "empty", "unverified", "not_checked", "not_started", null);
-      environments.Add(created);
-      return Task.FromResult(created);
+      return new ManagedEnvironmentList("environment", 1, [.. environments], Recipes: Catalog);
     }
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
@@ -1567,66 +730,6 @@ public sealed class ManagedEnvironmentSettingsTests
         DefaultSourceIds: modelSourceId is null ? [] : [modelSourceId], Recipes: Catalog));
     }
 
-    public async Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
-      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      PreviewCalls++;
-      if (BeforePreview is not null) await BeforePreview();
-      return new ManagedEnvironmentPlan("plan", environmentId, 1, 1, recipe,
-        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds,
-        Sources:
-        [
-          new ManagedEnvironmentPlanSource(
-            (sourceIds ?? ["tuna-pypi"])[0], "package_index",
-            sourceIds is null ? "TUNA PyPI 镜像" : "PyPI 官方源",
-            "https://example.invalid", sourceIds is not null,
-            sourceIds is null ? "product_default" : "environment_override",
-            "online_index"),
-        ],
-        DependencyOrigin: "online_index", PythonOrigin: "product_bundle",
-        RuntimeWheelOrigin: "product_bundle", RequiresServiceStop: RequiresServiceStop, RemovedDependencies: RemovedDependencies);
-    }
-
-    public async Task<ManagedEnvironmentQueryResult> FindCompatibleEnvironmentAsync(
-      string recipe, CancellationToken cancellationToken = default)
-    {
-      if (BeforeFind is not null) await BeforeFind();
-      return new ManagedEnvironmentQueryResult(
-        recipe,
-        Recipes: Catalog,
-        Selected: HasCompatibleEnvironment ? new ManagedEnvironmentSelection("environment", 1, recipe, "active_environment") : null,
-        Environments:
-        [
-          new ManagedEnvironmentQueryMatch("environment", "活动环境", 1, "installed",
-            Recipe: recipe, Active: true, Selected: true,
-            ReasonCode: "selected_active_environment"),
-        ]);
-    }
-
-    public async Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      InstallCalls++;
-      if (BeforeInstall is not null) await BeforeInstall();
-      int index = environments.FindIndex(item => item.Id == plan.EnvironmentId);
-      environments[index] = environments[index] with
-      {
-        Status = "installed",
-        DependencyState = "installed",
-      };
-      return environments[index];
-    }
-
-    public Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds,
-      Action<ManagedEnvironmentInstallProgress> progress, CancellationToken cancellationToken = default)
-    {
-      Observer = progress;
-      return InstallEnvironmentAsync(plan, sourceIds, cancellationToken);
-    }
-
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(
       string environmentId, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();
@@ -1634,10 +737,6 @@ public sealed class ManagedEnvironmentSettingsTests
     public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
       PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(
-      string environmentId, CancellationToken cancellationToken = default) =>
-      Task.FromResult(environments.Single(item => item.Id == environmentId));
 
     public Task DeleteEnvironmentAsync(string environmentId,
       CancellationToken cancellationToken = default)
@@ -1659,153 +758,27 @@ public sealed class ManagedEnvironmentSettingsTests
   }
 
   /// <summary>
-  /// 可控时序的冻结管理器：安装可阻塞到取消，取消时可模拟持久层已
-  /// 写入的终态（中断投影、先于取消的自然失败、已提交记录、读取故障）。
+  /// 可控时序的冻结管理器：按需模拟活动指针与列表内容。
   /// </summary>
   private sealed class WaitingManager : IManagedEnvironmentClient
   {
-    public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public bool Cancelled { get; private set; }
     public string? ActiveId { get; init; }
-    public Exception? InstallError { get; init; }
-    public ManagedEnvironmentInstallFailure? Failure { get; set; }
-    public string? CancelFailureReasonCode { get; init; } = "install_interrupted";
-    public bool CommitBeforeCancel { get; init; }
-    public bool FailListAfterCancel { get; init; }
-    public bool BlockListAfterCancel { get; init; }
 
     private ManagedEnvironment current = new("environment", "保留环境", 1, "venv", "empty", "python",
       "ready", "empty", "unavailable", "not_checked", "not_started", null);
 
-    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
-      CancellationToken cancellationToken = default)
-    {
-      if (BlockListAfterCancel && Cancelled)
-        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-      if (FailListAfterCancel && Cancelled)
-        throw new HttpRequestException("environments list unavailable");
-      return new ManagedEnvironmentList(ActiveId, 0,
-        [current with { LastInstallFailure = Failure }],
-        Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-directml", "PaddleOCR ONNX · CPU")]);
-    }
-
-    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
-      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
+    public Task<ManagedEnvironmentList> ListEnvironmentsAsync(
       CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 0, recipe,
-        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds));
-
-    public async Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      if (InstallError is not null) throw InstallError;
-      Started.SetResult();
-      if (CommitBeforeCancel)
-        current = current with
-        {
-          Revision = plan.EnvironmentRevision + 1,
-          Status = "installed",
-          DependencyState = "installed",
-          Recipe = plan.Recipe,
-        };
-      try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
-      catch (OperationCanceledException)
-      {
-        Cancelled = true;
-        if (CancelFailureReasonCode is { } reason)
-          Failure = new ManagedEnvironmentInstallFailure(
-            "failed", plan.EnvironmentRevision, plan.Recipe, reason,
-            reason == "install_interrupted" ? "preview_again" : "check_directory_permissions",
-            reason == "install_interrupted"
-              ? "Dependency installation was interrupted."
-              : "could not prepare candidate environment: venv exit 1",
-            null, ["tuna-pypi"], PlanId: plan.PlanId);
-        throw;
-      }
-      throw new InvalidOperationException("Install unexpectedly completed.");
-    }
+      Task.FromResult(new ManagedEnvironmentList(ActiveId, 0, [current],
+        Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-directml", "PaddleOCR ONNX · CPU")]));
 
     public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
       string? environmentId, string? modelSourceId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
     public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
       PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task DeleteEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-  }
-
-  /// <summary>
-  /// 控制安装提交后结果刷新的时序：install 返回即标记已安装并进入刷新
-  /// 阻塞点，验证取消入口关闭与刷新取消不改判安装结果。
-  /// </summary>
-  private sealed class RefreshGateManager : IManagedEnvironmentClient
-  {
-    public TaskCompletionSource RefreshEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public TaskCompletionSource RefreshGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public bool RefreshTokenCancelled { get; private set; }
-    public bool CancelRefreshByToken { get; init; }
-
-    private ManagedEnvironment current = new("environment", "环境", 1, "venv", "empty", "python",
-      "ready", "empty", "unavailable", "not_checked", "not_started", null);
-    private int installReturned;
-
-    public async Task<ManagedEnvironmentList> ListEnvironmentsAsync(
-      CancellationToken cancellationToken = default)
-    {
-      if (Volatile.Read(ref installReturned) == 0)
-        return new ManagedEnvironmentList(null, 0, [current],
-          Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-directml", "PaddleOCR ONNX · CPU")]);
-      RefreshEntered.TrySetResult();
-      if (CancelRefreshByToken)
-        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-      await RefreshGate.Task.WaitAsync(cancellationToken);
-      RefreshTokenCancelled = cancellationToken.IsCancellationRequested;
-      return new ManagedEnvironmentList(null, 0, [current],
-        Recipes: [new ManagedEnvironmentRecipe("paddleocr-ort-directml", "PaddleOCR ONNX · CPU")]);
-    }
-
-    public Task<ManagedEnvironmentPlan> PreviewEnvironmentInstallAsync(
-      string environmentId, string recipe, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default) =>
-      Task.FromResult(new ManagedEnvironmentPlan("plan", environmentId, 1, 0, recipe,
-        sourceIds ?? ["tuna-pypi"], RequestedSourceIds: sourceIds));
-
-    public Task<ManagedEnvironment> InstallEnvironmentAsync(
-      ManagedEnvironmentPlan plan, IReadOnlyList<string>? sourceIds = null,
-      CancellationToken cancellationToken = default)
-    {
-      current = current with
-      {
-        Revision = plan.EnvironmentRevision + 1,
-        Status = "installed",
-        DependencyState = "installed",
-        Recipe = plan.Recipe,
-      };
-      Volatile.Write(ref installReturned, 1);
-      return Task.FromResult(current);
-    }
-
-    public Task<ManagedEnvironmentList> SetEnvironmentSourcesAsync(
-        string? environmentId, string? modelSourceId,
-        CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-    public Task<ManagedEnvironment> CreateEnvironmentAsync(string name, CancellationToken cancellationToken = default) =>
-      throw new NotSupportedException();
-    public Task<PreparedEnvironmentSwitch> PrepareEnvironmentSwitchAsync(string environmentId,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<CommittedEnvironmentSwitch> CommitEnvironmentSwitchAsync(
-      PreparedEnvironmentSwitch prepared, StartedEnvironmentHealth? startedHealth = null,
-      CancellationToken cancellationToken = default) => throw new NotSupportedException();
-    public Task<ManagedEnvironment> RepairEmptyEnvironmentAsync(string environmentId,
       CancellationToken cancellationToken = default) => throw new NotSupportedException();
     public Task DeleteEnvironmentAsync(string environmentId, CancellationToken cancellationToken = default) =>
       throw new NotSupportedException();

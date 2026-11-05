@@ -173,59 +173,74 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     ).toBeDisabled();
   });
 
-  it("Paddle 分区只按推理后端选择且只有聚焦分区自动查询", async () => {
+  it("设备选择随宿主快照回显，切换直接发送 switchEnvironment", async () => {
     const user = userEvent.setup();
     const actions = buildActions();
     const settings = {
       environmentRecipes: recipes,
       environmentSources: sources,
-      environments: [],
+      environments: [
+        {
+          id: "shared",
+          name: "PaddleOCR ONNX + MinerU · Windows DirectML",
+          revision: 3,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "ready",
+          configuredRecognitionTypes: [
+            "text",
+            "table",
+            "structure",
+            "document",
+          ],
+          targetDevice: "directml",
+        },
+      ],
+      activeEnvironmentId: "shared",
       environmentBusy: false,
     };
     render(
       <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
     );
-    // Paddle 分区：单一后端选择（统一闭包 = DirectML 安装档 + CPU 切换），
-    // 不再出现“识别组件/加速方式”双下拉。
+    // Paddle 分区：单一设备选择（统一闭包 = DirectML + CPU 切换），
+    // 当前设备来自活动环境快照，不再有“识别组件/加速方式”双下拉。
     const backend = screen.getByLabelText("Paddle 推理后端");
     expect(backend).toHaveValue("directml");
     expect(within(backend).getAllByRole("option")).toHaveLength(2);
     expect(screen.queryByLabelText("识别组件")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("加速方式")).not.toBeInTheDocument();
-    // 统一闭包同时命中两个分区：两分区都如实呈现随包依赖来源。
+    // 目录展示保留 display name / 用途 / 设备，依赖如实标注随包离线。
     expect(
       screen.getAllByText(/依赖随包提供，可离线安装/).length,
     ).toBeGreaterThan(0);
     expect(
       screen.getByText(/文字、表格与版面结构识别共用同一套 PaddleOCR 依赖/),
     ).toBeVisible();
-    // 只有聚焦的 Paddle 分区自动查询；MinerU 分区不 mount 即发请求。
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
-      }),
-    );
-    const mineruSection = screen.getByLabelText("MinerU 本地引擎");
+    // 预构建运行时树：兼容查询/准备/待确认计划入口全部退役，挂载不发命令。
+    expect(actions.run).not.toHaveBeenCalled();
     expect(
-      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
-    ).toBeVisible();
-    // 切换设备是显式选择：先失效旧计划，再对新设备档发起只读查询；
-    // 同闭包切换不另装配方。
+      screen.queryByRole("button", { name: "查询可复用环境" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "准备此后端" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认安装依赖" }),
+    ).not.toBeInTheDocument();
+    // 同闭包设备切换：switchEnvironment 携带用户选定设备。
     await user.selectOptions(backend, "cpu");
     expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
+      type: "settings.switchEnvironment",
+      environmentId: "shared",
+      device: "cpu",
     });
-    expect(screen.getByText(/设备 cpu，Python 3\.13/)).toBeVisible();
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
-      }),
-    );
   });
 
-  it("统一推理闭包目录下 MinerU 分区复用共享闭包配方", async () => {
+  it("统一推理闭包目录下 MinerU 分区复用共享闭包并按同一活动环境切换设备", async () => {
     const user = userEvent.setup();
     const actions = buildActions();
     // 统一闭包形态：目录只剩 paddleocr-ort-directml，document 能力随
@@ -254,10 +269,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
           targetDevice: "directml",
         },
       ],
-      environmentCompatibility: {
-        recipe: "paddleocr-ort-directml",
-        selectedEnvironmentId: "unified-installed",
-      },
+      activeEnvironmentId: "unified-installed",
       environmentBusy: false,
     };
     render(
@@ -270,110 +282,26 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(
       within(mineruSection).getByText(/本地文档解析由统一推理闭包随包携带/),
     ).toBeVisible();
-    // 兼容查询结果按配方绑定投影进 MinerU 分区（共享闭包同一配方命中）。
-    expect(
-      within(mineruSection).getByText(/可直接复用环境「统一推理闭包」/),
-    ).toBeVisible();
     // 设备选择与安装配方分离：统一闭包同闭包支持 directml↔cpu 切换，
     // 设备下拉枚举 supported_devices，切换命令发送用户选定设备。
-    const backend = screen.getByLabelText("Paddle 推理后端");
-    expect(backend).toHaveValue("directml");
-    expect(within(backend).getAllByRole("option")).toHaveLength(2);
-    const paddleSection = screen.getByLabelText("PaddleOCR 推理后端");
-    await user.click(
-      within(paddleSection).getByRole("button", {
-        name: "切换到此环境并启动验证",
-      }),
-    );
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.switchEnvironment",
-      environmentId: "unified-installed",
-      device: "directml",
-    });
-    await user.selectOptions(backend, "cpu");
+    const mineruDeviceSelect =
+      within(mineruSection).getByLabelText("MinerU 运行设备");
+    expect(mineruDeviceSelect).toHaveValue("directml");
+    expect(within(mineruDeviceSelect).getAllByRole("option")).toHaveLength(2);
     expect(
-      within(paddleSection).getByText(/设备 cpu，Python 3\.13/),
-    ).toBeVisible();
-    await user.click(
-      within(paddleSection).getByRole("button", {
-        name: "切换到此环境并启动验证",
+      within(mineruSection).queryByRole("button", {
+        name: "安装 MinerU 本地引擎",
       }),
-    );
+    ).not.toBeInTheDocument();
+    await user.selectOptions(mineruDeviceSelect, "cpu");
     expect(actions.run).toHaveBeenCalledWith({
       type: "settings.switchEnvironment",
       environmentId: "unified-installed",
       device: "cpu",
     });
-  });
-
-  it("MinerU 分区显式查询后按 recipe 绑定展示结果与安装入口", async () => {
-    const user = userEvent.setup();
-    const actions = buildActions();
-    const settings = {
-      environmentRecipes: recipes,
-      environmentSources: sources,
-      environments: [],
-      environmentBusy: false,
-    };
-    const view = render(
-      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
-    );
-    const mineruSection = screen.getByLabelText("MinerU 本地引擎");
-    await user.click(
-      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
-    );
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
-      }),
-    );
-    // 迟到的他配方结果（退役配方）不得投影进当前选择：无命中结论不出现，
-    // 只如实提示本次查询未收到结果，可重试。
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentCompatibility: {
-            recipe: "paddleocr-ort-cpu",
-            selectedEnvironmentId: null,
-          },
-        })}
-        actions={actions}
-      />,
-    );
-    const sectionAfterLateResult = screen.getByLabelText("MinerU 本地引擎");
     expect(
-      within(sectionAfterLateResult).queryByText(/没有可直接复用的已安装环境/),
-    ).not.toBeInTheDocument();
-    expect(
-      within(sectionAfterLateResult).getByRole("button", {
-        name: "重新查询兼容环境",
-      }),
+      within(mineruSection).getByText(/切换设备会重新启动并验证识别服务/),
     ).toBeVisible();
-    // 匹配的结果才展示：无命中 → 显式安装入口（prepare 仍需用户确认计划）。
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentCompatibility: {
-            recipe: "paddleocr-ort-directml",
-            selectedEnvironmentId: null,
-          },
-        })}
-        actions={actions}
-      />,
-    );
-    expect(
-      within(sectionAfterLateResult).getByText(/没有可直接复用的已安装环境/),
-    ).toBeVisible();
-    await user.click(
-      screen.getByRole("button", { name: "安装 MinerU 本地引擎" }),
-    );
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.prepareEnvironment",
-      recipe: "paddleocr-ort-directml",
-    });
   });
 
   it("MinerU 本地环境列出安装状态：活动环境引导先切换，非活动可确认移除", async () => {
@@ -419,136 +347,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(
       within(mineruSection).getByText(/共享模型缓存、下载缓存与基础/),
     ).toBeVisible();
-  });
-
-  it("显式查询取得主导权：覆盖导航恢复的计划选择且不作废待确认计划", async () => {
-    const user = userEvent.setup();
-    const actions = buildActions();
-    // 导航回来：待确认统一闭包计划驱动只读恢复（hasExplicitChoice=false）。
-    const settings = {
-      environmentRecipes: recipes,
-      environmentSources: sources,
-      environments: [
-        {
-          id: "prepared-dml",
-          name: "PaddleOCR ONNX + MinerU · Windows DirectML",
-          revision: 1,
-          kind: "venv",
-          status: "empty",
-          pythonState: "ready",
-          dependencyState: "empty",
-        },
-      ],
-      environmentPlan: {
-        planId: "p-dml",
-        environmentId: "prepared-dml",
-        environmentRevision: 1,
-        requestedRecipe: "paddleocr-ort-directml",
-        recipe: "paddleocr-ort-directml",
-        sourceIds: ["paddleocr-modelscope"],
-        requestedSourceIds: null,
-        dependencies: ["paddleocr==3.7.0"],
-      },
-      environmentBusy: false,
-    };
-    render(
-      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
-    );
-    // 恢复选择：Paddle 分区回显 DirectML 后端与待确认计划；统一闭包下
-    // 计划卡只渲染一次（归属 Paddle 分区），不出现重复确认入口。
-    expect(screen.getByLabelText("Paddle 推理后端")).toHaveValue("directml");
-    expect(
-      screen.getAllByRole("button", { name: "确认安装依赖" }),
-    ).toHaveLength(1);
-    // 点击 MinerU 显式查询：焦点必须真正切换（不被恢复选择持续覆盖）。
-    const mineruSection = screen.getByLabelText("MinerU 本地引擎");
-    await user.click(
-      within(mineruSection).getByRole("button", { name: "查询可复用环境" }),
-    );
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
-      }),
-    );
-    // 取得主导权不等于失效：仍绑定原配方的计划继续可确认。
-    expect(
-      screen.getAllByRole("button", { name: "确认安装依赖" }),
-    ).toHaveLength(1);
-    expect(actions.run).not.toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
-    });
-  });
-
-  it("晚到的旧计划不能绕过本地失效重新确认", async () => {
-    const user = userEvent.setup();
-    const actions = buildActions();
-    const settings = {
-      environmentRecipes: recipes,
-      environmentSources: sources,
-      environments: [],
-      environmentBusy: false,
-    };
-    const plan = (planId: string) => ({
-      planId,
-      environmentId: "env-1",
-      environmentRevision: 1,
-      requestedRecipe: "paddleocr-ort-directml",
-      recipe: "paddleocr-ort-directml",
-      sourceIds: ["paddleocr-modelscope"],
-      requestedSourceIds: null,
-      dependencies: ["paddleocr==3.7.0"],
-    });
-    const view = render(
-      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
-    );
-    // 显式设备选择绑定当前配方：随后到达的计划可确认。
-    await user.selectOptions(screen.getByLabelText("MinerU 安装设备"), "cpu");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
-    });
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentPlan: plan("plan-a"),
-        })}
-        actions={actions}
-      />,
-    );
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
-    // 再次显式设备切换：选择变化即失效旧计划。
-    await user.selectOptions(
-      screen.getByLabelText("MinerU 安装设备"),
-      "directml",
-    );
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.invalidateEnvironmentPlan",
-    });
-    // 失效后同 planId 的迟到重放不得再次进入确认。
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentPlan: plan("plan-a"),
-        })}
-        actions={actions}
-      />,
-    );
-    expect(
-      screen.queryByRole("button", { name: "确认安装依赖" }),
-    ).not.toBeInTheDocument();
-    // 换 planId 的新计划（绑定当前选择）恢复可确认。
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentPlan: plan("plan-b"),
-        })}
-        actions={actions}
-      />,
-    );
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
   });
 
   it("环境清单与来源直接呈现在常规页面，不再有折叠高级区", () => {
@@ -612,7 +410,8 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
           "settings.refreshEnvironmentList",
       ),
     ).toHaveLength(1);
-    // 真实快照到达：不再重复刷新，目录可用后聚焦分区自动查询。
+    // 真实快照到达：不再重复刷新；预构建运行时树下目录到达也不再触发
+    // 兼容查询/准备等安装面命令。
     rerender(
       <SettingsPage
         viewState={buildViewState({
@@ -623,12 +422,6 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
         })}
         actions={actions}
       />,
-    );
-    await waitFor(() =>
-      expect(actions.run).toHaveBeenCalledWith({
-        type: "settings.findCompatibleEnvironment",
-        recipe: "paddleocr-ort-directml",
-      }),
     );
     rerender(
       <SettingsPage
@@ -648,6 +441,13 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
           "settings.refreshEnvironmentList",
       ),
     ).toHaveLength(1);
+    expect(
+      actions.run.mock.calls.filter(
+        ([command]) =>
+          (command as { type: string }).type !==
+          "settings.refreshEnvironmentList",
+      ),
+    ).toHaveLength(0);
   });
 
   it("初始 busy 等待解除后只发一次且失败不自动重试", async () => {
@@ -707,7 +507,7 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(screen.getByText(/读取运行环境失败：连接超时/)).toBeInTheDocument();
   });
 
-  it("legacy 主机与已有快照都不自动刷新且不清在途计划", () => {
+  it("legacy 主机与已有快照都不自动刷新", () => {
     const legacyActions = buildActions();
     render(
       <SettingsPage
@@ -731,21 +531,12 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     render(
       <SettingsPage
         viewState={buildViewState({
-          environmentStatus: "已预览锁定配方。",
+          environmentStatus: "运行环境状态已同步。",
           environmentSnapshotLoaded: true,
           environmentRecipes: recipes,
           environments: [
             { id: "env-1", name: "文档", revision: 1, status: "empty" },
           ],
-          environmentPlan: {
-            planId: "plan-a",
-            environmentId: "env-1",
-            environmentRevision: 1,
-            requestedRecipe: "paddleocr-ort-directml",
-            recipe: "paddleocr-ort-directml",
-            sourceIds: [],
-            dependencies: ["paddleocr==3.7.0"],
-          },
         })}
         actions={actions}
       />,
@@ -753,12 +544,89 @@ describe("SettingsPage 环境管理（#283 分区方向）", () => {
     expect(actions.run).not.toHaveBeenCalledWith({
       type: "settings.refreshEnvironmentList",
     });
-    // 已有快照与待确认计划不被自动加载触碰。
-    expect(screen.getByRole("button", { name: "确认安装依赖" })).toBeVisible();
+    // 已有快照不被自动加载触碰；页面静默等待用户操作。
+  });
+
+  it("product 环境按宿主 operation_blocks 投影禁用移除入口", () => {
+    const actions = buildActions();
+    const settings = {
+      environmentRecipes: recipes,
+      environmentSources: sources,
+      environments: [
+        {
+          id: "product",
+          name: "产品内置环境",
+          revision: 1,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "not_started",
+          configuredRecognitionTypes: [
+            "text",
+            "table",
+            "structure",
+            "document",
+          ],
+          targetDevice: "directml",
+          operationBlocks: { delete: "product_environment" },
+        },
+        {
+          id: "legacy-env",
+          name: "旧版环境",
+          revision: 1,
+          kind: "legacy",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "not_started",
+          configuredRecognitionTypes: [],
+        },
+        {
+          id: "user-env",
+          name: "用户环境",
+          revision: 2,
+          kind: "venv",
+          status: "installed",
+          pythonState: "ready",
+          dependencyState: "installed",
+          engineState: "ready",
+          modelState: "ready",
+          serviceState: "ready",
+          configuredRecognitionTypes: ["text"],
+          targetDevice: "cpu",
+        },
+      ],
+      activeEnvironmentId: "user-env",
+      environmentBusy: false,
+    };
+    render(
+      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
+    );
+    const list = screen.getByLabelText("已安装环境");
+    // product 环境被宿主投影保护：移除按钮如实呈现但禁用。
+    const productRow = within(list)
+      .getByText("产品内置环境")
+      .closest("div") as HTMLElement;
+    expect(
+      within(productRow).getByRole("button", { name: "移除环境" }),
+    ).toBeDisabled();
+    // legacy 环境按既有规则不提供移除入口，只读展示。
+    const legacyRow = within(list)
+      .getByText("旧版环境")
+      .closest("div") as HTMLElement;
+    expect(
+      within(legacyRow).queryByRole("button", { name: "移除环境" }),
+    ).not.toBeInTheDocument();
+    expect(actions.run).not.toHaveBeenCalled();
   });
 });
 
-it("uses explicit metadata when recipe identifiers and display names change", async () => {
+it("目录标识变更时按显式元数据展示并沿活动环境切换设备", async () => {
   const actions = buildActions();
   const renamed = recipes.map((recipe) => ({
     ...recipe,
@@ -769,19 +637,30 @@ it("uses explicit metadata when recipe identifiers and display names change", as
     <SettingsPage
       viewState={buildViewState({
         environmentRecipes: renamed,
-        environments: [],
+        environments: [
+          {
+            id: "env-1",
+            name: "统一闭包",
+            revision: 2,
+            kind: "venv",
+            status: "installed",
+            targetDevice: "directml",
+            configuredRecognitionTypes: ["text", "document"],
+          },
+        ],
+        activeEnvironmentId: "env-1",
       })}
       actions={actions}
     />,
   );
   const section = screen.getByLabelText("PaddleOCR 推理后端");
+  // 目录展示只用显式 display name / 用途元数据，不解析 id。
+  expect(within(section).getByText(/目标配置：名称 0/)).toBeVisible();
   await userEvent.selectOptions(within(section).getByRole("combobox"), "cpu");
-  await userEvent.click(
-    within(section).getByRole("button", { name: "重新查询兼容环境" }),
-  );
   expect(actions.run).toHaveBeenCalledWith({
-    type: "settings.findCompatibleEnvironment",
-    recipe: "custom.engine_0",
+    type: "settings.switchEnvironment",
+    environmentId: "env-1",
+    device: "cpu",
   });
 });
 
@@ -822,96 +701,14 @@ it("saves model source identifiers from provider metadata", async () => {
     paddleocrModelSourceId: "source-1",
     mineruModelSourceId: "source-3",
   });
-  expect(actions.run).not.toHaveBeenCalledWith(
-    expect.objectContaining({ type: "settings.prepareEnvironment" }),
-  );
+  // 保存只写来源配置，不触发任何安装面命令。
+  expect(
+    actions.run.mock.calls.filter(
+      ([command]) => command.type !== "settings.setEnvironmentSources",
+    ),
+  ).toHaveLength(0);
   view.unmount();
 });
-
-it.each(["device", "service", "active"] as const)(
-  "兼容结果失效后随运行选择变化补发一次查询：%s",
-  async (change) => {
-    const actions = buildActions();
-    const environment = {
-      id: "shared",
-      name: "Paddle",
-      revision: 3,
-      kind: "venv",
-      status: "installed",
-      recipe: "paddleocr-ort-directml",
-      targetDevice: change === "device" ? "cpu" : "directml",
-      serviceState: change === "service" ? "not_started" : "ready",
-    };
-    const settings = {
-      environmentRecipes: recipes,
-      environmentSources: sources,
-      environmentBusy: false,
-      activeEnvironmentId: change === "active" ? "other" : "shared",
-      environments: [environment],
-    };
-    const query = {
-      type: "settings.findCompatibleEnvironment",
-      recipe: "paddleocr-ort-directml",
-    };
-    const view = render(
-      <SettingsPage viewState={buildViewState(settings)} actions={actions} />,
-    );
-    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
-    const compatibility = {
-      recipe: "paddleocr-ort-directml",
-      selectedEnvironmentId: "shared",
-    };
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...settings,
-          environmentCompatibility: compatibility,
-        })}
-        actions={actions}
-      />,
-    );
-    actions.run.mockClear();
-    // A real same-id switch or background attach clears compatibility while
-    // preserving the installed environment revision. Busy must defer dispatch.
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({ ...settings, environmentBusy: true })}
-        actions={actions}
-      />,
-    );
-    expect(actions.run).not.toHaveBeenCalledWith(query);
-    const complete = {
-      ...settings,
-      activeEnvironmentId: "shared",
-      environments: [
-        { ...environment, targetDevice: "directml", serviceState: "ready" },
-      ],
-    };
-    view.rerender(
-      <SettingsPage viewState={buildViewState(complete)} actions={actions} />,
-    );
-    await waitFor(() => expect(actions.run).toHaveBeenCalledWith(query));
-    expect(
-      actions.run.mock.calls.filter(([command]) => command.type === query.type),
-    ).toHaveLength(1);
-    view.rerender(
-      <SettingsPage
-        viewState={buildViewState({
-          ...complete,
-          environmentCompatibility: compatibility,
-        })}
-        actions={actions}
-      />,
-    );
-    expect(
-      screen.getAllByText("该兼容环境已是当前环境并通过启动验证，无需重装。")
-        .length,
-    ).toBeGreaterThan(0);
-    expect(
-      actions.run.mock.calls.filter(([command]) => command.type === query.type),
-    ).toHaveLength(1);
-  },
-);
 
 describe("Worker 空闲资源设置", () => {
   it.each([

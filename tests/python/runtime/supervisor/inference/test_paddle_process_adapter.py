@@ -92,8 +92,9 @@ def test_broken_worker_pipe_discards_process():
 
 @pytest.mark.parametrize("recipe", ["paddleocr-ort-directml"])
 def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch, recipe):
+    # 预构建树统一 ``-I -B -m`` 入口：模块直接从树内闭包解析，不再注入
+    # 产品代码根，也不继承不受信的 PYTHONPATH。
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
-    monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
     monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
     assert paddle_python() == Path(sys.executable)
     observed = {}
@@ -108,8 +109,13 @@ def test_managed_paddle_worker_uses_current_code_and_same_venv(monkeypatch, reci
     )
     with pytest.raises(RuntimeError, match="captured"):
         PaddleProcessAdapter(Path(sys.executable))._start()
-    assert observed["args"][:4] == [sys.executable, "-I", "-B", "-c"]
-    assert "vibeocr.runtime.recognition.paddle_worker" in observed["args"][4]
+    assert observed["args"][:5] == [
+        sys.executable,
+        "-I",
+        "-B",
+        "-m",
+        "vibeocr.runtime.recognition.paddle_worker",
+    ]
     assert "PYTHONPATH" not in observed["env"]
 
 

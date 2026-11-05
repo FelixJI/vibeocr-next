@@ -19,8 +19,9 @@ from vibeocr.runtime.documents.pdf_backend_client import (
 
 
 def test_managed_pdf_worker_uses_current_code_and_same_venv(monkeypatch):
+    # 预构建树统一 ``-I -B -m`` 入口：与 Paddle worker 同一模式，模块直接
+    # 从树内闭包解析，不再注入产品代码根。
     monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "named")
-    monkeypatch.setenv("VIBEOCR_PRODUCT_CODE_ROOT", "C:\\product\\runtime-code")
     monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
     observed = {}
 
@@ -34,8 +35,13 @@ def test_managed_pdf_worker_uses_current_code_and_same_venv(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="captured"):
         PdfBackendClient().start()
-    assert observed["args"][:4] == [sys.executable, "-I", "-B", "-c"]
-    assert "vibeocr.runtime.documents.pdf_backend_process" in observed["args"][4]
+    assert observed["args"][:5] == [
+        sys.executable,
+        "-I",
+        "-B",
+        "-m",
+        "vibeocr.runtime.documents.pdf_backend_process",
+    ]
     assert "PYTHONPATH" not in observed["env"]
 
 

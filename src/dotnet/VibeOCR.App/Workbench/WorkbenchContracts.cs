@@ -619,33 +619,21 @@ public sealed record OpenProjectPageCommand : WorkbenchCommand;
 public sealed record RefreshRuntimeCommand : WorkbenchCommand;
 public sealed record RefreshEnvironmentListCommand : WorkbenchCommand;
 
-public sealed record CreateEnvironmentCommand(string Name) : WorkbenchCommand;
-public sealed record PreviewEnvironmentInstallCommand(string EnvironmentId, string Recipe, string? SourceId) : WorkbenchCommand;
-public sealed record ConfirmEnvironmentInstallCommand(string PlanId, string? SourceId) : WorkbenchCommand;
 public sealed record SetEnvironmentSourcesCommand(
   string? EnvironmentId, string? ModelSourceId,
   string? PaddleocrModelSourceId = null, string? MineruModelSourceId = null,
   bool IndependentModelSources = false) : WorkbenchCommand;
-public sealed record CancelEnvironmentInstallCommand : WorkbenchCommand;
-public sealed record InvalidateEnvironmentPlanCommand : WorkbenchCommand;
 public sealed record SwitchEnvironmentCommand(string EnvironmentId, string? Device = null) : WorkbenchCommand;
 public sealed record DeleteEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
 public sealed record SetEnvironmentCleanupPageCommand(int Page) : WorkbenchCommand;
 public sealed record PreviewEnvironmentCleanupCommand : WorkbenchCommand;
 public sealed record RunEnvironmentCleanupCommand(string PlanId, IReadOnlyList<string> ItemIds) : WorkbenchCommand;
 public sealed record CancelEnvironmentCleanupCommand : WorkbenchCommand;
-public sealed record RepairEmptyEnvironmentCommand(string EnvironmentId) : WorkbenchCommand;
-/// <summary>推荐配置选择：只读查询配方兼容环境，不创建/不安装/不切换。</summary>
-public sealed record FindCompatibleEnvironmentCommand(string Recipe) : WorkbenchCommand;
-
-/// <summary>优先复用兼容环境，否则按精确 ID 准备并预览；明确确认后才安装。</summary>
-public sealed record PrepareEnvironmentCommand(string Recipe) : WorkbenchCommand;
 
 /// <summary>
-/// 远程模式宿主入口：随包离线基础配方一键就绪。已安装可复用环境直接
-/// 切换启动；无可复用环境时新建/复用专用环境并走 Runtime 权威离线
-/// 安装事务（取消/CAS/回滚保留），安装完成后切换启动承载识别服务。
-/// 不触碰用户已有空环境，不下载识别模型。
+/// 远程模式宿主入口：随包预构建环境一键就绪。找到随包基础配方对应的
+/// 已安装环境后直接切换启动承载识别服务；不新建、不安装、不触碰用户
+/// 已有环境，也不下载识别模型。
 /// </summary>
 public sealed record PrepareRemoteHostCommand : WorkbenchCommand;
 
@@ -777,16 +765,6 @@ public sealed record SetRecognitionOptionsCommand(string ModeId, PaddleModeOptio
 /// </summary>
 public sealed record SetDefaultRecognitionModeCommand(string ModeId) : WorkbenchCommand;
 
-/// <summary>Start ensure with the staged explicit component/source intent.</summary>
-public sealed record InstallRuntimeCommand : WorkbenchCommand;
-public sealed record ConfirmRuntimeInstallCommand(string PlanId) : WorkbenchCommand;
-
-/// <summary>Cancel the running durable maintenance operation.</summary>
-public sealed record CancelRuntimeMaintenanceCommand : WorkbenchCommand;
-
-/// <summary>Retry the last failed/cancelled maintenance operation (reuse intent).</summary>
-public sealed record RetryRuntimeMaintenanceCommand : WorkbenchCommand;
-
 public sealed record CheckUpdateCommand : WorkbenchCommand;
 
 public sealed record DownloadUpdateCommand : WorkbenchCommand;
@@ -804,7 +782,6 @@ public sealed record SetUpdateSourceCommand(
     string? Url = null) : WorkbenchCommand;
 
 /// <summary>Cancel the active Runtime operation before retrying an app update.</summary>
-public sealed record CancelRuntimeForUpdateCommand : WorkbenchCommand;
 
 public sealed record ExportDiagnosticsCommand : WorkbenchCommand;
 
@@ -1068,7 +1045,6 @@ public sealed record SettingsWorkbenchState(
   string PendingBackend = "cpu",
   bool CanSwitchBackend = false,
   IReadOnlyList<SettingsFeatureOptionState>? Features = null,
-  SettingsMaintenanceState? Maintenance = null,
   string StatusMessage = "",
   string ServiceStatus = "",
   string MaintenanceStatus = "",
@@ -1077,27 +1053,19 @@ public sealed record SettingsWorkbenchState(
   string ProgressText = "",
   string ProgressDetail = "",
   double? ProgressPercent = null,
-  bool CanPreviewInstall = false,
-  VibeOCR.Runtime.Contracts.Generated.Host.RuntimeInstallPlan? InstallPlan = null,
   SettingsMineruConnectionState? MineruConnection = null,
   SettingsDefaultRecognitionModeState? DefaultRecognitionMode = null,
   SettingsMineruRecognitionState? MineruRecognition = null,
   IReadOnlyList<SettingsRecognitionModeOptionState>? RecognitionModes = null,
   IReadOnlyList<SettingsEnvironmentState>? Environments = null,
   string? ActiveEnvironmentId = null,
-  SettingsEnvironmentPlanState? EnvironmentPlan = null,
   string EnvironmentStatus = "",
   bool EnvironmentBusy = false,
   IReadOnlyList<SettingsEnvironmentSourceState>? EnvironmentSources = null,
   IReadOnlyList<string>? EnvironmentDefaultSourceIds = null,
   IReadOnlyList<string>? EnvironmentUnknownDefaultSourceIds = null,
   IReadOnlyList<SettingsEnvironmentResolvedSourceState>? EnvironmentResolvedDefaultSources = null,
-  bool EnvironmentCanCancelInstall = false,
-  VibeOCR.Runtime.Contracts.Generated.Host.ManagedEnvironmentInstallEvent? EnvironmentInstallProgress = null,
-  IReadOnlyList<string>? EnvironmentInstallLog = null,
-  bool EnvironmentSupportsInstallProgress = false,
   IReadOnlyList<SettingsEnvironmentRecipeState>? EnvironmentRecipes = null,
-  SettingsEnvironmentCompatibilityState? EnvironmentCompatibility = null,
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null,
   bool EnvironmentSupportsCleanup = false,
@@ -1183,25 +1151,6 @@ public sealed record SettingsEnvironmentRecipeState(
   bool SupportsRemoteHost = false,
   bool DefaultRemoteHost = false);
 
-/// <summary>
-/// <summary>当前选择配方的 find_compatible 只读结果（绑定配方 id，防止旧结果覆盖新选择）。</summary>
-public sealed record SettingsEnvironmentCompatibilityState(
-  string Recipe,
-  string? SelectedEnvironmentId = null,
-  int? SelectedEnvironmentRevision = null,
-  string? SelectionReason = null,
-  IReadOnlyList<SettingsEnvironmentQueryMatchState>? Environments = null);
-
-/// <summary>单环境对查询的评估：selected 标记选中项；reason_code 说明原因。</summary>
-public sealed record SettingsEnvironmentQueryMatchState(
-  string EnvironmentId,
-  string Name,
-  int Revision,
-  string Status,
-  bool Active = false,
-  bool Selected = false,
-  string? ReasonCode = null);
-
 /// <summary>每 kind 解析：Id 为 null 表示产品默认（模型源无覆盖时官方原生默认，端点未知）。</summary>
 public sealed record SettingsEnvironmentResolvedSourceState(
   string Kind,
@@ -1209,6 +1158,7 @@ public sealed record SettingsEnvironmentResolvedSourceState(
   string? DisplayName,
   string Origin);
 
+/// <summary>环境记录回放的历史安装失败证据（Runtime 持久保存，仅诊断展示）。</summary>
 public sealed record SettingsEnvironmentInstallFailureState(
   string Phase,
   int EnvironmentRevision,
@@ -1219,40 +1169,6 @@ public sealed record SettingsEnvironmentInstallFailureState(
   IReadOnlyList<string>? RequestedSourceIds = null,
   IReadOnlyList<string>? EffectiveSourceIds = null);
 
-public sealed record SettingsEnvironmentPlanState(
-  string PlanId,
-  string EnvironmentId,
-  string Recipe,
-  IReadOnlyList<string> SourceIds,
-  IReadOnlyList<string> Dependencies,
-  string RequestedRecipe,
-  IReadOnlyList<string>? RequestedSourceIds = null,
-  int EnvironmentRevision = 0,
-  IReadOnlyList<SettingsEnvironmentPlanSourceState>? Sources = null,
-  string? DependencyOrigin = null,
-  string? PythonOrigin = null,
-  string? RuntimeWheelOrigin = null,
-  IReadOnlyList<string>? RemovedDependencies = null,
-  bool RequiresServiceStop = false,
-  string? CudaPluginAction = null);
-
-/// <summary>计划内单来源：请求/继承标记、用途分类与脱敏端点。</summary>
-public sealed record SettingsEnvironmentPlanSourceState(
-  string Id,
-  string Kind,
-  string DisplayName,
-  string Endpoint,
-  bool Requested,
-  string InheritedFrom,
-  string Usage,
-  string? ActualEndpoint = null);
-
-/// <summary>
-/// One shell action's hotkey projection for the settings page: the configured
-/// combination, the actually registered one (null when registration failed,
-/// e.g. the combination is occupied by another app), the last error, and the
-/// action's default binding (null when the action has no default key).
-/// </summary>
 public sealed record SettingsHotkeyActionState(
   string ActionId,
   string DisplayName,
@@ -1336,20 +1252,6 @@ public sealed record SettingsRecognitionModeOptionState(
 /// sets and requested/effective source ids are the installation truth from
 /// Backend snapshots. App/UI code only consumes this neutral projection.
 /// </summary>
-public sealed record SettingsMaintenanceState(
-  bool IsRunning,
-  string StatusCode,
-  string? OperationId,
-  IReadOnlyList<string> RequestedComponentIds,
-  IReadOnlyList<string> EffectiveComponentIds,
-  IReadOnlyList<string> RequestedSourceIds,
-  IReadOnlyList<string> EffectiveSourceIds,
-  bool CanCancel,
-  bool CanRetry,
-  string FailureReason = "",
-  string FailureCode = "");
-
-/// <summary>Catalog package-index source projected as a single-select option.</summary>
 public sealed record SettingsSourceOptionState(
   string Kind,
   string Id,

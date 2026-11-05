@@ -47,6 +47,25 @@ def _paddle_onnx_catalog() -> dict:
     )["models"]
 
 
+def _bundled_models_seeded(
+    shared_root: Path, models: Sequence[str], catalog: dict
+) -> bool:
+    """三模型双源 payload 是否已全部就位且校验通过（seed 快速路径）。"""
+    for name in models:
+        for source in ("modelscope", "huggingface"):
+            for entry in catalog[name]["sources"][source]["files"]:
+                asset = ModelAsset(
+                    _PADDLE_ONNX_NAMESPACE,
+                    source,
+                    catalog[name]["repo_id"],
+                    name,
+                )
+                payload = _asset_root(shared_root, asset) / "payload" / entry["path"]
+                if not _valid_file(payload, entry):
+                    return False
+    return True
+
+
 def seed_bundled_paddle_onnx_models(
     manifest: object,
     shared_root: Path,
@@ -60,6 +79,10 @@ def seed_bundled_paddle_onnx_models(
     <source>/<repo>/payload/…``），source/revision 身份与冻结清单一致：
     已存在且校验通过的文件不重写；包内字节与冻结清单不匹配时 fail
     closed，不静默降级。CPU/CUDA/DirectML 环境共用同一共享缓存。
+
+    PR2 起调用点从安装事务迁到 ``initialize_default``：每次启动都会
+    幂等执行，全部 payload 已就位且逐文件校验通过时直接返回，不再
+    打开/解压 model pack（整包约 38.4MB 的读取与哈希开销）。
     """
     from vibeocr.runtime.environments.runtime_manifest import ManifestError
 
@@ -81,6 +104,8 @@ def seed_bundled_paddle_onnx_models(
             expected_members[f"{name}/{file_entry['path']}"] = file_entry
     shared_root = shared_root.resolve()
     with RuntimeStoreLock(shared_root / "prepare.lock", timeout=1800):
+        if _bundled_models_seeded(shared_root, models, catalog):
+            return
         try:
             with zipfile.ZipFile(archive) as bundle:
                 names = set(bundle.namelist())
