@@ -6,9 +6,7 @@ PDF_EDIT_V2 = "pdf.edit.v2"
 QRCODE_V2 = "qrcode.v2"
 EXPORT_DOCUMENT_V1 = "export.document.v1"
 RUNTIME_SETTINGS_V2 = "runtime.settings.v2"
-RUNTIME_MAINTENANCE_V1 = "runtime.maintenance.v1"
 TASK_PROGRESS_V1 = "task.progress.v1"
-RUNTIME_COMPONENT_REPAIR_V1 = "runtime.component-repair.v1"
 RUNTIME_CAPABILITY_METADATA_V1 = "runtime.capability-metadata.v1"
 RUNTIME_EVENTS_SSE_V1 = "runtime.events.sse.v1"
 RUNTIME_EVENTS_NDJSON_V1 = "runtime.events.ndjson.v1"
@@ -29,9 +27,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'qrcode.v2',
     'export.document.v1',
     'runtime.settings.v2',
-    'runtime.maintenance.v1',
     'task.progress.v1',
-    'runtime.component-repair.v1',
     'runtime.capability-metadata.v1',
     'runtime.events.sse.v1',
     'runtime.events.ndjson.v1',

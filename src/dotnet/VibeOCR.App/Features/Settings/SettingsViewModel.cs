@@ -18,13 +18,6 @@ public sealed record SettingsSourceOption(
     string DisplayName,
     bool Selected);
 
-/// <summary>One optional feature for the pending accelerator.</summary>
-public sealed record SettingsFeatureOption(
-    string FeatureId,
-    string DisplayName,
-    string Accelerator,
-    bool Selected);
-
 /// <summary>任务继承绑定时默认识别模式的解析状态。</summary>
 internal enum RuntimeDefaultModeBinding
 {
@@ -83,14 +76,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     private bool _isBusy;
     private string _status = "正在读取设置";
     private string? _backend;
-    private string _pendingBackend = "cpu";
     private bool _restartRequired;
-    private bool _selectionStaged;
-    private HashSet<string> _installedComponentIds = new(StringComparer.Ordinal);
     private RuntimeSelectionService? _selection;
     private RecognitionSelectionSnapshot? _recognitionSelection;
     private IReadOnlyList<SettingsSourceOption> _sources = [];
-    private IReadOnlyList<SettingsFeatureOption> _features = [];
     private IReadOnlyList<string> _selectedSourceIds = [];
     private MineruConnectionState? _mineruConnection;
     private DefaultRecognitionModeState? _defaultRecognitionMode;
@@ -151,20 +140,12 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     /// 实快照前为 null，不得把默认目标 cpu 冒充为实际运行设备。
     /// </summary>
     public string? Backend { get => _backend; private set => SetField(ref _backend, value); }
-    public string PendingBackend { get => _pendingBackend; set => SetField(ref _pendingBackend, value); }
     public bool RestartRequired { get => _restartRequired; private set => SetField(ref _restartRequired, value); }
-    public bool CanSwitchBackend => !IsBusy && Backend is not null && !string.Equals(Backend, PendingBackend, StringComparison.Ordinal);
 
     public IReadOnlyList<SettingsSourceOption> Sources
     {
         get => _sources;
         private set => SetField(ref _sources, value);
-    }
-
-    public IReadOnlyList<SettingsFeatureOption> Features
-    {
-        get => _features;
-        private set => SetField(ref _features, value);
     }
 
     public RuntimeSelectionService? Selection => _selection;
@@ -222,10 +203,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 if (generation != Volatile.Read(ref _generation)) return;
                 RuntimeStatus.ApplySnapshot(runtime);
                 Backend = runtime.Profile.Accelerator == RuntimeAccelerator.Cpu ? "cpu" : "nvidia_cuda";
-                _installedComponentIds = runtime.Profile.Components
-                    .Where(component => component.ActualState == RuntimeComponentActualState.Ready)
-                    .Select(component => component.ComponentId).ToHashSet(StringComparer.Ordinal);
-                if (!_selectionStaged) PendingBackend = Backend;
             }
             catch (NotSupportedException)
             {
@@ -705,40 +682,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         return LocalizeV2(error.Code);
     }
 
-    /// <summary>Stage the accelerator for the pending feature selection.</summary>
-    public void SetPendingAccelerator(string accelerator)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(accelerator);
-        _selectionStaged = true;
-        PendingBackend = accelerator;
-        Features = _selection is null
-            ? []
-            : ProjectFeatures(_selection, accelerator, []);
-    }
-
-    /// <summary>Toggle one optional feature for the pending accelerator (session state).</summary>
-    public void SetFeatureEnabled(string featureId, bool enabled)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
-        IReadOnlyList<SettingsFeatureOption> current = Features;
-        if (!current.Any(item => item.FeatureId == featureId))
-        {
-            Status = $"未知功能 {featureId}";
-            return;
-        }
-        _selectionStaged = true;
-        Features = [.. current.Select(item => item.FeatureId == featureId
-            ? item with { Selected = enabled }
-            : item)];
-        Status = enabled
-            ? $"已选择功能 {featureId}"
-            : $"已取消功能 {featureId}";
-    }
-
-    /// <summary>Selected optional feature ids for the pending accelerator (N4 consumes these).</summary>
-    public IReadOnlyList<string> PendingFeatureIds =>
-        [.. Features.Where(item => item.Selected).Select(item => item.FeatureId)];
-
     public void Cancel() { }
 
     private async Task<bool> LoadSelectionSerializedAsync(
@@ -794,11 +737,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             MineruRecognition = MineruRecognitionSettings.Read(
                 settings, selection.SupportsMineruConfig);
             Sources = ProjectSources(selection, selectedSourceIds);
-            IReadOnlyList<string> selectedFeatures = _selectionStaged ? PendingFeatureIds :
-                selection.Variants.Where(variant => variant.Accelerator == PendingBackend &&
-                    _installedComponentIds.Contains(variant.ComponentId))
-                    .Select(variant => variant.FeatureId).ToArray();
-            Features = ProjectFeatures(selection, PendingBackend, selectedFeatures);
             // Publish the catalog marker last. Readers that observe the new
             // selection can therefore also observe its matching projections;
             // command paths additionally await this same gate. 投影写入可能
@@ -902,18 +840,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                 SourceDisplayName(source),
                 selectedIds.Contains(source.Id)))];
 
-    private static IReadOnlyList<SettingsFeatureOption> ProjectFeatures(
-        RuntimeSelectionService selection,
-        string accelerator,
-        IReadOnlyList<string> selectedIds) =>
-        [.. selection.Variants
-            .Where(variant => variant.Accelerator == accelerator)
-            .Select(variant => new SettingsFeatureOption(
-                variant.FeatureId,
-                FeatureDisplayName(variant.FeatureId),
-                variant.Accelerator,
-                selectedIds.Contains(variant.FeatureId)))];
-
     internal static string DisplayName(OcrEngine engine) => engine switch
     {
         // RapidOcr 已退役：仅历史记录诊断展示；目录不再提供该引擎。
@@ -947,15 +873,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         "modelscope" or "paddleocr-modelscope" or "mineru-modelscope" => "ModelScope",
         "paddleocr-bos" => "百度 BOS",
         _ => source.Id,
-    };
-
-    internal static string FeatureDisplayName(string featureId) => featureId switch
-    {
-        "paddleocr" => "PaddleOCR 本地文字与文档识别",
-        "mineru" => "MinerU 本地深度文档解析（远程模式无需安装）",
-        "document_parsing" => "文档解析（PaddleOCR/MinerU）",
-        "gpu_runtime" => "CUDA GPU 运行时",
-        _ => featureId,
     };
 
     internal static string LocalizeSelection(RuntimeSelectionException error) => error.Kind switch
@@ -995,7 +912,5 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-        if (name is nameof(IsBusy) or nameof(Backend) or nameof(PendingBackend))
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanSwitchBackend)));
     }
 }

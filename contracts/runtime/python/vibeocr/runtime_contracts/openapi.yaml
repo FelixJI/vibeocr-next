@@ -246,7 +246,7 @@
         "operationId": "getRuntimeStatus",
         "responses": {
           "200": {
-            "description": "Runtime service, profile, component, and maintenance status",
+            "description": "Runtime service, profile, and component status",
             "content": {
               "application/json": {
                 "schema": {
@@ -2094,10 +2094,8 @@
                 "qrcode.v2",
                 "export.document.v1",
                 "runtime.settings.v2",
-                "runtime.maintenance.v1",
                 "task.progress.v1",
                 "runtime.maintenance.v2",
-                "runtime.component-repair.v1",
                 "runtime.capability-metadata.v1",
                 "runtime.events.sse.v1",
                 "runtime.events.ndjson.v1",
@@ -4425,137 +4423,6 @@
         },
         "additionalProperties": false
       },
-      "RuntimeMaintenanceStatus": {
-        "type": "object",
-        "required": [
-          "operation_id",
-          "sequence",
-          "operation",
-          "operation_state",
-          "phase",
-          "profile_id",
-          "updated_at"
-        ],
-        "properties": {
-          "operation_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "source_operation_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "minLength": 1
-          },
-          "sequence": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "operation": {
-            "type": "string",
-            "enum": [
-              "inspect",
-              "ensure",
-              "repair"
-            ]
-          },
-          "operation_state": {
-            "type": "string",
-            "enum": [
-              "queued",
-              "running",
-              "succeeded",
-              "failed",
-              "cancelled"
-            ]
-          },
-          "phase": {
-            "type": "string",
-            "enum": [
-              "validate_binding",
-              "wait_for_lock",
-              "prepare_runtime",
-              "install_profile",
-              "install_backend",
-              "verify_runtime",
-              "commit_runtime"
-            ]
-          },
-          "profile_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "component_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "progress": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProgressSnapshot"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "message_code": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "requested_component_ids": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "effective_component_ids": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "requested_download_source_ids": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "effective_download_source_ids": {
-            "type": "array",
-            "minItems": 1,
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "source": {
-            "$ref": "#/components/schemas/RuntimeSourceIdentity"
-          },
-          "plan_id": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "additionalProperties": false
-      },
       "RuntimeProfileStatus": {
         "type": "object",
         "required": [
@@ -4588,8 +4455,7 @@
         "type": "string",
         "enum": [
           "ready",
-          "degraded",
-          "maintenance"
+          "degraded"
         ]
       },
       "RuntimeStatusSnapshot": {
@@ -4599,8 +4465,7 @@
           "instance_id",
           "service_state",
           "backend_version",
-          "profile",
-          "maintenance"
+          "profile"
         ],
         "properties": {
           "schema_version": {
@@ -4622,16 +4487,6 @@
           },
           "profile": {
             "$ref": "#/components/schemas/RuntimeProfileStatus"
-          },
-          "maintenance": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RuntimeMaintenanceStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
           }
         },
         "additionalProperties": false
@@ -4776,7 +4631,7 @@
       },
       "SettingsSnapshot": {
         "type": "object",
-        "description": "Backend settings snapshot/exchange. download_source_ids persists at most one selected source per kind; array order has no priority meaning. Each present id overrides the source for its kind, while kinds not present use the Backend-declared default for that kind. Maintenance start snapshots this preference into its operation intent. Clients SHOULD send the current selection when the capability is declared and MUST omit it otherwise; an empty in-memory selection MUST serialize as omission. Omission delegates all kinds to Backend-declared defaults and unknown ids fail closed with DOWNLOAD_SOURCE_UNKNOWN.",
+        "description": "Backend settings snapshot/exchange. download_source_ids persists at most one selected source per kind; array order has no priority meaning. Each present id overrides the source for its kind, while kinds not present use the Backend-declared default for that kind. Clients SHOULD send the current selection when the capability is declared and MUST omit it otherwise; an empty in-memory selection MUST serialize as omission. Omission delegates all kinds to Backend-declared defaults and unknown ids fail closed with DOWNLOAD_SOURCE_UNKNOWN.",
         "required": [
           "schema_version",
           "residency",

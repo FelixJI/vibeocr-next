@@ -704,12 +704,6 @@ public sealed record HideFloatingToolbarCommand : WorkbenchCommand;
 /// </summary>
 public sealed record SetDownloadSourceCommand(string Kind, string? SourceId) : WorkbenchCommand;
 
-/// <summary>Stage the accelerator for pending feature selection.</summary>
-public sealed record SetAcceleratorCommand(string Accelerator) : WorkbenchCommand;
-
-/// <summary>Toggle one optional feature for the pending accelerator.</summary>
-public sealed record SetRuntimeFeatureCommand(string FeatureId, bool Enabled) : WorkbenchCommand;
-
 /// <summary>
 /// Set the MinerU connection preference in Backend settings
 /// extra.mineru_connection. Remote requires the runtime capability
@@ -1042,17 +1036,8 @@ public sealed record SettingsWorkbenchState(
   string? Backend,
   bool StartupEnabled,
   IReadOnlyList<SettingsSourceOptionState>? Sources = null,
-  string PendingBackend = "cpu",
-  bool CanSwitchBackend = false,
-  IReadOnlyList<SettingsFeatureOptionState>? Features = null,
   string StatusMessage = "",
   string ServiceStatus = "",
-  string MaintenanceStatus = "",
-  string MaintenancePhase = "",
-  bool ProgressActive = false,
-  string ProgressText = "",
-  string ProgressDetail = "",
-  double? ProgressPercent = null,
   SettingsMineruConnectionState? MineruConnection = null,
   SettingsDefaultRecognitionModeState? DefaultRecognitionMode = null,
   SettingsMineruRecognitionState? MineruRecognition = null,
@@ -1256,13 +1241,6 @@ public sealed record SettingsSourceOptionState(
   string Kind,
   string Id,
   string DisplayName,
-  bool Selected);
-
-/// <summary>Optional feature for the pending accelerator.</summary>
-public sealed record SettingsFeatureOptionState(
-  string FeatureId,
-  string DisplayName,
-  string Accelerator,
   bool Selected);
 
 public sealed record UpdateWorkbenchState(

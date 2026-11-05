@@ -15,13 +15,11 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
-from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_selection import normalize_download_source_ids
 from vibeocr.runtime.environments.settings_store import (
     RuntimeSettings,
@@ -193,7 +191,6 @@ class SupervisorModule:
         self.recognition_mode_registry = recognition_mode_registry
         self._lock = threading.RLock()
         self._draining = False
-        self._runtime_maintenance = False
         self._shutdown = False
         self._settings_store = settings_store
         default_settings = SettingsSnapshot(default_ttl_seconds=300, pipelines=())
@@ -308,42 +305,6 @@ class SupervisorModule:
     # Submit
     # ------------------------------------------------------------------
 
-    def runtime_maintenance_blockers(self) -> tuple[dict[str, str], ...]:
-        with self._lock:
-            if self._runtime_maintenance:
-                return (
-                    {
-                        "code": "runtime_maintenance_active",
-                        "next_action": "wait_for_maintenance",
-                    },
-                )
-            if self._preload_count > 0:
-                return (
-                    {
-                        "code": "engine_preparation_active",
-                        "next_action": "wait_for_preparation",
-                    },
-                )
-            if any(record.state not in TERMINAL_JOB_STATES for record in self.registry):
-                return (
-                    {"code": "recognition_jobs_active", "next_action": "close_tasks"},
-                )
-            return ()
-
-    def run_runtime_maintenance[T](self, action: Callable[[], T]) -> T:
-        """Exclude job admission through the complete maintenance transaction."""
-        with self._lock:
-            if self.runtime_maintenance_blockers():
-                raise RuntimeLockTimeout(
-                    "recognition jobs, engine preparation or runtime maintenance are active"
-                )
-            self._runtime_maintenance = True
-        try:
-            return action()
-        finally:
-            with self._lock:
-                self._runtime_maintenance = False
-
     def submit(
         self,
         *,
@@ -355,7 +316,7 @@ class SupervisorModule:
         client_items: tuple[SubmitItem, ...] | None = None,
     ) -> JobRef:
         with self._lock:
-            if self._draining or self._shutdown or self._runtime_maintenance:
+            if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             from vibeocr.runtime.recognition.paddle_onnx import (
                 freeze_request,
@@ -652,7 +613,7 @@ class SupervisorModule:
 
     def retry(self, job_id: str) -> JobRef:
         with self._lock:
-            if self._draining or self._shutdown or self._runtime_maintenance:
+            if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             source = self.registry.get(job_id)
             if source.state not in TERMINAL_JOB_STATES:
@@ -775,8 +736,6 @@ class SupervisorModule:
             recognition_modes, pipelines
         )
         with self._lock:
-            if self._runtime_maintenance:
-                raise RuntimeLockTimeout("runtime maintenance is active")
             self._preload_count += 1
             status = self._residency_snapshot
         try:

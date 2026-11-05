@@ -206,33 +206,6 @@ public sealed class RuntimeHttpClient : IAsyncDisposable
     }
 
 
-    private static void ValidateInstallPlanCapability(IReadOnlyList<string>? requiredCapabilities)
-    {
-        if (requiredCapabilities is null || !requiredCapabilities.Contains("runtime.install-plan.v1"))
-        {
-            throw new ArgumentException("plan requests require runtime.install-plan.v1 capability.");
-        }
-    }
-
-    private async Task RequireInstallPlanCapabilityAsync(CancellationToken cancellationToken)
-    {
-        using HttpResponseMessage response = await GetAsync(
-            RuntimeOperationPaths.GetRuntimeHealth, cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-        using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using JsonDocument health = await JsonDocument.ParseAsync(
-            stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!health.RootElement.TryGetProperty("capabilities", out JsonElement capabilities)
-            || capabilities.ValueKind != JsonValueKind.Array
-            || !capabilities.EnumerateArray().Any(value =>
-                value.ValueKind == JsonValueKind.String && value.GetString() == "runtime.install-plan.v1"))
-        {
-            throw new RuntimeClientException(HttpV2ErrorCode.RuntimeCapabilityUnavailable,
-                "Runtime does not support runtime.install-plan.v1", retryable: false);
-        }
-    }
-
-
     public async Task EnsureSuccessAsync(
         HttpResponseMessage response,
         CancellationToken cancellationToken)

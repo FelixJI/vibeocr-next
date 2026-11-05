@@ -1196,9 +1196,9 @@ describe("AppShell", () => {
     expect(screen.getByText("客户端 v2 / Supervisor 未知")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "复制诊断详情" }));
     expect(actions.run).toHaveBeenCalledWith({ type: "diagnostics.copy" });
-    // 服务未就绪时修复入口可见并指向设置页的既有能力。
+    // 服务未就绪时设置入口可见并指向设置页的既有能力。
     await user.click(
-      screen.getByRole("button", { name: "打开设置的修复入口" }),
+      screen.getByRole("button", { name: "打开设置的运行环境分区" }),
     );
     expect(actions.navigate).toHaveBeenCalledWith("settings");
     unmount();
@@ -1616,7 +1616,7 @@ describe("AppShell", () => {
     unmount();
   });
 
-  it("keeps the current service state separate from a failed maintenance outcome", async () => {
+  it("keeps the current service state separate from a retired maintenance outcome", async () => {
     window.location.hash = "#/settings";
     const actions: AppActions = {
       run: vi.fn(),
@@ -1628,7 +1628,7 @@ describe("AppShell", () => {
       revision: 34,
       route: "settings",
       theme: "light",
-      capabilities: ["settings.selection", "runtime.maintenance"],
+      capabilities: ["settings.selection", "runtime.refresh"],
       features: {
         settings: {
           theme: "light",
@@ -1639,11 +1639,6 @@ describe("AppShell", () => {
           hotkey: "Ctrl+Alt+Q",
           sources: [],
           serviceStatus: "识别服务已就绪。",
-          maintenanceStatus: "上次安装失败：下载中断。",
-          maintenancePhase: "",
-          progressActive: false,
-          progressText: "",
-          progressPercent: null,
         },
       },
       runtimeLabel: "原生宿主已连接",
@@ -1654,15 +1649,9 @@ describe("AppShell", () => {
     );
 
     expect(screen.getByText("当前服务：识别服务已就绪。")).toBeVisible();
-    expect(
-      screen.getByText("本次维护：上次安装失败：下载中断。"),
-    ).toBeVisible();
-    // 终态不得继续渲染活动进度动画；准确终态文案保留。
+    // 预构建运行时树：维护投影已退役，不得再渲染维护行或进度条。
+    expect(screen.queryByText(/本次维护/)).not.toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/维护操作已完成|维护任务已完成|100%/),
-    ).not.toBeInTheDocument();
-    // 预构建运行时树：维护重试入口已退役，legacy 分支只剩状态行与内置说明。
     expect(
       screen.queryByRole("button", { name: "重新预览上次选择" }),
     ).not.toBeInTheDocument();
@@ -1751,115 +1740,6 @@ describe("AppShell", () => {
     expect(
       screen.getByText("技术详情（内部协议与排错证据）"),
     ).toBeInTheDocument();
-    unmount();
-  });
-
-  it("gates the maintenance progress bar on the active operation with a real total", async () => {
-    window.location.hash = "#/settings";
-    const actions: AppActions = {
-      run: vi.fn(),
-      navigate: vi.fn(),
-      setTheme: vi.fn(),
-    };
-    const settingsFeature = {
-      theme: "light",
-      isBusy: false,
-      statusCode: "settings.ready",
-      backend: "cpu",
-      startupEnabled: false,
-      pendingBackend: "cpu",
-      sources: [],
-      features: [],
-      serviceStatus: "运行时已就绪",
-      maintenanceStatus: "正在准备识别服务运行时",
-      maintenancePhase: "安装重依赖",
-      progressActive: true,
-      progressText: "已完成 1024 bytes · 总量未知",
-      progressDetail: "",
-      progressPercent: null,
-      maintenance: {
-        isRunning: true,
-        statusCode: "running",
-        operationId: "op-10",
-        requestedComponentIds: [],
-        effectiveComponentIds: [],
-        requestedSourceIds: [],
-        effectiveSourceIds: [],
-        canCancel: true,
-        canRetry: false,
-      },
-    };
-    const viewState: AppViewState = {
-      connected: true,
-      revision: 36,
-      route: "settings",
-      theme: "light",
-      capabilities: ["settings.selection", "runtime.maintenance"],
-      features: { settings: settingsFeature },
-      runtimeLabel: "原生宿主已连接",
-    };
-
-    const { rerender, unmount } = await renderLoaded(
-      <App actions={actions} viewState={viewState} />,
-    );
-
-    // 真实操作进行中且无总量：不确定进度。
-    const indeterminate = screen.getByRole("progressbar", {
-      name: "运行环境维护进度",
-    });
-    expect(indeterminate).not.toHaveAttribute("aria-valuenow");
-
-    await rerender(
-      <App
-        actions={actions}
-        viewState={{
-          ...viewState,
-          revision: 37,
-          features: {
-            settings: {
-              ...settingsFeature,
-              progressText: "512 / 1024 bytes",
-              progressPercent: 50,
-            },
-          },
-        }}
-      />,
-    );
-    // 有真实总量才显示百分比。
-    expect(
-      screen.getByRole("progressbar", { name: "运行环境维护进度" }),
-    ).toHaveAttribute("aria-valuenow", "0.5");
-
-    await rerender(
-      <App
-        actions={actions}
-        viewState={{
-          ...viewState,
-          revision: 38,
-          features: {
-            settings: {
-              ...settingsFeature,
-              maintenanceStatus: "维护操作已完成",
-              maintenancePhase: "提交运行时切换",
-              progressActive: false,
-              progressText: "",
-              progressPercent: null,
-              maintenance: {
-                ...settingsFeature.maintenance,
-                isRunning: false,
-                statusCode: "succeeded",
-                canCancel: false,
-              },
-            },
-          },
-        }}
-      />,
-    );
-    // 下一次宿主快照退出活动动画，保留终态文案。
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(
-      screen.getByText("本次维护：维护操作已完成 · 提交运行时切换"),
-    ).toBeVisible();
     unmount();
   });
 

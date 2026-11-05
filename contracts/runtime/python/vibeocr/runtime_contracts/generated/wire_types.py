@@ -18,7 +18,7 @@ RecognitionModeLifecycleKind = Literal['unmanaged', 'model_residency', 'process_
 RecognitionModeProvisioning = Literal['base_runtime', 'operating_system', 'advanced_component']
 RecognitionResourceKind = Literal['model', 'process']
 RuntimeComponentState = Literal['not_required', 'pending', 'installing', 'verifying', 'ready', 'failed', 'cancelled']
-RuntimeServiceState = Literal['ready', 'degraded', 'maintenance']
+RuntimeServiceState = Literal['ready', 'degraded']
 
 
 class AddTextLayerRequest(TypedDict, total=False):
@@ -566,26 +566,6 @@ class RuntimeComponentStatus(TypedDict, total=False):
     repairable: NotRequired[bool]
 
 
-class RuntimeMaintenanceStatus(TypedDict, total=False):
-    operation_id: Required[str]
-    source_operation_id: NotRequired[str | None]
-    sequence: Required[int]
-    operation: Required[Literal['inspect', 'ensure', 'repair']]
-    operation_state: Required[Literal['queued', 'running', 'succeeded', 'failed', 'cancelled']]
-    phase: Required[Literal['validate_binding', 'wait_for_lock', 'prepare_runtime', 'install_profile', 'install_backend', 'verify_runtime', 'commit_runtime']]
-    profile_id: Required[str]
-    component_id: NotRequired[str | None]
-    updated_at: Required[str]
-    progress: NotRequired[ProgressSnapshot | None]
-    message_code: NotRequired[str | None]
-    requested_component_ids: NotRequired[list[str]]
-    effective_component_ids: NotRequired[list[str]]
-    requested_download_source_ids: NotRequired[list[str]]
-    effective_download_source_ids: NotRequired[list[str]]
-    source: NotRequired[RuntimeSourceIdentity]
-    plan_id: NotRequired[str]
-
-
 class RuntimePreloadRequest(TypedDict, total=False):
     pipelines: Required[list[str]]
     recognition_modes: NotRequired[list[RecognitionModeId]]
@@ -615,7 +595,6 @@ class RuntimeStatusSnapshot(TypedDict, total=False):
     backend_version: Required[str]
     source: NotRequired[RuntimeSourceIdentity]
     profile: Required[RuntimeProfileStatus]
-    maintenance: Required[RuntimeMaintenanceStatus | None]
 
 
 class SaveRequest(TypedDict, total=False):

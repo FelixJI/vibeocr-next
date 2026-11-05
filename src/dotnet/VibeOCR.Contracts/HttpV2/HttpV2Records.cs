@@ -263,74 +263,6 @@ public sealed record RuntimeSourceIdentity
     public required string RuntimeManifestSha256 { get; init; }
 }
 
-public sealed record RuntimeMaintenanceRequest
-{
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? OperationId { get; init; }
-    public required RuntimeMaintenanceOperation Operation { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? ProfileId { get; init; }
-    /// <summary>
-    /// Confirmed install plan id (runtime.install-plan.v1). Valid for ensure
-    /// only, requires an explicit OperationId, and is mutually exclusive with
-    /// ProfileId, ComponentIds, InstallComponentIds and DownloadSourceIds.
-    /// Null keeps the legacy semantics without plan confirmation.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? PlanId { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? ComponentIds { get; init; }
-    /// <summary>
-    /// Manual install scope for ensure (runtime.component-selection.v1) as
-    /// stable component ids. Null omits the wire field (Backend default set),
-    /// while an empty list explicitly selects no optional components.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? InstallComponentIds { get; init; }
-    /// <summary>
-    /// Download source ids snapshotted into this ensure operation. Null uses
-    /// the current Backend setting/default; at most one id is valid per kind.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? DownloadSourceIds { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? RequiredCapabilities { get; init; }
-}
-
-public sealed record RuntimeMaintenanceCommand
-{
-    public required string CommandId { get; init; }
-    public required RuntimeMaintenanceCommandKind Command { get; init; }
-    public required string TargetOperationId { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? NewOperationId { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? ExpectedSequence { get; init; }
-    /// <summary>
-    /// Fresh install plan id (runtime.install-plan.v1) for a retry that
-    /// replaces the source operation's plan confirmation. Invalid for cancel
-    /// and mutually exclusive with the selection overrides; when present,
-    /// RequiredCapabilities must contain runtime.install-plan.v1.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? PlanId { get; init; }
-    /// <summary>
-    /// On retry, explicitly re-selects a still-compatible install scope
-    /// (runtime.component-selection.v1). Null omits the wire field and reuses
-    /// the source operation's normalized intent.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? InstallComponentIds { get; init; }
-    /// <summary>
-    /// On retry, explicitly replaces the source operation's normalized
-    /// download source intent. Null reuses it.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? DownloadSourceIds { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? RequiredCapabilities { get; init; }
-}
-
 public sealed record RuntimeComponentStatus
 {
     public required string ComponentId { get; init; }
@@ -357,54 +289,6 @@ public sealed record RuntimeProfileStatus
     public required RuntimeAccelerator Accelerator { get; init; }
     public IReadOnlyList<RuntimeComponentStatus> Components { get; init; } =
         Array.Empty<RuntimeComponentStatus>();
-}
-
-public sealed record RuntimeMaintenanceStatus
-{
-    public required string OperationId { get; init; }
-    public string? SourceOperationId { get; init; }
-    public required int Sequence { get; init; }
-    public required RuntimeMaintenanceOperation Operation { get; init; }
-    public required RuntimeOperationState OperationState { get; init; }
-    public required RuntimeMaintenancePhase Phase { get; init; }
-    public required string ProfileId { get; init; }
-    public string? ComponentId { get; init; }
-    public required string UpdatedAt { get; init; }
-    public ProgressSnapshot? Progress { get; init; }
-    public string? MessageCode { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? RequestedComponentIds { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? EffectiveComponentIds { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? RequestedDownloadSourceIds { get; init; }
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? EffectiveDownloadSourceIds { get; init; }
-    /// <summary>Install plan id echo when this operation confirmed a previewed plan.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? PlanId { get; init; }
-}
-
-[JsonConverter(typeof(RuntimeInstallPlanRequestJsonConverter))]
-public sealed record RuntimeInstallPlanRequest
-{
-    public required IReadOnlyList<string> RequiredCapabilities { get; init; }
-    /// <summary>Null keeps the persistent preference or product default.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public RuntimeAccelerator? Accelerator { get; init; }
-    /// <summary>
-    /// Manual install scope (runtime.component-selection.v1): null omits the
-    /// wire field (Backend default), an empty list explicitly selects no
-    /// optional components.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? InstallComponentIds { get; init; }
-    /// <summary>
-    /// Download source selection (runtime.download-sources.v1); must be
-    /// non-empty when present, null omits the field.
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public IReadOnlyList<string>? DownloadSourceIds { get; init; }
 }
 
 public sealed record RuntimeInstallPlanResponse : IJsonOnDeserialized
@@ -530,41 +414,6 @@ public sealed record RuntimeInstallPlanCost : IJsonOnDeserialized
     }
 }
 
-public sealed record RuntimeMaintenanceReceipt
-{
-    public int SchemaVersion { get; init; } = HttpV2Schema.Version;
-    public required string OperationId { get; init; }
-    public required RuntimeMaintenanceStatus Snapshot { get; init; }
-    public IReadOnlyList<string> NegotiatedCapabilities { get; init; } = Array.Empty<string>();
-}
-
-public sealed record RuntimeMaintenanceEvent
-{
-    public int SchemaVersion { get; init; } = HttpV2Schema.Version;
-    public required RuntimeMaintenanceEventType EventType { get; init; }
-    public required int Sequence { get; init; }
-    public required RuntimeMaintenanceOperation Operation { get; init; }
-    public required RuntimeMaintenanceStatus Snapshot { get; init; }
-    public required string MessageCode { get; init; }
-    public IDictionary<string, string> MessageArgs { get; init; } =
-        new Dictionary<string, string>();
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? FallbackMessage { get; init; }
-}
-
-public sealed record RuntimeMaintenanceUpdate
-{
-    public int SchemaVersion { get; init; } = HttpV2Schema.Version;
-    public required string OperationId { get; init; }
-    public required RuntimeMaintenanceStatus Snapshot { get; init; }
-    public IReadOnlyList<RuntimeMaintenanceEvent> Events { get; init; } =
-        Array.Empty<RuntimeMaintenanceEvent>();
-    public required int OldestSequence { get; init; }
-    public required int ThroughSequence { get; init; }
-    public required bool More { get; init; }
-    public string? ReplayExpiresAt { get; init; }
-}
-
 public sealed record RuntimeStatusSnapshot
 {
     public int SchemaVersion { get; init; } = HttpV2Schema.Version;
@@ -572,7 +421,6 @@ public sealed record RuntimeStatusSnapshot
     public required RuntimeServiceState ServiceState { get; init; }
     public required string BackendVersion { get; init; }
     public required RuntimeProfileStatus Profile { get; init; }
-    public RuntimeMaintenanceStatus? Maintenance { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public RuntimeSourceIdentity? Source { get; init; }
 }

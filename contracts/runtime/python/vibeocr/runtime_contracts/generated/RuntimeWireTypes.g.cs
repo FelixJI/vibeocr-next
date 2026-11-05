@@ -355,9 +355,7 @@ public enum RuntimeServiceState
     [JsonStringEnumMemberName("ready")]
     Ready,
     [JsonStringEnumMemberName("degraded")]
-    Degraded,
-    [JsonStringEnumMemberName("maintenance")]
-    Maintenance
+    Degraded
 }
 
 public sealed class RuntimeServiceStateJsonConverter : JsonStringEnumConverter<RuntimeServiceState>
@@ -1565,60 +1563,6 @@ public sealed record RuntimeComponentStatus
     public bool? Repairable { get; init; }
 }
 
-public sealed record RuntimeMaintenanceStatus
-{
-    [JsonPropertyName("operation_id")]
-    public required string OperationId { get; init; }
-
-    [JsonPropertyName("source_operation_id")]
-    public string? SourceOperationId { get; init; }
-
-    [JsonPropertyName("sequence")]
-    public required int Sequence { get; init; }
-
-    [JsonPropertyName("operation")]
-    public required string Operation { get; init; }
-
-    [JsonPropertyName("operation_state")]
-    public required string OperationState { get; init; }
-
-    [JsonPropertyName("phase")]
-    public required string Phase { get; init; }
-
-    [JsonPropertyName("profile_id")]
-    public required string ProfileId { get; init; }
-
-    [JsonPropertyName("component_id")]
-    public string? ComponentId { get; init; }
-
-    [JsonPropertyName("updated_at")]
-    public required string UpdatedAt { get; init; }
-
-    [JsonPropertyName("progress")]
-    public ProgressSnapshot? Progress { get; init; }
-
-    [JsonPropertyName("message_code")]
-    public string? MessageCode { get; init; }
-
-    [JsonPropertyName("requested_component_ids")]
-    public IReadOnlyList<string>? RequestedComponentIds { get; init; }
-
-    [JsonPropertyName("effective_component_ids")]
-    public IReadOnlyList<string>? EffectiveComponentIds { get; init; }
-
-    [JsonPropertyName("requested_download_source_ids")]
-    public IReadOnlyList<string>? RequestedDownloadSourceIds { get; init; }
-
-    [JsonPropertyName("effective_download_source_ids")]
-    public IReadOnlyList<string>? EffectiveDownloadSourceIds { get; init; }
-
-    [JsonPropertyName("source")]
-    public RuntimeSourceIdentity? Source { get; init; }
-
-    [JsonPropertyName("plan_id")]
-    public string? PlanId { get; init; }
-}
-
 public sealed record RuntimePreloadRequest
 {
     [JsonPropertyName("pipelines")]
@@ -1680,9 +1624,6 @@ public sealed record RuntimeStatusSnapshot
 
     [JsonPropertyName("profile")]
     public required RuntimeProfileStatus Profile { get; init; }
-
-    [JsonPropertyName("maintenance")]
-    public required RuntimeMaintenanceStatus? Maintenance { get; init; }
 }
 
 public sealed record SaveRequest

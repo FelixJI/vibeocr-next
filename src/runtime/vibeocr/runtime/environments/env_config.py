@@ -158,7 +158,7 @@ CONFIG_DIR = "config"
 # {import 模块名: pip 包名} —— 检测环境时 import 模块名，结果/缓存用包名做 key。
 # - paddle 模块：paddlepaddle-gpu / paddlepaddle-cpu / paddlepaddle 均导入为 paddle，
 #   故只检 paddle；但它们的发行版名各异，额外候选见 OCR_DIST_NAME_ALIASES。
-# - 版本约束不在此处，安装版本来自随包依赖 profile（env_manager._load_dep_specs）
+# - 版本约束不在此处，安装版本来自随包依赖 profile（dependency_profiles.json）
 # - PDF 后端依赖（fitz/fastapi/uvicorn/pydantic/fonttools）已从主 exe 排除，
 #   由便携 Python 安装供 PDF 子进程用，故与 OCR 依赖同等纳入就绪检测。
 OCR_CHECK_MODULES: dict[str, str] = {
@@ -414,21 +414,3 @@ def get_update_progress_path() -> Path:
     不主动 mkdir——替换器写它时已 ensure parent（与 ready 信号一致）。
     """
     return get_data_dir() / "cache" / "update" / "progress.json"
-
-
-def get_pending_sync_path() -> Path:
-    """获取依赖版本待同步标记文件路径
-
-    updater 在替换应用文件后写入此文件（含变更的 dep_versions），
-    新版 VibeOCR 启动时读取并据此用 install_embedded_dependencies 升级 python/，
-    升级成功后删除。与 updater_main.py 的写入路径保持一致。
-    """
-    d = get_data_dir() / "settings"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "pending_sync.json"
-
-
-# 依赖同步失败重试上限：达到后主程序提示用户"建议重装嵌入式 Python"。
-# 单次同步失败常为网络/镜像抖动，多次失败则更可能是 python/ 损坏，
-# 此时引导用户走 reinstall_embedded_python（设置页入口）比继续重试更有效。
-SYNC_MAX_ATTEMPTS = 3

@@ -197,37 +197,6 @@ public enum RuntimeServiceState
 {
     [JsonStringEnumMemberName("ready")] Ready,
     [JsonStringEnumMemberName("degraded")] Degraded,
-    [JsonStringEnumMemberName("maintenance")] Maintenance,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<RuntimeMaintenanceOperation>))]
-public enum RuntimeMaintenanceOperation
-{
-    [JsonStringEnumMemberName("inspect")] Inspect,
-    [JsonStringEnumMemberName("ensure")] Ensure,
-    [JsonStringEnumMemberName("repair")] Repair,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<RuntimeOperationState>))]
-public enum RuntimeOperationState
-{
-    [JsonStringEnumMemberName("queued")] Queued,
-    [JsonStringEnumMemberName("running")] Running,
-    [JsonStringEnumMemberName("succeeded")] Succeeded,
-    [JsonStringEnumMemberName("failed")] Failed,
-    [JsonStringEnumMemberName("cancelled")] Cancelled,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<RuntimeMaintenancePhase>))]
-public enum RuntimeMaintenancePhase
-{
-    [JsonStringEnumMemberName("validate_binding")] ValidateBinding,
-    [JsonStringEnumMemberName("wait_for_lock")] WaitForLock,
-    [JsonStringEnumMemberName("prepare_runtime")] PrepareRuntime,
-    [JsonStringEnumMemberName("install_profile")] InstallProfile,
-    [JsonStringEnumMemberName("install_backend")] InstallBackend,
-    [JsonStringEnumMemberName("verify_runtime")] VerifyRuntime,
-    [JsonStringEnumMemberName("commit_runtime")] CommitRuntime,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<RuntimeAccelerator>))]
@@ -309,21 +278,6 @@ public enum HttpV2ErrorCode
     [JsonStringEnumMemberName("MINERU_CONFIG_MIGRATION_REQUIRED")] MineruConfigMigrationRequired,
     [JsonStringEnumMemberName("MINERU_TIER_UNAVAILABLE")] MineruTierUnavailable,
     [JsonStringEnumMemberName("MINERU_TIER_PREPARATION_REQUIRED")] MineruTierPreparationRequired,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<RuntimeMaintenanceCommandKind>))]
-public enum RuntimeMaintenanceCommandKind
-{
-    [JsonStringEnumMemberName("cancel")] Cancel,
-    [JsonStringEnumMemberName("retry")] Retry,
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter<RuntimeMaintenanceEventType>))]
-public enum RuntimeMaintenanceEventType
-{
-    [JsonStringEnumMemberName("snapshot")] Snapshot,
-    [JsonStringEnumMemberName("progress")] Progress,
-    [JsonStringEnumMemberName("heartbeat")] Heartbeat,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<RuntimeComponentDesiredState>))]

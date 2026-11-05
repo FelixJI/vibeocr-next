@@ -539,42 +539,6 @@ public sealed class RuntimeSelectionService
     }
 
     /// <summary>
-    /// Map feature ids for one accelerator to component ids via the variant
-    /// catalog. Feature ids and component ids stay distinct even when the
-    /// current Backend happens to name them identically.
-    /// </summary>
-    public IReadOnlyList<string> SelectComponentIds(
-        string accelerator,
-        IReadOnlyCollection<string>? featureIds)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(accelerator);
-        if (_variantCatalog is null)
-        {
-            throw Missing(ComponentSelectionCapability);
-        }
-        if (featureIds is null || featureIds.Count == 0)
-        {
-            return Array.Empty<string>();
-        }
-        var componentIds = new List<string>(featureIds.Count);
-        foreach (string featureId in featureIds)
-        {
-            if (string.IsNullOrWhiteSpace(featureId) ||
-                !_componentByVariant.TryGetValue(
-                    (featureId, accelerator),
-                    out string? componentId))
-            {
-                throw Error(
-                    RuntimeSelectionErrorKind.UnknownFeature,
-                    $"Feature '{featureId}' has no component variant for accelerator "
-                    + $"'{accelerator}'.");
-            }
-            componentIds.Add(componentId);
-        }
-        return componentIds.Distinct(StringComparer.Ordinal).ToArray();
-    }
-
-    /// <summary>
     /// Persist the user's download source preference in Backend settings (the
     /// long-term source of truth). The update re-serializes the current
     /// snapshot so residency and extra settings survive; endpoints are never

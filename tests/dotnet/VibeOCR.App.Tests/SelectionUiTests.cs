@@ -33,8 +33,6 @@ public sealed class SelectionUiTests
         Assert.Equal(
             ["tuna-pypi"],
             viewModel.Sources.Where(source => source.Selected).Select(source => source.Id));
-        // 默认 pending 加速器是 cpu:只有 CPU 变体进入功能列表。
-        Assert.Equal(["document_parsing"], viewModel.Features.Select(feature => feature.FeatureId));
     }
 
     [Fact]
@@ -140,27 +138,6 @@ public sealed class SelectionUiTests
     }
 
     [Fact]
-    public async Task AcceleratorAndFeatureSelectionStagePendingChoices()
-    {
-        var fake = new SelectionInferenceClient { Health = SelectionHealth() };
-        var viewModel = new SettingsViewModel(fake);
-        await viewModel.LoadSnapshotAsync(CancellationToken.None);
-
-        viewModel.SetPendingAccelerator("nvidia_cuda");
-        Assert.Equal(
-            ["document_parsing", "gpu_runtime"],
-            viewModel.Features.Select(feature => feature.FeatureId));
-
-        viewModel.SetFeatureEnabled("gpu_runtime", true);
-        Assert.Equal(["gpu_runtime"], viewModel.PendingFeatureIds);
-        Assert.Equal("cpu", viewModel.Backend);
-
-        viewModel.SetFeatureEnabled("quantum_parsing", true);
-        Assert.Contains("未知功能", viewModel.Status);
-        Assert.Equal(["gpu_runtime"], viewModel.PendingFeatureIds);
-    }
-
-    [Fact]
     public async Task RecognitionTaskModeOverridesRuntimeDefault()
     {
         var fake = new CompletedRecognitionClient();
@@ -218,37 +195,24 @@ public sealed class SelectionUiTests
             WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package_index","sourceId":"pypi"}"""), sessionId).Command);
         Assert.IsType<SetDownloadSourceCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("settings", "setSource", """{"kind":"package_index"}"""), sessionId).Command);
-        Assert.IsType<SetAcceleratorCommand>(
-            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setAccelerator", """{"accelerator":"nvidia_cuda"}"""), sessionId).Command);
-        Assert.IsType<SetRuntimeFeatureCommand>(
-            WorkbenchBridgeCodec.ParseCommand(Command("settings", "setFeature", """{"featureId":"gpu_runtime","enabled":true}"""), sessionId).Command);
         Assert.IsType<SetTaskEngineCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("recognition", "setTaskEngine", """{"engine":"windows"}"""), sessionId).Command);
         Assert.IsType<SetTaskEngineCommand>(
             WorkbenchBridgeCodec.ParseCommand(Command("recognition", "setTaskEngine", "{}"), sessionId).Command);
 
-        Assert.Throws<WorkbenchBridgeProtocolException>(
-            () => WorkbenchBridgeCodec.ParseCommand(
-                Command("settings", "setAccelerator", """{"accelerator":"tpu"}"""), sessionId));
         var state = new SettingsWorkbenchState(
             WorkbenchTheme.Dark,
             false,
             "settings.ready",
             "cpu",
             false,
-            [new SettingsSourceOptionState("package_index", "tuna-pypi", "TUNA", true)],
-            "nvidia_cuda",
-            true,
-            [new SettingsFeatureOptionState("gpu_runtime", "CUDA", "nvidia_cuda", false)]);
+            [new SettingsSourceOptionState("package_index", "tuna-pypi", "TUNA", true)]);
         string payload = WorkbenchBridgeCodec.SerializeState(
             sessionId,
             new WorkbenchStateEnvelope(7, "settings", WorkbenchStateChange.Replace, state));
         Assert.DoesNotContain("\"engines\"", payload);
         Assert.DoesNotContain("selectedEngine", payload);
         Assert.Contains("\"sources\":[", payload);
-        Assert.Contains("\"pendingBackend\":\"nvidia_cuda\"", payload);
-        Assert.Contains("\"canSwitchBackend\":true", payload);
-        Assert.Contains("\"features\":[", payload);
         // 桥接投影不泄漏 endpoint 或内部依赖信息。
         Assert.DoesNotContain("endpoint", payload);
         Assert.DoesNotContain("component_id", payload);

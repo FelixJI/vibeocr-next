@@ -170,12 +170,6 @@ def test_settings_selection_round_trips_and_omission_stays_wire_compatible() -> 
     assert "kinds not present" in description
     assert "Backend-declared default for that kind" in description
 
-    status = _spec()["components"]["schemas"]["RuntimeMaintenanceStatus"]
-    assert {
-        "requested_download_source_ids",
-        "effective_download_source_ids",
-    }.issubset(status["properties"])
-
 
 def test_empty_settings_selection_normalizes_to_golden_omission() -> None:
     payload = dtos.SettingsSnapshot(download_source_ids=()).to_payload()

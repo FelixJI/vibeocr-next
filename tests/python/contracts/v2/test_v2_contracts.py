@@ -26,8 +26,6 @@ from vibeocr.runtime_contracts import (
     JobState,
     JobStateTransitionError,
     PipelineSelection,
-    ProgressSnapshot,
-    ProgressUnit,
     ResidencyEntry,
     ResidencyKind,
     ResidencyStatus,
@@ -37,12 +35,6 @@ from vibeocr.runtime_contracts import (
     RuntimeComponentState,
     RuntimeComponentStatus,
     RuntimeDriftReason,
-    RuntimeMaintenanceCommand,
-    RuntimeMaintenanceCommandKind,
-    RuntimeMaintenanceOperation,
-    RuntimeMaintenancePhase,
-    RuntimeMaintenanceStatus,
-    RuntimeOperationState,
     RuntimeProfileStatus,
     RuntimeServiceState,
     RuntimeSourceIdentity,
@@ -61,7 +53,6 @@ from vibeocr.runtime_contracts import (
     parse_pipeline_selection,
     parse_pipeline_spec,
     parse_residency_entry,
-    parse_runtime_maintenance_update,
     parse_runtime_status,
     parse_submit_request,
 )
@@ -408,7 +399,7 @@ def test_runtime_status_round_trips_typed_profile_and_progress() -> None:
     )
     status = RuntimeStatusSnapshot(
         instance_id="runtime-1",
-        service_state=RuntimeServiceState.MAINTENANCE,
+        service_state=RuntimeServiceState.DEGRADED,
         backend_version="0.9.0",
         profile=RuntimeProfileStatus(
             profile_id="win-x64-cpu",
@@ -428,240 +419,12 @@ def test_runtime_status_round_trips_typed_profile_and_progress() -> None:
                 ),
             ),
         ),
-        maintenance=RuntimeMaintenanceStatus(
-            operation_id="install-1",
-            sequence=2,
-            operation=RuntimeMaintenanceOperation.ENSURE,
-            operation_state=RuntimeOperationState.RUNNING,
-            phase=RuntimeMaintenancePhase.INSTALL_PROFILE,
-            profile_id="win-x64-cpu",
-            component_id="ocr_engine",
-            requested_component_ids=("ocr_engine",),
-            effective_component_ids=("ocr_engine", "runtime_base"),
-            requested_download_source_ids=("pypi-tuna", "hf-mirror"),
-            effective_download_source_ids=("pypi-tuna", "hf-mirror"),
-            progress=ProgressSnapshot(
-                unit=ProgressUnit.BYTES,
-                current=50,
-                total=100,
-                estimated_remaining_seconds=2.5,
-            ),
-            message_code="runtime.install.profile",
-        ),
         source=source,
     )
     payload = status.to_payload()
     assert parse_runtime_status(payload) == status
-    assert payload["maintenance"]["progress"] == {
-        "unit": "bytes",
-        "current": 50,
-        "total": 100,
-        "estimated_remaining_seconds": 2.5,
-    }
     assert payload["source"]["backend_source_sha"] == "a" * 40
     assert payload["profile"]["components"][0]["drift_reason"] == "version_mismatch"
-    assert payload["maintenance"]["effective_component_ids"] == [
-        "ocr_engine",
-        "runtime_base",
-    ]
-    assert payload["maintenance"]["effective_download_source_ids"] == [
-        "pypi-tuna",
-        "hf-mirror",
-    ]
-
-
-def test_runtime_retry_and_cursor_update_preserve_idempotent_identity() -> None:
-    command = RuntimeMaintenanceCommand(
-        command_id="cmd-1",
-        command=RuntimeMaintenanceCommandKind.RETRY,
-        target_operation_id="op-1",
-        new_operation_id="op-2",
-        expected_sequence=7,
-    )
-    assert command.to_payload() == {
-        "command_id": "cmd-1",
-        "command": "retry",
-        "target_operation_id": "op-1",
-        "new_operation_id": "op-2",
-        "expected_sequence": 7,
-    }
-
-    def snapshot(sequence: int) -> dict:
-        return {
-            "operation_id": "op-2",
-            "source_operation_id": "op-1",
-            "sequence": sequence,
-            "operation": "repair",
-            "operation_state": "running",
-            "phase": "install_profile",
-            "profile_id": "win-x64-cpu",
-            "component_id": "ocr_engine",
-            "updated_at": "2026-08-05T12:00:00Z",
-            "progress": None,
-            "message_code": "runtime.install.profile",
-            "requested_component_ids": ["ocr_engine"],
-            "effective_component_ids": ["ocr_engine", "runtime_base"],
-            "requested_download_source_ids": ["pypi-tuna", "hf-mirror"],
-            "effective_download_source_ids": ["pypi-tuna", "hf-mirror"],
-        }
-
-    events = [
-        {
-            "schema_version": 2,
-            "event_type": "snapshot",
-            "operation": "repair",
-            "snapshot": snapshot(sequence),
-            "message_code": "runtime.install.profile",
-        }
-        for sequence in (8, 9)
-    ]
-    update = parse_runtime_maintenance_update(
-        {
-            "schema_version": 2,
-            "operation_id": "op-2",
-            "snapshot": snapshot(9),
-            "events": events,
-            "oldest_sequence": 1,
-            "through_sequence": 9,
-            "more": False,
-            "replay_expires_at": "2026-08-06T12:00:00Z",
-        }
-    )
-    assert update.snapshot.source_operation_id == "op-1"
-    assert update.snapshot.effective_download_source_ids == (
-        "pypi-tuna",
-        "hf-mirror",
-    )
-    assert [event.sequence for event in update.events] == [8, 9]
-
-
-def test_runtime_cursor_update_rejects_sequence_gap() -> None:
-    snapshot = {
-        "operation_id": "op-1",
-        "sequence": 3,
-        "operation": "ensure",
-        "operation_state": "running",
-        "phase": "install_profile",
-        "profile_id": "win-x64-cpu",
-        "updated_at": "2026-08-05T12:00:00Z",
-    }
-    events = [
-        {
-            "schema_version": 2,
-            "event_type": "snapshot",
-            "sequence": sequence,
-            "operation": "ensure",
-            "snapshot": {**snapshot, "sequence": sequence},
-            "message_code": "runtime.install.profile",
-        }
-        for sequence in (1, 3)
-    ]
-
-    with pytest.raises(ContractError, match="sequence gap"):
-        parse_runtime_maintenance_update(
-            {
-                "schema_version": 2,
-                "operation_id": "op-1",
-                "snapshot": snapshot,
-                "events": events,
-                "oldest_sequence": 1,
-                "through_sequence": 3,
-                "more": False,
-                "replay_expires_at": None,
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        (lambda payload: payload.update(operation_id="op-other"), "operation_id"),
-        (
-            lambda payload: payload["events"][0]["snapshot"].update(
-                operation_id="op-other"
-            ),
-            "event operation_id",
-        ),
-        (lambda payload: payload.update(more="false"), "more must be a boolean"),
-    ],
-)
-def test_runtime_cursor_update_rejects_cross_operation_or_weak_boolean(
-    mutation, message: str
-) -> None:
-    snapshot = {
-        "operation_id": "op-1",
-        "sequence": 1,
-        "operation": "ensure",
-        "operation_state": "running",
-        "phase": "prepare_runtime",
-        "profile_id": "win-x64-cpu",
-        "updated_at": "2026-08-05T12:00:00Z",
-    }
-    payload = {
-        "schema_version": 2,
-        "operation_id": "op-1",
-        "snapshot": snapshot.copy(),
-        "events": [
-            {
-                "schema_version": 2,
-                "event_type": "snapshot",
-                "sequence": 1,
-                "operation": "ensure",
-                "snapshot": snapshot.copy(),
-                "message_code": "runtime.prepare",
-            }
-        ],
-        "oldest_sequence": 1,
-        "through_sequence": 1,
-        "more": False,
-        "replay_expires_at": None,
-    }
-    mutation(payload)
-
-    with pytest.raises(ContractError, match=message):
-        parse_runtime_maintenance_update(payload)
-
-
-@pytest.mark.parametrize(
-    ("oldest", "through", "snapshot_sequence", "expires_at", "message"),
-    [
-        (True, 1, 1, None, "oldest_sequence"),
-        ("1", 1, 1, None, "oldest_sequence"),
-        (0, 1, 1, None, "oldest_sequence"),
-        (2, 1, 1, None, "oldest_sequence"),
-        (1, 1, True, None, "sequence"),
-        (1, 1, "1", None, "sequence"),
-        (1, 1, 1.5, None, "sequence"),
-        (1, 2, 1, None, "snapshot precedes cursor"),
-        (1, 1, 1, "not-a-timestamp", "replay_expires_at"),
-        (1, 1, 1, "2026-08-06T12:00:00", "replay_expires_at"),
-    ],
-)
-def test_runtime_cursor_update_rejects_invalid_cursor_metadata(
-    oldest, through, snapshot_sequence, expires_at, message: str
-) -> None:
-    snapshot = {
-        "operation_id": "op-1",
-        "sequence": snapshot_sequence,
-        "operation": "ensure",
-        "operation_state": "running",
-        "phase": "prepare_runtime",
-        "profile_id": "win-x64-cpu",
-        "updated_at": "2026-08-05T12:00:00Z",
-    }
-    payload = {
-        "schema_version": 2,
-        "operation_id": "op-1",
-        "snapshot": snapshot,
-        "events": [],
-        "oldest_sequence": oldest,
-        "through_sequence": through,
-        "more": False,
-        "replay_expires_at": expires_at,
-    }
-
-    with pytest.raises(ContractError, match=message):
-        parse_runtime_maintenance_update(payload)
 
 
 # ---------------------------------------------------------------------------

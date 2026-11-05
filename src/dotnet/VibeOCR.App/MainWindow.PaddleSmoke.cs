@@ -35,18 +35,15 @@ public sealed partial class MainWindow
   private static string PaddleSmokeEnvironmentName => PaddleSmokeRecipe.StartsWith("paddleocr-ort-", StringComparison.Ordinal)
     ? "paddle-smoke-" + PaddleSmokeRecipe["paddleocr-".Length..] : "paddle-smoke-cpu";
   private static bool PaddleSmokeInstalledRecipeMatches(ManagedEnvironment environment) =>
-    environment.Status == "installed" && (environment.Recipe == PaddleSmokeRecipe ||
-      PaddleSmokeRecipe == "paddleocr-ort-cpu" && environment.Recipe == "paddleocr-ort-cuda");
+    environment.Status == "installed" && environment.Recipe == PaddleSmokeRecipe;
 
   private static ManagedEnvironment? FindPaddleSmokeEnvironment(ManagedEnvironmentList list) =>
     list.Environments.FirstOrDefault(item => item.Id == list.ActiveId && PaddleSmokeInstalledRecipeMatches(item))
     ?? list.Environments.FirstOrDefault(PaddleSmokeInstalledRecipeMatches)
-    ?? list.Environments.FirstOrDefault(item => item.Id == list.ActiveId &&
-      PaddleSmokeRecipe == "paddleocr-ort-cuda" && item.Recipe == "paddleocr-ort-cpu")
     ?? list.Environments.FirstOrDefault(item => item.Name == PaddleSmokeEnvironmentName);
 
   private static string PaddleSmokeDevice => PaddleSmokeRecipe.EndsWith("directml", StringComparison.Ordinal)
-    ? "directml" : PaddleSmokeRecipe.EndsWith("cuda", StringComparison.Ordinal) ? "nvidia_cuda" : "cpu";
+    ? "directml" : "cpu";
 
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。

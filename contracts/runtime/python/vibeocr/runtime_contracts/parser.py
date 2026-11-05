@@ -72,16 +72,7 @@ from .dtos import (
     RuntimeInstallPlanComponent,
     RuntimeInstallPlanCost,
     RuntimeInstallPlanDependencyState,
-    RuntimeInstallPlanRequest,
     RuntimeInstallPlanResponse,
-    RuntimeMaintenanceEvent,
-    RuntimeMaintenanceEventType,
-    RuntimeMaintenanceOperation,
-    RuntimeMaintenancePhase,
-    RuntimeMaintenanceReceipt,
-    RuntimeMaintenanceStatus,
-    RuntimeMaintenanceUpdate,
-    RuntimeOperationState,
     RuntimeProfileStatus,
     RuntimeServiceState,
     RuntimeSourceIdentity,
@@ -1003,78 +994,6 @@ def _parse_component_ids(payload: Any, field: str) -> tuple[str, ...]:
     return tuple(payload)
 
 
-def _parse_runtime_maintenance_status(payload: Any) -> RuntimeMaintenanceStatus:
-    if not isinstance(payload, dict):
-        raise ContractError("runtime maintenance must be a JSON object")
-    _require_fields(
-        payload,
-        (
-            "operation_id",
-            "sequence",
-            "operation",
-            "operation_state",
-            "phase",
-            "profile_id",
-            "updated_at",
-        ),
-        "runtime maintenance",
-    )
-    sequence = payload["sequence"]
-    if type(sequence) is not int or sequence < 1:
-        raise ContractError("runtime maintenance sequence must be a positive integer")
-    return RuntimeMaintenanceStatus(
-        operation_id=payload["operation_id"],
-        source_operation_id=payload.get("source_operation_id"),
-        sequence=sequence,
-        operation=_require_enum(
-            RuntimeMaintenanceOperation,
-            payload["operation"],
-            "runtime maintenance operation",
-        ),
-        operation_state=_require_enum(
-            RuntimeOperationState,
-            payload["operation_state"],
-            "runtime operation state",
-        ),
-        phase=_require_enum(
-            RuntimeMaintenancePhase,
-            payload["phase"],
-            "runtime maintenance phase",
-        ),
-        profile_id=payload["profile_id"],
-        component_id=payload.get("component_id"),
-        updated_at=payload["updated_at"],
-        progress=(
-            _parse_progress_snapshot(payload["progress"])
-            if payload.get("progress") is not None
-            else None
-        ),
-        message_code=payload.get("message_code"),
-        requested_component_ids=_parse_component_ids(
-            payload.get("requested_component_ids"),
-            "requested_component_ids",
-        ),
-        effective_component_ids=_parse_component_ids(
-            payload.get("effective_component_ids"),
-            "effective_component_ids",
-        ),
-        requested_download_source_ids=_parse_component_ids(
-            payload.get("requested_download_source_ids"),
-            "requested_download_source_ids",
-        ),
-        effective_download_source_ids=_parse_component_ids(
-            payload.get("effective_download_source_ids"),
-            "effective_download_source_ids",
-        ),
-        source=(
-            _parse_runtime_source_identity(payload["source"])
-            if payload.get("source") is not None
-            else None
-        ),
-        plan_id=payload.get("plan_id"),
-    )
-
-
 def parse_runtime_status(payload: dict[str, Any]) -> RuntimeStatusSnapshot:
     if not isinstance(payload, dict):
         raise ContractError("runtime status must be a JSON object")
@@ -1086,7 +1005,6 @@ def parse_runtime_status(payload: dict[str, Any]) -> RuntimeStatusSnapshot:
             "service_state",
             "backend_version",
             "profile",
-            "maintenance",
         ),
         "runtime status",
     )
@@ -1159,10 +1077,6 @@ def parse_runtime_status(payload: dict[str, Any]) -> RuntimeStatusSnapshot:
         )
         if "repairable" in component and not isinstance(component["repairable"], bool):
             raise ContractError("runtime component repairable must be a boolean")
-    maintenance_raw = payload["maintenance"]
-    maintenance = None
-    if maintenance_raw is not None:
-        maintenance = _parse_runtime_maintenance_status(maintenance_raw)
     return RuntimeStatusSnapshot(
         schema_version=SCHEMA_VERSION,
         instance_id=payload["instance_id"],
@@ -1181,155 +1095,11 @@ def parse_runtime_status(payload: dict[str, Any]) -> RuntimeStatusSnapshot:
             ),
             components=tuple(parsed_components),
         ),
-        maintenance=maintenance,
         source=(
             _parse_runtime_source_identity(payload["source"])
             if payload.get("source") is not None
             else None
         ),
-    )
-
-
-def parse_runtime_maintenance_receipt(
-    payload: dict[str, Any],
-) -> RuntimeMaintenanceReceipt:
-    if not isinstance(payload, dict):
-        raise ContractError("runtime maintenance receipt must be a JSON object")
-    _require_fields(
-        payload,
-        ("schema_version", "operation_id", "snapshot", "negotiated_capabilities"),
-        "runtime maintenance receipt",
-    )
-    if payload["schema_version"] != SCHEMA_VERSION:
-        raise ContractError("runtime maintenance receipt schema_version mismatch")
-    negotiated = _parse_component_ids(
-        payload["negotiated_capabilities"], "negotiated_capabilities"
-    )
-    snapshot = _parse_runtime_maintenance_status(payload["snapshot"])
-    if snapshot.operation_id != payload["operation_id"]:
-        raise ContractError("runtime maintenance receipt operation_id mismatch")
-    return RuntimeMaintenanceReceipt(
-        operation_id=payload["operation_id"],
-        snapshot=snapshot,
-        negotiated_capabilities=negotiated,
-    )
-
-
-def parse_runtime_maintenance_event(payload: dict[str, Any]) -> RuntimeMaintenanceEvent:
-    if not isinstance(payload, dict):
-        raise ContractError("runtime maintenance event must be a JSON object")
-    _require_fields(
-        payload,
-        (
-            "schema_version",
-            "event_type",
-            "operation",
-            "snapshot",
-            "message_code",
-        ),
-        "runtime maintenance event",
-    )
-    if payload["schema_version"] != SCHEMA_VERSION:
-        raise ContractError("runtime maintenance event schema_version mismatch")
-    snapshot = _parse_runtime_maintenance_status(payload["snapshot"])
-    sequence = payload.get("sequence", snapshot.sequence)
-    if type(sequence) is not int or sequence < 1 or snapshot.sequence != sequence:
-        raise ContractError("runtime maintenance event sequence mismatch")
-    operation = _require_enum(
-        RuntimeMaintenanceOperation, payload["operation"], "runtime operation"
-    )
-    if operation != snapshot.operation:
-        raise ContractError("runtime maintenance event operation mismatch")
-    message_args = payload.get("message_args", {})
-    if not isinstance(message_args, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in message_args.items()
-    ):
-        raise ContractError("runtime maintenance event message_args must be strings")
-    return RuntimeMaintenanceEvent(
-        sequence=sequence,
-        event_type=_require_enum(
-            RuntimeMaintenanceEventType, payload["event_type"], "runtime event type"
-        ),
-        operation=operation,
-        snapshot=snapshot,
-        message_code=payload["message_code"],
-        message_args=dict(message_args),
-        fallback_message=payload.get("fallback_message"),
-    )
-
-
-def parse_runtime_maintenance_update(
-    payload: dict[str, Any],
-) -> RuntimeMaintenanceUpdate:
-    if not isinstance(payload, dict):
-        raise ContractError("runtime maintenance update must be a JSON object")
-    _require_present_fields(
-        payload,
-        (
-            "schema_version",
-            "operation_id",
-            "snapshot",
-            "events",
-            "oldest_sequence",
-            "through_sequence",
-            "more",
-            "replay_expires_at",
-        ),
-        "runtime maintenance update",
-    )
-    if payload["schema_version"] != SCHEMA_VERSION:
-        raise ContractError("runtime maintenance update schema_version mismatch")
-    if not isinstance(payload["events"], list):
-        raise ContractError("runtime maintenance update events must be a list")
-    events = tuple(parse_runtime_maintenance_event(item) for item in payload["events"])
-    sequences = [event.sequence for event in events]
-    if any(right != left + 1 for left, right in zip(sequences, sequences[1:])):
-        raise ContractError("runtime maintenance event sequence gap")
-    through = payload["through_sequence"]
-    if (
-        type(through) is not int
-        or through < 0
-        or (sequences and sequences[-1] != through)
-    ):
-        raise ContractError("runtime maintenance through_sequence mismatch")
-    snapshot = _parse_runtime_maintenance_status(payload["snapshot"])
-    oldest = payload["oldest_sequence"]
-    if type(oldest) is not int or oldest < 1:
-        raise ContractError("runtime maintenance oldest_sequence mismatch")
-    if oldest > snapshot.sequence or (sequences and sequences[0] < oldest):
-        raise ContractError("runtime maintenance oldest_sequence mismatch")
-    if snapshot.sequence < through:
-        raise ContractError("runtime maintenance snapshot precedes cursor")
-    if snapshot.operation_id != payload["operation_id"]:
-        raise ContractError("runtime maintenance update operation_id mismatch")
-    if any(event.snapshot.operation_id != payload["operation_id"] for event in events):
-        raise ContractError("runtime maintenance update event operation_id mismatch")
-    more = payload["more"]
-    if type(more) is not bool:
-        raise ContractError("runtime maintenance update more must be a boolean")
-    replay_expires_at = payload["replay_expires_at"]
-    if replay_expires_at is not None:
-        if not isinstance(replay_expires_at, str):
-            raise ContractError("runtime maintenance replay_expires_at is invalid")
-        try:
-            expires_at = datetime.fromisoformat(
-                replay_expires_at.replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ContractError(
-                "runtime maintenance replay_expires_at is invalid"
-            ) from exc
-        if expires_at.tzinfo is None:
-            raise ContractError("runtime maintenance replay_expires_at is invalid")
-    return RuntimeMaintenanceUpdate(
-        operation_id=payload["operation_id"],
-        snapshot=snapshot,
-        events=events,
-        oldest_sequence=oldest,
-        through_sequence=through,
-        more=more,
-        replay_expires_at=replay_expires_at,
     )
 
 
@@ -1539,67 +1309,6 @@ def parse_runtime_install_plan_response(
     )
 
 
-def parse_runtime_install_plan_request(
-    payload: dict[str, Any],
-) -> RuntimeInstallPlanRequest:
-    """Strictly parse an install plan preview request (server/test facing)."""
-
-    if not isinstance(payload, dict):
-        raise ContractError("install plan request must be a JSON object")
-    _reject_unknown_fields(
-        payload,
-        frozenset(
-            {
-                "accelerator",
-                "install_component_ids",
-                "download_source_ids",
-                "required_capabilities",
-            }
-        ),
-        "install plan request",
-    )
-    _require_fields(payload, ("required_capabilities",), "install plan request")
-    required_capabilities = _parse_component_ids(
-        payload["required_capabilities"], "required_capabilities"
-    )
-    if "runtime.install-plan.v1" not in required_capabilities:
-        raise ContractError(
-            "install plan request required_capabilities must contain "
-            "runtime.install-plan.v1"
-        )
-    accelerator = None
-    if "accelerator" in payload:
-        accelerator = _require_enum(
-            RuntimeAccelerator,
-            payload["accelerator"],
-            "install plan request accelerator",
-        )
-    install_component_ids = None
-    if "install_component_ids" in payload:
-        if payload["install_component_ids"] is None:
-            raise ContractError("install_component_ids must be an array, not null")
-        install_component_ids = _parse_component_ids(
-            payload["install_component_ids"], "install_component_ids"
-        )
-    download_source_ids = None
-    if "download_source_ids" in payload:
-        if payload["download_source_ids"] is None:
-            raise ContractError(
-                "install plan request download_source_ids must be an array, not null"
-            )
-        download_source_ids = _parse_component_ids(
-            payload["download_source_ids"], "download_source_ids"
-        )
-        if not download_source_ids:
-            raise ContractError("download_source_ids must be non-empty when provided")
-    return RuntimeInstallPlanRequest(
-        required_capabilities=required_capabilities,
-        accelerator=accelerator,
-        install_component_ids=install_component_ids,
-        download_source_ids=download_source_ids,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class SchemaValidator:
     """Bundles the parse helpers so callers can inject a fake clock etc."""
@@ -1628,12 +1337,8 @@ __all__ = [
     "parse_job_update",
     "parse_pipeline_selection",
     "parse_pipeline_spec",
-    "parse_runtime_install_plan_request",
     "parse_runtime_install_plan_response",
     "parse_residency_entry",
-    "parse_runtime_maintenance_event",
-    "parse_runtime_maintenance_receipt",
-    "parse_runtime_maintenance_update",
     "parse_runtime_status",
     "parse_submit_request",
 ]

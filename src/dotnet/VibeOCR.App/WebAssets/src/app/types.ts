@@ -188,8 +188,6 @@ export type AppActionType =
   | "settings.showFloatingToolbar"
   | "settings.hideFloatingToolbar"
   | "settings.setSource"
-  | "settings.setAccelerator"
-  | "settings.setFeature"
   | "settings.setWorkerIdle"
   | "settings.setMineruConnection"
   | "settings.setMineruRecognition"
