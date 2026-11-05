@@ -48,6 +48,31 @@ def test_prepare_mineru_local_source_runs_in_locked_sdk(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["root"] == str(home / "models")
 
 
+def test_managed_device_env_binds_locked_config_surface(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """F3：MINERU_MODEL_ONNX_DEVICE（cpu/gpu）经真实 load_config 生效且
+    来源为 env；仅投射 child env，不回写 Config 文件。"""
+    from mineru.config import load_config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    config = home / "config.yaml"
+    original = "model:\n  onnx_device: auto\n"
+    config.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("MINERU_HOME", str(home))
+    monkeypatch.setenv("MINERU_CONFIG", str(config))
+    for projected, expected in (("cpu", "cpu"), ("gpu", "gpu")):
+        monkeypatch.setenv("MINERU_MODEL_ONNX_DEVICE", projected)
+        loaded = load_config()
+        assert loaded.config.model.onnx_device == expected
+        assert loaded.sources[("model", "onnx_device")] == "env"
+    monkeypatch.delenv("MINERU_MODEL_ONNX_DEVICE")
+    loaded = load_config()
+    assert loaded.config.model.onnx_device == "auto"
+    assert config.read_text(encoding="utf-8") == original
+
+
 def test_local_environment_config_validates_under_locked_schema(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -228,6 +228,45 @@ class TestSubmitEngineSelection:
         assert body["detail"]["selectable_engines"] == ["paddleocr"]
         assert executor.pipelines == []
 
+    async def test_retired_rapidocr_with_legacy_cuda_device_still_426_retired(
+        self, tmp_path: Any, engines: list[_FakeOcrEngine]
+    ) -> None:
+        """F1 回归（7487 失败）：历史 rapidocr+device=cuda 组合必须可解析
+        并到达引擎门禁，以 engine_retired 结构化拒绝（426），而不是设备
+        枚举 400；活跃 Paddle 的 device=cuda 仍为 400（见 parser 合同）。"""
+        module, executor = _module(tmp_path, engines)
+        token = generate_session_token()
+        manifest = json.dumps(
+            {
+                "schema_version": 2,
+                "request_id": "legacy-rapid-cuda",
+                "kind": "recognition",
+                "priority": "interactive",
+                "pipeline": {
+                    "pipeline_id": "OCR",
+                    "options_version": 1,
+                    "options": {"device": "cuda"},
+                    "engine": "rapidocr",
+                },
+                "items": [
+                    {
+                        "client_item_key": "k",
+                        "ordinal": 0,
+                        "display_name": "a.png",
+                        "source": {"type": "upload.v1", "attachment": "f"},
+                    }
+                ],
+            }
+        )
+        async with _client(create_app(module, token), token) as http:
+            resp = await _submit(http, manifest)
+        assert resp.status_code == 426, resp.text
+        body = resp.json()
+        assert body["code"] == "OCR_ENGINE_UNAVAILABLE"
+        assert body["detail"]["reason_code"] == "engine_retired"
+        assert body["detail"]["engine"] == "rapidocr"
+        assert executor.pipelines == []
+
     async def test_engine_on_non_ocr_pipeline_rejected_400(
         self, tmp_path: Any, engines: list[_FakeOcrEngine]
     ) -> None:

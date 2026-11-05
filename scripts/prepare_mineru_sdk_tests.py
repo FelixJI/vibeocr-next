@@ -39,6 +39,8 @@ VENV_DIR = ROOT / "build" / "mineru-sdk-contract-venv"
 # 路径顶层导入（flash 原生抽取也会走到该导入）。
 # requests/huggingface-hub：mineru.model.download 顶层导入，
 # model_cache.prepare_mineru 真实行为回归需要该链路可导入。
+# onnxruntime-directml：metacommands 策略/设备门禁真实合同需要真实
+# ORT 面与 DmlExecutionProvider（版本由 lock 钉死，仅测试 venv）。
 DIRECT_DEPENDENCIES = [
     "docvortex",
     "PyYAML",
@@ -55,6 +57,7 @@ DIRECT_DEPENDENCIES = [
     "openai",
     "requests",
     "huggingface-hub",
+    "onnxruntime-directml",
 ]
 
 # pip-compile 输出行：`name==version \`（续行是 --hash/注释）。
@@ -94,7 +97,9 @@ def probe_imports(python: Path) -> bool:
     probe = (
         "import mineru.parser.api_client, "
         "mineru.model.download, "
+        "onnxruntime, "
         "vibeocr.runtime.recognition.mineru_api, "
+        "vibeocr.runtime.recognition.mineru_api_entry, "
         "vibeocr.runtime.environments.model_cache, pytest"
     )
     return (

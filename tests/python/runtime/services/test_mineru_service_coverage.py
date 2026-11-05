@@ -359,6 +359,7 @@ class TestStartApiDeviceVisibility:
         """缺省（无设备意图变量，与 composition 的 cpu 缺省一致）：只覆盖子进程 env。"""
         monkeypatch.delenv("VIBEOCR_RUNTIME_ACCELERATOR", raising=False)
         monkeypatch.delenv("VIBEOCR_USE_GPU", raising=False)
+        monkeypatch.delenv("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", raising=False)
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
         parent_before = self._parent_visibility()
@@ -367,7 +368,31 @@ class TestStartApiDeviceVisibility:
 
         assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
         assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
+        # 无设备快照时不投射，保持锁定 SDK 的默认 auto 读取语义。
+        assert "MINERU_MODEL_ONNX_DEVICE" not in captured
         assert self._parent_visibility() == parent_before
+
+    def test_managed_device_snapshot_binds_mineru_onnx_device(
+        self, monkeypatch, tmp_path
+    ):
+        """F3 回归（7487 失败）：已提交 worker 设备快照经锁定 SDK 的
+        model.onnx_device env 面绑定（cpu→cpu，directml→gpu），仅投射
+        child env，不改写用户 Config 文件；VLM 屏蔽保持不变。"""
+        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", "cpu")
+        captured = _run_start_api_capture_env(monkeypatch, tmp_path)
+        assert captured["MINERU_MODEL_ONNX_DEVICE"] == "cpu"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
+
+        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", "directml")
+        captured = _run_start_api_capture_env(monkeypatch, tmp_path)
+        assert captured["MINERU_MODEL_ONNX_DEVICE"] == "gpu"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+
+        # 绑定只投射 child env：配置文件内容保持首次写入的嵌套结构。
+        config_text = (tmp_path / "mineru4" / "config.yaml").read_text(encoding="utf-8")
+        assert "  vlm:\n    engine: llama-cpp\n" in config_text
+        assert "onnx_device" not in config_text
 
     def test_legacy_gpu_flag_no_longer_preserves_visibility(
         self, monkeypatch, tmp_path

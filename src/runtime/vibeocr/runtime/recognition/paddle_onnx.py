@@ -63,6 +63,23 @@ def model_catalog() -> dict:
     )["models"]
 
 
+def _resolve_auto_device(default_device: str) -> tuple[str, bool]:
+    """按真实可用性解析 auto 设备。
+
+    只有生效默认是 DirectML 时才探测硬件（复用 DXGI ``hardware_adapters``，
+    无 NVML/厂商专用栈）：存在硬件适配器→directml，否则回退 CPU。探测
+    异常原样传播，不把闭包/系统故障伪装成“无硬件”的静默 CPU 回退；
+    返回 (device, fallback) 供快照记录可观察的回退事实。
+    """
+    if default_device != "directml":
+        return default_device, False
+    from vibeocr.runtime.recognition.directml_devices import hardware_adapters
+
+    if hardware_adapters():
+        return "directml", False
+    return "cpu", True
+
+
 def freeze_request(
     options: dict, source_ids: tuple[str, ...] = (), *, pipeline_id: str = "OCR"
 ) -> dict:
@@ -78,9 +95,14 @@ def freeze_request(
     default_device = os.environ.get(
         "VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", installed_device
     )
-    device = options.get("device", default_device)
-    if device == "auto":
-        device = default_device
+    requested_device = options.get("device", default_device)
+    if requested_device == "auto":
+        device, auto_device_fallback = _resolve_auto_device(default_device)
+        if auto_device_fallback:
+            logger.info("[PaddleOnnx] auto 设备回退 CPU：未发现 DirectML 硬件适配器")
+    else:
+        device = requested_device
+        auto_device_fallback = False
     if recipe not in RECIPES or device not in {"cpu", installed_device}:
         raise PaddleOnnxError("Provider requires its matching Paddle ONNX environment")
     source = next(
@@ -155,6 +177,9 @@ def freeze_request(
         "model_preset": preset,
         "device": device,
         "provider": PROVIDERS[device],
+        # auto 回退可观察：显式设备恒为 False；auto 无 DML 硬件回退 CPU
+        # 时为 True，随快照冻结供诊断/验收区分“显式 CPU”与“回退 CPU”。
+        "auto_device_fallback": auto_device_fallback,
         "device_id": device_id,
         "adapter": adapter,
         "source": source,

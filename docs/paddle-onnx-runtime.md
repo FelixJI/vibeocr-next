@@ -16,7 +16,14 @@
 
 Windows 的 `chardet` 原生扩展已在较长 Portable 路径下出现 DLL 导入失败；若提示文件名或扩展名太长，请缩短 Portable 目录后重新预览安装。
 
-`device` 的省略/`auto` 跟随所选环境；统一闭包内 `cpu`/`directml` 可直接切换（同一闭包同时携带两个 EP，无需重装）。DirectML 的 `target_device` 和任务 `provider` 独立表示图形设备，不将 CPU profile 冒充实际 CPU 执行。DirectML 用 DXGI `EnumAdapters1` 硬件 ordinal；软件适配器排除。CUDA 支持已整体退役：DirectML 是唯一 GPU 后端，不要求 NVIDIA 驱动门槛。
+`device` 的省略/`auto` 按真实可用性解析：统一闭包默认 DirectML 时，存在
+DXGI 硬件适配器即选 DML，否则回退 CPU；回退写入请求快照
+（`auto_device_fallback`）并在日志可见，不静默。显式 `directml` 缺硬件仍
+明确失败。统一闭包内 `cpu`/`directml` 可直接切换（同一闭包同时携带两个
+EP，无需重装）。DirectML 的 `target_device` 和任务 `provider` 独立表示图形
+设备，不将 CPU profile 冒充实际 CPU 执行。DirectML 用 DXGI `EnumAdapters1`
+硬件 ordinal；软件适配器排除。CUDA 支持已整体退役：DirectML 是唯一 GPU
+后端，不要求 NVIDIA 驱动门槛。
 
 PaddleX 的 `device="cpu"` 仅选择其编排入口，`engine_config.providers` 与 `provider_options` 才决定 ORT 执行设备。每个启用 runner 都检查实际首 EP 并关闭 ORT 的运行失败自动 fallback。日志区分请求 EP、available EP、各 session 的实际 EP/选项与模型目录。GPU 执行证据使用真实 profile 节点；shape/control 的必要 CPU 分区单独保留，不能据此宣称整图 GPU 或将整图 CPU 标为 GPU。
 

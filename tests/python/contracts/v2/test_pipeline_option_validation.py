@@ -63,10 +63,16 @@ def test_retired_rapid_selections_stay_deserializable_but_rejected_downstream() 
     assert pipeline_selection.pipeline_id == "RAPID_TABLE"
     # 历史 RAPID_TABLE 的 device 词表随退役冻结（含旧 cuda 值）：解析通过
     # 后由模式门禁结构化拒绝，不在 parser 层裸抛枚举错误。
-    legacy_cuda = parse_pipeline_selection(
+    legacy_rapid_table_cuda = parse_pipeline_selection(
         _selection("RAPID_TABLE", {"device": "cuda"})
     )
-    assert legacy_cuda.options == {"device": "cuda"}
+    assert legacy_rapid_table_cuda.options == {"device": "cuda"}
+    # F1 回归（7487 失败）：历史 OCR+rapidocr+device=cuda 组合同样保持可
+    # 解析（退休原因由引擎门禁返回，真实 HTTP 见 supervisor 测试）。
+    legacy_rapid_engine_cuda = parse_pipeline_selection(
+        {**_selection("OCR", {"device": "cuda"}), "engine": "rapidocr"}
+    )
+    assert legacy_rapid_engine_cuda.options == {"device": "cuda"}
 
 
 # ---------------------------------------------------------------------------
