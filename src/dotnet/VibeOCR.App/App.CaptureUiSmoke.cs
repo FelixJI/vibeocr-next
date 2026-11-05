@@ -96,6 +96,9 @@ public sealed partial class App
         case "RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds":
           await VerifyRegionPickerLayoutChangeAsync();
           break;
+        case "FrozenBackgroundMovesOnceWithoutReencodingAndReleasesOnClose":
+          await ScreenRegionPicker.VerifyFrozenBackgroundHandoffSelfCheckAsync();
+          break;
         case "CaptureRestoresVisibleMinimizedAndHiddenOwnerState":
           await ScreenRegionPicker.VerifyOwnerRestoreSelfCheckAsync(CancellationToken.None);
           break;

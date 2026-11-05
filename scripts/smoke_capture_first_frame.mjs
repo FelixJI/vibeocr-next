@@ -26,8 +26,10 @@ export function statistics(values) {
 
 export function attachWorkingSets(health, samples, appPid) {
   assert(samples.length, 'Owned process samples are missing.');
+  for (const sample of samples)
+    assert(Number.isFinite(sample.started_at_ms) && sample.started_at_ms <= sample.at_ms, 'Invalid working-set sample interval.');
   return health.rows.map((row) => {
-    const closed = samples.filter((sample) => sample.at_ms >= row.closed_at_ms &&
+    const closed = samples.filter((sample) => sample.started_at_ms >= row.closed_at_ms &&
       sample.at_ms <= row.settled_at_ms);
     assert(closed.length, `No closed working-set sample for cycle ${row.cycle}.`);
     const app = [], webview = [];
@@ -38,7 +40,7 @@ export function attachWorkingSets(health, samples, appPid) {
       app.push(ownApp.ws_bytes);
       webview.push(web.reduce((sum, proc) => sum + proc.ws_bytes, 0));
     }
-    const active = samples.filter((sample) => sample.at_ms >= row.command_at_ms &&
+    const active = samples.filter((sample) => sample.started_at_ms >= row.command_at_ms &&
       sample.at_ms <= row.settled_at_ms);
     const roles = {};
     const appPeak = [], webPeak = [];
@@ -74,7 +76,9 @@ export function summarize(batches) {
     assert.equal(batch.health.callbacks_after_stop, 0);
     assert.equal(batch.health.submit_attempts, 0);
     assert.equal(batch.health.startup_ensure_attempts, 0);
-    assert.equal(batch.health.installer_attempts, 0);
+    assert.equal(batch.zero_evidence.root_pid_seen, true);
+    assert.equal(batch.zero_evidence.applog_non_empty, true);
+    assert.deepEqual(batch.zero_evidence.applog_forbidden_hits, []);
     assert.equal(batch.health.inference_attached, false);
     assert.equal(batch.zero_evidence.violations.length, 0, JSON.stringify(batch.zero_evidence.violations));
     for (const [cycle, row] of batch.health.rows.entries()) {
@@ -280,7 +284,7 @@ async function main() {
   const record = { schema_version: 1, issue: 216, state: 'failed', measurement_complete: false, root,
     source_identity: read(path.join(candidate, 'app/metadata/component-identities.json')).project,
     batches: [], coverage_gaps: ['Only this physical monitor/DPI; mixed DPI and negative-coordinate secondary displays UNVERIFIED.'],
-    limitations: ['CIM intervals are nominal 250ms plus query time; short-lived processes can be missed.',
+    limitations: ['CIM ownership discovery includes query time and can miss short-lived processes; independent working-set reads record their full start/end interval.',
       'WebView working set sums include shared pages counted by multiple processes.',
       'Cold n=3; max/median only. Warm n=19; nearest-rank p95 and complete raw rows.',
       'UI max dispatch lag is reported for investigation; it is not attributed to a function.'] };

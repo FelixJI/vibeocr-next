@@ -383,8 +383,8 @@ public sealed partial class App : Application
                      Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
                      Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE")))
         {
-            // 首次普通启动在首窗后后台准备随包默认环境（Paddle CPU），首个
-            // 计算需求经同一 Coordinator 共享该尝试；关闭由 shutdown 令牌取消。
+            // 仅既有自检合同要求后台就绪；普通壳由显式计算经同一 Coordinator
+            // 按需准备，关闭仍由 shutdown 令牌取消。
             _ = StartBackgroundRuntimeAsync();
         }
 
@@ -969,12 +969,11 @@ public sealed partial class App : Application
         (_runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."))
             .EnsureReadyAsync(cancellationToken);
 
-    /// <summary>首次启动策略：普通启动在首窗后后台就绪；截图首帧/替换与
-    /// managed-environment 安装阶段保持按需启动，restart 阶段恢复启动。</summary>
+    /// <summary>普通启动保持按需获取；明确自检的原有后台就绪合同不变。</summary>
     internal static bool ShouldStartBackgroundRuntime(
         string? selfTestSmoke, string? managedEnvironmentPhase)
     {
-        if (string.IsNullOrWhiteSpace(selfTestSmoke)) return true;
+        if (string.IsNullOrWhiteSpace(selfTestSmoke)) return false;
         if (selfTestSmoke is "capture-first-frame-e2e" or "capture-replacement-e2e") return false;
         if (selfTestSmoke == "managed-environment-e2e") return managedEnvironmentPhase == "restart";
         return true;

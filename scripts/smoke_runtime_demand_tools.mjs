@@ -110,6 +110,12 @@ const jsonLines = (file) => fs.existsSync(file)
 
 // Minimal named exports for scripts/smoke_workbench_delivery.mjs reuse only;
 // the CLI behavior, zero-runtime rules and steps of this smoke are unchanged.
+export function allowsLocalToolRequest(value) {
+  const url = new URL(value);
+  return url.protocol === 'data:' || url.origin === 'https://app.vibeocr' ||
+    (['http:', 'https:'].includes(url.protocol) && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname));
+}
+
 export async function freePort() {
   const server = net.createServer();
   server.listen(0, '127.0.0.1');
@@ -154,8 +160,9 @@ export async function connect(child, debugPort) {
 }
 
 // Owner-written read-only monitor contract: wait for monitor-ready, the
-// spawned App PID goes to root-pid.txt, stop-monitor ends it. CIM snapshots
-// are a lower bound (complete_start_trace=false), never a complete trace.
+// spawned App PID goes to root-pid.txt, stop-monitor ends both discovery and
+// independent owned working-set reads. CIM ownership snapshots remain a lower
+// bound (complete_start_trace=false), never a complete process-start trace.
 export async function monitor(root) {
   const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', probeScript,
     '-OutputRoot', root], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -294,6 +301,7 @@ async function waitForStableNewWindow(pid, beforeHandles, mainHandle, timeoutMs 
 
 async function drawRectangle(page) {
   await page.getByRole('button', { name: '矩形', exact: true }).click();
+  await page.getByRole('button', { name: '常用颜色 #f38b35', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const editor = page.getByLabel('图片检查画布');
   const box = await editor.boundingBox();
@@ -392,6 +400,7 @@ async function qrToolStep(ctx) {
   await page.getByRole('tab', { name: '生成', exact: true }).click();
   await page.getByLabel('生成格式').selectOption('qrcode');
   await page.getByLabel('输入内容', { exact: true }).fill(payload);
+  await page.locator('summary').filter({ hasText: '底部文字' }).click();
   await page.getByLabel('底部文字', { exact: true }).selectOption('off');
   // The preview element may not exist before the first generation; a null
   // baseline is valid, so never block on a missing attribute.
@@ -752,7 +761,7 @@ export function zeroEvidence(copy, root, appPid) {
     applog_forbidden_hits: scan.hits,
     environment_state_absent: environmentSurfaces.filter((relative) =>
       !fs.existsSync(path.join(copy, relative))),
-    combined: 'CIM owned lineage (250ms snapshot lower bound, complete_start_trace=false) + ' +
+    combined: 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independent working-set reads + ' +
       'non-empty AppLog without Installer command starts (any action, incl. list/' +
       'switch reservation) or runtime demand connect/initialize_default + fresh ' +
       'state kept no environment registry/store/plans/cache/marker on the ' +
@@ -837,6 +846,12 @@ async function run(candidate, work) {
       });
     assert(!fs.existsSync(path.join(copy, 'state')), 'Copied candidate already has state.');
     const debugPort = await freePort();
+    const proxyPort = await freePort();
+    assert.notEqual(proxyPort, debugPort, 'Unavailable HTTP proxy must not use the debug listener.');
+    const blockedProxy = `http://127.0.0.1:${proxyPort}`;
+    record.network_policy = { app_http_proxy: blockedProxy, external_http: 'refused or blocked by client',
+      allowed_web_origin: 'https://app.vibeocr', loopback_allowed: true, os_network_changed: false,
+      blocked_external_requests: 0 };
     record.debug_port = debugPort;
     watch = await monitor(root);
     const env = { ...process.env,
@@ -844,7 +859,10 @@ async function run(candidate, work) {
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
         `--remote-debugging-port=${debugPort} --remote-debugging-address=127.0.0.1` };
     for (const name of Object.keys(env))
-      if (name.startsWith('VIBEOCR_SELF_TEST') || name.startsWith('VIBEOCR_SOAK')) delete env[name];
+      if (name.startsWith('VIBEOCR_SELF_TEST') || name.startsWith('VIBEOCR_SOAK') ||
+          ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'].includes(name.toLowerCase())) delete env[name];
+    Object.assign(env, { HTTP_PROXY: blockedProxy, HTTPS_PROXY: blockedProxy, ALL_PROXY: blockedProxy,
+      NO_PROXY: 'localhost,127.0.0.1,::1' });
     const executable = path.join(copy, 'app', 'VibeOCR.WinUI.exe');
     ctx.child = spawn(executable, ['--profile', 'production', '--install-root', copy],
       { cwd: path.dirname(executable), env, stdio: 'ignore' });
@@ -854,6 +872,13 @@ async function run(candidate, work) {
     const connected = await connect(ctx.child, debugPort);
     ctx.browser = connected.browser;
     ctx.page = connected.page;
+    const guardedContexts = ctx.browser.contexts();
+    for (const context of guardedContexts) await context.route('**/*', (route) => {
+      if (allowsLocalToolRequest(route.request().url())) return route.continue();
+      record.network_policy.blocked_external_requests++;
+      return route.abort('blockedbyclient');
+    });
+    record.network_policy.guarded_contexts = guardedContexts.length;
     // Task #215: passive measurement (listener-only, additive). Contexts
     // existing at attach are instrumented; the scene page's context is
     // confirmed explicitly via page.context() at harvest time. The already-
@@ -873,6 +898,8 @@ async function run(candidate, work) {
     record.steps.settings = await settingsStep(ctx);
     record.steps.image_edit = await imageEditStep(ctx);
     record.steps.screenshot_capture = await captureStep(ctx);
+    assert(ctx.browser.contexts().every(context => guardedContexts.includes(context)),
+      'An unguarded WebView context appeared during the tool actions.');
     record.functional_valid = true;
   } catch (error) {
     record.error = error.stderr || `${error.name}: ${error.message}`;

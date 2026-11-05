@@ -1,13 +1,18 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { zeroEvidence, allowsLocalToolRequest } from '../../scripts/smoke_runtime_demand_tools.mjs';
 import { statistics, attachWorkingSets, summarize, validateBaseline, checkAfter } from '../../scripts/smoke_capture_first_frame.mjs';
 
 const baselineCounts = { Subscriptions: 1, Resources: 0, AnnotationEntries: 0,
   AnnotationReservations: 0, AnnotationOwnedFiles: 0, ResourceFiles: 0, EditorWebViews: 0, TotalWebViews: 1 };
 function batch(cycles) {
   return { state: 'passed', health: { schema_version: 1, state: 'passed', callbacks_after_stop: 0,
-    submit_attempts: 0, startup_ensure_attempts: 0, installer_attempts: 0, inference_attached: false,
+    submit_attempts: 0, startup_ensure_attempts: 0, inference_attached: false,
     baseline: baselineCounts, rows: Array.from({ length: cycles }, (_, index) => ({
       cycle: index + 1, temperature: index === 0 ? 'cold' : 'warm',
       capture_to_presented_ms: index === 0 ? 100 : 50,
@@ -20,7 +25,7 @@ function batch(cycles) {
       working_set: { app_closed_median_bytes: 100 * 1024 * 1024,
         webview_closed_median_bytes: 200 * 1024 * 1024,
         app_observed_peak_bytes: 150 * 1024 * 1024, webview_observed_peak_bytes: 250 * 1024 * 1024 },
-    })) }, zero_evidence: { violations: [] } };
+    })) }, zero_evidence: { violations: [], root_pid_seen: true, applog_non_empty: true, applog_forbidden_hits: [] } };
 }
 export function runSelfCheck() {
   assert.deepEqual(statistics([9, 1, 3, 7]), { count: 4, median: 5, p95: 9, max: 9 });
@@ -45,6 +50,16 @@ export function runSelfCheck() {
   const forbidden = structuredClone(batches);
   forbidden[1].zero_evidence.violations.push('installer observed');
   assert.throws(() => summarize(forbidden));
+  for (const field of ['root_pid_seen', 'applog_non_empty']) {
+    const absent = structuredClone(batches);
+    absent[1].zero_evidence[field] = false;
+    assert.throws(() => summarize(absent));
+    delete absent[1].zero_evidence[field];
+    assert.throws(() => summarize(absent));
+  }
+  const installerLog = structuredClone(batches);
+  installerLog[0].zero_evidence.applog_forbidden_hits.push('Runtime Installer command starting action=list');
+  assert.throws(() => summarize(installerLog));
   const growth = structuredClone(batches);
   for (const row of growth[0].health.rows.slice(-5)) row.working_set.app_closed_median_bytes += 33 * 1024 * 1024;
   const growthSummary = summarize(growth);
@@ -73,7 +88,7 @@ export function runSelfCheck() {
   assert.equal(budgetFailure.performance_comparison.warm_p95_ms.passed, false);
   assert.equal(budgetFailure.row_count, 22);
   assert.equal(budgetFailure.gate_violations.length, 1);
-  const samples = [{ at_ms: 2300, procs: [{ pid: 99, name: 'VibeOCR.WinUI.exe', ws_bytes: 10 },
+  const samples = [{ started_at_ms: 2299, at_ms: 2300, procs: [{ pid: 99, name: 'VibeOCR.WinUI.exe', ws_bytes: 10 },
     { pid: 101, name: 'msedgewebview2.exe', ws_bytes: 20, webview_role: 'browser' },
     { pid: 102, name: 'msedgewebview2.exe', ws_bytes: 30, webview_role: 'renderer' }] }];
   const attached = attachWorkingSets(batches[1].health, samples, 99);
@@ -83,8 +98,54 @@ export function runSelfCheck() {
   assert.throws(() => attachWorkingSets(batches[1].health, [], 99), /missing/);
   assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], at_ms: 5000 }], 99), /No closed/);
   assert.throws(() => attachWorkingSets(batches[1].health, samples, 999), /working set is missing/);
+  assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], started_at_ms: 1999 }], 99), /No closed/);
+  assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], started_at_ms: 2301 }], 99), /sample interval/);
 }
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   runSelfCheck();
   console.log('Capture first-frame statistics, resource rejection, working-set and frozen-budget contracts: passed');
 }
+
+test('real owned working-set sampling continues while discovery is blocked and stops after disposal',
+  { skip: process.platform !== 'win32' }, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-sampler-selfcheck-'));
+    const output = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+      path.resolve('scripts/runtime_demand_process_probe.ps1'), '-OutputRoot', root, '-SelfCheck'],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.match(output, /independent owned working-set sampler: passed/);
+  });
+
+test('zero-Runtime evidence rejects forbidden owned processes and missing real log evidence', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-zero-evidence-'));
+  const copy = path.join(root, 'candidate');
+  const logs = path.join(copy, 'state', 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const log = path.join(logs, 'winui-dev-20380119.log');
+  fs.writeFileSync(log, '00:00:00.000 [INFO ] OnLaunched: profile=production shellOnly=False');
+  fs.writeFileSync(path.join(root, 'process-samples.jsonl'), '');
+  const starts = path.join(root, 'process-starts.jsonl');
+  const writeStarts = (rows) => fs.writeFileSync(starts, rows.map(row => JSON.stringify(row)).join('\n'));
+  const owner = { pid: 123, class: 'other' };
+  writeStarts([owner]);
+  assert.deepEqual(zeroEvidence(copy, root, 123).violations, []);
+  for (const role of ['installer', 'installer-child', 'supervisor', 'python-child']) {
+    writeStarts([owner, { pid: 124, class: role }]);
+    assert(zeroEvidence(copy, root, 123).violations.some(message => message.includes('owned lineage')));
+  }
+  writeStarts([]);
+  assert.equal(zeroEvidence(copy, root, 123).root_pid_seen, false);
+  writeStarts([owner]);
+  fs.writeFileSync(log, 'Runtime Installer command starting action=list');
+  assert(zeroEvidence(copy, root, 123).violations.some(message => message.includes('AppLog shows')));
+  fs.writeFileSync(log, '');
+  assert.equal(zeroEvidence(copy, root, 123).applog_non_empty, false);
+});
+
+test('isolated tool network policy permits only local resources and loopback', () => {
+  for (const url of ['https://app.vibeocr/__resource/image', 'http://127.0.0.1:1234/',
+    'http://localhost:1234/', 'http://[::1]:1234/', 'blob:https://app.vibeocr/pixels', 'data:image/png;base64,AA=='])
+    assert.equal(allowsLocalToolRequest(url), true, url);
+  for (const url of ['https://example.com/', 'https://app.vibeocr.evil/',
+    'http://app.vibeocr/', 'https://127.0.0.1.evil/', 'wss://example.com/'])
+    assert.equal(allowsLocalToolRequest(url), false, url);
+});
