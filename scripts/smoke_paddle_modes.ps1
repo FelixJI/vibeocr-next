@@ -345,7 +345,7 @@ try {
             if ($health.state -eq 'passed') {
                 Write-Host "PASSED $phaseName (task=$($health.evidence.job.task_id))"
             } elseif ($health.state -eq 'blocked') {
-                Write-Host "BLOCKED $phaseName stage=$($health.stage)（提交被环境/目录显式拒绝，证据见 $smokeRoot）"
+                Write-Host "BLOCKED $phaseName stage=$($health.stage)（提交被服务或输入目录拒绝，证据见 $smokeRoot）"
                 Set-PaddleOutcome 'blocked'
             } else {
                 Write-Host "FAILED  $phaseName stage=$($health.stage) $($health.error)"
@@ -441,6 +441,6 @@ Write-Host ''
 Write-Host '==== Paddle 三模式冒烟汇总 ===='
 $results | Format-Table phase, mode, state, stage -AutoSize | Out-String | Write-Host
 Write-Host "隔离证据保留在: $smokeRoot （候选副本、fixtures、health JSON、UI 导出文件）"
-Write-Host "已请求配方: $Provider；模型档位: $ModelPreset。实际 session/EP 节点沿对应原生 profile 证据核对。"
+Write-Host "已请求设备: $Provider；模型档位: $ModelPreset。实际 session/EP 节点沿对应原生 profile 证据核对。"
 if ($exitCode -eq 0 -and $results.Count -gt 0) { Write-Host 'All requested modes PASSED.' }
 exit $exitCode

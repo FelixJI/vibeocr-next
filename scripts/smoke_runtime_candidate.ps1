@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Runtime candidate AC6 smoke: isolated base install + real OCR round trip.
+Runtime candidate AC6 smoke: isolated product runtime + real OCR round trip.
 
 .DESCRIPTION
 Copies a built product candidate (ProductRoot, e.g. .release-build/VibeOCR of
@@ -73,7 +73,7 @@ $inputDirectory = Join-Path $smokeRoot 'input'
 $resultsDirectory = Join-Path $smokeRoot 'test-results'
 New-Item -ItemType Directory -Path $candidateRoot, $inputDirectory, $resultsDirectory | Out-Null
 
-# 隔离副本承载全部安装与 OCR 证据;源候选保持只读。
+# 隔离副本承载产品启动与 OCR 证据；源候选保持只读。
 Get-ChildItem -LiteralPath $sourceRoot -Force |
     Copy-Item -Destination $candidateRoot -Recurse -Force
 

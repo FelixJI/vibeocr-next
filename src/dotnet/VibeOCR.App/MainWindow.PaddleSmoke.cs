@@ -467,16 +467,16 @@ public sealed partial class MainWindow
   {
     if (!Path.GetExtension(fixture).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
       throw new InvalidOperationException("PDF input requires a PDF fixture.");
-    RecordPaddleSmokeStage($"pdf select mode {mode}");
-    await NavigateSmokeAsync("PDF", "button");
-    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
-    await SelectSmokeValueAsync("#pdf-task-engine", mode);
     RecordPaddleSmokeStage("open PDF via public picker");
+    await NavigateSmokeAsync("PDF", "button");
     await ClickWorkbenchSmokeButtonAsync("打开 PDF");
     await CompletePaddleOpenPickerAsync(fixture);
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(
       state => !state.IsBusy && state.PageCount > 0,
       TimeSpan.FromMinutes(2));
+    RecordPaddleSmokeStage($"pdf select mode {mode}");
+    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
+    await SelectSmokeValueAsync("#pdf-task-engine", mode);
     bool structurePages = mode is "paddle_table" or "paddle_structure";
     int[] pageIndexes = structurePages ? [0, 1] : [0];
     if (structurePages)
@@ -947,13 +947,13 @@ public sealed partial class MainWindow
   private async Task<object> RunPaddlePdfOperationsAsync(string mode, string fixture, ProductRuntimeSession session, int timeoutMinutes)
   {
     if (mode != "paddle_text") throw new InvalidOperationException("PDF operations smoke requires Paddle text OCR.");
-    await NavigateSmokeAsync("PDF", "button");
-    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
-    await SelectSmokeValueAsync("#pdf-task-engine", mode);
     RecordPaddleSmokeStage("open eight orientation pages via public picker");
+    await NavigateSmokeAsync("PDF", "button");
     await ClickWorkbenchSmokeButtonAsync("打开 PDF");
     await CompletePaddleOpenPickerAsync(fixture);
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.DetectedCount == 8, TimeSpan.FromMinutes(2));
+    await WaitForPaddleModeAsync("#pdf-task-engine", mode);
+    await SelectSmokeValueAsync("#pdf-task-engine", mode);
     await ClickWorkbenchSmokeButtonAsync("全选页面");
     await SelectSmokeValueAsync("#pdf-operation-range", "all");
     int before = smokeSubmitAttempts!();

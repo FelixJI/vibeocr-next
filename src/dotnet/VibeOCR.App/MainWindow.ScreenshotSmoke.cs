@@ -180,7 +180,10 @@ public sealed partial class MainWindow
       "); if (!b || b.disabled || b.getAttribute('aria-disabled')==='true') return false; b.click(); return true; })()";
     if (capture)
     {
-      // 右上角统一截图按钮单击直接开始普通截图，不再经过菜单。
+      // bridge-ready 表示状态已投递；识别页异步渲染后才能点击真实按钮。
+      await WaitForSmokeDomAsync(
+        """!!document.querySelector('button[aria-label="截图"]:not(:disabled):not([aria-disabled="true"])')""",
+        TimeSpan.FromSeconds(10));
       if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript("截图")) != "true")
         throw new InvalidOperationException("Screenshot button unavailable.");
       return;
