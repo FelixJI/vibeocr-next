@@ -216,9 +216,12 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
               "Runtime 目录未提供随包基础配方，请更新产品。");
           }
           // 预构建语义：随包环境已随产品安装就绪；只切换启动，
-          // 不新建、不安装，也不下载识别模型。
+          // 不新建、不安装，也不下载识别模型。历史 venv 记录（升级保留）
+          // 即使配方匹配也已被 Runtime 标记为不可运行，宿主只认 product
+          // 环境，避免 FirstOrDefault 命中排在注册表前面的旧记录。
           ManagedEnvironment? target = environment.Snapshot?.Environments
-            .FirstOrDefault(item => item.Recipe == baseRecipe &&
+            .FirstOrDefault(item => item.Kind == "product" &&
+              item.Recipe == baseRecipe &&
               string.Equals(item.Status, "installed", StringComparison.Ordinal));
           if (target is null)
           {

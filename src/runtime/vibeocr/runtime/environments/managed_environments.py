@@ -1661,10 +1661,14 @@ class ManagedEnvironmentStore:
             with RuntimeStoreLock(self._lock):
                 data = self._read()
                 active = data["environments"].get(data["active_id"])
-                # 历史 venv 环境在本产品形态下不可运行：其 site-packages
-                # 内的旧 Runtime 代码无法读取预构建 manifest，一律迁移
-                # active 到产品树（数据保留只读，可由空间清理回收）。
-                legacy_active = active is not None and active["kind"] == "venv"
+                # 历史 venv/legacy 环境在本产品形态下不可运行：其
+                # site-packages/runtime 根内的旧 Runtime 代码无法读取预
+                # 构建 manifest，一律迁移 active 到产品树（数据保留只读，
+                # 可由空间清理回收）。
+                legacy_active = active is not None and active["kind"] in {
+                    "venv",
+                    "legacy",
+                }
                 retired_default = (
                     legacy_active
                     and active["status"] == "installed"

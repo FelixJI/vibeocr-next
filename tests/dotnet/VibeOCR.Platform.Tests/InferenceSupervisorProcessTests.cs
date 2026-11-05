@@ -477,18 +477,28 @@ public sealed class InferenceSupervisorProcessTests
     [Fact]
     public async Task ProductCodeSupervisorLogsRoundTripUtf8AndStripAnsi()
     {
-        // 真实子进程回归：复用生产模块入口调用链（-X utf8 -m），用
-        // PYTHONPATH 指向假 supervisor 包，在 PYTHONUTF8=1 环境下输出中文
-        // 路径与 ANSI 色码，验证 argv 级 -X utf8、C# 管道 UTF-8 钉子与
+        // 真实子进程回归：复用生产模块入口调用链（-I -B -X utf8 -m）。
+        // -I 隔离会忽略 PYTHONPATH：假 supervisor 包写入现场 venv 的
+        // site-packages（隔离不排除解释器自身 site），与预构建树的解析
+        // 形态一致；同时携带 PYTHONUTF8=1 证明 argv 级 -X utf8 才是决定
+        // 性钉子，输出中文路径与 ANSI 色码验证 C# 管道 UTF-8 与
         // AppendLog 边界清洗。
         string root = Path.Combine(
             Path.GetTempPath(), $"vibeocr-supervisor-utf8-{Guid.NewGuid():N}");
-        string codeRoot = Path.Combine(root, "runtime-code");
-        string packageRoot = Path.Combine(codeRoot, "vibeocr");
+        string venvRoot = Path.Combine(root, "runtime-env");
+        var bootstrap = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+            ResolveTestPython(), $"-m venv --without-pip \"{venvRoot}\"")
+        {
+            CreateNoWindow = true,
+            UseShellExecute = false,
+        }) ?? throw new InvalidOperationException("test venv bootstrap failed");
+        bootstrap.WaitForExit(TimeSpan.FromSeconds(120));
+        if (bootstrap.ExitCode != 0)
+            throw new InvalidOperationException($"test venv bootstrap exited {bootstrap.ExitCode}");
+        string siteRoot = Path.Combine(venvRoot, "Lib", "site-packages");
+        string packageRoot = Path.Combine(siteRoot, "vibeocr");
         string hostDirectory = Path.Combine(packageRoot, "runtime", "host");
         Directory.CreateDirectory(hostDirectory);
-        // regular package（每级 __init__.py）：避免 runpy 解析到开发机
-        // site-packages 内同名的真实 vibeocr 包。
         foreach (string directory in new[]
         {
             packageRoot,
@@ -500,7 +510,8 @@ public sealed class InferenceSupervisorProcessTests
         }
         File.WriteAllText(Path.Combine(hostDirectory, "main.py"), FakeSupervisorSource);
         string logPath = Path.Combine(root, "supervisor.log");
-        string python = ResolveTestPython();
+        // 标准 venv 布局：解释器位于 Scripts/（预构建树把它复制到根）。
+        string python = Path.Combine(venvRoot, "Scripts", "python.exe");
         var launch = new RuntimeLaunch(
             python,
             "vibeocr.runtime.host.main",
@@ -508,11 +519,6 @@ public sealed class InferenceSupervisorProcessTests
             Path.Combine(root, "models"),
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                // 测试用 PYTHONPATH 把模块入口解析到上面的假包；生产闭包
-                // 在预构建树内解析。与生产一致携带 PYTHONUTF8=1：隔离
-                // 模式下它被忽略，回归必须证明 argv 的 -X utf8 才是决定
-                // 性钉子。
-                ["PYTHONPATH"] = codeRoot,
                 ["PYTHONUTF8"] = "1",
             });
         IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);

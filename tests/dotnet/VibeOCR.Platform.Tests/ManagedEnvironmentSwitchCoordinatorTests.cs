@@ -119,9 +119,12 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
             injectSoakCrash: true);
 
         Assert.Equal(launch.PythonExecutable, options.FileName);
-        // -X utf8 是 argv 级钉子：无论 launch 环境是否携带 PYTHONUTF8，
-        // supervisor 的 stdout/stderr 编码契约都不依赖本机 locale。
-        Assert.Equal(["-X", "utf8", "-m", launch.SupervisorModule], options.Arguments);
+        // -I -B 隔离用户环境并禁写字节码，-X utf8 是 argv 级钉子：无论
+        // launch 环境是否携带 PYTHONUTF8，supervisor 的 stdout/stderr
+        // 编码契约都不依赖本机 locale。
+        Assert.Equal(
+            ["-I", "-B", "-X", "utf8", "-m", launch.SupervisorModule],
+            options.Arguments);
         Assert.Equal(launch.WorkingDirectory, options.WorkingDirectory);
         Assert.Equal(
             launch.Environment["VIBEOCR_RUNTIME_ROOT"],
@@ -147,9 +150,12 @@ public sealed class ManagedEnvironmentSwitchCoordinatorTests
         IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);
 
         // 预构建运行时树（PR2）：supervisor 统一经模块入口启动，树内
-        // site-packages 自带完整闭包；-X utf8 仍是隔离模式下钉死 UTF-8
-        // 输出契约的唯一 argv 钉子（中文路径日志乱码回归）。
-        Assert.Equal(["-X", "utf8", "-m", launch.SupervisorModule], arguments);
+        // site-packages 自带完整闭包；-I -B 保持隔离（继承的
+        // PYTHONHOME/PYTHONPATH 不得劫持树内解释器），-X utf8 钉死 UTF-8
+        // 输出契约（中文路径日志乱码回归）。
+        Assert.Equal(
+            ["-I", "-B", "-X", "utf8", "-m", launch.SupervisorModule],
+            arguments);
     }
 
     [Fact]

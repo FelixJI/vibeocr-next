@@ -130,7 +130,9 @@ def test_upgrade_keeps_legacy_environment(tmp_path, monkeypatch) -> None:
     (legacy / "python.exe").write_bytes(b"test interpreter")
     (legacy / ".installed.json").write_text("{}", encoding="utf-8")
     listed = manager.initialize_default()
-    assert listed["active_id"] == "legacy"
+    # legacy 活动环境与 venv 同理：旧 runtime 根的代码读不了预构建
+    # manifest，active 一律迁移到产品树；记录与目录保留只读。
+    assert listed["active_id"] == _PRODUCT_ID
     assert {item["id"] for item in listed["environments"]} == {"legacy", _PRODUCT_ID}
     # legacy 记录不是退役 venv 默认：不产生迁移标记。
     assert not (
@@ -153,8 +155,13 @@ def test_legacy_user_persists_registry_before_first_service_start(
     )
     assert not manager._registry.is_file()
 
-    assert manager.initialize_default()["active_id"] == "legacy"
-    assert manager.list()["active_id"] == "legacy"
+    # 初始化即迁移 active 到产品树并首次落盘注册表（legacy 记录保留）。
+    assert manager.initialize_default()["active_id"] == _PRODUCT_ID
+    assert manager.list()["active_id"] == _PRODUCT_ID
+    # 回到"无注册表"状态验证 prepare_switch 的首次落盘防御分支：候选
+    # Supervisor 的启动租约必须读到注册表，而 commit_switch 要等目标
+    # 健康后才落盘，prepare 需先把合成记录按 store 锁写回磁盘。
+    manager._registry.unlink()
 
     class Health(BaseHTTPRequestHandler):
         def do_GET(self):

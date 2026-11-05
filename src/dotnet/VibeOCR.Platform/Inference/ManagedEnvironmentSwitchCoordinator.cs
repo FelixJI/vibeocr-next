@@ -38,10 +38,11 @@ public sealed class ManagedEnvironmentSwitchCoordinator(IManagedEnvironmentClien
 {
     internal static IReadOnlyList<string> RuntimeArguments(RuntimeLaunch launch)
     {
-        // -I 会忽略 PYTHONUTF8/PYTHONIOENCODING；argv 级 -X utf8 才能在隔离
-        // 模式下钉死 supervisor 的 UTF-8 输出契约。预构建运行时树内 interpreter
-        // 已随产品携带完整闭包，supervisor 统一经 launch 声明的模块入口启动。
-        return ["-X", "utf8", "-m", launch.SupervisorModule];
+        // -I（implies -E/-P/-s）隔离用户环境的 PYTHONHOME/PYTHONPATH 等，
+        // 且不排除解释器自身 site-packages——树内闭包照常解析；-B 不写
+        // pyc，-X utf8 在隔离忽略 PYTHONUTF8 的前提下钉死 supervisor 的
+        // UTF-8 输出契约。supervisor 统一经 launch 声明的模块入口启动。
+        return ["-I", "-B", "-X", "utf8", "-m", launch.SupervisorModule];
     }
 
     internal static InferenceSupervisorOptions BuildSupervisorOptions(
