@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from functools import cache
 from importlib.resources import files
@@ -388,7 +390,7 @@ def create_app(
                     getattr(upload, "content_type", None),
                     await upload.read(),
                 )
-            ref = module.submit_request(manifest, attachments)
+            ref = await asyncio.to_thread(module.submit_request, manifest, attachments)
         except MineruConfigError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RecognitionModeError as exc:
@@ -479,7 +481,7 @@ def create_app(
                     "job_ref": None,
                 }
             if command.kind is JobCommandKind.RETRY:
-                ref = module.retry(command.job_id)
+                ref = await asyncio.to_thread(module.retry, command.job_id)
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "instance_id": instance_id,
@@ -527,7 +529,7 @@ def create_app(
 
     @app.get("/v2/runtime/residency", response_model=wire.ResidencyStatus)
     async def residency() -> dict[str, Any]:
-        return module.residency_payload()
+        return await asyncio.to_thread(module.residency_payload)
 
     @app.post("/v2/runtime/release", response_model=wire.ResidencyStatus)
     async def release_runtime(request: Request) -> JsonResult:
@@ -678,17 +680,18 @@ def create_app(
             source_ids = (
                 normalize_download_source_ids(raw_sources) if raw_sources else ()
             )
+            current = module.settings()
             snapshot = SettingsSnapshot(
                 revision=body.get("revision", 0),
                 recognition_device=body.get(
-                    "recognition_device", module.settings().recognition_device
+                    "recognition_device", current.recognition_device
                 ),
                 default_ttl_seconds=default_ttl,
                 paddle_idle_seconds=body.get(
-                    "paddle_idle_seconds", module.settings().paddle_idle_seconds
+                    "paddle_idle_seconds", current.paddle_idle_seconds
                 ),
                 mineru_idle_seconds=body.get(
-                    "mineru_idle_seconds", module.settings().mineru_idle_seconds
+                    "mineru_idle_seconds", current.mineru_idle_seconds
                 ),
                 pipelines=pipelines,
                 extra=extra,
@@ -699,7 +702,27 @@ def create_app(
             )
             if await request.is_disconnected():
                 raise ValueError("设置保存已取消。")
-            return module.update_settings(snapshot, prepared=prepared).to_payload()
+            cancelled = threading.Event()
+
+            async def watch_disconnect() -> None:
+                while (await request.receive())["type"] != "http.disconnect":
+                    pass
+                cancelled.set()
+
+            watcher = asyncio.create_task(watch_disconnect())
+            try:
+                committed = await asyncio.to_thread(
+                    module.update_settings,
+                    snapshot,
+                    prepared=prepared,
+                    cancelled=cancelled.is_set,
+                )
+                return committed.to_payload()
+            finally:
+                cancelled.set()
+                watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher
         except RuntimeSettingsStoreError as exc:
             return _error_response(
                 ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}

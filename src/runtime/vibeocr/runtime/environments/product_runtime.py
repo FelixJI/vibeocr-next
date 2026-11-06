@@ -17,7 +17,10 @@ from vibeocr.runtime.environments.runtime_selection import (
     expand_legacy_model_sources,
     normalize_download_source_ids,
 )
-from vibeocr.runtime.environments.settings_store import RuntimeSettingsStore
+from vibeocr.runtime.environments.settings_store import (
+    RuntimeSettingsStore,
+    RuntimeSettingsStoreError,
+)
 from vibeocr.runtime_contracts import SettingsSnapshot
 
 
@@ -73,11 +76,18 @@ def _legacy_snapshot(state: Path, product: Path) -> SettingsSnapshot:
         )
     source_paths.append(product / "state" / "supervisor-settings.json")
     snapshot = SettingsSnapshot()
+    recovery_error = None
     for source in source_paths:
         if source.is_file():
             if source.resolve() != source:
                 raise ValueError("旧设置文件包含重解析点，原文件已保留。")
-            snapshot = RuntimeSettingsStore(source).read_legacy(snapshot)
+            try:
+                snapshot = RuntimeSettingsStore(source).read_legacy(snapshot)
+            except RuntimeSettingsStoreError as exc:
+                if exc.recovered is None:
+                    raise
+                snapshot = exc.recovered
+                recovery_error = exc
             break
     sources = {}
     for values in (
@@ -101,7 +111,7 @@ def _legacy_snapshot(state: Path, product: Path) -> SettingsSnapshot:
                 f"旧配置中的设备类型无效，请检查 {registry}；原文件已保留。"
             )
         device = "cpu" if recipe.endswith("-cpu") else "auto"
-    return replace(
+    snapshot = replace(
         snapshot,
         extra={
             **snapshot.extra,
@@ -115,6 +125,13 @@ def _legacy_snapshot(state: Path, product: Path) -> SettingsSnapshot:
         recognition_device=device,
         download_source_ids=tuple(sources.values()),
     )
+    if recovery_error is not None:
+        raise RuntimeSettingsStoreError(
+            str(recovery_error),
+            recovered=snapshot,
+            connection_valid=recovery_error.connection_valid,
+        ) from recovery_error
+    return snapshot
 
 
 def prepare_product_runtime() -> RuntimeSettingsStore:
@@ -153,11 +170,17 @@ def prepare_product_runtime() -> RuntimeSettingsStore:
     store = RuntimeSettingsStore(state / "recognition" / "supervisor-settings.json")
     if store.path.resolve() != store.path:
         raise ValueError("产品设置目录不可包含重解析点。")
-    if store.path.exists():
-        snapshot = store.load(SettingsSnapshot())
-    else:
-        snapshot = _legacy_snapshot(state, product)
-        store.replace(snapshot)
+    try:
+        if store.path.exists():
+            snapshot = store.load(SettingsSnapshot())
+        else:
+            snapshot = _legacy_snapshot(state, product)
+            store.replace(snapshot)
+    except RuntimeSettingsStoreError as exc:
+        if exc.recovered is None:
+            raise
+        snapshot = exc.recovered
+        store.preserve_startup_error(exc)
     cache = (
         state
         if snapshot.extra.get("legacy_cache_at_state_root") is True

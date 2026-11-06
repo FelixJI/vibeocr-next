@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
@@ -758,8 +759,9 @@ class SupervisorModule:
         )
 
     def settings(self) -> SettingsSnapshot:
-        with self._lock:
-            return self._settings
+        # A writer replaces this snapshot only after its durable commit. Readers
+        # can observe the previous value while that writer stops an idle worker.
+        return self._settings
 
     def _require_idle_for_device(self) -> None:
         if self._preload_count or any(
@@ -787,6 +789,7 @@ class SupervisorModule:
         snapshot: SettingsSnapshot,
         *,
         prepared: tuple[SettingsSnapshot, str] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> SettingsSnapshot:
         from vibeocr.runtime.recognition.recognition_modes import (
             DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
@@ -889,6 +892,8 @@ class SupervisorModule:
                     validate = getattr(self._executor, "validate_settings", None)
                     if callable(validate):
                         validate(snapshot)
+                    if cancelled is not None and cancelled():
+                        raise ValueError("设置保存已取消。")
                     # Persist first: applying a shorter policy cannot precede durable commit.
                     if self._settings_store is not None:
                         self._settings_store.replace(snapshot)
@@ -915,7 +920,7 @@ class SupervisorModule:
                         )
                     if status is not None:
                         self._residency_snapshot = status
-        return self._settings
+        return snapshot
 
     def _remember_residency(self, status: ResidencyStatus) -> ResidencyStatus:
         with self._lock:

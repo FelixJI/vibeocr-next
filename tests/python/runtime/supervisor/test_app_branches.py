@@ -514,6 +514,78 @@ async def test_preload_rejects_unknown_pipeline(pdf_app, supervisor_token: str) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("cancel_save", [False, True])
+async def test_device_stop_keeps_http_loop_responsive(
+    pdf_app, pdf_module, supervisor_token, monkeypatch, cancel_save
+):
+    import asyncio
+    import threading
+
+    from vibeocr.runtime.recognition import device_probe
+
+    monkeypatch.setattr(device_probe, "prepare_device", lambda _: None)
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "auto")
+    original_stop = pdf_module._executor.release_idle
+    residency_entered = asyncio.Event()
+    residency_thread = []
+    original_residency = pdf_module.residency_payload
+
+    def waiting_residency():
+        residency_thread.append(threading.get_ident())
+        loop.call_soon_threadsafe(residency_entered.set)
+        return original_residency()
+
+    monkeypatch.setattr(pdf_module, "residency_payload", waiting_residency)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocking_stop(scope):
+        loop.call_soon_threadsafe(entered.set)
+        if not release.wait(5):
+            raise RuntimeError("HTTP event loop did not serve independent work")
+        return original_stop(scope)
+
+    monkeypatch.setattr(pdf_module._executor, "release_idle", blocking_stop)
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        saving = asyncio.create_task(
+            http.put("/v2/settings", json={**before, "recognition_device": "cpu"})
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 8)
+            assert not saving.done()
+            residency = asyncio.create_task(http.get("/v2/runtime/residency"))
+            await asyncio.wait_for(residency_entered.wait(), 8)
+            assert residency_thread != [threading.get_ident()]
+            assert not residency.done()
+            assert (await http.get("/v2/health")).status_code == 200
+            assert (await http.get("/v2/settings")).json() == before
+            assert (
+                await http.post("/v2/pdf/sessions/open", json={"path": "synthetic.pdf"})
+            ).status_code == 200
+            if cancel_save:
+                saving.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await saving
+        finally:
+            release.set()
+            if not saving.cancelled():
+                response = await saving
+        assert (await residency).status_code == 200
+        # Acquire the commit lock after the stopped worker leaves the transaction.
+        if cancel_save:
+            await asyncio.to_thread(
+                pdf_module.prepare_recognition_device, pdf_module.settings()
+            )
+        after = (await http.get("/v2/settings")).json()
+        if cancel_save:
+            assert after == before
+        else:
+            assert response.status_code == 200
+            assert after["recognition_device"] == "cpu"
+
+
 async def test_cancelled_device_probe_keeps_committed_settings(
     pdf_app, supervisor_token, monkeypatch
 ):

@@ -293,3 +293,37 @@ def test_migration_io_failure_keeps_valid_runtime_preferences_and_original(
         store.replace(SettingsSnapshot())
     assert path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"schema_version": 99},
+        {"unknown_setting": True},
+        {"recognition_device": "cuda"},
+        {"revision": -1},
+    ],
+)
+def test_unrecognized_product_settings_do_not_enter_lifecycle_recovery(
+    tmp_path, invalid
+):
+    path = tmp_path / "supervisor-settings.json"
+    original = json.dumps(
+        {
+            "schema_version": 1,
+            "settings": {
+                "schema_version": 2,
+                "paddle_idle_seconds": -1,
+                "extra": {},
+                **invalid,
+            },
+        }
+    ).encode()
+    path.write_bytes(original)
+    store = RuntimeSettingsStore(path)
+    with pytest.raises(RuntimeSettingsStoreError) as fault:
+        store.load(SettingsSnapshot())
+    assert fault.value.recovered is None
+    with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
+        store.replace(SettingsSnapshot())
+    assert path.read_bytes() == original

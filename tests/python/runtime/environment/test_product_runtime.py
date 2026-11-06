@@ -328,6 +328,80 @@ def test_device_stop_never_waits_for_operation_while_holding_short_settings_lock
         module.shutdown_now()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("valid_connection", [False, True])
+def test_product_preparation_preserves_restricted_remote_recovery(
+    staged_runtime_product, monkeypatch, legacy, valid_connection
+):
+    import sys
+
+    from vibeocr.runtime.environments import model_cache, product_runtime
+    from vibeocr.runtime.host.composition import _NullExecutor
+    from vibeocr.runtime.jobs.module import SupervisorModule, SupervisorOptions
+
+    product, runtime, manifest, binding, catalog = staged_runtime_product
+    for key, value in {
+        "VIBEOCR_PRODUCT_ROOT": product,
+        "VIBEOCR_RUNTIME_MANIFEST": manifest,
+        "VIBEOCR_COMPONENT_LOCK": binding,
+        "VIBEOCR_PRODUCT_RUNTIME": "1",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    monkeypatch.delenv("VIBEOCR_LAYOUT_MANIFEST", raising=False)
+    monkeypatch.setattr(sys, "executable", str(runtime / "python.exe"))
+    monkeypatch.setattr(model_cache, "_paddle_onnx_catalog", lambda: catalog)
+    state = product / "state"
+    current = state / "recognition" / "supervisor-settings.json"
+    old = state / "environments" / "product" / "supervisor-settings.json"
+    path = old if legacy else current
+    path.parent.mkdir(parents=True)
+    connection = {
+        "mode": "remote",
+        "api_url": "https://example.invalid" if valid_connection else "file:///bad",
+    }
+    original = json.dumps(
+        {
+            "schema_version": 1,
+            "settings": {
+                "schema_version": 2,
+                "paddle_idle_seconds": -1,
+                "revision": 4,
+                "recognition_device": "cpu",
+                "extra": {"mineru_connection": connection},
+                "download_source_ids": ["mineru-huggingface"],
+            },
+        }
+    ).encode()
+    path.write_bytes(original)
+    store = product_runtime.prepare_product_runtime()
+    module = SupervisorModule(
+        options=SupervisorOptions(instance_id="recovery"),
+        stager_root=state / "staging",
+        executor=_NullExecutor(),
+        settings_store=store,
+    )
+    try:
+        snapshot = module.settings()
+        assert snapshot.extra["worker_settings_error"]
+        assert (
+            snapshot.extra["worker_mineru_connection_unavailable"]
+            is not valid_connection
+        )
+        assert snapshot.extra["mineru_connection"] == connection
+        assert "mineru-huggingface" in snapshot.download_source_ids
+        assert snapshot.revision == 4
+        if legacy:
+            assert snapshot.extra["legacy_cache_profile"] == "product"
+            assert not current.exists()
+        else:
+            assert snapshot.recognition_device == "cpu"
+        with pytest.raises(RuntimeSettingsStoreError, match="preserved"):
+            store.replace(snapshot)
+        assert path.read_bytes() == original
+    finally:
+        module.shutdown_now()
+
+
 def test_product_prepare_imports_legacy_cache_and_fails_closed_on_wrong_interpreter(
     tmp_path, monkeypatch, staged_runtime_product
 ):

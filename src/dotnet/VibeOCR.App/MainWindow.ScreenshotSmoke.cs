@@ -77,6 +77,12 @@ public sealed partial class MainWindow
       }
 
       await ClickSmokeButtonAsync("矩形");
+      // 默认笔色由用户设置决定；此像素检查明确绘制橙色矩形。
+      const string orange = """button[aria-label="常用颜色 #f38b35"]""";
+      await WaitForSmokeDomAsync($"document.querySelector('{orange}')", TimeSpan.FromSeconds(10), editorSurface: true);
+      await ClickSmokeButtonAsync("常用颜色 #f38b35");
+      await WaitForSmokeDomAsync($"document.querySelector('{orange}')?.getAttribute('aria-pressed') === 'true'",
+        TimeSpan.FromSeconds(10), editorSurface: true);
       string canvasBox = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const c = document.querySelector('canvas[aria-label=\"图片检查画布\"]'); " +
         "c.scrollIntoView({block:'center'}); const r=c.getBoundingClientRect(); " +
@@ -105,7 +111,7 @@ public sealed partial class MainWindow
           edited.Result is not null ||
           smokeStartupEnsureAttempts() != ensureAfterCapture)
       {
-        throw new InvalidOperationException("Editing changed session, published a recognition result or installed Runtime.");
+        throw new InvalidOperationException("Editing changed session, published a recognition result or started Runtime.");
       }
 
       await WaitForAutomaticTextLayerAsync(editedSession);

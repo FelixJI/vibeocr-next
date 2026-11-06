@@ -43,8 +43,17 @@ class RuntimeSettingsStore:
         self.path = Path(path)
         self._observed: bytes | None = None
         self._read_failed = False
+        self._startup_error: RuntimeSettingsStoreError | None = None
+
+    def preserve_startup_error(self, error: RuntimeSettingsStoreError) -> None:
+        # Legacy import may fail before a canonical file exists. Keep this session
+        # read-only and deliver the same restricted recovery to the Supervisor.
+        self._startup_error = error
+        self._read_failed = True
 
     def load(self, default: SettingsSnapshot) -> SettingsSnapshot:
+        if self._startup_error is not None:
+            raise self._startup_error
         self._read_failed = False
         try:
             return self._load(default)
@@ -177,11 +186,15 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             "mineru_idle_seconds",
         }
         if set(payload) - known:
-            raise ValueError("unrecognized settings fields")
+            raise RuntimeSettingsStoreError(
+                "invalid supervisor settings payload: unrecognized fields; original file preserved"
+            )
         if payload.get("schema_version") != SettingsSnapshot().schema_version and not (
             payload.get("schema_version") == 1 and "pipeline_ttls" in payload
         ):
-            raise ValueError("settings schema")
+            raise RuntimeSettingsStoreError(
+                "invalid settings schema; original file preserved"
+            )
         has_legacy = "residency" in payload or "pipeline_ttls" in payload
         residency = payload.get("residency")
         if residency is None and "pipeline_ttls" in payload:
@@ -271,11 +284,15 @@ def _recover_non_lifecycle(
             if payload.get("download_source_ids")
             else ()
         )
+        recovered = SettingsSnapshot(
+            revision=payload.get("revision", 0),
+            recognition_device=payload.get("recognition_device", "auto"),
+            extra=dict(extra),
+            download_source_ids=tuple(sources),
+        )
     except (RuntimeSelectionError, TypeError, ValueError):
-        sources = ()
-    return SettingsSnapshot(
-        extra=dict(extra), download_source_ids=tuple(sources)
-    ), connection_valid
+        return None, False
+    return recovered, connection_valid
 
 
 def _worker_timeout(residency: dict[str, Any], owner: str) -> int:
