@@ -20,7 +20,7 @@ foreach ($marker in @(
     'app\VibeOCR.WinUI.exe',
     'app\metadata\product-layout.json',
     'runtime\backend\runtime-manifest.json',
-    'runtime\installer\vibeocr-runtime-installer.exe'
+    'runtime\env\runtime-env\python.exe'
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $marker) -PathType Leaf)) {
         throw "Candidate marker missing: $marker"
@@ -29,34 +29,9 @@ foreach ($marker in @(
 if (Test-Path -LiteralPath (Join-Path $source 'state')) {
     throw 'Source candidate must not contain user or previous smoke state'
 }
-if (-not $PreparedCandidateRoot) {
-    throw 'Standalone screenshot smoke requires a prepared isolated candidate. Run scripts/smoke_managed_environments.ps1 -ProductRoot <candidate> -WorkRoot <isolated-work-root> first, then pass its retained candidate with -PreparedCandidateRoot to this script.'
-}
-$candidate = (Resolve-Path -LiteralPath $PreparedCandidateRoot).Path.TrimEnd('\')
+. (Join-Path $PSScriptRoot 'New-ProductSmokeCandidate.ps1')
+$candidate = New-ProductSmokeCandidate -Source $source -Work $work -Prepared $PreparedCandidateRoot
 $smokeRoot = Split-Path -Parent $candidate
-if ((Split-Path -Leaf $candidate) -ne 'candidate' -or
-    (Split-Path -Leaf $smokeRoot) -cnotmatch '^(?:ve-[0-9a-f]{12}|vibeocr-managed-e2e-[0-9a-f]{32})$' -or
-    -not $smokeRoot.StartsWith($work + '\', [StringComparison]::OrdinalIgnoreCase) -or
-    -not (Test-Path -LiteralPath (Join-Path $candidate 'state') -PathType Container)) {
-    throw 'PreparedCandidateRoot must be the retained candidate from the isolated managed-environment smoke under WorkRoot'
-}
-foreach ($marker in @('app\VibeOCR.WinUI.exe', 'app\metadata\product-layout.json')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $candidate $marker) -PathType Leaf)) {
-        throw "Prepared candidate marker missing: $marker"
-    }
-}
-if ((Get-Content -LiteralPath (Join-Path $source 'app\metadata\product-layout.json') -Raw) -ne
-    (Get-Content -LiteralPath (Join-Path $candidate 'app\metadata\product-layout.json') -Raw)) {
-    throw 'Prepared candidate does not match ProductRoot layout'
-}
-$sourceIdentity = Get-Content -LiteralPath (Join-Path $source 'app\metadata\component-identities.json') -Raw | ConvertFrom-Json
-$candidateIdentity = Get-Content -LiteralPath (Join-Path $candidate 'app\metadata\component-identities.json') -Raw | ConvertFrom-Json
-foreach ($field in @('component', 'repository', 'version', 'source_sha')) {
-    if (-not $sourceIdentity.project.$field -or
-        $sourceIdentity.project.$field -ne $candidateIdentity.project.$field) {
-        throw "Prepared candidate product binding differs: $field"
-    }
-}
 $healthPath = Join-Path $smokeRoot 'screenshot-e2e-health.json'
 $webViewData = Join-Path $smokeRoot 'screenshot-webview2'
 
@@ -98,8 +73,8 @@ try {
             $health.submit_attempts_after_pure_pins -ne 0 -or
             $health.submit_attempts_after_first_layer -ne 1 -or
             $health.submit_attempts_after_edit -ne 2 -or
-            $health.startup_ensure_attempts -ne
-                $health.startup_ensure_attempts_before_capture -or
+            $health.startup_ensure_attempts_before_capture -ne 0 -or
+            $health.startup_ensure_attempts -ne 1 -or
             -not $health.latin_selection -or -not $health.chinese_selection -or
             -not $health.pinned_selection -or
             @($health.ui_previews).Count -ne 3) {
@@ -121,10 +96,9 @@ try {
         $health.submit_attempts_after_capture -ne 0 -or
         $health.explicit_recognition_submit_attempts -ne 1 -or
         $health.submit_attempts_after_recognition -ne ($health.automatic_text_submit_attempts + 1) -or
-        $health.startup_ensure_attempts_after_capture -ne
-            $health.startup_ensure_attempts_before_capture -or
-        $health.startup_ensure_attempts_after_capture -ne
-            $health.startup_ensure_attempts_after_recognition) {
+        $health.startup_ensure_attempts_before_capture -ne 0 -or
+        $health.startup_ensure_attempts_after_capture -ne 0 -or
+        $health.startup_ensure_attempts_after_recognition -ne 1) {
         throw 'Screenshot smoke health evidence is incomplete or inconsistent'
     }
     Write-Host "$Mode passed: $($health.capture.Width)x$($health.capture.Height), session=$($health.session_id), revision=$($health.revision)."

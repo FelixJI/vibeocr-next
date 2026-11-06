@@ -33,6 +33,8 @@ from vibeocr.runtime_contracts.generated.error_codes import (
 ROOT = Path(__file__).resolve().parents[4]
 V2 = ROOT / "contracts/runtime/python/vibeocr/runtime_contracts"
 STABLE_ENGINE_IDS = ("rapidocr", "windows", "paddleocr")
+# #317：wire 枚举保留历史 rapidocr（反序列化+拒绝）；能力目录只列活跃 id。
+ACTIVE_ENGINE_IDS = ("windows", "paddleocr")
 ENGINE_SELECTION_ERRORS = {
     "OCR_ENGINE_UNKNOWN": ("validation", 400, False),
     "OCR_ENGINE_UNAVAILABLE": ("capability", 426, False),
@@ -133,7 +135,10 @@ def test_engine_catalog_covers_all_availability_states_on_health() -> None:
     }
     catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
     engines = {engine["id"]: engine for engine in catalog["engines"]}
-    assert set(engines) == set(STABLE_ENGINE_IDS)
+    assert set(engines) == set(ACTIVE_ENGINE_IDS)
+    # 退休 rapidocr 仍在 wire 枚举中，但不再是能力目录条目。
+    assert "rapidocr" in set(STABLE_ENGINE_IDS)
+    assert "rapidocr" not in engines
     assert {engine["availability"] for engine in engines.values()} <= {
         "ready",
         "preparation_required",
@@ -157,20 +162,14 @@ def test_engine_catalog_covers_all_availability_states_on_health() -> None:
     assert "ocr_engine_catalog" not in schema["CapabilityDescriptor"]["required"]
 
 
-def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
-    host = json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-    assert host["$defs"]["OcrEngineId"]["enum"] == list(STABLE_ENGINE_IDS)
-    assert host["$defs"]["OcrEngineAvailability"]["enum"] == [
+def test_http_ocr_catalog_binds_availability_states() -> None:
+    schema = _spec()["components"]["schemas"]
+    assert schema["OcrEngineAvailability"]["enum"] == [
         "ready",
         "preparation_required",
         "unavailable",
     ]
-    # Runtime Host 面已缩为 environment 侍者：引擎 catalog defs 仍在 host
-    # schema 上，不再挂在已删除的 CapabilityDescriptor 下。
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert hasattr(runtime_host_types, "OcrEngineCatalog")
-    assert hasattr(runtime_host_types, "OcrEngineDescriptor")
+    assert schema["OcrEngineId"]["enum"] == list(STABLE_ENGINE_IDS)
 
 
 def test_engine_selection_capability_is_registered_everywhere() -> None:

@@ -139,7 +139,9 @@ class TestMinerUService:
 
         cmd = mock_popen.call_args[0][0]
         assert "-m" in cmd
-        assert "mineru.parser.api_server" in cmd
+        # 经自有入口启动：先应用锁定 SDK 公开策略再转发官方 api_server
+        # （参数/端点不变，见 mineru_api_entry）。
+        assert "vibeocr.runtime.recognition.mineru_api_entry" in cmd
         assert "--host" in cmd
         assert "--port" in cmd
         # MinerU 4（含锁定的 4.1.3）api_server CLI 无 --language 选项，传入即

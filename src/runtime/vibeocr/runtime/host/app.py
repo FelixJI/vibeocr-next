@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import cache
 from importlib.resources import files
@@ -40,19 +42,14 @@ if TYPE_CHECKING:
 
 from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.environments.runtime_maintenance import (
-    RuntimeCapabilityError,
-    RuntimeInstallFailure,
-    RuntimeInstallPlanBlocked,
-    RuntimeInstallPlanStale,
-    RuntimeSourceIdentityMismatch,
     runtime_status_from_environment,
 )
 from vibeocr.runtime.environments.runtime_selection import (
     RuntimeSelectionError,
-    component_variant_catalog_payload,
     download_source_catalog_payload,
     normalize_download_source_ids,
 )
+from vibeocr.runtime.environments.settings_store import RuntimeSettingsStoreError
 from vibeocr.runtime.host.auth import (
     check_bearer_token,
     check_loopback,
@@ -89,7 +86,6 @@ from vibeocr.runtime_contracts.errors import error_registry
 from vibeocr.runtime_contracts.generated.capabilities import (
     OCR_ENGINE_SELECTION_V1,
     OCR_RECOGNITION_MODES_V1,
-    RUNTIME_COMPONENT_SELECTION_V1,
     RUNTIME_DOWNLOAD_SOURCES_V1,
 )
 
@@ -210,12 +206,6 @@ def _capability_descriptors(
             from vibeocr.runtime.recognition.mineru_readiness import catalog_payload
 
             descriptor["mineru_config_catalog"] = catalog_payload()
-        elif name == RUNTIME_COMPONENT_SELECTION_V1:
-            # 可选组件目录由 manifest/profile 派生：feature+accelerator ->
-            # component_id；base 必备组件不进入可选目录。
-            descriptor["component_variant_catalog"] = (
-                component_variant_catalog_payload()
-            )
         descriptors.append(descriptor)
     return descriptors
 
@@ -257,45 +247,35 @@ def _extract_engine_selection(
     return payload, engine
 
 
-def _runtime_exception_response(exc: Exception, instance_id: str) -> JSONResponse:
-    detail: dict[str, Any] = {"reason": str(exc)}
-    retry_after: int | None = None
-    if isinstance(exc, RuntimeInstallPlanStale):
-        code = ErrorCode.RUNTIME_INSTALL_PLAN_STALE
-    elif isinstance(exc, RuntimeInstallPlanBlocked):
-        code = ErrorCode.RUNTIME_INSTALL_PLAN_BLOCKED
-    elif isinstance(exc, RuntimeSourceIdentityMismatch):
-        code = ErrorCode.RUNTIME_IDENTITY_MISMATCH
-    elif isinstance(exc, RuntimeCapabilityError):
-        code = ErrorCode.RUNTIME_CAPABILITY_UNAVAILABLE
-    elif isinstance(exc, RuntimeLockTimeout):
-        code = ErrorCode.RUNTIME_BUSY
-        retry_after = 1
-    elif isinstance(exc, OSError):
-        code = ErrorCode.RUNTIME_IO_ERROR
-        retry_after = 1
-    elif isinstance(exc, RuntimeInstallFailure):
-        code = ErrorCode.RUNTIME_INSTALL_FAILED
-    elif isinstance(exc, RuntimeSelectionError):
-        code = exc.code
-    elif isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
-        code = ErrorCode.VALIDATION_ERROR
-    else:
-        code = ErrorCode.INTERNAL_ERROR
-    return _error_response(
-        code,
-        instance_id,
-        detail=detail,
-        retry_after=retry_after,
-    )
-
-
 class _PdfUnavailable(Exception):
     """Raised when the supervisor was built without a PDF adapter."""
 
 
 class _PdfBadRequest(Exception):
     """Raised when a PDF route receives an unparseable/invalid body."""
+
+
+@asynccontextmanager
+async def _request_cancellation(request: Request):
+    # The body has been consumed. Observe its peer until the work in the
+    # thread reaches its own commit/admission fence.
+    if await request.is_disconnected():
+        raise ValueError("请求已取消。")
+    cancelled = threading.Event()
+
+    async def watch_disconnect() -> None:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+        cancelled.set()
+
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        yield cancelled.is_set
+    finally:
+        cancelled.set()
+        watcher.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher
 
 
 def create_app(
@@ -433,7 +413,10 @@ def create_app(
                     getattr(upload, "content_type", None),
                     await upload.read(),
                 )
-            ref = module.submit_request(manifest, attachments)
+            async with _request_cancellation(request) as cancelled:
+                ref = await asyncio.to_thread(
+                    module.submit_request, manifest, attachments, cancelled=cancelled
+                )
         except MineruConfigError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RecognitionModeError as exc:
@@ -524,7 +507,10 @@ def create_app(
                     "job_ref": None,
                 }
             if command.kind is JobCommandKind.RETRY:
-                ref = module.retry(command.job_id)
+                async with _request_cancellation(request) as cancelled:
+                    ref = await asyncio.to_thread(
+                        module.retry, command.job_id, cancelled=cancelled
+                    )
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "instance_id": instance_id,
@@ -572,7 +558,7 @@ def create_app(
 
     @app.get("/v2/runtime/residency", response_model=wire.ResidencyStatus)
     async def residency() -> dict[str, Any]:
-        return module.residency_payload()
+        return await asyncio.to_thread(module.residency_payload)
 
     @app.post("/v2/runtime/release", response_model=wire.ResidencyStatus)
     async def release_runtime(request: Request) -> JsonResult:
@@ -651,7 +637,12 @@ def create_app(
         except MineruConfigError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RuntimeLockTimeout as exc:
-            return _runtime_exception_response(exc, instance_id)
+            return _error_response(
+                ErrorCode.RUNTIME_BUSY,
+                instance_id,
+                detail={"reason": str(exc)},
+                retry_after=1,
+            )
         except RecognitionModeError as exc:
             return _recognition_mode_error_response(exc, instance_id)
         except OcrEngineError as exc:
@@ -718,19 +709,38 @@ def create_app(
             source_ids = (
                 normalize_download_source_ids(raw_sources) if raw_sources else ()
             )
+            current = module.settings()
             snapshot = SettingsSnapshot(
+                revision=body.get("revision", 0),
+                recognition_device=body.get(
+                    "recognition_device", current.recognition_device
+                ),
                 default_ttl_seconds=default_ttl,
                 paddle_idle_seconds=body.get(
-                    "paddle_idle_seconds", module.settings().paddle_idle_seconds
+                    "paddle_idle_seconds", current.paddle_idle_seconds
                 ),
                 mineru_idle_seconds=body.get(
-                    "mineru_idle_seconds", module.settings().mineru_idle_seconds
+                    "mineru_idle_seconds", current.mineru_idle_seconds
                 ),
                 pipelines=pipelines,
                 extra=extra,
                 download_source_ids=source_ids,
             )
-            return module.update_settings(snapshot).to_payload()
+            prepared = await asyncio.to_thread(
+                module.prepare_recognition_device, snapshot
+            )
+            async with _request_cancellation(request) as cancelled:
+                committed = await asyncio.to_thread(
+                    module.update_settings,
+                    snapshot,
+                    prepared=prepared,
+                    cancelled=cancelled,
+                )
+                return committed.to_payload()
+        except RuntimeSettingsStoreError as exc:
+            return _error_response(
+                ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
+            )
         except RuntimeSelectionError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RecognitionModeError as exc:

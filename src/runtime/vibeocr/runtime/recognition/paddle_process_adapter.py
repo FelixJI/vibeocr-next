@@ -48,16 +48,9 @@ logger = logging.getLogger(__name__)
 
 
 def paddle_python() -> Path | None:
-    """#270：Paddle worker 解释器只在 Paddle ONNX 管理环境内指向当前进程。
+    from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
 
-    不再发现旧 legacy 安装的 ``engines/paddle`` 隔离解释器，也不再在非
-    ORT 环境里落回原生 Paddle；返回 None 表示本进程没有可用 Paddle 后端。
-    """
-    from vibeocr.runtime.recognition.paddle_onnx import RECIPES
-
-    if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "") in RECIPES:
-        return Path(sys.executable)
-    return None
+    return Path(sys.executable) if is_ort_environment() else None
 
 
 class PaddleProcessAdapter:

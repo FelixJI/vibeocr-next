@@ -22,6 +22,112 @@ public sealed partial class MainWindow
     }
   }
 
+  private async Task VerifyPinPhysicalClientAsync()
+  {
+    async Task<WorkbenchAnnotationFile> CreateImageAsync(int width, int height)
+    {
+      using var encoded = new InMemoryRandomAccessStream();
+      BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, encoded);
+      byte[] pixels = new byte[width * height * 4];
+      Array.Fill(pixels, (byte)255);
+      encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        (uint)width, (uint)height, 96, 96, pixels);
+      await encoder.FlushAsync();
+      encoded.Seek(0);
+      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+        encoded.AsStreamForRead(), CancellationToken.None);
+      return annotationStore.Take(lease.ResourceUri);
+    }
+
+    using WorkbenchAnnotationFile original = await CreateImageAsync(976, 836);
+    using WorkbenchAnnotationFile snapshot = await CreateImageAsync(800, 600);
+    using WorkbenchAnnotationFile secondImage = await CreateImageAsync(976, 836);
+    Guid pinSession = Guid.NewGuid();
+    var pinLayer = new RecognitionTextLayerState("textlayer.ready", null, new(pinSession.ToString("N"), 0),
+      "paddle_text", "pins-smoke", null, [new("VibeOCR 123", 100, 100, 600, 200)]);
+    using var pin = new PinnedImageWindow(original, pinSession, 0, pinLayer, [],
+      () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
+    using var secondPin = new PinnedImageWindow(secondImage, pinSession, 0, pinLayer, [],
+      () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
+    int doubleTaps = 0;
+    Action stopFirstTap = pin.SmokeObserveDoubleTap(() => doubleTaps++);
+    Action stopSecondTap = secondPin.SmokeObserveDoubleTap(() => doubleTaps++);
+    var failures = new List<string>();
+    void CheckClient(string phase)
+    {
+      var expected = pin.SmokeExpectedOriginalClientSize;
+      var actual = pin.SmokeClientSize;
+      string evidence = $"{phase}: actual={actual.Width}x{actual.Height}, expected={expected.Width}x{expected.Height}";
+      CaptureUiSmokeTrace.Stage("pins.physical-client." + evidence);
+      if (actual.Width != expected.Width || actual.Height != expected.Height) failures.Add(evidence);
+    }
+
+    try
+    {
+      await pin.ShowAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeDocumentReady), "Geometry pin did not load.");
+      await secondPin.ShowAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(secondPin.SmokeDocumentReady), "Second geometry pin did not load.");
+      CheckClient("initial");
+      await UntilPinStageWidthAsync(pin, original.Width, "Initial pin stage lost physical 1:1 scale.");
+      // 直接拖动契约：与 text-selection e2e 同一真实鼠标路径 helper。真实按下
+      // 必须先被 band 处理，随后窗口按请求的物理位移精确移动。
+      var beforeDrag = pin.SmokePosition;
+      await pin.SmokeDragTitleBarAsync(40, 30);
+      var afterDrag = pin.SmokePosition;
+      if (afterDrag.X != beforeDrag.X + 40 || afterDrag.Y != beforeDrag.Y + 30)
+        throw new InvalidOperationException($"Pin band drag moved " +
+          $"({afterDrag.X - beforeDrag.X},{afterDrag.Y - beforeDrag.Y}) instead of (40,30).");
+      CaptureUiSmokeTrace.Stage("pins.band-drag");
+      foreach (PinnedImageWindow target in new[] { secondPin, pin })
+      {
+        var before = target.SmokePosition;
+        await target.SmokeDragTitleBarAsync(40, 30);
+        var after = target.SmokePosition;
+        if (after.X != before.X + 40 || after.Y != before.Y + 30)
+          throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch.");
+      }
+      CaptureUiSmokeTrace.Stage("pins.alternating-band-drags");
+      if (doubleTaps != 0) throw new InvalidOperationException("Pin activation/drag caused DoubleTapped.");
+      // #319 菜单可见性契约最小复现：ShowAt 的 Opened/IsOpen 相对单次 WebView
+      // 往返异步，与取字 e2e 同一契约，用有界等待真实状态而非固定 sleep。
+      pin.SmokeRevealActions();
+      await UntilPinStateAsync(() => pin.SmokeActionsFlyoutOpen && pin.SmokeMoreButtonOpacity == 1
+        ? null : $"flyoutOpen={pin.SmokeActionsFlyoutOpen}, opacity={pin.SmokeMoreButtonOpacity}",
+        "Pinned actions menu did not reach its fully visible open state");
+      CaptureUiSmokeTrace.Stage("pins.actions-flyout-visible");
+      pin.SmokeInvokeZoomIn();
+      await UntilPinStageWidthAsync(pin, original.Width * pin.SmokeZoom, "Zoomed pin stage did not enlarge.");
+      pin.SmokeSetOpacity(0.65);
+      await pin.SmokeDismissActionsAsync();
+      pin.SmokeInvokeToggleTopmost();
+      pin.SmokeInvokeToggleTopmost();
+      pin.SmokeInvokeMaximize();
+      await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeIsMaximized), "Geometry pin did not maximize.");
+      pin.SmokeInvokeOriginalSize();
+      await WaitForPinCheckAsync(() => Task.FromResult(!pin.SmokeIsMaximized && pin.SmokeZoom == 1),
+        "Geometry pin did not restore.");
+      CheckClient("original-size");
+      await UntilPinStageWidthAsync(pin, original.Width, "Restored pin stage lost physical 1:1 scale.");
+      await CopyPinSubstringAsync(pin);
+      await pin.SmokeDismissActionsAsync();
+      CaptureUiSmokeTrace.Stage("pins.actions-after-restore-copy");
+      pin.SmokeInvokeMinimize();
+      await UntilPinStateAsync(() => pin.SmokeIsMinimized ? null : "not minimized", "First geometry pin did not minimize.");
+      pin.SmokeRestoreFromMinimized();
+      await UntilPinStateAsync(() => !pin.SmokeIsMinimized ? null : "still minimized", "First geometry pin did not restore.");
+      await secondPin.SmokeMouseClickCloseButtonAsync();
+      await UntilPinStateAsync(() => secondPin.SmokeDisposed ? null : "still open", "Real mouse did not close second geometry pin.");
+      CaptureUiSmokeTrace.Stage("pins.second-native-close");
+      await pin.ApplySnapshotAsync(snapshot.Path, snapshot.Width, snapshot.Height, Guid.NewGuid(), []);
+      CheckClient("snapshot");
+      await UntilPinStageWidthAsync(pin, snapshot.Width, "Snapshot pin stage lost physical 1:1 scale.");
+      if (failures.Count != 0)
+        throw new InvalidOperationException("Pin physical client mismatch: " + string.Join("; ", failures));
+    }
+    finally { stopSecondTap(); stopFirstTap(); secondPin.ForceClose(); pin.ForceClose(); }
+  }
+
   internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;
   internal Task SmokeHistoryInitialization => pinHistoryStore!.Initialization;
 
@@ -48,9 +154,10 @@ public sealed partial class MainWindow
     finally { stop.Cancel(); }
   }
 
-  internal async Task VerifyPinsSelfCheckAsync()
+  internal async Task VerifyPinsSelfCheckAsync(bool lifecycle)
   {
     CaptureUiSmokeTrace.Stage("pins.main-ready");
+    if (!lifecycle) await VerifyPinPhysicalClientAsync();
     Features.Recognition.PinnedImageWindow.SmokeFilterEvents.Clear();
     Features.Recognition.PinnedImageWindow.SmokeFilterRecording = true;
     await WaitForPinCheckAsync(() => Task.FromResult(webHost.HasSubscription), "Main bridge was not ready.");
@@ -91,22 +198,25 @@ public sealed partial class MainWindow
       const select=document.querySelector('select[aria-label="输出格式"]');select.value='image/jpeg';select.dispatchEvent(new Event('change',{bubbles:true}));})()
       """);
     string pinRoot = PinSnapshotStore.RootFor(layout.DataRoot);
-    int windowCount = CountSmokeAppWindows();
-    File.WriteAllText(pinRoot, "owned persistence blocker");
-    try
+    if (!lifecycle)
     {
-      for (int attempt = 0; attempt < 2; attempt++)
+      int windowCount = CountSmokeAppWindows();
+      File.WriteAllText(pinRoot, "owned persistence blocker");
+      try
       {
-        await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
-        await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
-          "document.body.textContent.includes('贴图未创建') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
-          "Failed first pin did not return a recoverable receipt.");
-        await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
-        if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+          await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
+          await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
+            "document.body.textContent.includes('贴图未创建') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
+            "Failed first pin did not return a recoverable receipt.");
+          await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
+          if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
+        }
       }
+      finally { File.Delete(pinRoot); }
+      await VerifyRecoveryBeforeCleanupAsync(png);
     }
-    finally { File.Delete(pinRoot); }
-    await VerifyRecoveryBeforeCleanupAsync(png);
     await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
     await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 1), "JPEG selection prevented first pin creation.");
     if (pinSnapshotStore!.ReadSnapshotPng(pinnedImages[0].PinId) is not { Width: 64, Height: 32 })
@@ -121,6 +231,12 @@ public sealed partial class MainWindow
     commandHandler.StateChanged += state => observedScopes.Add(state.Scope);
     try
     {
+      if (lifecycle)
+      {
+        await VerifyPinsLifecycleSelfCheckAsync(first, second);
+        VerifyPinImageFilters();
+        return;
+      }
       byte[] beforeSetupFailure = await File.ReadAllBytesAsync(first.CurrentImagePath);
       first.SmokeEditorSetupStep = () => throw new IOException("smoke editor setup before host initialization");
       try { await EnterPinEditAsync(first); }
@@ -360,222 +476,10 @@ public sealed partial class MainWindow
       CaptureUiSmokeTrace.Stage("pins.manager-above-pass-through");
       first.SetCollapsed(true); first.SetCollapsed(false);
 
-      CaptureUiSmokeTrace.Stage("pins.formula-render");
-      var formula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
-      formula.SmokeInputText(new string('中', 1366));
-      if (formula.RecoveryState().Content.Length != 0 || !formula.StatusText.Contains("4096"))
-        throw new InvalidOperationException("Formula input accepted an over-budget UTF-8 source without guidance.");
-      string emojiBoundary = string.Concat(Enumerable.Repeat("😀", 1024));
-      formula.SmokeInputText(emojiBoundary);
-      if (formula.RecoveryState().Content != emojiBoundary)
-        throw new InvalidOperationException("Formula input split or rejected valid emoji at the byte boundary.");
-      string legacyFormula = new('中', 4096);
-      var legacyRecovery = new PinSnapshotStore.Recovery(formula.PinId, "Formula", legacyFormula,
-        formula.SmokePosition.X, formula.SmokePosition.Y, 640, 400);
-      string legacyDirectory = Path.Combine(PinSnapshotStore.RootFor(layout.DataRoot), formula.PinId.ToString("N"));
-      Directory.CreateDirectory(legacyDirectory);
-      File.WriteAllText(Path.Combine(legacyDirectory, "window.json"), JsonSerializer.Serialize(legacyRecovery));
-      formula.Restore(legacyRecovery);
-      if (formula.RecoveryState().Content != legacyFormula || !formula.StatusText.Contains("完整恢复"))
-        throw new InvalidOperationException("Legacy oversized formula text was silently dropped.");
-      await formula.RenderFormulaAsync();
-      if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
-        throw new InvalidOperationException("Unchanged legacy oversized formula blocked actual exit preparation.");
-      if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula)
-        throw new InvalidOperationException("Legacy exit preparation dropped the original formula text.");
-      CancelPinsExitPreparation();
-      formula.SmokeInputText(legacyFormula[..^1]);
-      if (formula.RecoveryState().Content.Length != legacyFormula.Length - 1)
-        throw new InvalidOperationException("Legacy formula cannot be shortened while still beyond the byte budget.");
-      if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
-        throw new InvalidOperationException("Shortened legacy formula still above the byte budget blocked exit preparation.");
-      if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula[..^1])
-        throw new InvalidOperationException("Legacy formula shortening did not persist through actual exit preparation.");
-      CancelPinsExitPreparation();
-      CaptureUiSmokeTrace.Stage("pins.legacy-formula-exit-preserved");
-      CaptureUiSmokeTrace.Stage("pins.formula-utf8-budget");
-      formula.SetText("\\frac{x^2+1}{2}");
-      SmokeFailFormulaInitialization = true;
-      await formula.RenderFormulaAsync();
-      if (SmokeFailedFormulaHost is not { IsDisposed: true } || formula.HasFormulaImage ||
-        !formula.RecoveryState().Content.Contains("x^2+1"))
-        throw new InvalidOperationException("Failed formula initialization leaked its host or lost its source.");
-      CaptureUiSmokeTrace.Stage("pins.formula-initialization-rollback");
-      bool failedHostNavigated = false;
-      SmokeFailedFormulaHost.StateChanged += state =>
-      {
-        if (state.StartsWith("navigation-", StringComparison.Ordinal)) failedHostNavigated = true;
-      };
-      // 真实并发/迟到回归（闸门注入）：挂起创建 + 第二次调用只创建一次，
-      // 挂起期间修改源文本 → 迟到结果不套用且无旧内容展示，随后重试成功。
-      SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
-      Task suspendedRender = formula.RenderFormulaAsync();
-      await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 1), "Formula host creation did not start.");
-      await formula.RenderFormulaAsync();
-      if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Concurrent render created a second formula host.");
-      formula.SetText("\\frac{x^2+5}{9}");
-      SmokeFormulaHostGate.TrySetResult();
-      await suspendedRender;
-      if (formula.HasFormulaImage) throw new InvalidOperationException("Stale formula render installed an old image.");
-      if (!formula.StatusText.Contains("未套用")) throw new InvalidOperationException($"Stale render did not surface discard guidance: {formula.StatusText}");
-      // 重试（无闸门，复用同一宿主）：新源文本渲染成功且源保留。
-      await formula.RenderFormulaAsync();
-      if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("x^2+5"))
-        throw new InvalidOperationException($"Formula retry after discard failed: {formula.StatusText}");
-      if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Formula retry created another host instead of reusing.");
-      if (failedHostNavigated) throw new InvalidOperationException("Failed formula host retained a native navigation handler.");
-      formula.SetText("\\unknownCommand{");
-      await formula.RenderFormulaAsync();
-      if (formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("unknownCommand"))
-        throw new InvalidOperationException("Failed formula inserted an image or lost its source.");
-      // 失败后重试成功：换新有效公式重新渲染，图片恢复且新源保留。
-      formula.SetText("\\sqrt{a^2+b^2}");
-      await formula.RenderFormulaAsync();
-      if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("sqrt"))
-        throw new InvalidOperationException($"Formula retry after failure did not recover: {formula.StatusText}");
-      formula.ForceClose();
-      // 创建期间关闭：迟到宿主必须释放，不得接管字段泄漏。
-      var closing = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
-      closing.SetText("x+1");
-      SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
-      Task lateRender = closing.RenderFormulaAsync();
-      await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 2), "Late formula host creation did not start.");
-      closing.ForceClose();
-      SmokeFormulaHostGate.TrySetResult();
-      await lateRender;
-      if (!SmokeFormulaHosts[1].IsDisposed) throw new InvalidOperationException("Late formula host after close was leaked.");
-      SmokeFormulaHostGate = null;
-
-      CaptureUiSmokeTrace.Stage("pins.close-cancel-discard");
-      if (!SmokeRecoveryInjectionConsumed) throw new InvalidOperationException("Injected recovery root failure never ran at startup.");
-      await EnterPinEditAsync(second);
-      await WaitForPinEditorAsync(second);
-      await RotateSmokePinAsync(second);
-      second.Close();
-      await WaitForPinCheckAsync(() => Task.FromResult(second.SmokeInvokeEditDecision("取消")), "Close decision was absent.");
-      if (second.Disposed || !second.Editing) throw new InvalidOperationException("Cancel closed a dirty pin.");
-      await WaitForPinCheckAsync(() => Task.FromResult(!second.SmokeEditDecisionPending), "Cancel decision did not finish.");
-      second.Close();
-      await WaitForPinCheckAsync(() => Task.FromResult(second.SmokeInvokeEditDecision("放弃更改")), "Discard decision was absent.");
-      await WaitForPinCheckAsync(() => Task.FromResult(second.Disposed), "Discard did not close the pin.");
-      if (pinSnapshotStore!.GetSnapshotPngPath(second.PinId) is not null)
-        throw new InvalidOperationException("Closing a single pin did not delete its owned recovery record.");
-
-      CaptureUiSmokeTrace.Stage("pins.exit-recovery");
-      var expanded = first.SmokeClientSize;
-      first.SetCollapsed(true);
-      var exitText = CreateTypedPin(TypedPinWindow.ContentKind.Text);
-      var exitColor = CreateTypedPin(TypedPinWindow.ContentKind.Color);
-      var exitFormula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
-      exitText.SetText("saved-before-exit"); exitColor.SetText("#123456"); exitFormula.SetText("x+1");
-      exitColor.SmokeSetNativeEnabled(false);
-      var lateReadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-      var lateReadReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-      exitText.SmokeBeforeFileTextApply = () => { lateReadStarted.TrySetResult(); return lateReadReleased.Task; };
-      string lateTextPath = Path.Combine(resourceRoot, "pins-exit-late-text.txt");
-      File.WriteAllText(lateTextPath, "late-file-text");
-      Task lateTextLoad = exitText.LoadFileAsync(lateTextPath);
-      await lateReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-      bool gapReached = false, preserved = false;
-      await (SmokeExitCoordinatorFailureProbe ?? throw new InvalidOperationException("No exit coordinator probe."))(async () =>
-      {
-        gapReached = true;
-        lateReadReleased.TrySetResult();
-        await lateTextLoad;
-        exitText.SmokeInputText("late-text"); exitColor.SmokeInputText("#ABCDEF"); exitFormula.SmokeInputText("late-formula");
-        first.SetCollapsed(false);
-        exitText.Close();
-        preserved = exitText.Kind == TypedPinWindow.ContentKind.Text &&
-          exitText.RecoveryState().Content == "saved-before-exit" &&
-          exitColor.RecoveryState().Content == "#123456" && exitFormula.RecoveryState().Content == "x+1" &&
-          !exitText.Disposed && !exitText.SmokeNativeEnabled && first.Collapsed;
-        await Task.Yield();
-        throw new IOException("smoke injected failure after pin exit preparation");
-      });
-      if (!gapReached || !preserved)
-        throw new InvalidOperationException("Prepared pin contents or close state changed during the real shutdown await gap.");
-      exitText.SmokeInputText("resumed-after-failure");
-      if (pinsExitReview || !exitText.SmokeNativeEnabled || exitText.RecoveryState().Content != "resumed-after-failure")
-        throw new InvalidOperationException("Failed application exit did not restore pin editing.");
-      if (exitColor.SmokeNativeEnabled) throw new InvalidOperationException("Exit cancellation enabled a previously disabled window.");
-      exitColor.SmokeSetNativeEnabled(true);
-      exitText.ForceClose(); exitColor.ForceClose(); exitFormula.ForceClose();
-      if (!await PreparePinsExitAsync()) throw new InvalidOperationException("Exit recovery could not persist pins.");
-      var recovered = pinSnapshotStore.LoadRecovery();
-      if (recovered.Count != 1 || !recovered.Any(item => item.Id == first.PinId && item.X == first.SmokePosition.X))
-        throw new InvalidOperationException("Pin recovery did not retain content and physical position.");
-      // Simulate the same shutdown disposal and fresh recovery path, preserving owned records.
-      shuttingDown = true;
-      first.ForceClose();
-      shuttingDown = false;
-      CancelPinsExitPreparation();
-      RestorePins();
-      first = pinnedImages.Single();
-      await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Recovered static pin not ready.");
-      if (!first.Collapsed) throw new InvalidOperationException("Recovery lost the collapsed state.");
-      first.SetCollapsed(false);
-      if (first.SmokeClientSize.Width != expanded.Width || first.SmokeClientSize.Height != expanded.Height)
-        throw new InvalidOperationException($"Recovery lost expanded size: expected={expanded.Width}x{expanded.Height}, actual={first.SmokeClientSize.Width}x{first.SmokeClientSize.Height}, record={JsonSerializer.Serialize(recovered.Single())}");
-      await VerifySmokePinTextAsync(first);
-
-      // 启动显示瞬时失败≠用户关闭：失败窗口释放但恢复快照保留，重试恢复成功。
-      CaptureUiSmokeTrace.Stage("pins.show-failure-retain");
-      shuttingDown = true;
-      first.ForceClose();
-      shuttingDown = false;
-      Features.Recognition.PinnedImageWindow.SmokeFailNextShow = true;
-      RestorePins();
-      await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 0), "Failed show window was not released.");
-      if (pinSnapshotStore!.LoadRecovery().Count != 1)
-        throw new InvalidOperationException("Startup show failure deleted the recovery snapshot.");
-      RestorePins();
-      first = pinnedImages.Single();
-      await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Retry after startup failure did not restore.");
-      await VerifySmokePinTextAsync(first);
-
-      // 拓扑变更回归：自身窗口的屏外恢复记录，用当前工作区验证 image 与
-      // typed 贴图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
-      CaptureUiSmokeTrace.Stage("pins.offscreen-recovery");
-      var typed = CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind.Text);
-      typed.SetText("offscreen-restore");
-      var workAreas = Features.Pins.PinSnapshotStore.CurrentWorkAreas();
-      int offscreenX = checked((int)(workAreas.Max(area => (long)area.X + area.Width) + 4000));
-      int offscreenY = checked((int)(workAreas.Max(area => (long)area.Y + area.Height) + 4000));
-      pinSnapshotStore!.SaveRecovery(first.RecoveryState() with { X = offscreenX, Y = offscreenY });
-      pinSnapshotStore.SaveRecovery(typed.RecoveryState() with { X = offscreenX, Y = offscreenY });
-      shuttingDown = true;
-      first.ForceClose();
-      typed.ForceClose();
-      shuttingDown = false;
-      RestorePins();
-      var recoveredImage = pinnedImages.Single(pin => pin.RecoveryState().X != offscreenX);
-      var recoveredTyped = typedPins.Single(pin => pin.RecoveryState().X != offscreenX);
-      if (!BandVisibleOnCurrentDesktop(recoveredImage.SmokePosition.X, recoveredImage.SmokePosition.Y,
-          recoveredImage.RecoveryState().Width) ||
-        !BandVisibleOnCurrentDesktop(recoveredTyped.SmokePosition.X, recoveredTyped.SmokePosition.Y,
-          recoveredTyped.RecoveryState().Width))
-        throw new InvalidOperationException($"Offscreen recovery did not keep a draggable band visible: image=({recoveredImage.SmokePosition.X},{recoveredImage.SmokePosition.Y}), typed=({recoveredTyped.SmokePosition.X},{recoveredTyped.SmokePosition.Y}), areas={string.Join(";", Features.Pins.PinSnapshotStore.CurrentWorkAreas())}");
-      first = recoveredImage;
-      first.Close(); second.Close(); recoveredTyped.ForceClose();
-      if (pinSnapshotStore.LoadRecovery().Count != 0) throw new InvalidOperationException("Closing a pin kept its owned recovery entry.");
-
-      // 图片过滤注册真实调用配对（按 WebView2 实例分组）：每实例每 URI
-      // add−remove ≤1（多次换装不累积），移除的 URI 必曾被注册。
-      foreach (var group in Features.Recognition.PinnedImageWindow.SmokeFilterEvents
-        .GroupBy(item => item.Instance))
-      {
-        Dictionary<string, int> adds = [];
-        Dictionary<string, int> removes = [];
-        foreach ((_, string uri, bool added) in group)
-        {
-          if (added) adds[uri] = adds.GetValueOrDefault(uri) + 1;
-          else removes[uri] = removes.GetValueOrDefault(uri) + 1;
-        }
-        if (adds.Keys.Concat(removes.Keys).Any(uri =>
-            adds.GetValueOrDefault(uri) - removes.GetValueOrDefault(uri) > 1) ||
-          removes.Keys.Any(uri => adds.GetValueOrDefault(uri) == 0))
-          throw new InvalidOperationException($"Image filter registrations accumulated or removed an unregistered URI (instance {group.Key}): {string.Join("; ", group.Select(item => $"{(item.Added ? "add" : "remove")}({item.Uri})"))}");
-      }
+      foreach (var pin in pinnedImages.ToArray()) pin.ForceClose();
+      foreach (var pin in typedPins.ToArray()) pin.ForceClose();
+      pinManager?.ForceClose();
+      VerifyPinImageFilters();
     }
     finally
     {
@@ -584,6 +488,241 @@ public sealed partial class MainWindow
       foreach (var pin in typedPins.ToArray()) pin.ForceClose();
       pinManager?.ForceClose();
     }
+  }
+
+  private static void VerifyPinImageFilters()
+  {
+    // 图片过滤注册真实调用配对（按 WebView2 实例分组）：每实例每 URI
+    // add−remove ≤1（多次换装不累积），移除的 URI 必曾被注册。
+    foreach (var group in Features.Recognition.PinnedImageWindow.SmokeFilterEvents
+      .GroupBy(item => item.Instance))
+    {
+      Dictionary<string, int> adds = [];
+      Dictionary<string, int> removes = [];
+      foreach ((_, string uri, bool added) in group)
+      {
+        if (added) adds[uri] = adds.GetValueOrDefault(uri) + 1;
+        else removes[uri] = removes.GetValueOrDefault(uri) + 1;
+      }
+      if (adds.Keys.Concat(removes.Keys).Any(uri =>
+          adds.GetValueOrDefault(uri) - removes.GetValueOrDefault(uri) > 1) ||
+        removes.Keys.Any(uri => adds.GetValueOrDefault(uri) == 0))
+        throw new InvalidOperationException($"Image filter registrations accumulated or removed an unregistered URI (instance {group.Key}): {string.Join("; ", group.Select(item => $"{(item.Added ? "add" : "remove")}({item.Uri})"))}");
+    }
+  }
+
+  private async Task VerifyPinsLifecycleSelfCheckAsync(PinnedImageWindow first, PinnedImageWindow second)
+  {
+    // 生命周期必须从真实编辑并保存的贴图开始，保留原长场景的工程/屏蔽前置。
+    foreach (PinnedImageWindow pin in new[] { first, second })
+    {
+      await EnterPinEditAsync(pin);
+      await WaitForPinEditorAsync(pin);
+      await RotateSmokePinAsync(pin);
+      if (!await pin.SaveEditAsync() || pinSnapshotStore!.GetSnapshotProjectPath(pin.PinId) is null ||
+        pin.SmokeImageSize != (32, 64))
+        throw new InvalidOperationException("Lifecycle fixture did not commit its real edited pin project.");
+    }
+    await VerifySmokePinTextAsync(first);
+    CaptureUiSmokeTrace.Stage("pins.lifecycle-edited-fixture");
+    CaptureUiSmokeTrace.Stage("pins.formula-render");
+    var formula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+    formula.SmokeInputText(new string('中', 1366));
+    if (formula.RecoveryState().Content.Length != 0 || !formula.StatusText.Contains("4096"))
+      throw new InvalidOperationException("Formula input accepted an over-budget UTF-8 source without guidance.");
+    string emojiBoundary = string.Concat(Enumerable.Repeat("😀", 1024));
+    formula.SmokeInputText(emojiBoundary);
+    if (formula.RecoveryState().Content != emojiBoundary)
+      throw new InvalidOperationException("Formula input split or rejected valid emoji at the byte boundary.");
+    string legacyFormula = new('中', 4096);
+    var legacyRecovery = new PinSnapshotStore.Recovery(formula.PinId, "Formula", legacyFormula,
+      formula.SmokePosition.X, formula.SmokePosition.Y, 640, 400);
+    string legacyDirectory = Path.Combine(PinSnapshotStore.RootFor(layout.DataRoot), formula.PinId.ToString("N"));
+    Directory.CreateDirectory(legacyDirectory);
+    File.WriteAllText(Path.Combine(legacyDirectory, "window.json"), JsonSerializer.Serialize(legacyRecovery));
+    formula.Restore(legacyRecovery);
+    if (formula.RecoveryState().Content != legacyFormula || !formula.StatusText.Contains("完整恢复"))
+      throw new InvalidOperationException("Legacy oversized formula text was silently dropped.");
+    await formula.RenderFormulaAsync();
+    if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
+      throw new InvalidOperationException("Unchanged legacy oversized formula blocked actual exit preparation.");
+    if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula)
+      throw new InvalidOperationException("Legacy exit preparation dropped the original formula text.");
+    CancelPinsExitPreparation();
+    formula.SmokeInputText(legacyFormula[..^1]);
+    if (formula.RecoveryState().Content.Length != legacyFormula.Length - 1)
+      throw new InvalidOperationException("Legacy formula cannot be shortened while still beyond the byte budget.");
+    if (!await PreparePinsExitAsync().WaitAsync(TimeSpan.FromSeconds(10)))
+      throw new InvalidOperationException("Shortened legacy formula still above the byte budget blocked exit preparation.");
+    if (pinSnapshotStore!.LoadRecovery().Single(record => record.Id == formula.PinId).Content != legacyFormula[..^1])
+      throw new InvalidOperationException("Legacy formula shortening did not persist through actual exit preparation.");
+    CancelPinsExitPreparation();
+    CaptureUiSmokeTrace.Stage("pins.legacy-formula-exit-preserved");
+    CaptureUiSmokeTrace.Stage("pins.formula-utf8-budget");
+    formula.SetText("\\frac{x^2+1}{2}");
+    SmokeFailFormulaInitialization = true;
+    await formula.RenderFormulaAsync();
+    if (SmokeFailedFormulaHost is not { IsDisposed: true } || formula.HasFormulaImage ||
+      !formula.RecoveryState().Content.Contains("x^2+1"))
+      throw new InvalidOperationException("Failed formula initialization leaked its host or lost its source.");
+    CaptureUiSmokeTrace.Stage("pins.formula-initialization-rollback");
+    bool failedHostNavigated = false;
+    SmokeFailedFormulaHost.StateChanged += state =>
+    {
+      if (state.StartsWith("navigation-", StringComparison.Ordinal)) failedHostNavigated = true;
+    };
+    // 真实并发/迟到回归（闸门注入）：挂起创建 + 第二次调用只创建一次，
+    // 挂起期间修改源文本 → 迟到结果不套用且无旧内容展示，随后重试成功。
+    SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task suspendedRender = formula.RenderFormulaAsync();
+    await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 1), "Formula host creation did not start.");
+    await formula.RenderFormulaAsync();
+    if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Concurrent render created a second formula host.");
+    formula.SetText("\\frac{x^2+5}{9}");
+    SmokeFormulaHostGate.TrySetResult();
+    await suspendedRender;
+    if (formula.HasFormulaImage) throw new InvalidOperationException("Stale formula render installed an old image.");
+    if (!formula.StatusText.Contains("未套用")) throw new InvalidOperationException($"Stale render did not surface discard guidance: {formula.StatusText}");
+    // 重试（无闸门，复用同一宿主）：新源文本渲染成功且源保留。
+    await formula.RenderFormulaAsync();
+    if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("x^2+5"))
+      throw new InvalidOperationException($"Formula retry after discard failed: {formula.StatusText}");
+    if (SmokeFormulaHosts.Count != 1) throw new InvalidOperationException("Formula retry created another host instead of reusing.");
+    if (failedHostNavigated) throw new InvalidOperationException("Failed formula host retained a native navigation handler.");
+    formula.SetText("\\unknownCommand{");
+    await formula.RenderFormulaAsync();
+    if (formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("unknownCommand"))
+      throw new InvalidOperationException("Failed formula inserted an image or lost its source.");
+    // 失败后重试成功：换新有效公式重新渲染，图片恢复且新源保留。
+    formula.SetText("\\sqrt{a^2+b^2}");
+    await formula.RenderFormulaAsync();
+    if (!formula.HasFormulaImage || !formula.RecoveryState().Content.Contains("sqrt"))
+      throw new InvalidOperationException($"Formula retry after failure did not recover: {formula.StatusText}");
+    formula.ForceClose();
+    // 创建期间关闭：迟到宿主必须释放，不得接管字段泄漏。
+    var closing = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+    closing.SetText("x+1");
+    SmokeFormulaHostGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task lateRender = closing.RenderFormulaAsync();
+    await WaitForPinCheckAsync(() => Task.FromResult(SmokeFormulaHosts.Count == 2), "Late formula host creation did not start.");
+    closing.ForceClose();
+    SmokeFormulaHostGate.TrySetResult();
+    await lateRender;
+    if (!SmokeFormulaHosts[1].IsDisposed) throw new InvalidOperationException("Late formula host after close was leaked.");
+    SmokeFormulaHostGate = null;
+
+    CaptureUiSmokeTrace.Stage("pins.close-cancel-discard");
+    if (!SmokeRecoveryInjectionConsumed) throw new InvalidOperationException("Injected recovery root failure never ran at startup.");
+    await EnterPinEditAsync(second);
+    await WaitForPinEditorAsync(second);
+    await RotateSmokePinAsync(second);
+    second.Close();
+    await WaitForPinCheckAsync(() => Task.FromResult(second.SmokeInvokeEditDecision("取消")), "Close decision was absent.");
+    if (second.Disposed || !second.Editing) throw new InvalidOperationException("Cancel closed a dirty pin.");
+    await WaitForPinCheckAsync(() => Task.FromResult(!second.SmokeEditDecisionPending), "Cancel decision did not finish.");
+    second.Close();
+    await WaitForPinCheckAsync(() => Task.FromResult(second.SmokeInvokeEditDecision("放弃更改")), "Discard decision was absent.");
+    await WaitForPinCheckAsync(() => Task.FromResult(second.Disposed), "Discard did not close the pin.");
+    if (pinSnapshotStore!.GetSnapshotPngPath(second.PinId) is not null)
+      throw new InvalidOperationException("Closing a single pin did not delete its owned recovery record.");
+
+    CaptureUiSmokeTrace.Stage("pins.exit-recovery");
+    var expanded = first.SmokeClientSize;
+    first.SetCollapsed(true);
+    var exitText = CreateTypedPin(TypedPinWindow.ContentKind.Text);
+    var exitColor = CreateTypedPin(TypedPinWindow.ContentKind.Color);
+    var exitFormula = CreateTypedPin(TypedPinWindow.ContentKind.Formula);
+    exitText.SetText("saved-before-exit"); exitColor.SetText("#123456"); exitFormula.SetText("x+1");
+    exitColor.SmokeSetNativeEnabled(false);
+    var lateReadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var lateReadReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    exitText.SmokeBeforeFileTextApply = () => { lateReadStarted.TrySetResult(); return lateReadReleased.Task; };
+    string lateTextPath = Path.Combine(resourceRoot, "pins-exit-late-text.txt");
+    File.WriteAllText(lateTextPath, "late-file-text");
+    Task lateTextLoad = exitText.LoadFileAsync(lateTextPath);
+    await lateReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    bool gapReached = false, preserved = false;
+    await (SmokeExitCoordinatorFailureProbe ?? throw new InvalidOperationException("No exit coordinator probe."))(async () =>
+    {
+      gapReached = true;
+      lateReadReleased.TrySetResult();
+      await lateTextLoad;
+      exitText.SmokeInputText("late-text"); exitColor.SmokeInputText("#ABCDEF"); exitFormula.SmokeInputText("late-formula");
+      first.SetCollapsed(false);
+      exitText.Close();
+      preserved = exitText.Kind == TypedPinWindow.ContentKind.Text &&
+        exitText.RecoveryState().Content == "saved-before-exit" &&
+        exitColor.RecoveryState().Content == "#123456" && exitFormula.RecoveryState().Content == "x+1" &&
+        !exitText.Disposed && !exitText.SmokeNativeEnabled && first.Collapsed;
+      await Task.Yield();
+      throw new IOException("smoke injected failure after pin exit preparation");
+    });
+    if (!gapReached || !preserved)
+      throw new InvalidOperationException("Prepared pin contents or close state changed during the real shutdown await gap.");
+    exitText.SmokeInputText("resumed-after-failure");
+    if (pinsExitReview || !exitText.SmokeNativeEnabled || exitText.RecoveryState().Content != "resumed-after-failure")
+      throw new InvalidOperationException("Failed application exit did not restore pin editing.");
+    if (exitColor.SmokeNativeEnabled) throw new InvalidOperationException("Exit cancellation enabled a previously disabled window.");
+    exitColor.SmokeSetNativeEnabled(true);
+    exitText.ForceClose(); exitColor.ForceClose(); exitFormula.ForceClose();
+    if (!await PreparePinsExitAsync()) throw new InvalidOperationException("Exit recovery could not persist pins.");
+    var recovered = pinSnapshotStore.LoadRecovery();
+    if (recovered.Count != 1 || !recovered.Any(item => item.Id == first.PinId && item.X == first.SmokePosition.X))
+      throw new InvalidOperationException("Pin recovery did not retain content and physical position.");
+    // Simulate the same shutdown disposal and fresh recovery path, preserving owned records.
+    shuttingDown = true;
+    first.ForceClose();
+    shuttingDown = false;
+    CancelPinsExitPreparation();
+    RestorePins();
+    first = pinnedImages.Single();
+    await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Recovered static pin not ready.");
+    if (!first.Collapsed) throw new InvalidOperationException("Recovery lost the collapsed state.");
+    first.SetCollapsed(false);
+    if (first.SmokeClientSize.Width != expanded.Width || first.SmokeClientSize.Height != expanded.Height)
+      throw new InvalidOperationException($"Recovery lost expanded size: expected={expanded.Width}x{expanded.Height}, actual={first.SmokeClientSize.Width}x{first.SmokeClientSize.Height}, record={JsonSerializer.Serialize(recovered.Single())}");
+    await VerifySmokePinTextAsync(first);
+
+    // 启动显示瞬时失败≠用户关闭：失败窗口释放但恢复快照保留，重试恢复成功。
+    CaptureUiSmokeTrace.Stage("pins.show-failure-retain");
+    shuttingDown = true;
+    first.ForceClose();
+    shuttingDown = false;
+    Features.Recognition.PinnedImageWindow.SmokeFailNextShow = true;
+    RestorePins();
+    await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 0), "Failed show window was not released.");
+    if (pinSnapshotStore!.LoadRecovery().Count != 1)
+      throw new InvalidOperationException("Startup show failure deleted the recovery snapshot.");
+    RestorePins();
+    first = pinnedImages.Single();
+    await WaitForPinCheckAsync(() => Task.FromResult(first.SmokeDocumentReady), "Retry after startup failure did not restore.");
+    await VerifySmokePinTextAsync(first);
+
+    // 拓扑变更回归：自身窗口的屏外恢复记录，用当前工作区验证 image 与
+    // typed 贴图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
+    CaptureUiSmokeTrace.Stage("pins.offscreen-recovery");
+    var typed = CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind.Text);
+    typed.SetText("offscreen-restore");
+    var workAreas = Features.Pins.PinSnapshotStore.CurrentWorkAreas();
+    int offscreenX = checked((int)(workAreas.Max(area => (long)area.X + area.Width) + 4000));
+    int offscreenY = checked((int)(workAreas.Max(area => (long)area.Y + area.Height) + 4000));
+    pinSnapshotStore!.SaveRecovery(first.RecoveryState() with { X = offscreenX, Y = offscreenY });
+    pinSnapshotStore.SaveRecovery(typed.RecoveryState() with { X = offscreenX, Y = offscreenY });
+    shuttingDown = true;
+    first.ForceClose();
+    typed.ForceClose();
+    shuttingDown = false;
+    RestorePins();
+    var recoveredImage = pinnedImages.Single(pin => pin.RecoveryState().X != offscreenX);
+    var recoveredTyped = typedPins.Single(pin => pin.RecoveryState().X != offscreenX);
+    if (!BandVisibleOnCurrentDesktop(recoveredImage.SmokePosition.X, recoveredImage.SmokePosition.Y,
+        recoveredImage.RecoveryState().Width) ||
+      !BandVisibleOnCurrentDesktop(recoveredTyped.SmokePosition.X, recoveredTyped.SmokePosition.Y,
+        recoveredTyped.RecoveryState().Width))
+      throw new InvalidOperationException($"Offscreen recovery did not keep a draggable band visible: image=({recoveredImage.SmokePosition.X},{recoveredImage.SmokePosition.Y}), typed=({recoveredTyped.SmokePosition.X},{recoveredTyped.SmokePosition.Y}), areas={string.Join(";", Features.Pins.PinSnapshotStore.CurrentWorkAreas())}");
+    first = recoveredImage;
+    first.Close(); second.Close(); recoveredTyped.ForceClose();
+    if (pinSnapshotStore.LoadRecovery().Count != 0) throw new InvalidOperationException("Closing a pin kept its owned recovery entry.");
   }
 
   private async Task VerifyRecoveryBeforeCleanupAsync(byte[] png)

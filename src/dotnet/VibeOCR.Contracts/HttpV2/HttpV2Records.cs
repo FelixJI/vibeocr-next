@@ -440,6 +440,8 @@ public sealed record SettingsSnapshot
     private IReadOnlyList<string>? _downloadSourceIds;
 
     public int SchemaVersion { get; init; } = HttpV2Schema.Version;
+    public int Revision { get; init; }
+    public string RecognitionDevice { get; init; } = "auto";
     public int PaddleIdleSeconds { get; init; } = 600;
     public int MineruIdleSeconds { get; init; } = 600;
     public SettingsResidency Residency { get; init; } = new();

@@ -14,7 +14,6 @@ using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using Xunit;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 
 namespace VibeOCR.App.Tests;
@@ -304,6 +303,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public bool RemoveModeCapability;
     public bool TableUnavailable;
+    public string DefaultMode = "paddle_table";
 
     public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
     {
@@ -334,7 +334,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       {
         Extra = new Dictionary<string, JsonElement>
         {
-          ["default_recognition_mode"] = JsonSerializer.SerializeToElement("paddle_table"),
+          ["default_recognition_mode"] = JsonSerializer.SerializeToElement(DefaultMode),
         },
       });
   }
@@ -1110,6 +1110,148 @@ public sealed class ScreenshotSessionWorkbenchTests
       finally { readinessCleanup.Cancel(); }
     }
     finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ExplicitTextCapturePreparesRuntimeAfterCapture(bool preparationFails)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var inputs = new FixedCaptureInput();
+    var recognition = new RecognitionViewModel(inference, inputs);
+    bool attached = false;
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => attached,
+      ensureRuntimeReady: _ =>
+      {
+        Assert.Equal(1, inputs.CaptureCalls);
+        Assert.NotNull(recognition.CurrentInput);
+        preparations++;
+        if (preparationFails) throw new IOException("Synthetic preparation failed.");
+        attached = true;
+        return Task.CompletedTask;
+      });
+    using var completed = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && state.ScreenshotSession is not null);
+    Assert.Null((await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(),
+      TestContext.Current.CancellationToken)).Error);
+    RecognitionWorkbenchState state = await completed.Task;
+    Assert.Equal(1, preparations);
+    Assert.Equal(preparationFails ? "recognition.failed" : "recognition.session", state.StatusCode);
+    Assert.Equal(!preparationFails, state.ScreenshotSession!.TextSelectionRequested);
+    Assert.NotNull(state.Input);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Fact]
+  public async Task FailedTextPreparationKeepsCapturedHistoryOwnership()
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput
+    { Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8) });
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    var history = new PinHistoryStore(root);
+    history.SetEnabled(true);
+    bool preparationFails = true;
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => !preparationFails,
+      pinHistory: history, ensureRuntimeReady: _ => preparationFails
+        ? throw new IOException("Synthetic preparation failed.") : Task.CompletedTask);
+    using var failed = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && state.StatusCode == "recognition.failed");
+    await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+    RecognitionWorkbenchState state = await failed.Task;
+    PinHistoryEntryState original = Assert.Single(history.Projection(null).Entries);
+    preparationFails = false;
+    WorkbenchAnnotationLease edited = UploadAnnotation(annotations, AnnotationPng);
+    using var completed = new RecognitionStateAwaiter(handler,
+      value => !value.IsBusy && value.Result is not null);
+    Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(
+      edited.ResourceUri.AbsoluteUri, Guid.Parse(state.ScreenshotSession!.SessionId), 0, []),
+      TestContext.Current.CancellationToken)).Error);
+    await completed.Task;
+    PinHistoryEntryState updated = Assert.Single(history.Projection("selection").Entries);
+    Assert.Equal(original.EntryId, updated.EntryId);
+    Assert.NotEmpty(updated.RecognizedText!);
+    Assert.Single(inference.Requests);
+    await AssertHistoryImageAsync(history, HistoryPixels);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RejectedExplicitTextCaptureDoesNotPrepareRuntime(bool failed)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var inputs = new FixedCaptureInput { FailCapture = failed, CancelCapture = !failed };
+    var recognition = new RecognitionViewModel(inference, inputs);
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => false,
+      ensureRuntimeReady: _ => { preparations++; return Task.CompletedTask; });
+    using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+    await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+    Assert.Null((await completed.Task).ScreenshotSession);
+    Assert.Equal(0, preparations);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Theory]
+  [InlineData("cancel")]
+  [InlineData("close")]
+  [InlineData("dispose")]
+  public async Task ExplicitTextCaptureCancelsOwnedPreparation(string action)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var cleanup = new CancellationTokenSource();
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => false,
+      ensureRuntimeReady: async ct =>
+      {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct, cleanup.Token);
+        using var registration = ct.Register(() => cancelled.TrySetResult());
+        entered.TrySetResult();
+        await Task.Delay(Timeout.Infinite, wait.Token);
+      });
+    try
+    {
+      await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+      await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      if (action == "dispose") await handler.DisposeAsync();
+      else
+      {
+        WorkbenchCommand command = action == "close"
+          ? new CloseScreenshotSessionCommand() : new CancelRecognitionCommand();
+        WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+        Assert.Null(outcome.Error);
+        RecognitionWorkbenchState state = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(outcome.States));
+        if (action == "close") Assert.Null(state.ScreenshotSession);
+        else
+        {
+          Assert.NotNull(state.Input);
+          Assert.False(state.ScreenshotSession!.TextSelectionRequested);
+        }
+      }
+      await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Empty(inference.Requests);
+    }
+    finally { cleanup.Cancel(); }
   }
 
   [Fact]
@@ -3642,6 +3784,99 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task EditorProjectionOffersPreparationOnlyBeforeRuntimeAttach(bool attached)
+  {
+    string root = TemporaryRoot();
+    var inference = new SelectionSubmitClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var settings = new SettingsViewModel(inference);
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+      inferenceAttached: () => attached, ensureRuntimeReady: _ =>
+      {
+        preparations++;
+        return Task.CompletedTask;
+      });
+    var modes = handler.InitialStates.OfType<RecognitionWorkbenchState>().Single().RecognitionModes!;
+    Assert.Equal(2, modes.Count);
+    for (int index = 0; index < modes.Count; index++)
+      Assert.Equal(attached ? null : (ScreenshotRecognitionIntent?)index, modes[index].Intent);
+    using JsonDocument projection = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "recognition", WorkbenchStateChange.Replace,
+        new RecognitionWorkbenchState(false, "recognition.session", RecognitionModes: modes))));
+    JsonElement projected = projection.RootElement.GetProperty("payload").GetProperty("state").GetProperty("recognitionModes");
+    Assert.Equal(attached ? JsonValueKind.Null : JsonValueKind.Number, projected[0].GetProperty("intent").ValueKind);
+    if (!attached) Assert.Equal(0, projected[0].GetProperty("intent").GetInt32());
+    Assert.Equal(0, preparations);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Theory]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Table)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Table)]
+  [InlineData("recognition", true, ScreenshotRecognitionIntent.Table)]
+  [InlineData("imageEdit", true, ScreenshotRecognitionIntent.Table)]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Text)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Text)]
+  public async Task ColdEditorIntentSurvivesPreparationAndRefusesUnavailableCatalog(
+    string scope, bool unavailable, ScreenshotRecognitionIntent intent)
+  {
+    string root = TemporaryRoot();
+    var inference = new RefreshingImageSelectionClient { DefaultMode = "paddle_text" };
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var settings = new SettingsViewModel(inference);
+    bool attached = false;
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+      inferenceAttached: () => attached, ensureRuntimeReady: async ct =>
+      {
+        entered.TrySetResult();
+        await release.Task.WaitAsync(ct);
+        attached = true;
+      });
+    var captured = new TaskCompletionSource<RecognitionScreenshotSessionState>(TaskCreationOptions.RunContinuationsAsynchronously);
+    handler.StateChanged += state =>
+    {
+      RecognitionScreenshotSessionState? session = state switch
+      {
+        RecognitionWorkbenchState r when scope == "recognition" && !r.IsBusy => r.ScreenshotSession,
+        ImageEditWorkbenchState e when scope == "imageEdit" && !e.IsBusy => e.ScreenshotSession,
+        _ => null,
+      };
+      if (session is not null) captured.TrySetResult(session);
+    };
+    await handler.ExecuteAsync(scope == "recognition"
+      ? new OpenRecognitionImageForEditCommand() : new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+    var session = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.False(entered.Task.IsCompleted);
+    WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+    using var terminal = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && (state.StatusCode == "recognition.modeUnavailable" || state.Result is not null));
+    WorkbenchCommand command = scope == "recognition"
+      ? new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent)
+      : new RecognizeImageEditImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent);
+    Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await handler.ExecuteAsync(new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken);
+    inference.TableUnavailable = unavailable;
+    release.TrySetResult();
+    RecognitionWorkbenchState result = await terminal.Task;
+    if (unavailable)
+    {
+      Assert.Equal("recognition.modeUnavailable", result.StatusCode);
+      Assert.Empty(inference.Requests);
+    }
+    else Assert.Equal(intent == ScreenshotRecognitionIntent.Text ? "OCR" : "TABLE_RECOGNITION", Assert.Single(inference.Requests).Pipeline.PipelineId);
+  }
+
+  [Theory]
   [InlineData(ScreenshotRecognitionIntent.Table, "TABLE_RECOGNITION")]
   // #270：Formula 意图已随独立公式识别退役，不再解析到任何管线。
   public async Task ColdScreenshotCategoryResolvesOnlyAfterExplicitPreparation(
@@ -3909,7 +4144,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Fact]
-  public async Task EnvironmentSwitchWindowCancelsScreenshotSelectionRecognitionWithoutSubmit()
+  public async Task PendingDeviceChangeCancelsScreenshotSelectionRecognitionWithoutSubmit()
   {
     string root = TemporaryRoot();
     try
@@ -3922,19 +4157,18 @@ public sealed class ScreenshotSessionWorkbenchTests
       await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
+      using var changeCancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+      Task Prepare(CancellationToken ct) => ct == changeCancellation.Token
+        ? Task.Delay(Timeout.InfiniteTimeSpan, ct) : Task.CompletedTask;
       await using var handler = CreateHandler(
         recognition, root, broker, annotationStore, settings,
-        inferenceAttached: () => true);
-      // 与 DefaultModeRequestContractTests 同一真实状态位：环境切换窗口
-      // 内提交必须取消，不能继续使用切换前的目录发出请求。
-      System.Reflection.FieldInfo switching = typeof(WorkbenchSettingsOwner)
-        .GetField("environmentSwitching",
-          System.Reflection.BindingFlags.NonPublic |
-          System.Reflection.BindingFlags.Instance)!;
+        inferenceAttached: () => true, ensureRuntimeReady: Prepare);
       int terminalShown = 0;
       handler.ScreenshotSelectionRecognized += () => terminalShown++;
 
-      switching.SetValue(handler.Settings, 1);
+      Task<WorkbenchCommandOutcome> change = handler.ExecuteAsync(
+        new SetRecognitionDeviceCommand("directml"), changeCancellation.Token).AsTask();
+      Assert.True(handler.Settings.IsDeviceChanging);
       RecognitionWorkbenchState cancelled;
       using (var completed = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.StatusCode == "recognition.cancelled" &&
@@ -3949,8 +4183,10 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Null(handler.CurrentImageSessionId);
       await UntilAsync(() => terminalShown == 1);
 
-      // 退出切换窗口后同一链路恢复：仅一次显式模式提交，无默认回退。
-      switching.SetValue(handler.Settings, 0);
+      // 取消设备更改后同一链路恢复：仅一次显式模式提交，无默认回退。
+      await changeCancellation.CancelAsync();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => change);
+      Assert.False(handler.Settings.IsDeviceChanging);
       RecognitionWorkbenchState done;
       using (var recovered = new RecognitionStateAwaiter(handler,
         state => !state.IsBusy && state.Result is not null))

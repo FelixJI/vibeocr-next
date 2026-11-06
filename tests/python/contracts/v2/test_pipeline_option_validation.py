@@ -21,13 +21,21 @@ def _selection(pipeline_id: str, options: dict) -> dict:
     }
 
 
-@pytest.mark.parametrize("device", ["auto", "cpu", "cuda"])
-@pytest.mark.parametrize("engine", [None, "rapidocr", "paddleocr"])
+@pytest.mark.parametrize("device", ["auto", "cpu"])
+@pytest.mark.parametrize("engine", [None, "paddleocr"])
 def test_paddle_device_selection_reaches_options(device: str, engine: str | None):
     payload = _selection("OCR", {"device": device})
     if engine is not None:
         payload["engine"] = engine
     assert parse_pipeline_selection(payload).options == {"device": device}
+
+
+@pytest.mark.parametrize("pipeline_id", ["OCR", "PP-StructureV3", "TABLE_RECOGNITION"])
+def test_cuda_device_is_rejected_at_the_active_contract_entry(pipeline_id: str):
+    """#317：CUDA 执行分支已退役；活跃管道的新 device=cuda 请求在入口
+    枚举校验处明确拒绝，不进入执行解析。"""
+    with pytest.raises(ContractError, match="pipeline option device"):
+        parse_pipeline_selection(_selection(pipeline_id, {"device": "cuda"}))
 
 
 @pytest.mark.parametrize("engine", ["windows"])
@@ -53,6 +61,18 @@ def test_retired_rapid_selections_stay_deserializable_but_rejected_downstream() 
         _selection("RAPID_TABLE", {"device": "cpu"})
     )
     assert pipeline_selection.pipeline_id == "RAPID_TABLE"
+    # 历史 RAPID_TABLE 的 device 词表随退役冻结（含旧 cuda 值）：解析通过
+    # 后由模式门禁结构化拒绝，不在 parser 层裸抛枚举错误。
+    legacy_rapid_table_cuda = parse_pipeline_selection(
+        _selection("RAPID_TABLE", {"device": "cuda"})
+    )
+    assert legacy_rapid_table_cuda.options == {"device": "cuda"}
+    # F1 回归（7487 失败）：历史 OCR+rapidocr+device=cuda 组合同样保持可
+    # 解析（退休原因由引擎门禁返回，真实 HTTP 见 supervisor 测试）。
+    legacy_rapid_engine_cuda = parse_pipeline_selection(
+        {**_selection("OCR", {"device": "cuda"}), "engine": "rapidocr"}
+    )
+    assert legacy_rapid_engine_cuda.options == {"device": "cuda"}
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +277,7 @@ def test_mineru_options_accept_valid_values() -> None:
 
 @pytest.mark.parametrize("engine", [None, "paddleocr"])
 @pytest.mark.parametrize("preset", ["tiny", "small", "medium"])
-@pytest.mark.parametrize("device", ["auto", "cpu", "cuda", "directml"])
+@pytest.mark.parametrize("device", ["auto", "cpu", "directml"])
 def test_paddle_onnx_selection_keeps_model_and_provider(engine, preset, device):
     payload = {
         **_selection("OCR", {"model_preset": preset, "device": device}),

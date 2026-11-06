@@ -1679,6 +1679,12 @@ public sealed record SettingsSnapshot
     [JsonPropertyName("download_source_ids")]
     public IReadOnlyList<string>? DownloadSourceIds { get; init; }
 
+    [JsonPropertyName("revision")]
+    public int? Revision { get; init; }
+
+    [JsonPropertyName("recognition_device")]
+    public string? RecognitionDevice { get; init; }
+
     [JsonPropertyName("paddle_idle_seconds")]
     public int? PaddleIdleSeconds { get; init; }
 

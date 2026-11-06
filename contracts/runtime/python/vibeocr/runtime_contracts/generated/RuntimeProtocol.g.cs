@@ -16,7 +16,6 @@ public static class RuntimeProtocol
     public const string RUNTIME_EVENTS_NDJSON_V1 = "runtime.events.ndjson.v1";
     public const string OCR_ENGINE_SELECTION_V1 = "ocr.engine-selection.v1";
     public const string RUNTIME_DOWNLOAD_SOURCES_V1 = "runtime.download-sources.v1";
-    public const string RUNTIME_COMPONENT_SELECTION_V1 = "runtime.component-selection.v1";
     public const string OCR_RECOGNITION_MODES_V1 = "ocr.recognition-modes.v1";
     public const string OCR_MINERU_CONFIG_V1 = "ocr.mineru-config.v1";
     public const string OCR_MINERU_REMOTE_API_V1 = "ocr.mineru-remote-api.v1";
@@ -41,7 +40,6 @@ public static class RuntimeProtocol
         "runtime.events.ndjson.v1",
         "ocr.engine-selection.v1",
         "runtime.download-sources.v1",
-        "runtime.component-selection.v1",
         "ocr.recognition-modes.v1",
         "ocr.mineru-config.v1",
         "ocr.mineru-remote-api.v1",

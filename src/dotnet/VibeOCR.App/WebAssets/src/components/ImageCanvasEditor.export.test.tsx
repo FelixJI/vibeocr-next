@@ -531,6 +531,58 @@ describe("editor export pixels and previews", () => {
     unmount();
   });
 
+  it.each([
+    [0, "识别文字"],
+    [1, "表格识别"],
+  ] as const)(
+    "submits cold host intent %i without inventing a mode",
+    async (intent, label) => {
+      stubCanvasStack();
+      const actions = createActions();
+      const modes = [
+        {
+          modeId: "",
+          displayName: "文字识别",
+          availability: "catalog_unavailable",
+          intent: 0 as const,
+        },
+        {
+          modeId: "",
+          displayName: "表格识别",
+          availability: "catalog_unavailable",
+          intent: 1 as const,
+        },
+      ];
+      const { unmount } = render(
+        <ImageCanvasEditor
+          {...editorProps({ actions })}
+          recognitionModes={modes}
+        />,
+      );
+      const button = await screen.findByRole("button", { name: label });
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      await waitFor(() =>
+        expect(actions.run).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "recognition.recognizeScreenshotImage",
+            intent,
+          }),
+        ),
+      );
+      const submitted = actions.run.mock.calls.find(
+        ([action]) => action.type === "recognition.recognizeScreenshotImage",
+      )![0];
+      expect(submitted).not.toHaveProperty("modeId");
+      expect(
+        actions.run.mock.calls.filter(
+          ([action]) => action.type === "recognition.recognizeScreenshotImage",
+        ),
+      ).toHaveLength(1);
+      unmount();
+    },
+  );
+
   it("explains missing capabilities and never falls back to a generic recognition submit", async () => {
     stubCanvasStack();
     const actions = createActions();

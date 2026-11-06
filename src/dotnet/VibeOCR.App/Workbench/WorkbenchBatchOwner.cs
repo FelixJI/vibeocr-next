@@ -83,7 +83,7 @@ internal sealed class WorkbenchBatchOwner(Func<BatchViewModel> batchFactory, Fun
   {
     batch ??= batchFactory();
     if (batchPreparation is not null || batch.IsRunning) return Task.FromResult<BatchWorkbenchState?>(BatchState(batch));
-    if (settingsOwner.IsEnvironmentSwitching) return Task.FromResult<BatchWorkbenchState?>(BatchState(batch));
+    if (settingsOwner.IsDeviceChanging) return Task.FromResult<BatchWorkbenchState?>(BatchState(batch));
     if (settingsOwner.CurrentModel?.RecognitionSelection is not null) SynchronizeBatchMode(requireUsable: true);
     var preparation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, operations.Token);
     batchPreparation = preparation;

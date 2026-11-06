@@ -84,7 +84,9 @@ def test_product_finalize_is_deterministic_and_binds_runtime(tmp_path: Path) -> 
     assert manifests[0].read_bytes() == manifests[1].read_bytes()
     records = json.loads(manifests[0].read_text(encoding="utf-8"))["files"]
     assert "app/metadata/component-lock.json" in records
-    assert "runtime/installer/vibeocr-runtime-installer.exe" in records
+    assert "runtime/env/runtime-env/python.exe" in records
+    assert "runtime/env/runtime-env/python313.dll" in records
+    assert not any("runtime-installer" in path for path in records)
     assert "runtime/backend/runtime-manifest.json" in records
 
 

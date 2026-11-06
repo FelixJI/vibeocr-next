@@ -222,33 +222,17 @@ class TestCheckApiRunning:
 
 
 class TestResolvePythonExecutable:
-    def test_embedded_python_exists(self, monkeypatch):
-        """嵌入式 Python 存在 → 返回它（lines 169-176）。"""
-        s = _make_service()
-        fake_path = Path("/fake/embedded/python.exe")
-
-        import vibeocr.runtime.environments.env_manager as env_mod
-
-        monkeypatch.setattr(env_mod, "get_project_root", lambda: Path("/fake"))
-        monkeypatch.setattr(env_mod, "get_embedded_python", lambda root: fake_path)
-        monkeypatch.setattr(Path, "exists", lambda self: True)
-        result = s._resolve_python_executable()
-        assert result == fake_path
-
-    def test_fallback_to_sys_executable(self, monkeypatch):
-        """无嵌入式 Python → 返回 sys.executable（lines 169-176）。"""
-        s = _make_service()
+    def test_uses_supervisor_interpreter_despite_legacy_paths(
+        self, monkeypatch, tmp_path
+    ):
         import sys
 
-        import vibeocr.runtime.environments.env_manager as env_mod
-
-        monkeypatch.setattr(env_mod, "get_project_root", lambda: Path("/fake"))
-        monkeypatch.setattr(
-            env_mod, "get_embedded_python", lambda root: Path("/fake/nonexistent.exe")
-        )
-        # embedded.exists() → False
-        result = s._resolve_python_executable()
-        assert result == Path(sys.executable)
+        legacy = tmp_path / "old-env" / "python.exe"
+        legacy.parent.mkdir()
+        legacy.touch()
+        monkeypatch.setenv("VIBEOCR_PADDLE_PYTHON", str(legacy))
+        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "old-env")
+        assert _make_service()._resolve_python_executable() == Path(sys.executable)
 
 
 class TestStartApi:
@@ -333,7 +317,7 @@ class TestStartApi:
 
         captured_env = _run_start_api_capture_env(monkeypatch, tmp_path)
 
-        assert "MINERU_MODEL_SOURCE" not in captured_env
+        assert captured_env["MINERU_MODEL_SOURCE"] == "modelscope"
 
 
 class TestStartApiDeviceVisibility:
@@ -359,6 +343,7 @@ class TestStartApiDeviceVisibility:
         """缺省（无设备意图变量，与 composition 的 cpu 缺省一致）：只覆盖子进程 env。"""
         monkeypatch.delenv("VIBEOCR_RUNTIME_ACCELERATOR", raising=False)
         monkeypatch.delenv("VIBEOCR_USE_GPU", raising=False)
+        monkeypatch.delenv("VIBEOCR_RECOGNITION_DEVICE", raising=False)
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("GGML_VK_VISIBLE_DEVICES", raising=False)
         parent_before = self._parent_visibility()
@@ -367,7 +352,31 @@ class TestStartApiDeviceVisibility:
 
         assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
         assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
+        # 无设备快照时不投射，保持锁定 SDK 的默认 auto 读取语义。
+        assert "MINERU_MODEL_ONNX_DEVICE" not in captured
         assert self._parent_visibility() == parent_before
+
+    def test_recognition_device_snapshot_binds_mineru_onnx_device(
+        self, monkeypatch, tmp_path
+    ):
+        """F3 回归（7487 失败）：已提交 worker 设备快照经锁定 SDK 的
+        model.onnx_device env 面绑定（cpu→cpu，directml→gpu），仅投射
+        child env，不改写用户 Config 文件；VLM 屏蔽保持不变。"""
+        monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "cpu")
+        captured = _run_start_api_capture_env(monkeypatch, tmp_path)
+        assert captured["MINERU_MODEL_ONNX_DEVICE"] == "cpu"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert captured["GGML_VK_VISIBLE_DEVICES"] == " "
+
+        monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "directml")
+        captured = _run_start_api_capture_env(monkeypatch, tmp_path)
+        assert captured["MINERU_MODEL_ONNX_DEVICE"] == "gpu"
+        assert captured["CUDA_VISIBLE_DEVICES"] == "-1"
+
+        # 绑定只投射 child env：配置文件内容保持首次写入的嵌套结构。
+        config_text = (tmp_path / "mineru4" / "config.yaml").read_text(encoding="utf-8")
+        assert "  vlm:\n    engine: llama-cpp\n" in config_text
+        assert "onnx_device" not in config_text
 
     def test_legacy_gpu_flag_no_longer_preserves_visibility(
         self, monkeypatch, tmp_path

@@ -30,7 +30,9 @@ from vibeocr.runtime.jobs.module import (  # noqa: E402
 
 HTTP_METHODS = {"GET", "PUT", "POST", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"}
 
+# wire 枚举仍含历史 rapidocr（历史记录反序列化）；能力目录只列活跃 id。
 STABLE_ENGINE_IDS = ["rapidocr", "windows", "paddleocr"]
+ACTIVE_ENGINE_IDS = ["windows", "paddleocr"]
 
 
 def _contains(actual: object, expected: object) -> bool:
@@ -125,8 +127,8 @@ def check_conformance() -> None:
 
 
 def _engine_selection_app():
-    """app + 确定性引擎目录 fixture：rapidocr 退休投影 unavailable/
-    engine_retired（未注册 adapter）、windows unavailable、paddleocr ready。"""
+    """app + 确定性引擎目录 fixture：目录只列活跃 id（windows
+    unavailable、paddleocr ready）；退休 rapidocr 仅在提交时拒绝。"""
     from vibeocr.runtime.recognition.ocr_engines import (
         EngineAvailability,
         EngineDescriptor,
@@ -197,8 +199,8 @@ async def _engine_selection_http_checks() -> None:
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {token}"},
     ) as client:
-        # 2. ready envelope：catalog 覆盖全部稳定 id，descriptor 形状合法；
-        # 已退休的 rapidocr 固定投影 unavailable/engine_retired。
+        # 2. ready envelope：catalog 只覆盖活跃 id，descriptor 形状合法；
+        # 已退休的 rapidocr 不再作为能力目录条目，仅在提交时结构化拒绝。
         health = (await client.get("/v2/health")).json()
         descriptor = next(
             d
@@ -209,14 +211,10 @@ async def _engine_selection_http_checks() -> None:
         if catalog is None:
             raise RuntimeError("engine-selection descriptor lacks ocr_engine_catalog")
         entries = catalog["engines"]
-        if [entry["id"] for entry in entries] != STABLE_ENGINE_IDS:
+        if [entry["id"] for entry in entries] != ACTIVE_ENGINE_IDS:
             raise RuntimeError(f"engine catalog ids differ: {entries}")
-        retired_entry = next(entry for entry in entries if entry["id"] == "rapidocr")
-        if (
-            retired_entry["availability"] != "unavailable"
-            or retired_entry["reason_code"] != "engine_retired"
-        ):
-            raise RuntimeError("retired rapidocr engine was not projected as retired")
+        if any(entry["id"] == "rapidocr" for entry in entries):
+            raise RuntimeError("retired rapidocr engine must not be cataloged")
         for entry in entries:
             missing_keys = {
                 "id",
@@ -315,11 +313,8 @@ def check_selection_conformance() -> None:
 
     from vibeocr.runtime.environments.runtime_selection import (
         normalize_download_source_ids,
-        normalize_install_component_ids,
     )
 
-    # 预构建运行时树后维护路由已退役：组件选择校验降为策略函数级
-    # （normalize 仍是 ME 计划选择的权威实现）。
     normalize_download_source_ids(["paddleocr-modelscope"])
     try:
         normalize_download_source_ids(["not-a-source"])
@@ -327,14 +322,6 @@ def check_selection_conformance() -> None:
         pass
     else:
         raise RuntimeError("unknown download source did not fail closed")
-    normalize_install_component_ids([], accelerator="cpu")
-    try:
-        normalize_install_component_ids(["not-a-component"], accelerator="cpu")
-    except Exception:
-        pass
-    else:
-        raise RuntimeError("unknown install component did not fail closed")
-
     # 1. formal schema：来源选择在 settings 快照与错误码目录中声明；
     #    维护/安装请求 schema 已随预构建运行时树（PR2）退役。
     if "download_source_ids" not in schemas["SettingsSnapshot"]["properties"]:
@@ -377,28 +364,15 @@ async def _selection_http_checks() -> None:
             raise RuntimeError("default ModelScope model source is not declared")
         if {"tuna-pypi", "pypi"}.intersection({source["id"] for source in sources}):
             raise RuntimeError("retired package index sources must not be declared")
-        variants = descriptors["runtime.component-selection.v1"][
-            "component_variant_catalog"
-        ]["variants"]
-        variant_keys = {(v["feature_id"], v["accelerator"]) for v in variants}
-        if len(variant_keys) != len(variants):
-            raise RuntimeError("component variant business keys are not unique")
-        # 统一推理闭包后组件档位全部退役，可选目录允许为空。
-        selectable = {v["component_id"] for v in variants}
-        if {
-            "ocr_engine",
-            "rapidocr-base",
-            "image_code_tools",
-        }.intersection(selectable):
-            raise RuntimeError("base components must not be selectable variants")
-        # 引擎 catalog 的 required_component 指向 managed 统一推理闭包配方
-        # （paddleocr-ort-directml），不再要求出现在组件档位目录中；但必须
-        # 是已知的受管配方 id。
+        if "runtime.component-selection.v1" in descriptors or any(
+            "component_variant_catalog" in descriptor
+            for descriptor in descriptors.values()
+        ):
+            raise RuntimeError("product advertised retired component installation")
         engine_catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
-        managed_recipes = {"paddleocr-ort-directml"}
         for entry in engine_catalog["engines"]:
             required = entry.get("required_component")
-            if required is not None and required not in selectable | managed_recipes:
+            if required is not None and required != "paddleocr-ort-directml":
                 raise RuntimeError(
                     f"engine {entry['id']} requires unknown component {required}"
                 )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import zipfile
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
@@ -243,23 +242,6 @@ class RuntimeEnvBinding:
 
 
 @dataclass(frozen=True, slots=True)
-class InstallerArtifact:
-    """Bound Runtime Installer executable.
-
-    当前 manifest 直接以 ``executable`` + ``executable_sha256`` 绑定冻结
-    安装器可执行文件。历史 manifest 通过单成员 zip（``archive`` 三元组）
-    绑定同一可执行文件；loader 两种形态都接受，生产端只产出新形态。
-    """
-
-    executable_name: str
-    executable_sha256: str
-    # 以下仅历史 zip 绑定形态使用。
-    archive_path: Path | None = None
-    archive_sha256: str | None = None
-    archive_executable_path: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeManifest:
     path: Path
     sha256: str
@@ -268,7 +250,6 @@ class RuntimeManifest:
     runtime_sha256: str | None
     runtime_env: RuntimeEnvBinding | None
     python: PythonRuntime
-    installer: InstallerArtifact
     profiles: dict[str, RuntimeProfile]
     capabilities: tuple[str, ...]
     source_commit: str
@@ -286,39 +267,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def installer_executable_sha256(path: Path, executable_path: str) -> str:
-    try:
-        with zipfile.ZipFile(path) as archive:
-            names = archive.namelist()
-            if names != [executable_path]:
-                raise ManifestError(
-                    "installer archive must contain only the bound executable"
-                )
-            return hashlib.sha256(archive.read(executable_path)).hexdigest()
-    except (OSError, KeyError, zipfile.BadZipFile) as exc:
-        raise ManifestError("installer archive is invalid") from exc
-
-
-# 产品稳定执行路径里的安装器文件名（runtime/installer/ 下分发一次）。
-INSTALLER_EXECUTABLE_NAME = "vibeocr-runtime-installer.exe"
-
-
-def _installer_executable_candidates(
-    manifest_path: Path, executable_name: str
-) -> tuple[Path, ...]:
-    """Resolve the bound installer executable's two canonical locations.
-
-    新形态绑定在两个真实校验位置解析：manifest 同目录（扁平 runtime
-    bundle 构建输出）与规范产品布局 ``runtime/installer/``（manifest 位于
-    ``runtime/backend/`` 时）。任一存在即参与校验；全部缺失 fail closed。
-    """
-    sibling = manifest_path.parent / executable_name
-    product_layout = manifest_path.parent.parent / "installer" / executable_name
-    if sibling == product_layout:
-        return (sibling,)
-    return (sibling, product_layout)
 
 
 def _sha256(value: object, *, field: str) -> str:
@@ -472,6 +420,8 @@ def validate_requirements_lock(
             "mineru",
             "torch",
             "cu126",
+            "pynvml",
+            "nvidia-ml-py",
             "opencv-python",
             "opencv-contrib-python",
         ):
@@ -516,6 +466,9 @@ def validate_requirements_lock(
             "transformers",
             "paddle2onnx",
             "rapidocr",
+            # #317：NVML 专用预算已退役，闭包不再携带 NVIDIA 探测栈。
+            "pynvml",
+            "nvidia-ml-py",
         }
         if device != "directml":
             # cpu 仅作为历史锁读取校验：旧闭包不含 MinerU/onnx，混入
@@ -659,53 +612,6 @@ def load_runtime_manifest(
         ),
         sha256=python_sha,
     )
-    installer_data = data.get("installer")
-    if not isinstance(installer_data, dict):
-        raise ManifestError("installer binding is required")
-    # 单一权威摘要：executable_sha256 同时约束扁平 bundle 里的可执行文件与
-    # 产品 runtime/installer/ 稳定执行路径；不叠加第二层 hash。
-    executable_sha = _sha256(
-        installer_data.get("executable_sha256"),
-        field="installer.executable_sha256",
-    )
-    legacy_archive = installer_data.get("archive")
-    if legacy_archive is None:
-        if "sha256" in installer_data or "executable_path" in installer_data:
-            raise ManifestError(
-                "installer binding must not mix archive and executable fields"
-            )
-        executable_name = _relative_filename(
-            installer_data.get("executable"),
-            field="installer.executable",
-        )
-        if executable_name != INSTALLER_EXECUTABLE_NAME:
-            raise ManifestError("installer.executable is invalid")
-        installer_artifact = InstallerArtifact(
-            executable_name=executable_name,
-            executable_sha256=executable_sha,
-        )
-    else:
-        # 历史 manifest：冻结安装器以单成员 zip 绑定在 manifest 旁。
-        if "executable" in installer_data:
-            raise ManifestError(
-                "installer binding must not mix archive and executable fields"
-            )
-        installer_archive = _relative_filename(
-            legacy_archive,
-            field="installer.archive",
-        )
-        archive_executable_path = installer_data.get("executable_path")
-        if archive_executable_path != "runtime-installer/vibeocr-runtime-installer.exe":
-            raise ManifestError("installer.executable_path is invalid")
-        installer_artifact = InstallerArtifact(
-            executable_name=INSTALLER_EXECUTABLE_NAME,
-            executable_sha256=executable_sha,
-            archive_path=manifest_path.parent / installer_archive,
-            archive_sha256=_sha256(
-                installer_data.get("sha256"), field="installer.sha256"
-            ),
-            archive_executable_path=archive_executable_path,
-        )
     profiles_data = data.get("profiles")
     # 新 manifest 只定义 base；历史 manifest 可能仍带 cpu/cu126 档位（按
     # 历史锁规则校验、不进入当前档位目录），未知 profile 一律拒绝。
@@ -1008,31 +914,6 @@ def load_runtime_manifest(
             and sha256_file(runtime_env.manifest_path) != runtime_env.manifest_sha256
         ):
             raise ManifestError("runtime env manifest SHA-256 mismatch")
-        if installer_artifact.archive_path is not None:
-            archive_sha = installer_artifact.archive_sha256
-            member_path = installer_artifact.archive_executable_path
-            if (
-                archive_sha is None
-                or member_path is None
-                or sha256_file(installer_artifact.archive_path) != archive_sha
-            ):
-                raise ManifestError("Installer archive SHA-256 mismatch")
-            actual_executable_sha = installer_executable_sha256(
-                installer_artifact.archive_path,
-                member_path,
-            )
-            if actual_executable_sha != installer_artifact.executable_sha256:
-                raise ManifestError("Installer executable SHA-256 mismatch")
-        else:
-            candidates = _installer_executable_candidates(
-                manifest_path, installer_artifact.executable_name
-            )
-            present = [path for path in candidates if path.is_file()]
-            if not present:
-                raise ManifestError("Installer executable is missing")
-            for executable in present:
-                if sha256_file(executable) != installer_artifact.executable_sha256:
-                    raise ManifestError("Installer executable SHA-256 mismatch")
     # Rapid 专属引擎环境（rapid_cuda_environment）已随引擎退役移除：
     # 新 manifest 不再绑定，历史产品继续使用其自带的旧代码与旧 manifest。
     if "rapid_cuda_environment" in data:
@@ -1093,7 +974,6 @@ def load_runtime_manifest(
         runtime_sha256=runtime_sha,
         runtime_env=runtime_env,
         python=python_runtime,
-        installer=installer_artifact,
         profiles=profiles,
         capabilities=tuple(capabilities),
         source_commit=source_commit,
@@ -1106,10 +986,8 @@ def load_runtime_manifest(
 
 __all__ = [
     "ACCELERATOR_TO_PLAN",
-    "INSTALLER_EXECUTABLE_NAME",
     "PROFILE_NAMES",
     "PROFILE_COMPONENTS",
-    "InstallerArtifact",
     "ManifestError",
     "PaddleModelPack",
     "RuntimeEnvBinding",
@@ -1121,7 +999,6 @@ __all__ = [
     "RuntimeProfile",
     "covering_profile_id",
     "plan_profile_id",
-    "installer_executable_sha256",
     "load_runtime_manifest",
     "migrate_legacy_component_ids",
     "runtime_component_binding",

@@ -228,6 +228,45 @@ class TestSubmitEngineSelection:
         assert body["detail"]["selectable_engines"] == ["paddleocr"]
         assert executor.pipelines == []
 
+    async def test_retired_rapidocr_with_legacy_cuda_device_still_426_retired(
+        self, tmp_path: Any, engines: list[_FakeOcrEngine]
+    ) -> None:
+        """F1 回归（7487 失败）：历史 rapidocr+device=cuda 组合必须可解析
+        并到达引擎门禁，以 engine_retired 结构化拒绝（426），而不是设备
+        枚举 400；活跃 Paddle 的 device=cuda 仍为 400（见 parser 合同）。"""
+        module, executor = _module(tmp_path, engines)
+        token = generate_session_token()
+        manifest = json.dumps(
+            {
+                "schema_version": 2,
+                "request_id": "legacy-rapid-cuda",
+                "kind": "recognition",
+                "priority": "interactive",
+                "pipeline": {
+                    "pipeline_id": "OCR",
+                    "options_version": 1,
+                    "options": {"device": "cuda"},
+                    "engine": "rapidocr",
+                },
+                "items": [
+                    {
+                        "client_item_key": "k",
+                        "ordinal": 0,
+                        "display_name": "a.png",
+                        "source": {"type": "upload.v1", "attachment": "f"},
+                    }
+                ],
+            }
+        )
+        async with _client(create_app(module, token), token) as http:
+            resp = await _submit(http, manifest)
+        assert resp.status_code == 426, resp.text
+        body = resp.json()
+        assert body["code"] == "OCR_ENGINE_UNAVAILABLE"
+        assert body["detail"]["reason_code"] == "engine_retired"
+        assert body["detail"]["engine"] == "rapidocr"
+        assert executor.pipelines == []
+
     async def test_engine_on_non_ocr_pipeline_rejected_400(
         self, tmp_path: Any, engines: list[_FakeOcrEngine]
     ) -> None:
@@ -383,11 +422,7 @@ class TestOmittedEngineFreezeParity:
     ) -> None:
         from vibeocr.runtime_contracts import SettingsSnapshot
 
-        monkeypatch.setenv(
-            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
-        )
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "managed-default")
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_REVISION", "3")
+        monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
         module, _ = _module(
             tmp_path,
             [
@@ -426,18 +461,15 @@ class TestOmittedEngineFreezeParity:
         assert snapshots[0] is not None and snapshots[1] is not None
         assert snapshots[0] == snapshots[1]
         assert snapshots[0]["source"] == "modelscope"
-        assert snapshots[0]["recipe"] == "paddleocr-ort-directml"
-        assert snapshots[0]["environment_id"] == "managed-default"
-        assert snapshots[0]["environment_revision"] == "3"
+        assert snapshots[0]["device"] == "cpu"
+        assert snapshots[0]["provider"] == "CPUExecutionProvider"
 
     async def test_omitted_engine_rejects_wrong_device_at_submit(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """缺省 engine（解析为 paddleocr）携带环境不匹配设备时，提交期即
-        拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
-        monkeypatch.setenv(
-            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
-        )
+        """缺省 engine（解析为 paddleocr）携带已退役 cuda 设备时，在入口
+        枚举校验处拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
+        monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
         module, executor = _module(
             tmp_path,
             [
@@ -454,7 +486,9 @@ class TestOmittedEngineFreezeParity:
             )
         assert rejected.status_code == 400, rejected.text
         assert rejected.json()["code"] == "VALIDATION_ERROR"
-        assert "matching Paddle ONNX environment" in rejected.text
+        # #317：cuda 已从活跃 device 契约移除，拒绝发生在 parser 枚举校验
+        # （入口），不再依赖环境匹配门禁。
+        assert "pipeline option device" in rejected.text
         # 提交被拒：任务从未进入 executor，也没有任何冻结快照。
         assert executor.pipelines == []
         assert all(record.paddle_snapshot is None for record in module.registry)
@@ -475,10 +509,9 @@ class TestReadyEngineCatalog:
         )
         catalog = engine_descriptor["ocr_engine_catalog"]
         entries = {entry["id"]: entry for entry in catalog["engines"]}
-        assert set(entries) == {"rapidocr", "windows", "paddleocr"}
-        # 已退休的 rapidocr 固定投影 unavailable/engine_retired。
-        assert entries["rapidocr"]["availability"] == "unavailable"
-        assert entries["rapidocr"]["reason_code"] == "engine_retired"
+        # #317：目录只列活跃 id；rapidocr 已从能力目录移除，显式提交
+        # 仍以 engine_retired 结构化拒绝（见上方提交测试）。
+        assert set(entries) == {"windows", "paddleocr"}
         assert entries["windows"]["availability"] == "unavailable"
         assert entries["paddleocr"]["availability"] == "ready"
         assert entries["paddleocr"]["included_in_base"] is True
@@ -682,7 +715,8 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
     # 统一推理闭包：受管配方恒为 directml；device 只影响默认模式断言
     # （cpu 是 directml 环境内的合法设备选择）。
     recipe = "paddleocr-ort-directml"
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", device)
     status = (
         EngineAvailability.READY if ready else EngineAvailability.PREPARATION_REQUIRED
     )
@@ -715,6 +749,7 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
                 "/v2/settings",
                 json={
                     "schema_version": 2,
+                    "revision": (await http.get("/v2/settings")).json()["revision"],
                     "residency": {"default_ttl_seconds": 300, "pipelines": []},
                     "extra": {"default_recognition_mode": mode},
                 },

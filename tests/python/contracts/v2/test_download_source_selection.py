@@ -48,10 +48,6 @@ def _spec() -> dict:
     return json.loads((V2 / "openapi.yaml").read_text(encoding="utf-8"))
 
 
-def _host_schema() -> dict:
-    return json.loads((V2 / "runtime-host.schema.json").read_text(encoding="utf-8"))
-
-
 def _runtime_api_golden() -> dict:
     return json.loads((V2 / "golden/runtime-api.json").read_text(encoding="utf-8"))
 
@@ -82,13 +78,7 @@ def test_source_kinds_are_single_sourced_across_layers() -> None:
     spec_kind = _spec()["components"]["schemas"]["DownloadSourceKind"]
     assert tuple(spec_kind["x-vibeocr-known-values"]) == DOWNLOAD_SOURCE_KINDS
     assert "enum" not in spec_kind
-    host_kind = _host_schema()["$defs"]["DownloadSourceKind"]
-    assert tuple(host_kind["x-vibeocr-known-values"]) == DOWNLOAD_SOURCE_KINDS
-    assert "enum" not in host_kind
     assert wire_types.DownloadSourceKind is str
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert runtime_host_types.DownloadSourceKind is str
 
 
 def test_legacy_model_registry_catalog_remains_wire_compatible() -> None:
@@ -230,22 +220,14 @@ def test_download_source_catalog_rides_on_health_descriptor() -> None:
     assert "does not make VibeOCR responsible for model files" in kind_description
 
 
-def test_runtime_host_schema_carries_the_same_catalog_seam() -> None:
-    host = _host_schema()
-    # Runtime Host 面已缩为 environment 侍者：来源目录 defs 仍在 host schema
-    # 上，不再挂在已删除的 CapabilityDescriptor 下。
-    assert "CapabilityDescriptor" not in host["$defs"]
-    descriptor = host["$defs"]["DownloadSourceDescriptor"]
-    assert set(descriptor["required"]) == {"kind", "id", "endpoint"}
-    kind_description = host["$defs"]["DownloadSourceKind"]["description"]
-    assert "model_registry selects an upstream model-source preference" in (
-        kind_description
-    )
-    assert "does not make VibeOCR responsible for model files" in kind_description
-    from vibeocr.runtime_contracts.generated import runtime_host_types
-
-    assert hasattr(runtime_host_types, "DownloadSourceCatalog")
-    assert hasattr(runtime_host_types, "DownloadSourceDescriptor")
+def test_product_http_catalog_round_trips_unknown_source_kind() -> None:
+    source = {
+        "kind": "future-source",
+        "id": "upstream",
+        "endpoint": "https://example.invalid",
+    }
+    _component_schema_validator("DownloadSourceDescriptor").validate(source)
+    assert wire_types.DownloadSourceDescriptor(**source) == source
 
 
 def test_download_source_capability_is_registered_everywhere() -> None:
@@ -318,11 +300,3 @@ def test_generated_bindings_expose_strongly_typed_source_selection() -> None:
     assert "public required string Endpoint { get; init; }" in descriptor_record
 
     assert "public enum DownloadSourceKind" not in csharp_wire
-
-    host_wire = (V2 / "generated/RuntimeHostWireTypes.g.cs").read_text(encoding="utf-8")
-    # Runtime Host 的来源选择请求面已退役；host wire 只保留目录结构类型。
-    assert "RuntimeHostRequest" not in host_wire
-    host_descriptor = host_wire.split(
-        "public sealed record DownloadSourceDescriptor", 1
-    )[1].split("\n}", 1)[0]
-    assert "public required string Endpoint { get; init; }" in host_descriptor

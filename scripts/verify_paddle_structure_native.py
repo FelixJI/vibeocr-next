@@ -355,9 +355,8 @@ def main():
     if not os.environ.get("VIBEOCR_SHARED_MODEL_CACHE"):
         raise RuntimeError("Set VIBEOCR_SHARED_MODEL_CACHE to the isolated cache")
     os.environ.update(
-        VIBEOCR_MANAGED_ENVIRONMENT_RECIPE=f"paddleocr-ort-{args.device}",
-        VIBEOCR_MANAGED_ENVIRONMENT_ID="retained-smoke",
-        VIBEOCR_MANAGED_ENVIRONMENT_REVISION="1",
+        VIBEOCR_PRODUCT_RUNTIME="1",
+        VIBEOCR_RECOGNITION_DEVICE=args.device,
         PADDLE_PDX_MODEL_SOURCE=args.source,
         PADDLE_PDX_CACHE_HOME=str(args.output / "private"),
         PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK="True",

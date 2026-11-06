@@ -418,6 +418,10 @@ class MinerUProcessAdapter:
                     ErrorCode.VALIDATION_ERROR,
                     "mineru_connection_change_blocked_by_active_tasks",
                 )
+            if self.lifecycle is not None and hasattr(
+                self.lifecycle, "set_model_sources"
+            ):
+                self.lifecycle.set_model_sources(snapshot.download_source_ids)
             configure_connection(connection)
             self._idle.retire_when_idle(
                 connection.mode == "remote" and self._process_started

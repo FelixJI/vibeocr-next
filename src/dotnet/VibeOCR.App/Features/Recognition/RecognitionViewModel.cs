@@ -456,7 +456,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
                     if (generation == Volatile.Read(ref _generation))
                     {
                         TerminalState = JobState.Cancelled;
-                        Status = "运行环境正在切换，已取消本次识别";
+                        Status = "识别设置已更改，已取消本次识别";
                     }
                     return;
                 }

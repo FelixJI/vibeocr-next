@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from vibeocr.runtime.environments import env_config, env_manager, runtime_layout
+from vibeocr.runtime.environments import env_manager, runtime_layout
 
 
 def test_app_paths_resolve_next_repository_source(
@@ -46,17 +46,16 @@ def test_legacy_root_interfaces_share_runtime_layout_result() -> None:
     repository = Path(__file__).resolve().parents[4]
 
     assert install_root == repository
-    assert env_config.get_project_root() == install_root
     assert env_manager.get_project_root() == install_root
 
 
-def test_source_checkout_uses_engine_profile_not_root_dev_dependencies() -> None:
-    assert (
-        env_config.validate_dep_check_consistency(
-            runtime_layout.resolve_app_paths().install_root
-        )
-        == []
-    )
+def test_product_service_state_stays_outside_the_bundled_interpreter(
+    monkeypatch, tmp_path
+):
+    state = tmp_path / "portable" / "state"
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
+    monkeypatch.setenv("VIBEOCR_RUNTIME_STATE_ROOT", str(state))
+    assert env_manager.get_project_root() == state
 
 
 def test_app_paths_anchor_regular_wheel_at_python_environment(

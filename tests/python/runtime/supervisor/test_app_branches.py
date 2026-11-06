@@ -514,6 +514,267 @@ async def test_preload_rejects_unknown_pipeline(pdf_app, supervisor_token: str) 
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("cancel_save", [False, True])
+async def test_device_stop_keeps_http_loop_responsive(
+    pdf_app, pdf_module, supervisor_token, monkeypatch, cancel_save
+):
+    import asyncio
+    import threading
+
+    from vibeocr.runtime.recognition import device_probe
+
+    monkeypatch.setattr(device_probe, "prepare_device", lambda _: None)
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "auto")
+    original_stop = pdf_module._executor.release_idle
+    residency_entered = asyncio.Event()
+    residency_thread = []
+    original_residency = pdf_module.residency_payload
+
+    def waiting_residency():
+        residency_thread.append(threading.get_ident())
+        loop.call_soon_threadsafe(residency_entered.set)
+        return original_residency()
+
+    monkeypatch.setattr(pdf_module, "residency_payload", waiting_residency)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocking_stop(scope):
+        loop.call_soon_threadsafe(entered.set)
+        if not release.wait(5):
+            raise RuntimeError("HTTP event loop did not serve independent work")
+        return original_stop(scope)
+
+    monkeypatch.setattr(pdf_module._executor, "release_idle", blocking_stop)
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        saving = asyncio.create_task(
+            http.put("/v2/settings", json={**before, "recognition_device": "cpu"})
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 8)
+            assert not saving.done()
+            residency = asyncio.create_task(http.get("/v2/runtime/residency"))
+            await asyncio.wait_for(residency_entered.wait(), 8)
+            assert residency_thread != [threading.get_ident()]
+            assert not residency.done()
+            assert (await http.get("/v2/health")).status_code == 200
+            assert (await http.get("/v2/settings")).json() == before
+            assert (
+                await http.post("/v2/pdf/sessions/open", json={"path": "synthetic.pdf"})
+            ).status_code == 200
+            if cancel_save:
+                saving.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await saving
+        finally:
+            release.set()
+            if not saving.cancelled():
+                response = await saving
+        assert (await residency).status_code == 200
+        # Acquire the commit lock after the stopped worker leaves the transaction.
+        if cancel_save:
+            await asyncio.to_thread(
+                pdf_module.prepare_recognition_device, pdf_module.settings()
+            )
+        after = (await http.get("/v2/settings")).json()
+        if cancel_save:
+            assert after == before
+        else:
+            assert response.status_code == 200
+            assert after["recognition_device"] == "cpu"
+
+
+@pytest.mark.parametrize("operation", ["submit", "retry"])
+@pytest.mark.parametrize("interruption", ["task_cancel", "disconnect"])
+async def test_abandoned_job_http_request_cannot_admit_after_device_stop(
+    pdf_app,
+    pdf_module,
+    supervisor_token,
+    tmp_path,
+    monkeypatch,
+    operation,
+    interruption,
+):
+    import asyncio
+    import json
+    import threading
+
+    from vibeocr.runtime.environments.product_job_leases import ProductJobLeases
+    from vibeocr.runtime.recognition import device_probe
+    from vibeocr.runtime_contracts import JobKind, JobPriority, JobState
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "auto")
+    monkeypatch.setattr(device_probe, "prepare_device", lambda _: None)
+    leases = ProductJobLeases(tmp_path / "product-leases")
+    monkeypatch.setattr(pdf_module, "_product_job_leases", leases)
+    executed = threading.Event()
+
+    def fail_source(record, staged):
+        record.transition(JobState.RUNNING)
+        record.commit_item_failure(
+            record.items[0].item_id, error_code="TEST", error="synthetic retry source"
+        )
+        record.transition(JobState.COMPLETED_WITH_ERRORS)
+        executed.set()
+
+    monkeypatch.setattr(pdf_module._executor, "execute", fail_source)
+    if operation == "retry":
+        source = pdf_module.submit(
+            kind=JobKind.RECOGNITION,
+            priority=JobPriority.INTERACTIVE,
+            uploads=[("source.png", "image/png", b"source")],
+        )
+        assert await asyncio.to_thread(executed.wait, 5)
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1/v2/jobs/command",
+            json={"command_id": "retry", "kind": "retry", "job_id": source.job_id},
+        )
+    else:
+        manifest = {
+            "schema_version": 2,
+            "request_id": "unfinished",
+            "kind": "recognition",
+            "priority": "interactive",
+            "pipeline": {"pipeline_id": "OCR", "options_version": 1, "options": {}},
+            "items": [
+                {
+                    "client_item_key": "k",
+                    "ordinal": 0,
+                    "display_name": "a.png",
+                    "source": {"type": "upload.v1", "attachment": "f"},
+                }
+            ],
+        }
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1/v2/jobs",
+            data={"manifest": json.dumps(manifest)},
+            files={"f": ("a.png", b"input", "image/png")},
+        )
+    original_jobs = {job.job_id for job in pdf_module.registry}
+    original_paths = set(pdf_module.stager.root.rglob("*"))
+    admitted = []
+    original_admit = leases.admit
+
+    def admit(job_id):
+        admitted.append(job_id)
+        original_admit(job_id)
+
+    monkeypatch.setattr(leases, "admit", admit)
+    dispatched = []
+    original_dispatch = pdf_module._dispatch
+
+    def dispatch(record, staged):
+        dispatched.append(record.job_id)
+        original_dispatch(record, staged)
+
+    monkeypatch.setattr(pdf_module, "_dispatch", dispatch)
+    stopping = asyncio.Event()
+    resume = threading.Event()
+    original_stop = pdf_module._executor.release_idle
+
+    def stop(scope):
+        loop.call_soon_threadsafe(stopping.set)
+        assert resume.wait(10)
+        return original_stop(scope)
+
+    monkeypatch.setattr(pdf_module._executor, "release_idle", stop)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    method = "submit_request" if operation == "submit" else "retry"
+    original = getattr(pdf_module, method)
+
+    def queued(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(pdf_module, method, queued)
+    messages = asyncio.Queue()
+    messages.put_nowait(
+        {"type": "http.request", "body": await request.aread(), "more_body": False}
+    )
+    disconnected = asyncio.Event()
+
+    async def receive():
+        message = await messages.get()
+        if message["type"] == "http.disconnect":
+            disconnected.set()
+        return message
+
+    async def send(message):
+        pass  # Simulate a peer which no longer accepts the response.
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": request.url.path,
+        "raw_path": request.url.raw_path,
+        "query_string": b"",
+        "root_path": "",
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 80),
+        "headers": [(key.lower(), value) for key, value in request.headers.raw]
+        + [(b"authorization", f"Bearer {supervisor_token}".encode())],
+    }
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        saving = asyncio.create_task(
+            http.put("/v2/settings", json={**before, "recognition_device": "cpu"})
+        )
+        try:
+            await asyncio.wait_for(stopping.wait(), 5)
+            job_request = asyncio.create_task(pdf_app(scope, receive, send))
+            await asyncio.wait_for(entered.wait(), 5)
+            if interruption == "task_cancel":
+                job_request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await job_request
+            else:
+                messages.put_nowait({"type": "http.disconnect"})
+                await asyncio.wait_for(disconnected.wait(), 3)
+        finally:
+            resume.set()
+            assert (await saving).status_code == 200
+            await asyncio.wait_for(finished.wait(), 5)
+            if not job_request.cancelled():
+                await job_request
+        assert admitted == [] and dispatched == []
+        assert {job.job_id for job in pdf_module.registry} == original_jobs
+        assert set(pdf_module.stager.root.rglob("*")) == original_paths
+
+
+async def test_cancelled_device_probe_keeps_committed_settings(
+    pdf_app, supervisor_token, monkeypatch
+):
+    from starlette.requests import Request
+    from vibeocr.runtime.recognition import device_probe
+
+    prepared = []
+    monkeypatch.setattr(device_probe, "prepare_device", prepared.append)
+
+    async def disconnected(_request):
+        return True
+
+    monkeypatch.setattr(Request, "is_disconnected", disconnected)
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        response = await http.put(
+            "/v2/settings", json={**before, "recognition_device": "cpu"}
+        )
+        assert response.status_code == 400
+        assert prepared == ["cpu"]
+        assert (await http.get("/v2/settings")).json() == before
+
+
 async def test_put_settings_rejects_invalid_json(
     pdf_app, supervisor_token: str
 ) -> None:
@@ -1578,7 +1839,7 @@ async def test_http_preserves_validated_engine_for_paddle_model_and_provider_opt
     )
     # 统一推理闭包：受管配方恒为 directml，device 只是请求内设备选择
     # （cpu/directml 同闭包切换）。
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml")
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
     monkeypatch.setattr(
         directml_devices,
         "hardware_adapters",
@@ -1634,7 +1895,7 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
             RecognitionModeAvailability.READY
         )
     )
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-cpu")
+    monkeypatch.delenv("VIBEOCR_PRODUCT_RUNTIME", raising=False)
     manifest = {
         "schema_version": 2,
         "request_id": "legacy-must-not-fallback",
@@ -1662,7 +1923,7 @@ async def test_http_legacy_paddle_cannot_ignore_onnx_preset(
             files={"f": ("a.png", b"synthetic", "image/png")},
         )
     assert response.status_code == 400
-    assert "matching managed ONNX environment" in response.text
+    assert "product ONNX runtime" in response.text
 
 
 async def test_worker_settings_round_trip_and_old_client_omission_preserve_values(
@@ -1680,7 +1941,7 @@ async def test_worker_settings_round_trip_and_old_client_omission_preserve_value
         assert saved.status_code == 200
         legacy = {
             key: value
-            for key, value in changed.items()
+            for key, value in saved.json().items()
             if not key.endswith("idle_seconds")
         }
         old_client = await http.put("/v2/settings", json=legacy)
@@ -1689,10 +1950,11 @@ async def test_worker_settings_round_trip_and_old_client_omission_preserve_value
         assert old_client.json()["mineru_idle_seconds"] == 2147483647
         for value in [-1, True, 1.5, "600", 2147483648]:
             rejected = await http.put(
-                "/v2/settings", json={**changed, "paddle_idle_seconds": value}
+                "/v2/settings", json={**old_client.json(), "paddle_idle_seconds": value}
             )
             assert rejected.status_code == 400
-        assert (await http.get("/v2/settings")).json() == saved.json()
+        assert old_client.json()["revision"] == saved.json()["revision"] + 1
+        assert (await http.get("/v2/settings")).json() == old_client.json()
 
 
 async def test_release_busy_reports_accepted_work_protection(

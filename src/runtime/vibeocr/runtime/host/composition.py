@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
+from vibeocr.runtime.environments.product_job_leases import ProductJobLeases
 from vibeocr.runtime.environments.settings_store import RuntimeSettings
 from vibeocr.runtime.host.bootstrap import (
     BootstrapHandle,
@@ -197,7 +197,7 @@ def _build_paddle_executor(
 def _paddle_available() -> bool:
     """Return True if a Paddle ONNX backend is usable in this environment.
 
-    #270：不再以 ``import paddle`` 原生探测；只有 Paddle ONNX 管理环境里
+    #270：不再以 ``import paddle`` 原生探测；只在产品的 Paddle ONNX 运行时中
     的 ORT/进程探针算可用（隔离 worker / onnxruntime 导入）。
     """
     from vibeocr.runtime.recognition.ocr_engines import EngineAvailability
@@ -255,6 +255,7 @@ class _MinerUServiceLifecycle:
         import threading
 
         self._state_lock = threading.Lock()
+        self._model_source = "modelscope"
         self._closed = False
         self._startup_cancel = threading.Event()
 
@@ -272,6 +273,16 @@ class _MinerUServiceLifecycle:
             self._closed = True
             self._startup_cancel.set()
 
+    def set_model_sources(self, source_ids: tuple[str, ...]) -> None:
+        from vibeocr.runtime.environments.runtime_selection import (
+            model_source_environment,
+        )
+
+        with self._state_lock:
+            self._model_source = model_source_environment(source_ids)[
+                "MINERU_MODEL_SOURCE"
+            ]
+
     def start(self) -> None:
         from vibeocr.runtime.recognition.mineru_service import MinerUService
 
@@ -279,7 +290,8 @@ class _MinerUServiceLifecycle:
             if self._closed:
                 raise RuntimeError("MinerU owner is closed")
             cancel = self._startup_cancel
-        MinerUService.bind_owner(cancel)
+            model_source = self._model_source
+        MinerUService.bind_owner(cancel, model_source=model_source)
         service = MinerUService()
         service._ensure_api_running()  # Singleton reuse must also restart after idle exit.
 
@@ -398,11 +410,7 @@ def _build_recognition_mode_registry(
             }
             descriptor = descriptors[definition.engine]
             required_component = (
-                (
-                    os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"]
-                    if is_ort_environment()
-                    else "paddleocr-ort-directml"
-                )
+                "paddleocr-ort-directml"
                 if definition.mode_id is RecognitionModeId.PADDLE_TEXT
                 else None
             )
@@ -425,7 +433,7 @@ def _build_recognition_mode_registry(
                 reason_code=descriptor.reason_code,
                 required_component=None
                 if descriptor.availability.value == "ready"
-                else os.environ["VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"],
+                else "paddleocr-ort-directml",
             )
         if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             return ModeAvailability(
@@ -610,7 +618,12 @@ def build_supervisor(
         engine_resolver=engine_resolver,
         recognition_mode_registry=recognition_mode_registry,
         settings_store=settings_store,
-        managed_references=ManagedEnvironmentReferences.from_environment(),
+        product_job_leases=ProductJobLeases(
+            Path(os.environ["VIBEOCR_RUNTIME_STATE_ROOT"]) / "locks",
+            getattr(settings_store, "require_current", None),
+        )
+        if os.environ.get("VIBEOCR_PRODUCT_RUNTIME") == "1"
+        else None,
     )
     # Clean stale staging left by a previous crashed instance (plan Phase 2).
     # At startup no jobs are known yet, so every existing dir is stale.

@@ -29,6 +29,7 @@ export function importErrorLabel(value: unknown): string | undefined {
 }
 export interface ImageRecognitionMode {
   readonly modeId: string;
+  readonly intent?: 0 | 1 | null;
   readonly displayName: string;
   readonly availability: string;
   readonly reasonCode?: string | null;
@@ -46,7 +47,11 @@ export function imageRecognitionModes(
     return (
       typeof mode.modeId === "string" &&
       typeof mode.displayName === "string" &&
-      typeof mode.availability === "string"
+      typeof mode.availability === "string" &&
+      (mode.intent == null ||
+        ((mode.intent === 0 || mode.intent === 1) &&
+          mode.modeId === "" &&
+          mode.availability === "catalog_unavailable"))
     );
   })
     ? value

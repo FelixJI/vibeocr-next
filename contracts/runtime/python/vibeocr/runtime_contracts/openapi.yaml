@@ -3057,7 +3057,7 @@
       },
       "OcrEngineCatalog": {
         "type": "object",
-        "description": "Structured catalog of selectable plain-text OCR engines, carried by the ocr.engine-selection.v1 capability descriptor. Servers MUST list one descriptor per stable OcrEngineId with no duplicate ids. The catalog is not a frontend default: clients always send the user's explicit choice and fall back to the Backend default only when the field is omitted.",
+        "description": "Structured catalog of selectable plain-text OCR engines, carried by the ocr.engine-selection.v1 capability descriptor. Servers MUST list one descriptor per active OcrEngineId with no duplicate ids; retired ids (rapidocr) stay deserializable on the wire but are no longer catalog entries — explicit selections are rejected fail closed at the availability gate. The catalog is not a frontend default: clients always send the user's explicit choice and fall back to the Backend default only when the field is omitted.",
         "required": [
           "engines"
         ],
@@ -3115,7 +3115,7 @@
       },
       "OcrEngineId": {
         "type": "string",
-        "description": "Stable engine ids for the plain-text OCR pipeline. Unknown values MUST fail closed with OCR_ENGINE_UNKNOWN and MUST NOT silently fall back to another engine. The backend default for an omitted selection is paddleocr. rapidocr is retired: the value stays deserializable for historical records, the engine catalog reports it unavailable with reason engine_retired, and submissions are rejected fail closed with OCR_ENGINE_UNAVAILABLE.",
+        "description": "Stable engine ids for the plain-text OCR pipeline. Unknown values MUST fail closed with OCR_ENGINE_UNKNOWN and MUST NOT silently fall back to another engine. The backend default for an omitted selection is paddleocr. rapidocr is retired: the value stays deserializable for historical records, it is no longer listed in the engine catalog, and submissions are rejected fail closed with OCR_ENGINE_UNAVAILABLE (reason engine_retired).",
         "enum": [
           "rapidocr",
           "windows",
@@ -4657,6 +4657,16 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "recognition_device": {
+            "type": "string",
+            "enum": ["auto", "cpu", "directml"],
+            "default": "auto"
           },
           "paddle_idle_seconds": {
             "type": "integer",

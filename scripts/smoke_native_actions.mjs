@@ -1122,7 +1122,7 @@ async function main() {
   assert(!contained(source, work) && !contained(work, source),
     'ProductRoot and WorkRoot must not nest.');
   for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
-    'runtime/backend/runtime-manifest.json', 'runtime/installer/vibeocr-runtime-installer.exe'])
+    'runtime/backend/runtime-manifest.json', 'runtime/env/runtime-env/python.exe'])
     assert(fs.statSync(path.join(source, marker)).isFile(), `Candidate marker missing: ${marker}`);
   assert(!fs.existsSync(path.join(source, 'state')),
     'Source candidate already has state; refusing to copy it.');

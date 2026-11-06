@@ -286,10 +286,10 @@ public sealed class MineruConfigContractTests
     }
 
     [Fact]
-    public void GeneratedRuntimeHostWireTypesCarryTheCatalogSeam()
+    public void GeneratedHttpWireTypesCarryTheCatalogSeam()
     {
         string hostWire = File.ReadAllText(
-            Path.Combine(V2Directory, "generated", "RuntimeHostWireTypes.g.cs"));
+            Path.Combine(V2Directory, "generated", "RuntimeWireTypes.g.cs"));
         Assert.Contains("record MineruConfigCatalog", hostWire);
         Assert.Contains("record MineruTierDescriptor", hostWire);
         Assert.Contains("enum MineruTierId", hostWire);

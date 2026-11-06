@@ -44,7 +44,8 @@ public sealed record PaddleModeOptions
     // Rapid 模式退役映射：旧 recognition_device_options[rapid_text/rapid_table]
     // 的设备值（auto|cpu）迁移为对应 Paddle 模式的 device 选项；仅当
     // 当前模式没有自己的记录时生效，不覆盖已有 Paddle 设置。CUDA 档位
-    // 已退役：历史 cuda 偏好不再迁移，回退默认 auto。
+    // 已退役：历史 cuda 偏好（含 Paddle 记录内残留）不再迁移，一律回退
+    // 默认 auto；是否真的支持 device 由目录 ProjectWire/ToWire 门控。
     private static readonly IReadOnlyDictionary<string, string> LegacyRapidDeviceModeIds =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -71,8 +72,16 @@ public sealed record PaddleModeOptions
         }
         JsonNode compat = stored.DeepClone();
         if (compat is JsonObject options)
+        {
             foreach (string field in RetiredKnownFields)
                 options.Remove(field);
+            // 历史 cuda 设备偏好随档位退役：仅剔除该字段回退默认（auto），
+            // 同记录其余合法设置保留；未知字段与非法类型仍严格解析失败。
+            if (options["device"] is JsonValue device &&
+                device.TryGetValue<string>(out string? value) &&
+                value == "cuda")
+                options.Remove("device");
+        }
         try
         {
             return compat.Deserialize<PaddleModeOptions>(JsonOptions) ?? new();

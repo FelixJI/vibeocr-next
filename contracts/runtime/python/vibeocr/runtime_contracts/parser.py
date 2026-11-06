@@ -355,6 +355,17 @@ def parse_pipeline_selection(payload: dict[str, Any]) -> PipelineSelection:
             f"unsupported option(s) for {pipeline.value}: {', '.join(unknown_options)}"
         )
     for name, value in sorted(options.items()):
+        if (
+            name == "device"
+            and value == "cuda"
+            and pipeline is OCRPipeline.OCR
+            and payload.get("engine") == "rapidocr"
+        ):
+            # 历史退休组合读取兼容：OCR+engine=rapidocr+device=cuda 在旧
+            # 引擎目录可解析；保持可解析使其抵达引擎门禁，得到结构化
+            # OCR_ENGINE_UNAVAILABLE/engine_retired 拒绝。活跃 Paddle 的
+            # device=cuda 仍在此处枚举拒绝，未知/非法值照常校验。
+            continue
         _validate_option_value(pipeline, name, value)
     if "mineru" in payload and "engine" in payload:
         raise ContractError(

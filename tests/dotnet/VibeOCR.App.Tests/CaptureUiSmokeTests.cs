@@ -13,9 +13,14 @@ public sealed class CaptureUiSmokeTests : IDisposable
 {
   private readonly string _root = Path.Combine(Path.GetTempPath(), $"vibeocr-capture-ui-{Guid.NewGuid():N}");
 
+  // 两个功能组各自保留原 30 秒进程上限，避免累积自检挤占退出预算。
   [Fact]
-  public Task PinsSaveSwitchRecoverAndRenderFormula() =>
-      RunUiSmokeAsync(nameof(PinsSaveSwitchRecoverAndRenderFormula));
+  public Task PinsSaveSwitchAndRecover() =>
+      RunUiSmokeAsync(nameof(PinsSaveSwitchAndRecover));
+
+  [Fact]
+  public Task PinsFormulaWindowLifecycleAndExitRecovery() =>
+      RunUiSmokeAsync(nameof(PinsFormulaWindowLifecycleAndExitRecovery));
 
   [Fact]
   public Task WebResourceResponseStopsAfterWebViewCloses() =>
@@ -199,7 +204,8 @@ public sealed class CaptureUiSmokeTests : IDisposable
       string detail = File.Exists(result) ? File.ReadAllText(result) : "No UI smoke result.";
       Assert.True(child.ExitCode == 0, $"UI smoke exit={child.ExitCode}: {detail}");
       Assert.Equal("passed", detail);
-      TestContext.Current.TestOutputHelper!.WriteLine(ReadUiSmokeDiagnostics(child, exited, _root));
+      TestContext.Current.TestOutputHelper!.WriteLine($"UI smoke scenario={scenario}, elapsedMs={elapsed.ElapsedMilliseconds}\n" +
+          ReadUiSmokeDiagnostics(child, exited, _root));
     }, async () =>
     {
       if (!child.HasExited)

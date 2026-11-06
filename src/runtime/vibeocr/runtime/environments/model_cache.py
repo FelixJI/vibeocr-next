@@ -659,13 +659,16 @@ def paddle_text_models_prepared(cache_home: Path) -> bool:
 
 def prepare_mineru(tier: str) -> Path:
     """Executed in the target MinerU interpreter, never in a health probe."""
-    from mineru.config import config
+    # 锁定 mineru 4.1.3 无模块级 ``config`` 导出，公开入口是 ``get_config()``。
+    from mineru.config import get_config
     from mineru.model.download import (
         MODEL_COMPLETE_MARKER,
         resolve_model_source,
         verify_model_repo,
     )
     from mineru.model.registry import model_repos_for_tier
+
+    config = get_config()
 
     source = resolve_model_source(allow_auto=True)
     if source == "local":

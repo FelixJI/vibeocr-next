@@ -37,6 +37,10 @@ VENV_DIR = ROOT / "build" / "mineru-sdk-contract-venv"
 # 版本全部由 lock constraints 钉死，传递依赖在 constraints 内解析。
 # json-repair/openai：mineru.backend.postprocess.llm_* 在 api_server 解析
 # 路径顶层导入（flash 原生抽取也会走到该导入）。
+# requests/huggingface-hub：mineru.model.download 顶层导入，
+# model_cache.prepare_mineru 真实行为回归需要该链路可导入。
+# onnxruntime-directml：metacommands 策略/设备门禁真实合同需要真实
+# ORT 面与 DmlExecutionProvider（版本由 lock 钉死，仅测试 venv）。
 DIRECT_DEPENDENCIES = [
     "docvortex",
     "PyYAML",
@@ -51,6 +55,9 @@ DIRECT_DEPENDENCIES = [
     "lxml",
     "json-repair",
     "openai",
+    "requests",
+    "huggingface-hub",
+    "onnxruntime-directml",
 ]
 
 # pip-compile 输出行：`name==version \`（续行是 --hash/注释）。
@@ -89,7 +96,11 @@ def run(command: list[str]) -> subprocess.CompletedProcess:
 def probe_imports(python: Path) -> bool:
     probe = (
         "import mineru.parser.api_client, "
-        "vibeocr.runtime.recognition.mineru_api, pytest"
+        "mineru.model.download, "
+        "onnxruntime, "
+        "vibeocr.runtime.recognition.mineru_api, "
+        "vibeocr.runtime.recognition.mineru_api_entry, "
+        "vibeocr.runtime.environments.model_cache, pytest"
     )
     return (
         subprocess.run([str(python), "-c", probe], capture_output=True).returncode == 0
@@ -104,25 +115,41 @@ def installed_version(python: Path, distribution: str) -> str | None:
 
 def assemble(constraints: dict[str, str], mineru_version: str, *, force: bool) -> None:
     python = venv_python()
-    if (
-        not force
-        and python.is_file()
-        and installed_version(python, "mineru") == mineru_version
-        and probe_imports(python)
-    ):
-        print(
-            f"[prepare_mineru_sdk_tests] venv already ready "
-            f"(mineru=={mineru_version}); reuse it",
-            flush=True,
-        )
-        return
-
     uv = shutil.which("uv")
     if uv is None:
         raise SystemExit(
             "uv is required to assemble the MinerU SDK contract venv "
             "(install it or run via the repository dev environment)"
         )
+
+    if (
+        not force
+        and python.is_file()
+        and installed_version(python, "mineru") == mineru_version
+    ):
+        # 复用第三方依赖，但本项目 wheel 必须重建为当前源码：ready 探针
+        # 只看导入，无法区分陈旧源码；重装限定 vibeocr-next-runtime，
+        # 不升级任何第三方依赖。
+        run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--no-deps",
+                "--reinstall-package",
+                "vibeocr-next-runtime",
+                str(ROOT),
+            ]
+        )
+        if probe_imports(python):
+            print(
+                f"[prepare_mineru_sdk_tests] venv already ready "
+                f"(mineru=={mineru_version}); reuse it",
+                flush=True,
+            )
+            return
 
     # 走到重建分支（复用条件不满足或 --force）：先移除陈旧/半装配目录，
     # 再创建干净 venv，保证脚本可重复执行。

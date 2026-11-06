@@ -514,6 +514,9 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                              'maximum': 2147483647,
                                                              'minimum': 0,
                                                              'type': 'integer'},
+                                     'recognition_device': {'default': 'auto',
+                                                            'enum': ['auto', 'cpu', 'directml'],
+                                                            'type': 'string'},
                                      'residency': {'additionalProperties': False,
                                                    'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                           'type': 'integer'},
@@ -598,6 +601,7 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                                                 'type': 'array'}},
                                                    'required': ['default_ttl_seconds', 'pipelines'],
                                                    'type': 'object'},
+                                     'revision': {'default': 0, 'minimum': 0, 'type': 'integer'},
                                      'schema_version': {'const': 2}},
                       'required': ['schema_version', 'residency', 'extra'],
                       'type': 'object'},
@@ -3056,12 +3060,37 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                'one '
                                                                                                                                'descriptor '
                                                                                                                                'per '
-                                                                                                                               'stable '
+                                                                                                                               'active '
                                                                                                                                'OcrEngineId '
                                                                                                                                'with '
                                                                                                                                'no '
                                                                                                                                'duplicate '
-                                                                                                                               'ids. '
+                                                                                                                               'ids; '
+                                                                                                                               'retired '
+                                                                                                                               'ids '
+                                                                                                                               '(rapidocr) '
+                                                                                                                               'stay '
+                                                                                                                               'deserializable '
+                                                                                                                               'on '
+                                                                                                                               'the '
+                                                                                                                               'wire '
+                                                                                                                               'but '
+                                                                                                                               'are '
+                                                                                                                               'no '
+                                                                                                                               'longer '
+                                                                                                                               'catalog '
+                                                                                                                               'entries '
+                                                                                                                               '— '
+                                                                                                                               'explicit '
+                                                                                                                               'selections '
+                                                                                                                               'are '
+                                                                                                                               'rejected '
+                                                                                                                               'fail '
+                                                                                                                               'closed '
+                                                                                                                               'at '
+                                                                                                                               'the '
+                                                                                                                               'availability '
+                                                                                                                               'gate. '
                                                                                                                                'The '
                                                                                                                                'catalog '
                                                                                                                                'is '
@@ -3231,15 +3260,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                           'for '
                                                                                                                                                                                           'historical '
                                                                                                                                                                                           'records, '
+                                                                                                                                                                                          'it '
+                                                                                                                                                                                          'is '
+                                                                                                                                                                                          'no '
+                                                                                                                                                                                          'longer '
+                                                                                                                                                                                          'listed '
+                                                                                                                                                                                          'in '
                                                                                                                                                                                           'the '
                                                                                                                                                                                           'engine '
-                                                                                                                                                                                          'catalog '
-                                                                                                                                                                                          'reports '
-                                                                                                                                                                                          'it '
-                                                                                                                                                                                          'unavailable '
-                                                                                                                                                                                          'with '
-                                                                                                                                                                                          'reason '
-                                                                                                                                                                                          'engine_retired, '
+                                                                                                                                                                                          'catalog, '
                                                                                                                                                                                           'and '
                                                                                                                                                                                           'submissions '
                                                                                                                                                                                           'are '
@@ -3247,7 +3276,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                           'fail '
                                                                                                                                                                                           'closed '
                                                                                                                                                                                           'with '
-                                                                                                                                                                                          'OCR_ENGINE_UNAVAILABLE.',
+                                                                                                                                                                                          'OCR_ENGINE_UNAVAILABLE '
+                                                                                                                                                                                          '(reason '
+                                                                                                                                                                                          'engine_retired).',
                                                                                                                                                                            'enum': ['rapidocr',
                                                                                                                                                                                     'windows',
                                                                                                                                                                                     'paddleocr'],
@@ -3429,15 +3460,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                              'for '
                                                                                                                                                                                                              'historical '
                                                                                                                                                                                                              'records, '
+                                                                                                                                                                                                             'it '
+                                                                                                                                                                                                             'is '
+                                                                                                                                                                                                             'no '
+                                                                                                                                                                                                             'longer '
+                                                                                                                                                                                                             'listed '
+                                                                                                                                                                                                             'in '
                                                                                                                                                                                                              'the '
                                                                                                                                                                                                              'engine '
-                                                                                                                                                                                                             'catalog '
-                                                                                                                                                                                                             'reports '
-                                                                                                                                                                                                             'it '
-                                                                                                                                                                                                             'unavailable '
-                                                                                                                                                                                                             'with '
-                                                                                                                                                                                                             'reason '
-                                                                                                                                                                                                             'engine_retired, '
+                                                                                                                                                                                                             'catalog, '
                                                                                                                                                                                                              'and '
                                                                                                                                                                                                              'submissions '
                                                                                                                                                                                                              'are '
@@ -3445,7 +3476,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                                                                              'fail '
                                                                                                                                                                                                              'closed '
                                                                                                                                                                                                              'with '
-                                                                                                                                                                                                             'OCR_ENGINE_UNAVAILABLE.',
+                                                                                                                                                                                                             'OCR_ENGINE_UNAVAILABLE '
+                                                                                                                                                                                                             '(reason '
+                                                                                                                                                                                                             'engine_retired).',
                                                                                                                                                                                               'enum': ['rapidocr',
                                                                                                                                                                                                        'windows',
                                                                                                                                                                                                        'paddleocr'],
@@ -4091,6 +4124,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                         'maximum': 2147483647,
                                                         'minimum': 0,
                                                         'type': 'integer'},
+                                'recognition_device': {'default': 'auto',
+                                                       'enum': ['auto', 'cpu', 'directml'],
+                                                       'type': 'string'},
                                 'residency': {'additionalProperties': False,
                                               'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                      'type': 'integer'},
@@ -4175,6 +4211,7 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                            'type': 'array'}},
                                               'required': ['default_ttl_seconds', 'pipelines'],
                                               'type': 'object'},
+                                'revision': {'default': 0, 'minimum': 0, 'type': 'integer'},
                                 'schema_version': {'const': 2}},
                  'required': ['schema_version', 'residency', 'extra'],
                  'type': 'object'},
@@ -5902,15 +5939,15 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                             'for '
                                                                                                                             'historical '
                                                                                                                             'records, '
+                                                                                                                            'it '
+                                                                                                                            'is '
+                                                                                                                            'no '
+                                                                                                                            'longer '
+                                                                                                                            'listed '
+                                                                                                                            'in '
                                                                                                                             'the '
                                                                                                                             'engine '
-                                                                                                                            'catalog '
-                                                                                                                            'reports '
-                                                                                                                            'it '
-                                                                                                                            'unavailable '
-                                                                                                                            'with '
-                                                                                                                            'reason '
-                                                                                                                            'engine_retired, '
+                                                                                                                            'catalog, '
                                                                                                                             'and '
                                                                                                                             'submissions '
                                                                                                                             'are '
@@ -5918,7 +5955,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                             'fail '
                                                                                                                             'closed '
                                                                                                                             'with '
-                                                                                                                            'OCR_ENGINE_UNAVAILABLE.',
+                                                                                                                            'OCR_ENGINE_UNAVAILABLE '
+                                                                                                                            '(reason '
+                                                                                                                            'engine_retired).',
                                                                                                              'enum': ['rapidocr',
                                                                                                                       'windows',
                                                                                                                       'paddleocr'],
@@ -6916,6 +6955,9 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                         'maximum': 2147483647,
                                                         'minimum': 0,
                                                         'type': 'integer'},
+                                'recognition_device': {'default': 'auto',
+                                                       'enum': ['auto', 'cpu', 'directml'],
+                                                       'type': 'string'},
                                 'residency': {'additionalProperties': False,
                                               'properties': {'default_ttl_seconds': {'minimum': 0,
                                                                                      'type': 'integer'},
@@ -7000,6 +7042,7 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                            'type': 'array'}},
                                               'required': ['default_ttl_seconds', 'pipelines'],
                                               'type': 'object'},
+                                'revision': {'default': 0, 'minimum': 0, 'type': 'integer'},
                                 'schema_version': {'const': 2}},
                  'required': ['schema_version', 'residency', 'extra'],
                  'type': 'object'},

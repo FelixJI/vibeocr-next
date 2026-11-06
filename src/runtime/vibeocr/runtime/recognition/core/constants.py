@@ -62,11 +62,9 @@ class Constants:
 
     # 批量处理配置
     # OCR 批量识别（多文件图片 Tab）单次 predict 的 batch_size 上界。
-    # 实际值由 BatchQueueManager._calculate_batch_size 按显卡显存动态估算
-    # （gpu_memory_monitor.estimate_batch_size：free*0.7 / 单图显存），此常量
-    # 只作为动态估算的上限 clamp，必须 ≥ GPU 计算批(text_recognition_batch_size=8)
-    # 才不会人为卡死 GPU。与 estimate_batch_size 内部的 16 上限对齐。
-    # 低显存卡由动态估算自动降到更小值，无需改此常量。
+    # #317：随 NVML 预算退役，不再按显卡显存动态估算；本常量作为固定上界
+    # clamp（与字节/像素预算共同约束），必须 ≥ 计算批
+    # (text_recognition_batch_size=8) 才不会人为卡死吞吐。
     OCR_BATCH_GPU_SIZE_CAP = 16
     # 单次 OCR 传输/推理预算。字节预算低于 SHM 可用区约 90MB，给协议元数据、
     # 结果与并发预取留余量；像素预算约等于 16 张 2000×2000 图，约束解码后

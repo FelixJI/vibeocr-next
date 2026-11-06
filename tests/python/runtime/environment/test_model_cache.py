@@ -485,15 +485,23 @@ def test_mineru_prepare_uses_product_code_and_service_configuration(
     service._prepare_cached_models("standard", lambda: False)
     arguments, kwargs = launches[0]
     assert arguments[0] == sys.executable
-    assert arguments[1:4] == ["-I", "-B", "-c"]
-    assert "VIBEOCR_PRODUCT_CODE_ROOT" in arguments[4]
-    assert arguments[-1] == "standard"
+    assert arguments[1:] == [
+        "-I",
+        "-B",
+        "-m",
+        "vibeocr.runtime.environments.model_cache",
+        "standard",
+    ]
     env = kwargs["env"]
     assert "PYTHONPATH" not in env
     assert env["CUDA_VISIBLE_DEVICES"] == "-1"
     assert env["GGML_VK_VISIBLE_DEVICES"] == " "
     assert "small_backend: onnx" in Path(env["MINERU_CONFIG"]).read_text()
     assert "engine: llama-cpp" in Path(env["MINERU_CONFIG"]).read_text()
+    # 回归：vlm 必须嵌套在 model 下（旧顶层写法会被 Config 静默忽略）。
+    generated = Path(env["MINERU_CONFIG"]).read_text(encoding="utf-8")
+    assert "\n  vlm:\n    engine: llama-cpp\n" in generated
+    assert "\nvlm:" not in generated
     assert env.get("MINERU_MODEL_BASE_DIR") != "old-generation"
     assert module.MinerUService._model_root == str(prepared)
     assert shutdowns == []
@@ -511,22 +519,25 @@ for name in ('paddlex', 'mineru', 'huggingface-hub', 'modelscope-hub'):
         versions[name] = {'version': dist.version, 'metadata': str(dist._path)}
     except __import__('importlib').metadata.PackageNotFoundError:
         pass
-assert versions['huggingface-hub']['version'] == '1.33.0', versions
-assert versions['modelscope-hub']['version'] == '0.4.5', versions
+expected = json.loads(__import__('os').environ['FIXTURE_LOCKED_VERSIONS'])
+assert all(versions.get(name, {}).get('version') == pinned for name, pinned in expected.items()), versions
 if __import__('os').environ['MINERU_MODEL_SOURCE'] == 'modelscope':
     from modelscope_hub import constants
     assert constants.API_TIMEOUT == constants.API_CONNECT_TIMEOUT == 1
     assert constants.API_MAX_RETRIES == constants.DOWNLOAD_RETRY_TIMES == 1
     assert constants.DOWNLOAD_TIMEOUT == 1
 markers = 0
-assert version('mineru') == '4.1.3'
 from vibeocr.runtime.recognition.mineru_service import MinerUService
+from threading import Event
+owner = Event()
+MinerUService.bind_owner(owner, model_source=__import__("os").environ["MINERU_MODEL_SOURCE"])
 service = object.__new__(MinerUService)
 service._prepare_cached_models('basic', lambda: False)
 root = Path(service._model_root)
-from mineru.config import config
+from mineru.config import get_config
 from mineru.model.registry import model_repos_for_tier
 from mineru.model.download import MODEL_COMPLETE_MARKER, verify_model_repo
+config = get_config()
 config.model.base_dir = str(root)
 repos = model_repos_for_tier('basic')
 assert all(verify_model_repo(repo).ready for repo in repos)
@@ -549,11 +560,23 @@ print(json.dumps({'root': str(root), 'sdk': versions, 'models': name, 'markers':
 @pytest.mark.parametrize("adapter", ["mineru"])
 @pytest.mark.parametrize("source", ["huggingface", "modelscope"])
 def test_native_adapter_cold_hot_offline_missing_and_repair(
-    tmp_path, provider_server, adapter, source
+    tmp_path, provider_server, adapter, source, monkeypatch
 ):
     """Opt-in native SDK integration: real manager, service child, registry and verifier."""
     if os.environ.get("VIBEOCR_NATIVE_MODEL_TESTS") != "1":
         pytest.skip("requires the locked native SDK test harness")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4]))
+    from scripts.prepare_mineru_sdk_tests import parse_lock_constraints
+    from scripts.product_layout import load_product_layout
+
+    pins, _ = parse_lock_constraints()
+    expected = {
+        name: pins[name] for name in ("mineru", "huggingface-hub", "modelscope-hub")
+    }
+    product = os.environ.get("VIBEOCR_NATIVE_MODEL_PRODUCT_ROOT")
+    python = (
+        load_product_layout(Path(product)).runtime_python if product else sys.executable
+    )
     endpoint, payloads, counts = provider_server
     shared = tmp_path / "shared"
     if adapter == "mineru":
@@ -582,13 +605,11 @@ def test_native_adapter_cold_hot_offline_missing_and_repair(
         env = {
             **os.environ,
             "FIXTURE_ADAPTER": adapter,
+            "FIXTURE_LOCKED_VERSIONS": json.dumps(expected),
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
             "VIBEOCR_SHARED_MODEL_CACHE": str(shared),
-            "VIBEOCR_MANAGED_ENVIRONMENT_ID": "native-model-fixture",
-            "VIBEOCR_PRODUCT_CODE_ROOT": str(
-                Path(__file__).resolve().parents[4] / "src/runtime"
-            ),
+            "VIBEOCR_PRODUCT_RUNTIME": "1",
             "MINERU_HOME": str(private / "mineru"),
             "MINERU_CONFIG": str(config),
             "MINERU_MODEL_SOURCE": source,
@@ -615,7 +636,7 @@ def test_native_adapter_cold_hot_offline_missing_and_repair(
             "USERPROFILE": str(private),
         }
         result = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", _NATIVE_ADAPTER_CHECK],
+            [str(python), "-I", "-B", "-c", _NATIVE_ADAPTER_CHECK],
             env=env,
             capture_output=True,
             text=True,

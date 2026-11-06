@@ -27,12 +27,8 @@ public sealed partial class MainWindow
       {
         throw new InvalidOperationException("Screenshot smoke dependencies are missing.");
       }
-      for (int attempt = 0; !smokeInferenceAttached(); attempt++)
-      {
-        if (attempt >= 21000)
-          throw new TimeoutException("Real Supervisor did not attach within 35 minutes.");
-        await Task.Delay(100);
-      }
+      if (smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
+        throw new InvalidOperationException("Cold capture attached or started a Runtime before OCR demand.");
       int submitsBefore = smokeSubmitAttempts();
       if (submitsBefore != 0)
         throw new InvalidOperationException("OCR was submitted before screenshot capture.");
@@ -45,7 +41,7 @@ public sealed partial class MainWindow
         screenshotSmokePicker.Evidence ??
         throw new InvalidOperationException("GDI synthetic capture has no evidence.");
       if (captured.Result is not null || captured.Input is null ||
-          smokeSubmitAttempts() != 0 ||
+          smokeSubmitAttempts() != 0 || smokeInferenceAttached() ||
           smokeStartupEnsureAttempts() != ensureBeforeCapture)
       {
         throw new InvalidOperationException("Pure screenshot started OCR or lacks an input.");
@@ -81,6 +77,12 @@ public sealed partial class MainWindow
       }
 
       await ClickSmokeButtonAsync("矩形");
+      // 默认笔色由用户设置决定；此像素检查明确绘制橙色矩形。
+      const string orange = """button[aria-label="常用颜色 #f38b35"]""";
+      await WaitForSmokeDomAsync($"document.querySelector('{orange}')", TimeSpan.FromSeconds(10), editorSurface: true);
+      await ClickSmokeButtonAsync("常用颜色 #f38b35");
+      await WaitForSmokeDomAsync($"document.querySelector('{orange}')?.getAttribute('aria-pressed') === 'true'",
+        TimeSpan.FromSeconds(10), editorSurface: true);
       string canvasBox = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
         "(() => { const c = document.querySelector('canvas[aria-label=\"图片检查画布\"]'); " +
         "c.scrollIntoView({block:'center'}); const r=c.getBoundingClientRect(); " +
@@ -109,7 +111,7 @@ public sealed partial class MainWindow
           edited.Result is not null ||
           smokeStartupEnsureAttempts() != ensureAfterCapture)
       {
-        throw new InvalidOperationException("Editing changed session, published a recognition result or installed Runtime.");
+        throw new InvalidOperationException("Editing changed session, published a recognition result or started Runtime.");
       }
 
       await WaitForAutomaticTextLayerAsync(editedSession);
@@ -123,7 +125,7 @@ public sealed partial class MainWindow
       if (recognizedSession.SessionId != editedSession.SessionId ||
           recognizedSession.Revision != editedSession.Revision ||
           smokeSubmitAttempts() != submitsBeforeRecognition + 1 ||
-          smokeStartupEnsureAttempts() != ensureAfterCapture ||
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensureAfterCapture + 1 ||
           string.IsNullOrWhiteSpace(smokeLastJobId()))
       {
         throw new InvalidOperationException("Explicit OCR session or operation counts mismatch.");
@@ -184,13 +186,27 @@ public sealed partial class MainWindow
       "); if (!b || b.disabled || b.getAttribute('aria-disabled')==='true') return false; b.click(); return true; })()";
     if (capture)
     {
-      // 右上角统一截图按钮单击直接开始普通截图，不再经过菜单。
+      // bridge-ready 表示状态已投递；识别页异步渲染后才能点击真实按钮。
+      await WaitForSmokeDomAsync(
+        """!!document.querySelector('button[aria-label="截图"]:not(:disabled):not([aria-disabled="true"])')""",
+        TimeSpan.FromSeconds(10));
       if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript("截图")) != "true")
         throw new InvalidOperationException("Screenshot button unavailable.");
       return;
     }
-    if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript(label)) != "true")
+    RecognitionScreenshotSessionState? closingSession = null;
+    if (label == "结束会话")
+    {
+      closingSession = (await WaitForScreenshotStateAsync(_ => true, TimeSpan.FromSeconds(2))).ScreenshotSession;
+      if (closingSession is null)
+        throw new InvalidOperationException("Screenshot smoke has no active session to close.");
+    }
+    string result = await surface.CoreWebView2.ExecuteScriptAsync(ClickScript(label));
+    // Closing the scene can destroy its WebView before the script's true reply arrives.
+    if (result != "true" && !(closingSession is not null && result == "null"))
       throw new InvalidOperationException($"Screenshot smoke button unavailable: {label}");
+    if (closingSession is not null)
+      await WaitForScreenshotStateAsync(state => state.ScreenshotSession is null, TimeSpan.FromSeconds(15));
   }
   private async Task<RecognitionWorkbenchState> WaitForScreenshotStateAsync(
     Func<RecognitionWorkbenchState, bool> matches, TimeSpan timeout)

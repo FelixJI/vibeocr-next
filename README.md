@@ -19,8 +19,6 @@ VibeOCR Next 包含 WinUI 3 桌面客户端、Python Runtime 与跨进程内部�
 运行时与 typed HTTP client，WebView2 承载 React/TypeScript workbench。Supervisor、OCR/PDF
 worker 仍在独立进程运行。
 
-![VibeOCR Next 运行时安装进度](docs/runtime-install-progress.png)
-
 > [!IMPORTANT]
 > Next 仅支持 Windows 10/11 x64，桌面技术栈是 WinUI 3，不是 WPF。Release 只发布由本仓当前
 > 源码构建并绑定的单 Next 产品候选，不再消费独立 Backend/Protocol Release。
@@ -29,7 +27,7 @@ worker 仍在独立进程运行。
 ## 主要能力
 
 - 原生 WinUI 3 桌面识别工作流；
-- 本地 Backend 解析、安装、启动、ready 与 capability 协商；
+- 随包 Runtime 定位、按需启动、ready 与 capability 协商；
 - typed Protocol client 驱动的 job 提交、观察和控制；
 - React/TypeScript WebAssets 与 WebView2 高级 workbench；
 - 单实例、运行时前置检查和 Windows 打包交付。
@@ -48,6 +46,9 @@ worker 仍在独立进程运行。
 3. 解压整个目录后运行根目录的 `VibeOCR.exe`；不要只复制 `current` 子目录。
 4. 应用数据固定保存在解压根的 `state`；应用更新由 Velopack 在应用内检查、下载并应用。
 
+桌面当前仍要求系统具备 .NET 10、Windows App Runtime 和 WebView2，启动器会检查这些前置条件。
+完整依赖随包与干净系统验证见 [#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
+
 在“关于与诊断 → 更新”检查版本、下载并安装更新。更新由桌面宿主执行，
 无需识别服务就绪；尚未检查时显示“尚未检查更新”，失败会显示原因。
 “检测与下载来源”可选择官方直连，或填写自己的 URL 前缀／HTTP 代理，
@@ -59,42 +60,14 @@ worker 仍在独立进程运行。
 托盘开关默认关闭，启用后点击关闭按钮只隐藏主窗口到托盘，点击托盘图标可恢复原页面；
 最小化按钮任何时候都只最小化到任务栏。未启用时关闭窗口执行退出确认；这两项设置不依赖识别服务启动。
 
-### 运行环境与依赖安装
+### 识别服务与计算设备
 
-![真实 Windows 候选重启后的已安装环境与运行状态](docs/managed-environments.png)
+解压完整产品包后即可打开主窗口、截图、编辑和使用本地二维码工具。首次 OCR、PDF 操作或在设置中点击“检查识别服务”时，桌面才启动随包解释器。并发请求共享同一次服务启动，每个请求可以独立取消。准备失败后可以用原输入重试。
 
-- 普通启动在首窗显示后后台准备计算服务；首次使用从随包离线依赖准备并选中“默认环境”（PaddleOCR ONNX · CPU）；
-  升级沿用仍受支持的已有环境，旧 Rapid 环境按下方退役说明处理。完成初始化后，删除环境不会触发自动重建。
-  纯截图编辑、复制保存和本地二维码工具不等待计算服务就绪。
-  并发计算请求共享准备，每个请求可独立取消；准备失败或取消保留输入供重试。
-  “查看环境清单”仅只读检查已有环境，不初始化默认环境或启动计算服务。
-  默认环境使用固定目录 `state/environments/paddleocr-ort-cpu`，按需准备的环境自动命名，重装不再新增 revision 路径。
-  已有名称和 UUID 环境继续兼容，旧 revision 布局在重装时迁移；详见[环境路径与迁移说明](docs/managed-environment-paths.md)。
-- 在“设置 → 运行环境”选择 PaddleOCR 推理后端（CPU / DirectML / CUDA），或单独安装、移除 MinerU 本地引擎。
-  Paddle 文字、表格与版面结构共用推理依赖，额外模型按需下载。选择只查询兼容环境，
-  不改变识别默认模式或当前任务。已有兼容环境可直接切换并启动验证；没有时，“准备此后端”
-  自动准备目标环境并在常规页面展示简短确认，明确确认后才安装。完整包清单和路径是可选只读详情，
-  环境清单、依赖版本、下载来源与空间清理收进高级区域，无需手动命名。改后端、目标环境或保存来源后必须重新预览。
-  准备失败可重试，导航返回可继续确认；旧空环境也可从环境列表继续准备或移除。
-- 下载来源只有两项：依赖默认使用 TUNA PyPI 镜像，模型默认使用 ModelScope（魔搭）。
-  保存来源后统一用于各环境后续的依赖安装与模型下载，不立即下载或安装；已经进行中的安装使用原计划。
-  已有来源偏好在显式保存前保留，保存后清除相应的旧环境覆盖；运行中的模型来源在下次启动环境时生效。
-- 失败或取消后仍可查看当次冻结的请求/生效来源，重新预览不会覆盖这份失败证据。
+在设置中选择自动、CPU 或 DirectML。服务用实际计算探测设备，再保存设置。识别任务或预热正在占用设备时，请在结束后重试。已提交任务使用提交时的设备与模型来源，后续任务使用新设置。CPU 和 DirectML 共用产品解释器和模型缓存。
 
-![常规设置中的简短安装确认、主要依赖与服务影响](docs/environment-plan.png)
+Paddle 和 MinerU 可以分别选择模型来源。升级时读取旧配置中选中的设备、模型来源与缓存位置，保留原配置和用户文件。[旧设置与路径](docs/managed-environment-paths.md)
 
-- 可以保留多个环境；“切换到此环境”先启动并验证目标服务，再替换当前服务，不会重新安装
-  已准备的依赖。有运行任务时拒绝切换，验证失败保留旧健康服务；任务记录绑定提交时的环境修订。
-- 配方区分 PaddleOCR 与 MinerU，支持的设备以
-  当前配方为准。每个环境独立管理可写依赖目录，基础解释器和可信下载缓存可复用。
-  选择 CUDA 配方不代表已完成 GPU 实际推理，界面分别展示目标设备与实际执行设备。
-- 环境列表展示解释器、依赖、引擎、模型与服务状态。可修复异常解释器，或删除未活动且
-  未被任务占用的环境；兼容旧环境会登记保留，不因新界面自动清空重装。
-- “空间清理”先检查并分页展示可清理项和保护原因，仅执行本页明确选择并确认的项目。
-  可移除闲置环境的专属依赖、已记录的准备残留和无保留引用的依赖下载工件；当前/被引用/旧兼容环境、
-  模型、基础 Python 与未知路径保留。显示的逻辑字节不保证等量物理空间释放，清理缓存可能导致以后重新下载。
-  文件占用、取消或中断后可重新检查并继续清理；已删除的文件不会恢复，也不会把部分删除的环境标为健康。
-- 未安装识别环境时，可先点“设置 → MinerU 连接 → 启用 MinerU 远程模式”，准备产品自带的基础服务。无需下载本地 MinerU、PaddleOCR 引擎或模型。
 - 批量识别支持图片、PDF、Word（docx）、Excel（xlsx）和 PowerPoint（pptx）。PDF 可使用文字、表格及文档识别管道，并为每个文件单独填写页码（如 `1,3-5`，`r1` 表示最后一页）；留空时 PDF 沿用 MinerU 默认范围，其他管道默认全部。Office 文档使用 MinerU Flash 档整篇解析，按页识别需先转换为 PDF。
 - MinerU 识别参数可在设置中选择服务声明的档位、OCR 模式和 PDF 默认页码范围；每个文件的页码可覆盖默认值。本地模式支持语言配置；远程语言由服务启动参数决定，客户端不能覆盖。MinerU 4 接口尚无公式/表格独立开关，界面会明确说明由档位与服务端控制。
 - 自部署 MinerU 4 服务可在“设置 → MinerU 连接”切换为远程模式，填写服务根地址及可选
@@ -107,27 +80,18 @@ worker 仍在独立进程运行。
   0 秒表示持久运行。计时从整个作业及必要清理完成后开始，排队/批次间隙、状态刷新不会触发或延长回收。
   到期退出自有 Worker，下次识别按需恢复；磁盘模型和环境保留。旧模型保留配置首次读取时备份为
   `supervisor-settings.json.worker-idle.bak` 后原子迁移，可在设置中恢复十分钟默认值。
-- 预计下载量只计本次新增下载，不等于最终环境大小；依赖尚未解析时显示“未知”，下载总量
-  未知时只展示阶段与已用时，不定百分比。全部字节下载完成后还需经过安装、验证与激活，
-  下载进度到 100% 不等于整体完成。
-
-![真实 Windows 隔离候选移除闲置环境后的清理结果](docs/environment-cleanup.png)
-
 ### 模型准备与就绪状态
 
-- PaddleOCR CPU 与 DirectML 的依赖随产品离线分发，默认 small 文字检测、识别及文档方向模型也随包携带；首次使用仍需在本地准备独立环境。基础 Runtime、PaddleOCR CPU 与 DirectML 的第三方 wheel 共用一个离线 wheel pool 随包分发一次（相同 wheel 不重复携带，同名不同版本共存），各环境仍按自身锁的精确清单独立安装，不混装 CPU/DirectML 的 ONNX Runtime。
-  DirectML 与 CPU 环境独立安装，模型可复用。DirectML 能否执行取决于本机设备与驱动，不以安装完成代替设备就绪检查。
-- 依赖安装、模型首次准备、引擎在所选设备上实际可用和服务就绪是不同的阶段。其他 Paddle ONNX 模型按冻结清单从所选 ModelScope/Hugging Face 来源准备，
-  MinerU 沿自身模型机制准备；首次使用可能额外下载，服务就绪不代表模型全部就绪。
+产品携带默认 small 文字检测、识别和文档方向模型。其他 Paddle ONNX 模型按固定清单从选定的 ModelScope 或 Hugging Face 准备，MinerU 使用自身模型机制。实际推理还取决于所选设备的驱动、模型文件及任务类型。
 - 识别模式在对应任务中选择，各模式的可用性（可用/需准备依赖/不可用）以任务中的实际显示为准。
 
 ### Paddle 模式退役与旧设置
 
-Paddle 仅保留文字、表格和非 VLM 文档结构识别，使用 CPU、CUDA 或 DirectML 的 ONNX Runtime 环境；
+Paddle 仅保留文字、表格和非 VLM 文档结构识别，使用 CPU 或 DirectML 的 ONNX Runtime 环境（CUDA 执行分支已退役）；
 模型提供 tiny、small（默认）、medium 三档。PaddleOCR-VL、独立 Paddle 公式和结构内专用公式/VLM 推理
 已退役，这是本产品迁移范围，不表示 ONNX Runtime 不能运行任何 VLM 或公式模型。MinerU 能力继续保留。
 
-旧环境和模型不会自动卸载。旧环境不再提供原生 Paddle 推理，请在设置中显式准备并切换对应 ORT 环境。
+现有模型、工程、识别结果和环境目录保留在原处。需要调整设备时请在设置中选择 CPU、DirectML 或自动。
 保存的上述退役默认模式、截图固定模式或快捷键选择保留原值，执行时提示已退役，请重新选择；未设置默认使用 PaddleOCR 文字识别。
 旧识别选项在读取副本中仅移除已知退役字段，保留方向等合法选项；读取不会写回配置，正常保存才原子写入。
 如需恢复旧设置，可使用原配置备份和旧版本；历史公式、VL、表格结果仍可查看和导出，原始数据不批量重写。
@@ -292,15 +256,11 @@ CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `pre
 正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
 （`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`
 和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 调用
-`scripts/build_internal_runtime.ps1` 从当前源码产出内部 Runtime wheel、冻结 Runtime Installer、
-共享第三方 offline wheel pool（base / Paddle ONNX CPU / DirectML 闭包去重后每个 wheel 只分发一次，
-各 profile 另附自身精确 requirements 清单 zip，经既有 `runtime_pack` 元组接口绑定）与 runtime manifest；
-第三方 CPython 归档与各 Windows 运行环境
-profile 锁保留在 `config/runtime/`。产品内部沿用 `runtime/backend/` 与
+`scripts/build_internal_runtime.ps1` 从当前源码构建内部 wheel，按 `config/runtime/` 的 CPython 归档和锁将其装入随包 Runtime 树。Runtime manifest 绑定解释器树清单、依赖锁与默认模型包。产品内部沿用 `runtime/backend/` 与
 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
 不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为
 `project:{component,repository,version,source_sha}`；`runtime-manifest.json` 的 `product`
-同样只含这四字段，installer 摘要、profile 与 capabilities 位于 manifest 顶层；
+同样只含这四字段，预构建树清单绑定、profile 与 capabilities 位于 manifest 顶层；
 `component-lock.json` 的 `product` 在四字段之上追加 `runtime_manifest_sha256` 与
 `accelerator`，`required_capabilities` 位于 lock 顶层。版本与派生文件只由自动化脚本更新。
 

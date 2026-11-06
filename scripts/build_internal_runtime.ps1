@@ -57,13 +57,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Next Runtime wheel build failed' }
 $wheels = @(Get-ChildItem -LiteralPath $work -Filter "vibeocr_next_runtime-$Version-*.whl" -File)
 if ($wheels.Count -ne 1) { throw 'Expected exactly one Next Runtime wheel' }
 
-uv run --frozen --group build python (Join-Path $root 'scripts/build_runtime_installer.py') `
-    --output-dir $work --work-dir (Join-Path $work 'installer-work')
-if ($LASTEXITCODE -ne 0) { throw 'Runtime Installer build failed' }
-$installer = Join-Path $work "vibeocr-runtime-installer.exe"
-if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-    throw 'Frozen Runtime Installer executable is missing'
-}
 
 $baseLock = Join-Path $runtimeConfig 'win-x64-base/requirements-win-x64-base.lock'
 # 预构建运行时树（PR2）：构建期把 CPython 归档安全解包，统一闭包
@@ -114,7 +107,6 @@ $manifestArgs = @(
     '--runtime-env-manifest', $runtimeEnvManifest,
     '--python-version', [string]$pythonLock.version,
     '--python-source-url', [string]$pythonLock.source_url,
-    '--installer-executable', $installer,
     '--version', $Version,
     '--source-commit', $sourceSha,
     '--build-workflow', 'github.com/FelixJI/vibeocr-next/.github/workflows/ci.yml',

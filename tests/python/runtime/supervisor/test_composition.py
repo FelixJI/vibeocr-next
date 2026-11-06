@@ -149,14 +149,8 @@ def test_build_supervisor_keeps_base_ocr_path_without_optional_backends(
         stager_root=tmp_path / "stage",
         engine_registry=registry,
     )
-    assert module.engine_resolver.catalog_payload()["engines"][0] == {
-        "id": "rapidocr",
-        "availability": "unavailable",
-        "included_in_base": False,
-        "reason_code": "engine_retired",
-        "required_component": None,
-    }
-    import pytest
+    # 目录只列活跃 id：首项是未就绪的 windows（rapidocr 已移除）。
+    assert module.engine_resolver.catalog_payload()["engines"][0]["id"] == "windows"
     from vibeocr.runtime.recognition.recognition_modes import (
         RecognitionModeError,
     )
@@ -418,14 +412,12 @@ def test_build_ocr_engine_registry_registers_all_stable_engines() -> None:
 
     registry = composition._build_ocr_engine_registry(lambda: object())
     descriptors = OcrEngineResolver(registry).probe_descriptors()
+    # #317：目录只覆盖活跃 id；rapidocr 已从能力目录移除，仅保留解析后
+    # fail closed 的结构化拒绝（见 resolver 测试）。
     assert [d.engine_id for d in descriptors] == [
-        OcrEngine.RAPIDOCR,
         OcrEngine.WINDOWS,
         OcrEngine.PADDLEOCR,
     ]
-    # rapidocr 已退役：不再注册 adapter，探针固定投影 engine_retired。
-    assert descriptors[0].availability.value == "unavailable"
-    assert descriptors[0].reason_code == "engine_retired"
     # Paddle 必须以惰性句柄注册（导入成本推迟）。
     paddle_engine = registry.get(OcrEngine.PADDLEOCR)
     assert isinstance(paddle_engine, LazyEngineHandle)
@@ -693,7 +685,7 @@ def test_mineru_lifecycle_start_invokes_singleton(
         calls.append("constructor")
         or types.SimpleNamespace(_ensure_api_running=lambda: calls.append("ensure"))
     )
-    fake_module.MinerUService.bind_owner = lambda owner: None
+    fake_module.MinerUService.bind_owner = lambda owner, *, model_source: None
     monkeypatch.setitem(
         sys.modules, "vibeocr.runtime.recognition.mineru_service", fake_module
     )

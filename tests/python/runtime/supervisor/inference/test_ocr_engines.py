@@ -149,14 +149,14 @@ class TestEngineValidForPipeline:
 
 
 class TestOcrEngineRegistry:
-    def test_catalog_covers_all_stable_ids_when_empty(self) -> None:
+    def test_catalog_covers_all_active_ids_when_empty(self) -> None:
         resolver = OcrEngineResolver(registry=OcrEngineRegistry([]))
         payload = resolver.catalog_payload()
         ids = [entry["id"] for entry in payload["engines"]]
-        assert ids == ["rapidocr", "windows", "paddleocr"]
-        # rapidocr 是退休枚举值：未注册 adapter 时固定投影 engine_retired。
+        # #317：目录只覆盖活跃 id；退休 rapidocr 不再投影，解析后在
+        # resolve 处 fail closed（engine_retired）。
+        assert ids == ["windows", "paddleocr"]
         entries = {entry["id"]: entry for entry in payload["engines"]}
-        assert entries["rapidocr"]["reason_code"] == "engine_retired"
         assert entries["windows"]["reason_code"] == "engine_not_installed"
         assert entries["paddleocr"]["reason_code"] == "engine_not_installed"
         assert all(entry["availability"] == "unavailable" for entry in entries.values())

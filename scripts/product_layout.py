@@ -8,7 +8,6 @@ import json
 import shutil
 import stat
 import uuid
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -50,7 +49,7 @@ CANONICAL_PATHS = {
     "app.entry": "app/VibeOCR.WinUI.exe",
     "app.web_assets": "app/WebAssets",
     "runtime.manifest": "runtime/backend/runtime-manifest.json",
-    "runtime.installer": "runtime/installer/vibeocr-runtime-installer.exe",
+    "runtime.python": "runtime/env/runtime-env/python.exe",
     "metadata.component_lock": "app/metadata/component-lock.json",
     "metadata.component_identities": "app/metadata/component-identities.json",
     "metadata.release_manifest": "app/metadata/product-release-manifest.json",
@@ -70,7 +69,7 @@ class ProductLayout:
     web_assets: Path
     runtime_root: Path
     runtime_manifest: Path
-    runtime_installer: Path
+    runtime_python: Path
     metadata_root: Path
     component_lock: Path
     component_identities: Path
@@ -183,7 +182,7 @@ def _load_product_layout(
         "app.entry": app.get("entry"),
         "app.web_assets": app.get("web_assets"),
         "runtime.manifest": runtime.get("manifest"),
-        "runtime.installer": runtime.get("installer"),
+        "runtime.python": runtime.get("python"),
         "metadata.component_lock": metadata.get("component_lock"),
         "metadata.component_identities": metadata.get("component_identities"),
         "metadata.release_manifest": metadata.get("release_manifest"),
@@ -203,8 +202,8 @@ def _load_product_layout(
         runtime_manifest=_resolved_relative(
             root, runtime.get("manifest"), "runtime.manifest"
         ),
-        runtime_installer=_resolved_relative(
-            root, runtime.get("installer"), "runtime.installer"
+        runtime_python=_resolved_relative(
+            root, runtime.get("python"), "runtime.python"
         ),
         metadata_root=_resolved_relative(root, roots.get("metadata"), "roots.metadata"),
         component_lock=_resolved_relative(
@@ -228,7 +227,7 @@ def _load_product_layout(
         layout.app_root / "MainWindow.xbf",
         layout.web_assets / "index.html",
         layout.runtime_manifest,
-        layout.runtime_installer,
+        layout.runtime_python,
         layout.component_lock,
         layout.component_identities,
         root / "LICENSE",
@@ -326,9 +325,6 @@ def verify_product_release(product_root: Path) -> ProductLayout:
         raise ProductLayoutError("layout.closure-mismatch: runtime binding")
     load_runtime_manifest(layout.runtime_manifest)
 
-    installer = _require_mapping(runtime.get("installer"), "runtime installer")
-    if installer.get("executable_sha256") != _sha256(layout.runtime_installer):
-        raise ProductLayoutError("layout.closure-mismatch: runtime installer")
     return layout
 
 
@@ -430,32 +426,23 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
     _require_non_reparse_regular_file(runtime_manifest_path)
     runtime_manifest = _read_json_object(runtime_manifest_path, "runtime manifest")
     runtime_env = runtime_manifest.get("runtime_env")
-    prebuilt = runtime_env is not None
-    if prebuilt and not isinstance(runtime_env, dict):
-        raise ProductLayoutError("layout.invalid-descriptor: runtime_env")
-    names = {"runtime-manifest.json"}
-    if runtime_manifest.get("runtime_wheel") is not None:
-        names.add(
-            _release_file_name(runtime_manifest.get("runtime_wheel"), "runtime_wheel")
+    env_binding = _require_mapping(runtime_env, "runtime_env")
+    names = {
+        "runtime-manifest.json",
+        _release_file_name(env_binding.get("manifest"), "runtime_env.manifest"),
+    }
+    if runtime_manifest.get("runtime_wheel") or _require_mapping(
+        runtime_manifest.get("python"), "python"
+    ).get("archive"):
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: expected a prebuilt product Runtime"
         )
-    python = _require_mapping(runtime_manifest.get("python"), "python")
-    installer = _require_mapping(runtime_manifest.get("installer"), "installer")
-    if python.get("archive") is not None:
-        names.add(_release_file_name(python.get("archive"), "python.archive"))
-    if prebuilt:
-        env_binding = _require_mapping(runtime_env, "runtime_env")
-        names.add(
-            _release_file_name(env_binding.get("manifest"), "runtime_env.manifest")
-        )
-    if installer.get("archive") is None:
-        # 新形态：安装器可执行文件只在产品 runtime/installer/ 分发一次，
-        # 不进入 runtime/backend/（去重旧 zip+exe 双副本）。仍校验名字形。
-        _release_file_name(installer.get("executable"), "installer.executable")
-    else:
-        # 历史 manifest：backend 目录继续携带绑定的单成员 zip。
-        names.add(_release_file_name(installer.get("archive"), "installer.archive"))
 
     ort = runtime_manifest.get("paddle_onnx_environments", {})
+    if "directml" not in _require_mapping(ort, "paddle_onnx_environments"):
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: product inference lock is missing"
+        )
     for device, record in _require_mapping(ort, "paddle_onnx_environments").items():
         binding = _require_mapping(record, f"paddle_onnx_environments.{device}")
         names.add(
@@ -463,12 +450,10 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
                 binding.get("lock"), f"paddle_onnx_environments.{device}.lock"
             )
         )
-        names.update(
-            _runtime_pack_file_names(
-                binding.get("runtime_pack"),
-                f"paddle_onnx_environments.{device}.runtime_pack",
+        if binding.get("runtime_pack"):
+            raise ProductLayoutError(
+                f"layout.invalid-descriptor: paddle_onnx_environments.{device} cannot bind wheel packs"
             )
-        )
     model_pack = runtime_manifest.get("paddle_model_pack")
     if model_pack is None:
         raise ProductLayoutError(
@@ -481,137 +466,30 @@ def _runtime_product_closure(backend_release_dir: Path) -> tuple[Path, ...]:
             model_pack_binding.get("archive"), "paddle_model_pack.archive"
         )
     )
-    # 统一推理闭包：DirectML 单档随产品携带离线 wheel 闭包（CPU 推理走
-    # 同闭包 CPUExecutionProvider 设备切换，不单独发货；分设备 CPU/CUDA
-    # pack 已退役）。历史 manifest 若仍绑定 cpu 条目，上面的通用循环按
-    # 既有规则校验。预构建运行时树形态下依赖已在构建期装配进树，pack
-    # 绑定不再存在。
-    if not prebuilt:
-        for device in ("directml",):
-            record = _require_mapping(
-                ort.get(device), f"paddle_onnx_environments.{device}"
-            )
-            if not _runtime_pack_file_names(
-                record.get("runtime_pack"),
-                f"paddle_onnx_environments.{device}.runtime_pack",
-            ):
-                raise ProductLayoutError(
-                    "layout.invalid-descriptor: paddle_onnx_environments."
-                    f"{device}.runtime_pack must contain the offline engine pack"
-                )
     profiles = _require_mapping(runtime_manifest.get("profiles"), "profiles")
-    base_packs: tuple[str, ...] | None = None
-    for profile_name, value in profiles.items():
-        profile = _require_mapping(value, f"profiles.{profile_name}")
-        names.add(
-            _release_file_name(profile.get("lock"), f"profiles.{profile_name}.lock")
-        )
-        if "paddle_environment" in profile:
-            paddle = _require_mapping(
-                profile["paddle_environment"],
-                f"profiles.{profile_name}.paddle_environment",
-            )
-            names.add(
-                _release_file_name(
-                    paddle.get("lock"),
-                    f"profiles.{profile_name}.paddle_environment.lock",
-                )
-            )
-        profile_packs = _runtime_pack_file_names(
-            profile.get("runtime_pack"), f"profiles.{profile_name}.runtime_pack"
-        )
-        if profile_name == "win-x64-base":
-            base_packs = profile_packs
-        scopes = profile.get("install_scopes", [])
-        if not isinstance(scopes, list):
-            raise ProductLayoutError(
-                f"layout.invalid-descriptor: profiles.{profile_name}.install_scopes "
-                "must be an array"
-            )
-        for index, value in enumerate(scopes):
-            scope = _require_mapping(
-                value, f"profiles.{profile_name}.install_scopes[{index}]"
-            )
-            names.add(
-                _release_file_name(
-                    scope.get("lock"),
-                    f"profiles.{profile_name}.install_scopes[{index}].lock",
-                )
-            )
-            _runtime_pack_file_names(
-                scope.get("runtime_pack"),
-                f"profiles.{profile_name}.install_scopes[{index}].runtime_pack",
-            )
-
-    if prebuilt:
-        if base_packs:
-            raise ProductLayoutError(
-                "layout.invalid-descriptor: runtime_env form must not bind "
-                "profile runtime packs"
-            )
-        env_root = _release_file_name(
-            _require_mapping(runtime_env, "runtime_env").get("root"),
-            "runtime_env.root",
-        )
-        if env_root != "runtime-env":
-            raise ProductLayoutError(
-                "layout.invalid-descriptor: runtime_env.root must be runtime-env"
-            )
-        _require_safe_directory_tree(source / env_root)
-        if not (source / env_root / "python.exe").is_file():
-            raise ProductLayoutError(
-                "layout.invalid-path: runtime env tree has no python.exe"
-            )
-    elif not base_packs:
+    if set(profiles) != {"win-x64-base"}:
         raise ProductLayoutError(
-            "layout.invalid-descriptor: profiles.win-x64-base.runtime_pack "
-            "must contain the offline base pack"
+            "layout.invalid-descriptor: expected the product base profile"
         )
-    names.update(base_packs or ())
-
-    code_root = source / "runtime-code"
-    if prebuilt:
-        code_root = None
-    if code_root is not None:
-        if not code_root.is_dir():
-            raise ProductLayoutError(
-                "layout.invalid-path: runtime code root is unavailable"
-            )
-        if code_root.is_symlink() or getattr(
-            code_root.lstat(), "st_file_attributes", 0
-        ) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
-            raise ProductLayoutError(
-                "layout.invalid-path: runtime code root is unavailable"
-            )
-    product = _require_mapping(runtime_manifest.get("product"), "runtime product")
-    version = product.get("version")
-    if not isinstance(version, str):
-        raise ProductLayoutError("layout.invalid-descriptor: runtime product version")
-    code_files: tuple[Path, ...] = ()
-    if code_root is not None:
-        required_code = (
-            code_root / "vibeocr/runtime/__init__.py",
-            code_root / "vibeocr/runtime/host/main.py",
-            code_root / "vibeocr/runtime/recognition/paddle_worker.py",
-            code_root / "vibeocr/runtime/documents/pdf_backend_process.py",
-            code_root / "vibeocr/runtime/environments/dependency_profiles.json",
-            code_root / "vibeocr/runtime_contracts/__init__.py",
-            code_root / f"vibeocr_next_runtime-{version}.dist-info/METADATA",
+    profile = _require_mapping(profiles["win-x64-base"], "profiles.win-x64-base")
+    names.add(_release_file_name(profile.get("lock"), "profiles.win-x64-base.lock"))
+    if (
+        profile.get("runtime_pack")
+        or profile.get("install_scopes")
+        or profile.get("paddle_environment")
+    ):
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: profiles.win-x64-base cannot bind install scopes or packs"
         )
-        for path in required_code:
-            _require_non_reparse_regular_file(path)
-        code_entries = tuple(code_root.rglob("*"))
-        if any(
-            path.is_symlink()
-            or getattr(path.lstat(), "st_file_attributes", 0)
-            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            for path in code_entries
-        ):
-            raise ProductLayoutError(
-                "layout.invalid-path: runtime code contains a link"
-            )
-        code_files = tuple(path for path in code_entries if path.is_file())
-    closure = tuple(source / name for name in sorted(names)) + code_files
+    env_root = _release_file_name(env_binding.get("root"), "runtime_env.root")
+    if env_root != "runtime-env":
+        raise ProductLayoutError(
+            "layout.invalid-descriptor: runtime_env.root must be runtime-env"
+        )
+    _require_safe_directory_tree(source / env_root)
+    _require_non_reparse_regular_file(source / env_root / "python.exe")
+    _require_non_reparse_regular_file(source / env_root / "python313.dll")
+    closure = tuple(source / name for name in sorted(names))
     for path in closure:
         _require_non_reparse_regular_file(path)
     load_runtime_manifest(runtime_manifest_path)
@@ -640,11 +518,9 @@ def stage_product_layout(
         app_root = staging / "app"
         metadata_root = app_root / "metadata"
         backend_root = staging / "runtime" / "backend"
-        installer_root = staging / "runtime" / "installer"
         _copy_publish_tree(app_publish_root, app_root)
         metadata_root.mkdir(parents=True)
         backend_root.mkdir(parents=True)
-        installer_root.mkdir(parents=True)
 
         shutil.copyfile(
             bootstrapper_executable.resolve(strict=True), staging / "VibeOCR.exe"
@@ -680,33 +556,6 @@ def stage_product_layout(
             _require_safe_directory_tree(backend_source / env_root)
             env_destination = staging / "runtime" / "env" / env_root
             shutil.copytree(backend_source / env_root, env_destination)
-        installer = _require_mapping(runtime_manifest.get("installer"), "installer")
-        installer_path = installer_root / "vibeocr-runtime-installer.exe"
-        expected_hash = installer.get("executable_sha256")
-        archive_name = installer.get("archive")
-        if isinstance(archive_name, str):
-            # 历史 manifest：从绑定的单成员 zip 提取可执行文件。
-            executable_name = installer.get("executable_path")
-            if not isinstance(executable_name, str):
-                raise ProductLayoutError(
-                    "layout.invalid-descriptor: invalid runtime installer"
-                )
-            with zipfile.ZipFile(backend_root / archive_name) as archive:
-                executable = archive.read(executable_name)
-            installer_path.write_bytes(executable)
-        else:
-            executable_name = installer.get("executable")
-            if executable_name != installer_path.name:
-                raise ProductLayoutError(
-                    "layout.invalid-descriptor: invalid runtime installer"
-                )
-            _require_non_reparse_regular_file(backend_source / executable_name)
-            shutil.copyfile(backend_source / executable_name, installer_path)
-        if (
-            not isinstance(expected_hash, str)
-            or _sha256(installer_path) != expected_hash
-        ):
-            raise ProductLayoutError("layout.closure-mismatch: runtime installer hash")
 
         descriptor = {
             "schema_version": 1,
@@ -723,7 +572,7 @@ def stage_product_layout(
             },
             "runtime": {
                 "manifest": "runtime/backend/runtime-manifest.json",
-                "installer": "runtime/installer/vibeocr-runtime-installer.exe",
+                "python": "runtime/env/runtime-env/python.exe",
             },
             "metadata": {
                 "component_lock": "app/metadata/component-lock.json",

@@ -18,10 +18,10 @@ from vibeocr.runtime.documents.pdf_backend_client import (
 )
 
 
-def test_managed_pdf_worker_uses_current_code_and_same_venv(monkeypatch):
+def test_product_pdf_worker_uses_the_supervisor_interpreter(monkeypatch):
     # 预构建树统一 ``-I -B -m`` 入口：与 Paddle worker 同一模式，模块直接
     # 从树内闭包解析，不再注入产品代码根。
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "named")
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
     monkeypatch.setenv("PYTHONPATH", "C:\\untrusted")
     observed = {}
 
@@ -65,32 +65,14 @@ def _mock_resp(status=200, json_data=None, content=b"", text=None, reason="OK"):
 
 
 class TestResolvePythonExe:
-    def test_embedded_exists(self, monkeypatch):
-        client = PdfBackendClient()
-        from pathlib import Path
-
-        import vibeocr.runtime.environments.env_manager as env
-
-        monkeypatch.setattr(env, "get_project_root", lambda: Path("/fake"))
-        monkeypatch.setattr(
-            env, "get_embedded_python", lambda r: Path("/fake/embedded/python.exe")
-        )
-        monkeypatch.setattr(Path, "exists", lambda self: True)
-        assert client._resolve_python_exe() == str(Path("/fake/embedded/python.exe"))
-
-    def test_fallback_to_sys_executable(self, monkeypatch):
-        import sys
-        from pathlib import Path
-
-        client = PdfBackendClient()
-        import vibeocr.runtime.environments.env_manager as env
-
-        monkeypatch.setattr(env, "get_project_root", lambda: Path("/fake"))
-        monkeypatch.setattr(
-            env, "get_embedded_python", lambda r: Path("/fake/none.exe")
-        )
-        result = client._resolve_python_exe()
-        assert result == sys.executable
+    def test_child_uses_supervisor_interpreter_despite_legacy_paths(
+        self, monkeypatch, tmp_path
+    ):
+        legacy = tmp_path / "old-env" / "python.exe"
+        legacy.parent.mkdir()
+        legacy.touch()
+        monkeypatch.setenv("VIBEOCR_PADDLE_PYTHON", str(legacy))
+        assert PdfBackendClient()._resolve_python_exe() == sys.executable
 
 
 class TestGetBackendEnv:

@@ -47,12 +47,10 @@ public sealed partial class App : Application
     private InferenceSupervisorProcess? _supervisorProcess => _managedSession?.Process;
     private string? _supervisorInstanceId => _managedSession?.InstanceId;
     private DiagnosticsViewModel? _supervisorDiagnostics;
-    private IManagedEnvironmentClient? _managedEnvironments;
-    private ManagedEnvironmentSettings? _environmentSettings;
-    private ManagedEnvironmentSession? _managedSession => _runtimeDemand?.Connection?.Session;
+    private ProductRuntimeSession? _managedSession => _runtimeDemand?.Connection?.Session;
     private RuntimeDemandCoordinator? _runtimeDemand;
     private SyntheticScreenRegionPicker? _screenshotSmokePicker;
-    private int _startupRuntimeEnsureAttempts = 0;
+    private int _startupRuntimeEnsureAttempts;
     private FrontendExclusiveLock? _exclusiveLock;
     private WindowMessageService? _windowMessages;
     private TrayMenuOwnerWindow? _trayOwner;
@@ -66,7 +64,7 @@ public sealed partial class App : Application
     private bool _shutdownStarted;
     private bool _soakCrashRequested;
     private bool _soakCrashInjected;
-    private ManagedEnvironmentSession? _supervisorRecoveryScheduledSession;
+    private ProductRuntimeSession? _supervisorRecoveryScheduledSession;
     // The maintenance lease serializes this stop/restore callback pair.
 
     private const uint HotkeyMessage = 0x0312;
@@ -192,9 +190,6 @@ public sealed partial class App : Application
                 "WEBVIEW2_USER_DATA_FOLDER",
                 layout.WebView2Root);
         }
-        _managedEnvironments = new RuntimeInstallerClient(
-            RuntimeInstallerConfiguration.ForNext(layout),
-            new RuntimeInstallerCommandRunner(action => AppLog.Info($"Runtime Installer command starting action={action}")));
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
         WebReadySmokeStatus.Stage("app-launched");
@@ -235,11 +230,12 @@ public sealed partial class App : Application
         RecordMilestone(diagnostics, "T1", _startup.Elapsed);
 
         var runtimeConnection = new ManagedRuntimeConnection(
-            _managedEnvironments, layout, _runtimeStatus, PublishManagedEnvironmentSession);
+            layout, _runtimeStatus, PublishProductRuntimeSession);
         runtimeConnection.Milestone += name => RecordMilestone(diagnostics, name, _startup.Elapsed);
         _runtimeDemand = new RuntimeDemandCoordinator(
             async (initialize, token) =>
             {
+                Interlocked.Increment(ref _startupRuntimeEnsureAttempts);
                 AppLog.Info($"Runtime demand: connect begin initialize={initialize}");
                 _inferenceGateway.MarkStartupPending();
                 bool connected = await ConnectSupervisorAfterFirstWindowAsync(
@@ -256,7 +252,7 @@ public sealed partial class App : Application
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
         if (Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") is
-            "screenshot-e2e" or "text-selection-e2e" or "managed-environment-e2e" or "capture-first-frame-e2e" or "capture-replacement-e2e")
+            "screenshot-e2e" or "text-selection-e2e" or "capture-first-frame-e2e" or "capture-replacement-e2e")
         {
             _screenshotSmokePicker = new SyntheticScreenRegionPicker(
                 Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") ==
@@ -336,15 +332,7 @@ public sealed partial class App : Application
           },
           () => new SettingsViewModel(
             _inferenceGateway,
-            _runtimeStatus,
-            _environmentSettings ??= new ManagedEnvironmentSettings(
-              _managedEnvironments ?? throw new InvalidOperationException("Runtime manager is unavailable."),
-              SwitchManagedEnvironmentAsync,
-              () => _managedSession is { } session
-                ? (session.EnvironmentId, session.Revision) : null,
-              _productMaintenance,
-              () => _managedSession,
-              SwitchManagedEnvironmentDeviceAsync)),
+            _runtimeStatus),
           () => _shellViewModel ??
             throw new InvalidOperationException("Desktop shell is unavailable."),
           () => _updateViewModel ??
@@ -356,7 +344,6 @@ public sealed partial class App : Application
           () => _inferenceGateway.SubmitAttempts,
           () => _inferenceGateway.LastSubmittedJobId,
           () => Volatile.Read(ref _startupRuntimeEnsureAttempts),
-          () => _environmentSettings?.Snapshot,
           () => _managedSession,
           shellActions: _actionDispatcher,
           ensureRuntimeReady: EnsureRuntimeReadyAsync,
@@ -380,11 +367,9 @@ public sealed partial class App : Application
             RecordMilestone(diagnostics, "T6", _startup.Elapsed);
         }
         else if (ShouldStartBackgroundRuntime(
-                     Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
-                     Environment.GetEnvironmentVariable("VIBEOCR_MANAGED_ENVIRONMENT_E2E_PHASE")))
+                     Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) || CodesIsolatedStateSelfTestRequested())
         {
-            // 仅既有自检合同要求后台就绪；普通壳由显式计算经同一 Coordinator
-            // 按需准备，关闭仍由 shutdown 令牌取消。
+            // T6 probes intentionally include the real first connection.
             _ = StartBackgroundRuntimeAsync();
         }
 
@@ -969,15 +954,8 @@ public sealed partial class App : Application
         (_runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."))
             .EnsureReadyAsync(cancellationToken);
 
-    /// <summary>普通启动保持按需获取；明确自检的原有后台就绪合同不变。</summary>
-    internal static bool ShouldStartBackgroundRuntime(
-        string? selfTestSmoke, string? managedEnvironmentPhase)
-    {
-        if (string.IsNullOrWhiteSpace(selfTestSmoke)) return false;
-        if (selfTestSmoke is "capture-first-frame-e2e" or "capture-replacement-e2e") return false;
-        if (selfTestSmoke == "managed-environment-e2e") return managedEnvironmentPhase == "restart";
-        return true;
-    }
+    internal static bool ShouldStartBackgroundRuntime(string? selfTestSmoke) =>
+        selfTestSmoke == "t6";
 
     private async Task StartBackgroundRuntimeAsync()
     {
@@ -1010,9 +988,6 @@ public sealed partial class App : Application
                     AppLog.Warn($"Recognition catalog refresh after attach failed: {error.Message}");
                 }
             }
-            // The attempt token breaks a settings-switch gate dependency: a
-            // new switch cancels this attempt before draining its connection.
-            await RefreshEnvironmentSettingsAfterActivationAsync(_environmentSettings, cancellationToken);
         }
         return connected;
     }
@@ -1057,7 +1032,7 @@ public sealed partial class App : Application
                 Environment.GetEnvironmentVariable("VIBEOCR_SOAK_EXTERNAL_CRASH") != "1";
             if (injectCrash) _soakCrashInjected = true;
             bool connected = await (_runtimeDemand?.Connection ?? throw new InvalidOperationException("Runtime connection is unavailable."))
-                .ConnectAsync(!isRecovery, cancellationToken, injectCrash);
+                .ConnectAsync(cancellationToken, injectCrash);
             if (!connected)
             {
                 var unavailable = new InvalidOperationException("当前为空环境，未启动识别服务。");
@@ -1098,60 +1073,7 @@ public sealed partial class App : Application
         }
     }
 
-    private Task SwitchManagedEnvironmentAsync(string environmentId, CancellationToken cancellationToken) =>
-        SwitchManagedEnvironmentDeviceAsync(environmentId, null, cancellationToken);
-
-    private Task SwitchManagedEnvironmentDeviceAsync(string environmentId, string? device, CancellationToken cancellationToken) =>
-        SwitchManagedEnvironmentAndRefreshAsync(
-            _runtimeDemand ?? throw new InvalidOperationException("Runtime demand coordinator is unavailable."),
-            (token, committed) => _runtimeDemand.Connection!.SwitchAsync(environmentId, token, committed, device),
-            async token =>
-            {
-                if (_managedSession is { } session)
-                {
-                    SupervisorReadyEnvelope ready = session.Process.Ready;
-                    _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.Ready, ready.InstanceId, ready.ProtocolVersion, null));
-                    if (_window is not null) await _window.RefreshRecognitionCatalogAsync(token);
-                }
-                else
-                    _supervisorDiagnostics?.UpdateSupervisor(new SupervisorHealth(SupervisorHealthState.NotReady, null, null, "当前为空环境，未启动识别服务。"));
-            }, error => AppLog.Warn($"Recognition catalog refresh after environment switch failed: {error.Message}"), cancellationToken);
-
-    internal static async Task SwitchManagedEnvironmentAndRefreshAsync(
-        RuntimeDemandCoordinator coordinator, Func<CancellationToken, Action, Task> activate,
-        Func<CancellationToken, Task> refresh, Action<Exception> refreshFailed, CancellationToken cancellationToken)
-    {
-        await coordinator.SwitchAsync(activate, cancellationToken);
-        // Activation has committed. Refresh has its own outcome and cannot
-        // turn the committed environment into an activation failure.
-        try { await refresh(cancellationToken); }
-        catch (Exception error) { refreshFailed(error); }
-    }
-
-    // 在 supervisor 门释放后刷新；环境切换持环境门等待 supervisor 门。
-    internal static async Task RefreshEnvironmentSettingsAfterActivationAsync(
-        ManagedEnvironmentSettings? settings, CancellationToken cancellationToken)
-    {
-        // 首次启动时 Snapshot 尚未读取（null）恰恰最需要刷新：否则激活后
-        // 环境列表永远不装载，设置页与冒烟 fixture 都拿不到 product 环境。
-        if (settings is null) return;
-        try
-        {
-            await settings.RefreshAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // 刷新取消不改变已经提交的环境；切换或关停可排空旧 attempt。
-        }
-        catch (Exception error)
-        {
-            AppLog.Warn($"Managed environment refresh after activation failed: {error.Message}");
-        }
-    }
-
-
-
-    private void PublishManagedEnvironmentSession(ManagedEnvironmentSession? previous, ManagedEnvironmentSession? next)
+    private void PublishProductRuntimeSession(ProductRuntimeSession? previous, ProductRuntimeSession? next)
     {
         _window?.InvalidatePinnedTextLayers();
         if (previous is not null)
@@ -1295,7 +1217,7 @@ public sealed partial class App : Application
         object? sender,
         SupervisorUnexpectedExitEventArgs eventArgs)
     {
-        ManagedEnvironmentSession? trigger = _managedSession;
+        ProductRuntimeSession? trigger = _managedSession;
         if (_applicationShutdown.IsCancellationRequested
             || trigger is null || !ReferenceEquals(sender, trigger.Process)
             || !TryScheduleSupervisorRecovery(ref _supervisorRecoveryScheduledSession, trigger, () => _managedSession)) return;
@@ -1308,18 +1230,18 @@ public sealed partial class App : Application
             _ = Task.Run(ScheduleRecovery);
     }
 
-    internal static bool TryScheduleSupervisorRecovery(ref ManagedEnvironmentSession? scheduled,
-        ManagedEnvironmentSession trigger, Func<ManagedEnvironmentSession?> currentSession)
+    internal static bool TryScheduleSupervisorRecovery(ref ProductRuntimeSession? scheduled,
+        ProductRuntimeSession trigger, Func<ProductRuntimeSession?> currentSession)
     {
         while (true)
         {
-            ManagedEnvironmentSession? previous = Volatile.Read(ref scheduled);
+            ProductRuntimeSession? previous = Volatile.Read(ref scheduled);
             if (!ReferenceEquals(currentSession(), trigger) || ReferenceEquals(previous, trigger)) return false;
             if (ReferenceEquals(Interlocked.CompareExchange(ref scheduled, trigger, previous), previous)) return true;
         }
     }
 
-    internal static void CompleteSupervisorRecovery(ref ManagedEnvironmentSession? scheduled, ManagedEnvironmentSession trigger) =>
+    internal static void CompleteSupervisorRecovery(ref ProductRuntimeSession? scheduled, ProductRuntimeSession trigger) =>
         Interlocked.CompareExchange(ref scheduled, null, trigger);
 
     internal static async Task RunCurrentSupervisorRecoveryAsync(
@@ -1329,7 +1251,7 @@ public sealed partial class App : Application
         finally { complete(); }
     }
 
-    private async Task RecoverSupervisorAfterExitAsync(ManagedEnvironmentSession trigger)
+    private async Task RecoverSupervisorAfterExitAsync(ProductRuntimeSession trigger)
     {
         bool IsCurrentSession() => !_applicationShutdown.IsCancellationRequested
             && ReferenceEquals(trigger, _managedSession);

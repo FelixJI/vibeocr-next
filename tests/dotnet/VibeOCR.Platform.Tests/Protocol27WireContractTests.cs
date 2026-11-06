@@ -1,6 +1,6 @@
 using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
-using Host = VibeOCR.Runtime.Contracts.Generated.Host;
+using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using Xunit;
 
 namespace VibeOCR.Platform.Tests;
@@ -62,8 +62,8 @@ public sealed class Protocol27WireContractTests
         const string json =
             """{"kind":"internal-mirror","id":"mirror-1","endpoint":"https://example.invalid/simple"}""";
 
-        Host.DownloadSourceDescriptor descriptor =
-            JsonSerializer.Deserialize<Host.DownloadSourceDescriptor>(json)!;
+        Wire.DownloadSourceDescriptor descriptor =
+            JsonSerializer.Deserialize<Wire.DownloadSourceDescriptor>(json)!;
 
         Assert.Equal("internal-mirror", descriptor.Kind);
         Assert.Equal("mirror-1", descriptor.Id);

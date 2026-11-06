@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import httpx
 from vibeocr.runtime.environments.runtime_selection import (
-    component_variant_catalog_payload,
     download_source_catalog_payload,
 )
 from vibeocr.runtime.host.app import create_app
@@ -28,7 +27,8 @@ async def test_health_declares_selection_capability_catalogs(
 
     descriptors = {d["name"]: d for d in health["capability_descriptors"]}
     source_descriptor = descriptors["runtime.download-sources.v1"]
-    variant_descriptor = descriptors["runtime.component-selection.v1"]
+    assert "runtime.component-selection.v1" not in descriptors
+    assert "runtime.component-selection.v1" not in health["capabilities"]
 
     # catalog 结构与业务键唯一性（fail closed 的构建期防线在
     # runtime_selection 单测，这里钉住 HTTP 面的真实输出形状）。
@@ -49,13 +49,6 @@ async def test_health_declares_selection_capability_catalogs(
         "paddleocr_model_registry",
         "mineru_model_registry",
     }
-
-    variants = variant_descriptor["component_variant_catalog"]["variants"]
-    assert variants == component_variant_catalog_payload()["variants"]
-    keys = {(v["feature_id"], v["accelerator"]) for v in variants}
-    assert len(keys) == len(variants)
-    component_ids = {v["component_id"] for v in variants}
-    assert {"ocr_engine", "pdf_document_tools"}.isdisjoint(component_ids)
 
 
 async def test_settings_roundtrips_download_source_ids(
@@ -86,6 +79,7 @@ async def test_settings_roundtrips_download_source_ids(
             "/v2/settings",
             json={
                 "schema_version": 2,
+                "revision": got.json()["revision"],
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
                 "download_source_ids": ["paddleocr-modelscope", "paddleocr-bos"],
@@ -97,6 +91,7 @@ async def test_settings_roundtrips_download_source_ids(
             "/v2/settings",
             json={
                 "schema_version": 2,
+                "revision": got.json()["revision"],
                 "residency": {"default_ttl_seconds": 300, "pipelines": []},
                 "extra": {},
                 "download_source_ids": ["paddleocr-modelscope", "mineru-modelscope"],

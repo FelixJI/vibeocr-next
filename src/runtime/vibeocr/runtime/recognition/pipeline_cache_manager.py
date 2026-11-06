@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from contextlib import contextmanager
@@ -23,28 +22,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: 显存分档阈值（MB）。≤8GB=1 并存，>8GB=2 并存。
-VRAM_TIER_8GB = 8192
-#: pynvml 不可用时的回退并存上限（保守，防 OOM）。
-FALLBACK_MAX_HEAVY = 1
+#: Paddle 重管道并存上限（有界安全限额）。#317：NVML/pynvml 专用预算已
+#: 随 CUDA 执行分支退役移除，不再探测 NVIDIA 显存；统一闭包内 DirectML
+#: 与 CPU 会话本身顺序执行，未知 GPU 内存（不探测）一律取保守值 1，
+#: 不按“NVIDIA 可探测”或任何厂商探针决定预算与可用性。
+MAX_HEAVY_PIPELINES = 1
 #: Parent-side restart recovery embeds original timestamps under this private key.
 _RESTORE_LAST_USED_KEY = "__vibeocr_restore_last_used_unix_ms__"
-
-
-def compute_max_heavy_by_vram(total_vram_mb: int) -> int:
-    """按显存计算 paddle 重管道并存上限。
-
-    Args:
-        total_vram_mb: GPU 显存总量（MB），0 表示无法读取。
-
-    Returns:
-        并存上限：≤8G=1, >8G=2, 未知=1。
-    """
-    if total_vram_mb <= 0:
-        return FALLBACK_MAX_HEAVY
-    if total_vram_mb <= VRAM_TIER_8GB:
-        return 1
-    return 2
 
 
 class PipelineCacheManager:
@@ -68,9 +52,10 @@ class PipelineCacheManager:
         self._active_counts: dict[str, int] = {}
         self._pinned: set[str] = set()
         self._state_lock = threading.RLock()
-        self._max_heavy = (
-            max_heavy if max_heavy is not None else self._detect_max_heavy()
-        )
+        # #317：固定有界限额；max_heavy 仅供测试/注入覆盖。不再读取
+        # VIBEOCR_USE_GPU，也不再调用 NVML 探测显存（跨厂商 DirectML
+        # 语义下 GPU 内存未知，安全限额即预算）。
+        self._max_heavy = max_heavy if max_heavy is not None else MAX_HEAVY_PIPELINES
         # tick_interval 是最长巡检间隔；真正等待时间会缩短到最近 TTL 截止点。
         self._tick_interval = max(0.01, float(tick_interval))
         self._stop_event = threading.Event()
@@ -91,29 +76,6 @@ class PipelineCacheManager:
             self._stop_event = threading.Event()
         if not hasattr(self, "_tick_interval"):
             self._tick_interval = 30.0
-
-    def _detect_max_heavy(self) -> int:
-        """读 GPU 显存总量算并存上限，失败回退。
-
-        CPU 模式（VIBEOCR_USE_GPU != true）固定返回 1（串行更稳）。
-        """
-        if os.environ.get("VIBEOCR_USE_GPU", "").lower() != "true":
-            return 1
-        try:
-            from vibeocr.runtime.processes.utils.gpu_memory_monitor import (
-                GPUMemoryMonitor,
-            )
-
-            info = GPUMemoryMonitor().get_status()
-            if info.available and info.total > 0:
-                return compute_max_heavy_by_vram(info.total)
-        except Exception as e:
-            logger.warning(
-                "[CacheManager] 检测显存失败，回退上限 %d: %s",
-                FALLBACK_MAX_HEAVY,
-                e,
-            )
-        return FALLBACK_MAX_HEAVY
 
     # ------------------------------------------------------------------
     # 公共属性 / 使用租约

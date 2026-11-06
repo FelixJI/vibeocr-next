@@ -30,8 +30,9 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
-        case "PinsSaveSwitchRecoverAndRenderFormula":
-          await VerifyPinsUiAsync(layout);
+        case "PinsSaveSwitchAndRecover":
+        case "PinsFormulaWindowLifecycleAndExitRecovery":
+          await VerifyPinsUiAsync(layout, lifecycle: scenario == "PinsFormulaWindowLifecycleAndExitRecovery");
           break;
         case "WebResourceResponseStopsAfterWebViewCloses":
           await VerifyClosedWebResourceResponseAsync(layout, disposeBeforeResponse: true);
@@ -639,8 +640,17 @@ public sealed partial class App
       Check(HeldKeys().Length == 0, $"User input is held during smoke activation: {string.Join(',', HeldKeys())}.");
       Check(SetCursorPos(target.X, target.Y), "Cannot position the cursor for smoke activation.");
       moved = true;
-      Check(HitRoot() == handle && HeldKeys().Length == 0 && GetCursorPos(out PointL positioned) && positioned.X == target.X && positioned.Y == target.Y,
-          "Smoke activation point changed before the click.");
+      nint hit = HitRoot();
+      int[] held = HeldKeys();
+      bool cursorRead = GetCursorPos(out PointL positioned);
+      if (!(hit == handle && held.Length == 0 && cursorRead && positioned.X == target.X && positioned.Y == target.Y))
+      {
+        Check(false,
+            $"Smoke activation point changed before the click. hit={hit}, expected={handle}, " +
+            $"held=[{string.Join(',', held)}], cursorRead={cursorRead}, " +
+            $"cursor=({positioned.X},{positioned.Y}), target=({target.X},{target.Y}), " +
+            $"initialClient={client}, currentClient={ScreenTargetQuery.TryGetClientBounds(handle)}.");
+      }
       try
       {
         Check(SendInput(1, [new SmokeInput { MouseFlags = 0x0002 }], Marshal.SizeOf<SmokeInput>()) == 1,

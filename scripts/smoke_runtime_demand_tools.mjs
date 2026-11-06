@@ -70,6 +70,7 @@ const forbiddenClasses = new Set(['installer', 'installer-child', 'supervisor', 
 // Owner-landed AppLog Installer invocation line: the prefix rejects ANY
 // action, including read-only transient "list" and "switch reservation".
 const appLogForbiddenPrefixes = [
+  'Runtime demand: starting product Supervisor',
   'Runtime Installer command starting action=',
   'Runtime demand: connect begin',
   'Runtime demand: initialize_default begin',
@@ -836,7 +837,7 @@ async function run(candidate, work) {
   let watch;
   try {
     for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
-      'runtime/backend/runtime-manifest.json', 'runtime/installer/vibeocr-runtime-installer.exe'])
+      'runtime/backend/runtime-manifest.json', 'runtime/env/runtime-env/python.exe'])
       assert(fs.statSync(path.join(candidate, marker)).isFile(), `Candidate marker missing: ${marker}`);
     assert(!fs.existsSync(path.join(candidate, 'state')), 'Source candidate must have no state.');
     await exec('robocopy', [candidate, copy, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
