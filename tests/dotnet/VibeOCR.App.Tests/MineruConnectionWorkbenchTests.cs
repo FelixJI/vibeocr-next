@@ -272,6 +272,92 @@ public sealed class MineruConnectionWorkbenchTests
     finally { Directory.Delete(resourceRoot, recursive: true); }
   }
   [Fact]
+  public async Task ColdWorkerIdleSavePreparesRuntimeBeforeReadingBackendSettings()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-cold-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      List<string> calls = [];
+      var fake = new OrderedWorkerIdleClient(calls) { Settings = RemoteConnectionSnapshot() };
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      await using var handler = CreateWorkerIdleHandler(
+        settings, broker, resourceRoot, annotationStore,
+        ensureRuntimeReady: _ => { calls.Add("prepare"); return Task.CompletedTask; });
+
+      // 冷启动（未刷新运行时、未加载目录）直接保存空闲设置：保存入口先
+      // 按需准备运行时，再读改写真实设置，而不是立即 NotAttached 失败。
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SetWorkerIdleCommand(0, 120), TestContext.Current.CancellationToken);
+
+      Assert.Null(outcome.Error);
+      var state = Assert.IsType<SettingsWorkbenchState>(Assert.Single(outcome.States));
+      Assert.Equal(0, state.PaddleIdleSeconds);
+      Assert.Equal(120, state.MineruIdleSeconds);
+      Assert.Equal(0, settings.PaddleIdleSeconds);
+      Assert.Equal(120, settings.MineruIdleSeconds);
+      Assert.Equal(["prepare", "get", "update"], calls);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task WorkerIdlePrepareFailureOrCancelKeepsConfirmedValuesWithoutBackendWrites(bool cancel)
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-prepare-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      List<string> calls = [];
+      var fake = new OrderedWorkerIdleClient(calls);
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      Exception? prepareError = null;
+      await using var handler = CreateWorkerIdleHandler(
+        settings, broker, resourceRoot, annotationStore,
+        ensureRuntimeReady: _ => prepareError is null
+          ? Task.CompletedTask
+          : Task.FromException(prepareError));
+      var published = new List<SettingsWorkbenchState>();
+      handler.StateChanged += state => { if (state is SettingsWorkbenchState update) published.Add(update); };
+      CancellationToken token = TestContext.Current.CancellationToken;
+      await handler.ExecuteAsync(new SetWorkerIdleCommand(300, 120), token);
+      int reads = fake.GetCalls;
+      int writes = fake.UpdateCalls;
+      published.Clear();
+      prepareError = cancel
+        ? new OperationCanceledException()
+        : new VibeOCR.App.Inference.InferenceClientNotAttachedException("runtime start refused");
+
+      if (cancel)
+      {
+        await Assert.ThrowsAsync<OperationCanceledException>(
+          () => handler.ExecuteAsync(new SetWorkerIdleCommand(0, 60), token).AsTask());
+        Assert.Empty(published);
+      }
+      else
+      {
+        WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+          new SetWorkerIdleCommand(0, 60), token);
+        Assert.Equal("desktop_command_failed", refused.Error?.Code);
+        Assert.Empty(refused.States);
+        Assert.Empty(published);
+      }
+      // 准备失败/取消不触发读改写，模型与后端保持已确认值。
+      Assert.Equal(reads, fake.GetCalls);
+      Assert.Equal(writes, fake.UpdateCalls);
+      Assert.Equal(300, settings.PaddleIdleSeconds);
+      Assert.Equal(120, settings.MineruIdleSeconds);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Fact]
   public void WorkerIdleBridgeAcceptsBoundedSecondsAndRejectsInvalidTypes()
   {
     Guid sessionId = Guid.NewGuid();
@@ -1038,7 +1124,8 @@ public sealed class MineruConnectionWorkbenchTests
 
   internal static DesktopWorkbenchCommandHandler CreateWorkerIdleHandler(
     SettingsViewModel settings, WorkbenchResourceBroker broker,
-    string resourceRoot, WorkbenchAnnotationStore annotationStore) => new(
+    string resourceRoot, WorkbenchAnnotationStore annotationStore,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null) => new(
     static () => throw new InvalidOperationException(),
     static () => throw new InvalidOperationException(),
     static () => throw new InvalidOperationException(),
@@ -1047,7 +1134,36 @@ public sealed class MineruConnectionWorkbenchTests
     () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
     static () => throw new InvalidOperationException(),
     new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-    broker, resourceRoot, static () => 0, annotationStore);
+    broker, resourceRoot, static () => 0, annotationStore, ensureRuntimeReady: ensureRuntimeReady);
+
+  /// <summary>
+  /// 记录空闲设置读改写调用顺序的推理桩：prepare 由宿主注入的
+  /// ensureRuntimeReady 记录，用于断言“先准备、后真实调用”。
+  /// </summary>
+  private sealed class OrderedWorkerIdleClient(List<string> calls) : InferenceClientStub
+  {
+    public SettingsSnapshot Settings { get; set; } = new();
+
+    public int GetCalls { get; private set; }
+
+    public int UpdateCalls { get; private set; }
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+    {
+      GetCalls++;
+      calls.Add("get");
+      return Task.FromResult(Settings);
+    }
+
+    public override Task<SettingsSnapshot> UpdateSettingsAsync(
+      SettingsSnapshot settings, CancellationToken cancellationToken)
+    {
+      UpdateCalls++;
+      calls.Add("update");
+      Settings = settings;
+      return Task.FromResult(settings);
+    }
+  }
   private sealed class StubHotkeyRegistrar : IHotkeyRegistrar
   {
     public bool Register(string hotkey, out string? conflict)
