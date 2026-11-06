@@ -498,7 +498,9 @@ public sealed partial class MainWindow
     {
       const string selector = "[aria-label=\"选择第 1 页\"]";
       await WaitForSmokeDomAsync($"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
-      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({JsonSerializer.Serialize(selector)}).click()");
+      // 打开模型的早期通知可能先于自动选中首页；只点击当前未选中的公开控件。
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        $"(() => {{ const e=document.querySelector({JsonSerializer.Serialize(selector)}); if (!e.checked) e.click(); }})()");
       opened = await WaitForPaddlePdfAsync(state => state.SelectedPages?.Contains(0) == true, TimeSpan.FromSeconds(30));
     }
     paddleSmokePartialEvidence = new { input_kind = "pdf", mode, fixture_path = fixture,
