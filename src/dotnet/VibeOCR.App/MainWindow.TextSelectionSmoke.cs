@@ -61,14 +61,41 @@ public sealed partial class MainWindow
 
       // 菜单已移除：统一截图按钮单击只做普通截图；专用取字会话经同一宿主
       // 命令入口（与原菜单命令一致）触发。
+      string previousSession = captured.ScreenshotSession!.SessionId;
       await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(
           Guid.NewGuid(),
           new CaptureScreenshotTextSessionCommand()),
         CancellationToken.None);
-      captured = await WaitForScreenshotStateAsync(
-        state => !state.IsBusy && state.ScreenshotSession?.TextSelectionRequested == true,
-        TimeSpan.FromSeconds(30));
+      // 新会话终态在准备完成后才发布。真实连接计数只能在成功捕获、
+      // 资源收编与历史处理之后增长，故原 30 秒仍约束本地捕获阶段。
+      using (var captureTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+      {
+        try
+        {
+          while (smokeStartupEnsureAttempts() == ensuresBefore)
+            await Task.Delay(100, captureTimeout.Token);
+        }
+        catch (OperationCanceledException) when (captureTimeout.IsCancellationRequested)
+        {
+          throw new TimeoutException("Explicit text capture did not start Runtime demand within 30 seconds.");
+        }
+      }
+      if (smokeStartupEnsureAttempts() != ensuresBefore + 1)
+        throw new InvalidOperationException("Explicit text capture started more than one Runtime connection.");
+      try
+      {
+        // 沿用 Supervisor 的既有启动预算作为本阶段上限，不改变产品超时。
+        captured = await WaitForScreenshotStateAsync(
+          state => !state.IsBusy && state.Input is not null &&
+            state.ScreenshotSession is { TextSelectionRequested: true } session &&
+            session.SessionId != previousSession,
+          TimeSpan.FromSeconds(90));
+      }
+      catch (TimeoutException error)
+      {
+        throw new TimeoutException("Explicit text Runtime preparation did not publish its new session within 90 seconds.", error);
+      }
       await WaitForEditorSessionAsync(captured.ScreenshotSession!.SessionId);
       await WaitForCanvasAsync();
       capture = screenshotSmokePicker.Evidence ??
