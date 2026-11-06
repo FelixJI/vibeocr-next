@@ -303,6 +303,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public bool RemoveModeCapability;
     public bool TableUnavailable;
+    public string DefaultMode = "paddle_table";
 
     public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
     {
@@ -333,7 +334,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       {
         Extra = new Dictionary<string, JsonElement>
         {
-          ["default_recognition_mode"] = JsonSerializer.SerializeToElement("paddle_table"),
+          ["default_recognition_mode"] = JsonSerializer.SerializeToElement(DefaultMode),
         },
       });
   }
@@ -3638,6 +3639,99 @@ public sealed class ScreenshotSessionWorkbenchTests
     });
     // 上排固定动作（识别两类/长截图/复制/保存/钉图/设置/重选/退出/放大镜）
     // 与直接入口（确认/撤销/重做）在 picker 内以中文文字内联创建，无图标键。
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task EditorProjectionOffersPreparationOnlyBeforeRuntimeAttach(bool attached)
+  {
+    string root = TemporaryRoot();
+    var inference = new SelectionSubmitClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var settings = new SettingsViewModel(inference);
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+      inferenceAttached: () => attached, ensureRuntimeReady: _ =>
+      {
+        preparations++;
+        return Task.CompletedTask;
+      });
+    var modes = handler.InitialStates.OfType<RecognitionWorkbenchState>().Single().RecognitionModes!;
+    Assert.Equal(2, modes.Count);
+    for (int index = 0; index < modes.Count; index++)
+      Assert.Equal(attached ? null : (ScreenshotRecognitionIntent?)index, modes[index].Intent);
+    using JsonDocument projection = JsonDocument.Parse(WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "recognition", WorkbenchStateChange.Replace,
+        new RecognitionWorkbenchState(false, "recognition.session", RecognitionModes: modes))));
+    JsonElement projected = projection.RootElement.GetProperty("payload").GetProperty("state").GetProperty("recognitionModes");
+    Assert.Equal(attached ? JsonValueKind.Null : JsonValueKind.Number, projected[0].GetProperty("intent").ValueKind);
+    if (!attached) Assert.Equal(0, projected[0].GetProperty("intent").GetInt32());
+    Assert.Equal(0, preparations);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Theory]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Table)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Table)]
+  [InlineData("recognition", true, ScreenshotRecognitionIntent.Table)]
+  [InlineData("imageEdit", true, ScreenshotRecognitionIntent.Table)]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Text)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Text)]
+  public async Task ColdEditorIntentSurvivesPreparationAndRefusesUnavailableCatalog(
+    string scope, bool unavailable, ScreenshotRecognitionIntent intent)
+  {
+    string root = TemporaryRoot();
+    var inference = new RefreshingImageSelectionClient { DefaultMode = "paddle_text" };
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var settings = new SettingsViewModel(inference);
+    bool attached = false;
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+      inferenceAttached: () => attached, ensureRuntimeReady: async ct =>
+      {
+        entered.TrySetResult();
+        await release.Task.WaitAsync(ct);
+        attached = true;
+      });
+    var captured = new TaskCompletionSource<RecognitionScreenshotSessionState>(TaskCreationOptions.RunContinuationsAsynchronously);
+    handler.StateChanged += state =>
+    {
+      RecognitionScreenshotSessionState? session = state switch
+      {
+        RecognitionWorkbenchState r when scope == "recognition" && !r.IsBusy => r.ScreenshotSession,
+        ImageEditWorkbenchState e when scope == "imageEdit" && !e.IsBusy => e.ScreenshotSession,
+        _ => null,
+      };
+      if (session is not null) captured.TrySetResult(session);
+    };
+    await handler.ExecuteAsync(scope == "recognition"
+      ? new OpenRecognitionImageForEditCommand() : new SelectImageEditFileCommand(), TestContext.Current.CancellationToken);
+    var session = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.False(entered.Task.IsCompleted);
+    WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+    using var terminal = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && (state.StatusCode == "recognition.modeUnavailable" || state.Result is not null));
+    WorkbenchCommand command = scope == "recognition"
+      ? new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent)
+      : new RecognizeImageEditImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent);
+    Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    await handler.ExecuteAsync(new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken);
+    inference.TableUnavailable = unavailable;
+    release.TrySetResult();
+    RecognitionWorkbenchState result = await terminal.Task;
+    if (unavailable)
+    {
+      Assert.Equal("recognition.modeUnavailable", result.StatusCode);
+      Assert.Empty(inference.Requests);
+    }
+    else Assert.Equal(intent == ScreenshotRecognitionIntent.Text ? "OCR" : "TABLE_RECOGNITION", Assert.Single(inference.Requests).Pipeline.PipelineId);
   }
 
   [Theory]

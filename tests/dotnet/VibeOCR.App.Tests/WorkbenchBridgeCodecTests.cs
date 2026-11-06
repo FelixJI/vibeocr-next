@@ -11,6 +11,32 @@ namespace VibeOCR.App.Tests;
 public sealed class WorkbenchBridgeCodecTests
 {
   [Theory]
+  [InlineData("recognition")]
+  [InlineData("imageEdit")]
+  public void ImageRecognitionIntentIsNumericClosedAndExclusive(string scope)
+  {
+    Guid session = Guid.NewGuid();
+    const string resource = "https://app.vibeocr/__annotation/0123456789abcdef0123456789abcdef";
+    for (int intent = 0; intent < 2; intent++)
+    {
+      var command = ParseForTest(CommandJson(session, scope, "recognizeScreenshotImage",
+        JsonSerializer.Serialize(new { resourceUri = resource, sessionId = session, revision = 0, excludeBoxes = Array.Empty<object>(), intent })), session).Command;
+      var parsed = command switch
+      {
+        RecognizeScreenshotImageCommand c => c.Intent,
+        RecognizeImageEditImageCommand c => c.Intent,
+        _ => throw new InvalidOperationException(),
+      };
+      Assert.Equal(intent, (int)parsed!.Value);
+    }
+    foreach (object? intent in new object?[] { null, 2, -1, "Text", 0.5, true })
+      Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, scope,
+        "recognizeScreenshotImage", JsonSerializer.Serialize(new { resourceUri = resource, sessionId = session, revision = 0, excludeBoxes = Array.Empty<object>(), intent })), session));
+    Assert.Throws<WorkbenchBridgeProtocolException>(() => ParseForTest(CommandJson(session, scope,
+      "recognizeScreenshotImage", JsonSerializer.Serialize(new { resourceUri = resource, sessionId = session, revision = 0, excludeBoxes = Array.Empty<object>(), intent = 0, modeId = "paddle_text" })), session));
+  }
+
+  [Theory]
   [InlineData("cpu")]
   [InlineData("directml")]
   [InlineData("auto")]

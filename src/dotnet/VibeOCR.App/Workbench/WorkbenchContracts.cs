@@ -175,7 +175,8 @@ public sealed record RecognizeScreenshotImageCommand(
     Guid SessionId,
     long Revision,
     IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes,
-    string? ModeId = null) : WorkbenchCommand,
+    string? ModeId = null,
+    ScreenshotRecognitionIntent? Intent = null) : WorkbenchCommand,
     IScreenshotSessionExclusions;
 
 /// <summary>
@@ -235,7 +236,8 @@ public sealed record RecognizeImageEditImageCommand(
     Guid SessionId,
     long Revision,
     IReadOnlyList<WorkbenchExclusionBox> ExcludeBoxes,
-    string? ModeId = null) : WorkbenchCommand,
+    string? ModeId = null,
+    ScreenshotRecognitionIntent? Intent = null) : WorkbenchCommand,
     IScreenshotSessionExclusions;
 
 public sealed record PrepareImageEditTextLayerCommand(

@@ -119,6 +119,8 @@ public static class WorkbenchBridgeCodec
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> ImageRecognitionArgumentFields =
     ["resourceUri", "sessionId", "revision", "excludeBoxes", "modeId"];
+  private static readonly HashSet<string> ImageRecognitionIntentArgumentFields =
+    ["resourceUri", "sessionId", "revision", "excludeBoxes", "intent"];
   private static readonly HashSet<string> PinResourceArgumentFields =
     ["resourceUri", "sessionId", "revision", "excludeBoxes"];
   private static readonly HashSet<string> StructuredCopyArgumentFields =
@@ -452,13 +454,15 @@ public static class WorkbenchBridgeCodec
       case ("imageEdit", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
           arguments, arguments.TryGetProperty("modeId", out _)
-            ? ImageRecognitionArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
+            ? ImageRecognitionArgumentFields : arguments.TryGetProperty("intent", out _)
+              ? ImageRecognitionIntentArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
         return new RecognizeImageEditImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
           ParseExclusionBoxes(arguments),
-          ParseOptionalImageRecognitionMode(arguments));
+          ParseOptionalImageRecognitionMode(arguments),
+          ParseOptionalImageRecognitionIntent(arguments));
       case ("imageEdit", "prepareScreenshotTextLayer"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -694,13 +698,15 @@ public static class WorkbenchBridgeCodec
       case ("recognition", "recognizeScreenshotImage"):
         EnsureObjectWithFields(
           arguments, arguments.TryGetProperty("modeId", out _)
-            ? ImageRecognitionArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
+            ? ImageRecognitionArgumentFields : arguments.TryGetProperty("intent", out _)
+              ? ImageRecognitionIntentArgumentFields : SessionResourceWithExclusionArgumentFields, "command arguments");
         return new RecognizeScreenshotImageCommand(
           ReadAnnotationResourceUri(arguments),
           ParseGuidArgument(arguments, "sessionId"),
           ParseContentRevision(arguments),
           ParseExclusionBoxes(arguments),
-          ParseOptionalImageRecognitionMode(arguments));
+          ParseOptionalImageRecognitionMode(arguments),
+          ParseOptionalImageRecognitionIntent(arguments));
       case ("recognition", "prepareScreenshotTextLayer"):
         EnsureObjectWithFields(
           arguments, SessionResourceArgumentFields, "command arguments");
@@ -1450,6 +1456,15 @@ public static class WorkbenchBridgeCodec
         "Workbench MinerU language is invalid.");
     }
     return new SetMineruRecognitionCommand(tier!, ocrMode!, pageRange!, language);
+  }
+
+  private static ScreenshotRecognitionIntent? ParseOptionalImageRecognitionIntent(JsonElement arguments)
+  {
+    if (!arguments.TryGetProperty("intent", out JsonElement element)) return null;
+    if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out int intent) &&
+      intent is (int)ScreenshotRecognitionIntent.Text or (int)ScreenshotRecognitionIntent.Table)
+      return (ScreenshotRecognitionIntent)intent;
+    throw new WorkbenchBridgeProtocolException("Workbench image recognition intent is invalid.");
   }
 
   private static string? ParseOptionalImageRecognitionMode(JsonElement arguments)

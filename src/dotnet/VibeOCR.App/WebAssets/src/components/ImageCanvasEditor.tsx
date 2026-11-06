@@ -5610,7 +5610,7 @@ export function ImageCanvasEditor({
     return true;
   }
 
-  async function recognizeCurrentImage(modeId?: string) {
+  async function recognizeCurrentImage(modeId?: string, intent?: 0 | 1) {
     if (!session || !canRecognize || exportInProgressRef.current) return;
     if (refuseIfFullyMasked("recognition")) return;
     exportInProgressRef.current = true;
@@ -5627,6 +5627,7 @@ export function ImageCanvasEditor({
       const started = await actions.run({
         type: commands.recognizeScreenshotImage,
         ...(modeId === undefined ? {} : { modeId }),
+        ...(intent === undefined ? {} : { intent }),
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
@@ -7599,11 +7600,19 @@ export function ImageCanvasEditor({
         displayName,
         availability: "catalog_unavailable",
       }));
+  const canPrepareMode = (mode: ImageRecognitionMode) =>
+    (mode.intent === 0 || mode.intent === 1) &&
+    mode.modeId === "" &&
+    mode.availability === "catalog_unavailable";
   const unavailableModeHints =
     recognitionModes === undefined
       ? []
       : imageModes
-          .filter((mode) => mode.availability !== "ready" || !mode.modeId)
+          .filter(
+            (mode) =>
+              !canPrepareMode(mode) &&
+              (mode.availability !== "ready" || !mode.modeId),
+          )
           .map(
             (mode) =>
               `${mode.displayName}：${
@@ -7641,11 +7650,16 @@ export function ImageCanvasEditor({
             !canRecognize ||
             isExporting ||
             !!textEdit ||
-            mode.availability !== "ready" ||
-            !mode.modeId ||
+            (!canPrepareMode(mode) &&
+              (mode.availability !== "ready" || !mode.modeId)) ||
             recognitionBusy
           }
-          onClick={() => void recognizeCurrentImage(mode.modeId)}
+          onClick={() =>
+            void recognizeCurrentImage(
+              mode.modeId || undefined,
+              canPrepareMode(mode) ? (mode.intent ?? undefined) : undefined,
+            )
+          }
         >
           {mode.displayName === "文字识别" ? "识别文字" : mode.displayName}
         </Button>
