@@ -83,7 +83,11 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     try
     {
       if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
-      await settings.SetRecognitionDeviceAsync(device, cancellationToken);
+      if (!await settings.SetRecognitionDeviceAsync(device, cancellationToken))
+      {
+        operations.Publish(SettingsState(settings));
+        throw new InvalidOperationException(settings.Status);
+      }
       PinnedTextEnvironmentChanged?.Invoke();
     }
     finally { Interlocked.Exchange(ref deviceChanging, 0); }

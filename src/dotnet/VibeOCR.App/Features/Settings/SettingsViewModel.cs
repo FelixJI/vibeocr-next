@@ -103,7 +103,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
     public RuntimeStatusViewModel RuntimeStatus { get; }
     public string? RecognitionDevice { get; private set; }
 
-    public async Task SetRecognitionDeviceAsync(string device, CancellationToken cancellationToken)
+    public async Task<bool> SetRecognitionDeviceAsync(string device, CancellationToken cancellationToken)
     {
         await _settingsGate.WaitAsync(cancellationToken);
         try
@@ -112,7 +112,9 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             SettingsSnapshot updated = await _inference.UpdateSettingsAsync(current with { RecognitionDevice = device }, cancellationToken);
             RecognitionDevice = updated.RecognitionDevice;
             Status = "已保存计算设备。";
+            return true;
         }
+        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return false; }
         finally { _settingsGate.Release(); }
     }
     public string WorkerSettingsWarning { get; private set; } = "";

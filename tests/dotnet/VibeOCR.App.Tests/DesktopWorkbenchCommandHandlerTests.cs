@@ -53,6 +53,67 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     Assert.Equal("directml", settings.RecognitionDevice);
   }
 
+  [Theory]
+  [InlineData("read")]
+  [InlineData("update")]
+  [InlineData("cancel")]
+  public async Task DeviceCommandFailurePreservesConfirmedDeviceAndDoesNotPublishChange(string failure)
+  {
+    string root = Path.Combine(Path.GetTempPath(), $"vibeocr-device-refusal-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    var inference = new DeviceSettingsClient();
+    inference.Released.SetResult();
+    var settings = new SettingsViewModel(inference);
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = new DesktopWorkbenchCommandHandler(
+      () => new RecognitionViewModel(inference, new SignallingInputService()),
+      static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
+      static () => throw new InvalidOperationException(), () => settings, CreateShellViewModel,
+      static () => throw new InvalidOperationException(), new DiagnosticsViewModel("test", new PrerequisiteReport([])),
+      broker, root, static () => 0, annotations);
+    int changes = 0;
+    var published = new List<SettingsWorkbenchState>();
+    handler.StateChanged += state => { if (state is SettingsWorkbenchState update) published.Add(update); };
+    handler.PinnedTextEnvironmentChanged += () => changes++;
+    CancellationToken token = TestContext.Current.CancellationToken;
+    await handler.ExecuteAsync(new SetRecognitionDeviceCommand("cpu"), token);
+    Assert.Equal(1, changes);
+    string confirmedStatus = settings.Status;
+    published.Clear();
+    inference.NextError = failure == "cancel"
+      ? new OperationCanceledException()
+      : new InferenceClientException(HttpV2ErrorCode.ValidationError, "device busy or unavailable", false);
+    inference.FailRead = failure == "read";
+
+    if (failure == "cancel")
+    {
+      await Assert.ThrowsAsync<OperationCanceledException>(
+        () => handler.ExecuteAsync(new SetRecognitionDeviceCommand("directml"), token).AsTask());
+      Assert.Equal(confirmedStatus, settings.Status);
+      Assert.Empty(published);
+    }
+    else
+    {
+      WorkbenchCommandOutcome refused = await handler.ExecuteAsync(new SetRecognitionDeviceCommand("directml"), token);
+      Assert.Equal("desktop_command_failed", refused.Error?.Code);
+      Assert.Empty(refused.States);
+      Assert.NotEmpty(published);
+      Assert.All(published, state =>
+      {
+        Assert.Equal("cpu", state.RecognitionDevice);
+        Assert.Equal("操作失败", state.StatusMessage);
+      });
+    }
+    Assert.Equal("cpu", settings.RecognitionDevice);
+    Assert.Equal(1, changes);
+    inference.NextError = null;
+    WorkbenchCommandOutcome accepted = await handler.ExecuteAsync(new SetRecognitionDeviceCommand("directml"), token);
+    Assert.Null(accepted.Error);
+    Assert.Equal("directml", Assert.IsType<SettingsWorkbenchState>(Assert.Single(accepted.States)).RecognitionDevice);
+    Assert.Equal(2, changes);
+  }
+
   [Fact]
   public async Task AnnotatedImageCopyConsumesOpaqueUploadOnlyAfterNativeSuccess()
   {
@@ -2117,11 +2178,17 @@ public sealed class DesktopWorkbenchCommandHandlerTests
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public int Writes { get; private set; }
-    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken) =>
-      Task.FromResult(new SettingsSnapshot { RecognitionDevice = "cpu", Revision = 7 });
+    public Exception? NextError { get; set; }
+    public bool FailRead { get; set; }
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+    {
+      if (FailRead && NextError is not null) throw NextError;
+      return Task.FromResult(new SettingsSnapshot { RecognitionDevice = "cpu", Revision = 7 });
+    }
     public override async Task<SettingsSnapshot> UpdateSettingsAsync(SettingsSnapshot settings, CancellationToken cancellationToken)
     {
       Assert.Equal(7, settings.Revision);
+      if (NextError is not null) throw NextError;
       Writes++;
       Started.TrySetResult();
       await Released.Task.WaitAsync(cancellationToken);
