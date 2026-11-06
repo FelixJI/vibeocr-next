@@ -22,6 +22,59 @@ public sealed partial class MainWindow
     }
   }
 
+  private async Task VerifyPinPhysicalClientAsync()
+  {
+    async Task<WorkbenchAnnotationFile> CreateImageAsync(int width, int height)
+    {
+      using var encoded = new InMemoryRandomAccessStream();
+      BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, encoded);
+      byte[] pixels = new byte[width * height * 4];
+      Array.Fill(pixels, (byte)255);
+      encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        (uint)width, (uint)height, 96, 96, pixels);
+      await encoder.FlushAsync();
+      encoded.Seek(0);
+      WorkbenchAnnotationLease lease = await annotationStore.UploadPngAsync(
+        encoded.AsStreamForRead(), CancellationToken.None);
+      return annotationStore.Take(lease.ResourceUri);
+    }
+
+    using WorkbenchAnnotationFile original = await CreateImageAsync(976, 836);
+    using WorkbenchAnnotationFile snapshot = await CreateImageAsync(800, 600);
+    using var pin = new PinnedImageWindow(original, Guid.NewGuid(), 0, null, [],
+      () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
+    var failures = new List<string>();
+    void CheckClient(string phase)
+    {
+      var expected = pin.SmokeExpectedOriginalClientSize;
+      var actual = pin.SmokeClientSize;
+      string evidence = $"{phase}: actual={actual.Width}x{actual.Height}, expected={expected.Width}x{expected.Height}";
+      CaptureUiSmokeTrace.Stage("pins.physical-client." + evidence);
+      if (actual.Width != expected.Width || actual.Height != expected.Height) failures.Add(evidence);
+    }
+
+    try
+    {
+      await pin.ShowAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeDocumentReady), "Geometry pin did not load.");
+      CheckClient("initial");
+      await UntilPinStageWidthAsync(pin, original.Width, "Initial pin stage lost physical 1:1 scale.");
+      pin.SmokeInvokeMaximize();
+      await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeIsMaximized), "Geometry pin did not maximize.");
+      pin.SmokeInvokeOriginalSize();
+      await WaitForPinCheckAsync(() => Task.FromResult(!pin.SmokeIsMaximized && pin.SmokeZoom == 1),
+        "Geometry pin did not restore.");
+      CheckClient("original-size");
+      await UntilPinStageWidthAsync(pin, original.Width, "Restored pin stage lost physical 1:1 scale.");
+      await pin.ApplySnapshotAsync(snapshot.Path, snapshot.Width, snapshot.Height, Guid.NewGuid(), []);
+      CheckClient("snapshot");
+      await UntilPinStageWidthAsync(pin, snapshot.Width, "Snapshot pin stage lost physical 1:1 scale.");
+      if (failures.Count != 0)
+        throw new InvalidOperationException("Pin physical client mismatch: " + string.Join("; ", failures));
+    }
+    finally { pin.ForceClose(); }
+  }
+
   internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;
   internal Task SmokeHistoryInitialization => pinHistoryStore!.Initialization;
 
@@ -51,6 +104,7 @@ public sealed partial class MainWindow
   internal async Task VerifyPinsSelfCheckAsync(bool lifecycle)
   {
     CaptureUiSmokeTrace.Stage("pins.main-ready");
+    if (!lifecycle) await VerifyPinPhysicalClientAsync();
     Features.Recognition.PinnedImageWindow.SmokeFilterEvents.Clear();
     Features.Recognition.PinnedImageWindow.SmokeFilterRecording = true;
     await WaitForPinCheckAsync(() => Task.FromResult(webHost.HasSubscription), "Main bridge was not ready.");

@@ -23,6 +23,7 @@ public sealed partial class MainWindow
       return;
     }
 
+    object? firstLayerEvidence = null;
     try
     {
       if (screenshotSmokePicker is null || smokeSubmitAttempts is null ||
@@ -101,6 +102,16 @@ public sealed partial class MainWindow
       capture = screenshotSmokePicker.Evidence ??
         throw new InvalidOperationException("Text capture has no synthetic evidence.");
       RecognitionTextLayerState firstLayer = await WaitForReadyTextLayerAsync(0);
+      string viewportJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync("""
+        (() => {
+          const c=document.querySelector('canvas[aria-label="图片检查画布"]');
+          return c ? {coordinateWidth:Number(c.dataset.coordinateWidth)||c.width,
+            coordinateHeight:Number(c.dataset.coordinateHeight)||c.height,
+            clientWidth:c.clientWidth,clientHeight:c.clientHeight,
+            devicePixelRatio:window.devicePixelRatio} : null;
+        })()
+        """);
+      firstLayerEvidence = new { layer = firstLayer, viewport = JsonSerializer.Deserialize<JsonElement>(viewportJson) };
       if (smokeSubmitAttempts() != 1 ||
           !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1 ||
           firstLayer.Lines is not { Count: > 0 } ||
@@ -293,6 +304,7 @@ public sealed partial class MainWindow
         schema_version = 1,
         state = "passed",
         capture,
+        first_layer = firstLayerEvidence,
         session_id = secondBinding.SessionId,
         revision = secondBinding.Revision,
         pins = 2,
@@ -325,6 +337,7 @@ public sealed partial class MainWindow
       {
         schema_version = 1,
         state = "failed",
+        first_layer = firstLayerEvidence,
         error = error.ToString(),
       }));
       Close();
@@ -445,9 +458,12 @@ public sealed partial class MainWindow
     // selection is made by WebView2 mouse input, as it is for a user.
     string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync($$"""
       (() => {
-        const element = [...document.querySelectorAll('.image-text-glyphs')]
-          .find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
-        if (!element?.firstChild) return null;
+        const nodes = [...document.querySelectorAll('.image-text-glyphs')];
+        const lines = nodes.map(node => ({text:node.textContent,
+          nodeType:node.firstChild?.nodeType, nodeName:node.firstChild?.nodeName}));
+        try {
+        const element = nodes.find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
+        if (!element?.firstChild) return {matched:false, lines};
         const text = element.firstChild.textContent;
         const start = {{(chinese ? "text.search(/[\\u4e00-\\u9fff]/)" : "Math.min(1, text.length - 1)")}};
         const end = Math.min(text.length, start + {{(chinese ? 1 : 3)}});
@@ -458,11 +474,20 @@ public sealed partial class MainWindow
           return {x: box.x, y: box.y + box.height / 2};
         };
         element.scrollIntoView({block:'center'});
-        return {expected:text.slice(start,end), start:point(start), end:point(end)};
+        return {matched:true, lines, expected:text.slice(start,end), start:point(start), end:point(end)};
+        } catch(error) { return {matched:false, lines, error:String(error), stack:error?.stack}; }
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
     JsonElement root = geometry.RootElement;
+    if (root.ValueKind != JsonValueKind.Object)
+    {
+      string rendered = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
+        "Array.from(document.querySelectorAll('.image-text-glyphs'),n=>({text:n.textContent,nodeType:n.firstChild?.nodeType,nodeName:n.firstChild?.nodeName}))");
+      throw new InvalidOperationException($"Text selection geometry returned {geometryJson}; rendered={rendered}.");
+    }
+    if (!root.GetProperty("matched").GetBoolean())
+      throw new InvalidOperationException($"Text selection geometry failed: {geometryJson}");
     string expected = root.GetProperty("expected").GetString() ?? string.Empty;
     JsonElement startPoint = root.GetProperty(chinese ? "end" : "start");
     JsonElement endPoint = root.GetProperty(chinese ? "start" : "end");

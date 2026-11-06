@@ -495,7 +495,7 @@ internal sealed class PinnedImageWindow : IDisposable
     window.AppWindow.Move(new PointInt32(
       work.X + Math.Min(160, Math.Max(0, work.Width - clientWidth)),
       work.Y + Math.Min(160, Math.Max(0, work.Height - clientHeight))));
-    window.AppWindow.ResizeClient(new SizeInt32(clientWidth, clientHeight));
+    ResizePhysicalClient(new SizeInt32(clientWidth, clientHeight));
     window.AppWindow.Changed += OnAppWindowChanged;
     window.AppWindow.Closing += OnPinWindowClosing;
     window.Closed += (_, _) => Dispose();
@@ -862,7 +862,7 @@ internal sealed class PinnedImageWindow : IDisposable
     (int availableWidth, int availableHeight) = ComputeAvailableClientSize();
     (int clientWidth, int clientHeight) = ComputeOriginalClientSize(
       imageWidth, imageHeight, availableWidth, availableHeight);
-    window.AppWindow.ResizeClient(new SizeInt32(clientWidth, clientHeight));
+    ResizePhysicalClient(new SizeInt32(clientWidth, clientHeight));
     SyncMaximizeButton();
     if (loaded)
     {
@@ -1154,7 +1154,7 @@ internal sealed class PinnedImageWindow : IDisposable
     (int availableWidth, int availableHeight) = ComputeAvailableClientSize();
     (int clientWidth, int clientHeight) = ComputeOriginalClientSize(
       imageWidth, imageHeight, availableWidth, availableHeight);
-    window.AppWindow.ResizeClient(new SizeInt32(clientWidth, clientHeight));
+    ResizePhysicalClient(new SizeInt32(clientWidth, clientHeight));
     SyncMaximizeButton();
     if (loaded)
     {

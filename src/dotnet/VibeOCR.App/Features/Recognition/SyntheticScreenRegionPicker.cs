@@ -78,7 +78,10 @@ internal sealed class SyntheticScreenRegionPicker(string text = "VibeOCR 123") :
       // returning the window below it (same as the Paddle smoke bitmap window).
       uint childStyle = 0x40000000 | 0x10000000 | 0x00000001 | 0x00000100 |
         (text.Contains('\n') ? 0u : 0x00000200u);
-      child = CreateWindowExW(0, "STATIC", text, childStyle,
+      // 双语取字夹具留一行内部上边距，首行不侵入现场裁剪手柄区域。
+      // 单行普通截图/基准夹具保持原像素位置与居中方式。
+      string displayedText = text.Contains('\n') ? "\r\n" + text : text;
+      child = CreateWindowExW(0, "STATIC", displayedText, childStyle,
         0, 0, client.Right - client.Left, client.Bottom - client.Top,
         handle, 0, 0, 0);
       if (child == 0)
