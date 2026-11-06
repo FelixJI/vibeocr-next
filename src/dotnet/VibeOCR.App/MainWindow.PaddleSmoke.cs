@@ -126,7 +126,18 @@ public sealed partial class MainWindow
       paddleSmokeOutcome = "failed";
       // 失败路径保全：尽力保留本次合成输入已获取的证据与 workbench 预览
       // PNG；预览/写盘的任何异常都不掩盖原始失败（不新增报告框架）。
-      string? failurePreviewPath = null;
+      File.WriteAllText(path, JsonSerializer.Serialize(new
+      {
+        schema_version = 1,
+        state = paddleSmokeOutcome,
+        phase,
+        stage = paddleSmokeStage,
+        mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
+        error = error.ToString(),
+        // 已获取的原始 job/outcomes/clipboard/capture（若任何）。
+        partial_evidence = paddleSmokePartialEvidence,
+        preview_path = (string?)null,
+      }));
       if (phase != "device")
       {
         try
@@ -142,26 +153,12 @@ public sealed partial class MainWindow
               CoreWebView2CapturePreviewImageFormat.Png, previewStream);
             await previewStream.FlushAsync();
           }
-          failurePreviewPath = preview;
         }
         catch
         {
           // 预览保全失败不掩盖原失败，也不删除现场文件。
-          failurePreviewPath = null;
         }
       }
-      File.WriteAllText(path, JsonSerializer.Serialize(new
-      {
-        schema_version = 1,
-        state = paddleSmokeOutcome,
-        phase,
-        stage = paddleSmokeStage,
-        mode = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE"),
-        error = error.ToString(),
-        // 已获取的原始 job/outcomes/clipboard/capture（若任何）。
-        partial_evidence = paddleSmokePartialEvidence,
-        preview_path = failurePreviewPath,
-      }));
     }
     finally
     {
@@ -511,6 +508,7 @@ public sealed partial class MainWindow
     if (textLayer && pipeline != "OCR") throw new InvalidOperationException("PDF text layer smoke requires the coordinate-preserving OCR pipeline.");
     RecordPaddleSmokeStage($"pdf recognize selected pages {mode}");
     await ClickWorkbenchSmokeButtonAsync(textLayer ? "添加选中页文字层" : "提取/解析选中页");
+    RecordPaddleSmokeStage("PDF operation click returned");
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
       state => !state.IsBusy &&
         pageIndexes.All(index => state.Pages?.FirstOrDefault(page => page.Index == index)?.StatusCode
@@ -817,6 +815,7 @@ public sealed partial class MainWindow
     if (overwritten != "true") throw new InvalidOperationException("Explicit overwrite was not enabled through its public checkbox.");
     long revision = layered.Revision;
     await ClickWorkbenchSmokeButtonAsync("添加选中页文字层");
+    RecordPaddleSmokeStage("PDF add text layer click returned");
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.Revision > revision && state.AddedCount == 1, TimeSpan.FromMinutes(timeoutMinutes));
     await SelectPageAsync(1);
     await ClickWorkbenchSmokeButtonAsync("删除选中文字层");
@@ -984,6 +983,7 @@ public sealed partial class MainWindow
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     await WaitForPaddlePdfAsync(state => !state.IsBusy && state.TaskEngine == mode, TimeSpan.FromMinutes(2));
     await ClickWorkbenchSmokeButtonAsync("添加选中页文字层");
+    RecordPaddleSmokeStage("PDF add text layer click returned");
     PdfWorkbenchState layered = await WaitForPaddlePdfAsync(state => !state.IsBusy && state.AddedCount == 1 && state.IsModified, TimeSpan.FromMinutes(timeoutMinutes));
     long revision = layered.Revision;
     await ClickWorkbenchSmokeButtonAsync("顺时针 90°");
@@ -1040,7 +1040,8 @@ public sealed partial class MainWindow
     {
       string diagnostic = JsonSerializer.Serialize(last is null ? null : new {
         last.Phase, last.IsBusy, last.StatusCode, last.Revision, last.AddedCount, last.SelectedPage, last.TaskEngine,
-        last.PageCount, last.SelectedPages, pages = last.Pages?.Select(page => new { page.Index, page.StatusCode }),
+        last.PageCount, last.SelectedPages, last.Summary,
+        submit_attempts = smokeSubmitAttempts?.Invoke(), last_job_id = smokeLastJobId?.Invoke(), pages = last.Pages?.Select(page => new { page.Index, page.StatusCode }),
       });
       throw new TimeoutException($"PDF state wait timed out after {timeout}. Last state: {diagnostic}", error);
     }
