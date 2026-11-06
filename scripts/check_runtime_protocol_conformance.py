@@ -313,11 +313,8 @@ def check_selection_conformance() -> None:
 
     from vibeocr.runtime.environments.runtime_selection import (
         normalize_download_source_ids,
-        normalize_install_component_ids,
     )
 
-    # 预构建运行时树后维护路由已退役：组件选择校验降为策略函数级
-    # （normalize 仍是 ME 计划选择的权威实现）。
     normalize_download_source_ids(["paddleocr-modelscope"])
     try:
         normalize_download_source_ids(["not-a-source"])
@@ -325,14 +322,6 @@ def check_selection_conformance() -> None:
         pass
     else:
         raise RuntimeError("unknown download source did not fail closed")
-    normalize_install_component_ids([], accelerator="cpu")
-    try:
-        normalize_install_component_ids(["not-a-component"], accelerator="cpu")
-    except Exception:
-        pass
-    else:
-        raise RuntimeError("unknown install component did not fail closed")
-
     # 1. formal schema：来源选择在 settings 快照与错误码目录中声明；
     #    维护/安装请求 schema 已随预构建运行时树（PR2）退役。
     if "download_source_ids" not in schemas["SettingsSnapshot"]["properties"]:
@@ -375,28 +364,15 @@ async def _selection_http_checks() -> None:
             raise RuntimeError("default ModelScope model source is not declared")
         if {"tuna-pypi", "pypi"}.intersection({source["id"] for source in sources}):
             raise RuntimeError("retired package index sources must not be declared")
-        variants = descriptors["runtime.component-selection.v1"][
-            "component_variant_catalog"
-        ]["variants"]
-        variant_keys = {(v["feature_id"], v["accelerator"]) for v in variants}
-        if len(variant_keys) != len(variants):
-            raise RuntimeError("component variant business keys are not unique")
-        # 统一推理闭包后组件档位全部退役，可选目录允许为空。
-        selectable = {v["component_id"] for v in variants}
-        if {
-            "ocr_engine",
-            "rapidocr-base",
-            "image_code_tools",
-        }.intersection(selectable):
-            raise RuntimeError("base components must not be selectable variants")
-        # 引擎 catalog 的 required_component 指向 managed 统一推理闭包配方
-        # （paddleocr-ort-directml），不再要求出现在组件档位目录中；但必须
-        # 是已知的受管配方 id。
+        if "runtime.component-selection.v1" in descriptors or any(
+            "component_variant_catalog" in descriptor
+            for descriptor in descriptors.values()
+        ):
+            raise RuntimeError("product advertised retired component installation")
         engine_catalog = descriptors["ocr.engine-selection.v1"]["ocr_engine_catalog"]
-        managed_recipes = {"paddleocr-ort-directml"}
         for entry in engine_catalog["engines"]:
             required = entry.get("required_component")
-            if required is not None and required not in selectable | managed_recipes:
+            if required is not None and required != "paddleocr-ort-directml":
                 raise RuntimeError(
                     f"engine {entry['id']} requires unknown component {required}"
                 )

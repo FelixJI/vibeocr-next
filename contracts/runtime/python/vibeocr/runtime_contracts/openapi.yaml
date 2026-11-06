@@ -4658,6 +4658,16 @@
               "minLength": 1
             }
           },
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          },
+          "recognition_device": {
+            "type": "string",
+            "enum": ["auto", "cpu", "directml"],
+            "default": "auto"
+          },
           "paddle_idle_seconds": {
             "type": "integer",
             "minimum": 0,

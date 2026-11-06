@@ -7,22 +7,19 @@ import json
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from vibeocr.runtime.environments.runtime_manifest import (
-    RuntimeComponent,
     RuntimeInstallScope,
+    RuntimeManifest,
     RuntimeProfile,
     covering_profile_id,
     load_runtime_manifest,
-    migrate_legacy_component_ids,
-    plan_profile_id,
     runtime_component_binding,
     scoped_component_version,
 )
@@ -31,39 +28,8 @@ _COMPONENT_PROBE_CACHE_TTL_SECONDS = 10.0
 _WINDOWS_REPLACE_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08)
 _component_probe_cache_lock = threading.Lock()
 _component_probe_cache: dict[
-    tuple[str, str, tuple[str, ...], int | None], tuple[float, dict[str, bool]]
+    tuple[str, str, tuple[str, ...]], tuple[float, dict[str, bool]]
 ] = {}
-
-
-class RuntimeOperationError(RuntimeError):
-    """Base error for Runtime install/environment control."""
-
-
-class RuntimeInstallPlanStale(RuntimeOperationError):
-    pass
-
-
-class RuntimeInstallPlanBlocked(RuntimeOperationError):
-    pass
-
-
-class RuntimeCapabilityError(RuntimeOperationError):
-    """A requested Runtime capability is unavailable."""
-
-
-class RuntimeInstallFailure(RuntimeOperationError):
-    """Runtime installation failed after the request was accepted."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        reason_code: str = "unknown",
-        next_action: str = "inspect_diagnostics",
-    ) -> None:
-        super().__init__(message)
-        self.reason_code = reason_code
-        self.next_action = next_action
 
 
 def safe_runtime_detail(text: str) -> str:
@@ -79,10 +45,6 @@ def safe_runtime_detail(text: str) -> str:
     )
     text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", text)
     return text[-4000:]
-
-
-class RuntimeSourceIdentityMismatch(RuntimeOperationError):
-    """A durable operation is bound to a different verified Runtime source."""
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -120,33 +82,7 @@ def _replace_transient_windows_lock(source: Path, destination: Path) -> None:
     raise last_error
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeProfileDescriptor:
-    profile_id: str
-    accelerator: str
-    components: tuple[RuntimeComponent, ...]
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "profile_id": self.profile_id,
-            "accelerator": self.accelerator,
-            "components": [component.to_payload() for component in self.components],
-        }
-
-
-def profile_descriptor(
-    profile: RuntimeProfile,
-    *,
-    accelerator: str,
-) -> RuntimeProfileDescriptor:
-    return RuntimeProfileDescriptor(
-        profile_id=profile.name,
-        accelerator=accelerator,
-        components=profile.components,
-    )
-
-
-def runtime_source_identity(manifest: Any) -> dict[str, str]:
+def runtime_source_identity(manifest: RuntimeManifest) -> dict[str, str]:
     return {
         "backend_version": manifest.backend_version,
         "backend_source_sha": manifest.source_commit,
@@ -176,38 +112,13 @@ def probe_runtime_components(
     *,
     profile_id: str = "win-x64-cpu",
 ) -> dict[str, bool]:
-    paddle_root = runtime_root / "engines" / "paddle"
-    paddle_ids = tuple(x for x in component_ids if x.startswith("paddleocr-"))
-    if paddle_ids and paddle_root.is_dir():
-        host_ids = tuple(x for x in component_ids if x not in paddle_ids)
-        return {
-            **(
-                probe_runtime_components(runtime_root, host_ids, profile_id=profile_id)
-                if host_ids
-                else {}
-            ),
-            **probe_runtime_components(paddle_root, paddle_ids, profile_id=profile_id),
-        }
-    python = next(
-        (
-            candidate
-            for candidate in (
-                runtime_root / "Scripts" / "python.exe",
-                runtime_root / "python.exe",
-                runtime_root / "bin" / "python",
-            )
-            if candidate.is_file()
-        ),
-        runtime_root / "python.exe",
-    )
+    python = runtime_root / "python.exe"
     modules = {
         component_id: runtime_component_binding(profile_id, component_id).import_name
         for component_id in component_ids
     }
     script = (
         "import importlib,json,os,sys\n"
-        "code_root=os.environ.get('VIBEOCR_PRODUCT_CODE_ROOT')\n"
-        "if code_root: sys.path.insert(0,code_root)\n"
         "modules=json.loads(sys.argv[1])\n"
         "result={}\n"
         "for component_id,module in modules.items():\n"
@@ -276,12 +187,7 @@ def probe_runtime_components(
 def _cached_runtime_component_probe(
     runtime_root: Path, component_ids: tuple[str, ...], *, profile_id: str
 ) -> dict[str, bool]:
-    marker = runtime_root / ".installed.json"
-    try:
-        marker_mtime = marker.stat().st_mtime_ns
-    except OSError:
-        marker_mtime = None
-    key = (str(runtime_root.resolve()), profile_id, component_ids, marker_mtime)
+    key = (str(runtime_root.resolve()), profile_id, component_ids)
     now = time.monotonic()
     with _component_probe_cache_lock:
         cached = _component_probe_cache.get(key)
@@ -304,191 +210,22 @@ def _cached_runtime_component_probe(
         return result
 
 
-def _installed_marker(runtime_root: Path | None) -> dict[str, Any] | None:
-    if runtime_root is None:
-        return None
-    try:
-        value = json.loads(
-            (runtime_root / ".installed.json").read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _marker_identity_matches(
-    marker: dict[str, Any] | None,
-    *,
-    manifest: Any,
-    accelerator: str,
-) -> bool:
-    return marker is not None and all(
-        marker.get(key) == value
-        for key, value in (
-            ("schema_version", 1),
-            ("backend_version", manifest.backend_version),
-            ("manifest_sha256", manifest.sha256),
-            ("accelerator", accelerator),
-        )
-    )
-
-
-def declared_installed_closure(
-    marker: dict[str, Any] | None,
-    *,
-    manifest: Any,
-    accelerator: str,
-) -> frozenset[str] | None:
-    """Read the marker-declared installed closure for display projections.
-
-    The closure participates only when the marker's basic identity matches the
-    verified manifest and the declared ids stay inside the accelerator plan;
-    whether the closure is an installable scope remains owned by the
-    installer's integrity gate.
-    """
-    if not _marker_identity_matches(marker, manifest=manifest, accelerator=accelerator):
-        return None
-    installed = marker.get("component_ids")
-    if (
-        not isinstance(installed, list)
-        or not installed
-        or any(not isinstance(item, str) or not item for item in installed)
-        or len(set(installed)) != len(installed)
-    ):
-        return None
-    # 统一闭包后新 manifest 只产 base 档：旧 marker 的 cpu/cuda 档位 profile
-    # 缺席时按 base 投影（与 plan_profile_id/covering_profile_id 同一规则），
-    # 否则旧环境状态读取直接 KeyError。
-    profile_id = plan_profile_id(manifest, accelerator)
-    plan_ids = {
-        component.component_id for component in manifest.profiles[profile_id].components
-    }
-    # 旧 marker 里的退役 id（rapidocr-base/原生 paddle 等）先折叠再比对：
-    # 历史闭包应继续投影到覆盖 profile，而不是整体作废。
-    closure = frozenset(migrate_legacy_component_ids(profile_id, tuple(installed)))
-    return closure if closure <= plan_ids else None
-
-
-def _legacy_closure_with_current_code(
-    marker: dict[str, Any] | None,
-    *,
-    manifest: Any,
-    accelerator: str,
-    runtime_root: Path | None,
-) -> frozenset[str] | None:
-    code_root = os.environ.get("VIBEOCR_PRODUCT_CODE_ROOT")
-    if (
-        os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID") != "legacy"
-        or runtime_root is None
-        or not code_root
-        or not Path(__file__).resolve().is_relative_to(Path(code_root).resolve())
-        or not isinstance(marker, dict)
-        or marker.get("schema_version") != 1
-        or marker.get("accelerator") != accelerator
-        or not isinstance(marker.get("backend_version"), str)
-        or not isinstance(marker.get("manifest_sha256"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", marker["manifest_sha256"])
-        or marker["backend_version"]
-        != _distribution_versions(runtime_root).get("vibeocr-next-runtime")
-        or Path(sys.prefix).resolve() != runtime_root.resolve()
-        or tuple(sys.version_info[:3])
-        != tuple(int(part) for part in manifest.python.version.split("."))
-    ):
-        return None
-    ids = marker.get("component_ids")
-    if (
-        not isinstance(ids, list)
-        or not ids
-        or any(not isinstance(item, str) or not item for item in ids)
-        or len(set(ids)) != len(ids)
-    ):
-        return None
-    # 与 declared_installed_closure 同一档位解析与退役折叠规则：新
-    # manifest 缺历史档位 profile 时按 base 投影，保证旧闭包可读取。
-    profile_id = plan_profile_id(manifest, accelerator)
-    plan_ids = {
-        component.component_id for component in manifest.profiles[profile_id].components
-    }
-    closure = frozenset(migrate_legacy_component_ids(profile_id, tuple(ids)))
-    return closure if closure <= plan_ids else None
-
-
 def _component_statuses(
-    descriptor: RuntimeProfileDescriptor,
-    *,
-    manifest: Any,
-    runtime_root: Path | None,
-    probe_results: dict[str, bool] | None = None,
-    marker: dict[str, Any] | None = None,
-    managed_scope: RuntimeInstallScope | None = None,
-    managed_closure: frozenset[str] | None = None,
+    profile: RuntimeProfile,
+    scope: RuntimeInstallScope,
+    runtime_root: Path,
+    required_ids: frozenset[str],
+    probe_results: dict[str, bool],
 ) -> list[dict[str, Any]]:
-    python_ready = runtime_root is not None and any(
-        candidate.is_file()
-        for candidate in (
-            runtime_root / "Scripts" / "python.exe",
-            runtime_root / "python.exe",
-            runtime_root / "bin" / "python",
-        )
-    )
-    # marker 的基础字段逐项比较：component_ids（安装闭包）是 2.7.0 新增
-    # 字段，由 installer 的 integrity gate 负责判定，不参与展示层 drift；
-    # 闭包外的可选组件按 not_required 投影，不得谎报 desired ready。
-    legacy_closure = _legacy_closure_with_current_code(
-        marker,
-        manifest=manifest,
-        accelerator=descriptor.accelerator,
-        runtime_root=runtime_root,
-    )
-    marker_matches = (
-        managed_scope is not None
-        or managed_closure is not None
-        or legacy_closure is not None
-        or _marker_identity_matches(
-            marker, manifest=manifest, accelerator=descriptor.accelerator
-        )
-    )
-    required_ids = (
-        frozenset((*managed_scope.component_ids, "runtime_host"))
-        if managed_scope is not None
-        else managed_closure
-        if managed_closure is not None
-        else legacy_closure
-        or declared_installed_closure(
-            marker, manifest=manifest, accelerator=descriptor.accelerator
-        )
-    )
-    versions = _distribution_versions(runtime_root) if runtime_root is not None else {}
-    product_code = os.environ.get("VIBEOCR_PRODUCT_CODE_ROOT")
-    if product_code and Path(__file__).resolve().is_relative_to(
-        Path(product_code).resolve()
-    ):
-        for distribution in importlib.metadata.Distribution.discover(
-            path=[product_code]
-        ):
-            name = distribution.metadata.get("Name")
-            if name and re.sub(r"[-_.]+", "-", name).lower() == "vibeocr-next-runtime":
-                versions["vibeocr-next-runtime"] = distribution.version
-                break
-    paddle_versions = (
-        _distribution_versions(runtime_root / "engines" / "paddle")
-        if runtime_root is not None and (runtime_root / "engines" / "paddle").is_dir()
-        else versions
-    )
-    profile = manifest.profiles[descriptor.profile_id]
-    installed_scope = managed_scope or next(
-        (scope for scope in profile.scopes if set(scope.component_ids) == required_ids),
-        None,
-    )
+    python_ready = (runtime_root / "python.exe").is_file()
+    versions = _distribution_versions(runtime_root)
     statuses: list[dict[str, Any]] = []
-    for component in descriptor.components:
+    for component in profile.components:
         component = replace(
             component,
-            version=scoped_component_version(profile, installed_scope, component),
+            version=scoped_component_version(profile, scope, component),
         )
-        if required_ids is not None and component.component_id not in required_ids:
-            # base-only / 精确 scope 安装不含该可选组件：缺席是合法状态，
-            # 不是 drift，也不可 repair（扩闭包属于 ensure 的选择面）。
+        if component.component_id not in required_ids:
             statuses.append(
                 {
                     **component.to_payload(),
@@ -503,29 +240,17 @@ def _component_statuses(
             )
             continue
         actual_version: str | None = None
-        if (
-            marker is None and managed_scope is None and managed_closure is None
-        ) or not python_ready:
+        if not python_ready:
             actual_state = "missing"
             drift_reason = "missing"
-        elif not marker_matches:
-            actual_state = "drifted"
-            drift_reason = "identity_mismatch"
         elif component.version is None:
             actual_state = "ready"
             drift_reason = "none"
         else:
             distribution = runtime_component_binding(
-                descriptor.profile_id, component.component_id
+                profile.name, component.component_id
             ).distribution
-            environment_versions = (
-                paddle_versions
-                if component.component_id.startswith("paddleocr-")
-                else versions
-            )
-            actual_version = environment_versions.get(
-                re.sub(r"[-_.]+", "-", distribution).lower()
-            )
+            actual_version = versions.get(re.sub(r"[-_.]+", "-", distribution).lower())
             if actual_version is None:
                 actual_state = "missing"
                 drift_reason = "missing"
@@ -535,10 +260,8 @@ def _component_statuses(
             else:
                 actual_state = "ready"
                 drift_reason = "none"
-        if (
-            actual_state == "ready"
-            and probe_results is not None
-            and not probe_results.get(component.component_id, False)
+        if actual_state == "ready" and not probe_results.get(
+            component.component_id, False
         ):
             actual_state = "drifted"
             drift_reason = "integrity_failed"
@@ -551,101 +274,31 @@ def _component_statuses(
                 "actual_state": actual_state,
                 "actual_version": actual_version,
                 "drift_reason": drift_reason,
-                "repairable": actual_state != "ready",
+                "repairable": False,
             }
         )
     return statuses
 
 
-def runtime_profile_status(
-    manifest: Any,
-    *,
-    accelerator: str,
-    runtime_root: Path | None,
-    probe_results: dict[str, bool] | None = None,
-    profile_id: str | None = None,
-    managed_scope: RuntimeInstallScope | None = None,
-    managed_closure: frozenset[str] | None = None,
+def _product_profile_status(
+    manifest: RuntimeManifest, accelerator: str, tree: Path, scope: RuntimeInstallScope
 ) -> dict[str, Any]:
-    """Project one desired/actual component view for every transport.
-
-    ``profile_id`` pins the projected component set, declared versions, and
-    import bindings; the installer's drift evaluation pins it to the covering
-    profile of the *installed* closure. When omitted, the projection follows
-    that same rule: the covering profile of the marker-declared installed
-    closure when one is trusted, and the historical accelerator-plan
-    projection otherwise, so a base-only installation reports
-    ``win-x64-base`` instead of a plan view it does not satisfy.
-
-    ``managed_closure`` 是 #270 为退役原生 Paddle 环境保留的只读已安装闭包
-    投影：与真实安装 scope 一样作为可信闭包参与覆盖 profile/探针范围，
-    但不携带锁或安装身份（版本漂移按历史 manifest 元数据评估）。
-    """
-    trusted_closure = managed_scope is not None or managed_closure is not None
-    marker = None if trusted_closure else _installed_marker(runtime_root)
-    if profile_id is None:
-        legacy_closure = (
-            _legacy_closure_with_current_code(
-                marker,
-                manifest=manifest,
-                accelerator=accelerator,
-                runtime_root=runtime_root,
-            )
-            if not trusted_closure
-            else None
-        )
-        closure = (
-            frozenset((*managed_scope.component_ids, "runtime_host"))
-            if managed_scope is not None
-            else managed_closure
-            if managed_closure is not None
-            else legacy_closure
-            or declared_installed_closure(
-                marker, manifest=manifest, accelerator=accelerator
-            )
-        )
-        profile_id = (
-            covering_profile_id(
-                manifest, accelerator=accelerator, component_ids=closure
-            )
-            if closure is not None
-            # 无闭包证据（空 runtime root）时按 accelerator 档位投影；统一
-            # 闭包后新 manifest 只产 base 档，历史 accelerator 档位缺失时
-            # 回退 base，与 covering_profile_id 同一读取规则。
-            else plan_profile_id(manifest, accelerator)
-        )
-    descriptor = profile_descriptor(
-        manifest.profiles[profile_id], accelerator=accelerator
+    required_ids = frozenset((*scope.component_ids, "runtime_host"))
+    profile_id = covering_profile_id(
+        manifest, accelerator=accelerator, component_ids=required_ids
     )
-    if probe_results is None and runtime_root is not None:
-        required_ids = (
-            frozenset((*managed_scope.component_ids, "runtime_host"))
-            if managed_scope is not None
-            else managed_closure
-            if managed_closure is not None
-            else None
-        )
-        probe_results = _cached_runtime_component_probe(
-            runtime_root,
-            tuple(
-                component.component_id
-                for component in descriptor.components
-                if required_ids is None or component.component_id in required_ids
-            ),
-            profile_id=profile_id,
-        )
-    return {
-        "profile_id": descriptor.profile_id,
-        "accelerator": descriptor.accelerator,
-        "components": _component_statuses(
-            descriptor,
-            manifest=manifest,
-            runtime_root=runtime_root,
-            probe_results=probe_results,
-            marker=marker,
-            managed_scope=managed_scope,
-            managed_closure=managed_closure,
+    profile = manifest.profiles[profile_id]
+    probe = _cached_runtime_component_probe(
+        tree,
+        tuple(
+            c.component_id for c in profile.components if c.component_id in required_ids
         ),
+        profile_id=profile_id,
+    )
+    return {
+        "profile_id": profile.name,
+        "accelerator": accelerator,
+        "components": _component_statuses(profile, scope, tree, required_ids, probe),
     }
 
 
@@ -653,7 +306,9 @@ def runtime_status_from_environment(
     instance_id: str,
     service_state: str,
 ) -> dict[str, Any]:
-    """Build the HTTP status snapshot from installer-owned environment/state."""
+    """Project the bound product tree; never probe registry-selected interpreters."""
+    if os.environ.get("VIBEOCR_PRODUCT_RUNTIME") != "1":
+        raise RuntimeError("仅能读取随包产品 Runtime 的状态。")
     manifest_value = os.environ.get("VIBEOCR_RUNTIME_MANIFEST")
     accelerator = os.environ.get("VIBEOCR_RUNTIME_ACCELERATOR")
     state_root_value = os.environ.get("VIBEOCR_RUNTIME_STATE_ROOT")
@@ -664,39 +319,18 @@ def runtime_status_from_environment(
     # Status polling only needs the immutable descriptor and must not rehash the
     # large Python/runtime archives on every HTTP request.
     manifest = load_runtime_manifest(manifest_value, verify_artifacts=False)
-    managed_scope = None
-    managed_closure: frozenset[str] | None = None
-    managed_id = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID")
-    managed_recipe = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE")
-    if managed_id and managed_id != "legacy":
-        from vibeocr.runtime.environments.managed_environments import (
-            ManagedEnvironmentStore,
-        )
-
-        if not runtime_root_value or not managed_recipe:
-            raise RuntimeError("managed Runtime status environment is incomplete")
-        manager = ManagedEnvironmentStore(
-            product_root=os.environ["VIBEOCR_PRODUCT_ROOT"],
-            component_lock=os.environ["VIBEOCR_COMPONENT_LOCK"],
-            runtime_manifest=manifest_value,
-            layout_manifest=os.environ.get("VIBEOCR_LAYOUT_MANIFEST") or None,
-            product_id=os.environ.get("VIBEOCR_PRODUCT_ID") or None,
-        )
-        managed_scope, managed_closure, managed_accelerator = manager.status_scope(
-            managed_id,
-            int(os.environ["VIBEOCR_MANAGED_ENVIRONMENT_REVISION"]),
-            Path(runtime_root_value),
-            managed_recipe,
-            os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_DEVICE"),
-        )
-        if managed_accelerator != accelerator:
-            raise RuntimeError("managed Runtime accelerator differs from registry")
-    profile = runtime_profile_status(
-        manifest,
-        accelerator=accelerator,
-        runtime_root=Path(runtime_root_value) if runtime_root_value else None,
-        managed_scope=managed_scope,
-        managed_closure=managed_closure,
+    if not runtime_root_value:
+        raise RuntimeError("缺少产品解释器树。")
+    if manifest.runtime_env is None:
+        raise RuntimeError("产品清单缺少预构建 Runtime 绑定。")
+    expected_root = manifest.path.parent.parent / "env" / manifest.runtime_env.root
+    if Path(runtime_root_value).resolve() != expected_root.resolve():
+        raise RuntimeError("产品状态根与随包解释器树不匹配。")
+    product_scope = manifest.paddle_onnx_environments.get("paddleocr-ort-directml")
+    if product_scope is None:
+        raise RuntimeError("产品清单未绑定 Paddle / MinerU 推理依赖。")
+    profile = _product_profile_status(
+        manifest, accelerator, expected_root, product_scope
     )
     if service_state != "maintenance" and any(
         # not_required 组件缺席是合法状态（base-only / 精确 scope 安装），
@@ -716,20 +350,3 @@ def runtime_status_from_environment(
         "source": runtime_source_identity(manifest),
         "profile": profile,
     }
-
-
-__all__ = [
-    "RuntimeCapabilityError",
-    "RuntimeInstallFailure",
-    "RuntimeInstallPlanBlocked",
-    "RuntimeInstallPlanStale",
-    "RuntimeOperationError",
-    "RuntimeProfileDescriptor",
-    "RuntimeSourceIdentityMismatch",
-    "declared_installed_closure",
-    "profile_descriptor",
-    "runtime_source_identity",
-    "runtime_profile_status",
-    "runtime_status_from_environment",
-    "safe_runtime_detail",
-]

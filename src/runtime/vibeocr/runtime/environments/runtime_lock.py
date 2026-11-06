@@ -1,4 +1,4 @@
-"""Cross-process locks for runtime installation, verification and GC."""
+"""Cross-process locks for product settings, job leases and model assets."""
 
 from __future__ import annotations
 

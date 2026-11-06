@@ -49,7 +49,7 @@ function Start-Process {
     $script:launchCount += 1
     $health = @{
         schema_version = 1; state = $env:MOCK_STATE; phase = $env:MOCK_PHASE
-        stage = 'app'; error = $null; evidence = @{}
+        stage = 'app'; error = $null; evidence = @{device = $Provider}
     }
     Set-Content -LiteralPath $env:VIBEOCR_PADDLE_SMOKE_HEALTH `
         -Value (ConvertTo-Json $health -Depth 5) -Encoding utf8
@@ -96,7 +96,7 @@ def _run_phase(
     *,
     exit_code: int,
     state: str,
-    phase: str = "install",
+    phase: str = "device",
     root: Path | None = None,
 ) -> dict[str, object]:
     smoke_root = root if root is not None else tmp_path / "smoke-root"
@@ -160,7 +160,7 @@ RESUME_MARKERS = (
     "candidate/app/VibeOCR.WinUI.exe",
     "candidate/app/metadata/product-layout.json",
     "candidate/runtime/backend/runtime-manifest.json",
-    "candidate/runtime/installer/vibeocr-runtime-installer.exe",
+    "candidate/runtime/env/runtime-env/python.exe",
     "fixtures/text_zh_en.png",
     "fixtures/table_merged_zh_en.png",
     "fixtures/document_mixed.png",
@@ -222,37 +222,46 @@ def test_fresh_crash_leaves_no_receipt_and_resume_rejects(tmp_path: Path) -> Non
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
     outcome = _run_phase(
-        tmp_path, exit_code=-1073740791, state="passed", phase="install", root=root
+        tmp_path, exit_code=-1073740791, state="passed", phase="device", root=root
     )
     assert outcome["threw"] is True
     assert outcome["receiptExists"] is False
     completed = _run_resume(root, "-Modes", "paddle_text")
     assert completed.returncode != 0
     assert "receipt" in completed.stderr
-    assert (root / "paddle-install.json").exists()
+    assert (root / "paddle-device.json").exists()
 
 
 def test_resume_reuses_phases_with_exit0_receipts(tmp_path: Path) -> None:
     # exit0 完成才写 receipt；带有效 receipt 的 passed health 可复用，exit 0。
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
-    _run_phase(tmp_path, exit_code=0, state="passed", phase="install", root=root)
+    _run_phase(tmp_path, exit_code=0, state="passed", phase="device", root=root)
     _run_phase(tmp_path, exit_code=0, state="passed", phase="paddle_text", root=root)
     completed = _run_resume(root, "-Modes", "paddle_text")
     assert completed.returncode == 0
     assert "All requested modes PASSED." in completed.stdout
 
 
+def test_resume_rejects_device_receipt_for_a_different_provider(tmp_path: Path) -> None:
+    root = tmp_path / "resume-root"
+    _fabricate_resume_root(root)
+    _run_phase(tmp_path, exit_code=0, state="passed", phase="device", root=root)
+    completed = _run_resume(root, "-Modes", "paddle_text", "-Provider", "directml")
+    assert completed.returncode != 0
+    assert "differs from requested directml" in completed.stderr
+
+
 def test_resume_rejects_historical_health_without_receipt(tmp_path: Path) -> None:
     # 历史根只有 health、无 receipt：不得默认 exit0 兼容，install 复用即拒绝。
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
-    _write_health(root, "paddle-install", "passed")
+    _write_health(root, "paddle-device", "passed")
     _write_health(root, "paddle-paddle_text", "passed")
     completed = _run_resume(root, "-Modes", "paddle_text")
     assert completed.returncode != 0
     assert "receipt" in completed.stderr
-    assert (root / "paddle-install.json").exists()
+    assert (root / "paddle-device.json").exists()
     assert (root / "paddle-paddle_text.json").exists()
 
 
@@ -260,7 +269,7 @@ def test_resume_rejects_mode_health_without_receipt(tmp_path: Path) -> None:
     # install 复用合法，但 mode health 缺 receipt：mode 复用分支同样 fail closed。
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
-    _run_phase(tmp_path, exit_code=0, state="passed", phase="install", root=root)
+    _run_phase(tmp_path, exit_code=0, state="passed", phase="device", root=root)
     _write_health(root, "paddle-paddle_text", "passed")
     completed = _run_resume(root, "-Modes", "paddle_text")
     assert completed.returncode != 0
@@ -272,7 +281,7 @@ def test_resume_rejects_input_health_without_receipt(tmp_path: Path) -> None:
     # input 复用分支：缺 receipt 的既有 input health 拒绝复用。
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
-    _run_phase(tmp_path, exit_code=0, state="passed", phase="install", root=root)
+    _run_phase(tmp_path, exit_code=0, state="passed", phase="device", root=root)
     _run_phase(tmp_path, exit_code=0, state="passed", phase="paddle_table", root=root)
     _write_health(root, "paddle-input-file", "passed")
     completed = _run_resume(root, "-Modes", "paddle_table", "-InputKinds", "file")
@@ -285,7 +294,7 @@ def test_resume_kept_blocked_with_receipt_keeps_blocked_exit(tmp_path: Path) -> 
     # blocked + 有效 receipt：原 blocked 语义保留（exit 3，不放行不升级）。
     root = tmp_path / "resume-root"
     _fabricate_resume_root(root)
-    _run_phase(tmp_path, exit_code=0, state="passed", phase="install", root=root)
+    _run_phase(tmp_path, exit_code=0, state="passed", phase="device", root=root)
     _run_phase(tmp_path, exit_code=0, state="blocked", phase="paddle_text", root=root)
     completed = _run_resume(root, "-Modes", "paddle_text")
     assert completed.returncode == 3

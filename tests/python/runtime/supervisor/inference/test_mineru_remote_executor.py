@@ -296,7 +296,14 @@ class TestSettingsChain:
         release = adapter.reserve()
         try:
             # 连接不变，仅 TTL 调整：允许。
-            module.update_settings(_snapshot(REMOTE_EXTRA, ttl=600))
+            from dataclasses import replace
+
+            module.update_settings(
+                replace(
+                    _snapshot(REMOTE_EXTRA, ttl=600),
+                    revision=module.settings().revision,
+                )
+            )
             assert module.settings().mineru_idle_seconds == 600
             assert isolated_connection.current_connection().mode == "remote"
         finally:

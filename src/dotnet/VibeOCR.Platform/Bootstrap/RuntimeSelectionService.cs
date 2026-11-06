@@ -86,6 +86,7 @@ public sealed class RuntimeSelectionService
     public const string EngineSelectionCapability = "ocr.engine-selection.v1";
     public const string RecognitionModesCapability = RecognitionModeCatalog.Capability;
     public const string DownloadSourceCapability = "runtime.download-sources.v1";
+    // Older v2 health descriptors may carry this read-only catalog.
     public const string ComponentSelectionCapability = "runtime.component-selection.v1";
     /// <summary>
     /// 远程 MinerU API 能力，直接引用 Protocol SDK 常量（Protocol 2.9.0

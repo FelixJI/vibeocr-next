@@ -14,13 +14,18 @@ adapters behind the same interface.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vibeocr.runtime.environments.managed_references import ManagedEnvironmentReferences
-from vibeocr.runtime.environments.runtime_selection import normalize_download_source_ids
+from vibeocr.runtime.environments.product_job_leases import ProductJobLeases
+from vibeocr.runtime.environments.runtime_selection import (
+    model_source_environment,
+    normalize_download_source_ids,
+)
 from vibeocr.runtime.environments.settings_store import (
     RuntimeSettings,
     RuntimeSettingsStoreError,
@@ -120,6 +125,11 @@ class ShutdownRequested(Exception):
     """Raised when an operation is attempted on a draining/shutdown module."""
 
 
+def _require_request_active(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise ValueError("请求已取消。")
+
+
 class SupervisorModule:
     """Process-wide supervisor orchestrator (UI-free)."""
 
@@ -134,15 +144,11 @@ class SupervisorModule:
         engine_resolver: OcrEngineResolver | None = None,
         recognition_mode_registry: RecognitionModeRegistry | None = None,
         settings_store: RuntimeSettings | None = None,
-        managed_references: ManagedEnvironmentReferences | None = None,
+        product_job_leases: ProductJobLeases | None = None,
     ) -> None:
         self.options = options
         self.registry = JobRegistry(
             options.instance_id,
-            environment_id=managed_references.env_id if managed_references else None,
-            environment_revision=managed_references.revision
-            if managed_references
-            else None,
         )
         self.stager = InputStager(
             root=stager_root,
@@ -155,15 +161,15 @@ class SupervisorModule:
         )
         # Wire the registry so every terminal transition records its
         # timestamp for the retention policy — executors do not need to know.
-        self._managed_references = managed_references
+        self._product_job_leases = product_job_leases
 
         def on_terminal(record: JobRecord) -> None:
             self.retention.mark_terminal(record)
             if (
-                self._managed_references is not None
+                self._product_job_leases is not None
                 and record.state in TERMINAL_JOB_STATES
             ):
-                self._managed_references.release(record.job_id)
+                self._product_job_leases.release(record.job_id)
 
         self.registry.set_terminal_hook(on_terminal)
         self._executor = executor
@@ -314,8 +320,10 @@ class SupervisorModule:
         request_id: str | None = None,
         pipeline: PipelineSelection | None = None,
         client_items: tuple[SubmitItem, ...] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> JobRef:
         with self._lock:
+            _require_request_active(cancelled)
             if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             from vibeocr.runtime.recognition.paddle_onnx import (
@@ -335,7 +343,7 @@ class SupervisorModule:
                 and {"model_preset", "device"} & pipeline.options.keys()
             ):
                 raise ContractError(
-                    "Paddle ONNX options require a matching managed ONNX environment"
+                    "Paddle ONNX options require the product ONNX runtime"
                 )
             if (
                 is_ort_environment()
@@ -354,9 +362,11 @@ class SupervisorModule:
                         dict(pipeline.options),
                         self._settings.download_source_ids,
                         pipeline_id=pipeline.pipeline_id,
+                        default_device=self._settings.recognition_device,
                     )
                 except PaddleOnnxError as exc:
                     raise ContractError(str(exc)) from exc
+            _require_request_active(cancelled)
             # Allocate a job id first so staging lives under the real job dir.
             job_id = new_job_id()
             staged, items = self.stager.stage_job_with_item_errors(job_id, uploads)
@@ -374,13 +384,15 @@ class SupervisorModule:
                     )
                     for index, item in enumerate(items)
                 ]
-            if self._managed_references is not None:
+            if self._product_job_leases is not None:
                 try:
-                    self._managed_references.admit(job_id)
+                    _require_request_active(cancelled)
+                    self._product_job_leases.admit(job_id)
                 except BaseException:
                     self.stager.release(job_id)
                     raise
             try:
+                _require_request_active(cancelled)
                 record = self.registry.create(
                     kind=kind,
                     priority=priority,
@@ -393,8 +405,8 @@ class SupervisorModule:
                     paddle_snapshot=paddle_snapshot,
                 )
             except BaseException:
-                if self._managed_references is not None:
-                    self._managed_references.release(job_id)
+                if self._product_job_leases is not None:
+                    self._product_job_leases.release(job_id)
                 self.stager.release(job_id)
                 raise
             try:
@@ -425,6 +437,8 @@ class SupervisorModule:
         self,
         request: SubmitRequest,
         attachments: dict[str, tuple[str | None, bytes]],
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> JobRef:
         """Submit a strict logical manifest through the deep job interface."""
         uploads: list[tuple[str, str | None, bytes]] = []
@@ -451,6 +465,7 @@ class SupervisorModule:
             request_id=request.request_id,
             pipeline=request.pipeline,
             client_items=request.items,
+            cancelled=cancelled,
         )
 
     def _dispatch(self, record: JobRecord, staged: list[StagedInput]) -> None:
@@ -611,8 +626,11 @@ class SupervisorModule:
         mode = self._executor.cancel_mode_for(record)
         return self.registry.request_cancel(job_id, mode=mode)
 
-    def retry(self, job_id: str) -> JobRef:
+    def retry(
+        self, job_id: str, *, cancelled: Callable[[], bool] | None = None
+    ) -> JobRef:
         with self._lock:
+            _require_request_active(cancelled)
             if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             source = self.registry.get(job_id)
@@ -634,14 +652,16 @@ class SupervisorModule:
                 raise InputExpiredError(
                     "retry input expired or unavailable: " + ", ".join(missing)
                 )
+            _require_request_active(cancelled)
             retry_job_id = new_job_id()
-            if self._managed_references is not None:
-                self._managed_references.admit(retry_job_id)
+            if self._product_job_leases is not None:
+                self._product_job_leases.admit(retry_job_id)
             try:
+                _require_request_active(cancelled)
                 new_record = self.registry.create_retry(job_id, job_id=retry_job_id)
             except BaseException:
-                if self._managed_references is not None:
-                    self._managed_references.release(retry_job_id)
+                if self._product_job_leases is not None:
+                    self._product_job_leases.release(retry_job_id)
                 raise
             try:
                 staged = self.stager.clone_for_retry(
@@ -674,8 +694,8 @@ class SupervisorModule:
             if record.state not in TERMINAL_JOB_STATES:
                 record.transition(JobState.FAILED)
         finally:
-            if self._managed_references is not None:
-                self._managed_references.release(record.job_id)
+            if self._product_job_leases is not None:
+                self._product_job_leases.release(record.job_id)
             self.stager.release(record.job_id)
 
     def delete(self, job_id: str) -> None:
@@ -757,10 +777,38 @@ class SupervisorModule:
         )
 
     def settings(self) -> SettingsSnapshot:
-        with self._lock:
-            return self._settings
+        # A writer replaces this snapshot only after its durable commit. Readers
+        # can observe the previous value while that writer stops an idle worker.
+        return self._settings
 
-    def update_settings(self, snapshot: SettingsSnapshot) -> SettingsSnapshot:
+    def _require_idle_for_device(self) -> None:
+        if self._preload_count or any(
+            job.state not in TERMINAL_JOB_STATES for job in self.registry
+        ):
+            raise ValueError("识别任务或预加载仍在进行，请在完成后更改计算设备。")
+
+    def prepare_recognition_device(
+        self, snapshot: SettingsSnapshot
+    ) -> tuple[SettingsSnapshot, str]:
+        from vibeocr.runtime.recognition.device_probe import prepare_device
+
+        with self._lock:
+            previous = self._settings
+            if snapshot.revision != previous.revision:
+                raise ValueError("设置已更新，请刷新后重试。")
+            if snapshot.recognition_device == previous.recognition_device:
+                return previous, snapshot.recognition_device
+            self._require_idle_for_device()
+        prepare_device(snapshot.recognition_device)
+        return previous, snapshot.recognition_device
+
+    def update_settings(
+        self,
+        snapshot: SettingsSnapshot,
+        *,
+        prepared: tuple[SettingsSnapshot, str] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> SettingsSnapshot:
         from vibeocr.runtime.recognition.recognition_modes import (
             DEFAULT_RECOGNITION_MODE_EXTRA_KEY,
             LEGACY_RECOGNITION_MODE_ALIASES,
@@ -770,8 +818,21 @@ class SupervisorModule:
 
         if snapshot.download_source_ids:
             normalize_download_source_ids(snapshot.download_source_ids)
+        prepared = prepared or self.prepare_recognition_device(snapshot)
         with self._lock:
             previous = self._settings
+            if (
+                previous is not prepared[0]
+                or snapshot.recognition_device != prepared[1]
+                or snapshot.revision != previous.revision
+            ):
+                raise ValueError("设置已更新，请刷新后重试。")
+            if any(
+                snapshot.extra.get(key) != previous.extra.get(key)
+                for key in ("legacy_cache_profile", "legacy_cache_at_state_root")
+            ):
+                raise ValueError("旧模型缓存路径不能通过设置更改。")
+            device_changed = snapshot.recognition_device != previous.recognition_device
             if (
                 snapshot.default_ttl_seconds != previous.default_ttl_seconds
                 or snapshot.pipelines != previous.pipelines
@@ -824,24 +885,60 @@ class SupervisorModule:
                         DEFAULT_RECOGNITION_MODE_EXTRA_KEY: legacy_alias.value,
                     },
                 )
+            mineru_source_changed = model_source_environment(
+                snapshot.download_source_ids
+            ).get("MINERU_MODEL_SOURCE") != model_source_environment(
+                previous.download_source_ids
+            ).get("MINERU_MODEL_SOURCE")
+            restart_worker = device_changed or mineru_source_changed
+            if restart_worker:
+                # 探测期间允许正常提交；在与 submit 共用的锁内重新检查，再释放空闲 worker。
+                self._require_idle_for_device()
+            snapshot = replace(snapshot, revision=previous.revision + 1)
+            device_guard = (
+                self._product_job_leases.device_change()
+                if restart_worker and self._product_job_leases
+                else nullcontext()
+            )
             guard = getattr(self._executor, "settings_guard", nullcontext)
-            with guard():
-                validate = getattr(self._executor, "validate_settings", None)
-                if callable(validate):
-                    validate(snapshot)
-                # Persist first: applying a shorter policy cannot precede durable commit.
-                if self._settings_store is not None:
-                    self._settings_store.replace(snapshot)
-                configure = getattr(self._executor, "configure_settings", None)
-                status: ResidencyStatus | None = None
-                if callable(configure):
-                    configured = configure(snapshot)
-                    if isinstance(configured, ResidencyStatus):
-                        status = configured
-                self._settings = snapshot
-                if status is not None:
-                    self._residency_snapshot = status
-        return self._settings
+            with device_guard:
+                if restart_worker:
+                    # WorkerIdleOwner acquires operation_lock before its short settings lock.
+                    # Never hold the short lock while stopping a worker.
+                    self._executor.release_idle(None if device_changed else "MinerU")
+                with guard():
+                    validate = getattr(self._executor, "validate_settings", None)
+                    if callable(validate):
+                        validate(snapshot)
+                    if cancelled is not None and cancelled():
+                        raise ValueError("设置保存已取消。")
+                    # Persist first: applying a shorter policy cannot precede durable commit.
+                    if self._settings_store is not None:
+                        self._settings_store.replace(snapshot)
+                    configure = getattr(self._executor, "configure_settings", None)
+                    status: ResidencyStatus | None = None
+                    # A device-only write changes the admission snapshot and child
+                    # process environment. It does not reconfigure the worker TTL.
+                    settings_changed = (
+                        replace(
+                            snapshot,
+                            revision=previous.revision,
+                            recognition_device=previous.recognition_device,
+                        )
+                        != previous
+                    )
+                    if callable(configure) and (not device_changed or settings_changed):
+                        configured = configure(snapshot)
+                        if isinstance(configured, ResidencyStatus):
+                            status = configured
+                    self._settings = snapshot
+                    if device_changed:
+                        os.environ["VIBEOCR_RECOGNITION_DEVICE"] = (
+                            snapshot.recognition_device
+                        )
+                    if status is not None:
+                        self._residency_snapshot = status
+        return snapshot
 
     def _remember_residency(self, status: ResidencyStatus) -> ResidencyStatus:
         with self._lock:

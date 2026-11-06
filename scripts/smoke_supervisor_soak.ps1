@@ -4,11 +4,10 @@ param(
   [Parameter(Mandatory = $true)][string]$ProductRoot,
   [Parameter(Mandatory = $true)][string]$WorkRoot,
   # maintenance = selftest 注入维护互斥早退（仅需 stateless 候选）。
-  # fail       = 副本内破坏 component-lock，真实进入连接故障终态（需 -PreparedProductRoot）。
-  # crash      = supervisor ready 后真实崩溃 + 一次自动恢复（需 -PreparedProductRoot）。
+  # fail       = 副本内破坏 component-lock，真实进入连接故障终态。
+  # crash      = supervisor ready 后真实崩溃 + 一次自动恢复。
   [ValidateSet('maintenance', 'fail', 'crash')][string]$Mode = 'maintenance',
-  # smoke_managed_environments.ps1 打印的 "Isolated evidence retained at: <root>" 下的
-  # candidate 目录（含冒烟安装的活动环境与 state）。绝不指向真实安装或含用户数据的目录。
+  # 可选：复用同一产品、WorkRoot 内隔离冒烟旧状态的副本。
   [string]$PreparedProductRoot = '',
   [int]$TimeoutMinutes = 20
 )
@@ -29,7 +28,7 @@ $markers = @(
   'app\VibeOCR.WinUI.exe',
   'app\metadata\product-layout.json',
   'runtime\backend\runtime-manifest.json',
-  'runtime\installer\vibeocr-runtime-installer.exe'
+  'runtime\env\runtime-env\python.exe'
 )
 foreach ($marker in $markers) {
   if (-not (Test-Path -LiteralPath (Join-Path $source $marker) -PathType Leaf)) {
@@ -40,45 +39,11 @@ if (Test-Path -LiteralPath (Join-Path $source 'state')) {
   throw 'ProductRoot must be stateless (no state directory); use -PreparedProductRoot for installed smoke state'
 }
 
-# fail/crash 需要活动已安装环境：只接受冒烟保留的含 state 候选。
-$prepared = $null
-if ($Mode -ne 'maintenance') {
-  if ([string]::IsNullOrWhiteSpace($PreparedProductRoot)) {
-    throw "Mode $Mode requires -PreparedProductRoot (run scripts/smoke_managed_environments.ps1 first and pass its retained candidate)"
-  }
-  $prepared = (Resolve-Path -LiteralPath $PreparedProductRoot).Path.TrimEnd('\')
-  if ($prepared.Equals($source, [StringComparison]::OrdinalIgnoreCase) -or
-      $prepared.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'PreparedProductRoot must not be the stateless ProductRoot or inside it'
-  }
-  foreach ($marker in $markers) {
-    if (-not (Test-Path -LiteralPath (Join-Path $prepared $marker) -PathType Leaf)) {
-      throw "Prepared candidate marker missing: $marker"
-    }
-  }
-  if (-not (Test-Path -LiteralPath (Join-Path $prepared 'state') -PathType Container)) {
-    throw 'PreparedProductRoot has no smoke state directory'
-  }
-}
-
-$smokeRoot = Join-Path $work "soak-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-$candidate = Join-Path $smokeRoot 'candidate'
+. (Join-Path $PSScriptRoot 'New-ProductSmokeCandidate.ps1')
+$candidate = New-ProductSmokeCandidate -Source $source -Work $work -Prepared $PreparedProductRoot
+$smokeRoot = Split-Path -Parent $candidate
 $webViewData = Join-Path $smokeRoot 'webview2'
-New-Item -ItemType Directory -Path $candidate | Out-Null
-if ($Mode -eq 'crash') {
-  # 崩溃恢复必须启动已安装环境的真实 Python：state 内是绝对路径，只能
-  # 就地运行冒烟保留候选（其本身就是 GUID 隔离产物，绝不复用真实安装）。
-  $runRoot = $prepared
-} else {
-  # maintenance/fail 在独立 GUID 副本上运行；fail 在副本内破坏锁，
-  # 真实进入连接故障路径而不是让 OnLaunched 失败。
-  $runRoot = $candidate
-  if ($Mode -eq 'fail') {
-    Copy-Item -Path (Join-Path $prepared '*') -Destination $candidate -Recurse -Force
-  } else {
-    Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $candidate -Recurse -Force
-  }
-}
+$runRoot = $candidate
 
 $previous = @{}
 foreach ($name in @(
@@ -104,9 +69,7 @@ $soakPath = Join-Path $smokeRoot 'soak.json'
 $process = $null
 try {
   if ($Mode -eq 'fail') {
-    # 只破坏激活期才读取的 component-lock：OnLaunched 不读它（ReadProfileDescriptor
-    # 吞掉 manifest 解析错误），ListEnvironments/激活任一失败都会进入
-    # ConnectSupervisorCoreAsync 的 Faulted 终态并 FailSoakRun。
+    # 仅在 GUID 副本破坏启动绑定，保留原产品与已准备的候选。
     Set-Content -LiteralPath (Join-Path $candidate 'app\metadata\component-lock.json') `
       -Value '{ corrupted-by-soak' -NoNewline -Encoding ascii
   }

@@ -207,14 +207,14 @@ export function DiagnosticsPage({ viewState, actions }: FeatureProps) {
             </Badge>
           </div>
           <p className="form-note">
-            识别服务未就绪时，可打开设置的运行环境分区重新检查状态。
+            识别服务未就绪时，可在设置中检查服务状态。
           </p>
           <div className="setting-row">
             <Button
               onClick={openSettings}
               icon={<Settings aria-hidden="true" size={16} />}
             >
-              打开设置的运行环境分区
+              打开识别服务设置
             </Button>
           </div>
           {/* 技术详情默认折叠：原生 details 可键盘展开；内部协议与实例证据

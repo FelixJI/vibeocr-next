@@ -408,16 +408,13 @@ public sealed class DefaultModeRequestContractTests
     await recognition.RecognizeFileAsync(
       TestContext.Current.CancellationToken, Cancelled);
     Assert.Equal(JobState.Cancelled, recognition.TerminalState);
-    Assert.Equal("运行环境正在切换，已取消本次识别", recognition.Status);
+    Assert.Equal("识别设置已更改，已取消本次识别", recognition.Status);
     Assert.Empty(fake.Submissions);
   }
 
   [Fact]
-  public async Task EnvironmentSwitchingCancelsBatchAndPdfSubmitWithoutDefaultFallback()
+  public async Task PendingDeviceChangeCancelsBatchAndPdfSubmitWithoutDefaultFallback()
   {
-    // 真实 handler 提交路径回归：环境切换窗口（StartEnvironmentOperation
-    // 置位的同一状态）内启动批量/PDF，提交必须取消而非以空快照提交
-    // （旧实现 engine=null 落回 Runtime 缺省引擎）。
     var fake = Client("windows_text");
     string root = Path.Combine(
       Path.GetTempPath(), $"vibeocr-default-switch-{Guid.NewGuid():N}");
@@ -433,6 +430,9 @@ public sealed class DefaultModeRequestContractTests
       Directory.CreateDirectory(resourceRoot);
       broker = new WorkbenchResourceBroker(resourceRoot);
       using var annotations = new WorkbenchAnnotationStore(resourceRoot);
+      using var changeCancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+      Task Prepare(CancellationToken ct) => ct == changeCancellation.Token
+        ? Task.Delay(Timeout.InfiniteTimeSpan, ct) : Task.CompletedTask;
       await using var handler = new DesktopWorkbenchCommandHandler(
         static () => throw new InvalidOperationException(),
         () => batch,
@@ -442,13 +442,11 @@ public sealed class DefaultModeRequestContractTests
         () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
         static () => throw new InvalidOperationException(),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-        broker, resourceRoot, static () => 0, annotations);
-      System.Reflection.FieldInfo switching = typeof(WorkbenchSettingsOwner)
-        .GetField("environmentSwitching",
-          System.Reflection.BindingFlags.NonPublic |
-          System.Reflection.BindingFlags.Instance)!;
+        broker, resourceRoot, static () => 0, annotations, ensureRuntimeReady: Prepare);
 
-      switching.SetValue(handler.Settings, 1);
+      Task<WorkbenchCommandOutcome> change = handler.ExecuteAsync(
+        new SetRecognitionDeviceCommand("directml"), changeCancellation.Token).AsTask();
+      Assert.True(handler.Settings.IsDeviceChanging);
       WorkbenchCommandOutcome batchOutcome = await handler.ExecuteAsync(
         new StartBatchCommand(), TestContext.Current.CancellationToken);
       var batchState = Assert.IsType<BatchWorkbenchState>(
@@ -463,9 +461,11 @@ public sealed class DefaultModeRequestContractTests
       Assert.False(pdfState.IsBusy);
       Assert.Null(pdfOutcome.Error);
 
-      // 未提交任何请求；退出切换窗口后同一链路恢复提交。
+      // 未提交任何请求；取消设备更改后同一链路恢复提交。
       Assert.Empty(fake.Submissions);
-      switching.SetValue(handler.Settings, 0);
+      await changeCancellation.CancelAsync();
+      await Assert.ThrowsAnyAsync<OperationCanceledException>(() => change);
+      Assert.False(handler.Settings.IsDeviceChanging);
       WorkbenchCommandOutcome resumed = await handler.ExecuteAsync(
         new StartBatchCommand(), TestContext.Current.CancellationToken);
       Assert.Null(resumed.Error);

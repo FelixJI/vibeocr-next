@@ -20,10 +20,8 @@ public sealed class PortableLayoutException : InvalidOperationException
 /// install root keeps only Velopack payload and read-only assets.
 /// </summary>
 /// <remarks>
-/// Concrete model and Python environment paths are deliberately absent. The
-/// Backend Runtime Installer remains their sole owner; the runtime share it
-/// uses is anchored on this layout's state root via the generated
-/// portable-layout manifest.
+/// The product descriptor locates its bundled interpreter. The portable-layout
+/// manifest anchors mutable runtime settings and model caches separately.
 /// </remarks>
 public sealed record PortableLayout(
     string Profile,
@@ -37,7 +35,7 @@ public sealed record PortableLayout(
     string WebAssetsRoot,
     string ComponentLock,
     string RuntimeManifest,
-    string RuntimeInstaller,
+    string RuntimePython,
     string? PortableLayoutManifest)
 {
     /// <summary>Stable mutable root; identical to <see cref="DataRoot"/>.</summary>
@@ -95,7 +93,7 @@ public sealed record PortableLayout(
         string? explicitManifest = string.IsNullOrWhiteSpace(portableLayoutManifest)
             ? null
             : Path.GetFullPath(portableLayoutManifest);
-        // 生产默认在便携根生成 portable-layout.json,把安装器的运行时/模型
+        // 生产默认在便携根生成 portable-layout.json,把识别服务的设置/模型
         // 存储锚定到 state/;显式传入(测试/隔离)优先。
         string? resolvedManifest = explicitManifest ??
             (profile == "production"
@@ -115,17 +113,16 @@ public sealed record PortableLayout(
             productLayout?.ComponentLock ?? Path.Combine(installRoot, "component-lock.json"),
             productLayout?.RuntimeManifest ??
                 Path.Combine(installRoot, "backend", "runtime-manifest.json"),
-            productLayout?.RuntimeInstaller ?? Path.Combine(
+            productLayout?.RuntimePython ?? Path.Combine(
                 installRoot,
-                "runtime-installer",
-                "vibeocr-runtime-installer.exe"),
+                "runtime", "env", "runtime-env", "python.exe"),
             resolvedManifest);
         layout.ValidateContainment();
         return layout;
     }
 
     /// <summary>
-    /// Whether the Backend Runtime Installer receives an explicit shared
+    /// Whether the product Runtime receives an explicit shared
     /// layout anchored on the portable state root (production).
     /// </summary>
     public bool UsesSharedRuntimeStore =>
@@ -135,7 +132,7 @@ public sealed record PortableLayout(
     /// Prepare the portable state root: verify containment, run the
     /// create/write/rename/delete probe, create the stable state directories,
     /// and (production) write the idempotent portable-layout manifest that
-    /// anchors the installer's runtime/model store on <c>state</c>.
+    /// anchors the runtime settings and model store on <c>state</c>.
     /// </summary>
     public void EnsurePortableState()
     {
@@ -206,7 +203,7 @@ public sealed record PortableLayout(
             return;
         }
         // 注册稳定安装根(manifest 所在目录)而非版本载荷目录:Runtime
-        // Installer 收到的 product_root 是 InstallRoot,跨 Velopack 更新稳定;
+        // Supervisor 收到的 product_root 是 InstallRoot,跨 Velopack 更新稳定;
         // Backend 会把注册 root 相对 manifest 解析后与之比对,注册 current
         // 这类版本目录会在每次更新后失配并使 ensure 失败。
         string manifestRoot = Path.GetDirectoryName(Path.GetFullPath(manifestPath))!;

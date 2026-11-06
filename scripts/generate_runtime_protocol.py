@@ -764,8 +764,6 @@ def _outputs() -> dict[Path, str]:
     bootstrap = _read("bootstrap.schema.json")
     errors = _read("errors.json")
     openapi = _read("openapi.yaml")
-    runtime_host = _read("runtime-host.schema.json")
-    runtime_host_components = {"components": {"schemas": runtime_host["$defs"]}}
     return {
         V2 / "schemas/errors.schema.json": _standalone_error_schema(openapi),
         V2 / "generated/capabilities.py": _python(capabilities, bootstrap),
@@ -782,15 +780,6 @@ def _outputs() -> dict[Path, str]:
             openapi,
         ),
         V2 / "generated/RuntimeWireTypes.g.cs": _csharp_wire_types(openapi),
-        V2 / "generated/runtime_host_types.py": _python_wire_types(
-            runtime_host_components
-        ),
-        V2 / "generated/RuntimeHostWireTypes.g.cs": _csharp_wire_types(
-            runtime_host_components
-        ).replace(
-            "namespace VibeOCR.Runtime.Contracts.Generated.Wire;",
-            "namespace VibeOCR.Runtime.Contracts.Generated.Host;",
-        ),
     }
 
 

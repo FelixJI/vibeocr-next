@@ -15,7 +15,7 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, RecoverableLazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or RefreshEnvironmentListCommand or SetEnvironmentSourcesCommand or SwitchEnvironmentCommand or SetEnvironmentCleanupPageCommand or PreviewEnvironmentCleanupCommand or RunEnvironmentCleanupCommand or CancelEnvironmentCleanupCommand or DeleteEnvironmentCommand or PrepareRemoteHostCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or SetRecognitionDeviceCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -23,29 +23,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetEditorPreferencesCommand editor => SetEditorPreferences(editor.Preferences),
     PickImageOutputDirectoryCommand => await PickImageOutputDirectoryAsync(),
     RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
-    RefreshEnvironmentListCommand => await RunEnvironmentAsync(
-      environment => environment.RefreshAsync(cancellationToken), cancellationToken),
-    SetEnvironmentSourcesCommand setEnvironmentSources => await RunEnvironmentAsync(
-      environment => setEnvironmentSources.IndependentModelSources
-        ? environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
-            setEnvironmentSources.PaddleocrModelSourceId,
-            setEnvironmentSources.MineruModelSourceId, cancellationToken)
-        : environment.SetSourcesAsync(setEnvironmentSources.EnvironmentId,
-            setEnvironmentSources.ModelSourceId,
-            cancellationToken), cancellationToken),
-    SwitchEnvironmentCommand switchEnvironment => StartEnvironmentOperation(
-      environment => environment.SwitchAsync(switchEnvironment.EnvironmentId, cancellationToken, switchEnvironment.Device),
-      refreshCatalog: true),
-    SetEnvironmentCleanupPageCommand page => await RunEnvironmentAsync(
-      environment => environment.SetCleanupPageAsync(page.Page, cancellationToken), cancellationToken),
-    PreviewEnvironmentCleanupCommand => await RunEnvironmentAsync(
-      environment => environment.PreviewCleanupAsync(cancellationToken), cancellationToken),
-    RunEnvironmentCleanupCommand cleanup => StartEnvironmentOperation(
-      environment => environment.CleanupAsync(cleanup.PlanId, cleanup.ItemIds, cancellationToken)),
-    CancelEnvironmentCleanupCommand => CancelEnvironmentCleanup(),
-    DeleteEnvironmentCommand deleteEnvironment => await RunEnvironmentAsync(
-      environment => environment.DeleteAsync(deleteEnvironment.EnvironmentId, cancellationToken), cancellationToken),
-    PrepareRemoteHostCommand => PrepareRemoteHost(cancellationToken),
+    SetRecognitionDeviceCommand choice => await SetDeviceAsync(choice.Device, cancellationToken),
     SetThemeCommand setTheme => SetTheme(setTheme),
     SetStartupCommand startup => SetStartup(startup),
     SetMinimizeToTrayCommand tray => SetMinimizeToTray(tray),
@@ -78,14 +56,14 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     _ => throw new InvalidOperationException("Unsupported Settings workbench command."),
   };
 
-  private int environmentSwitching;
+  private int deviceChanging;
   // 保留已就绪实例的基线，避免首次设置通知误清贴图取字。
   private string pinnedServiceInstance = supervisorInstanceId() ?? string.Empty;
   private SettingsViewModel? settings;
   internal SettingsViewModel? CurrentModel => settings;
   internal SettingsViewModel EnsureModel() => settings ??= CreateSettings();
   internal WorkbenchTheme Theme => theme;
-  internal bool IsEnvironmentSwitching => Volatile.Read(ref environmentSwitching) != 0;
+  internal bool IsDeviceChanging => Volatile.Read(ref deviceChanging) != 0;
   private WorkbenchTheme theme = WorkbenchTheme.System;
   private async Task<SettingsWorkbenchState> RefreshRuntimeAsync(
     CancellationToken cancellationToken)
@@ -97,150 +75,23 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     return SettingsState(settings);
   }
 
-  private async Task<SettingsWorkbenchState> RunEnvironmentAsync(
-    Func<ManagedEnvironmentSettings, Task> action,
-    CancellationToken cancellationToken)
+  private async Task<SettingsWorkbenchState> SetDeviceAsync(string device, CancellationToken cancellationToken)
   {
-    cancellationToken.ThrowIfCancellationRequested();
+    if (Interlocked.CompareExchange(ref deviceChanging, 1, 0) != 0)
+      throw new InvalidOperationException("计算设备正在验证中。");
     settings ??= CreateSettings();
-    ManagedEnvironmentSettings environments = settings.Environments
-      ?? throw new InvalidOperationException("运行环境管理器不可用。");
-    await action(environments);
-    return SettingsState(settings);
-  }
-
-  private SettingsWorkbenchState? StartEnvironmentOperation(
-    Func<ManagedEnvironmentSettings, Task> action,
-    bool refreshCatalog = false)
-  {
-    settings ??= CreateSettings();
-    ManagedEnvironmentSettings environments = settings.Environments
-      ?? throw new InvalidOperationException("运行环境管理器不可用。");
-    if (refreshCatalog)
-    {
-      Interlocked.Exchange(ref environmentSwitching, 1);
-      settings.ClearSelection();
-      // 切换尚未提交，失效文案不得声称实例已更换；结束后按实际当前服务回读。
-      settings.InvalidateSnapshot("服务状态待重新检查。");
-    }
-    return operations.Start(SettingsState(settings), async () =>
-    {
-      bool completed = false;
-      try
-      {
-        if (refreshCatalog)
-          await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
-        await action(environments);
-        completed = true;
-      }
-      catch (Exception error) when (error is not OperationCanceledException)
-      {
-        AppLog.Warn($"Environment operation failed: {error.GetType().Name}: {error.Message}");
-      }
-      finally
-      {
-        if (refreshCatalog)
-        {
-          try
-          {
-            if (!operations.IsDisposed)
-            {
-              if (completed)
-              {
-                await RefreshRecognitionCatalogAsync(CancellationToken.None);
-                // 以新环境重新读取设置快照：Backend/驻留等旧实例投影不得
-                // 继续冒充当前状态。
-                await settings.LoadSnapshotAsync(CancellationToken.None);
-              }
-              else
-              {
-                // 失败同样按实际当前服务回读；不刷环境列表，
-                // 避免其中性成功文案覆盖切换失败的根因。
-                await settings.LoadSnapshotAsync(refreshEnvironments: false, CancellationToken.None);
-                await RefreshRecognitionCatalogStatesAsync(CancellationToken.None);
-              }
-            }
-          }
-          catch (Exception error) when (error is not OperationCanceledException)
-          {
-            AppLog.Warn($"Recognition catalog refresh failed: {error.GetType().Name}: {error.Message}");
-          }
-          finally
-          {
-            Interlocked.Exchange(ref environmentSwitching, 0);
-            if (!operations.IsDisposed) operations.Publish(SettingsState(settings));
-          }
-        }
-      }
-    });
-  }
-
-  private SettingsWorkbenchState CancelEnvironmentCleanup()
-  {
-    settings ??= CreateSettings();
-    settings.Environments?.CancelCleanup();
-    return SettingsState(settings);
-  }
-
-  /// <summary>远程模式入口跨步骤禁重入：各步之间 RunAsync 会释放
-  /// IsBusy，此标志覆盖整段链路，SettingsState 的环境忙碌投影含它，
-  /// finally 里滑零；重复点击直接拒绝，不进入第二套编排。</summary>
-  private int remoteHostPreparing;
-
-  /// <summary>按 Runtime 推荐的宿主配方切换已安装的随包环境，事务失败不切换。</summary>
-  private SettingsWorkbenchState? PrepareRemoteHost(
-    CancellationToken cancellationToken)
-  {
-    settings ??= CreateSettings();
-    _ = settings.Environments
-      ?? throw new InvalidOperationException("运行环境管理器不可用。");
-    if (Interlocked.CompareExchange(ref remoteHostPreparing, 1, 0) != 0)
-      throw new InvalidOperationException("远程模式基础服务正在准备中，请稍候。");
     try
     {
-      return StartEnvironmentOperation(async environment =>
+      if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
+      if (!await settings.SetRecognitionDeviceAsync(device, cancellationToken))
       {
-        try
-        {
-          await environment.RefreshAsync(cancellationToken);
-          // 目录缺失等失败经 ReportFailure 状态 seam 用户可见，
-          // 不被后台追踪仅记录日志。
-          string? baseRecipe = environment.Snapshot?.Recipes?.SingleOrDefault(recipe =>
-              recipe.DefaultRemoteHost && recipe.SupportsRemoteHost)?.Id;
-          if (baseRecipe is null)
-          {
-            environment.ReportFailure("Runtime 目录未提供随包基础配方，请更新产品。");
-            throw new InvalidOperationException(
-              "Runtime 目录未提供随包基础配方，请更新产品。");
-          }
-          // 预构建语义：随包环境已随产品安装就绪；只切换启动，
-          // 不新建、不安装，也不下载识别模型。历史 venv 记录（升级保留）
-          // 即使配方匹配也已被 Runtime 标记为不可运行，宿主只认 product
-          // 环境，避免 FirstOrDefault 命中排在注册表前面的旧记录。
-          ManagedEnvironment? target = environment.Snapshot?.Environments
-            .FirstOrDefault(item => item.Kind == "product" &&
-              item.Recipe == baseRecipe &&
-              string.Equals(item.Status, "installed", StringComparison.Ordinal));
-          if (target is null)
-          {
-            environment.ReportFailure("未找到已安装的随包基础服务环境，请更新产品。");
-            throw new InvalidOperationException(
-              "未找到已安装的随包基础服务环境，请更新产品。");
-          }
-          await environment.SwitchAsync(target.Id, cancellationToken);
-        }
-        finally
-        {
-          Interlocked.Exchange(ref remoteHostPreparing, 0);
-        }
-      }, refreshCatalog: true);
+        operations.Publish(SettingsState(settings));
+        throw new InvalidOperationException(settings.Status);
+      }
+      PinnedTextEnvironmentChanged?.Invoke();
     }
-    catch
-    {
-      // 闭包未被追踪发布（同步段失败）：同样滑零，避免永久占用入口。
-      Interlocked.Exchange(ref remoteHostPreparing, 0);
-      throw;
-    }
+    finally { Interlocked.Exchange(ref deviceChanging, 0); }
+    return SettingsState(settings);
   }
 
   private SettingsWorkbenchState SetTheme(SetThemeCommand command)
@@ -391,6 +242,10 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetWorkerIdleCommand command, CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
+    // 只有已加载真实空闲策略才按需准备运行时；未加载由 ViewModel
+    // fail closed（零 prepare/零 IO），与保存失败共用同一错误分支。
+    if (settings.PaddleIdleSeconds is not null && settings.MineruIdleSeconds is not null &&
+      ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
     if (!await settings.SetWorkerIdleAsync(command.PaddleSeconds, command.MineruSeconds, cancellationToken))
     {
       operations.Publish(SettingsState(settings));
@@ -482,8 +337,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
   private SettingsViewModel CreateSettings()
   {
     SettingsViewModel model = settingsFactory();
-    if (model.Environments is { } environments)
-      environments.StateChanged += OnSettingsChanged;
     model.RuntimeStatus.PropertyChanged += OnSettingsPropertyChanged;
     model.PropertyChanged += OnSettingsPropertyChanged;
     return model;
@@ -657,55 +510,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
           mode.Availability,
           mode.ReasonCode))]
       : null,
-    Environments: viewModel.Environments?.Snapshot?.Environments.Select(item =>
-      new SettingsEnvironmentState(
-        item.Id, item.Name, item.Revision, item.Kind, item.Status,
-        item.PythonState, item.DependencyState, item.EngineState, item.ModelState,
-        item.ServiceState,
-        item.ConfiguredRecognitionTypes ?? [],
-        item.TargetDevice, item.ActualDevice, item.Reason,
-        item.PythonVersion, item.Abi, item.Python, item.Path, item.DiskBytes,
-        item.SourceIds ?? [],
-        item.OverrideSourceIds ?? [],
-        item.UnknownSourceIds ?? [],
-        item.ResolvedSources?.Select(source => new SettingsEnvironmentResolvedSourceState(
-          source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
-        item.LastInstallFailure is { } failure
-          ? new SettingsEnvironmentInstallFailureState(
-            failure.Phase, failure.EnvironmentRevision, failure.Recipe,
-            failure.ReasonCode, failure.NextAction, failure.Detail,
-            failure.RequestedSourceIds, failure.EffectiveSourceIds)
-          : null, item.OperationBlocks, item.Recipe)).ToArray(),
-    ActiveEnvironmentId: viewModel.Environments?.Snapshot?.ActiveId,
-    EnvironmentStatus: viewModel.Environments?.Status ?? "",
-    // 加载判定事实（不随文案变化）：快照是否已读到位、清单读取是否已尝试。
-    EnvironmentSnapshotLoaded: viewModel.Environments?.SnapshotLoaded == true,
-    EnvironmentListFetchAttempted: viewModel.Environments?.ListFetchAttempted == true,
-    // 远程模式入口准备期（含各步之间的空窗）同样锁定环境区与 MinerU
-    // 编辑器：不能只依赖各步 RunAsync 的瞬时 IsBusy。
-    EnvironmentBusy: (viewModel.Environments?.IsBusy ?? false) ||
-      Volatile.Read(ref environmentSwitching) != 0 || Volatile.Read(ref remoteHostPreparing) != 0,
-    EnvironmentSources: viewModel.Environments?.Snapshot?.Sources?.Select(source =>
-      new SettingsEnvironmentSourceState(
-        source.Id, source.Kind, source.DisplayName, source.Endpoint, source.IsDefault, Provider: source.Provider)).ToArray(),
-    EnvironmentDefaultSourceIds: viewModel.Environments?.Snapshot?.DefaultSourceIds,
-    EnvironmentResolvedDefaultSources: viewModel.Environments?.Snapshot?.ResolvedDefaultSources?.Select(source =>
-      new SettingsEnvironmentResolvedSourceState(source.Kind, source.Id, source.DisplayName, source.Origin)).ToArray(),
-    EnvironmentUnknownDefaultSourceIds: viewModel.Environments?.Snapshot?.UnknownDefaultSourceIds,
-    EnvironmentRecipes: viewModel.Environments?.Snapshot?.Recipes?.Select(recipe =>
-      new SettingsEnvironmentRecipeState(
-        recipe.Id, recipe.DisplayName, recipe.ConfiguredRecognitionTypes,
-        recipe.Accelerator, recipe.TargetDevice, recipe.SupportedDevices, recipe.PythonVersion, recipe.Abi,
-        recipe.Platform, recipe.ScopeId, recipe.ComponentIds, recipe.RecipeLock,
-        recipe.Dependencies, recipe.DependencyOrigin, recipe.PythonOrigin,
-        recipe.RuntimeWheelOrigin, recipe.Engine, recipe.Family, recipe.FamilyDisplayName,
-        recipe.Provider, recipe.SupportsRemoteHost, recipe.DefaultRemoteHost)).ToArray(),
-    EnvironmentSupportsCleanup: viewModel.Environments?.SupportsCleanup ?? false,
-    EnvironmentCleanupPlan: viewModel.Environments?.CleanupPlanPage,
-    EnvironmentCleanupResult: viewModel.Environments?.CleanupResultPage,
-    EnvironmentCleanupPage: viewModel.Environments?.CleanupPage ?? 0,
-    EnvironmentCleanupPageCount: viewModel.Environments?.CleanupPageCount ?? 1,
-    EnvironmentCanCancelCleanup: viewModel.Environments?.CanCancelCleanup ?? false);
+    RecognitionDevice: viewModel.RecognitionDevice);
 
   private StoredEditorPreferences? editorSettings;
   private string? editorPreferencesError;
@@ -782,7 +587,6 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
   {
     if (settings is not null)
     {
-      if (settings.Environments is { } environments) environments.StateChanged -= OnSettingsChanged;
       settings.RuntimeStatus.PropertyChanged -= OnSettingsPropertyChanged;
       settings.PropertyChanged -= OnSettingsPropertyChanged;
     }

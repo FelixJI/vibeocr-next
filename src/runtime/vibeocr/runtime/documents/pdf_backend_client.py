@@ -110,24 +110,12 @@ class PdfBackendClient:
     # ---- 进程生命周期 ---------------------------------------------------
 
     def _resolve_python_exe(self) -> str:
-        """选择子进程 Python 解释器(对齐 MinerU 范式)。"""
-        if os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID"):
-            return sys.executable
-        from vibeocr.runtime.environments.env_manager import (
-            get_embedded_python,
-            get_project_root,
-        )
-
-        project_root = get_project_root()
-        embedded = get_embedded_python(project_root)
-        if embedded.exists():
-            return str(embedded)
         return sys.executable
 
     def _get_backend_env(self) -> dict[str, str]:
         """构造 PDF 后端子进程环境变量。
 
-        Runtime Installer 已把精确 Backend wheel 安装进内容寻址 Runtime。
+        产品构建将当前 Runtime wheel 装入随包解释器。
         子进程必须从该解释器的 site-packages 导入，不能继承开发工作区路径、
         editable 环境或冻结前端的临时解包目录。
         """

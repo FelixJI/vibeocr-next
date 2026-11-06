@@ -272,6 +272,184 @@ public sealed class MineruConnectionWorkbenchTests
     finally { Directory.Delete(resourceRoot, recursive: true); }
   }
   [Fact]
+  public async Task UnloadedIdleProjectionIsExplicitAndSaveRefusedUntilRealRead()
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-unloaded-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      List<string> calls = [];
+      var fake = new OrderedWorkerIdleClient(calls)
+      {
+        Settings = RemoteConnectionSnapshot() with { PaddleIdleSeconds = 120, MineruIdleSeconds = 0 },
+      };
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      int preparations = 0;
+      await using var handler = CreateWorkerIdleHandler(
+        settings, broker, resourceRoot, annotationStore,
+        ensureRuntimeReady: _ => { preparations++; calls.Add("prepare"); return Task.CompletedTask; },
+        recognition: () => new RecognitionViewModel(fake, new EmptyRecognitionInput()));
+
+      // 冷启动未读取真实策略：投影必须明确“未加载”（wire 层 null），
+      // 不得以 600 占位通配真实已保存值。
+      JsonElement coldState = IdleWireProjection(handler.Settings);
+      Assert.Equal(JsonValueKind.Null, coldState.GetProperty("paddleIdleSeconds").ValueKind);
+      Assert.Equal(JsonValueKind.Null, coldState.GetProperty("mineruIdleSeconds").ValueKind);
+
+      // 未加载时保存被拒绝：不启动 Runtime、不读写真实设置，
+      // 不用占位值覆盖未编辑字段。
+      WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+        new SetWorkerIdleCommand(60, 600), TestContext.Current.CancellationToken);
+      Assert.Equal("desktop_command_failed", refused.Error?.Code);
+      Assert.Equal(0, preparations);
+      Assert.Equal(0, fake.GetCalls);
+      Assert.Equal(0, fake.UpdateCalls);
+      JsonElement refusedState = IdleWireProjection(handler.Settings);
+      Assert.Equal(JsonValueKind.Null, refusedState.GetProperty("paddleIdleSeconds").ValueKind);
+      Assert.Equal("请先加载空闲策略后再编辑保存。", settings.Status);
+
+      // 显式加载走真实 handler 命令路径（与 UI“加载空闲策略”同一
+      // settings.refreshRuntime），成功后呈现真实 120/0，此时保存携带
+      // 真实未编辑值 60/0，MinerU 持久运行策略不被覆盖。
+      WorkbenchCommandOutcome refreshed = await handler.ExecuteAsync(
+        new RefreshRuntimeCommand(), TestContext.Current.CancellationToken);
+      Assert.Null(refreshed.Error);
+      WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(
+        new SetWorkerIdleCommand(60, 0), TestContext.Current.CancellationToken);
+      Assert.Null(outcome.Error);
+      var state = Assert.IsType<SettingsWorkbenchState>(Assert.Single(outcome.States));
+      Assert.Equal(60, state.PaddleIdleSeconds);
+      Assert.Equal(0, state.MineruIdleSeconds);
+      Assert.Equal(60, fake.Settings.PaddleIdleSeconds);
+      Assert.Equal(0, fake.Settings.MineruIdleSeconds);
+      // 加载与保存各按需准备一次；保存仍先 prepare 再读改写。
+      Assert.Equal(2, preparations);
+      Assert.Equal(["prepare", "get", "update"], calls[^3..]);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  private static JsonElement IdleWireProjection(WorkbenchSettingsOwner owner)
+  {
+    string wire = WorkbenchBridgeCodec.SerializeState(Guid.NewGuid(),
+      new WorkbenchStateEnvelope(1, "settings", WorkbenchStateChange.Replace, owner.CurrentState()));
+    using JsonDocument document = JsonDocument.Parse(wire);
+    return document.RootElement.GetProperty("payload").GetProperty("state").Clone();
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ColdRuntimeLoadFailureOrCancelKeepsIdleUnknownAndSaveRefused(bool cancel)
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-load-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      List<string> calls = [];
+      var fake = new OrderedWorkerIdleClient(calls)
+      {
+        Settings = RemoteConnectionSnapshot() with { PaddleIdleSeconds = 120, MineruIdleSeconds = 0 },
+      };
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      Exception prepareError = cancel
+        ? new OperationCanceledException()
+        : new VibeOCR.App.Inference.InferenceClientNotAttachedException("runtime start refused");
+      int preparations = 0;
+      await using var handler = CreateWorkerIdleHandler(
+        settings, broker, resourceRoot, annotationStore,
+        ensureRuntimeReady: _ => { preparations++; return Task.FromException(prepareError); },
+        recognition: () => new RecognitionViewModel(fake, new EmptyRecognitionInput()));
+      CancellationToken token = TestContext.Current.CancellationToken;
+
+      // 冷态显式加载（settings.refreshRuntime 命令路径）准备失败/取消：
+      // 不进入任何真实读写。
+      if (cancel)
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+          () => handler.ExecuteAsync(new RefreshRuntimeCommand(), token).AsTask());
+      else
+        Assert.Equal("desktop_command_failed",
+          (await handler.ExecuteAsync(new RefreshRuntimeCommand(), token)).Error?.Code);
+      Assert.Equal(1, preparations);
+      Assert.Equal(0, fake.GetCalls);
+      JsonElement afterFailedLoad = IdleWireProjection(handler.Settings);
+      Assert.Equal(JsonValueKind.Null, afterFailedLoad.GetProperty("paddleIdleSeconds").ValueKind);
+      Assert.Equal(JsonValueKind.Null, afterFailedLoad.GetProperty("mineruIdleSeconds").ValueKind);
+
+      // 加载失败/取消后保存仍被拒绝：零准备增量、零读零写。
+      WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+        new SetWorkerIdleCommand(60, 600), token);
+      Assert.Equal("desktop_command_failed", refused.Error?.Code);
+      Assert.Equal(1, preparations);
+      Assert.Equal(0, fake.GetCalls);
+      Assert.Equal(0, fake.UpdateCalls);
+      Assert.Equal("请先加载空闲策略后再编辑保存。", settings.Status);
+      JsonElement afterRefused = IdleWireProjection(handler.Settings);
+      Assert.Equal(JsonValueKind.Null, afterRefused.GetProperty("paddleIdleSeconds").ValueKind);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task WorkerIdlePrepareFailureOrCancelKeepsConfirmedValuesWithoutBackendWrites(bool cancel)
+  {
+    string resourceRoot = Path.Combine(Path.GetTempPath(), $"vibeocr-worker-idle-prepare-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(resourceRoot);
+    try
+    {
+      List<string> calls = [];
+      var fake = new OrderedWorkerIdleClient(calls);
+      var settings = new SettingsViewModel(fake);
+      using var broker = new WorkbenchResourceBroker(resourceRoot);
+      using var annotationStore = new WorkbenchAnnotationStore(resourceRoot);
+      Exception? prepareError = null;
+      await using var handler = CreateWorkerIdleHandler(
+        settings, broker, resourceRoot, annotationStore,
+        ensureRuntimeReady: _ => prepareError is null
+          ? Task.CompletedTask
+          : Task.FromException(prepareError));
+      var published = new List<SettingsWorkbenchState>();
+      handler.StateChanged += state => { if (state is SettingsWorkbenchState update) published.Add(update); };
+      CancellationToken token = TestContext.Current.CancellationToken;
+      await settings.LoadSnapshotAsync(token);
+      await handler.ExecuteAsync(new SetWorkerIdleCommand(300, 120), token);
+      int reads = fake.GetCalls;
+      int writes = fake.UpdateCalls;
+      published.Clear();
+      prepareError = cancel
+        ? new OperationCanceledException()
+        : new VibeOCR.App.Inference.InferenceClientNotAttachedException("runtime start refused");
+
+      if (cancel)
+      {
+        await Assert.ThrowsAsync<OperationCanceledException>(
+          () => handler.ExecuteAsync(new SetWorkerIdleCommand(0, 60), token).AsTask());
+        Assert.Empty(published);
+      }
+      else
+      {
+        WorkbenchCommandOutcome refused = await handler.ExecuteAsync(
+          new SetWorkerIdleCommand(0, 60), token);
+        Assert.Equal("desktop_command_failed", refused.Error?.Code);
+        Assert.Empty(refused.States);
+        Assert.Empty(published);
+      }
+      // 准备失败/取消不触发读改写，模型与后端保持已确认值。
+      Assert.Equal(reads, fake.GetCalls);
+      Assert.Equal(writes, fake.UpdateCalls);
+      Assert.Equal(300, settings.PaddleIdleSeconds);
+      Assert.Equal(120, settings.MineruIdleSeconds);
+    }
+    finally { Directory.Delete(resourceRoot, recursive: true); }
+  }
+
+  [Fact]
   public void WorkerIdleBridgeAcceptsBoundedSecondsAndRejectsInvalidTypes()
   {
     Guid sessionId = Guid.NewGuid();
@@ -1038,8 +1216,13 @@ public sealed class MineruConnectionWorkbenchTests
 
   internal static DesktopWorkbenchCommandHandler CreateWorkerIdleHandler(
     SettingsViewModel settings, WorkbenchResourceBroker broker,
-    string resourceRoot, WorkbenchAnnotationStore annotationStore) => new(
-    static () => throw new InvalidOperationException(),
+    string resourceRoot, WorkbenchAnnotationStore annotationStore,
+    Func<CancellationToken, Task>? ensureRuntimeReady = null,
+    Func<VibeOCR.App.Features.Recognition.RecognitionViewModel>? recognition = null)
+  {
+    recognition ??= static () => throw new InvalidOperationException();
+    return new(
+    recognition,
     static () => throw new InvalidOperationException(),
     static () => throw new InvalidOperationException(),
     static () => throw new InvalidOperationException(),
@@ -1047,7 +1230,52 @@ public sealed class MineruConnectionWorkbenchTests
     () => new ShellViewModel(new StubHotkeyRegistrar(), new StubStartupRegistrar()),
     static () => throw new InvalidOperationException(),
     new DiagnosticsViewModel("test", new PrerequisiteReport([])),
-    broker, resourceRoot, static () => 0, annotationStore);
+    broker, resourceRoot, static () => 0, annotationStore, ensureRuntimeReady: ensureRuntimeReady);
+  }
+
+  /// <summary>
+  /// 记录空闲设置读改写调用顺序的推理桩：prepare 由宿主注入的
+  /// ensureRuntimeReady 记录，用于断言“先准备、后真实调用”；
+  /// 暴露最小 health/residency 以支持 LoadSnapshot 加载真实值。
+  /// </summary>
+  private sealed class OrderedWorkerIdleClient(List<string> calls) : InferenceClientStub
+  {
+    public SettingsSnapshot Settings { get; set; } = new();
+
+    public int GetCalls { get; private set; }
+
+    public int UpdateCalls { get; private set; }
+
+    public override Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken) => Task.FromResult(
+      new Wire.Health
+      {
+        SchemaVersion = 2,
+        InstanceId = "sup-idle",
+        ProtocolVersion = 2,
+        Ready = true,
+        Draining = false,
+        Capabilities = [],
+      });
+
+    public override Task<VibeOCR.Contracts.HttpV2.ResidencyStatus> GetResidencyAsync(
+      CancellationToken cancellationToken) => Task.FromResult(new VibeOCR.Contracts.HttpV2.ResidencyStatus());
+
+    public override Task<SettingsSnapshot> GetSettingsAsync(CancellationToken cancellationToken)
+    {
+      GetCalls++;
+      calls.Add("get");
+      return Task.FromResult(Settings);
+    }
+
+    public override Task<SettingsSnapshot> UpdateSettingsAsync(
+      SettingsSnapshot settings, CancellationToken cancellationToken)
+    {
+      UpdateCalls++;
+      calls.Add("update");
+      Settings = settings;
+      return Task.FromResult(settings);
+    }
+  }
   private sealed class StubHotkeyRegistrar : IHotkeyRegistrar
   {
     public bool Register(string hotkey, out string? conflict)

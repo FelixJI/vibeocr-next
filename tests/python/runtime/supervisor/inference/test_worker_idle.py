@@ -630,7 +630,10 @@ def test_settings_commit_guards_due_timers_and_applies_both_owner_policies(tmp_p
     updater.join(2)
     due.join(2)
     assert not updater.is_alive() and not due.is_alive()
-    assert committed == [requested] and module.settings() is requested
+    assert committed == [module.settings()]
+    from dataclasses import replace
+
+    assert module.settings() == replace(requested, revision=requested.revision + 1)
     assert (paddle.timeout, mineru.timeout) == (0, 1200) and stops == []
     paddle.close()
     mineru.close()
@@ -657,7 +660,8 @@ def test_mineru_startup_close_cancels_its_generation_and_reaps_owned_process(
         guard = None
 
         @classmethod
-        def bind_owner(cls, owner):
+        def bind_owner(cls, owner, *, model_source):
+            assert model_source == "modelscope"
             cls._startup_cancel = owner
 
         def _ensure_api_running(self):

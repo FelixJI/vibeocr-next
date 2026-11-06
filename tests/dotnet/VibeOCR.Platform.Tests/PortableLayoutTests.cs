@@ -32,9 +32,8 @@ public sealed class PortableLayoutTests
             Path.Combine(Path.GetFullPath(root), "portable-layout.json"),
             layout.PortableLayoutManifest);
         Assert.True(layout.UsesSharedRuntimeStore);
-        Assert.DoesNotContain(
-            layout.GetType().GetProperties(),
-            property => property.Name.Contains("Python", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(Path.Combine(layout.InstallRoot, "runtime", "env", "runtime-env", "python.exe"),
+            layout.RuntimePython);
     }
 
     [Fact]
@@ -497,7 +496,7 @@ public sealed class PortableLayoutTests
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
             "runtime/backend/runtime-manifest.json",
-            "runtime/installer/vibeocr-runtime-installer.exe",
+            "runtime/env/runtime-env/python.exe",
         ];
         foreach (string relative in required)
         {
@@ -514,7 +513,7 @@ public sealed class PortableLayoutTests
               "public_entry": "VibeOCR.exe",
               "roots": {"app":"app","runtime":"runtime","metadata":"app/metadata"},
               "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
-              "runtime": {"manifest":"runtime/backend/runtime-manifest.json","installer":"runtime/installer/vibeocr-runtime-installer.exe"},
+              "runtime": {"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
               "metadata": {"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
               "user_data": {"relative":"state"}
             }
@@ -576,11 +575,6 @@ public sealed class PortableLayoutTests
                 "\"component_lock\":\"current/app/metadata/component-lock.json\"",
                 manifest);
             Assert.False(Directory.Exists(Path.Combine(current, "state", "config")));
-            // Backend 身份校验等价物:注册 root 经 manifest 所在目录解析后必须
-            // 等于 Runtime Installer 声明的 product_root(稳定安装根),否则
-            // ensure 在 LayoutError: product_root does not match 上失败。
-            RuntimeInstallerConfiguration configuration =
-                RuntimeInstallerConfiguration.ForNext(layout);
             using (JsonDocument document = JsonDocument.Parse(manifest))
             {
                 string registeredRoot = document.RootElement
@@ -591,7 +585,7 @@ public sealed class PortableLayoutTests
                 string resolvedRegistered = Path.GetFullPath(
                     Path.Combine(root, registeredRoot));
                 Assert.Equal(
-                    Path.GetFullPath(configuration.ProductRoot),
+                    Path.GetFullPath(layout.InstallRoot),
                     resolvedRegistered);
             }
         }
@@ -642,7 +636,7 @@ public sealed class PortableLayoutTests
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
             "runtime/backend/runtime-manifest.json",
-            "runtime/installer/vibeocr-runtime-installer.exe",
+            "runtime/env/runtime-env/python.exe",
         ];
         foreach (string relative in required)
         {
@@ -656,7 +650,7 @@ public sealed class PortableLayoutTests
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
              "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
-             "runtime":{"manifest":"runtime/backend/runtime-manifest.json","installer":"runtime/installer/vibeocr-runtime-installer.exe"},
+             "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}
             """);
@@ -777,7 +771,7 @@ public sealed class PortableLayoutTests
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
             "runtime/backend/runtime-manifest.json",
-            "runtime/installer/vibeocr-runtime-installer.exe",
+            "runtime/env/runtime-env/python.exe",
         ];
         foreach (string relative in required)
         {
@@ -791,7 +785,7 @@ public sealed class PortableLayoutTests
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
              "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
-             "runtime":{"manifest":"runtime/backend/runtime-manifest.json","installer":"runtime/installer/vibeocr-runtime-installer.exe"},
+             "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}
             """);

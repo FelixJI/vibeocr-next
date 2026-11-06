@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
@@ -43,10 +42,10 @@ def _write_velopack_feed(artifacts: Path, version: str) -> None:
 
 def test_product_binding_requires_selection_and_mineru_capabilities() -> None:
     required = REQUIRED_CAPABILITIES
+    assert "runtime.component-selection.v1" not in required
     for capability in (
         "ocr.engine-selection.v1",
         "runtime.download-sources.v1",
-        "runtime.component-selection.v1",
         "ocr.mineru-config.v1",
         "ocr.mineru-remote-api.v1",
     ):
@@ -297,6 +296,7 @@ def _configure_release_smoke_fixture(
     with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
         package.writestr("VibeOCR/VibeOCR.exe", b"bootstrapper")
         package.writestr("VibeOCR/app/VibeOCR.WinUI.exe", b"desktop")
+        package.writestr("VibeOCR/runtime/env/runtime-env/python.exe", b"runtime")
         package.writestr(
             "VibeOCR/app/metadata/component-identities.json", json.dumps(identity)
         )
@@ -322,14 +322,14 @@ def _configure_release_smoke_fixture(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        if command[0] == sys.executable:
+        if Path(command[0]).name == "python.exe":
             assert command[1:4] == ["-I", "-B", "-c"]
             assert (
-                Path(command[-2])
-                == Path(str(kwargs["cwd"])) / "runtime/backend/runtime-code"
+                Path(command[0])
+                == Path(str(kwargs["cwd"])) / "runtime/env/runtime-env/python.exe"
             )
             assert command[-1] == "1.2.3"
-            assert kwargs["timeout"] == 30
+            assert kwargs["timeout"] == 120
             if fail_runtime_code:
                 raise subprocess.CalledProcessError(32, command)
         elif command[0].endswith("VibeOCR.exe"):
@@ -363,7 +363,12 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     verify(artifacts, "1.2.3")
 
     assert len(calls) == 3
-    assert calls[0][0] == sys.executable
+    assert Path(calls[0][0]).parts[-4:] == (
+        "runtime",
+        "env",
+        "runtime-env",
+        "python.exe",
+    )
     assert calls[1][0].endswith("VibeOCR.exe")
     assert calls[1][1:] == ["--self-test-prerequisites"]
     assert calls[2][2].endswith("smoke_web_workbench.ps1")
@@ -382,7 +387,12 @@ def test_release_smoke_stops_when_product_runtime_code_cannot_import(
 
     assert failure.value.returncode == 32
     assert len(calls) == 1
-    assert calls[0][0] == sys.executable
+    assert Path(calls[0][0]).parts[-4:] == (
+        "runtime",
+        "env",
+        "runtime-env",
+        "python.exe",
+    )
 
 
 def test_release_smoke_propagates_a_failed_public_entry_self_test(
@@ -500,7 +510,7 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
                     },
                     "runtime": {
                         "manifest": "runtime/backend/runtime-manifest.json",
-                        "installer": "runtime/installer/vibeocr-runtime-installer.exe",
+                        "python": "runtime/env/runtime-env/python.exe",
                     },
                     "metadata": {
                         "component_lock": "app/metadata/component-lock.json",
@@ -530,7 +540,7 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
             "runtime/backend/runtime-manifest.json",
-            "runtime/installer/vibeocr-runtime-installer.exe",
+            "runtime/env/runtime-env/python.exe",
         ):
             path = product / relative
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -55,10 +55,9 @@ public sealed class ResolvedProductLayout
         WebAssetsRoot = Path.Combine(AppRoot, "WebAssets");
         RuntimeRoot = Path.Combine(installRoot, "runtime");
         RuntimeManifest = Path.Combine(RuntimeRoot, "backend", "runtime-manifest.json");
-        RuntimeInstaller = Path.Combine(
+        RuntimePython = Path.Combine(
             RuntimeRoot,
-            "installer",
-            "vibeocr-runtime-installer.exe");
+            "env", "runtime-env", "python.exe");
         MetadataRoot = Path.Combine(AppRoot, "metadata");
         ComponentLock = Path.Combine(MetadataRoot, "component-lock.json");
         ComponentIdentities = Path.Combine(MetadataRoot, "component-identities.json");
@@ -73,7 +72,7 @@ public sealed class ResolvedProductLayout
     public string WebAssetsRoot { get; }
     public string RuntimeRoot { get; }
     public string RuntimeManifest { get; }
-    public string RuntimeInstaller { get; }
+    public string RuntimePython { get; }
     public string MetadataRoot { get; }
     public string ComponentLock { get; }
     public string ComponentIdentities { get; }
@@ -167,7 +166,7 @@ public sealed class ResolvedProductLayout
             Path.Combine(AppRoot, "MainWindow.xbf"),
             Path.Combine(WebAssetsRoot, "index.html"),
             RuntimeManifest,
-            RuntimeInstaller,
+            RuntimePython,
             ComponentLock,
             ComponentIdentities,
             ReleaseManifest,
@@ -208,9 +207,9 @@ public sealed class ResolvedProductLayout
             "runtime/backend/runtime-manifest.json",
             "runtime.manifest");
         Expect(
-            value.Runtime.Installer,
-            "runtime/installer/vibeocr-runtime-installer.exe",
-            "runtime.installer");
+            value.Runtime.Python,
+            "runtime/env/runtime-env/python.exe",
+            "runtime.python");
         Expect(
             value.Metadata.ComponentLock,
             "app/metadata/component-lock.json",
@@ -296,8 +295,8 @@ public sealed class ResolvedProductLayout
         [DataMember(Name = "manifest")]
         public string? Manifest { get; set; }
 
-        [DataMember(Name = "installer")]
-        public string? Installer { get; set; }
+        [DataMember(Name = "python")]
+        public string? Python { get; set; }
     }
 
     [DataContract]

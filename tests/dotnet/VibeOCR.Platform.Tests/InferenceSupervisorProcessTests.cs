@@ -227,8 +227,8 @@ public sealed class InferenceSupervisorProcessTests
             var qrClient = new QrCodeHttpClient(ready.BaseUrl, "test");
             // SwitchCoordinator validates this snapshot against the ready handshake
             // before publishing a session. Its identity outlives the child process.
-            await using var session = new ManagedEnvironmentSession(
-                "environment", 1, process, client, qrClient, new RuntimeStatusSnapshot
+            await using var session = new ProductRuntimeSession(
+                process, client, qrClient, new RuntimeStatusSnapshot
                 {
                     InstanceId = ready.InstanceId,
                     BackendVersion = "test",
@@ -512,28 +512,15 @@ public sealed class InferenceSupervisorProcessTests
         string logPath = Path.Combine(root, "supervisor.log");
         // 标准 venv 布局：解释器位于 Scripts/（预构建树把它复制到根）。
         string python = Path.Combine(venvRoot, "Scripts", "python.exe");
-        var launch = new RuntimeLaunch(
-            python,
-            "vibeocr.runtime.host.main",
-            root,
-            Path.Combine(root, "models"),
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["PYTHONUTF8"] = "1",
-            });
-        IReadOnlyList<string> arguments = ManagedEnvironmentSwitchCoordinator.RuntimeArguments(launch);
         using var proc = new InferenceSupervisorProcess(
             new InferenceSupervisorOptions(
                 python,
-                arguments,
+                ProductRuntimeSession.SupervisorArguments,
                 root,
                 logPath,
                 TimeSpan.FromSeconds(30),
                 BaselineCapabilities,
-                launch.Environment.ToDictionary(
-                    pair => pair.Key,
-                    pair => pair.Value,
-                    StringComparer.OrdinalIgnoreCase)),
+                new Dictionary<string, string> { ["PYTHONUTF8"] = "1" }),
             "tok");
         try
         {

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
+from vibeocr.runtime.environments.runtime_lock import RuntimeStoreLock
 from vibeocr.runtime_contracts import SettingsSnapshot, parse_pipeline_spec
 
 
@@ -40,9 +41,19 @@ class RuntimeSettingsStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._observed: bytes | None = None
         self._read_failed = False
+        self._startup_error: RuntimeSettingsStoreError | None = None
+
+    def preserve_startup_error(self, error: RuntimeSettingsStoreError) -> None:
+        # Legacy import may fail before a canonical file exists. Keep this session
+        # read-only and deliver the same restricted recovery to the Supervisor.
+        self._startup_error = error
+        self._read_failed = True
 
     def load(self, default: SettingsSnapshot) -> SettingsSnapshot:
+        if self._startup_error is not None:
+            raise self._startup_error
         self._read_failed = False
         try:
             return self._load(default)
@@ -50,11 +61,30 @@ class RuntimeSettingsStore:
             self._read_failed = True
             raise
 
-    def _load(self, default: SettingsSnapshot) -> SettingsSnapshot:
-        if not self.path.exists():
-            return default
+    def require_current(self) -> None:
+        """Fence a stale product session at job admission and at settings commit."""
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            current = self.path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current != self._observed:
+            raise RuntimeSettingsStoreError(
+                "设置已被另一进程更新，请重新打开识别服务。"
+            )
+
+    def read_legacy(self, default: SettingsSnapshot) -> SettingsSnapshot:
+        """Read the old profile without migrating or writing its file."""
+        return self._load(default, migrate=False)
+
+    def _load(
+        self, default: SettingsSnapshot, *, migrate: bool = True
+    ) -> SettingsSnapshot:
+        try:
+            self._observed = self.path.read_bytes()
+            value = json.loads(self._observed)
+        except FileNotFoundError:
+            self._observed = None
+            return default
         except (OSError, ValueError) as exc:
             raise RuntimeSettingsStoreError("invalid supervisor settings file") from exc
         if (
@@ -75,7 +105,9 @@ class RuntimeSettingsStore:
         if not isinstance(payload, dict):
             raise RuntimeSettingsStoreError("invalid supervisor settings payload")
         snapshot = _snapshot_from_payload(payload)
-        if "paddle_idle_seconds" not in payload or "mineru_idle_seconds" not in payload:
+        if migrate and (
+            "paddle_idle_seconds" not in payload or "mineru_idle_seconds" not in payload
+        ):
             backup = self.path.with_name(self.path.name + ".worker-idle.bak")
             try:
                 if backup.exists() and backup.read_bytes() != self.path.read_bytes():
@@ -116,7 +148,11 @@ class RuntimeSettingsStore:
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            with RuntimeStoreLock(self.path.with_suffix(".lock")):
+                self.require_current()
+                new_value = temporary.read_bytes()
+                os.replace(temporary, self.path)
+                self._observed = new_value
         except (OSError, TypeError, ValueError) as exc:
             raise RuntimeSettingsStoreError(
                 "could not replace supervisor settings"
@@ -144,15 +180,21 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             "default_ttl_seconds",
             "extra",
             "download_source_ids",
+            "revision",
+            "recognition_device",
             "paddle_idle_seconds",
             "mineru_idle_seconds",
         }
         if set(payload) - known:
-            raise ValueError("unrecognized settings fields")
+            raise RuntimeSettingsStoreError(
+                "invalid supervisor settings payload: unrecognized fields; original file preserved"
+            )
         if payload.get("schema_version") != SettingsSnapshot().schema_version and not (
             payload.get("schema_version") == 1 and "pipeline_ttls" in payload
         ):
-            raise ValueError("settings schema")
+            raise RuntimeSettingsStoreError(
+                "invalid settings schema; original file preserved"
+            )
         has_legacy = "residency" in payload or "pipeline_ttls" in payload
         residency = payload.get("residency")
         if residency is None and "pipeline_ttls" in payload:
@@ -191,6 +233,8 @@ def _snapshot_from_payload(payload: dict[str, Any]) -> SettingsSnapshot:
             raise ValueError("settings shape")
         return SettingsSnapshot(
             default_ttl_seconds=ttl,
+            revision=payload.get("revision", 0),
+            recognition_device=payload.get("recognition_device", "auto"),
             paddle_idle_seconds=payload["paddle_idle_seconds"]
             if "paddle_idle_seconds" in payload
             else _worker_timeout(residency, "PaddleOCR")
@@ -240,11 +284,15 @@ def _recover_non_lifecycle(
             if payload.get("download_source_ids")
             else ()
         )
+        recovered = SettingsSnapshot(
+            revision=payload.get("revision", 0),
+            recognition_device=payload.get("recognition_device", "auto"),
+            extra=dict(extra),
+            download_source_ids=tuple(sources),
+        )
     except (RuntimeSelectionError, TypeError, ValueError):
-        sources = ()
-    return SettingsSnapshot(
-        extra=dict(extra), download_source_ids=tuple(sources)
-    ), connection_valid
+        return None, False
+    return recovered, connection_valid
 
 
 def _worker_timeout(residency: dict[str, Any], owner: str) -> int:

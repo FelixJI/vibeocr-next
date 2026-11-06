@@ -24,7 +24,6 @@ from vibeocr.runtime.environments.model_cache import (
 logger = logging.getLogger(__name__)
 # 统一推理闭包：directml 是唯一受管配方；设备层支持 DirectML EP 与
 # CPU EP 的同闭包切换（#299 的 cpu/cuda 分设备配方已退役）。
-RECIPES = ("paddleocr-ort-directml",)
 PROVIDERS = {
     "cpu": "CPUExecutionProvider",
     "directml": "DmlExecutionProvider",
@@ -52,7 +51,7 @@ def cancelled() -> bool:
 
 
 def is_ort_environment() -> bool:
-    return os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE") in RECIPES
+    return os.environ.get("VIBEOCR_PRODUCT_RUNTIME") == "1"
 
 
 def model_catalog() -> dict:
@@ -81,7 +80,11 @@ def _resolve_auto_device(default_device: str) -> tuple[str, bool]:
 
 
 def freeze_request(
-    options: dict, source_ids: tuple[str, ...] = (), *, pipeline_id: str = "OCR"
+    options: dict,
+    source_ids: tuple[str, ...] = (),
+    *,
+    pipeline_id: str = "OCR",
+    default_device: str | None = None,
 ) -> dict:
     if pipeline_id not in PIPELINES:
         raise PaddleOnnxError("Unsupported Paddle ONNX pipeline")
@@ -90,24 +93,24 @@ def freeze_request(
     preset = options.get("model_preset", "small")
     if preset not in PRESETS:
         raise PaddleOnnxError("Unsupported Paddle ONNX model preset")
-    recipe = os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "")
-    installed_device = recipe.removeprefix("paddleocr-ort-")
-    default_device = os.environ.get(
-        "VIBEOCR_MANAGED_ENVIRONMENT_DEVICE", installed_device
+    default_device = default_device or os.environ.get(
+        "VIBEOCR_RECOGNITION_DEVICE", "auto"
     )
     # 省略与显式 auto 等价（docs 契约）：一律经 auto resolver 按真实
     # 可用性解析（cpu 默认不探测；探测异常不吞）；显式 cpu/directml
     # 保持原值，显式 directml 缺硬件仍明确失败。
     requested_device = options.get("device", "auto")
     if requested_device == "auto":
-        device, auto_device_fallback = _resolve_auto_device(default_device)
+        device, auto_device_fallback = _resolve_auto_device(
+            "directml" if default_device == "auto" else default_device
+        )
         if auto_device_fallback:
             logger.info("[PaddleOnnx] auto 设备回退 CPU：未发现 DirectML 硬件适配器")
     else:
         device = requested_device
         auto_device_fallback = False
-    if recipe not in RECIPES or device not in {"cpu", installed_device}:
-        raise PaddleOnnxError("Provider requires its matching Paddle ONNX environment")
+    if not is_ort_environment() or device not in PROVIDERS:
+        raise PaddleOnnxError("Provider requires the product ONNX runtime")
     source = next(
         (
             entry.removeprefix("paddleocr-")
@@ -170,11 +173,6 @@ def freeze_request(
         adapter = adapters[0]
         device_id = adapter["device_id"]
     return {
-        "environment_id": os.environ.get("VIBEOCR_MANAGED_ENVIRONMENT_ID", ""),
-        "environment_revision": os.environ.get(
-            "VIBEOCR_MANAGED_ENVIRONMENT_REVISION", ""
-        ),
-        "recipe": recipe,
         "pipeline_id": pipeline_id,
         "selections": selections,
         "model_preset": preset,
@@ -551,15 +549,12 @@ class PaddleOnnxPipeline:
 
 def create_pipeline(request: str, *, local_models_only: bool = False, **flags):
     snapshot = json.loads(request)
-    if any(
-        snapshot[key] != os.environ.get(variable, "")
-        for key, variable in (
-            ("recipe", "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE"),
-            ("environment_id", "VIBEOCR_MANAGED_ENVIRONMENT_ID"),
-            ("environment_revision", "VIBEOCR_MANAGED_ENVIRONMENT_REVISION"),
-        )
+    if not is_ort_environment() or snapshot["provider"] != PROVIDERS.get(
+        snapshot["device"]
     ):
-        raise PaddleOnnxError("Paddle ONNX environment snapshot changed")
+        raise PaddleOnnxError(
+            "Paddle worker received an invalid product device snapshot"
+        )
     selections = snapshot["selections"]
     for option in (
         "use_doc_orientation_classify",

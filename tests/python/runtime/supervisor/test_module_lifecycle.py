@@ -6,17 +6,16 @@ behaviour without any OCR/Paddle/MinerU dependency.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from typing import TYPE_CHECKING
 
 import pytest
-from vibeocr.runtime.environments.managed_references import (
-    ManagedEnvironmentReferences,
-    environment_has_references,
+from vibeocr.runtime.environments.product_job_leases import ProductJobLeases
+from vibeocr.runtime.environments.settings_store import (
+    RuntimeSettingsStore,
+    RuntimeSettingsStoreError,
 )
-from vibeocr.runtime.environments.runtime_lock import RuntimeLockTimeout
 from vibeocr.runtime.jobs.module import (
     ShutdownRequested,
     SupervisorModule,
@@ -149,20 +148,13 @@ def test_submit_returns_accepted_then_completes(module: SupervisorModule) -> Non
     assert [it.display_name for it in snap.items] == ["a.png", "b.png"]
 
 
-def test_managed_job_binds_revision_until_terminal(tmp_path: Path) -> None:
-    registry = tmp_path / "environments.json"
-    registry.write_text(
-        json.dumps(
-            {
-                "active_id": "managed",
-                "environments": {"managed": {"revision": 3}},
-            }
-        ),
-        encoding="utf-8",
-    )
-    refs = ManagedEnvironmentReferences(
-        registry, tmp_path / "store.lock", tmp_path / "references", "managed", 3
-    )
+def test_product_job_holds_admission_until_terminal_and_rejects_stale_session(
+    tmp_path: Path,
+) -> None:
+    store = RuntimeSettingsStore(tmp_path / "settings.json")
+    store.load(SettingsSnapshot())
+    refs = ProductJobLeases(tmp_path / "locks", store.require_current)
+    maintenance = ProductJobLeases(tmp_path / "locks")
     started = threading.Event()
     finish = threading.Event()
 
@@ -177,31 +169,28 @@ def test_managed_job_binds_revision_until_terminal(tmp_path: Path) -> None:
         options=SupervisorOptions(instance_id="managed-sup"),
         stager_root=tmp_path / "staging",
         executor=executor,
-        managed_references=refs,
+        product_job_leases=refs,
     )
     job = managed.submit(
         kind=JobKind.RECOGNITION,
         priority=JobPriority.INTERACTIVE,
         uploads=[("page.png", "image/png", b"image")],
     )
-    assert managed.registry.get(job.job_id).environment_id == "managed"
-    assert managed.registry.get(job.job_id).environment_revision == 3
     assert started.wait(2)
     try:
-        assert job.job_id in refs._held
-        assert list((tmp_path / "references" / "managed").glob("*.lock"))
-        assert environment_has_references(tmp_path / "references", "managed")
+        with (
+            pytest.raises(ValueError, match="识别任务仍在进行"),
+            maintenance.device_change(),
+        ):
+            pytest.fail("in-flight job lost cross-process lease")
     finally:
         finish.set()
     _wait_for_terminal(managed, job.job_id)
-    assert not environment_has_references(tmp_path / "references", "managed")
-    registry.write_text(
-        json.dumps(
-            {"active_id": "other", "environments": {"managed": {"revision": 3}}}
-        ),
-        encoding="utf-8",
-    )
-    with pytest.raises(RuntimeLockTimeout, match="no longer active"):
+    with maintenance.device_change():
+        RuntimeSettingsStore(store.path).replace(
+            SettingsSnapshot(recognition_device="cpu", revision=1)
+        )
+    with pytest.raises(RuntimeSettingsStoreError, match="另一进程"):
         managed.submit(
             kind=JobKind.RECOGNITION,
             priority=JobPriority.INTERACTIVE,
@@ -212,16 +201,7 @@ def test_managed_job_binds_revision_until_terminal(tmp_path: Path) -> None:
 def test_managed_admission_releases_lease_when_retry_clone_or_dispatch_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = tmp_path / "environments.json"
-    registry.write_text(
-        json.dumps(
-            {"active_id": "managed", "environments": {"managed": {"revision": 1}}}
-        ),
-        encoding="utf-8",
-    )
-    refs = ManagedEnvironmentReferences(
-        registry, tmp_path / "store.lock", tmp_path / "references", "managed", 1
-    )
+    refs = ProductJobLeases(tmp_path / "locks")
 
     class FailingExecutor(FakeExecutor):
         def execute(self, record, staged) -> None:  # type: ignore[no-untyped-def]
@@ -235,7 +215,7 @@ def test_managed_admission_releases_lease_when_retry_clone_or_dispatch_fails(
         options=SupervisorOptions(instance_id="managed-sup"),
         stager_root=tmp_path / "staging",
         executor=FailingExecutor(),
-        managed_references=refs,
+        product_job_leases=refs,
     )
     source = managed.submit(
         kind=JobKind.RECOGNITION,
@@ -254,7 +234,8 @@ def test_managed_admission_releases_lease_when_retry_clone_or_dispatch_fails(
         item for item in managed.registry.all_job_ids() if item != source.job_id
     )
     assert managed.registry.get(retry_id).state is JobState.FAILED
-    assert not environment_has_references(tmp_path / "references", "managed")
+    with ProductJobLeases(tmp_path / "locks").device_change():
+        assert not refs._held
 
     def fail_dispatch(_record, _staged) -> None:  # type: ignore[no-untyped-def]
         raise OSError("synthetic dispatch failure")
@@ -266,7 +247,8 @@ def test_managed_admission_releases_lease_when_retry_clone_or_dispatch_fails(
             priority=JobPriority.INTERACTIVE,
             uploads=[("next.png", "image/png", b"image")],
         )
-    assert not environment_has_references(tmp_path / "references", "managed")
+    with ProductJobLeases(tmp_path / "locks").device_change():
+        assert not refs._held
     assert all(
         managed.registry.get(job_id).state in TERMINAL_JOB_STATES
         for job_id in managed.registry.all_job_ids()

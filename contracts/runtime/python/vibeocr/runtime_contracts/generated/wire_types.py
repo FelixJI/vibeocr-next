@@ -621,6 +621,8 @@ class SettingsSnapshot(TypedDict, total=False):
     residency: Required[SettingsResidency]
     extra: Required[dict[str, Any]]
     download_source_ids: NotRequired[list[str]]
+    revision: NotRequired[int]
+    recognition_device: NotRequired[Literal['auto', 'cpu', 'directml']]
     paddle_idle_seconds: NotRequired[int]
     mineru_idle_seconds: NotRequired[int]
 

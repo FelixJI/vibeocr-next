@@ -5,7 +5,6 @@ import {
   render as renderImmediate,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
@@ -1197,14 +1196,12 @@ describe("AppShell", () => {
     await user.click(screen.getByRole("button", { name: "复制诊断详情" }));
     expect(actions.run).toHaveBeenCalledWith({ type: "diagnostics.copy" });
     // 服务未就绪时设置入口可见并指向设置页的既有能力。
-    await user.click(
-      screen.getByRole("button", { name: "打开设置的运行环境分区" }),
-    );
+    await user.click(screen.getByRole("button", { name: "打开识别服务设置" }));
     expect(actions.navigate).toHaveBeenCalledWith("settings");
     unmount();
   });
 
-  it("drives legacy source selection from settings state", async () => {
+  it("offers model sources from settings without package installation", async () => {
     window.location.hash = "#/settings";
     const user = userEvent.setup();
     const actions: AppActions = {
@@ -1266,31 +1263,7 @@ describe("AppShell", () => {
     expect(screen.queryByText("二维码与条形码")).not.toBeInTheDocument();
     expect(screen.queryByText("随包可用")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "识别默认模式" })).toBeVisible();
-    // 预构建运行时树：旧宿主分支不再提供安装目标/维护入口，只说明随产品内置。
-    expect(
-      screen.getByText("当前版本运行环境随产品内置，无需维护。"),
-    ).toBeVisible();
-    expect(screen.queryByLabelText("推理设备")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", {
-        name: "文档解析（PaddleOCR/MinerU）",
-      }),
-    ).not.toBeInTheDocument();
-
-    const packageSource = screen.getByLabelText("Python 包下载源");
-    expect(packageSource).toHaveValue("tuna-pypi");
-    await user.selectOptions(packageSource, "");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setSource",
-      kind: "package_index",
-    });
-    await user.selectOptions(packageSource, "pypi");
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setSource",
-      kind: "package_index",
-      sourceId: "pypi",
-    });
-
+    expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
     const modelSource = screen.getByLabelText("模型下载源");
     expect(modelSource).toHaveValue("");
     await user.selectOptions(modelSource, "huggingface");
@@ -1353,7 +1326,7 @@ describe("AppShell", () => {
       </StrictMode>,
     );
     expect(run).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "重新检查状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "检查识别服务" }));
     expect(run).toHaveBeenCalledWith({ type: "settings.refreshRuntime" });
 
     // 后续宿主状态广播（刷新结果、能力数组重建）不得再次触发挂载刷新。
@@ -1388,31 +1361,6 @@ describe("AppShell", () => {
         ([action]) => action?.type === "settings.refreshRuntime",
       ),
     ).toHaveLength(1);
-    unmount();
-  });
-
-  it("reads the environment list without requesting runtime preparation", async () => {
-    window.location.hash = "#/settings";
-    const run = vi.fn();
-    const actions: AppActions = { run, navigate: vi.fn(), setTheme: vi.fn() };
-    const viewState: AppViewState = {
-      connected: true,
-      revision: 43,
-      route: "settings",
-      theme: "light",
-      capabilities: ["runtime.environments", "runtime.refresh"],
-      features: { settings: { isBusy: false, environments: [] } },
-      runtimeLabel: "原生宿主已连接",
-    };
-    const { unmount } = await renderLoaded(
-      <App actions={actions} viewState={viewState} />,
-    );
-    expect(run).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "查看环境清单" }));
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(run).toHaveBeenCalledWith({
-      type: "settings.refreshEnvironmentList",
-    });
     unmount();
   });
 
@@ -1569,7 +1517,7 @@ describe("AppShell", () => {
     );
 
     expect(
-      screen.getByText(/MinerU 连接设置等待运行环境目录同步/),
+      screen.getByText("启动识别服务后即可配置远程 MinerU 连接。"),
     ).toBeVisible();
     expect(screen.getByLabelText("MinerU 运行模式")).toBeDisabled();
     expect(
@@ -1699,7 +1647,7 @@ describe("AppShell", () => {
       <App actions={actions} viewState={viewState} />,
     );
 
-    expect(screen.getByText("目标推理设备：尚未读取")).toBeVisible();
+    expect(screen.getByLabelText("计算设备")).toHaveValue("");
     expect(screen.getByText("当前服务：等待运行时检查")).toBeVisible();
     // 空闲（无活动维护操作）不得渲染滚动维护进度。
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
@@ -1963,489 +1911,6 @@ describe("AppShell", () => {
     });
     unmount();
   });
-  it("requires explicit cleanup selection and confirmation while protecting shared resources", async () => {
-    window.location.hash = "#/settings";
-    const user = userEvent.setup();
-    const actions: AppActions = {
-      run: vi.fn(),
-      navigate: vi.fn(),
-      setTheme: vi.fn(),
-    };
-    const viewState: AppViewState = {
-      connected: true,
-      revision: 1,
-      route: "settings",
-      theme: "light",
-      runtimeLabel: "connected",
-      capabilities: ["runtime.environments"],
-      features: {
-        settings: {
-          environmentSupportsCleanup: true,
-          environmentCleanupPage: 0,
-          environmentCleanupPageCount: 2,
-          environmentCanCancelCleanup: true,
-          environments: [],
-          environmentCleanupPlan: {
-            plan_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            warning: "仅逻辑字节，不保证物理释放",
-            items: [
-              {
-                id: "residual:known",
-                category: "residual",
-                label: "已知安装残留",
-                environment_id: null,
-                logical_bytes: 1024,
-                can_clean: true,
-                reason: "明确生产记录且无引用",
-                paths: ["environments/known/revisions/2"],
-                path_count: 1,
-              },
-              {
-                id: "protected:model",
-                category: "models",
-                label: "共享模型",
-                environment_id: null,
-                logical_bytes: null,
-                can_clean: false,
-                reason: "两个保留环境仍需使用",
-                paths: ["state/model-cache"],
-                path_count: 1,
-              },
-            ],
-          },
-          environmentCleanupResult: {
-            items: [
-              {
-                id: "previous",
-                state: "failed",
-                detail: "文件占用，重新检查继续",
-                removed_logical_bytes: 10,
-              },
-            ],
-          },
-        },
-      },
-    };
-    const { unmount, rerender } = await renderLoaded(
-      <App viewState={viewState} actions={actions} />,
-    );
-    // #294：清理在常规页面直接可见，无需先展开折叠区。
-    expect(screen.getByRole("checkbox", { name: /共享模型/ })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "检查可清理项" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.previewEnvironmentCleanup",
-    });
-    await user.click(screen.getByRole("checkbox", { name: /已知安装残留/ }));
-    await user.click(screen.getByRole("button", { name: "预览所选清理影响" }));
-    expect(actions.run).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "settings.runEnvironmentCleanup" }),
-    );
-    expect(screen.getByText(/缓存以后可能需要重新下载/)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "确认清理所选项目" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.runEnvironmentCleanup",
-      planId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      itemIds: ["residual:known"],
-    });
-    await user.click(screen.getByRole("button", { name: "取消清理" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.cancelEnvironmentCleanup",
-    });
-    expect(screen.getByText(/文件占用，重新检查继续/)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "下一页清理项目" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setEnvironmentCleanupPage",
-      page: 1,
-    });
-    await rerender(
-      <App
-        actions={actions}
-        viewState={{
-          ...viewState,
-          features: {
-            settings: {
-              ...(viewState.features.settings as Readonly<
-                Record<string, unknown>
-              >),
-              environmentCleanupPage: 1,
-            },
-          },
-        }}
-      />,
-    );
-    expect(
-      screen.getByRole("checkbox", { name: /已知安装残留/ }),
-    ).not.toBeChecked();
-    expect(
-      screen.getByRole("button", { name: "下一页清理项目" }),
-    ).toBeDisabled();
-    unmount();
-  });
-
-  it("shows an empty environment read-only without install entry points", async () => {
-    window.location.hash = "#/settings";
-    const user = userEvent.setup();
-    const actions: AppActions = {
-      run: vi.fn(),
-      navigate: vi.fn(),
-      setTheme: vi.fn(),
-    };
-    const viewState: AppViewState = {
-      connected: true,
-      revision: 1,
-      route: "settings",
-      theme: "light",
-      capabilities: ["runtime.environments"],
-      runtimeLabel: "尚未选择环境",
-      features: {
-        settings: {
-          environments: [
-            {
-              id: "env-1",
-              name: "文档",
-              revision: 1,
-              kind: "venv",
-              status: "empty",
-              pythonState: "ready",
-              dependencyState: "empty",
-              engineState: "unverified",
-              modelState: "not_checked",
-              serviceState: "not_started",
-              configuredRecognitionTypes: [],
-              targetDevice: null,
-              actualDevice: null,
-              lastInstallFailure: {
-                phase: "failed",
-                environmentRevision: 1,
-                recipe: "paddleocr-ort-cpu",
-                reasonCode: "network_error",
-                nextAction: "check_source_and_retry",
-                detail: "下载源连接失败。",
-                requestedSourceIds: null,
-                effectiveSourceIds: ["paddleocr-modelscope"],
-              },
-            },
-          ],
-          activeEnvironmentId: null,
-          environmentRecipes: [
-            {
-              id: "paddleocr-ort-cpu",
-              engine: "paddle",
-              family: "paddle-onnx",
-              familyDisplayName: "PaddleOCR ONNX",
-              provider: "CPUExecutionProvider",
-              defaultRemoteHost: true,
-              displayName: "PaddleOCR ONNX · CPU",
-              configuredRecognitionTypes: ["text"],
-              accelerator: "cpu",
-              targetDevice: "cpu",
-            },
-          ],
-          environmentSources: [
-            {
-              id: "paddleocr-modelscope",
-              kind: "paddleocr_model_registry",
-              provider: "modelscope",
-              displayName: "ModelScope",
-              endpoint: "https://www.modelscope.cn",
-              isDefault: true,
-            },
-            {
-              id: "mineru-modelscope",
-              kind: "mineru_model_registry",
-              provider: "modelscope",
-              displayName: "ModelScope",
-              endpoint: "https://www.modelscope.cn",
-              isDefault: true,
-            },
-          ],
-          environmentStatus: "运行环境状态已同步。",
-        },
-      },
-    };
-    const { unmount } = await renderLoaded(
-      <App actions={actions} viewState={viewState} />,
-    );
-    // #294：环境行/移除直接在常规页面可见，无需展开。
-    expect(screen.queryByText("高级：环境与依赖管理")).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("高级：环境清单、依赖版本、下载来源与空间清理"),
-    ).not.toBeInTheDocument();
-    // 快照已同步但无活动环境：展示默认配置“尚未启动”，不误写“尚未读取”，
-    // 也不伪造就绪。
-    expect(
-      screen.getByText("默认运行环境：PaddleOCR ONNX · CPU（尚未启动）"),
-    ).toBeVisible();
-    expect(screen.getByText(/Python ready · 依赖 empty/)).toBeVisible();
-    // 历史失败记录按只读状态如实呈现（含请求/生效来源）。
-    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
-      "下载源连接失败。",
-    );
-    expect(screen.getByText(/上次依赖安装未完成/)).toHaveTextContent(
-      "请求源：跟随配置；生效源：ModelScope",
-    );
-    // 预构建运行时树：无活动环境时不提供设备切换与任何安装入口。
-    expect(
-      screen.getByText(/当前没有活动环境；运行环境由宿主装载/),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "继续准备依赖" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "确认安装依赖" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "取消安装" }),
-    ).not.toBeInTheDocument();
-    // 移除仍走两步确认；切换环境沿用现有命令。
-    await user.click(screen.getByRole("button", { name: "移除环境" }));
-    expect(actions.run).not.toHaveBeenCalledWith({
-      type: "settings.deleteEnvironment",
-      environmentId: "env-1",
-    });
-    await user.click(screen.getByRole("button", { name: "取消移除" }));
-    await user.click(screen.getByRole("button", { name: "切换到此环境" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.switchEnvironment",
-      environmentId: "env-1",
-    });
-    unmount();
-  });
-  it("shows managed source catalog names and saves defaults and overrides separately", async () => {
-    window.location.hash = "#/settings";
-    const user = userEvent.setup();
-    const actions: AppActions = {
-      run: vi.fn().mockResolvedValue(true),
-      navigate: vi.fn(),
-      setTheme: vi.fn(),
-    };
-    const viewState: AppViewState = {
-      connected: true,
-      revision: 4,
-      route: "settings",
-      theme: "light",
-      capabilities: ["runtime.environments"],
-      runtimeLabel: "运行环境",
-      features: {
-        settings: {
-          environments: [
-            {
-              id: "env-a",
-              name: "文档",
-              revision: 2,
-              kind: "venv",
-              status: "installed",
-              pythonState: "ready",
-              dependencyState: "installed",
-              engineState: "unverified",
-              modelState: "not_checked",
-              serviceState: "ready",
-              configuredRecognitionTypes: ["text"],
-              targetDevice: "cpu",
-              actualDevice: null,
-              sourceIds: ["tuna-pypi"],
-              overrideSourceIds: [],
-              unknownSourceIds: ["gone-model"],
-              resolvedSources: [
-                {
-                  kind: "package_index",
-                  id: "tuna-pypi",
-                  displayName: "TUNA PyPI 镜像",
-                  origin: "global_default",
-                },
-                {
-                  kind: "paddleocr_model_registry",
-                  id: "paddleocr-huggingface",
-                  provider: "huggingface",
-                  displayName: "Hugging Face",
-                  origin: "product_default",
-                },
-              ],
-            },
-            {
-              id: "env-b",
-              name: "空白",
-              revision: 1,
-              kind: "venv",
-              status: "empty",
-              pythonState: "ready",
-              dependencyState: "empty",
-              engineState: "unavailable",
-              modelState: "not_applicable",
-              serviceState: "not_started",
-              configuredRecognitionTypes: [],
-              overrideSourceIds: ["paddleocr-modelscope"],
-              resolvedSources: [
-                {
-                  kind: "package_index",
-                  id: "tuna-pypi",
-                  displayName: "TUNA PyPI 镜像",
-                  origin: "global_default",
-                },
-                {
-                  kind: "paddleocr_model_registry",
-                  id: "paddleocr-modelscope",
-                  provider: "modelscope",
-                  displayName: "ModelScope",
-                  origin: "environment_override",
-                },
-              ],
-            },
-          ],
-          activeEnvironmentId: "env-a",
-          environmentRecipes: [
-            {
-              id: "paddleocr-ort-cpu",
-              engine: "paddle",
-              family: "paddle-onnx",
-              familyDisplayName: "PaddleOCR ONNX",
-              provider: "CPUExecutionProvider",
-              defaultRemoteHost: true,
-              displayName: "PaddleOCR ONNX · CPU",
-              configuredRecognitionTypes: ["text"],
-              accelerator: "cpu",
-              targetDevice: "cpu",
-            },
-          ],
-          environmentSources: [
-            {
-              id: "paddleocr-huggingface",
-              provider: "huggingface",
-              kind: "paddleocr_model_registry",
-              displayName: "Hugging Face",
-              endpoint: "https://huggingface.co",
-            },
-            {
-              id: "paddleocr-modelscope",
-              provider: "modelscope",
-              kind: "paddleocr_model_registry",
-              displayName: "ModelScope",
-              endpoint: "https://www.modelscope.cn",
-            },
-            {
-              id: "paddleocr-bos",
-              provider: "bos",
-              kind: "paddleocr_model_registry",
-              displayName: "百度 BOS",
-              endpoint: "https://paddle-model-ecology.bj.bcebos.com",
-            },
-            {
-              id: "mineru-huggingface",
-              provider: "huggingface",
-              kind: "mineru_model_registry",
-              displayName: "Hugging Face",
-              endpoint: "https://huggingface.co",
-            },
-            {
-              id: "mineru-modelscope",
-              provider: "modelscope",
-              kind: "mineru_model_registry",
-              displayName: "ModelScope",
-              endpoint: "https://www.modelscope.cn",
-            },
-          ],
-          environmentDefaultSourceIds: [
-            "paddleocr-huggingface",
-            "mineru-huggingface",
-          ],
-          environmentResolvedDefaultSources: [
-            {
-              kind: "paddleocr_model_registry",
-              id: "paddleocr-huggingface",
-              provider: "huggingface",
-              displayName: "Hugging Face",
-              origin: "product_default",
-            },
-            {
-              kind: "mineru_model_registry",
-              id: "mineru-huggingface",
-              provider: "huggingface",
-              displayName: "Hugging Face",
-              origin: "product_default",
-            },
-          ],
-          environmentUnknownDefaultSourceIds: [],
-        },
-      },
-    };
-    const { unmount, rerender } = await renderLoaded(
-      <App actions={actions} viewState={viewState} />,
-    );
-    // #294：来源设置在常规页面直接可见，验证目录/默认值与保存路径。
-    // 来源收敛为一个简单设置：依赖已全部随包离线，只剩模型来源可配；
-    // 目录展示名直出，默认值跟随 Runtime 解析，不再提供“来源配置/
-    // 全局默认来源”两处重复入口与 override 三层。
-    expect(screen.queryByLabelText("依赖包来源")).not.toBeInTheDocument();
-    const model = screen.getByLabelText("模型来源");
-    expect(model).toHaveValue("huggingface");
-    expect(within(model).getAllByRole("option")).toHaveLength(2);
-    expect(
-      within(model).getByRole("option", { name: "Hugging Face" }),
-    ).toBeInTheDocument();
-    expect(
-      within(model).getByRole("option", { name: "ModelScope（魔搭）" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("本环境依赖包来源")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("全局依赖包来源")).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("来源配置（默认、覆盖与已生效值）"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("全局默认来源（所有环境继承）"),
-    ).not.toBeInTheDocument();
-    // 管理模式下 DOWNLOADS 卡片整体不渲染（来源已收敛进运行环境面板）。
-    expect(screen.queryByText("下载来源")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Python 包下载源")).not.toBeInTheDocument();
-
-    // 保存只写全局模型来源，不按环境覆盖。
-    await user.selectOptions(model, "modelscope");
-    await user.click(screen.getByRole("button", { name: "保存下载来源" }));
-    expect(actions.run).toHaveBeenCalledWith({
-      type: "settings.setEnvironmentSources",
-      paddleocrModelSourceId: "paddleocr-modelscope",
-      mineruModelSourceId: "mineru-modelscope",
-    });
-
-    // 引擎间不一致的存量配置如实标注，选择后保存统一为同一提供方。
-    await rerender(
-      <App
-        actions={actions}
-        viewState={{
-          ...viewState,
-          revision: 41,
-          features: {
-            settings: {
-              ...(viewState.features.settings as Record<string, unknown>),
-              environmentDefaultSourceIds: [
-                "paddleocr-bos",
-                "mineru-modelscope",
-              ],
-            },
-          },
-        }}
-      />,
-    );
-    expect(model).toHaveValue("");
-    expect(
-      screen.getByText(/当前 PaddleOCR 与 MinerU 的模型来源不一致/),
-    ).toBeVisible();
-    await user.selectOptions(model, "huggingface");
-    await user.click(screen.getByRole("button", { name: "保存下载来源" }));
-    expect(
-      vi
-        .mocked(actions.run)
-        .mock.calls.filter(
-          ([action]) => action.type === "settings.setEnvironmentSources",
-        )
-        .at(-1)?.[0],
-    ).toEqual({
-      type: "settings.setEnvironmentSources",
-      paddleocrModelSourceId: "paddleocr-huggingface",
-      mineruModelSourceId: "mineru-huggingface",
-    });
-    unmount();
-  });
-
   it("shows the resolved runtime default and routes to settings from the inherit option", async () => {
     window.location.hash = "#/recognition";
     const user = userEvent.setup();

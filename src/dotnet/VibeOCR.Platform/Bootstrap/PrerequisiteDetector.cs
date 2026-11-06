@@ -11,14 +11,14 @@ public enum PrerequisiteKind
     DotNetRuntime,
     WindowsAppRuntime,
     WebView2Runtime,
-    RuntimeInstaller,
+    RuntimePython,
 }
 
 public sealed record PrerequisiteSnapshot(
     string? DotNetVersion,
     string? WindowsAppRuntimeVersion,
     string? WebView2Version,
-    bool RuntimeInstallerPresent);
+    bool RuntimePythonPresent);
 
 public sealed record PrerequisiteStatus(
     PrerequisiteKind Kind,
@@ -74,11 +74,11 @@ public sealed class PrerequisiteDetector
                 "Evergreen",
                 "https://developer.microsoft.com/microsoft-edge/webview2/"),
             new PrerequisiteStatus(
-                PrerequisiteKind.RuntimeInstaller,
-                snapshot.RuntimeInstallerPresent,
-                snapshot.RuntimeInstallerPresent ? "Bundled" : null,
+                PrerequisiteKind.RuntimePython,
+                snapshot.RuntimePythonPresent,
+                snapshot.RuntimePythonPresent ? "Bundled" : null,
                 "Bundled",
-                "repair://vibeocr/runtime-installer"),
+                "repair://vibeocr/product"),
         ]);
     }
 
@@ -106,7 +106,7 @@ internal static class WindowsPrerequisiteProbe
             DotNetRuntimeProbe.FindVersion(),
             FindWindowsAppRuntimeVersion(),
             FindWebView2Version(),
-            File.Exists(RuntimeInstallerConfiguration.ForNext(layout).Executable));
+            File.Exists(layout.RuntimePython));
     }
 
     private static string? FindWindowsAppRuntimeVersion()

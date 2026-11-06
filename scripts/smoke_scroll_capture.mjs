@@ -69,7 +69,7 @@ function contained(parent, child) {
 }
 
 // Mirrors the PreparedCandidateRoot contract of scripts/smoke_screenshot_session.ps1:
-// the argument must be the retained managed-environment candidate strictly
+// the argument must be the retained isolated product candidate strictly
 // inside the same WorkRoot (ve-12hex/candidate), already carrying its own
 // state, with layout metadata and product binding identical to the ProductRoot
 // being verified. The candidate is never copied, moved or overwritten here.
@@ -80,7 +80,7 @@ function validatePreparedCandidate(source, preparedRoot, work) {
   assert.equal(path.basename(candidate), 'candidate',
     'PreparedCandidateRoot must be the retained candidate directory itself.');
   assert(/^ve-[0-9a-f]{12}$/.test(path.basename(preparedSmokeRoot)),
-    'PreparedCandidateRoot must live in a ve-12hex managed-environment smoke root.');
+    'PreparedCandidateRoot must live in a ve-12hex product smoke root.');
   assert(relative && !relative.startsWith('..') && !path.isAbsolute(relative),
     'PreparedCandidateRoot must be strictly inside WorkRoot.');
   assert(fs.statSync(path.join(candidate, 'state')).isDirectory(),
@@ -1230,13 +1230,13 @@ async function main() {
   assert(!contained(source, work) && !contained(work, source),
     'ProductRoot and WorkRoot must not nest.');
   for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
-    'runtime/backend/runtime-manifest.json', 'runtime/installer/vibeocr-runtime-installer.exe'])
+    'runtime/backend/runtime-manifest.json', 'runtime/env/runtime-env/python.exe'])
     assert(fs.statSync(path.join(source, marker)).isFile(), `Candidate marker missing: ${marker}`);
   assert(!fs.existsSync(path.join(source, 'state')),
     'Source candidate already has state; refusing to copy it.');
   assert(fs.existsSync(fixtureScript), 'Scroll capture fixture script is missing.');
   const preparedCandidateRoot = optionalOption('--prepared-candidate');
-  // Prepared mode reuses one retained managed-environment candidate; the
+  // Prepared mode reuses one retained isolated product candidate; the
   // evidence root and its WebView2 profile are unique per run so neither the
   // retained candidate state nor any previous evidence is overwritten.
   const smokeRoot = preparedCandidateRoot
@@ -1256,7 +1256,7 @@ async function main() {
   if (preparedCandidateRoot)
     evidence.preparedCandidate = {
       root: candidate, shellOnly: false, smokeMode: 'native-actions-e2e',
-      note: 'Real Runtime started from the retained managed-environment candidate state.',
+      note: 'Real Runtime started from the retained isolated product candidate state.',
     };
   try {
     app = await launchApp(candidate, webviewData, instanceId,

@@ -79,44 +79,21 @@ def _verify_velopack_feed(artifacts: Path, version: str) -> tuple[Path, Path | N
 
 
 def _verify_runtime_code(product_root: Path, version: str) -> None:
-    # 预构建运行时树（PR2）优先：树内解释器自带完整依赖闭包（-I 不
-    # 排除解释器自身 site-packages），直接 import host/contracts 并对账
-    # runtime wheel 版本与解释器版本；树缺失才回退历史 runtime-code 形态。
     tree_python = product_root / "runtime" / "env" / "runtime-env" / "python.exe"
-    if tree_python.is_file():
-        tree_script = (
-            "import importlib.metadata,sys\n"
-            "assert importlib.metadata.version('vibeocr-next-runtime')=="
-            "sys.argv[1]\n"
-            "import vibeocr.runtime.host.main\n"
-            "import vibeocr.runtime_contracts\n"
-            "assert sys.version_info[:3]==(3,13,16)\n"
-        )
-        subprocess.run(
-            [str(tree_python), "-I", "-B", "-c", tree_script, version],
-            check=True,
-            timeout=120,
-            cwd=product_root,
-        )
-        return
-    code_root = product_root / "runtime/backend/runtime-code"
-    script = (
+    if not tree_python.is_file():
+        raise ValueError("product runtime is missing its bound python.exe")
+    tree_script = (
         "import importlib.metadata,sys\n"
-        "from pathlib import Path\n"
-        "root=Path(sys.argv[1]).resolve()\n"
-        "sys.path.insert(0,str(root))\n"
-        "import vibeocr.runtime.host.main as host\n"
-        "import vibeocr.runtime.environments.env_config as config\n"
-        "import vibeocr.runtime_contracts as contracts\n"
-        "assert all(Path(module.__file__).resolve().is_relative_to(root) "
-        "for module in (host,config,contracts))\n"
-        "assert Path(config.__file__).with_name('dependency_profiles.json').is_file()\n"
-        "assert importlib.metadata.version('vibeocr-next-runtime')==sys.argv[2]\n"
+        "assert importlib.metadata.version('vibeocr-next-runtime')=="
+        "sys.argv[1]\n"
+        "import vibeocr.runtime.host.main\n"
+        "import vibeocr.runtime_contracts\n"
+        "assert sys.version_info[:3]==(3,13,16)\n"
     )
     subprocess.run(
-        [sys.executable, "-I", "-B", "-c", script, str(code_root), version],
+        [str(tree_python), "-I", "-B", "-c", tree_script, version],
         check=True,
-        timeout=30,
+        timeout=120,
         cwd=product_root,
     )
 

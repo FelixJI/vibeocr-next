@@ -102,10 +102,8 @@ public sealed partial class MainWindow : Window
   private readonly Func<string?>? smokeLastJobId;
   private readonly Func<int>? smokeStartupEnsureAttempts;
   private readonly Func<bool>? smokeInferenceAttached;
-  private readonly Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot;
-  private readonly Func<ManagedEnvironmentSession?>? smokeManagedSession;
+  private readonly Func<ProductRuntimeSession?>? smokeManagedSession;
   private bool screenshotSmokeStarted;
-  private bool managedEnvironmentSmokeStarted;
   private bool paddleModesSmokeStarted;
   private bool initialized;
 
@@ -126,8 +124,7 @@ public sealed partial class MainWindow : Window
     Func<int>? smokeSubmitAttempts = null,
     Func<string?>? smokeLastJobId = null,
     Func<int>? smokeStartupEnsureAttempts = null,
-    Func<ManagedEnvironmentList?>? smokeEnvironmentSnapshot = null,
-    Func<ManagedEnvironmentSession?>? smokeManagedSession = null,
+    Func<ProductRuntimeSession?>? smokeManagedSession = null,
     ShellActionDispatcher? shellActions = null,
     Func<CancellationToken, Task>? ensureRuntimeReady = null,
     ISystemImportReader? systemImportReader = null,
@@ -149,7 +146,6 @@ public sealed partial class MainWindow : Window
     this.smokeSubmitAttempts = smokeSubmitAttempts;
     this.smokeLastJobId = smokeLastJobId;
     this.smokeStartupEnsureAttempts = smokeStartupEnsureAttempts;
-    this.smokeEnvironmentSnapshot = smokeEnvironmentSnapshot;
     this.smokeManagedSession = smokeManagedSession;
     smokeInferenceAttached = inferenceAttached;
 
@@ -791,12 +787,6 @@ public sealed partial class MainWindow : Window
       {
         screenshotSmokeStarted = true;
         _ = CompleteTextSelectionE2eSmokeAsync();
-      }
-      if (!managedEnvironmentSmokeStarted &&
-          Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "managed-environment-e2e")
-      {
-        managedEnvironmentSmokeStarted = true;
-        _ = CompleteManagedEnvironmentE2eSmokeAsync();
       }
       if (!paddleModesSmokeStarted &&
           Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "paddle-modes-e2e")

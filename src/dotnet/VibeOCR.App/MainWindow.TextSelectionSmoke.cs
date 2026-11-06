@@ -23,17 +23,14 @@ public sealed partial class MainWindow
       return;
     }
 
+    object? firstLayerEvidence = null;
     try
     {
       if (screenshotSmokePicker is null || smokeSubmitAttempts is null ||
           smokeStartupEnsureAttempts is null || smokeInferenceAttached is null)
         throw new InvalidOperationException("Text selection smoke dependencies are missing.");
-      for (int attempt = 0; !smokeInferenceAttached(); attempt++)
-      {
-        if (attempt >= 21000)
-          throw new TimeoutException("Real Supervisor did not attach within 35 minutes.");
-        await Task.Delay(100);
-      }
+      if (smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
+        throw new InvalidOperationException("Cold capture attached or started a Runtime before OCR demand.");
       if (smokeSubmitAttempts() != 0)
         throw new InvalidOperationException("OCR was submitted before capture.");
       int ensuresBefore = smokeStartupEnsureAttempts();
@@ -55,7 +52,8 @@ public sealed partial class MainWindow
       await WaitForPinCountAsync(1);
       PinnedImageWindow purePin = pinnedImages.Single();
       string purePath = purePin.SmokeImagePath;
-      if (!File.Exists(purePath) || smokeSubmitAttempts() != 0)
+      if (!File.Exists(purePath) || smokeSubmitAttempts() != 0 ||
+          smokeInferenceAttached() || smokeStartupEnsureAttempts() != 0)
         throw new InvalidOperationException("Pure pin submitted OCR or lost its PNG.");
       purePin.Close();
       await WaitForPinCountAsync(0);
@@ -64,21 +62,58 @@ public sealed partial class MainWindow
 
       // 菜单已移除：统一截图按钮单击只做普通截图；专用取字会话经同一宿主
       // 命令入口（与原菜单命令一致）触发。
+      string previousSession = captured.ScreenshotSession!.SessionId;
       await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(
           Guid.NewGuid(),
           new CaptureScreenshotTextSessionCommand()),
         CancellationToken.None);
-      captured = await WaitForScreenshotStateAsync(
-        state => !state.IsBusy && state.ScreenshotSession?.TextSelectionRequested == true,
-        TimeSpan.FromSeconds(30));
+      // 新会话终态在准备完成后才发布。真实连接计数只能在成功捕获、
+      // 资源收编与历史处理之后增长，故原 30 秒仍约束本地捕获阶段。
+      using (var captureTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+      {
+        try
+        {
+          while (smokeStartupEnsureAttempts() == ensuresBefore)
+            await Task.Delay(100, captureTimeout.Token);
+        }
+        catch (OperationCanceledException) when (captureTimeout.IsCancellationRequested)
+        {
+          throw new TimeoutException("Explicit text capture did not start Runtime demand within 30 seconds.");
+        }
+      }
+      if (smokeStartupEnsureAttempts() != ensuresBefore + 1)
+        throw new InvalidOperationException("Explicit text capture started more than one Runtime connection.");
+      try
+      {
+        // 沿用 Supervisor 的既有启动预算作为本阶段上限，不改变产品超时。
+        captured = await WaitForScreenshotStateAsync(
+          state => !state.IsBusy && state.Input is not null &&
+            state.ScreenshotSession is { TextSelectionRequested: true } session &&
+            session.SessionId != previousSession,
+          TimeSpan.FromSeconds(90));
+      }
+      catch (TimeoutException error)
+      {
+        throw new TimeoutException("Explicit text Runtime preparation did not publish its new session within 90 seconds.", error);
+      }
       await WaitForEditorSessionAsync(captured.ScreenshotSession!.SessionId);
       await WaitForCanvasAsync();
       capture = screenshotSmokePicker.Evidence ??
         throw new InvalidOperationException("Text capture has no synthetic evidence.");
       RecognitionTextLayerState firstLayer = await WaitForReadyTextLayerAsync(0);
+      string viewportJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync("""
+        (() => {
+          const c=document.querySelector('canvas[aria-label="图片检查画布"]');
+          return c ? {coordinateWidth:Number(c.dataset.coordinateWidth)||c.width,
+            coordinateHeight:Number(c.dataset.coordinateHeight)||c.height,
+            clientWidth:c.clientWidth,clientHeight:c.clientHeight,
+            devicePixelRatio:window.devicePixelRatio} : null;
+        })()
+        """);
+      firstLayerEvidence = new { layer = firstLayer, viewport = JsonSerializer.Deserialize<JsonElement>(viewportJson) };
       if (smokeSubmitAttempts() != 1 ||
-          smokeStartupEnsureAttempts() != ensuresBefore ||
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1 ||
           firstLayer.Lines is not { Count: > 0 } ||
           !firstLayer.Lines.Any(line => line.Text.Any(c => c is >= '一' and <= '龥')) ||
           !firstLayer.Lines.Any(line => line.Text.Contains("Vibe", StringComparison.OrdinalIgnoreCase)))
@@ -118,7 +153,7 @@ public sealed partial class MainWindow
       if (pinnedPaths.Distinct().Count() != 2 ||
           pinnedPaths.Any(path => !File.Exists(path)) ||
           smokeSubmitAttempts() != 1 ||
-          smokeStartupEnsureAttempts() != ensuresBefore)
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1)
         throw new InvalidOperationException("Text pins did not reuse the OCR layer and independent PNG leases.");
 
       foreach (PinnedImageWindow pin in oldPins)
@@ -159,7 +194,7 @@ public sealed partial class MainWindow
       oldPins[0].SmokeSetOpacity(0.65);
       if (oldPins[0].SmokeNativeAlpha >= 255)
         throw new InvalidOperationException("Pin opacity did not change native window alpha.");
-      oldPins[0].SmokeDismissActions();
+      await oldPins[0].SmokeDismissActionsAsync();
       // 右上角窗口控制：置顶双向切换、最大化后原大小恢复 1:1 与客户区。
       oldPins[0].SmokeInvokeToggleTopmost();
       if (oldPins[0].SmokeAlwaysOnTop)
@@ -216,13 +251,11 @@ public sealed partial class MainWindow
       if (secondBinding.SessionId != firstLayer.Binding?.SessionId ||
           secondBinding.Revision != edited.ScreenshotSession?.Revision ||
           smokeSubmitAttempts() != 2 ||
-          smokeStartupEnsureAttempts() != ensuresBefore)
+          !smokeInferenceAttached() || smokeStartupEnsureAttempts() != ensuresBefore + 1)
         throw new InvalidOperationException("Edited PNG did not get one new bound OCR layer.");
       foreach (PinnedImageWindow pin in oldPins) await WaitForPinTextAsync(pin, present: false);
 
       await ClickSmokeButtonAsync("结束会话");
-      await WaitForScreenshotStateAsync(
-        state => state.ScreenshotSession is null, TimeSpan.FromSeconds(15));
       oldPins[0].SmokeInvokePrepareText();
       await WaitForPinTextAsync(oldPins[0], present: true);
       if (smokeSubmitAttempts() != 3 ||
@@ -255,7 +288,7 @@ public sealed partial class MainWindow
             $"client={actual.Width}x{actual.Height}, " +
             $"expected={expectedClient.Width}x{expectedClient.Height}";
       }, "Pin did not restore its original client size after minimize.");
-      oldPins[1].SmokeMouseClickCloseButton();
+      await oldPins[1].SmokeMouseClickCloseButtonAsync();
       await WaitForPinCountAsync(1);
       if (!oldPins[1].SmokeDisposed)
         throw new InvalidOperationException("Real-mouse close click did not close the pin.");
@@ -269,6 +302,7 @@ public sealed partial class MainWindow
         schema_version = 1,
         state = "passed",
         capture,
+        first_layer = firstLayerEvidence,
         session_id = secondBinding.SessionId,
         revision = secondBinding.Revision,
         pins = 2,
@@ -301,6 +335,7 @@ public sealed partial class MainWindow
       {
         schema_version = 1,
         state = "failed",
+        first_layer = firstLayerEvidence,
         error = error.ToString(),
       }));
       Close();
@@ -421,9 +456,12 @@ public sealed partial class MainWindow
     // selection is made by WebView2 mouse input, as it is for a user.
     string geometryJson = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync($$"""
       (() => {
-        const element = [...document.querySelectorAll('.image-text-glyphs')]
-          .find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
-        if (!element?.firstChild) return null;
+        const nodes = [...document.querySelectorAll('.image-text-glyphs')];
+        const lines = nodes.map(node => ({text:node.textContent,
+          nodeType:node.firstChild?.nodeType, nodeName:node.firstChild?.nodeName}));
+        try {
+        const element = nodes.find(node => {{(chinese ? "/[\\u4e00-\\u9fff]/.test(node.textContent)" : "/[A-Za-z]{4}/.test(node.textContent)")}});
+        if (!element?.firstChild) return {matched:false, lines};
         const text = element.firstChild.textContent;
         const start = {{(chinese ? "text.search(/[\\u4e00-\\u9fff]/)" : "Math.min(1, text.length - 1)")}};
         const end = Math.min(text.length, start + {{(chinese ? 1 : 3)}});
@@ -434,11 +472,20 @@ public sealed partial class MainWindow
           return {x: box.x, y: box.y + box.height / 2};
         };
         element.scrollIntoView({block:'center'});
-        return {expected:text.slice(start,end), start:point(start), end:point(end)};
+        return {matched:true, lines, expected:text.slice(start,end), start:point(start), end:point(end)};
+        } catch(error) { return {matched:false, lines, error:String(error), stack:error?.stack}; }
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
     JsonElement root = geometry.RootElement;
+    if (root.ValueKind != JsonValueKind.Object)
+    {
+      string rendered = await SmokeEditorWebView.CoreWebView2.ExecuteScriptAsync(
+        "Array.from(document.querySelectorAll('.image-text-glyphs'),n=>({text:n.textContent,nodeType:n.firstChild?.nodeType,nodeName:n.firstChild?.nodeName}))");
+      throw new InvalidOperationException($"Text selection geometry returned {geometryJson}; rendered={rendered}.");
+    }
+    if (!root.GetProperty("matched").GetBoolean())
+      throw new InvalidOperationException($"Text selection geometry failed: {geometryJson}");
     string expected = root.GetProperty("expected").GetString() ?? string.Empty;
     JsonElement startPoint = root.GetProperty(chinese ? "end" : "start");
     JsonElement endPoint = root.GetProperty(chinese ? "start" : "end");
@@ -611,6 +658,11 @@ public sealed partial class MainWindow
   private static async Task<string> CopyPinSubstringAsync(PinnedImageWindow pin)
   {
     pin.SmokeRevealActions();
+    // ShowAt 的 Opened/IsOpen 相对单次 WebView 往返异步：先有界等待真实
+    // 打开与全不透明，再取几何；打开期间的原可见性断言保留并加上 IsOpen。
+    await UntilPinStateAsync(() => pin.SmokeActionsFlyoutOpen && pin.SmokeMoreButtonOpacity == 1
+      ? null : $"flyoutOpen={pin.SmokeActionsFlyoutOpen}, opacity={pin.SmokeMoreButtonOpacity}",
+      "Pinned actions menu did not reach its fully visible open state");
     string geometryJson = await pin.SmokeEvaluateAsync("""
       (() => {
         const span = [...document.querySelectorAll('.line span')]
@@ -626,7 +678,7 @@ public sealed partial class MainWindow
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
-    if (pin.SmokeMoreButtonOpacity != 1)
+    if (!pin.SmokeActionsFlyoutOpen || pin.SmokeMoreButtonOpacity != 1)
       throw new InvalidOperationException("Pinned actions must remain visible while their menu is open.");
     JsonElement root = geometry.RootElement;
     string expected = root.GetProperty("expected").GetString() ?? string.Empty;

@@ -271,7 +271,7 @@ async function main() {
   const baselinePath = option('--baseline', false);
   assert(!contained(candidate, work) && !contained(work, candidate), 'Candidate/Work must not nest.');
   for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
-    'runtime/backend/runtime-manifest.json', 'runtime/installer/vibeocr-runtime-installer.exe'])
+    'runtime/backend/runtime-manifest.json', 'runtime/env/runtime-env/python.exe'])
     assert(fs.statSync(path.join(candidate, marker)).isFile(), `Candidate marker missing: ${marker}`);
   assert(!fs.existsSync(path.join(candidate, 'state')), 'Source candidate must have no state.');
   const helpers = await import('./smoke_runtime_demand_tools.mjs');

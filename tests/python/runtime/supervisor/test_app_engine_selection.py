@@ -422,11 +422,7 @@ class TestOmittedEngineFreezeParity:
     ) -> None:
         from vibeocr.runtime_contracts import SettingsSnapshot
 
-        monkeypatch.setenv(
-            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
-        )
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_ID", "managed-default")
-        monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_REVISION", "3")
+        monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
         module, _ = _module(
             tmp_path,
             [
@@ -465,18 +461,15 @@ class TestOmittedEngineFreezeParity:
         assert snapshots[0] is not None and snapshots[1] is not None
         assert snapshots[0] == snapshots[1]
         assert snapshots[0]["source"] == "modelscope"
-        assert snapshots[0]["recipe"] == "paddleocr-ort-directml"
-        assert snapshots[0]["environment_id"] == "managed-default"
-        assert snapshots[0]["environment_revision"] == "3"
+        assert snapshots[0]["device"] == "cpu"
+        assert snapshots[0]["provider"] == "CPUExecutionProvider"
 
     async def test_omitted_engine_rejects_wrong_device_at_submit(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """缺省 engine（解析为 paddleocr）携带已退役 cuda 设备时，在入口
         枚举校验处拒绝（VALIDATION_ERROR），不得绕过门禁到执行期才失败。"""
-        monkeypatch.setenv(
-            "VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", "paddleocr-ort-directml"
-        )
+        monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
         module, executor = _module(
             tmp_path,
             [
@@ -722,7 +715,8 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
     # 统一推理闭包：受管配方恒为 directml；device 只影响默认模式断言
     # （cpu 是 directml 环境内的合法设备选择）。
     recipe = "paddleocr-ort-directml"
-    monkeypatch.setenv("VIBEOCR_MANAGED_ENVIRONMENT_RECIPE", recipe)
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", device)
     status = (
         EngineAvailability.READY if ready else EngineAvailability.PREPARATION_REQUIRED
     )
@@ -755,6 +749,7 @@ async def test_ort_retained_mode_catalog_and_default_follow_paddle_probe(
                 "/v2/settings",
                 json={
                     "schema_version": 2,
+                    "revision": (await http.get("/v2/settings")).json()["revision"],
                     "residency": {"default_ttl_seconds": 300, "pipelines": []},
                     "extra": {"default_recognition_mode": mode},
                 },

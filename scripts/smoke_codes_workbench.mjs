@@ -4,16 +4,9 @@
 // native clipboard copy/paste pixel roundtrip, source-Runtime pyzbar
 // cross-check and local decode of the current preview without a Supervisor.
 //
-// Stage 2 (fresh candidate 2, no state): the real product first materializes
-// its own portable-layout state during a shell-only boot (no manager list),
-// then the real frozen Runtime Installer receives the authoritative binding
-// request (protocol 2, cpu, install_component_ids=[]) for an offline base
-// Ensure into the fresh candidate state. Only then the full App starts; the
-// first manager list discovers the ensured base as the active legacy
-// environment and launches a real Supervisor. Every recognition result below
-// comes from the actual UI backed by the local C# decoder (Windows
-// BitmapDecoder + ZXing.Net); the Supervisor lifecycle itself is still
-// exercised end to end.
+// Stage 2 (fresh candidate 2): the full desktop starts without Python. An
+// explicit service check connects its bundled Supervisor before local decode,
+// recovery and isolation are exercised on the real UI.
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
@@ -32,9 +25,6 @@ const { chromium, expect } = requireWebAssets('@playwright/test');
 const nativeScript = path.join(scriptDir, 'native_actions_fixture.ps1');
 const clipboardScript = path.join(scriptDir, 'native_codes_clipboard_fixture.ps1');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// Bounded budgets: 30 min mirrors the product's own candidate ensure budget;
-// Supervisor startup mirrors the 90 s engine budget plus headroom.
-const ensureTimeoutMs = Number(process.env.VIBEOCR_CODES_SMOKE_ENSURE_TIMEOUT_MS || 30 * 60 * 1000);
 const supervisorReadyTimeoutMs = 4 * 60 * 1000;
 const decodeTimeoutMs = 90 * 1000;
 const qrTests = [
@@ -260,7 +250,7 @@ function productLayoutPaths(candidate) {
     appEntry: resolveUnder(app.entry, 'app.entry'),
     webAssetsRoot: resolveUnder(app.web_assets, 'app.web_assets'),
     runtimeManifest: resolveUnder(runtime.manifest, 'runtime.manifest'),
-    runtimeInstaller: resolveUnder(runtime.installer, 'runtime.installer'),
+    runtimePython: resolveUnder(runtime.python, 'runtime.python'),
     componentLock: resolveUnder(metadata.component_lock, 'metadata.component_lock'),
   };
 }
@@ -400,107 +390,6 @@ async function stage1(source, smokeRoot, evidence) {
   }
 }
 
-// The fresh candidate's portable-layout manifest and state directories are
-// materialized by the real product itself: a shell-only boot never runs the
-// first manager list, so legacy discovery stays pending for the Ensure below.
-async function materializePortableLayout(candidate, webviewData, smokeRoot) {
-  let boot;
-  try {
-    boot = await launchApp(candidate, webviewData, crypto.randomUUID().replaceAll('-', ''));
-    const layoutManifest = path.join(candidate, 'portable-layout.json');
-    const until = Date.now() + 20000;
-    while (!fs.existsSync(layoutManifest) && Date.now() < until) await delay(200);
-    assert(fs.existsSync(layoutManifest), 'Real product did not materialize portable-layout.json.');
-    assert(fs.existsSync(path.join(candidate, 'state')), 'Real product did not materialize its state root.');
-    return layoutManifest;
-  } finally {
-    if (boot) {
-      await stopOwned(boot.child, 'close', { AppPid: boot.child.pid, Handle: boot.main.Handle });
-      await boot.browser.close().catch(() => {});
-      assert(boot.child.exitCode !== null, 'Layout-materialization owned app PID did not exit.');
-    }
-  }
-}
-
-// Offline base-only Ensure through the real frozen installer. The binding
-// request mirrors RuntimeInstallerClient (protocol 2, cpu accelerator, empty
-// install list = base-only scope); paths and product id come from the
-// candidate's own layout config. Nothing here writes registries or state
-// directly - only the real installer process does.
-async function ensureBaseOffline(candidate, layout, smokeRoot) {
-  const layoutManifest = path.join(candidate, 'portable-layout.json');
-  const portable = readJson(layoutManifest);
-  assert.equal(portable.schema_version, 1, 'Unexpected portable-layout schema.');
-  const products = Object.keys(portable.products ?? {});
-  assert(products.length === 1, `Expected one registered product, got: ${products.join(',')}`);
-  const productId = products[0];
-  const manifest = readJson(layout.runtimeManifest);
-  const capabilities = manifest.capabilities ?? [];
-  for (const capability of ['runtime.maintenance.v2', 'runtime.component-selection.v1'])
-    assert(capabilities.includes(capability), `Frozen runtime manifest lacks ${capability}.`);
-  const request = {
-    protocol_version: 2,
-    product_root: candidate,
-    component_lock: layout.componentLock,
-    runtime_manifest: layout.runtimeManifest,
-    accelerator: 'cpu',
-    layout_manifest: layoutManifest,
-    product_id: productId,
-    operation: 'ensure',
-    accepted_event_streams: ['ndjson.v2'],
-    operation_id: `codes-smoke-${crypto.randomUUID()}`,
-    install_component_ids: [],
-  };
-  fs.writeFileSync(path.join(smokeRoot, 'installer-ensure-request.json'), JSON.stringify(request, null, 2));
-  const installerTemp = path.join(smokeRoot, 'installer-temp');
-  fs.mkdirSync(installerTemp, { recursive: true });
-  const child = spawn(layout.runtimeInstaller, ['--request-json', JSON.stringify(request)], {
-    cwd: candidate, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-    env: { ...process.env, TEMP: installerTemp, TMP: installerTemp },
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
-  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
-  const completed = await exitWithin(child, ensureTimeoutMs);
-  const exit = completed?.code ?? null;
-  if (exit === null) {
-    await forceStop(child);
-    throw new Error(`Offline base Ensure timed out after ${ensureTimeoutMs} ms.`);
-  }
-  fs.writeFileSync(path.join(smokeRoot, 'installer-ensure-output.jsonl'), stdout);
-  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-  let envelope = null;
-  if (lines.length) {
-    try { envelope = JSON.parse(lines[lines.length - 1]); } catch { envelope = null; }
-  }
-  if (exit !== 0 || !envelope?.ok || envelope.operation !== 'ensure' || !envelope.launch) {
-    throw new Error(`Frozen installer ensure failed (${exit}): ${envelope?.error?.message ?? stderr.trim()}`);
-  }
-  const stateRoot = path.join(candidate, 'state');
-  const launch = envelope.launch;
-  // Python and model storage must be anchored inside the fresh candidate's
-  // portable state; working_directory is the product root itself.
-  for (const [field, value] of Object.entries({
-    python_executable: launch.python_executable,
-    model_root: launch.model_root,
-  })) {
-    assert(typeof value === 'string' && contained(stateRoot, value),
-      `Ensure launch ${field} is not anchored in the fresh candidate state: ${value}`);
-  }
-  assert(fs.statSync(launch.python_executable).isFile(), 'Ensure launch python executable is missing.');
-  assert.equal(path.normalize(launch.working_directory), path.normalize(candidate),
-    'Ensure launch working_directory must be the product root itself.');
-  // Real legacy discovery inputs produced by the installer, before any manager
-  // list: the .installed.json marker plus python must exist and no managed
-  // registry may exist yet.
-  assert(fs.existsSync(path.join(stateRoot, 'runtime', '.installed.json')),
-    'Ensure did not produce the legacy .installed.json marker.');
-  assert(!fs.existsSync(path.join(stateRoot, 'environments.json')),
-    'Managed registry appeared before the first manager list; legacy discovery would be skipped.');
-  return { productId, request: { ...request }, launch, state: envelope.state };
-}
-
 // Independent QR with a per-run unique payload for picker/drop inputs: a
 // fresh payload cannot be satisfied by any stale preview result, so those
 // assertions can only pass through the real new input path.
@@ -572,9 +461,9 @@ async function waitForTrace(file, predicate, timeoutMs, label) {
 // Owned child-process census for zero-new-work evidence: a health trace
 // without Ready records does not by itself prove process counts, so we also
 // enumerate the app's own direct children (read-only Win32_Process query) and
-// snapshot installer evidence files. Only used for pids this smoke owns.
+// verify the exact interpreter for the running Supervisor. Only query owned children.
 async function ownedChildren(pid) {
-  const script = `$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + ${pid}) | Select-Object ProcessId,Name | ConvertTo-Json -Compress`;
+  const script = `$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + ${pid}) | Select-Object ProcessId,Name,ExecutablePath | ConvertTo-Json -Compress`;
   const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', script],
     { timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024 });
   const trimmed = stdout.trim();
@@ -692,7 +581,7 @@ async function waitDecodedItem(page, expected, timeoutMs) {
     .toBeVisible({ timeout: timeoutMs });
 }
 
-// #213 AC1 isolated states on the already-ensured candidate: maintenance-
+// #213 AC1 isolated states on the product candidate: maintenance-
 // paused and injected startup-failure windows. Each relaunch is a full real
 // App boot with strict selftest double-guarded flags (see App.xaml.cs); the
 // paste image is the real QR generated by stage 2. Zero-request evidence:
@@ -717,8 +606,6 @@ async function relaunchIsolatedStateCase({ candidate, webview2, smokeRoot, evide
     const childrenAtState = await ownedChildren(app.child.pid);
     assert(!hasPythonChild(childrenAtState),
       `${label} window unexpectedly has a Supervisor child: ${JSON.stringify(childrenAtState)}`);
-    const installerEvidenceBefore = fs.readdirSync(smokeRoot)
-      .filter((name) => name.startsWith('installer-')).sort();
     await page.getByRole('tab', { name: '识别', exact: true }).click();
     await setClipboardImage(smokeRoot, image);
     await native('foreground', { AppPid: app.child.pid });
@@ -734,15 +621,11 @@ async function relaunchIsolatedStateCase({ candidate, webview2, smokeRoot, evide
     const childrenAfterDecode = await ownedChildren(app.child.pid);
     assert(!hasPythonChild(childrenAfterDecode),
       `${label} decode ran with a Supervisor child present: ${JSON.stringify(childrenAfterDecode)}`);
-    const installerEvidenceAfter = fs.readdirSync(smokeRoot)
-      .filter((name) => name.startsWith('installer-')).sort();
-    assert.deepEqual(installerEvidenceAfter, installerEvidenceBefore,
-      `${label} decode created new installer evidence`);
     await page.screenshot({ path: path.join(smokeRoot, `${label}-decoded.png`) });
     evidence[label].results = results;
     evidence[label].childCensus = { atState: childrenAtState, afterDecode: childrenAfterDecode };
     evidence[label].zeroNewWorkEvidence =
-      'owned child-process census (no python child) + no Ready health record + installer evidence set unchanged; loopback HTTP traffic not directly observed';
+      'owned child-process census (no python child) + no Ready health record; loopback HTTP traffic not directly observed';
     evidence[label].state = 'passed';
     console.log(`Codes isolated state ${label} passed.`);
   } finally {
@@ -764,7 +647,7 @@ async function main() {
   const work = fs.realpathSync(option('--work-root'));
   assert(!contained(source, work) && !contained(work, source), 'ProductRoot and WorkRoot must not nest.');
   for (const marker of ['app/VibeOCR.WinUI.exe', 'app/metadata/product-layout.json',
-    'runtime/backend/runtime-manifest.json', 'runtime/installer/vibeocr-runtime-installer.exe'])
+    'runtime/backend/runtime-manifest.json', 'runtime/env/runtime-env/python.exe'])
     assert(fs.statSync(path.join(source, marker)).isFile(), `Candidate marker missing: ${marker}`);
   assert(!fs.existsSync(path.join(source, 'state')), 'Refusing source candidate with user or prior smoke state.');
   const smokeRoot = path.join(work, `vibeocr-codes-${crypto.randomUUID()}`);
@@ -772,7 +655,7 @@ async function main() {
   const stage2Root = path.join(smokeRoot, 'stage2');
   const evidence = { schema_version: 2, state: 'failed', smokeRoot, cases: [],
     stage1: { state: 'failed' }, stage2: { state: 'not-run' },
-    desktopRuntime: 'stage1 shell-only local decode; stage2 real Supervisor from offline base Ensure via frozen installer (decode stays local)',
+    desktopRuntime: 'stage1 shell-only local decode; stage2 on-demand bundled Supervisor (decode stays local)',
     decoder: 'stage1+stage2 local C# decoder (BitmapDecoder+ZXing.Net); source Runtime pyzbar used as independent cross-check',
     commonWindowsAppPaste: 'not covered by this script' };
   try {
@@ -793,26 +676,7 @@ async function main() {
     }
     evidence.stage2 = { state: 'failed', cases: [] };
 
-    // 1) Real product materializes portable layout state (no manager list).
     const webview2 = path.join(stage2Root, 'webview2');
-    await materializePortableLayout(candidate2, webview2, stage2Root);
-    // 2) Offline base-only Ensure through the real frozen installer, before
-    //    the first manager list, so real legacy discovery finds it active.
-    const ensured = await ensureBaseOffline(candidate2, layout, stage2Root);
-    evidence.stage2.ensure = {
-      productId: ensured.productId,
-      operationId: ensured.request.operation_id,
-      accelerator: ensured.request.accelerator,
-      installComponentIds: ensured.request.install_component_ids,
-      launch: {
-        python_executable: ensured.launch.python_executable,
-        working_directory: ensured.launch.working_directory,
-        model_root: ensured.launch.model_root,
-      },
-      state: ensured.state,
-    };
-
-    // 3) Full App: real Supervisor via legacy discovery + attach.
     const trace = path.join(stage2Root, 'supervisor-health.jsonl');
     let app;
     try {
@@ -821,14 +685,28 @@ async function main() {
         env: { VIBEOCR_SUPERVISOR_HEALTH_TRACE: trace },
       });
       evidence.stage2.appPid = app.child.pid;
+      await foreground(app);
+      const page = app.page;
+      const childrenBeforeDemand = await ownedChildren(app.child.pid);
+      assert(!hasPythonChild(childrenBeforeDemand), 'Normal startup launched Python before service demand.');
+      assert(!readTrace(trace).some((record) => record.state === 'Ready'), 'Normal startup attached a Supervisor.');
+      await page.getByRole('link', { name: '设置', exact: true }).click();
+      await page.getByRole('button', { name: '检查识别服务', exact: true }).click();
       const ready = await waitForTrace(trace,
         (record) => record.state === 'Ready' && Number(record.process_id) > 0 && !!record.instance_id,
         supervisorReadyTimeoutMs, 'initial Ready');
       const initialReady = ready[ready.length - 1];
+      const supervisor = (await ownedChildren(app.child.pid))
+        .find((child) => Number(child.ProcessId) === Number(initialReady.process_id));
+      assert(supervisor?.ExecutablePath, 'Ready Supervisor must be a child of the candidate desktop.');
+      assert.equal(fs.realpathSync(supervisor.ExecutablePath).toLowerCase(),
+        fs.realpathSync(layout.runtimePython).toLowerCase(), 'Ready Supervisor used a different Python.');
+      const portable = readJson(path.join(candidate2, 'portable-layout.json'));
+      assert.equal(portable.schema_version, 1);
+      assert.equal(Object.keys(portable.products ?? {}).length, 1);
+      assert(fs.statSync(path.join(candidate2, 'state')).isDirectory());
       evidence.stage2.supervisor = { readyInstanceId: initialReady.instance_id,
-        readyProcessId: Number(initialReady.process_id) };
-      await foreground(app);
-      const page = app.page;
+        readyProcessId: Number(initialReady.process_id), python: supervisor.ExecutablePath, childrenBeforeDemand };
       await page.getByRole('link', { name: '二维码与条码', exact: true }).click();
       await page.getByRole('heading', { name: '二维码与条码', exact: true }).waitFor();
 
@@ -1038,7 +916,7 @@ async function main() {
       }
     }
 
-    // Stage 3 (#213 AC1): isolated representative states on the same ensured
+    // Stage 3 (#213 AC1): isolated representative states on the same product
     // candidate — maintenance-paused, then injected startup failure. Both
     // relaunches keep decode fully local: the health trace must never reach
     // a Ready Supervisor in either case.

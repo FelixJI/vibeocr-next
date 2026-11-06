@@ -167,6 +167,6 @@ public sealed class ShellTests
             new(PrerequisiteKind.DotNetRuntime, true, "10.0.1", "10.0.0", "https://example.test/dotnet"),
             new(PrerequisiteKind.WindowsAppRuntime, true, "2.2.0", "2.2.0", "https://example.test/windows-app-runtime"),
             new(PrerequisiteKind.WebView2Runtime, true, "140.0", "Evergreen", "https://example.test/webview"),
-            new(PrerequisiteKind.RuntimeInstaller, true, "Bundled", "Bundled", "repair://vibeocr/runtime-installer"),
+            new(PrerequisiteKind.RuntimePython, true, "Bundled", "Bundled", "repair://vibeocr/runtime-python"),
         ]);
 }

@@ -232,7 +232,8 @@ class TestSettingsRoutes:
             assert accepted.status_code == 200
             rejected = await http.put(
                 "/v2/settings",
-                json=_settings_body({"default_recognition_mode": "auto"}),
+                json=_settings_body({"default_recognition_mode": "auto"})
+                | {"revision": accepted.json()["revision"]},
             )
             assert rejected.status_code == 400
             assert rejected.json()["code"] == "RECOGNITION_MODE_UNKNOWN"
@@ -267,7 +268,8 @@ class TestSettingsRoutes:
             assert accepted.status_code == 200
             rejected = await http.put(
                 "/v2/settings",
-                json=_settings_body({"default_recognition_mode": "paddle_structure"}),
+                json=_settings_body({"default_recognition_mode": "paddle_structure"})
+                | {"revision": accepted.json()["revision"]},
             )
             assert rejected.status_code == 426, rejected.text
             assert rejected.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
@@ -404,7 +406,8 @@ class TestSettingsRoutes:
                 "/v2/settings",
                 json=_settings_body(
                     {"default_recognition_mode": "paddle_structure", "topic": 2}
-                ),
+                )
+                | {"revision": put.json()["revision"]},
             )
         assert changed.status_code == 426
         assert changed.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
@@ -448,7 +451,8 @@ class TestSettingsRoutes:
                 "/v2/settings",
                 json=_settings_body(
                     {"default_recognition_mode": "windows_text", "topic": 2}
-                ),
+                )
+                | {"revision": same_value.json()["revision"]},
             )
             assert changed.status_code == 200
             # 回到失效值（值变更）再次触发可用性校验。
@@ -456,7 +460,8 @@ class TestSettingsRoutes:
                 "/v2/settings",
                 json=_settings_body(
                     {"default_recognition_mode": "paddle_structure", "topic": 2}
-                ),
+                )
+                | {"revision": changed.json()["revision"]},
             )
             assert stale.status_code == 426
             assert stale.json()["code"] == "RECOGNITION_MODE_UNAVAILABLE"
@@ -598,6 +603,7 @@ class TestPersistenceAndModuleSeam:
         # 同值重写（其他字段变化）不触发可用性校验；未知 id 仍恒定拒绝。
         pdf_module.update_settings(
             SettingsSnapshot(
+                revision=pdf_module.settings().revision,
                 paddle_idle_seconds=120,
                 extra={"default_recognition_mode": "windows_text"},
             )
@@ -605,7 +611,10 @@ class TestPersistenceAndModuleSeam:
         assert pdf_module.settings().paddle_idle_seconds == 120
         with pytest.raises(RecognitionModeError):
             pdf_module.update_settings(
-                SettingsSnapshot(extra={"default_recognition_mode": "not_a_mode"})
+                SettingsSnapshot(
+                    revision=pdf_module.settings().revision,
+                    extra={"default_recognition_mode": "not_a_mode"},
+                )
             )
         assert pdf_module.settings().extra["default_recognition_mode"] == "windows_text"
 

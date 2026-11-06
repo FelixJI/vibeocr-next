@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from vibeocr.runtime.environments.settings_store import RuntimeSettingsStore
+from vibeocr.runtime.environments.product_runtime import prepare_product_runtime
 from vibeocr.runtime.host.bootstrap import (
     BootstrapHandle,
     ReadyEnvelope,
@@ -45,16 +45,6 @@ from vibeocr.runtime_contracts.generated import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
 )
-
-
-def _settings_store_from_environment() -> RuntimeSettingsStore | None:
-    configured = os.environ.get("VIBEOCR_SUPERVISOR_SETTINGS")
-    if configured:
-        return RuntimeSettingsStore(Path(configured))
-    root = os.environ.get("VIBEOCR_SUP_ROOT")
-    if root:
-        return RuntimeSettingsStore(Path(root) / "supervisor-settings.json")
-    return None
 
 
 def _write_self_test_result() -> None:
@@ -103,12 +93,21 @@ def run_supervisor(
         # Without a token we cannot safely serve; fail fast.
         sys.stderr.write("vibeocr-supervisor: missing VIBEOCR_SUP_TOKEN\n")
         return 2
+    if os.environ.get("VIBEOCR_PRODUCT_RUNTIME") != "1":
+        sys.stderr.write("识别服务必须由随包产品 Runtime 启动。\n")
+        return 3
+    try:
+        settings_store = prepare_product_runtime()
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+        sys.stderr.write(
+            f"产品 Runtime 无法启动，请检查设置或重新解压完整产品包：{exc}\n"
+        )
+        return 3
     handle = BootstrapHandle(token)
     sock = bind_loopback_socket()
     port = sock.getsockname()[1]
     root_env = os.environ.get("VIBEOCR_SUP_ROOT")
     stager_root = Path(root_env) if root_env else None
-    settings_store = _settings_store_from_environment()
 
     module, _ = build_supervisor(
         instance_id=instance_id,

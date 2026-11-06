@@ -185,7 +185,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
     }
     throw new RecognitionModeUnavailableException(selection is null
       ? $"任务识别模式 {taskEngine} 需要的识别模式目录尚未加载（运行环境可能未就绪），已拒绝按通用文字识别执行；请在设置中检查运行环境后重试。"
-      : $"当前运行环境不支持识别模式 {taskEngine}，已拒绝按通用文字识别执行；请切换或准备对应运行环境。");
+      : $"当前运行环境不支持识别模式 {taskEngine}，已拒绝按通用文字识别执行；请在设置中检查识别服务或选择可用模式。");
   }
 
   /// <summary>
@@ -199,7 +199,7 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
   internal async Task<bool> EnsureSelectionLoadedAsync(CancellationToken cancellationToken)
   {
     settingsOwner.EnsureModel();
-    if (settingsOwner.IsEnvironmentSwitching) return false;
+    if (settingsOwner.IsDeviceChanging) return false;
     if (inferenceAttached?.Invoke() == false)
     {
       return false;
@@ -221,16 +221,16 @@ internal sealed class WorkbenchSelectionOwner(Func<CancellationToken, Task>? ens
     settingsOwner.EnsureModel();
     if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
     settingsOwner.OnSettingsChanged();
-    if (settingsOwner.IsEnvironmentSwitching)
+    if (settingsOwner.IsDeviceChanging)
     {
-      AppLog.Warn("Recognition submit cancelled: environment switch refresh is still running.");
+      AppLog.Warn("Recognition submit cancelled: device change is still running.");
       return false;
     }
     bool loaded = await settingsOwner.EnsureModel().LoadSelectionAsync(cancellationToken);
-    bool switching = settingsOwner.IsEnvironmentSwitching;
+    bool switching = settingsOwner.IsDeviceChanging;
     if (!loaded || switching)
       AppLog.Warn(switching
-        ? "Recognition submit cancelled: environment switch began during catalog loading."
+        ? "Recognition submit cancelled: device change began during catalog loading."
         : "Recognition submit cancelled: catalog was invalidated during loading.");
     return loaded && !switching;
   }
