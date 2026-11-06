@@ -1311,16 +1311,32 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           ClearResultActions();
           recognitionChannel.SessionId = captureSession;
           recognitionChannel.Revision = 0;
-          recognitionChannel.TextSelectionRequested = textSelectionRequested;
+          recognitionChannel.TextSelectionRequested = false;
           recognitionChannel.SceneEditing = true;
           recognitionChannel.SessionInput = input;
           recognitionChannel.SessionResult = null;
           recognitionChannel.ExcludeBoxes = [];
           publishedSession = true;
-          ReleaseCaptureGuard();
           // #238 截图历史：会话确立即录入（含未钉图；捕获时未启用则不持键，
           // 之后启用也不追溯落盘）。
           recognitionChannel.HistoryCaptureKey = frozenHistoryKey;
+          // 只有明确取字在成功捕获后请求服务；普通截图和自动文字层仍保持冷态。
+          // 沿用识别等待的代际取消票据，让关闭/修订不会留下迟到的准备会话。
+          if (textSelectionRequested && inferenceAttached?.Invoke() is false)
+          {
+            recognitionChannel.RecognitionDemand = demand;
+            bool prepared = await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
+            if (!prepared)
+            {
+              ReleaseCaptureGuard();
+              operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.cancelled"));
+              return;
+            }
+          }
+          recognitionChannel.TextSelectionRequested = textSelectionRequested;
+          ReleaseCaptureGuard();
           operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.session"));
         }
         else
@@ -1362,6 +1378,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       {
         capturedInput?.DisposeCaptureScene();
         if (ReferenceEquals(recognitionChannel.CaptureDemand, demand)) recognitionChannel.CaptureDemand = null;
+        if (ReferenceEquals(recognitionChannel.RecognitionDemand, demand)) recognitionChannel.RecognitionDemand = null;
         demand.Dispose();
         ScreenshotCaptureFinished?.Invoke();
       }

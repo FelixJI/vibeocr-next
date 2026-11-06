@@ -1112,6 +1112,148 @@ public sealed class ScreenshotSessionWorkbenchTests
     finally { Directory.Delete(root, recursive: true); }
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ExplicitTextCapturePreparesRuntimeAfterCapture(bool preparationFails)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var inputs = new FixedCaptureInput();
+    var recognition = new RecognitionViewModel(inference, inputs);
+    bool attached = false;
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => attached,
+      ensureRuntimeReady: _ =>
+      {
+        Assert.Equal(1, inputs.CaptureCalls);
+        Assert.NotNull(recognition.CurrentInput);
+        preparations++;
+        if (preparationFails) throw new IOException("Synthetic preparation failed.");
+        attached = true;
+        return Task.CompletedTask;
+      });
+    using var completed = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && state.ScreenshotSession is not null);
+    Assert.Null((await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(),
+      TestContext.Current.CancellationToken)).Error);
+    RecognitionWorkbenchState state = await completed.Task;
+    Assert.Equal(1, preparations);
+    Assert.Equal(preparationFails ? "recognition.failed" : "recognition.session", state.StatusCode);
+    Assert.Equal(!preparationFails, state.ScreenshotSession!.TextSelectionRequested);
+    Assert.NotNull(state.Input);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Fact]
+  public async Task FailedTextPreparationKeepsCapturedHistoryOwnership()
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput
+    { Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8) });
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    var history = new PinHistoryStore(root);
+    history.SetEnabled(true);
+    bool preparationFails = true;
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => !preparationFails,
+      pinHistory: history, ensureRuntimeReady: _ => preparationFails
+        ? throw new IOException("Synthetic preparation failed.") : Task.CompletedTask);
+    using var failed = new RecognitionStateAwaiter(handler,
+      state => !state.IsBusy && state.StatusCode == "recognition.failed");
+    await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+    RecognitionWorkbenchState state = await failed.Task;
+    PinHistoryEntryState original = Assert.Single(history.Projection(null).Entries);
+    preparationFails = false;
+    WorkbenchAnnotationLease edited = UploadAnnotation(annotations, AnnotationPng);
+    using var completed = new RecognitionStateAwaiter(handler,
+      value => !value.IsBusy && value.Result is not null);
+    Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(
+      edited.ResourceUri.AbsoluteUri, Guid.Parse(state.ScreenshotSession!.SessionId), 0, []),
+      TestContext.Current.CancellationToken)).Error);
+    await completed.Task;
+    PinHistoryEntryState updated = Assert.Single(history.Projection("selection").Entries);
+    Assert.Equal(original.EntryId, updated.EntryId);
+    Assert.NotEmpty(updated.RecognizedText!);
+    Assert.Single(inference.Requests);
+    await AssertHistoryImageAsync(history, HistoryPixels);
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RejectedExplicitTextCaptureDoesNotPrepareRuntime(bool failed)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var inputs = new FixedCaptureInput { FailCapture = failed, CancelCapture = !failed };
+    var recognition = new RecognitionViewModel(inference, inputs);
+    int preparations = 0;
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => false,
+      ensureRuntimeReady: _ => { preparations++; return Task.CompletedTask; });
+    using var completed = new RecognitionStateAwaiter(handler, state => !state.IsBusy);
+    await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+    Assert.Null((await completed.Task).ScreenshotSession);
+    Assert.Equal(0, preparations);
+    Assert.Empty(inference.Requests);
+  }
+
+  [Theory]
+  [InlineData("cancel")]
+  [InlineData("close")]
+  [InlineData("dispose")]
+  public async Task ExplicitTextCaptureCancelsOwnedPreparation(string action)
+  {
+    string root = TemporaryRoot();
+    var inference = new CompletedImageSelectionClient();
+    var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var cleanup = new CancellationTokenSource();
+    using var broker = new WorkbenchResourceBroker(root);
+    using var annotations = new WorkbenchAnnotationStore(root);
+    await using var handler = CreateHandler(recognition, root, broker, annotations,
+      new SettingsViewModel(inference), inferenceAttached: () => false,
+      ensureRuntimeReady: async ct =>
+      {
+        using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct, cleanup.Token);
+        using var registration = ct.Register(() => cancelled.TrySetResult());
+        entered.TrySetResult();
+        await Task.Delay(Timeout.Infinite, wait.Token);
+      });
+    try
+    {
+      await handler.ExecuteAsync(new CaptureScreenshotTextSessionCommand(), TestContext.Current.CancellationToken);
+      await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      if (action == "dispose") await handler.DisposeAsync();
+      else
+      {
+        WorkbenchCommand command = action == "close"
+          ? new CloseScreenshotSessionCommand() : new CancelRecognitionCommand();
+        WorkbenchCommandOutcome outcome = await handler.ExecuteAsync(command, TestContext.Current.CancellationToken);
+        Assert.Null(outcome.Error);
+        RecognitionWorkbenchState state = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(outcome.States));
+        if (action == "close") Assert.Null(state.ScreenshotSession);
+        else
+        {
+          Assert.NotNull(state.Input);
+          Assert.False(state.ScreenshotSession!.TextSelectionRequested);
+        }
+      }
+      await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Empty(inference.Requests);
+    }
+    finally { cleanup.Cancel(); }
+  }
+
   [Fact]
   public async Task TextCaptureIntentDoesNotLeakIntoNextNativePureCapture()
   {
