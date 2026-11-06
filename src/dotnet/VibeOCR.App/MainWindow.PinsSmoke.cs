@@ -49,6 +49,9 @@ public sealed partial class MainWindow
       () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
     using var secondPin = new PinnedImageWindow(secondImage, pinSession, 0, pinLayer, [],
       () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
+    int doubleTaps = 0;
+    Action stopFirstTap = pin.SmokeObserveDoubleTap(() => doubleTaps++);
+    Action stopSecondTap = secondPin.SmokeObserveDoubleTap(() => doubleTaps++);
     var failures = new List<string>();
     void CheckClient(string phase)
     {
@@ -85,6 +88,7 @@ public sealed partial class MainWindow
           throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch.");
       }
       CaptureUiSmokeTrace.Stage("pins.alternating-band-drags");
+      if (doubleTaps != 0) throw new InvalidOperationException("Pin activation/drag caused DoubleTapped.");
       // #319 菜单可见性契约最小复现：ShowAt 的 Opened/IsOpen 相对单次 WebView
       // 往返异步，与取字 e2e 同一契约，用有界等待真实状态而非固定 sleep。
       pin.SmokeRevealActions();
@@ -121,7 +125,7 @@ public sealed partial class MainWindow
       if (failures.Count != 0)
         throw new InvalidOperationException("Pin physical client mismatch: " + string.Join("; ", failures));
     }
-    finally { secondPin.ForceClose(); pin.ForceClose(); }
+    finally { stopSecondTap(); stopFirstTap(); secondPin.ForceClose(); pin.ForceClose(); }
   }
 
   internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;

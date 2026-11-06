@@ -46,6 +46,8 @@ internal sealed class PinnedImageWindow : IDisposable
   private const int SmCxSizeFrame = 32;
   private const int SmCySizeFrame = 33;
   private const int SmCxPaddedBorder = 92;
+  private const int SmCxDoubleClick = 36;
+  private const int SmCyDoubleClick = 37;
   private const uint GaRoot = 2;
   private const uint SwpNoSize = 0x0001;
   private const uint SwpNoZOrder = 0x0004;
@@ -371,26 +373,108 @@ internal sealed class PinnedImageWindow : IDisposable
   }
   /// <summary>模拟任务栏还原：最小化后由系统还原路径回到正常状态。</summary>
   internal void SmokeRestoreFromMinimized() => presenter.Restore();
+  internal Action SmokeObserveDoubleTap(Action observed)
+  {
+    DoubleTappedEventHandler handler = (_, _) => observed();
+    band.DoubleTapped += handler;
+    return () => band.DoubleTapped -= handler;
+  }
+  private async Task<int> SmokePrepareMouseActionAsync(PointL actionPoint)
+  {
+    nint handle = Handle;
+    int readyAttempts = 40;
+    bool LeftDown() => (GetAsyncKeyState(1) & 0x8000) != 0;
+    while ((dragOrigin is not null || LeftDown()) && readyAttempts > 0)
+    {
+      readyAttempts--;
+      await Task.Delay(25);
+    }
+    if (dragOrigin is not null || LeftDown())
+      throw new InvalidOperationException("Previous pin mouse input has not released.");
+    if (GetForegroundWindow() == handle) return readyAttempts;
+
+    root.UpdateLayout();
+    var dip = band.TransformToVisual(root).TransformBounds(new Windows.Foundation.Rect(0, 0, band.ActualWidth, band.ActualHeight));
+    uint dpi = GetDpiForWindow(handle);
+    if (dpi == 0 || dip.Width <= 0 || dip.Height <= 0)
+      throw new InvalidOperationException("Pin activation band has no physical layout.");
+    PointL origin = new();
+    if (!ClientToScreen(handle, ref origin) || !GetWindowRect(handle, out RectL before))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    bool wasMaximized = IsZoomed(handle);
+    var activationDip = new Windows.Foundation.Point(dip.X + dip.Width * 0.75, dip.Y + dip.Height / 2);
+    DependencyObject? hit = VisualTreeHelper.FindElementsInHostCoordinates(activationDip, root).FirstOrDefault();
+    while (hit != band)
+    {
+      if (hit is null or ButtonBase or Slider or ScrollBar or TextBox)
+        throw new InvalidOperationException("Pin activation point is not its empty band.");
+      hit = VisualTreeHelper.GetParent(hit);
+    }
+    var activationPoint = new PointL
+    {
+      X = origin.X + (int)Math.Round(activationDip.X * dpi / 96.0),
+      Y = origin.Y + (int)Math.Round(activationDip.Y * dpi / 96.0),
+    };
+    int doubleWidth = GetSystemMetricsForDpi(SmCxDoubleClick, dpi);
+    int doubleHeight = GetSystemMetricsForDpi(SmCyDoubleClick, dpi);
+    if (doubleWidth <= 0 || doubleHeight <= 0 ||
+        (Math.Abs(activationPoint.X - actionPoint.X) <= doubleWidth && Math.Abs(activationPoint.Y - actionPoint.Y) <= doubleHeight))
+      throw new InvalidOperationException("Pin activation and action points overlap the double-click area.");
+    nint hitRoot = GetAncestor(WindowFromPoint(activationPoint), GaRoot);
+    if (hitRoot != handle)
+      throw new InvalidOperationException($"Pin activation point is covered: handle=0x{(long)handle:X}, hitRoot=0x{(long)hitRoot:X}.");
+
+    bool doubleTapped = false, activationReleased = false;
+    DoubleTappedEventHandler tapped = (_, _) => doubleTapped = true;
+    PointerEventHandler released = (_, args) =>
+    {
+      var point = args.GetCurrentPoint(root);
+      if (!point.Properties.IsLeftButtonPressed &&
+          Math.Abs(origin.X + point.Position.X * dpi / 96.0 - activationPoint.X) <= 1 &&
+          Math.Abs(origin.Y + point.Position.Y * dpi / 96.0 - activationPoint.Y) <= 1)
+        activationReleased = true;
+    };
+    root.AddHandler(UIElement.PointerReleasedEvent, released, true);
+    band.DoubleTapped += tapped;
+    try
+    {
+      // The first click can only activate WinUI; keep it separate from the action.
+      bool down = false;
+      try
+      {
+        if (!SetCursorPos(activationPoint.X, activationPoint.Y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
+        down = true;
+      }
+      finally { if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0); }
+      while ((!activationReleased || GetForegroundWindow() != handle || dragOrigin is not null || LeftDown()) && readyAttempts > 0)
+      {
+        readyAttempts--;
+        await Task.Delay(25);
+      }
+      if (!activationReleased || GetForegroundWindow() != handle || dragOrigin is not null || LeftDown())
+        throw new InvalidOperationException($"Pin activation release did not arrive: released={activationReleased}, " +
+          $"fg=0x{(long)GetForegroundWindow():X}, origin={dragOrigin}.");
+      if (!GetWindowRect(handle, out RectL after)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      if (doubleTapped || before.Left != after.Left || before.Top != after.Top || before.Right != after.Right || before.Bottom != after.Bottom ||
+          IsZoomed(handle) != wasMaximized || GetDpiForWindow(handle) != dpi)
+        throw new InvalidOperationException("Pin activation click changed geometry or maximized state.");
+      CaptureUiSmokeTrace.Stage($"pins.mouse-activation-ready: handle=0x{(long)handle:X}, activation=({activationPoint.X},{activationPoint.Y}), " +
+        $"action=({actionPoint.X},{actionPoint.Y}), unchanged=True, doubleTapped=False, pollsLeft={readyAttempts}");
+      return readyAttempts;
+    }
+    finally
+    {
+      root.RemoveHandler(UIElement.PointerReleasedEvent, released);
+      band.DoubleTapped -= tapped;
+    }
+  }
   internal async Task SmokeDragTitleBarAsync(int dx, int dy)
   {
     // Use the laid-out band: estimating from the outer frame can hit a button.
     // PointerPressed must capture the live cursor before the mouse moves.
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     window.Activate();
-    // Window.Activate can leave another process foreground, consuming the first press.
-    if (!SetForegroundWindow(handle))
-      throw new InvalidOperationException($"Pin foreground activation was refused: handle=0x{(long)handle:X}, " +
-        $"fg=0x{(long)GetForegroundWindow():X}.");
-    // Foreground activation and PointerPressed share the original polling budget.
-    int readyAttempts = 40;
-    while (GetForegroundWindow() != handle && readyAttempts > 0)
-    {
-      readyAttempts--;
-      await Task.Delay(25);
-    }
-    if (GetForegroundWindow() != handle)
-      throw new InvalidOperationException($"Pin did not become foreground before the drag: handle=0x{(long)handle:X}, " +
-        $"fg=0x{(long)GetForegroundWindow():X}.");
     if (!GetWindowRect(handle, out RectL bounds))
       throw new Win32Exception(Marshal.GetLastWin32Error());
     uint dpi = GetDpiForWindow(handle);
@@ -413,6 +497,7 @@ internal sealed class PinnedImageWindow : IDisposable
     }
     int x = clientOrigin.X + (int)Math.Round(dragPoint.X * dpi / 96.0);
     int y = clientOrigin.Y + (int)Math.Round(dragPoint.Y * dpi / 96.0);
+    int readyAttempts = await SmokePrepareMouseActionAsync(new PointL { X = x, Y = y });
     string geometry = $"handle=0x{(long)handle:X}, rect=({bounds.Left},{bounds.Top}," +
       $"{bounds.Right},{bounds.Bottom}), band={bandDip}, dpi={dpi}, point=({x},{y})";
     nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
@@ -458,18 +543,6 @@ internal sealed class PinnedImageWindow : IDisposable
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     // A restored sibling can cover this pin even when both are topmost.
     window.Activate();
-    if (!SetForegroundWindow(handle))
-      throw new InvalidOperationException($"Pin close foreground activation was refused: handle=0x{(long)handle:X}, " +
-        $"fg=0x{(long)GetForegroundWindow():X}.");
-    bool activated = false;
-    for (int attempt = 0; attempt < 40; attempt++)
-    {
-      if (GetForegroundWindow() == handle) { activated = true; break; }
-      await Task.Delay(25);
-    }
-    if (!activated)
-      throw new InvalidOperationException($"Pin close target did not activate: handle=0x{(long)handle:X}, " +
-        $"fg=0x{(long)GetForegroundWindow():X}.");
     root.UpdateLayout();
     Windows.Foundation.Rect dip = closeButton.TransformToVisual(root).TransformBounds(
       new Windows.Foundation.Rect(0, 0, closeButton.ActualWidth, closeButton.ActualHeight));
@@ -480,6 +553,7 @@ internal sealed class PinnedImageWindow : IDisposable
       throw new Win32Exception(Marshal.GetLastWin32Error());
     int x = origin.X + (int)Math.Round((dip.X + dip.Width / 2) * dpi / 96.0);
     int y = origin.Y + (int)Math.Round((dip.Y + dip.Height / 2) * dpi / 96.0);
+    _ = await SmokePrepareMouseActionAsync(new PointL { X = x, Y = y });
     string geometry = $"handle=0x{(long)handle:X}, button=({dip.X:F1},{dip.Y:F1}," +
       $"{dip.Width:F1}x{dip.Height:F1}), dpi={dpi}, point=({x},{y})";
     nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
@@ -1630,8 +1704,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private static extern nint GetForegroundWindow();
 
   [DllImport("user32.dll")]
-  [return: MarshalAs(UnmanagedType.Bool)]
-  private static extern bool SetForegroundWindow(nint window);
+  private static extern short GetAsyncKeyState(int key);
 
 
   [DllImport("user32.dll", SetLastError = true)]
