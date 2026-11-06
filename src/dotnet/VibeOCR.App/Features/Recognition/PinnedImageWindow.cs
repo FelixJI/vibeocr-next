@@ -377,6 +377,20 @@ internal sealed class PinnedImageWindow : IDisposable
     // PointerPressed must capture the live cursor before the mouse moves.
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     window.Activate();
+    // Window.Activate can leave another process foreground, consuming the first press.
+    if (!SetForegroundWindow(handle))
+      throw new InvalidOperationException($"Pin foreground activation was refused: handle=0x{(long)handle:X}, " +
+        $"fg=0x{(long)GetForegroundWindow():X}.");
+    // Foreground activation and PointerPressed share the original polling budget.
+    int readyAttempts = 40;
+    while (GetForegroundWindow() != handle && readyAttempts > 0)
+    {
+      readyAttempts--;
+      await Task.Delay(25);
+    }
+    if (GetForegroundWindow() != handle)
+      throw new InvalidOperationException($"Pin did not become foreground before the drag: handle=0x{(long)handle:X}, " +
+        $"fg=0x{(long)GetForegroundWindow():X}.");
     if (!GetWindowRect(handle, out RectL bounds))
       throw new Win32Exception(Marshal.GetLastWin32Error());
     uint dpi = GetDpiForWindow(handle);
@@ -412,7 +426,7 @@ internal sealed class PinnedImageWindow : IDisposable
       MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
       down = true;
       bool activated = false;
-      for (int attempt = 0; attempt < 40; attempt++)
+      for (int attempt = 0; attempt < readyAttempts; attempt++)
       {
         if (GetForegroundWindow() == handle && dragOrigin is not null) { activated = true; break; }
         await Task.Delay(25);
@@ -444,6 +458,9 @@ internal sealed class PinnedImageWindow : IDisposable
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     // A restored sibling can cover this pin even when both are topmost.
     window.Activate();
+    if (!SetForegroundWindow(handle))
+      throw new InvalidOperationException($"Pin close foreground activation was refused: handle=0x{(long)handle:X}, " +
+        $"fg=0x{(long)GetForegroundWindow():X}.");
     bool activated = false;
     for (int attempt = 0; attempt < 40; attempt++)
     {
@@ -1611,6 +1628,11 @@ internal sealed class PinnedImageWindow : IDisposable
 
   [DllImport("user32.dll")]
   private static extern nint GetForegroundWindow();
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool SetForegroundWindow(nint window);
+
 
   [DllImport("user32.dll", SetLastError = true)]
   [return: MarshalAs(UnmanagedType.Bool)]

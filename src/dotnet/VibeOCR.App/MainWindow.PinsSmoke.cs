@@ -76,6 +76,15 @@ public sealed partial class MainWindow
         throw new InvalidOperationException($"Pin band drag moved " +
           $"({afterDrag.X - beforeDrag.X},{afterDrag.Y - beforeDrag.Y}) instead of (40,30).");
       CaptureUiSmokeTrace.Stage("pins.band-drag");
+      foreach (PinnedImageWindow target in new[] { secondPin, pin })
+      {
+        var before = target.SmokePosition;
+        await target.SmokeDragTitleBarAsync(40, 30);
+        var after = target.SmokePosition;
+        if (after.X != before.X + 40 || after.Y != before.Y + 30)
+          throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch.");
+      }
+      CaptureUiSmokeTrace.Stage("pins.alternating-band-drags");
       // #319 菜单可见性契约最小复现：ShowAt 的 Opened/IsOpen 相对单次 WebView
       // 往返异步，与取字 e2e 同一契约，用有界等待真实状态而非固定 sleep。
       pin.SmokeRevealActions();
