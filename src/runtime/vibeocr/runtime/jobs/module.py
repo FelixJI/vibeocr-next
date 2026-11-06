@@ -125,6 +125,11 @@ class ShutdownRequested(Exception):
     """Raised when an operation is attempted on a draining/shutdown module."""
 
 
+def _require_request_active(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise ValueError("请求已取消。")
+
+
 class SupervisorModule:
     """Process-wide supervisor orchestrator (UI-free)."""
 
@@ -315,8 +320,10 @@ class SupervisorModule:
         request_id: str | None = None,
         pipeline: PipelineSelection | None = None,
         client_items: tuple[SubmitItem, ...] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> JobRef:
         with self._lock:
+            _require_request_active(cancelled)
             if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             from vibeocr.runtime.recognition.paddle_onnx import (
@@ -359,6 +366,7 @@ class SupervisorModule:
                     )
                 except PaddleOnnxError as exc:
                     raise ContractError(str(exc)) from exc
+            _require_request_active(cancelled)
             # Allocate a job id first so staging lives under the real job dir.
             job_id = new_job_id()
             staged, items = self.stager.stage_job_with_item_errors(job_id, uploads)
@@ -378,11 +386,13 @@ class SupervisorModule:
                 ]
             if self._product_job_leases is not None:
                 try:
+                    _require_request_active(cancelled)
                     self._product_job_leases.admit(job_id)
                 except BaseException:
                     self.stager.release(job_id)
                     raise
             try:
+                _require_request_active(cancelled)
                 record = self.registry.create(
                     kind=kind,
                     priority=priority,
@@ -427,6 +437,8 @@ class SupervisorModule:
         self,
         request: SubmitRequest,
         attachments: dict[str, tuple[str | None, bytes]],
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> JobRef:
         """Submit a strict logical manifest through the deep job interface."""
         uploads: list[tuple[str, str | None, bytes]] = []
@@ -453,6 +465,7 @@ class SupervisorModule:
             request_id=request.request_id,
             pipeline=request.pipeline,
             client_items=request.items,
+            cancelled=cancelled,
         )
 
     def _dispatch(self, record: JobRecord, staged: list[StagedInput]) -> None:
@@ -613,8 +626,11 @@ class SupervisorModule:
         mode = self._executor.cancel_mode_for(record)
         return self.registry.request_cancel(job_id, mode=mode)
 
-    def retry(self, job_id: str) -> JobRef:
+    def retry(
+        self, job_id: str, *, cancelled: Callable[[], bool] | None = None
+    ) -> JobRef:
         with self._lock:
+            _require_request_active(cancelled)
             if self._draining or self._shutdown:
                 raise ShutdownRequested("supervisor is draining")
             source = self.registry.get(job_id)
@@ -636,10 +652,12 @@ class SupervisorModule:
                 raise InputExpiredError(
                     "retry input expired or unavailable: " + ", ".join(missing)
                 )
+            _require_request_active(cancelled)
             retry_job_id = new_job_id()
             if self._product_job_leases is not None:
                 self._product_job_leases.admit(retry_job_id)
             try:
+                _require_request_active(cancelled)
                 new_record = self.registry.create_retry(job_id, job_id=retry_job_id)
             except BaseException:
                 if self._product_job_leases is not None:

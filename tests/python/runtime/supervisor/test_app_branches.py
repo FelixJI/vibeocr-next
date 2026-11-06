@@ -586,6 +586,172 @@ async def test_device_stop_keeps_http_loop_responsive(
             assert after["recognition_device"] == "cpu"
 
 
+@pytest.mark.parametrize("operation", ["submit", "retry"])
+@pytest.mark.parametrize("interruption", ["task_cancel", "disconnect"])
+async def test_abandoned_job_http_request_cannot_admit_after_device_stop(
+    pdf_app,
+    pdf_module,
+    supervisor_token,
+    tmp_path,
+    monkeypatch,
+    operation,
+    interruption,
+):
+    import asyncio
+    import json
+    import threading
+
+    from vibeocr.runtime.environments.product_job_leases import ProductJobLeases
+    from vibeocr.runtime.recognition import device_probe
+    from vibeocr.runtime_contracts import JobKind, JobPriority, JobState
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setenv("VIBEOCR_RECOGNITION_DEVICE", "auto")
+    monkeypatch.setattr(device_probe, "prepare_device", lambda _: None)
+    leases = ProductJobLeases(tmp_path / "product-leases")
+    monkeypatch.setattr(pdf_module, "_product_job_leases", leases)
+    executed = threading.Event()
+
+    def fail_source(record, staged):
+        record.transition(JobState.RUNNING)
+        record.commit_item_failure(
+            record.items[0].item_id, error_code="TEST", error="synthetic retry source"
+        )
+        record.transition(JobState.COMPLETED_WITH_ERRORS)
+        executed.set()
+
+    monkeypatch.setattr(pdf_module._executor, "execute", fail_source)
+    if operation == "retry":
+        source = pdf_module.submit(
+            kind=JobKind.RECOGNITION,
+            priority=JobPriority.INTERACTIVE,
+            uploads=[("source.png", "image/png", b"source")],
+        )
+        assert await asyncio.to_thread(executed.wait, 5)
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1/v2/jobs/command",
+            json={"command_id": "retry", "kind": "retry", "job_id": source.job_id},
+        )
+    else:
+        manifest = {
+            "schema_version": 2,
+            "request_id": "unfinished",
+            "kind": "recognition",
+            "priority": "interactive",
+            "pipeline": {"pipeline_id": "OCR", "options_version": 1, "options": {}},
+            "items": [
+                {
+                    "client_item_key": "k",
+                    "ordinal": 0,
+                    "display_name": "a.png",
+                    "source": {"type": "upload.v1", "attachment": "f"},
+                }
+            ],
+        }
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1/v2/jobs",
+            data={"manifest": json.dumps(manifest)},
+            files={"f": ("a.png", b"input", "image/png")},
+        )
+    original_jobs = {job.job_id for job in pdf_module.registry}
+    original_paths = set(pdf_module.stager.root.rglob("*"))
+    admitted = []
+    original_admit = leases.admit
+
+    def admit(job_id):
+        admitted.append(job_id)
+        original_admit(job_id)
+
+    monkeypatch.setattr(leases, "admit", admit)
+    dispatched = []
+    original_dispatch = pdf_module._dispatch
+
+    def dispatch(record, staged):
+        dispatched.append(record.job_id)
+        original_dispatch(record, staged)
+
+    monkeypatch.setattr(pdf_module, "_dispatch", dispatch)
+    stopping = asyncio.Event()
+    resume = threading.Event()
+    original_stop = pdf_module._executor.release_idle
+
+    def stop(scope):
+        loop.call_soon_threadsafe(stopping.set)
+        assert resume.wait(10)
+        return original_stop(scope)
+
+    monkeypatch.setattr(pdf_module._executor, "release_idle", stop)
+    entered, finished = asyncio.Event(), asyncio.Event()
+    method = "submit_request" if operation == "submit" else "retry"
+    original = getattr(pdf_module, method)
+
+    def queued(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(pdf_module, method, queued)
+    messages = asyncio.Queue()
+    messages.put_nowait(
+        {"type": "http.request", "body": await request.aread(), "more_body": False}
+    )
+    disconnected = asyncio.Event()
+
+    async def receive():
+        message = await messages.get()
+        if message["type"] == "http.disconnect":
+            disconnected.set()
+        return message
+
+    async def send(message):
+        pass  # Simulate a peer which no longer accepts the response.
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": request.url.path,
+        "raw_path": request.url.raw_path,
+        "query_string": b"",
+        "root_path": "",
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 80),
+        "headers": [(key.lower(), value) for key, value in request.headers.raw]
+        + [(b"authorization", f"Bearer {supervisor_token}".encode())],
+    }
+    async with _http(supervisor_token, pdf_app) as http:
+        before = (await http.get("/v2/settings")).json()
+        saving = asyncio.create_task(
+            http.put("/v2/settings", json={**before, "recognition_device": "cpu"})
+        )
+        try:
+            await asyncio.wait_for(stopping.wait(), 5)
+            job_request = asyncio.create_task(pdf_app(scope, receive, send))
+            await asyncio.wait_for(entered.wait(), 5)
+            if interruption == "task_cancel":
+                job_request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await job_request
+            else:
+                messages.put_nowait({"type": "http.disconnect"})
+                await asyncio.wait_for(disconnected.wait(), 3)
+        finally:
+            resume.set()
+            assert (await saving).status_code == 200
+            await asyncio.wait_for(finished.wait(), 5)
+            if not job_request.cancelled():
+                await job_request
+        assert admitted == [] and dispatched == []
+        assert {job.job_id for job in pdf_module.registry} == original_jobs
+        assert set(pdf_module.stager.root.rglob("*")) == original_paths
+
+
 async def test_cancelled_device_probe_keeps_committed_settings(
     pdf_app, supervisor_token, monkeypatch
 ):

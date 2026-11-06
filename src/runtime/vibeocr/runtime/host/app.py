@@ -11,7 +11,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import cache
 from importlib.resources import files
@@ -255,6 +255,29 @@ class _PdfBadRequest(Exception):
     """Raised when a PDF route receives an unparseable/invalid body."""
 
 
+@asynccontextmanager
+async def _request_cancellation(request: Request):
+    # The body has been consumed. Observe its peer until the work in the
+    # thread reaches its own commit/admission fence.
+    if await request.is_disconnected():
+        raise ValueError("请求已取消。")
+    cancelled = threading.Event()
+
+    async def watch_disconnect() -> None:
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+        cancelled.set()
+
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        yield cancelled.is_set
+    finally:
+        cancelled.set()
+        watcher.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher
+
+
 def create_app(
     module: SupervisorModule,
     session_token: str,
@@ -390,7 +413,10 @@ def create_app(
                     getattr(upload, "content_type", None),
                     await upload.read(),
                 )
-            ref = await asyncio.to_thread(module.submit_request, manifest, attachments)
+            async with _request_cancellation(request) as cancelled:
+                ref = await asyncio.to_thread(
+                    module.submit_request, manifest, attachments, cancelled=cancelled
+                )
         except MineruConfigError as exc:
             return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
         except RecognitionModeError as exc:
@@ -481,7 +507,10 @@ def create_app(
                     "job_ref": None,
                 }
             if command.kind is JobCommandKind.RETRY:
-                ref = await asyncio.to_thread(module.retry, command.job_id)
+                async with _request_cancellation(request) as cancelled:
+                    ref = await asyncio.to_thread(
+                        module.retry, command.job_id, cancelled=cancelled
+                    )
                 return {
                     "schema_version": SCHEMA_VERSION,
                     "instance_id": instance_id,
@@ -700,29 +729,14 @@ def create_app(
             prepared = await asyncio.to_thread(
                 module.prepare_recognition_device, snapshot
             )
-            if await request.is_disconnected():
-                raise ValueError("设置保存已取消。")
-            cancelled = threading.Event()
-
-            async def watch_disconnect() -> None:
-                while (await request.receive())["type"] != "http.disconnect":
-                    pass
-                cancelled.set()
-
-            watcher = asyncio.create_task(watch_disconnect())
-            try:
+            async with _request_cancellation(request) as cancelled:
                 committed = await asyncio.to_thread(
                     module.update_settings,
                     snapshot,
                     prepared=prepared,
-                    cancelled=cancelled.is_set,
+                    cancelled=cancelled,
                 )
                 return committed.to_payload()
-            finally:
-                cancelled.set()
-                watcher.cancel()
-                with suppress(asyncio.CancelledError):
-                    await watcher
         except RuntimeSettingsStoreError as exc:
             return _error_response(
                 ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
