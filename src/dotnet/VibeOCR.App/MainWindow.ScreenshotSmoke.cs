@@ -194,8 +194,19 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Screenshot button unavailable.");
       return;
     }
-    if (await surface.CoreWebView2.ExecuteScriptAsync(ClickScript(label)) != "true")
+    RecognitionScreenshotSessionState? closingSession = null;
+    if (label == "结束会话")
+    {
+      closingSession = (await WaitForScreenshotStateAsync(_ => true, TimeSpan.FromSeconds(2))).ScreenshotSession;
+      if (closingSession is null)
+        throw new InvalidOperationException("Screenshot smoke has no active session to close.");
+    }
+    string result = await surface.CoreWebView2.ExecuteScriptAsync(ClickScript(label));
+    // Closing the scene can destroy its WebView before the script's true reply arrives.
+    if (result != "true" && !(closingSession is not null && result == "null"))
       throw new InvalidOperationException($"Screenshot smoke button unavailable: {label}");
+    if (closingSession is not null)
+      await WaitForScreenshotStateAsync(state => state.ScreenshotSession is null, TimeSpan.FromSeconds(15));
   }
   private async Task<RecognitionWorkbenchState> WaitForScreenshotStateAsync(
     Func<RecognitionWorkbenchState, bool> matches, TimeSpan timeout)

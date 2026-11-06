@@ -194,7 +194,7 @@ public sealed partial class MainWindow
       oldPins[0].SmokeSetOpacity(0.65);
       if (oldPins[0].SmokeNativeAlpha >= 255)
         throw new InvalidOperationException("Pin opacity did not change native window alpha.");
-      oldPins[0].SmokeDismissActions();
+      await oldPins[0].SmokeDismissActionsAsync();
       // 右上角窗口控制：置顶双向切换、最大化后原大小恢复 1:1 与客户区。
       oldPins[0].SmokeInvokeToggleTopmost();
       if (oldPins[0].SmokeAlwaysOnTop)
@@ -256,8 +256,6 @@ public sealed partial class MainWindow
       foreach (PinnedImageWindow pin in oldPins) await WaitForPinTextAsync(pin, present: false);
 
       await ClickSmokeButtonAsync("结束会话");
-      await WaitForScreenshotStateAsync(
-        state => state.ScreenshotSession is null, TimeSpan.FromSeconds(15));
       oldPins[0].SmokeInvokePrepareText();
       await WaitForPinTextAsync(oldPins[0], present: true);
       if (smokeSubmitAttempts() != 3 ||
@@ -290,7 +288,7 @@ public sealed partial class MainWindow
             $"client={actual.Width}x{actual.Height}, " +
             $"expected={expectedClient.Width}x{expectedClient.Height}";
       }, "Pin did not restore its original client size after minimize.");
-      oldPins[1].SmokeMouseClickCloseButton();
+      await oldPins[1].SmokeMouseClickCloseButtonAsync();
       await WaitForPinCountAsync(1);
       if (!oldPins[1].SmokeDisposed)
         throw new InvalidOperationException("Real-mouse close click did not close the pin.");
@@ -660,6 +658,11 @@ public sealed partial class MainWindow
   private static async Task<string> CopyPinSubstringAsync(PinnedImageWindow pin)
   {
     pin.SmokeRevealActions();
+    // ShowAt 的 Opened/IsOpen 相对单次 WebView 往返异步：先有界等待真实
+    // 打开与全不透明，再取几何；打开期间的原可见性断言保留并加上 IsOpen。
+    await UntilPinStateAsync(() => pin.SmokeActionsFlyoutOpen && pin.SmokeMoreButtonOpacity == 1
+      ? null : $"flyoutOpen={pin.SmokeActionsFlyoutOpen}, opacity={pin.SmokeMoreButtonOpacity}",
+      "Pinned actions menu did not reach its fully visible open state");
     string geometryJson = await pin.SmokeEvaluateAsync("""
       (() => {
         const span = [...document.querySelectorAll('.line span')]
@@ -675,7 +678,7 @@ public sealed partial class MainWindow
       })()
       """);
     using JsonDocument geometry = JsonDocument.Parse(geometryJson);
-    if (pin.SmokeMoreButtonOpacity != 1)
+    if (!pin.SmokeActionsFlyoutOpen || pin.SmokeMoreButtonOpacity != 1)
       throw new InvalidOperationException("Pinned actions must remain visible while their menu is open.");
     JsonElement root = geometry.RootElement;
     string expected = root.GetProperty("expected").GetString() ?? string.Empty;

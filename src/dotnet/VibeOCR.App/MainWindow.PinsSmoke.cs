@@ -41,7 +41,13 @@ public sealed partial class MainWindow
 
     using WorkbenchAnnotationFile original = await CreateImageAsync(976, 836);
     using WorkbenchAnnotationFile snapshot = await CreateImageAsync(800, 600);
-    using var pin = new PinnedImageWindow(original, Guid.NewGuid(), 0, null, [],
+    using WorkbenchAnnotationFile secondImage = await CreateImageAsync(976, 836);
+    Guid pinSession = Guid.NewGuid();
+    var pinLayer = new RecognitionTextLayerState("textlayer.ready", null, new(pinSession.ToString("N"), 0),
+      "paddle_text", "pins-smoke", null, [new("VibeOCR 123", 100, 100, 600, 200)]);
+    using var pin = new PinnedImageWindow(original, pinSession, 0, pinLayer, [],
+      () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
+    using var secondPin = new PinnedImageWindow(secondImage, pinSession, 0, pinLayer, [],
       () => Task.FromResult<RecognitionTextLayerState?>(null), () => "pins-smoke");
     var failures = new List<string>();
     void CheckClient(string phase)
@@ -57,8 +63,32 @@ public sealed partial class MainWindow
     {
       await pin.ShowAsync();
       await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeDocumentReady), "Geometry pin did not load.");
+      await secondPin.ShowAsync();
+      await WaitForPinCheckAsync(() => Task.FromResult(secondPin.SmokeDocumentReady), "Second geometry pin did not load.");
       CheckClient("initial");
       await UntilPinStageWidthAsync(pin, original.Width, "Initial pin stage lost physical 1:1 scale.");
+      // 直接拖动契约：与 text-selection e2e 同一真实鼠标路径 helper。真实按下
+      // 必须先被 band 处理，随后窗口按请求的物理位移精确移动。
+      var beforeDrag = pin.SmokePosition;
+      await pin.SmokeDragTitleBarAsync(40, 30);
+      var afterDrag = pin.SmokePosition;
+      if (afterDrag.X != beforeDrag.X + 40 || afterDrag.Y != beforeDrag.Y + 30)
+        throw new InvalidOperationException($"Pin band drag moved " +
+          $"({afterDrag.X - beforeDrag.X},{afterDrag.Y - beforeDrag.Y}) instead of (40,30).");
+      CaptureUiSmokeTrace.Stage("pins.band-drag");
+      // #319 菜单可见性契约最小复现：ShowAt 的 Opened/IsOpen 相对单次 WebView
+      // 往返异步，与取字 e2e 同一契约，用有界等待真实状态而非固定 sleep。
+      pin.SmokeRevealActions();
+      await UntilPinStateAsync(() => pin.SmokeActionsFlyoutOpen && pin.SmokeMoreButtonOpacity == 1
+        ? null : $"flyoutOpen={pin.SmokeActionsFlyoutOpen}, opacity={pin.SmokeMoreButtonOpacity}",
+        "Pinned actions menu did not reach its fully visible open state");
+      CaptureUiSmokeTrace.Stage("pins.actions-flyout-visible");
+      pin.SmokeInvokeZoomIn();
+      await UntilPinStageWidthAsync(pin, original.Width * pin.SmokeZoom, "Zoomed pin stage did not enlarge.");
+      pin.SmokeSetOpacity(0.65);
+      await pin.SmokeDismissActionsAsync();
+      pin.SmokeInvokeToggleTopmost();
+      pin.SmokeInvokeToggleTopmost();
       pin.SmokeInvokeMaximize();
       await WaitForPinCheckAsync(() => Task.FromResult(pin.SmokeIsMaximized), "Geometry pin did not maximize.");
       pin.SmokeInvokeOriginalSize();
@@ -66,13 +96,23 @@ public sealed partial class MainWindow
         "Geometry pin did not restore.");
       CheckClient("original-size");
       await UntilPinStageWidthAsync(pin, original.Width, "Restored pin stage lost physical 1:1 scale.");
+      await CopyPinSubstringAsync(pin);
+      await pin.SmokeDismissActionsAsync();
+      CaptureUiSmokeTrace.Stage("pins.actions-after-restore-copy");
+      pin.SmokeInvokeMinimize();
+      await UntilPinStateAsync(() => pin.SmokeIsMinimized ? null : "not minimized", "First geometry pin did not minimize.");
+      pin.SmokeRestoreFromMinimized();
+      await UntilPinStateAsync(() => !pin.SmokeIsMinimized ? null : "still minimized", "First geometry pin did not restore.");
+      await secondPin.SmokeMouseClickCloseButtonAsync();
+      await UntilPinStateAsync(() => secondPin.SmokeDisposed ? null : "still open", "Real mouse did not close second geometry pin.");
+      CaptureUiSmokeTrace.Stage("pins.second-native-close");
       await pin.ApplySnapshotAsync(snapshot.Path, snapshot.Width, snapshot.Height, Guid.NewGuid(), []);
       CheckClient("snapshot");
       await UntilPinStageWidthAsync(pin, snapshot.Width, "Snapshot pin stage lost physical 1:1 scale.");
       if (failures.Count != 0)
         throw new InvalidOperationException("Pin physical client mismatch: " + string.Join("; ", failures));
     }
-    finally { pin.ForceClose(); }
+    finally { secondPin.ForceClose(); pin.ForceClose(); }
   }
 
   internal bool SmokeHistoryInitializing => pinHistoryStore?.Initialization.IsCompleted == false;

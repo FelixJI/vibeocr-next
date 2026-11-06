@@ -263,6 +263,8 @@ internal sealed class PinnedImageWindow : IDisposable
   internal bool SmokeHasEditorOverlay => editorView is not null || editorHost is not null;
   internal string SmokeStatus => status.Text;
   internal double SmokeMoreButtonOpacity => moreButton.Opacity;
+  internal bool SmokeActionsFlyoutOpen => actionsFlyout.IsOpen;
+  private TaskCompletionSource? smokeActionsClosed;
   internal bool SmokeEditDecisionPending => closeDialogShowing;
   /// <summary>smoke：对当前编辑宿主注入 renderer 失败，覆盖空闲与保存交错。</summary>
   internal void SmokeResetEditorDocument() =>
@@ -337,28 +339,68 @@ internal sealed class PinnedImageWindow : IDisposable
   internal void SmokeInvokeOriginalSize() => new ButtonAutomationPeer(originalSizeButton).Invoke();
   internal void SmokeInvokeMinimize() => new ButtonAutomationPeer(minimizeButton).Invoke();
   internal void SmokeInvokeMaximize() => new ButtonAutomationPeer(maximizeButton).Invoke();
-  internal void SmokeRevealActions() => actionsFlyout.ShowAt(moreButton);
-  internal void SmokeDismissActions() => actionsFlyout.Hide();
+  internal void SmokeRevealActions()
+  {
+    if (smokeActionsClosed is { Task.IsCompleted: false })
+      throw new InvalidOperationException("Previous pinned actions menu has not closed.");
+    smokeActionsClosed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    actionsFlyout.Closed += OnSmokeActionsClosed;
+    try { actionsFlyout.ShowAt(moreButton); }
+    catch
+    {
+      actionsFlyout.Closed -= OnSmokeActionsClosed;
+      smokeActionsClosed = null;
+      throw;
+    }
+  }
+  private void OnSmokeActionsClosed(object? sender, object args)
+  {
+    actionsFlyout.Closed -= OnSmokeActionsClosed;
+    smokeActionsClosed?.TrySetResult();
+  }
+  internal async Task SmokeDismissActionsAsync()
+  {
+    if (smokeActionsClosed is not { } closed || closed.Task.IsCompleted) return;
+    // IsOpen becomes false before Closed; reopening during that gap is ignored.
+    try
+    {
+      actionsFlyout.Hide();
+      await closed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+    finally { actionsFlyout.Closed -= OnSmokeActionsClosed; }
+  }
   /// <summary>模拟任务栏还原：最小化后由系统还原路径回到正常状态。</summary>
   internal void SmokeRestoreFromMinimized() => presenter.Restore();
   internal async Task SmokeDragTitleBarAsync(int dx, int dy)
   {
-    // Real-mouse-path drag on the top band handle. Verify the point really hits
-    // this pin window before the native press, wait until the press actually
-    // activated it, and release only after the window really moved.
+    // Use the laid-out band: estimating from the outer frame can hit a button.
+    // PointerPressed must capture the live cursor before the mouse moves.
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     window.Activate();
     if (!GetWindowRect(handle, out RectL bounds))
       throw new Win32Exception(Marshal.GetLastWin32Error());
     uint dpi = GetDpiForWindow(handle);
     if (dpi == 0) throw new InvalidOperationException("Pin DPI is unavailable.");
-    int Metric(int index) => GetSystemMetricsForDpi(index, dpi);
-    // 把手条带在客户区顶部：物理高度按 DPI 换算，拖点取左侧四分位避开右上角按钮。
-    int bandHeight = (int)Math.Ceiling(BandHeightDip * dpi / 96.0);
-    int x = bounds.Left + (bounds.Right - bounds.Left) / 4;
-    int y = bounds.Top + Metric(SmCySizeFrame) + Metric(SmCxPaddedBorder) + bandHeight / 2;
+    root.UpdateLayout();
+    Windows.Foundation.Rect bandDip = band.TransformToVisual(root).TransformBounds(
+      new Windows.Foundation.Rect(0, 0, band.ActualWidth, band.ActualHeight));
+    if (bandDip.Width <= 0 || bandDip.Height <= 0)
+      throw new InvalidOperationException("Pin drag band has no layout.");
+    PointL clientOrigin = new();
+    if (!ClientToScreen(handle, ref clientOrigin))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    var dragPoint = new Windows.Foundation.Point(bandDip.X + bandDip.Width / 2, bandDip.Y + bandDip.Height / 2);
+    DependencyObject? hit = VisualTreeHelper.FindElementsInHostCoordinates(dragPoint, root).FirstOrDefault();
+    while (hit != band)
+    {
+      if (hit is null or ButtonBase or Slider or ScrollBar or TextBox)
+        throw new InvalidOperationException($"Pin band center {dragPoint} hits {hit?.GetType().Name} instead of its drag surface.");
+      hit = VisualTreeHelper.GetParent(hit);
+    }
+    int x = clientOrigin.X + (int)Math.Round(dragPoint.X * dpi / 96.0);
+    int y = clientOrigin.Y + (int)Math.Round(dragPoint.Y * dpi / 96.0);
     string geometry = $"handle=0x{(long)handle:X}, rect=({bounds.Left},{bounds.Top}," +
-      $"{bounds.Right},{bounds.Bottom}), dpi={dpi}, point=({x},{y})";
+      $"{bounds.Right},{bounds.Bottom}), band={bandDip}, dpi={dpi}, point=({x},{y})";
     nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
     if (hitRoot != handle)
       throw new InvalidOperationException($"Pin drag point is not its band: " +
@@ -372,12 +414,12 @@ internal sealed class PinnedImageWindow : IDisposable
       bool activated = false;
       for (int attempt = 0; attempt < 40; attempt++)
       {
-        if (GetForegroundWindow() == handle) { activated = true; break; }
+        if (GetForegroundWindow() == handle && dragOrigin is not null) { activated = true; break; }
         await Task.Delay(25);
       }
       if (!activated)
-        throw new InvalidOperationException($"Pin press did not activate it: " +
-          $"{geometry}, fg=0x{(long)GetForegroundWindow():X}.");
+        throw new InvalidOperationException($"Pin press did not activate its band: " +
+          $"{geometry}, fg=0x{(long)GetForegroundWindow():X}, dragOrigin={dragOrigin}.");
       if (!SetCursorPos(x + dx, y + dy))
         throw new Win32Exception(Marshal.GetLastWin32Error());
       for (int attempt = 0; ; attempt++)
@@ -397,12 +439,23 @@ internal sealed class PinnedImageWindow : IDisposable
     }
   }
   /// <summary>真实鼠标点击右上角关闭按钮：验证悬浮控件在 WebView2 之上可交互。</summary>
-  internal void SmokeMouseClickCloseButton()
+  internal async Task SmokeMouseClickCloseButtonAsync()
   {
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    // A restored sibling can cover this pin even when both are topmost.
+    window.Activate();
+    bool activated = false;
+    for (int attempt = 0; attempt < 40; attempt++)
+    {
+      if (GetForegroundWindow() == handle) { activated = true; break; }
+      await Task.Delay(25);
+    }
+    if (!activated)
+      throw new InvalidOperationException($"Pin close target did not activate: handle=0x{(long)handle:X}, " +
+        $"fg=0x{(long)GetForegroundWindow():X}.");
     root.UpdateLayout();
     Windows.Foundation.Rect dip = closeButton.TransformToVisual(root).TransformBounds(
       new Windows.Foundation.Rect(0, 0, closeButton.ActualWidth, closeButton.ActualHeight));
-    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
     uint dpi = GetDpiForWindow(handle);
     if (dpi == 0) throw new InvalidOperationException("Pin DPI is unavailable.");
     PointL origin = new();
@@ -415,10 +468,18 @@ internal sealed class PinnedImageWindow : IDisposable
     nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
     if (hitRoot != handle)
       throw new InvalidOperationException($"Pin close button is not hittable: " +
-        $"{geometry}, hitRoot=0x{(long)hitRoot:X}.");
-    if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
-    MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0);
+        $"{geometry}, hitRoot=0x{(long)hitRoot:X}, fg=0x{(long)GetForegroundWindow():X}.");
+    bool down = false;
+    try
+    {
+      if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
+      down = true;
+    }
+    finally
+    {
+      if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0);
+    }
   }
   internal async Task SmokeCapturePreviewAsync(string path)
   {
