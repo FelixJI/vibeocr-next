@@ -286,18 +286,32 @@ function WorkerIdleEditor({
   workers,
   actions,
 }: {
-  readonly paddleSeconds: number;
-  readonly mineruSeconds: number;
+  readonly paddleSeconds: number | null;
+  readonly mineruSeconds: number | null;
   readonly remote: boolean;
   readonly busy: boolean;
   readonly workers: unknown;
   readonly actions: AppActions;
 }) {
-  const [paddle, setPaddle] = useState(String(paddleSeconds));
-  const [mineru, setMineru] = useState(String(mineruSeconds));
+  // 真实策略尚未读取时不得用占位值编辑/保存：呈现明确的未加载状态与
+  // 显式加载入口（复用“检查识别服务”同一刷新命令），加载成功后才编辑。
+  const loaded = paddleSeconds !== null && mineruSeconds !== null;
+  const [paddle, setPaddle] = useState(loaded ? String(paddleSeconds) : "");
+  const [mineru, setMineru] = useState(loaded ? String(mineruSeconds) : "");
   const inFlight = useRef(false);
   const [pending, setPending] = useState(false);
   const disabled = busy || pending;
+  const load = async () => {
+    if (busy || inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    try {
+      await actions.run({ type: "settings.refreshRuntime" });
+    } finally {
+      inFlight.current = false;
+      setPending(false);
+    }
+  };
   const submit = async (restore: boolean) => {
     if (busy || inFlight.current) return;
     inFlight.current = true;
@@ -320,6 +334,19 @@ function WorkerIdleEditor({
   const valid = (value: string) =>
     /^\d+$/.test(value) && Number(value) <= 2147483647;
   const states = Array.isArray(workers) ? workers : [];
+  if (!loaded) {
+    return (
+      <>
+        <p className="form-note">加载已保存的空闲策略后即可编辑。</p>
+        <div className="button-row">
+          <Button disabled={disabled} onClick={() => void load()}>
+            加载空闲策略
+          </Button>
+        </div>
+        <p className="form-note">加载时会按需启动识别服务。</p>
+      </>
+    );
+  }
   const status = (owner: string) => {
     const value = states.find(
       (entry: { worker?: { owner?: string } }) => entry.worker?.owner === owner,
@@ -461,12 +488,12 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
             paddleSeconds={
               typeof state.paddleIdleSeconds === "number"
                 ? state.paddleIdleSeconds
-                : 600
+                : null
             }
             mineruSeconds={
               typeof state.mineruIdleSeconds === "number"
                 ? state.mineruIdleSeconds
-                : 600
+                : null
             }
             remote={mineru?.mode === "remote"}
             busy={booleanValue(state.isBusy)}

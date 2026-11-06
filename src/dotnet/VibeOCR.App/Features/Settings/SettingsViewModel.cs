@@ -118,12 +118,22 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         finally { _settingsGate.Release(); }
     }
     public string WorkerSettingsWarning { get; private set; } = "";
-    public int PaddleIdleSeconds { get; private set; } = 600;
-    public int MineruIdleSeconds { get; private set; } = 600;
+    /// <summary>
+    /// 空闲释放策略；null 表示尚未从真实设置读取，UI 不得当作 600
+    /// 占位编辑，保存入口也须拒绝未知值覆盖未编辑字段。
+    /// </summary>
+    public int? PaddleIdleSeconds { get; private set; }
+    public int? MineruIdleSeconds { get; private set; }
 
     public async Task<bool> SetWorkerIdleAsync(int paddleSeconds, int mineruSeconds, CancellationToken cancellationToken)
     {
         if (paddleSeconds < 0 || mineruSeconds < 0) throw new ArgumentOutOfRangeException(nameof(paddleSeconds));
+        if (PaddleIdleSeconds is null || MineruIdleSeconds is null)
+        {
+            // 未加载真实策略：不提交未知/占位值，不启动 Runtime。
+            Status = "请先加载空闲策略后再编辑保存。";
+            return false;
+        }
         await _settingsGate.WaitAsync(cancellationToken);
         try
         {

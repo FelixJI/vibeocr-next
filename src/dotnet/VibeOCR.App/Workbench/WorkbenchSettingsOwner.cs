@@ -242,9 +242,10 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     SetWorkerIdleCommand command, CancellationToken cancellationToken)
   {
     settings ??= CreateSettings();
-    // 冷启动（普通启动不再连接 Runtime）直接保存空闲设置：与设备设置
-    // 入口一致，先按需准备运行时再读改写真实设置；准备失败/取消不更新。
-    if (ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
+    // 只有已加载真实空闲策略才按需准备运行时；未加载由 ViewModel
+    // fail closed（零 prepare/零 IO），与保存失败共用同一错误分支。
+    if (settings.PaddleIdleSeconds is not null && settings.MineruIdleSeconds is not null &&
+      ensureRuntimeReady is not null) await ensureRuntimeReady(cancellationToken);
     if (!await settings.SetWorkerIdleAsync(command.PaddleSeconds, command.MineruSeconds, cancellationToken))
     {
       operations.Publish(SettingsState(settings));

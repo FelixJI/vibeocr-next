@@ -1031,7 +1031,8 @@ public sealed record SettingsWorkbenchState(
   SettingsFloatingToolbarState? FloatingToolbar = null,
   EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
   bool MinimizeToTray = false, string ShellSettingsError = "",
-  int PaddleIdleSeconds = 600, int MineruIdleSeconds = 600,
+  // null 表示尚未从真实设置读取；不得当作 600 占位编辑。
+  int? PaddleIdleSeconds = null, int? MineruIdleSeconds = null,
   IReadOnlyList<VibeOCR.Contracts.HttpV2.ResidencyEntry>? Workers = null,
   string WorkerSettingsWarning = "") : WorkbenchState
 {

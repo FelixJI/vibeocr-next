@@ -357,4 +357,90 @@ describe("Worker 空闲资源设置", () => {
     await user.type(paddle, "1.5");
     expect(screen.getByRole("button", { name: "保存空闲设置" })).toBeDisabled();
   });
+  it("未加载时不可编辑保存，加载失败后仍保持锁定", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    actions.run.mockResolvedValue(false);
+    const { rerender } = render(
+      <SettingsPage
+        viewState={buildViewState({
+          statusMessage: "尚未连接运行环境；可配置来源或准备依赖。",
+        })}
+        actions={actions}
+      />,
+    );
+    const locked = () => {
+      expect(
+        screen.queryByRole("spinbutton", { name: "PaddleOCR 空闲秒数" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("spinbutton", { name: "本地 MinerU 空闲秒数" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "保存空闲设置" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "恢复十分钟默认值" }),
+      ).not.toBeInTheDocument();
+    };
+    locked();
+    await user.click(screen.getByRole("button", { name: "加载空闲策略" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.refreshRuntime",
+    });
+    // 加载失败（回执 false）：宿主仍广播未加载状态，编辑与保存保持锁定。
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          statusMessage: "识别服务连接失败",
+        })}
+        actions={actions}
+      />,
+    );
+    locked();
+    expect(actions.run).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "settings.setWorkerIdle" }),
+    );
+  });
+  it("冷态点加载收到真实 120/0 后仅改 Paddle 提交 60/0", async () => {
+    const user = userEvent.setup();
+    const actions = buildActions();
+    const { rerender } = render(
+      <SettingsPage
+        viewState={buildViewState({
+          statusMessage: "尚未连接运行环境；可配置来源或准备依赖。",
+        })}
+        actions={actions}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "加载空闲策略" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.refreshRuntime",
+    });
+    // 宿主加载成功后广播真实快照，才呈现可编辑的真实值。
+    rerender(
+      <SettingsPage
+        viewState={buildViewState({
+          paddleIdleSeconds: 120,
+          mineruIdleSeconds: 0,
+        })}
+        actions={actions}
+      />,
+    );
+    const paddle = screen.getByRole("spinbutton", {
+      name: "PaddleOCR 空闲秒数",
+    });
+    expect(paddle).toHaveValue(120);
+    expect(
+      screen.getByRole("spinbutton", { name: "本地 MinerU 空闲秒数" }),
+    ).toHaveValue(0);
+    await user.clear(paddle);
+    await user.type(paddle, "60");
+    await user.click(screen.getByRole("button", { name: "保存空闲设置" }));
+    expect(actions.run).toHaveBeenCalledWith({
+      type: "settings.setWorkerIdle",
+      paddleSeconds: 60,
+      mineruSeconds: 0,
+    });
+  });
 });
