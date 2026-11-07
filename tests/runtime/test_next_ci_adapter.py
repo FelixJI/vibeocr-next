@@ -269,6 +269,53 @@ def test_release_build_runs_verified_web_bundle_before_packaged_smoke(
     assert not any(call.startswith("python|-m PyInstaller") for call in calls)
 
 
+# 与 product_layout.py stage 写出的 canonical 布局 descriptor 一致。
+_PRODUCT_LAYOUT_DESCRIPTOR = {
+    "schema_version": 1,
+    "product_id": "vibeocr",
+    "public_entry": "VibeOCR.exe",
+    "roots": {"app": "app", "runtime": "runtime", "metadata": "app/metadata"},
+    "app": {"entry": "app/VibeOCR.WinUI.exe", "web_assets": "app/WebAssets"},
+    "runtime": {
+        "manifest": "runtime/backend/runtime-manifest.json",
+        "python": "runtime/env/runtime-env/python.exe",
+    },
+    "metadata": {
+        "component_lock": "app/metadata/component-lock.json",
+        "component_identities": "app/metadata/component-identities.json",
+        "release_manifest": "app/metadata/product-release-manifest.json",
+    },
+    "user_data": {"relative": "state"},
+    "required": [],
+}
+
+
+def _write_installed_product_fixture(product: Path) -> None:
+    metadata = product / "app/metadata"
+    metadata.mkdir(parents=True)
+    (metadata / "product-layout.json").write_text(
+        json.dumps(_PRODUCT_LAYOUT_DESCRIPTOR), encoding="utf-8"
+    )
+    for name in ("VibeOCR.exe", "Velopack.dll", "LICENSE", "CHANGELOG.md"):
+        (product / name).write_bytes(b"placeholder")
+    for relative in (
+        "app/VibeOCR.WinUI.exe",
+        "app/VibeOCR.WinUI.dll",
+        "app/VibeOCR.WinUI.pri",
+        "app/App.xbf",
+        "app/MainWindow.xbf",
+        "app/WebAssets/index.html",
+        "app/metadata/component-lock.json",
+        "app/metadata/component-identities.json",
+        "app/metadata/product-release-manifest.json",
+        "runtime/backend/runtime-manifest.json",
+        "runtime/env/runtime-env/python.exe",
+    ):
+        path = product / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"placeholder")
+
+
 def _configure_release_smoke_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,7 +324,7 @@ def _configure_release_smoke_fixture(
     include_delta: bool = False,
     fail_bootstrapper: bool = False,
     fail_runtime_code: bool = False,
-) -> tuple[Path, list[list[str]]]:
+) -> tuple[Path, list[list[str]], list[Path]]:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     full = artifacts / "VibeOCRNext-1.2.3-full.nupkg"
@@ -294,11 +341,23 @@ def _configure_release_smoke_fixture(
         }
     }
     with zipfile.ZipFile(artifacts / "VibeOCRNext-v1.2.3-win-x64.zip", "w") as package:
-        package.writestr("VibeOCR/VibeOCR.exe", b"bootstrapper")
-        package.writestr("VibeOCR/app/VibeOCR.WinUI.exe", b"desktop")
-        package.writestr("VibeOCR/runtime/env/runtime-env/python.exe", b"runtime")
+        # canonical Portable 布局:顶层入口、更新工具与唯一 current 产品树。
+        package.writestr(".portable", b"velopack-portable-marker")
+        package.writestr("Update.exe", b"velopack-update")
+        package.writestr("VibeOCR.exe", b"velopack-entry")
+        package.writestr("current/VibeOCR.exe", b"bootstrapper")
+        package.writestr("current/Velopack.dll", b"velopack-runtime")
+        package.writestr("current/LICENSE", b"license")
+        package.writestr("current/CHANGELOG.md", b"changelog")
+        package.writestr("current/app/VibeOCR.WinUI.exe", b"desktop")
+        package.writestr("current/runtime/env/runtime-env/python.exe", b"runtime")
         package.writestr(
-            "VibeOCR/app/metadata/component-identities.json", json.dumps(identity)
+            "current/app/metadata/component-identities.json",
+            json.dumps(identity),
+        )
+        package.writestr(
+            "current/app/metadata/product-layout.json",
+            json.dumps(_PRODUCT_LAYOUT_DESCRIPTOR),
         )
     names = {
         full.name,
@@ -313,6 +372,7 @@ def _configure_release_smoke_fixture(
         json.dumps(identity), encoding="utf-8"
     )
     calls: list[list[str]] = []
+    unpack_roots: list[Path] = []
     monkeypatch.setattr(
         "scripts.release_smoke.verify_release_assets",
         lambda *args, **kwargs: names,
@@ -330,31 +390,41 @@ def _configure_release_smoke_fixture(
             )
             assert command[-1] == "1.2.3"
             assert kwargs["timeout"] == 120
+            unpack_roots.append(Path(str(kwargs["cwd"])))
             if fail_runtime_code:
                 raise subprocess.CalledProcessError(32, command)
         elif command[0].endswith("VibeOCR.exe"):
             assert command[1:] == ["--self-test-prerequisites"]
             assert kwargs["timeout"] == 30
             assert kwargs["cwd"] == Path(command[0]).parent
+            unpack_roots.append(Path(command[0]).parent)
             if fail_bootstrapper:
                 raise subprocess.CalledProcessError(30, command)
         elif "smoke_web_workbench.ps1" in command[2]:
             assert kwargs["timeout"] == 300
+            assert "-ReuseUnpackedProduct" in command
             product_root = Path(command[command.index("-ProductRoot") + 1])
+            assert product_root.name == "current"
+            assert product_root.parent.name.startswith("vibeocr-release-smoke-")
             assert (product_root / "app/VibeOCR.WinUI.exe").is_file()
+            environment = kwargs["env"]
+            assert environment is not None
+            assert Path(environment["TEMP"]) == product_root.parent.parent
+            assert Path(environment["TMP"]) == product_root.parent.parent
+            unpack_roots.append(product_root)
             if fail_smoke:
                 raise subprocess.CalledProcessError(31, command)
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr("scripts.release_smoke.subprocess.run", fake_run)
-    return artifacts, calls
+    return artifacts, calls, unpack_roots
 
 
 def test_release_smoke_executes_the_extracted_product_handshake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, calls = _configure_release_smoke_fixture(
+    artifacts, calls, unpack_roots = _configure_release_smoke_fixture(
         tmp_path,
         monkeypatch,
         fail_smoke=False,
@@ -372,13 +442,20 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     assert calls[1][0].endswith("VibeOCR.exe")
     assert calls[1][1:] == ["--self-test-prerequisites"]
     assert calls[2][2].endswith("smoke_web_workbench.ps1")
+    # 三次子进程调用必须共享同一个独占解包根,并在结束后由 Python 清理。
+    assert len(unpack_roots) == 3
+    assert len({str(path) for path in unpack_roots}) == 1
+    reused = unpack_roots[0]
+    assert reused.name == "current"
+    assert reused.parent.name.startswith("vibeocr-release-smoke-")
+    assert not reused.exists()
 
 
 def test_release_smoke_stops_when_product_runtime_code_cannot_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, calls = _configure_release_smoke_fixture(
+    artifacts, calls, _unpack_roots = _configure_release_smoke_fixture(
         tmp_path, monkeypatch, fail_smoke=False, fail_runtime_code=True
     )
 
@@ -399,7 +476,7 @@ def test_release_smoke_propagates_a_failed_public_entry_self_test(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, calls = _configure_release_smoke_fixture(
+    artifacts, calls, _unpack_roots = _configure_release_smoke_fixture(
         tmp_path,
         monkeypatch,
         fail_smoke=False,
@@ -416,7 +493,7 @@ def test_release_smoke_accepts_and_binds_one_current_delta(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, _calls = _configure_release_smoke_fixture(
+    artifacts, _calls, _unpack_roots = _configure_release_smoke_fixture(
         tmp_path,
         monkeypatch,
         fail_smoke=False,
@@ -434,7 +511,7 @@ def test_release_smoke_rejects_future_historical_full(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, _calls = _configure_release_smoke_fixture(
+    artifacts, _calls, _unpack_roots = _configure_release_smoke_fixture(
         tmp_path,
         monkeypatch,
         fail_smoke=False,
@@ -463,7 +540,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifacts, calls = _configure_release_smoke_fixture(
+    artifacts, calls, unpack_roots = _configure_release_smoke_fixture(
         tmp_path,
         monkeypatch,
         fail_smoke=True,
@@ -473,6 +550,8 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
         verify(artifacts, "1.2.3")
 
     assert len(calls) == 3
+    # handshake 失败后复用解包树仍由 Python 的 TemporaryDirectory 清理。
+    assert not unpack_roots[0].exists()
 
 
 @pytest.mark.parametrize("installed_layout", [False, True])
@@ -488,63 +567,11 @@ def test_web_ready_smoke_runs_an_isolated_production_profile(
     executable = product / (
         "app/VibeOCR.WinUI.exe" if installed_layout else "VibeOCR.WinUI.exe"
     )
-    executable.parent.mkdir(parents=True, exist_ok=True)
-    executable.write_bytes(b"placeholder")
     if installed_layout:
-        metadata = product / "app/metadata"
-        metadata.mkdir(parents=True)
-        (metadata / "product-layout.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "product_id": "vibeocr",
-                    "public_entry": "VibeOCR.exe",
-                    "roots": {
-                        "app": "app",
-                        "runtime": "runtime",
-                        "metadata": "app/metadata",
-                    },
-                    "app": {
-                        "entry": "app/VibeOCR.WinUI.exe",
-                        "web_assets": "app/WebAssets",
-                    },
-                    "runtime": {
-                        "manifest": "runtime/backend/runtime-manifest.json",
-                        "python": "runtime/env/runtime-env/python.exe",
-                    },
-                    "metadata": {
-                        "component_lock": "app/metadata/component-lock.json",
-                        "component_identities": "app/metadata/component-identities.json",
-                        "release_manifest": "app/metadata/product-release-manifest.json",
-                    },
-                    "user_data": {"relative": "state"},
-                    "required": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        for name in (
-            "VibeOCR.exe",
-            "Velopack.dll",
-            "LICENSE",
-            "CHANGELOG.md",
-        ):
-            (product / name).write_bytes(b"placeholder")
-        for relative in (
-            "app/VibeOCR.WinUI.dll",
-            "app/VibeOCR.WinUI.pri",
-            "app/App.xbf",
-            "app/MainWindow.xbf",
-            "app/WebAssets/index.html",
-            "app/metadata/component-lock.json",
-            "app/metadata/component-identities.json",
-            "app/metadata/product-release-manifest.json",
-            "runtime/backend/runtime-manifest.json",
-            "runtime/env/runtime-env/python.exe",
-        ):
-            path = product / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"placeholder")
+        _write_installed_product_fixture(product)
+    else:
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"placeholder")
     launch = tmp_path / "launch.json"
     cleanup = tmp_path / "cleanup.txt"
     wrapper = tmp_path / "run-smoke.ps1"
@@ -668,6 +695,227 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
         }
     else:
         assert list(product.iterdir()) == [product / "VibeOCR.WinUI.exe"]
+
+
+_REUSE_SMOKE_WRAPPER = r"""param(
+    [string]$Smoke,
+    [string]$Product,
+    [string]$TempBase,
+    [string]$Launch,
+    [string]$Cleanup,
+    [string]$Removals
+)
+$ErrorActionPreference = 'Stop'
+$env:TEMP = $TempBase
+$env:TMP = $TempBase
+$global:webViewCleanupAttempts = 0
+function Copy-Item {
+    throw 'reuse path must not copy the unpacked product'
+}
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [string]$LiteralPath,
+        [switch]$Recurse,
+        [switch]$Force
+    )
+    Add-Content -LiteralPath $Removals -Value $LiteralPath
+    if ($LiteralPath -like '*vibeocr-webview-smoke-*') {
+        $global:webViewCleanupAttempts += 1
+        if ($global:webViewCleanupAttempts -eq 1) {
+            throw 'simulated WebView2 file handle is still active'
+        }
+    }
+    Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+}
+function Start-Process {
+    param(
+        [string]$FilePath,
+        [object[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$WindowStyle,
+        [switch]$PassThru
+    )
+    @{
+        file = $FilePath
+        arguments = @($ArgumentList)
+        working_directory = $WorkingDirectory
+        user_data = $env:WEBVIEW2_USER_DATA_FOLDER
+        instance_scope = $env:VIBEOCR_SELF_TEST_INSTANCE
+        health = $env:VIBEOCR_WEB_READY_FILE
+    } | ConvertTo-Json | Set-Content -LiteralPath $Launch
+    New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
+        Out-Null
+    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2,"owner_restore":"verified"}' |
+        Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
+    $process = [pscustomobject]@{ ExitCode = 0 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$Milliseconds)
+        return $true
+    }
+    return $process
+}
+$env:VIBEOCR_SELF_TEST_INSTANCE = 'outer-test-scope'
+& $Smoke -ProductRoot $Product -ReuseUnpackedProduct
+if ($env:VIBEOCR_SELF_TEST_INSTANCE -ne 'outer-test-scope') {
+    throw 'smoke did not restore the caller instance scope'
+}
+$global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
+"""
+
+
+def _run_reuse_smoke(
+    tmp_path: Path, product: Path, temp_base: Path
+) -> subprocess.CompletedProcess[str]:
+    root = Path(__file__).parents[2]
+    launch = tmp_path / "launch.json"
+    cleanup = tmp_path / "cleanup.txt"
+    removals = tmp_path / "removals.log"
+    wrapper = tmp_path / "run-reuse-smoke.ps1"
+    wrapper.write_text(_REUSE_SMOKE_WRAPPER, encoding="utf-8")
+    return subprocess.run(
+        [
+            resolve_executable("pwsh"),
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            str(root / "scripts/smoke_web_workbench.ps1"),
+            str(product),
+            str(temp_base),
+            str(launch),
+            str(cleanup),
+            str(removals),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+
+
+def test_web_ready_smoke_reuses_the_release_smoke_unpack_tree_in_place(
+    tmp_path: Path,
+) -> None:
+    temp_base = tmp_path / "temp"
+    holder = temp_base / "vibeocr-release-smoke-0a1b2c3d"
+    current = holder / "current"
+    current.mkdir(parents=True)
+    _write_installed_product_fixture(current)
+
+    result = _run_reuse_smoke(tmp_path, current, temp_base)
+
+    assert result.returncode == 0, result.stderr
+    launch = json.loads((tmp_path / "launch.json").read_text(encoding="utf-8-sig"))
+    # 运行根仍是原 current 解包树:executable/install-root 不变,未复制。
+    assert Path(launch["file"]) == current / "app/VibeOCR.WinUI.exe"
+    assert Path(str(launch["working_directory"])) == current / "app"
+    assert launch["arguments"] == [
+        "--shell-only",
+        "--profile",
+        "production",
+        "--install-root",
+        str(current),
+    ]
+    assert Path(launch["user_data"]).parent == temp_base
+    assert Path(launch["user_data"]) != Path(launch["working_directory"])
+    # 健康/WebView 清理仍由 PowerShell 完成,且从不触碰原解包树。
+    assert not Path(launch["health"]).exists()
+    assert not Path(launch["user_data"]).exists()
+    assert (tmp_path / "cleanup.txt").read_text(encoding="utf-8-sig").strip() == "2"
+    removed = (tmp_path / "removals.log").read_text(encoding="utf-8-sig").splitlines()
+    assert any("vibeocr-webview-smoke-" in line for line in removed)
+    assert any("vibeocr-web-ready-" in line for line in removed)
+    assert not any(Path(line) == current for line in removed)
+    assert {path.name for path in current.iterdir()} == {
+        "VibeOCR.exe",
+        "Velopack.dll",
+        "LICENSE",
+        "CHANGELOG.md",
+        "app",
+        "runtime",
+    }
+    assert (current / "runtime/env/runtime-env/python.exe").read_bytes() == (
+        b"placeholder"
+    )
+    assert {path.name for path in temp_base.iterdir()} == {holder.name}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "external-root",
+        "plain-temp-child",
+        "holder-outside-temp",
+        "existing-state",
+        "existing-portable-layout",
+        "dangling-state-link",
+        "reparse-current",
+        "reparse-holder",
+    ],
+)
+def test_web_ready_smoke_reuse_rejects_unsafe_product_roots(
+    tmp_path: Path, case: str
+) -> None:
+    import _winapi
+
+    temp_base = tmp_path / "temp"
+    temp_base.mkdir()
+    holder_name = "vibeocr-release-smoke-9z8y7x6w"
+    product = temp_base / holder_name / "current"
+    if case == "external-root":
+        product = tmp_path / "elsewhere" / "product"
+        product.mkdir(parents=True)
+        expected = "named 'current'"
+    elif case == "plain-temp-child":
+        product = temp_base / "current"
+        product.mkdir()
+        expected = "dedicated vibeocr-release-smoke-"
+    elif case == "holder-outside-temp":
+        product = tmp_path / "elsewhere" / holder_name / "current"
+        product.mkdir(parents=True)
+        expected = "direct child of the current TEMP"
+    elif case == "existing-state":
+        product.mkdir(parents=True)
+        (product / "state").mkdir()
+        (product / "state" / "user.db").write_bytes(b"user-data")
+        expected = "pristine unpacked product"
+    elif case == "existing-portable-layout":
+        product.mkdir(parents=True)
+        (product / "portable-layout.json").write_text("{}", encoding="utf-8")
+        expected = "pristine unpacked product"
+    elif case == "dangling-state-link":
+        product.mkdir(parents=True)
+        target = temp_base / "vanishing-target"
+        target.mkdir()
+        _winapi.CreateJunction(str(target), str(product / "state"))
+        shutil.rmtree(target)
+        expected = "pristine unpacked product"
+    elif case == "reparse-current":
+        product.parent.mkdir(parents=True)
+        target = temp_base / "real-current"
+        target.mkdir()
+        _winapi.CreateJunction(str(target), str(product))
+        expected = "reparse points"
+    else:
+        real_holder = temp_base / "real-holder"
+        (real_holder / "current").mkdir(parents=True)
+        _winapi.CreateJunction(str(real_holder), str(temp_base / holder_name))
+        expected = "reparse points"
+    marker = product / "marker.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    result = _run_reuse_smoke(tmp_path, product, temp_base)
+
+    assert result.returncode != 0
+    assert expected in result.stderr
+    # 拒绝发生在读取 descriptor/复制/启动之前,既有数据原样保留。
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert not (tmp_path / "launch.json").exists()
+    if case == "existing-state":
+        assert (product / "state" / "user.db").read_bytes() == b"user-data"
+    if case == "reparse-holder":
+        assert (temp_base / holder_name).exists()
 
 
 def _run_app_ci_fixture(
@@ -966,7 +1214,7 @@ def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> 
 def test_release_smoke_binds_native_portable_and_product_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    artifacts, _calls = _configure_release_smoke_fixture(
+    artifacts, _calls, _unpack_roots = _configure_release_smoke_fixture(
         tmp_path, monkeypatch, fail_smoke=False
     )
     verify(artifacts, "1.2.3")
