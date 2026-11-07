@@ -808,6 +808,18 @@ async function pngPixels(page, png, mediaType = 'image/png') {
 const handleCursorShapes = ['sizeNWSE', 'sizeNS', 'sizeNESW', 'sizeWE', 'sizeWE', 'sizeNESW', 'sizeNS', 'sizeNWSE'];
 const magnifierLabelPattern = /^(-?\d+), (-?\d+)\r?\n#([0-9A-F]{6})\r?\nRGB (\d+), (\d+), (\d+)$/;
 
+// Island cursor truth (native-actions-e2e): the legacy global-cursor reading
+// can disagree with the WinUI island cursor, so the fixture reports the
+// overlay's InputSystemCursorShape name; the legacy handle stays evidence-only.
+const islandCursorNames = { cross: 'Cross', hand: 'Hand', arrow: 'Arrow', sizeAll: 'SizeAll',
+  sizeNWSE: 'SizeNorthwestSoutheast', sizeNS: 'SizeNorthSouth',
+  sizeNESW: 'SizeNortheastSouthwest', sizeWE: 'SizeWestEast' };
+export function islandCursorName(legacyShape) {
+  assert(Object.hasOwn(islandCursorNames, legacyShape),
+    `Unknown cursor expectation: ${legacyShape}`);
+  return islandCursorNames[legacyShape];
+}
+
 function manualHandleAnchors(rect) {
   const midX = rect.left + rect.width / 2;
   const midY = rect.top + rect.height / 2;
@@ -846,11 +858,11 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   async function observe(hover, cursorShape, sample, context, tolerance = 0) {
     await native('mouse-move', point(hover.x, hover.y));
     await delay(150);
-    const cursor = JSON.parse(await native('cursor'));
-    assert(cursor.shown && Math.abs(cursor.x - hover.x) <= 1 && Math.abs(cursor.y - hover.y) <= 1,
+    const cursor = JSON.parse(await native('cursor', { AppPid: appPid, Handle: overlayHandle }));
+    assert(Math.abs(cursor.x - hover.x) <= 1 && Math.abs(cursor.y - hover.y) <= 1,
       `OS cursor is not resting at ${hover.x},${hover.y}: ${JSON.stringify(cursor)}`);
-    assert(cursor[cursorShape] === true,
-      `${context} did not show the ${cursorShape} cursor: ${JSON.stringify(cursor)}`);
+    assert(cursor.islandCursorShape === islandCursorName(cursorShape),
+      `${context} did not show the ${cursorShape} island cursor: ${JSON.stringify(cursor)}`);
     const label = await native('magnifier', { AppPid: appPid, Handle: overlayHandle });
     const match = magnifierLabelPattern.exec(label);
     assert(match, `${context} magnifier label is not frozen-pixel evidence: ${JSON.stringify(label)}`);
@@ -860,7 +872,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
       sample: { x: Number(match[1]), y: Number(match[2]) },
       hex: `#${match[3]}`,
       rgb: [Number(match[4]), Number(match[5]), Number(match[6])],
-      cursor: { shape: cursorShape, handle: cursor.handle },
+      cursor: { expected: islandCursorName(cursorShape), island: cursor.islandCursorShape,
+        result: cursor.result, legacyHandle: cursor.legacyHandle },
     };
     for (let channel = 0; channel < 3; channel++)
       assert.equal(parseInt(observed.hex.slice(1 + channel * 2, 3 + channel * 2), 16),
@@ -1071,8 +1084,10 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     // Right-click leaves smart preview; its corner is otherwise a resize handle.
     await native('mouse-right', start);
     await native('mouse-move', start);
-    const manualCursor = JSON.parse(await native('cursor'));
-    assert(manualCursor.cross, 'Manual selection must start with the crosshair, not a preview handle.');
+    const manualCursor = JSON.parse(await native('cursor',
+      { AppPid: app.child.pid, Handle: overlay.Handle }));
+    assert(manualCursor.islandCursorShape === islandCursorName('cross'),
+      'Manual selection must start with the crosshair, not a preview handle.');
     gesture.events.push({ event: 'manual-start-cursor', previewLabel, cursor: manualCursor });
     await native('mouse-down', start);
     try { await native('mouse-move', end); }

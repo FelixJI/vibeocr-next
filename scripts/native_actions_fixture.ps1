@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'cursor-map', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -407,6 +407,73 @@ public static class NativeActionsFixture
             arrow = Standard(32512), cross = Standard(32515),
             sizeNWSE = Standard(32642), sizeNESW = Standard(32643),
             sizeWE = Standard(32644), sizeNS = Standard(32645), sizeAll = Standard(32646),
+        };
+    }
+
+    // Locked WinAppSDK 2.6.4 InputSystemCursorShape raw values the picker can
+    // actually show; the App answers LRESULT = 1 + raw. Anything else is rejected.
+    private static readonly Dictionary<int, string> IslandCursorShapes = new Dictionary<int, string>
+    {
+        { 1, "Arrow" }, { 2, "Cross" }, { 4, "Hand" }, { 7, "SizeAll" },
+        { 8, "SizeNortheastSouthwest" }, { 9, "SizeNorthSouth" },
+        { 10, "SizeNorthwestSoutheast" }, { 11, "SizeWestEast" },
+    };
+
+    public static string IslandCursorName(ulong wireResult)
+    {
+        return wireResult >= 1 && wireResult <= int.MaxValue &&
+            IslandCursorShapes.TryGetValue((int)wireResult, out string name) ? name : null;
+    }
+
+    private static void GuardCursorPoint(IntPtr window, int pid, Point point)
+    {
+        if (GetForegroundWindow() != window)
+            throw new InvalidOperationException("Overlay is not the foreground window at the cursor read.");
+        IntPtr hit = WindowFromPoint(point);
+        if (GetAncestor(hit, 2) != window)
+            throw new InvalidOperationException("Cursor point does not hit-test to the overlay root.");
+        GetWindowThreadProcessId(hit, out uint hitPid);
+        if (hitPid != (uint)pid)
+            throw new InvalidOperationException("Cursor point hit-test window is outside this smoke run.");
+    }
+
+    // Same-sample island cursor truth for native-actions-e2e: the physical
+    // cursor must rest on the overlay root with the overlay foreground before
+    // the query and again - at an unchanged position - after it; the legacy
+    // global handle is evidence only (it can disagree with island cursors).
+    public static object PickerCursor(long handle, int pid)
+    {
+        RequireOwner(handle, pid);
+        IntPtr window = new IntPtr(handle);
+        if (!GetCursorPos(out Point physical))
+            throw new InvalidOperationException("Cursor position is unavailable.");
+        GuardCursorPoint(window, pid, physical);
+        uint message = RegisterWindowMessage("VibeOCR.ScreenRegionPicker.CursorProbe");
+        if (message == 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        bool delivered = SendMessageTimeout(window, message, IntPtr.Zero, IntPtr.Zero,
+            2, 1000, out UIntPtr result) != IntPtr.Zero;
+        int error = delivered ? 0 : Marshal.GetLastWin32Error();
+        if (!GetCursorPos(out Point after))
+            throw new InvalidOperationException("Cursor position is unavailable after the read.");
+        if (after.X != physical.X || after.Y != physical.Y)
+            throw new InvalidOperationException(
+                "Cursor moved during the island read: " + physical.X + "," + physical.Y +
+                " -> " + after.X + "," + after.Y);
+        GuardCursorPoint(window, pid, after);
+        string shape = IslandCursorName(result.ToUInt64());
+        if (!delivered || shape is null)
+            throw new InvalidOperationException(
+                "Island cursor read failed closed: delivered=" + delivered + " error=" + error +
+                " result=" + result.ToUInt64() + " shape=" + (shape ?? "null"));
+        var legacyInfo = new CursorInfo { Size = (uint)Marshal.SizeOf<CursorInfo>(), Flags = 1 };
+        bool legacyOk = GetCursorInfo(ref legacyInfo);
+        return new {
+            x = physical.X, y = physical.Y, islandCursorShape = shape,
+            result = result.ToUInt64(), foregroundHandle = window.ToInt64(), pid,
+            legacyShown = legacyOk && (legacyInfo.Flags & 1) != 0,
+            legacyHandle = legacyInfo.Handle.ToInt64(),
+            legacyError = legacyOk ? 0 : Marshal.GetLastWin32Error(),
         };
     }
 
@@ -964,7 +1031,28 @@ try {
             if ($labels.Count -ne 1) { throw 'Owned picker selection label is unavailable or ambiguous.' }
             $labels[0]
         }
-        'cursor' { [NativeActionsFixture]::CursorState() | ConvertTo-Json -Compress }
+        'cursor' {
+            if ($Handle -le 0 -or $AppPid -le 0) {
+                throw 'Island cursor read requires the owned overlay handle and app pid.'
+            }
+            [NativeActionsFixture]::PickerCursor($Handle, $AppPid) | ConvertTo-Json -Compress
+        }
+        'cursor-map' {
+            # 纯映射自检（无 GUI）：锁定线值→名称，0/未知/坏码必须拒绝。
+            $cases = [ordered]@{ 1 = 'Arrow'; 2 = 'Cross'; 4 = 'Hand'; 7 = 'SizeAll';
+                8 = 'SizeNortheastSouthwest'; 9 = 'SizeNorthSouth'; 10 = 'SizeNorthwestSoutheast';
+                11 = 'SizeWestEast' }
+            foreach ($entry in $cases.GetEnumerator()) {
+                $name = [NativeActionsFixture]::IslandCursorName([uint64]$entry.Key)
+                if ($name -cne $entry.Value) { throw "Island cursor map mismatch: $($entry.Key) -> $name" }
+            }
+            foreach ($bad in @(0UL, 3UL, 5UL, 6UL, 12UL, [uint64]::MaxValue)) {
+                if ($null -ne [NativeActionsFixture]::IslandCursorName($bad)) {
+                    throw "Island cursor map accepted an unsupported code: $bad"
+                }
+            }
+            'island-cursor-map: ok'
+        }
         'magnifier' {
             if (-not ([NativeActionsFixture]::Windows($AppPid) | Where-Object { $_.Handle -eq $Handle -and $_.Visible })) {
                 throw 'Magnifier observation window is outside the owned app.'

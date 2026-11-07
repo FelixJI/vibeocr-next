@@ -8,14 +8,16 @@
 // through stopOwned's bounded fallback on a windowless child). Finally blocks
 // terminate only the ChildProcess handles this test itself spawned.
 import assert from 'node:assert/strict';
-import { ChildProcess, spawn } from 'node:child_process';
+import { ChildProcess, execFile, spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
 const { stopOwned, closeAppNormally, assertCaptureCanvasLayout, settleSceneCopyTimeline,
-  observeSceneCopyTerminal, raceDeadline } = await import(
+  observeSceneCopyTerminal, raceDeadline, islandCursorName } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_native_actions.mjs')).href);
 
 setTimeout(() => {
@@ -547,6 +549,30 @@ const settleMicrotasks = async (until, limit = 200) => {
   cleared.clear();
   assert.equal(cleared.promise instanceof Promise, true);
   console.log('case16 race-deadline: ok');
+}
+
+// 17. Island cursor contract (cursor-source-diagnostic1108): the legacy
+// global-cursor reading can disagree with the WinUI island cursor, so the
+// smoke maps its legacy expectations to InputSystemCursorShape names and the
+// fixture's locked wire map (LRESULT = 1 + raw enum) accepts only the
+// supported shapes - 0/unavailable, enum gaps and out-of-range codes are
+// rejected. Real fixture subprocess, no GUI, no window creation.
+{
+  assert.equal(islandCursorName('cross'), 'Cross');
+  assert.equal(islandCursorName('sizeNWSE'), 'SizeNorthwestSoutheast');
+  assert.equal(islandCursorName('sizeNS'), 'SizeNorthSouth');
+  assert.equal(islandCursorName('sizeNESW'), 'SizeNortheastSouthwest');
+  assert.equal(islandCursorName('sizeWE'), 'SizeWestEast');
+  assert.equal(islandCursorName('sizeAll'), 'SizeAll');
+  assert.equal(islandCursorName('hand'), 'Hand');
+  for (const bad of ['', 'sizeNwse', 'sizeNW', 'cross ', 'arrow-cross', undefined, null,
+    'toString', 'constructor', 'hasOwnProperty'])
+    assert.throws(() => islandCursorName(bad), /Unknown cursor expectation/);
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+    path.join(scriptDir, '..', '..', 'scripts', 'native_actions_fixture.ps1'),
+    '-Action', 'cursor-map'], { timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  assert.equal(stdout.trim(), 'island-cursor-map: ok');
+  console.log('case17 island-cursor-contract: ok');
 }
 
 console.log('smoke_native_actions contract: passed');

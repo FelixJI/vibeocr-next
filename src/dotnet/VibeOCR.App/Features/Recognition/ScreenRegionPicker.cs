@@ -1330,6 +1330,9 @@ public sealed class ScreenRegionPicker(
       throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
     }
     if (!automaticSelection) keyboardSink.Focus(FocusState.Programmatic);
+    using WindowMessageService? cursorQuery = diagnoseSmartQueries
+      ? InstallCursorQuery(overlayHandle, root)
+      : null;
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
     root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
     if (automaticSelection)
@@ -1355,6 +1358,43 @@ public sealed class ScreenRegionPicker(
         root.Children.Clear();
     }
   }
+
+  // native-actions-e2e 光标验收：App 外 GetCursorInfo 与 WinUI island 光标可
+  // 不一致（cursor-source-diagnostic1108），故同步消息读 ContentIsland 的
+  // InputPointerSource.Cursor；LRESULT=1+(int)shape，0=不可用/异常 fail closed。
+  private static WindowMessageService? InstallCursorQuery(nint overlayHandle, Grid root)
+  {
+    uint queryMessage = RegisterWindowMessageW("VibeOCR.ScreenRegionPicker.CursorProbe");
+    if (queryMessage == 0) return null;
+    WindowMessageService messages;
+    try
+    {
+      messages = new WindowMessageService(overlayHandle);
+    }
+    catch (InvalidOperationException)
+    {
+      return null;
+    }
+    messages.MessageHandled += message =>
+    {
+      if (message.Id != queryMessage) return null;
+      try
+      {
+        var island = root.XamlRoot?.ContentIsland;
+        if (island is null) return 0;
+        InputPointerSource? pointerSource = InputPointerSource.GetForIsland(island);
+        if (pointerSource?.Cursor is not InputSystemCursor cursor) return 0;
+        int shape = (int)cursor.CursorShape;
+        return shape >= 0 ? 1 + shape : 0;
+      }
+      catch
+      {
+        return 0;
+      }
+    };
+    return messages;
+  }
+
     // 只映射目录/投影 availability 的稳定词汇，不复制引擎/配方表；准备类
     // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字
     // 图标专用：指向设置 · 默认识别类型，不静默改选其他文字引擎；
@@ -1471,6 +1511,9 @@ public sealed class ScreenRegionPicker(
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X, Y; }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern uint RegisterWindowMessageW(string message);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect { public int Left, Top, Right, Bottom; }
