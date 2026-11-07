@@ -2036,7 +2036,23 @@ export function ImageCanvasEditor({
           if (index >= 0 && index < markCount) markCount = index;
         }
         let cached = previewCache.current;
-        if (canvas.width * canvas.height <= 16_000_000) {
+        // 空截图尚无可复用标注，直接绘制可避免分配重复画布。
+        const bareCaptureFrame =
+          !!captureGeometry &&
+          state.marks.length === 0 &&
+          !draftMark.current &&
+          !objectDraftRef.current &&
+          !textEdit &&
+          !objectEraserHits.current?.size &&
+          !cropDraft.current &&
+          !layer.patches?.length &&
+          !layer.preview &&
+          !layer.maskOverlay &&
+          !layer.duplicateOverlay;
+        if (bareCaptureFrame) {
+          cached = undefined;
+          previewCache.current = undefined;
+        } else if (canvas.width * canvas.height <= 16_000_000) {
           if (
             !cached ||
             cached.state !== state ||

@@ -192,6 +192,9 @@ public sealed partial class App : Application
         }
         AppLog.Initialize(Path.Combine(layout.DataRoot, "logs"));
         AppLog.Info($"OnLaunched: profile={options.Profile} shellOnly={options.ShellOnly}");
+        // capture-first-frame 冒烟：任何主窗/WebView 创建前等待采样器 root 首样本
+        // 回执（App.FirstFrameMonitor.cs；双门控未启用时零开销）。
+        WaitForFirstFrameRootSample(layout);
         WebReadySmokeStatus.Stage("app-launched");
         if (layout.Profile == "production" && File.Exists(layout.ConfigFile))
         {

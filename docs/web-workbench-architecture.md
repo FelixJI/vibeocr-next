@@ -47,9 +47,13 @@ receipt/error response 与 PDF preview flush 走独立关联通道；reset 完�
 仅该启动事务允许与控制帧相同的真实 checkpoint。缺 ready 的十秒期限、未知/重复 scope、单帧超限和旧 session 均不提交部分状态。
 这里的 ready 是状态快照提交。截图覆盖层另有 `captureScene`：C# 提供冻结桌面的物理几何、surface、截图会话、输入资源/内容 revision，以及 document/bootstrap generation；小响应与 snapshot 控制都携带同一 typed 元数据，TS 在完整快照提交后才经 runtime/viewState/props 使用。
 
+普通产品启动只创建原生壳与既有 deferred Runtime 入口，不后台初始化或启动 Python；首次显式 OCR/计算仍经同一 `RuntimeDemandCoordinator` 完成准备、目录获取、失败与取消，不复制第二套能力真值。
+
+原生选区从同一次 GDI 冻结画面创建一个背景 BMP，WinUI 解码展示后把同一数组交给 `ScreenshotCaptureScene`，编辑宿主经 `TakeBackground()` 最多领取一次；确认编辑不再重新编码整屏。选区裁剪输入仍单独形成当前修订，快速复制/保存/贴图不创建截图编辑 WebView，取消和替换沿用既有 scene 关闭与 owner 恢复归属。隐藏宿主后的 180ms 等待保留：当前合成场景测量不足以证明所有 DWM/真实宿主可见性条件，不能据此移除等待。
+
 截图编辑器不再注入 `window` 几何或由宿主轮询 DOM。前端确认对应输入的实际解码尺寸，完成源图画布绘制与冻结背景解码，再在后续 rAF 通过既有 bridge 发送一次 `capture.pixelReady`；解码/绘制失败只发送有界 `capture.pixelFailed` reason。宿主必须匹配当前 bridge session、document/bootstrap generation、surface、截图会话、输入资源和内容 revision，才原生设置 Opacity 揭示。旧、重复、导航后和关闭后的回报不生效。普通主窗 bootstrap-ready 保持原语义；截图只在匹配像素 ready 后重置一次自动恢复预算，十秒首帧期限和 renderer 失败最多自动 reload 一次，再显示可退出的原生恢复入口。导航、替换 bootstrap 和 dispose 撤销旧期限；command receipt 与 PDF preview flush 仍是独立契约。
 
-纯工具首帧测量使用打包应用的 `capture-first-frame-e2e`，三个隔离 App/UDF 冷批次分别 20/1/1 轮，保留 22 行真实原生 editor 的时间、dispatch lag、资源/订阅计数、工作集采样与进程角色。计时终点固定为原生 Opacity 揭示之后；输入开始点是 synthetic GDI capture，不包含人类热键或框选时间。普通启动不创建采样定时器。after 使用保存的 before 冻结预算；完整失败 before 可作为性能基线，但 cleanup、资源及 zero-Runtime 证据失败不能接受。每轮 closed 的 CIM 采样只有一秒窗口，常见仅一个样本；工作集增长是门禁证据，不能据此单独归因为浏览器缓存或资源泄漏。混合 DPI/负坐标副屏需要真实硬件证据，浏览器 DPR 测试不替代该验收。
+纯工具首帧测量使用打包应用的 `capture-first-frame-e2e`，三个隔离 App/UDF 冷批次分别 20/1/1 轮，保留 22 行真实原生 editor 的时间、dispatch lag、资源/订阅计数、工作集采样与进程角色。计时终点固定为原生 Opacity 揭示之后；输入开始点是 synthetic GDI capture，不包含人类热键或框选时间。普通启动不创建采样定时器。after 使用保存的 before 冻结预算；完整失败 before 可作为性能基线，但 cleanup、资源及 zero-Runtime 证据失败不能接受。每轮 closed 的工作集采样窗口固定一秒。CIM 仅负责带 PID/创建时间的进程归属和角色发现；已确认归属的进程由同一监控进程内的独立任务每 250ms 读取真实工作集，避免全机 CIM 查询耗时超过一秒而漏采。每条样本记录实际读取起止时间，只有整个读取区间落在窗口内才计入；停止监控会等待采样任务退出。CIM 归属发现仍是下界，可能漏掉短命进程。工作集增长是门禁证据，不能据此单独归因为浏览器缓存或资源泄漏。混合 DPI/负坐标副屏需要真实硬件证据，浏览器 DPR 测试不替代该验收。
 
 ## WebView2 与恢复
 

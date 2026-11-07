@@ -5,11 +5,15 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runCaptureReplacementBatch } from './smoke_capture_first_frame.mjs';
 
-export function validateReplacementHealth(health) {
+export function validateReplacementHealth(health, zero) {
   assert.equal(health.smoke, 'capture-replacement-e2e');
   assert.equal(health.state, 'passed', health.error ?? 'Native lifecycle failed.');
-  for (const key of ['submit_attempts', 'startup_ensure_attempts', 'installer_attempts']) assert.equal(health[key], 0);
+  for (const key of ['submit_attempts', 'startup_ensure_attempts']) assert.equal(health[key], 0);
   assert.equal(health.inference_attached, false);
+  assert.equal(zero.root_pid_seen, true);
+  assert.equal(zero.applog_non_empty, true);
+  assert.deepEqual(zero.applog_forbidden_hits, []);
+  assert.deepEqual(zero.violations, []);
   assert(health.renderer_failure.startsWith('UNVERIFIED:'), 'Reload must not masquerade as ProcessFailed evidence.');
   const phases = ['main-reload', 'two-replacements-held', 'latest-editor-and-reload',
     'pending-cancelled', 'shutdown-held', 'shutdown-drained'];
@@ -60,7 +64,7 @@ async function main() {
   const record = await runCaptureReplacementBatch(candidate, root, helpers);
   try {
     assert.equal(record.state, 'passed', record.error ?? record.cleanup_error ?? record.evidence_error);
-    validateReplacementHealth(record.health);
+    validateReplacementHealth(record.health, record.zero_evidence);
   } catch (error) { record.state = 'failed'; record.validation_error = error.stack ?? String(error); }
   fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(record, null, 2));
   console.log(JSON.stringify({ state: record.state, root }));

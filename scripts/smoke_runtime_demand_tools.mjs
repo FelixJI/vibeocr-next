@@ -4,7 +4,8 @@
 // toolbar show/hide toggle), image edit (clipboard-fixture paste -> rectangle
 // annotation -> copy -> repaste verify) and a pure screenshot capture through
 // the public 截图 button into the scene editor (manual drag over the synthetic
-// fixture, session BMP verification, annotate, copy, end session).
+// fixture, session BMP verification, annotate, pin + on-site measurement
+// before the scene-terminal copy, explicit end on an independent session).
 // Combined zero evidence: owned CIM lineage (runtime_demand_process_probe.ps1)
 // records no installer/supervisor/python descendants + candidate AppLog has no
 // "Runtime demand: connect begin" / "Runtime demand: initialize_default begin"
@@ -24,6 +25,9 @@
 // confirmed through verified controls), and the scene 贴图 pin is proven by a
 // passive owned-window diff (stable new visible top-level window, transient
 // popups/tooltips excluded) and removed again via owned close.
+// a0628: imageEdit copy/save upload evidence comes from the shared pre-click
+// observer (CDP network events proved lossy on this page); the save picker
+// is only driven after the accepted 201 + public command, fail closed.
 // Not covered (left for the main agent): settings hotkey re-recording. The
 // evidence root is never deleted; owned cleanup
 // follows recorded PID + creation_filetime lineage only.
@@ -52,7 +56,8 @@ import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, area, inside, delay,
-  startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned } from './smoke_native_actions.mjs';
+  startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned,
+  settleSceneCopyTimeline, observeSceneCopyTerminal, raceDeadline } from './smoke_native_actions.mjs';
 import { createWorkbenchCollector, runMeasurementSelfCheck } from './workbench_delivery_probe.mjs';
 
 const exec = promisify(execFile);
@@ -111,6 +116,12 @@ const jsonLines = (file) => fs.existsSync(file)
 
 // Minimal named exports for scripts/smoke_workbench_delivery.mjs reuse only;
 // the CLI behavior, zero-runtime rules and steps of this smoke are unchanged.
+export function allowsLocalToolRequest(value) {
+  const url = new URL(value);
+  return url.protocol === 'data:' || url.origin === 'https://app.vibeocr' ||
+    (['http:', 'https:'].includes(url.protocol) && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname));
+}
+
 export async function freePort() {
   const server = net.createServer();
   server.listen(0, '127.0.0.1');
@@ -155,8 +166,9 @@ export async function connect(child, debugPort) {
 }
 
 // Owner-written read-only monitor contract: wait for monitor-ready, the
-// spawned App PID goes to root-pid.txt, stop-monitor ends it. CIM snapshots
-// are a lower bound (complete_start_trace=false), never a complete trace.
+// spawned App PID goes to root-pid.txt, stop-monitor ends both discovery and
+// independent owned working-set reads. CIM ownership snapshots remain a lower
+// bound (complete_start_trace=false), never a complete process-start trace.
 export async function monitor(root) {
   const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-File', probeScript,
     '-OutputRoot', root], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -295,6 +307,7 @@ async function waitForStableNewWindow(pid, beforeHandles, mainHandle, timeoutMs 
 
 async function drawRectangle(page) {
   await page.getByRole('button', { name: '矩形', exact: true }).click();
+  await page.getByRole('button', { name: '常用颜色 #f38b35', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const editor = page.getByLabel('图片检查画布');
   const box = await editor.boundingBox();
@@ -305,16 +318,59 @@ async function drawRectangle(page) {
   await page.mouse.up();
 }
 
-async function copyAnnotated(page, successText) {
-  const requestPromise = page.waitForRequest((request) =>
-    request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-  { timeout: 15000 });
-  await page.getByRole('button', { name: '复制标注图', exact: true }).click();
-  const request = await requestPromise;
-  const response = await request.response();
-  assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
+// Non-terminal public copy (a0628): shared-observer timeline + fail-closed
+// judge (non-terminal mode), awaited host receipt, product success text;
+// no CDP waitForRequest.
+async function copyAnnotated(handoff, page, successText) {
+  const clickError = await page.getByRole('button', { name: '复制标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (clickError) handoff.timeline.clickError = clickError;
+  const command = await handoff.waitForCommand('copyScreenshotImage');
+  assert(command, `No public imageEdit.copyScreenshotImage command within 10 seconds: ${
+    JSON.stringify(handoff.timeline)}`);
+  settleSceneCopyTimeline(handoff.timeline, 'ImageEdit copy',
+    { action: 'copyScreenshotImage', requireScope: 'imageEdit', requireClose: false });
+  const upload = handoff.timeline.uploads.find(
+    (item) => item.resourceUri === command.resourceUri);
+  assert(upload?.blobMeta?.problem == null && Number.isSafeInteger(upload?.blobMeta?.byteLength),
+    `ImageEdit copy: unsound upload Blob evidence: ${JSON.stringify(handoff.timeline)}`);
+  const receipt = await handoff.waitForReceipt(command.envelopeId);
+  assert(receipt && receipt.ok === true,
+    `Public copy command receipt missing or failed: ${JSON.stringify(handoff.timeline)}`);
   await page.getByText(successText, { exact: false }).waitFor({ timeout: 15000 });
-  return { status: response.status(), byteLength: request.postDataBuffer()?.length ?? null };
+  return { status: upload.responseStatus, byteLength: upload.blobMeta.byteLength,
+    resourceUri: command.resourceUri, command: 'imageEdit.copyScreenshotImage',
+    receiptOk: receipt.ok, requestAt: upload.requestAt, responseAt: upload.responseAt };
+}
+
+// Scene-terminal copy (goal316/318): the scene closes on copy success, so
+// the proof is the Node-held timeline from the pre-click passive
+// observeSceneCopyTerminal, settled by the shared fail-closed judge; no
+// public copy command, non-201, failure receipt, crash or missing close is
+// never a success, and the automatic text-layer upload never counts as the
+// copy (association is by the command's resourceUri).
+async function copyAnnotatedTerminal(scene) {
+  const terminal = await observeSceneCopyTerminal(scene);
+  const clickError = await scene.getByRole('button', { name: '复制标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (clickError) terminal.timeline.clickError = clickError;
+  const deadline = raceDeadline(10000);
+  let ended;
+  try {
+    ended = await Promise.race([terminal.ended.then(() => true), deadline.promise]);
+  } finally { deadline.clear(); }
+  if (!ended) terminal.timeline.noTerminalEvent = true;
+  settleSceneCopyTimeline(terminal.timeline);
+  const command = terminal.timeline.copyCommands[0];
+  const upload = terminal.timeline.uploads.find(
+    (item) => item.resourceUri === command.resourceUri);
+  return { status: upload.responseStatus,
+    byteLength: upload.blobMeta?.byteLength ?? null,
+    requestAt: upload.requestAt, responseAt: upload.responseAt,
+    closedAt: terminal.timeline.closedAt,
+    clickError: terminal.timeline.clickError ?? null };
 }
 
 // Pure AppLog zero-evidence scanner (self-checkable without any GUI):
@@ -361,7 +417,10 @@ async function watchImageEditInput(page) {
       if (data?.kind !== 'event' || data.type !== 'app.state' ||
           data.payload?.scope !== 'imageEdit') return;
       const url = data.payload.state?.input?.url;
-      if (typeof url === 'string') window.__rt214ImageEditInput = url;
+      if (typeof url !== 'string') return;
+      const session = data.payload.state?.screenshotSession;
+      window.__rt214ImageEditInput = { url,
+        sessionId: typeof session?.sessionId === 'string' ? session.sessionId : null };
     });
   });
 }
@@ -393,6 +452,7 @@ async function qrToolStep(ctx) {
   await page.getByRole('tab', { name: '生成', exact: true }).click();
   await page.getByLabel('生成格式').selectOption('qrcode');
   await page.getByLabel('输入内容', { exact: true }).fill(payload);
+  await page.locator('summary').filter({ hasText: '底部文字' }).click();
   await page.getByLabel('底部文字', { exact: true }).selectOption('off');
   // The preview element may not exist before the first generation; a null
   // baseline is valid, so never block on a missing attribute.
@@ -478,11 +538,20 @@ async function imageEditStep(ctx) {
       if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
     return dark > 500;
   }, null, { timeout: 15000 });
-  // Pin the first paste to its observed public input resource URL.
-  await page.waitForFunction(() => typeof window.__rt214ImageEditInput === 'string',
-    null, { timeout: 15000 });
-  const firstInputUrl = await page.evaluate(() => window.__rt214ImageEditInput);
-  step.firstInputUrl = firstInputUrl;
+  // Pin the first paste to its observed public input URL and its session:
+  // the session is the precondition for the copy/save session variants
+  // (imageEdit.copyScreenshotImage / saveScreenshotImage), so it must exist.
+  await page.waitForFunction(() => {
+    const record = window.__rt214ImageEditInput;
+    return !!record && typeof record.url === 'string' &&
+      typeof record.sessionId === 'string' && record.sessionId.length > 0;
+  }, null, { timeout: 15000 });
+  const firstInput = await page.evaluate(() => window.__rt214ImageEditInput);
+  assert(typeof firstInput?.sessionId === 'string' && firstInput.sessionId.length > 0,
+    `Pasted imageEdit session missing; copy/save would use the session-less variants: ${
+      JSON.stringify(firstInput)}`);
+  step.firstInputUrl = firstInput.url;
+  step.firstSessionId = firstInput.sessionId;
   const before = await canvasOrange(page);
   assert(before.dark > 500, 'Pasted QR image never decoded in the editor canvas.');
   await drawRectangle(page);
@@ -498,24 +567,42 @@ async function imageEditStep(ctx) {
   const after = await canvasOrange(page);
   assert(after.orange > before.orange + 50, 'Rectangle edit changed too few canvas pixels.');
   step.annotationPixels = { before: before.orange, after: after.orange };
-  step.annotationUpload = await copyAnnotated(page, '已复制截图副本');
+  // a0628: one pre-click observer for both handoffs; the pasted session
+  // makes the public commands the copyScreenshotImage/saveScreenshotImage
+  // session variants (never the session-less copyAnnotatedImage).
+  const handoff = await observeSceneCopyTerminal(page,
+    { actions: ['copyScreenshotImage', 'saveScreenshotImage'] });
+  step.annotationUpload = await copyAnnotated(handoff, page, '已复制截图副本');
   // Real FileSavePicker through the owned save-file seam: the export upload
-  // is observed first, then the picker dialog (owned by our main window)
-  // receives the target path and its confirmation is driven through the
+  // is observed passively first (a0628: accepted 201 + the public
+  // imageEdit.saveScreenshotImage command BEFORE the picker is driven), then
+  // the picker dialog (owned by our main window) is driven through the
   // fixture's verified UIA/Win32 controls. The saved PNG is then decoded in
   // the product's own WebView2 and checked for exact input dimensions, the
   // QR content and the baked annotation pixels.
   const savedFile = path.join(root, 'imageedit-saved.png');
-  const saveRequest = page.waitForRequest((request) =>
-    request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-  { timeout: 15000 });
-  await page.getByRole('button', { name: '保存标注图', exact: true }).click();
-  const savedResponse = await (await saveRequest).response();
-  assert.equal(savedResponse?.status(), 201, 'Save export upload was not accepted.');
+  const saveClickError = await page.getByRole('button', { name: '保存标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (saveClickError) handoff.timeline.clickError = saveClickError;
+  const saveCommand = await handoff.waitForCommand('saveScreenshotImage');
+  assert(saveCommand, `No public imageEdit.saveScreenshotImage command within 10 seconds: ${
+    JSON.stringify(handoff.timeline)}`);
+  settleSceneCopyTimeline(handoff.timeline, 'ImageEdit save',
+    { action: 'saveScreenshotImage', requireScope: 'imageEdit', requireClose: false });
+  const saveUpload = handoff.timeline.uploads.find(
+    (item) => item.resourceUri === saveCommand.resourceUri);
+  step.saveUpload = { status: saveUpload.responseStatus,
+    byteLength: saveUpload.blobMeta?.byteLength ?? null,
+    resourceUri: saveCommand.resourceUri, command: 'imageEdit.saveScreenshotImage' };
   await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File', scrollCaptureScript,
     '-Action', 'save-file', '-Handle', String(main.Handle), '-AppPid', String(child.pid),
     '-OutputPath', savedFile, '-EvidenceRoot', root],
   { timeout: 45000, windowsHide: true });
+  const saveReceipt = await handoff.waitForReceipt(saveCommand.envelopeId, 20000);
+  assert(saveReceipt && saveReceipt.ok === true,
+    `Public save command receipt missing or failed: ${JSON.stringify(handoff.timeline)}`);
+  step.saveUpload.receiptOk = saveReceipt.ok;
   await page.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
   const savedStat = fs.statSync(savedFile);
   assert(savedStat.isFile() && savedStat.size > 8, 'Saved annotation PNG is missing or empty.');
@@ -531,10 +618,11 @@ async function imageEditStep(ctx) {
   // pass on the stale pre-paste canvas.
   await focusMain(ctx);
   await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
-  await page.waitForFunction((previous) =>
-    typeof window.__rt214ImageEditInput === 'string' &&
-    window.__rt214ImageEditInput !== previous, firstInputUrl, { timeout: 20000 });
-  step.repastedInputUrl = await page.evaluate(() => window.__rt214ImageEditInput);
+  await page.waitForFunction((previous) => {
+    const record = window.__rt214ImageEditInput;
+    return !!record && typeof record.url === 'string' && record.url !== previous;
+  }, firstInput.url, { timeout: 20000 });
+  step.repastedInputUrl = await page.evaluate(() => window.__rt214ImageEditInput.url);
   await page.waitForFunction(() => {
     const element = document.querySelector('canvas[aria-label="图片检查画布"]');
     if (!element) return false;
@@ -546,17 +634,86 @@ async function imageEditStep(ctx) {
   }, null, { timeout: 20000 });
   await page.screenshot({ path: path.join(root, 'imageedit-annotated.png') });
   step.repastedAnnotatedPixels = true;
+  // Shared restore hook: leave the page surfaces as the product had them.
+  await page.evaluate(() => window.__nativeActionsRestoreFetch?.())
+    .catch(() => { /* page already gone: nothing to restore */ });
   step.state = 'passed';
   return step;
 }
 
+// Open one fresh screenshot scene session through the public 截图 button
+// (manual drag, label check, Enter, scene appears and paints); reused for the
+// annotated session and the independent explicit-end session (goal316).
+async function startSceneSession(ctx, fixture) {
+  const { child, browser, page } = ctx;
+  await focusMain(ctx);
+  await page.getByRole('button', { name: '截图', exact: true }).click();
+  const button = fixture.buttonRect;
+  const x = button.left + Math.floor(button.width / 2);
+  const y = button.top + Math.floor(button.height / 2);
+  const overlays = await waitForWindows(child.pid, (item) => item.Visible &&
+    item.Handle !== ctx.main.Handle &&
+    area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
+    inside(item, x, y), 12000);
+  const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
+  const start = { AppPid: child.pid, X: fixture.rootRect.left + 20, Y: fixture.rootRect.top + 40 };
+  const end = { AppPid: child.pid, X: fixture.rootRect.right - 20, Y: fixture.rootRect.bottom - 20 };
+  await native('mouse-move', start);
+  await native('mouse-down', start);
+  try { await native('mouse-move', end); }
+  finally { await native('mouse-up', end); }
+  const region = { left: start.X, top: start.Y,
+    width: end.X - start.X, height: end.Y - start.Y };
+  const label = await native('selection', { AppPid: child.pid, Handle: overlay.Handle });
+  assert(label.includes(`手动 · ${region.width} × ${region.height} px`),
+    `Manual selection label mismatch: ${label}`);
+  const click = { AppPid: child.pid,
+    X: region.left + Math.floor(region.width / 2),
+    Y: region.top + Math.floor(region.height / 2) };
+  await native('mouse-move', click);
+  await native('mouse-down', click);
+  try {
+    assert((await windows(child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
+      'Selection click confirmed before release.');
+  } finally { await native('mouse-up', click); }
+  await native('enter', { AppPid: child.pid });
+  const deadline = Date.now() + 12000;
+  let scene = null;
+  while (Date.now() < deadline && !scene) {
+    scene = browser.contexts().flatMap((context) => context.pages())
+      .find((item) => item !== page && !item.isClosed() &&
+        item.url().includes('#/imageEdit?scene=1'));
+    if (!scene) await delay(100);
+  }
+  assert(scene, 'Screenshot scene WebView did not appear.');
+  // Task #215: install the probe on the scene as soon as it is located,
+  // BEFORE any public operation, and await it (its context is attached
+  // inside; an init-script probe, if any, stays untouched/idempotent).
+  if (ctx.collector) await ctx.collector.installOnPage(scene)
+    .catch((error) => ctx.collector.noteError(`scene install: ${error.message}`));
+  await scene.locator('html[data-capture-scene="true"]')
+    .waitFor({ state: 'attached', timeout: 12000 });
+  await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
+  await scene.waitForFunction(() => {
+    const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
+    if (!canvas) return false;
+    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    let changed = 0;
+    for (let i = 0; i < data.length; i += 40)
+      if (data[i] !== 22 || data[i + 1] !== 22 || data[i + 2] !== 22) changed++;
+    return changed > 100;
+  }, null, { timeout: 12000 });
+  return { scene, region, overlayHandle: overlay.Handle, selectionLabel: label };
+}
+
 // Pure screenshot capture through the public 截图 button: the synthetic
 // fixture (topmost full-desktop background) makes the frozen desktop and the
-// manual selection deterministic. Enter opens the scene editor; the capture is
-// proven by fetching the session input resource (32-bpp BMP of the exact
-// selected region) before annotating, copying and ending the session.
+// manual selection deterministic. Enter opens the scene editor; the capture
+// is proven by fetching the session input resource (32-bpp BMP of the exact
+// selected region) before annotating. Pinning and measurement precede the
+// scene-terminal copy; the explicit 结束会话 runs on an independent session.
 async function captureStep(ctx) {
-  const { child, browser, page, root } = ctx;
+  const { child, page, root } = ctx;
   const step = { state: 'failed' };
   const fixture = await startFixture();
   ctx.fixture = fixture;
@@ -574,64 +731,11 @@ async function captureStep(ctx) {
       X: fixture.rootRect.left, Y: fixture.rootRect.top,
       Width: fixture.rootRect.width, Height: fixture.rootRect.height,
       EvidenceRoot: root, OutputPath: path.join(root, 'capture-fixture.png') });
-    await focusMain(ctx);
-    await page.getByRole('button', { name: '截图', exact: true }).click();
-    const button = fixture.buttonRect;
-    const x = button.left + Math.floor(button.width / 2);
-    const y = button.top + Math.floor(button.height / 2);
-    const overlays = await waitForWindows(child.pid, (item) => item.Visible &&
-      item.Handle !== ctx.main.Handle &&
-      area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
-      inside(item, x, y), 12000);
-    const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
-    step.overlayHandle = overlay.Handle;
-    const start = { AppPid: child.pid, X: fixture.rootRect.left + 20, Y: fixture.rootRect.top + 40 };
-    const end = { AppPid: child.pid, X: fixture.rootRect.right - 20, Y: fixture.rootRect.bottom - 20 };
-    await native('mouse-move', start);
-    await native('mouse-down', start);
-    try { await native('mouse-move', end); }
-    finally { await native('mouse-up', end); }
-    const region = { left: start.X, top: start.Y,
-      width: end.X - start.X, height: end.Y - start.Y };
-    const label = await native('selection', { AppPid: child.pid, Handle: overlay.Handle });
-    assert(label.includes(`手动 · ${region.width} × ${region.height} px`),
-      `Manual selection label mismatch: ${label}`);
-    step.selectionLabel = label;
-    const click = { AppPid: child.pid,
-      X: region.left + Math.floor(region.width / 2),
-      Y: region.top + Math.floor(region.height / 2) };
-    await native('mouse-move', click);
-    await native('mouse-down', click);
-    try {
-      assert((await windows(child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
-        'Selection click confirmed before release.');
-    } finally { await native('mouse-up', click); }
-    await native('enter', { AppPid: child.pid });
-    const deadline = Date.now() + 12000;
-    let scene = null;
-    while (Date.now() < deadline && !scene) {
-      scene = browser.contexts().flatMap((context) => context.pages())
-        .find((item) => item !== page && item.url().includes('#/imageEdit?scene=1'));
-      if (!scene) await delay(100);
-    }
-    assert(scene, 'Screenshot scene WebView did not appear.');
-    // Task #215: install the probe on the scene as soon as it is located,
-    // BEFORE any public operation, and await it (its context is attached
-    // inside; an init-script probe, if any, stays untouched/idempotent).
-    if (ctx.collector) await ctx.collector.installOnPage(scene)
-      .catch((error) => ctx.collector.noteError(`scene install: ${error.message}`));
-    await scene.locator('html[data-capture-scene="true"]')
-      .waitFor({ state: 'attached', timeout: 12000 });
-    await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
-    await scene.waitForFunction(() => {
-      const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
-      if (!canvas) return false;
-      const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
-      let changed = 0;
-      for (let i = 0; i < data.length; i += 40)
-        if (data[i] !== 22 || data[i + 1] !== 22 || data[i + 2] !== 22) changed++;
-      return changed > 100;
-    }, null, { timeout: 12000 });
+    const first = await startSceneSession(ctx, fixture);
+    const scene = first.scene;
+    step.overlayHandle = first.overlayHandle;
+    step.selectionLabel = first.selectionLabel;
+    const region = first.region;
     // The main workbench page carries the passive session state projection.
     await page.waitForFunction(() => {
       const session = window.__rt214Session;
@@ -666,20 +770,25 @@ async function captureStep(ctx) {
     }
     assert(dark > 10 && light > 100, `Captured fixture pixels incomplete: dark=${dark}, light=${light}`);
     step.capture = { bmp: bmpFile, width, height, dark, light };
+    // The scene canvas already carries orange crop handles (~192 px baseline),
+    // so the stroke wait is baseline-relative with the +50 threshold unchanged.
+    const annotationBefore = await canvasOrange(scene);
     await drawRectangle(scene);
-    await scene.waitForFunction(() => {
+    await scene.waitForFunction((baseline) => {
       const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
       if (!canvas) return false;
       const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
       let orange = 0;
       for (let i = 0; i < data.length; i += 4)
         if (data[i] > 210 && data[i + 1] > 90 && data[i + 1] < 190 && data[i + 2] < 110) orange++;
-      return orange > 50;
-    }, null, { timeout: 10000 });
-    step.annotationUpload = await copyAnnotated(scene, '已复制截图副本');
+      return orange > baseline + 50;
+    }, annotationBefore.orange, { timeout: 10000 });
+    step.annotationPixels = { before: annotationBefore.orange,
+      after: (await canvasOrange(scene)).orange };
     // Public 贴图 pin: passive owned-window diff (stable new visible top-level
     // always-on-top window; transient popups/tooltips drop out) followed by
     // an owned close that must actually remove the window again.
+    // Runs before the copy: pinning keeps the session alive; the copy is terminal.
     const pinBefore = new Set((await windows(child.pid)).filter((item) => item.Visible)
       .map((item) => item.Handle));
     await scene.getByRole('button', { name: '贴图', exact: true }).click();
@@ -698,9 +807,25 @@ async function captureStep(ctx) {
     // window is still open (listener-only data; no bridge commands).
     if (ctx.collector) await ctx.collector.harvest('scene-capture', scene);
     await scene.screenshot({ path: path.join(root, 'capture-scene.png') });
-    const closed = scene.waitForEvent('close', { timeout: 10000 });
-    await scene.getByRole('button', { name: '结束会话', exact: true }).click();
-    await closed;
+    // Scene-terminal copy (goal316): proof is the Node-held request/response/
+    // close timeline; nothing is read from the scene afterwards.
+    step.annotationUpload = await copyAnnotatedTerminal(scene);
+    // The explicit 结束会话 stays covered on its own fresh, independent
+    // session (a different session id), never on the terminal one.
+    const second = await startSceneSession(ctx, fixture);
+    await page.waitForFunction((previous) => {
+      const session = window.__rt214Session;
+      return !!(session && session.sessionId !== previous &&
+        typeof session.inputUrl === 'string');
+    }, session.sessionId, { timeout: 10000 });
+    step.explicitEndSession = {
+      sessionId: (await page.evaluate(() => window.__rt214Session)).sessionId,
+      selectionLabel: second.selectionLabel,
+    };
+    const endClosed = second.scene.waitForEvent('close', { timeout: 10000 });
+    await second.scene.getByRole('button', { name: '结束会话', exact: true }).click();
+    await endClosed;
+    step.explicitEndSession.closed = true;
     step.state = 'passed';
   } finally {
     const owned = ctx.fixture;
@@ -753,7 +878,7 @@ export function zeroEvidence(copy, root, appPid) {
     applog_forbidden_hits: scan.hits,
     environment_state_absent: environmentSurfaces.filter((relative) =>
       !fs.existsSync(path.join(copy, relative))),
-    combined: 'CIM owned lineage (250ms snapshot lower bound, complete_start_trace=false) + ' +
+    combined: 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independent working-set reads + ' +
       'non-empty AppLog without Installer command starts (any action, incl. list/' +
       'switch reservation) or runtime demand connect/initialize_default + fresh ' +
       'state kept no environment registry/store/plans/cache/marker on the ' +
@@ -838,6 +963,12 @@ async function run(candidate, work) {
       });
     assert(!fs.existsSync(path.join(copy, 'state')), 'Copied candidate already has state.');
     const debugPort = await freePort();
+    const proxyPort = await freePort();
+    assert.notEqual(proxyPort, debugPort, 'Unavailable HTTP proxy must not use the debug listener.');
+    const blockedProxy = `http://127.0.0.1:${proxyPort}`;
+    record.network_policy = { app_http_proxy: blockedProxy, external_http: 'refused or blocked by client',
+      allowed_web_origin: 'https://app.vibeocr', loopback_allowed: true, os_network_changed: false,
+      blocked_external_requests: 0 };
     record.debug_port = debugPort;
     watch = await monitor(root);
     const env = { ...process.env,
@@ -845,7 +976,10 @@ async function run(candidate, work) {
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
         `--remote-debugging-port=${debugPort} --remote-debugging-address=127.0.0.1` };
     for (const name of Object.keys(env))
-      if (name.startsWith('VIBEOCR_SELF_TEST') || name.startsWith('VIBEOCR_SOAK')) delete env[name];
+      if (name.startsWith('VIBEOCR_SELF_TEST') || name.startsWith('VIBEOCR_SOAK') ||
+          ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'].includes(name.toLowerCase())) delete env[name];
+    Object.assign(env, { HTTP_PROXY: blockedProxy, HTTPS_PROXY: blockedProxy, ALL_PROXY: blockedProxy,
+      NO_PROXY: 'localhost,127.0.0.1,::1' });
     const executable = path.join(copy, 'app', 'VibeOCR.WinUI.exe');
     ctx.child = spawn(executable, ['--profile', 'production', '--install-root', copy],
       { cwd: path.dirname(executable), env, stdio: 'ignore' });
@@ -855,6 +989,13 @@ async function run(candidate, work) {
     const connected = await connect(ctx.child, debugPort);
     ctx.browser = connected.browser;
     ctx.page = connected.page;
+    const guardedContexts = ctx.browser.contexts();
+    for (const context of guardedContexts) await context.route('**/*', (route) => {
+      if (allowsLocalToolRequest(route.request().url())) return route.continue();
+      record.network_policy.blocked_external_requests++;
+      return route.abort('blockedbyclient');
+    });
+    record.network_policy.guarded_contexts = guardedContexts.length;
     // Task #215: passive measurement (listener-only, additive). Contexts
     // existing at attach are instrumented; the scene page's context is
     // confirmed explicitly via page.context() at harvest time. The already-
@@ -874,6 +1015,8 @@ async function run(candidate, work) {
     record.steps.settings = await settingsStep(ctx);
     record.steps.image_edit = await imageEditStep(ctx);
     record.steps.screenshot_capture = await captureStep(ctx);
+    assert(ctx.browser.contexts().every(context => guardedContexts.includes(context)),
+      'An unguarded WebView context appeared during the tool actions.');
     record.functional_valid = true;
   } catch (error) {
     record.error = error.stderr || `${error.name}: ${error.message}`;
