@@ -327,12 +327,14 @@ async function copyAnnotated(page, successText) {
   return { status: response.status(), byteLength: request.postDataBuffer()?.length ?? null };
 }
 
-// Scene-terminal copy (goal316): the scene closes on copy success, so the
-// proof is the Node-held timeline from observeSceneCopyTerminal, settled by
-// the shared fail-closed judge; no upload, non-201, crash or missing close
-// is never a success.
+// Scene-terminal copy (goal316/318): the scene closes on copy success, so
+// the proof is the Node-held timeline from the pre-click passive
+// observeSceneCopyTerminal, settled by the shared fail-closed judge; no
+// public copy command, non-201, failure receipt, crash or missing close is
+// never a success, and the automatic text-layer upload never counts as the
+// copy (association is by the command's resourceUri).
 async function copyAnnotatedTerminal(scene) {
-  const terminal = observeSceneCopyTerminal(scene);
+  const terminal = await observeSceneCopyTerminal(scene);
   const clickError = await scene.getByRole('button', { name: '复制标注图', exact: true })
     .click()
     .then(() => null, (error) => `${error.name}: ${error.message}`);
@@ -344,9 +346,12 @@ async function copyAnnotatedTerminal(scene) {
   } finally { deadline.clear(); }
   if (!ended) terminal.timeline.noTerminalEvent = true;
   settleSceneCopyTimeline(terminal.timeline);
-  return { status: terminal.timeline.responseStatus,
-    byteLength: terminal.timeline.cdpBodyBytes,
-    requestAt: terminal.timeline.requestAt, responseAt: terminal.timeline.responseAt,
+  const command = terminal.timeline.copyCommands[0];
+  const upload = terminal.timeline.uploads.find(
+    (item) => item.resourceUri === command.resourceUri);
+  return { status: upload.responseStatus,
+    byteLength: upload.blobMeta?.byteLength ?? null,
+    requestAt: upload.requestAt, responseAt: upload.responseAt,
     closedAt: terminal.timeline.closedAt,
     clickError: terminal.timeline.clickError ?? null };
 }

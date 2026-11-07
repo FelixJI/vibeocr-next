@@ -135,80 +135,232 @@ function assertCaptureCanvasLayout({ box, selection, desktopClient, viewport }) 
     viewport: { ...viewport } };
 }
 
-// Scene-terminal copy judge (goal316): pass requires exactly one accepted
-// 201 __annotation upload and the scene close after it; no upload, non-201,
-// duplicates, crash, early or missing close can never pass. Shared pure judge.
+// Scene-terminal copy judge (goal316/318): one public copyScreenshotImage
+// command whose resourceUri names exactly one accepted 201 upload, then a
+// normal close. Text-layer uploads (different resourceUri) never count; no
+// command, duplicates, non-201, failure receipts, crash, deadline-exceeded or
+// out-of-order close fail closed. A success receipt is never required.
 function settleSceneCopyTimeline(timeline, context = 'Scene copy') {
   assert(timeline && typeof timeline === 'object', `${context}: timeline evidence is missing.`);
   const evidence = JSON.stringify(timeline);
   assert.equal(timeline.crashedAt ?? null, null,
     `${context}: scene crashed instead of closing: ${evidence}`);
-  assert(timeline.requestAt !== null && timeline.requestAt !== undefined,
-    `${context}: no __annotation POST observed before the scene ended: ${evidence}`);
-  assert.equal(timeline.requestCount ?? 1, 1,
-    `${context}: expected exactly one annotation upload: ${evidence}`);
-  assert.equal(timeline.responseStatus ?? null, 201,
+  assert(Array.isArray(timeline.copyCommands) && timeline.copyCommands.length === 1,
+    `${context}: expected exactly one public copyScreenshotImage command: ${evidence}`);
+  const command = timeline.copyCommands[0];
+  assert(typeof command.resourceUri === 'string' && command.resourceUri.length > 0,
+    `${context}: public copy command carried no resourceUri: ${evidence}`);
+  const associated = (timeline.uploads ?? []).filter(
+    (upload) => upload.resourceUri === command.resourceUri);
+  assert.equal(associated.length, 1,
+    `${context}: the copy resource must match exactly one accepted upload: ${evidence}`);
+  const upload = associated[0];
+  assert.equal(upload.responseStatus ?? null, 201,
     `${context}: public annotation upload was not accepted: ${evidence}`);
   assert(timeline.closedAt !== null && timeline.closedAt !== undefined,
     `${context}: scene did not close after the accepted copy: ${evidence}`);
-  assert(Number.isSafeInteger(timeline.requestOrder) &&
-    Number.isSafeInteger(timeline.responseOrder) && Number.isSafeInteger(timeline.closedOrder) &&
-    timeline.requestOrder < timeline.responseOrder && timeline.responseOrder < timeline.closedOrder,
-  `${context}: scene closed before the upload response was accepted: ${evidence}`);
+  assert(Number.isSafeInteger(upload.requestOrder) && Number.isSafeInteger(upload.responseOrder) &&
+    Number.isSafeInteger(command.order) && Number.isSafeInteger(timeline.closedOrder) &&
+    upload.requestOrder < upload.responseOrder && upload.responseOrder < command.order &&
+    command.order < timeline.closedOrder,
+  `${context}: scene closed before the public copy was dispatched: ${evidence}`);
+  assert(!(timeline.copyReceipts ?? []).some((receipt) => receipt.ok === false),
+    `${context}: the host rejected the public copy command: ${evidence}`);
   assert(!timeline.noTerminalEvent, `${context}: scene close exceeded its deadline: ${evidence}`);
   return true;
 }
 
-// Node sink for the pre-click upload handoff: the first complete delivery
-// wins, later pushes are ignored. Pure Node object (unit-testable).
-function createUploadHandoff() {
-  const sink = { delivered: false, payload: null };
-  sink.done = new Promise((resolve) => { sink.resolve = resolve; });
-  sink.deliver = (payload) => {
-    if (sink.delivered) return;
-    sink.delivered = true;
-    sink.payload = payload;
-    sink.resolve(payload);
-  };
-  return sink;
-}
-
-// Pre-registered Node-side evidence for a scene-terminal copy: plain page
-// event listeners (unlike waitFor promises, which reject on close and lose
-// the record), so even an instant close right after the accepted upload
-// keeps the complete timeline in Node. Works on any emitter exposing the
-// Playwright page event surface (unit-testable with a plain EventEmitter).
-function observeSceneCopyTerminal(page) {
+// Pre-click passive scene-copy observation (goal316/318), awaited before
+// the copy click: an in-page wrapper keeps every __annotation POST, its real
+// response status (stamped the moment the fetch Promise resolves), the
+// product-side json resourceUri (observed through a pass-through wrap of
+// response.json, so the handover precedes the product's await continuation
+// without an extra clone parse), the same immutable Blob's bytes (Node-held
+// per upload; the timeline keeps only meta), the outgoing public copy
+// command and receipts for it; CDP page events only carry close/crash
+// (network events proved lossy when the scene retires quickly). Wrappers
+// forward arguments, the fetch Promise object and the json Promise object
+// unchanged and never delay the command. Works on any object exposing the
+// Playwright page event/binding surface (unit-testable with a plain
+// EventEmitter plus captured exposeBinding/evaluate).
+async function observeSceneCopyTerminal(page) {
   let eventOrder = 0;
-  let acceptRequest;
-  const received = new Promise((resolve) => { acceptRequest = resolve; });
-  const timeline = { requestAt: null, requestCount: 0, responseStatus: null,
-    responseAt: null, closedAt: null, crashedAt: null, cdpBodyBytes: null };
+  let acceptCommand;
+  const received = new Promise((resolve) => { acceptCommand = resolve; });
+  const timeline = { uploads: [], copyCommands: [], copyReceipts: [],
+    closedAt: null, closedOrder: null, crashedAt: null };
+  const uploadBySeq = new Map();
+  const blobEvidence = new Map();
+  const blobWaiters = new Map();
+  const settleBlobWaiters = (seq) => {
+    const waiters = blobWaiters.get(seq);
+    if (!waiters) return;
+    blobWaiters.delete(seq);
+    const blob = blobEvidence.get(seq) ?? null;
+    for (const resolve of waiters) resolve(blob);
+  };
   const ended = new Promise((resolve) => {
-    page.on('request', (request) => {
-      if (request.method() !== 'POST' ||
-          request.url() !== 'https://app.vibeocr/__annotation') return;
-      timeline.requestCount++;
-      timeline.requestAt = Date.now();
-      timeline.requestOrder = ++eventOrder;
-      acceptRequest();
-      try { timeline.cdpBodyBytes = request.postDataBuffer()?.length ?? null; }
-      catch { timeline.cdpBodyBytes = null; }
-    });
-    page.on('response', (response) => {
-      if (response.url() !== 'https://app.vibeocr/__annotation' ||
-          response.request().method() !== 'POST' ||
-          timeline.responseStatus !== null) return;
-      timeline.responseStatus = response.status();
-      timeline.responseAt = Date.now();
-      timeline.responseOrder = ++eventOrder;
-    });
     page.on('close', () => {
       timeline.closedAt = Date.now(); timeline.closedOrder = ++eventOrder; resolve();
     });
     page.on('crash', () => { timeline.crashedAt = Date.now(); resolve(); });
   });
-  return { timeline, received, ended };
+  await page.exposeBinding('__sceneCopyObserver', (_source, event) => {
+    if (!event || typeof event !== 'object') return;
+    if (event.kind === 'upload') {
+      const record = { seq: event.seq, requestAt: Date.now(), requestOrder: ++eventOrder,
+        responseStatus: null, responseAt: null, responseOrder: null,
+        resourceUri: null, uriAt: null, uriOrder: null,
+        error: null, blobMeta: null };
+      timeline.uploads.push(record);
+      uploadBySeq.set(event.seq, record);
+    } else if (event.kind === 'upload-response') {
+      const record = uploadBySeq.get(event.seq);
+      if (record && record.responseOrder === null) {
+        record.responseStatus = event.status ?? null;
+        record.responseAt = Date.now();
+        record.responseOrder = ++eventOrder;
+      }
+    } else if (event.kind === 'upload-uri') {
+      const record = uploadBySeq.get(event.seq);
+      if (record && record.uriOrder === null) {
+        record.resourceUri = event.resourceUri ?? null;
+        record.uriAt = Date.now();
+        record.uriOrder = ++eventOrder;
+      }
+    } else if (event.kind === 'upload-error') {
+      const record = uploadBySeq.get(event.seq);
+      if (record) record.error = event.error ?? 'upload failed';
+    } else if (event.kind === 'upload-blob') {
+      const record = uploadBySeq.get(event.seq);
+      blobEvidence.set(event.seq, event.blob ?? null);
+      if (record) {
+        record.blobMeta = event.blob ? { mimeType: event.blob.mimeType ?? null,
+          byteLength: event.blob.byteLength ?? null, problem: event.blob.problem ?? null } : null;
+      }
+      settleBlobWaiters(event.seq);
+    } else if (event.kind === 'copy-command') {
+      timeline.copyCommands.push({ envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, resourceUri: event.resourceUri ?? null });
+      acceptCommand();
+    } else if (event.kind === 'copy-receipt') {
+      timeline.copyReceipts.push({ envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, ok: event.ok ?? null, problemCode: event.problemCode ?? null });
+    }
+  });
+  await page.evaluate(() => {
+    const emit = (event) => {
+      try {
+        // exposeBinding returns a Promise: a quickly retiring page can make
+        // the observation channel reject; digest only that delivery failure
+        // (Node still fails closed on missing evidence) without touching any
+        // product Promise.
+        const delivery = window.__sceneCopyObserver(event);
+        if (delivery && typeof delivery.catch === 'function') delivery.catch(() => {});
+      } catch { /* passive; Node keeps the timeline */ }
+    };
+    const state = { uploadSeq: 0, copyIds: {} };
+    const originalFetch = window.fetch;
+    const pushBlob = (seq, body) => {
+      if (!(body instanceof Blob))
+        emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: null, byteLength: null, bytes: null,
+            problem: 'upload body was not a Blob' } });
+      else if (body.size > 8 * 1024 * 1024)
+        emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size, bytes: null,
+            problem: 'synthetic PNG exceeded 8 MiB' } });
+      else body.arrayBuffer().then(
+        (buffer) => emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size,
+            bytes: Array.from(new Uint8Array(buffer)), problem: null } }),
+        () => emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size, bytes: null,
+            problem: 'Blob observation failed' } }));
+    };
+    window.fetch = function (input, init) {
+      const isUpload = input === '/__annotation' && init && init.method === 'POST';
+      let seq = 0;
+      if (isUpload) {
+        seq = ++state.uploadSeq;
+        emit({ kind: 'upload', seq });
+        pushBlob(seq, init.body);
+      }
+      const promise = originalFetch.apply(this, arguments);
+      if (isUpload)
+        promise.then((response) => {
+          // Status and responseOrder are stamped at fetch-Promise resolve,
+          // strictly before the product's await continuation (this observer
+          // registers first), so a later json body read can never reorder
+          // them (real-probe regression: command seq 6, clone-json seq 7).
+          emit({ kind: 'upload-response', seq, status: response?.status ?? null });
+          try {
+            if (response && typeof response.json === 'function') {
+              const originalJson = response.json;
+              response.json = function () {
+                const jsonPromise = originalJson.apply(this, arguments);
+                // Registered before the product's await attaches to the same
+                // returned Promise: the resourceUri handover always precedes
+                // the copy command, with no extra clone parse.
+                jsonPromise.then((payload) => {
+                  emit({ kind: 'upload-uri', seq,
+                    resourceUri: payload && typeof payload === 'object' &&
+                      typeof payload.resourceUri === 'string' ? payload.resourceUri : null });
+                }, () => {});
+                return jsonPromise;
+              };
+            }
+          } catch { /* passive */ }
+        }, (error) => emit({ kind: 'upload-error', seq,
+          error: `${error?.name ?? 'Error'}: ${error?.message ?? 'upload failed'}` }));
+      return promise;
+    };
+    const channel = window.chrome && window.chrome.webview;
+    const originalPost = channel && typeof channel.postMessage === 'function'
+      ? channel.postMessage : null;
+    if (originalPost)
+      channel.postMessage = function (message) {
+        try {
+          const command = message && message.kind === 'request' && message.type === 'app.command' &&
+            message.payload ? message.payload.command : null;
+          if (command && command.action === 'copyScreenshotImage') {
+            state.copyIds[message.id] = true;
+            emit({ kind: 'copy-command', envelopeId: message.id,
+              resourceUri: command.arguments &&
+                typeof command.arguments.resourceUri === 'string'
+                ? command.arguments.resourceUri : null });
+          }
+        } catch { /* passive */ }
+        return originalPost.apply(this, arguments);
+      };
+    if (channel && typeof channel.addEventListener === 'function')
+      channel.addEventListener('message', ({ data }) => {
+        if (!data || data.kind !== 'response' || data.type !== 'app.command' ||
+            !Object.prototype.hasOwnProperty.call(state.copyIds, data.id)) return;
+        const problem = data.payload && data.payload.problem;
+        emit({ kind: 'copy-receipt', envelopeId: data.id,
+          ok: typeof (data.payload && data.payload.ok) === 'boolean'
+            ? data.payload.ok : null,
+          problemCode: problem && typeof problem.code === 'string' ? problem.code : null });
+      });
+    window.__nativeActionsRestoreFetch = () => {
+      window.fetch = originalFetch;
+      if (originalPost) channel.postMessage = originalPost;
+      delete window.__nativeActionsRestoreFetch;
+    };
+  });
+  return {
+    timeline, received, ended,
+    // Resolves with the Node-held Blob evidence of one upload (bytes or the
+    // bounded problem record) from the side map - never the timeline, which
+    // keeps only meta; only the harness waits on it, never the page.
+    waitForUploadBlob: (seq) => new Promise((resolve) => {
+      if (blobEvidence.has(seq)) { resolve(blobEvidence.get(seq) ?? null); return; }
+      const waiters = blobWaiters.get(seq) ?? [];
+      waiters.push(resolve);
+      blobWaiters.set(seq, waiters);
+    }),
+  };
 }
 
 // Bounded race timer: a lost race is always cleared by the caller in a
@@ -596,66 +748,6 @@ async function pngPixels(page, png, mediaType = 'image/png') {
     }
     return { width: image.width, height: image.height, orange, dark, light };
   }, { encoded: png.toString('base64'), mediaType });
-}
-
-// Installs the passive upload observation plus, when a Node sink is given,
-// a binding registered BEFORE the copy click that pushes the immutable Blob
-// evidence out to Node at fetch time; the real fetch and the product command
-// are never delayed or changed (the push is fire-and-forget).
-async function observeNextAnnotationUpload(page, handoff) {
-  if (handoff) await page.exposeBinding('__nativeActionsUploadHandoff',
-    (_source, payload) => handoff.deliver(payload));
-  await page.evaluate(() => {
-    const originalFetch = window.fetch;
-    const observed = { count: 0, mimeType: null, byteLength: null,
-      bytes: null, problem: null };
-    window.__nativeActionsUpload = observed;
-    const handoffOnce = () => {
-      if (!window.__nativeActionsUploadHandoff) return;
-      try {
-        window.__nativeActionsUploadHandoff({ count: observed.count,
-          mimeType: observed.mimeType, byteLength: observed.byteLength,
-          bytes: observed.bytes, problem: observed.problem });
-      } catch { /* best-effort push; the Node timeline stays authoritative */ }
-    };
-    window.fetch = function(input, init) {
-      if (input === '/__annotation' && init?.method === 'POST') {
-        observed.count++;
-        try {
-          const body = init.body;
-          if (!(body instanceof Blob)) {
-            observed.problem = 'upload body was not a Blob';
-            handoffOnce();
-          } else {
-            observed.mimeType = body.type;
-            observed.byteLength = body.size;
-            if (body.size > 8 * 1024 * 1024) {
-              observed.problem = 'synthetic PNG exceeded 8 MiB';
-              handoffOnce();
-            } else body.arrayBuffer().then(
-              (buffer) => {
-                observed.bytes = Array.from(new Uint8Array(buffer));
-                handoffOnce();
-              },
-              () => {
-                observed.problem = 'Blob observation failed';
-                handoffOnce();
-              },
-            );
-          }
-        } catch {
-          observed.problem = 'Blob observation failed';
-          handoffOnce();
-        }
-      }
-      return originalFetch.apply(this, arguments);
-    };
-    window.__nativeActionsRestoreFetch = () => {
-      window.fetch = originalFetch;
-      delete window.__nativeActionsRestoreFetch;
-      delete window.__nativeActionsUpload;
-    };
-  });
 }
 
 const handleCursorShapes = ['sizeNWSE', 'sizeNS', 'sizeNESW', 'sizeWE', 'sizeWE', 'sizeNESW', 'sizeNS', 'sizeNWSE'];
@@ -1097,17 +1189,19 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
 
   // Scene-terminal copy: a successful 复制标注图 closes the session and
   // retires this WebView, so all page reads (revision, editor screenshot)
-  // happen before the click and the upload/close proof is Node-held only.
+  // happen before the click and the copy proof is Node-held only. The
+  // pre-click passive observer keeps every upload, the public copy command,
+  // receipts and the close; the copy upload is selected by the command's
+  // resourceUri, so the automatic text-layer upload never stands in for the
+  // copied pixels.
   const revision = await page.evaluate(() => window.__nativeActionsEvidence);
   assert(revision?.sessionId && revision.revision >= 1,
     'Host screenshot session revision did not advance after editing.');
   await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
-  const uploadHandoff = createUploadHandoff();
-  await observeNextAnnotationUpload(page, uploadHandoff);
-  const terminal = observeSceneCopyTerminal(page);
+  const terminal = await observeSceneCopyTerminal(page);
   pixelEvidence.copyTimeline = terminal.timeline;
-  const requestDeadline = raceDeadline(10000);
-  const requestObserved = Promise.race([terminal.received.then(() => true), requestDeadline.promise]);
+  const commandDeadline = raceDeadline(10000);
+  const commandObserved = Promise.race([terminal.received.then(() => true), commandDeadline.promise]);
   let png;
   let uploadBytes;
   try {
@@ -1115,15 +1209,8 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
       .click()
       .then(() => null, (error) => `${error.name}: ${error.message}`);
     if (clickError) terminal.timeline.clickError = clickError;
-    assert(await requestObserved, `No annotation POST within 10 seconds: ${JSON.stringify(terminal.timeline)}`);
-    // The Blob evidence is pushed to Node by the pre-click binding at fetch
-    // time; the scene is never evaluated after the click, so even an instant
-    // close right after the accepted upload keeps the evidence in Node.
-    const handoffDeadline = raceDeadline(5000);
-    let observed;
-    try {
-      observed = await Promise.race([uploadHandoff.done, handoffDeadline.promise]);
-    } finally { handoffDeadline.clear(); }
+    assert(await commandObserved,
+      `No public copyScreenshotImage command within 10 seconds: ${JSON.stringify(terminal.timeline)}`);
     const endDeadline = raceDeadline(10000);
     let ended;
     try {
@@ -1131,25 +1218,30 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     } finally { endDeadline.clear(); }
     if (!ended) terminal.timeline.noTerminalEvent = true;
     settleSceneCopyTimeline(terminal.timeline);
-    if (!observed) observed = { count: 0, mimeType: null, byteLength: null,
-      bytes: null, problem: null,
-      handoffError: `upload handoff never reached Node: ${JSON.stringify(terminal.timeline)}` };
-    const cdpBytes = terminal.timeline.cdpBodyBytes;
-    assert.equal(observed.problem, null,
-      `Product Blob observation failed: ${JSON.stringify(observed)}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
-    assert.equal(observed.handoffError ?? null, null,
-      `Product Blob observation failed: ${JSON.stringify(observed)}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
-    assert.equal(observed.count, 1,
-      `Expected one product PNG upload, saw ${observed.count}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
+    const command = terminal.timeline.copyCommands[0];
+    const upload = terminal.timeline.uploads.find(
+      (item) => item.resourceUri === command.resourceUri);
+    // The immutable Blob evidence of exactly that upload is pushed to Node by
+    // the pre-click binding at fetch time; the scene is never evaluated after
+    // the click, so even an instant close keeps the pixels in Node.
+    const blobDeadline = raceDeadline(5000);
+    let observed;
+    try {
+      observed = await Promise.race([terminal.waitForUploadBlob(upload.seq), blobDeadline.promise]);
+    } finally { blobDeadline.clear(); }
+    if (!observed) observed = { mimeType: null, byteLength: null, bytes: null,
+      problem: `copy upload Blob never reached Node: ${JSON.stringify(terminal.timeline)}` };
+    assert.equal(observed.problem ?? null, null,
+      `Product Blob observation failed: ${JSON.stringify(observed)}; timeline=${JSON.stringify(terminal.timeline)}.`);
     assert.equal(observed.mimeType, 'image/png', 'Product upload Blob was not image/png.');
     assert(Array.isArray(observed.bytes) && observed.bytes.length === observed.byteLength,
       'Product upload Blob size changed during observation.');
     png = Buffer.from(observed.bytes);
     uploadBytes = observed.byteLength;
     assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
-      `Product upload Blob is not PNG; bytes=${uploadBytes}, CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
+      `Product upload Blob is not PNG; bytes=${uploadBytes}.`);
   } finally {
-    requestDeadline.clear();
+    commandDeadline.clear();
     await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
   fs.writeFileSync(path.join(evidenceRoot, manual ? 'manual-edited.png' : 'synthetic-edited.png'), png);
@@ -1408,7 +1500,7 @@ export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
   assertCaptureCanvasLayout, settleSceneCopyTimeline, observeSceneCopyTerminal,
-  createUploadHandoff, raceDeadline };
+  raceDeadline };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
