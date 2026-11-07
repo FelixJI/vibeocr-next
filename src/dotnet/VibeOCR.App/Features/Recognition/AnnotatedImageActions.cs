@@ -28,12 +28,13 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     CancellationToken cancellationToken)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
-    StorageFile source = await StorageFile.GetFileFromPathAsync(sourcePath);
+    // CreateFromFile 绑定路径后剪贴板延迟 OpenReadAsync 会在 >260 字符路径上抛 FileNotFoundException，故改走内存引用。
+    using IRandomAccessStream image = await OpenClipboardImageAsync(sourcePath, cancellationToken);
     var package = new DataPackage
     {
       RequestedOperation = DataPackageOperation.Copy,
     };
-    package.SetBitmap(RandomAccessStreamReference.CreateFromFile(source));
+    package.SetBitmap(RandomAccessStreamReference.CreateFromStream(image));
     for (int attempt = 0; ; attempt++)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -51,6 +52,28 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
       {
         throw new ClipboardBusyException(error);
       }
+    }
+  }
+
+  internal static async Task<IRandomAccessStream> OpenClipboardImageAsync(
+    string sourcePath,
+    CancellationToken cancellationToken)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+    cancellationToken.ThrowIfCancellationRequested();
+    InMemoryRandomAccessStream buffered = new();
+    try
+    {
+      await using FileStream source = File.OpenRead(sourcePath);
+      using IRandomAccessStream random = source.AsRandomAccessStream();
+      await RandomAccessStream.CopyAsync(random, buffered).AsTask(cancellationToken);
+      buffered.Seek(0);
+      return buffered;
+    }
+    catch
+    {
+      buffered.Dispose();
+      throw;
     }
   }
 
