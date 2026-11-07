@@ -4,7 +4,8 @@
 // toolbar show/hide toggle), image edit (clipboard-fixture paste -> rectangle
 // annotation -> copy -> repaste verify) and a pure screenshot capture through
 // the public 截图 button into the scene editor (manual drag over the synthetic
-// fixture, session BMP verification, annotate, copy, end session).
+// fixture, session BMP verification, annotate, pin + on-site measurement
+// before the scene-terminal copy, explicit end on an independent session).
 // Combined zero evidence: owned CIM lineage (runtime_demand_process_probe.ps1)
 // records no installer/supervisor/python descendants + candidate AppLog has no
 // "Runtime demand: connect begin" / "Runtime demand: initialize_default begin"
@@ -52,7 +53,8 @@ import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, area, inside, delay,
-  startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned } from './smoke_native_actions.mjs';
+  startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned,
+  settleSceneCopyTimeline, observeSceneCopyTerminal, raceDeadline } from './smoke_native_actions.mjs';
 import { createWorkbenchCollector, runMeasurementSelfCheck } from './workbench_delivery_probe.mjs';
 
 const exec = promisify(execFile);
@@ -325,6 +327,30 @@ async function copyAnnotated(page, successText) {
   return { status: response.status(), byteLength: request.postDataBuffer()?.length ?? null };
 }
 
+// Scene-terminal copy (goal316): the scene closes on copy success, so the
+// proof is the Node-held timeline from observeSceneCopyTerminal, settled by
+// the shared fail-closed judge; no upload, non-201, crash or missing close
+// is never a success.
+async function copyAnnotatedTerminal(scene) {
+  const terminal = observeSceneCopyTerminal(scene);
+  const clickError = await scene.getByRole('button', { name: '复制标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (clickError) terminal.timeline.clickError = clickError;
+  const deadline = raceDeadline(10000);
+  let ended;
+  try {
+    ended = await Promise.race([terminal.ended.then(() => true), deadline.promise]);
+  } finally { deadline.clear(); }
+  if (!ended) terminal.timeline.noTerminalEvent = true;
+  settleSceneCopyTimeline(terminal.timeline);
+  return { status: terminal.timeline.responseStatus,
+    byteLength: terminal.timeline.cdpBodyBytes,
+    requestAt: terminal.timeline.requestAt, responseAt: terminal.timeline.responseAt,
+    closedAt: terminal.timeline.closedAt,
+    clickError: terminal.timeline.clickError ?? null };
+}
+
 // Pure AppLog zero-evidence scanner (self-checkable without any GUI):
 // rejects any forbidden-prefix hit and requires at least one non-empty log
 // file. A merely existing directory is never sufficient evidence.
@@ -559,13 +585,79 @@ async function imageEditStep(ctx) {
   return step;
 }
 
+// Open one fresh screenshot scene session through the public 截图 button
+// (manual drag, label check, Enter, scene appears and paints); reused for the
+// annotated session and the independent explicit-end session (goal316).
+async function startSceneSession(ctx, fixture) {
+  const { child, browser, page } = ctx;
+  await focusMain(ctx);
+  await page.getByRole('button', { name: '截图', exact: true }).click();
+  const button = fixture.buttonRect;
+  const x = button.left + Math.floor(button.width / 2);
+  const y = button.top + Math.floor(button.height / 2);
+  const overlays = await waitForWindows(child.pid, (item) => item.Visible &&
+    item.Handle !== ctx.main.Handle &&
+    area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
+    inside(item, x, y), 12000);
+  const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
+  const start = { AppPid: child.pid, X: fixture.rootRect.left + 20, Y: fixture.rootRect.top + 40 };
+  const end = { AppPid: child.pid, X: fixture.rootRect.right - 20, Y: fixture.rootRect.bottom - 20 };
+  await native('mouse-move', start);
+  await native('mouse-down', start);
+  try { await native('mouse-move', end); }
+  finally { await native('mouse-up', end); }
+  const region = { left: start.X, top: start.Y,
+    width: end.X - start.X, height: end.Y - start.Y };
+  const label = await native('selection', { AppPid: child.pid, Handle: overlay.Handle });
+  assert(label.includes(`手动 · ${region.width} × ${region.height} px`),
+    `Manual selection label mismatch: ${label}`);
+  const click = { AppPid: child.pid,
+    X: region.left + Math.floor(region.width / 2),
+    Y: region.top + Math.floor(region.height / 2) };
+  await native('mouse-move', click);
+  await native('mouse-down', click);
+  try {
+    assert((await windows(child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
+      'Selection click confirmed before release.');
+  } finally { await native('mouse-up', click); }
+  await native('enter', { AppPid: child.pid });
+  const deadline = Date.now() + 12000;
+  let scene = null;
+  while (Date.now() < deadline && !scene) {
+    scene = browser.contexts().flatMap((context) => context.pages())
+      .find((item) => item !== page && !item.isClosed() &&
+        item.url().includes('#/imageEdit?scene=1'));
+    if (!scene) await delay(100);
+  }
+  assert(scene, 'Screenshot scene WebView did not appear.');
+  // Task #215: install the probe on the scene as soon as it is located,
+  // BEFORE any public operation, and await it (its context is attached
+  // inside; an init-script probe, if any, stays untouched/idempotent).
+  if (ctx.collector) await ctx.collector.installOnPage(scene)
+    .catch((error) => ctx.collector.noteError(`scene install: ${error.message}`));
+  await scene.locator('html[data-capture-scene="true"]')
+    .waitFor({ state: 'attached', timeout: 12000 });
+  await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
+  await scene.waitForFunction(() => {
+    const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
+    if (!canvas) return false;
+    const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    let changed = 0;
+    for (let i = 0; i < data.length; i += 40)
+      if (data[i] !== 22 || data[i + 1] !== 22 || data[i + 2] !== 22) changed++;
+    return changed > 100;
+  }, null, { timeout: 12000 });
+  return { scene, region, overlayHandle: overlay.Handle, selectionLabel: label };
+}
+
 // Pure screenshot capture through the public 截图 button: the synthetic
 // fixture (topmost full-desktop background) makes the frozen desktop and the
-// manual selection deterministic. Enter opens the scene editor; the capture is
-// proven by fetching the session input resource (32-bpp BMP of the exact
-// selected region) before annotating, copying and ending the session.
+// manual selection deterministic. Enter opens the scene editor; the capture
+// is proven by fetching the session input resource (32-bpp BMP of the exact
+// selected region) before annotating. Pinning and measurement precede the
+// scene-terminal copy; the explicit 结束会话 runs on an independent session.
 async function captureStep(ctx) {
-  const { child, browser, page, root } = ctx;
+  const { child, page, root } = ctx;
   const step = { state: 'failed' };
   const fixture = await startFixture();
   ctx.fixture = fixture;
@@ -583,64 +675,11 @@ async function captureStep(ctx) {
       X: fixture.rootRect.left, Y: fixture.rootRect.top,
       Width: fixture.rootRect.width, Height: fixture.rootRect.height,
       EvidenceRoot: root, OutputPath: path.join(root, 'capture-fixture.png') });
-    await focusMain(ctx);
-    await page.getByRole('button', { name: '截图', exact: true }).click();
-    const button = fixture.buttonRect;
-    const x = button.left + Math.floor(button.width / 2);
-    const y = button.top + Math.floor(button.height / 2);
-    const overlays = await waitForWindows(child.pid, (item) => item.Visible &&
-      item.Handle !== ctx.main.Handle &&
-      area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
-      inside(item, x, y), 12000);
-    const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
-    step.overlayHandle = overlay.Handle;
-    const start = { AppPid: child.pid, X: fixture.rootRect.left + 20, Y: fixture.rootRect.top + 40 };
-    const end = { AppPid: child.pid, X: fixture.rootRect.right - 20, Y: fixture.rootRect.bottom - 20 };
-    await native('mouse-move', start);
-    await native('mouse-down', start);
-    try { await native('mouse-move', end); }
-    finally { await native('mouse-up', end); }
-    const region = { left: start.X, top: start.Y,
-      width: end.X - start.X, height: end.Y - start.Y };
-    const label = await native('selection', { AppPid: child.pid, Handle: overlay.Handle });
-    assert(label.includes(`手动 · ${region.width} × ${region.height} px`),
-      `Manual selection label mismatch: ${label}`);
-    step.selectionLabel = label;
-    const click = { AppPid: child.pid,
-      X: region.left + Math.floor(region.width / 2),
-      Y: region.top + Math.floor(region.height / 2) };
-    await native('mouse-move', click);
-    await native('mouse-down', click);
-    try {
-      assert((await windows(child.pid)).some((item) => item.Handle === overlay.Handle && item.Visible),
-        'Selection click confirmed before release.');
-    } finally { await native('mouse-up', click); }
-    await native('enter', { AppPid: child.pid });
-    const deadline = Date.now() + 12000;
-    let scene = null;
-    while (Date.now() < deadline && !scene) {
-      scene = browser.contexts().flatMap((context) => context.pages())
-        .find((item) => item !== page && item.url().includes('#/imageEdit?scene=1'));
-      if (!scene) await delay(100);
-    }
-    assert(scene, 'Screenshot scene WebView did not appear.');
-    // Task #215: install the probe on the scene as soon as it is located,
-    // BEFORE any public operation, and await it (its context is attached
-    // inside; an init-script probe, if any, stays untouched/idempotent).
-    if (ctx.collector) await ctx.collector.installOnPage(scene)
-      .catch((error) => ctx.collector.noteError(`scene install: ${error.message}`));
-    await scene.locator('html[data-capture-scene="true"]')
-      .waitFor({ state: 'attached', timeout: 12000 });
-    await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
-    await scene.waitForFunction(() => {
-      const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
-      if (!canvas) return false;
-      const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
-      let changed = 0;
-      for (let i = 0; i < data.length; i += 40)
-        if (data[i] !== 22 || data[i + 1] !== 22 || data[i + 2] !== 22) changed++;
-      return changed > 100;
-    }, null, { timeout: 12000 });
+    const first = await startSceneSession(ctx, fixture);
+    const scene = first.scene;
+    step.overlayHandle = first.overlayHandle;
+    step.selectionLabel = first.selectionLabel;
+    const region = first.region;
     // The main workbench page carries the passive session state projection.
     await page.waitForFunction(() => {
       const session = window.__rt214Session;
@@ -675,20 +714,25 @@ async function captureStep(ctx) {
     }
     assert(dark > 10 && light > 100, `Captured fixture pixels incomplete: dark=${dark}, light=${light}`);
     step.capture = { bmp: bmpFile, width, height, dark, light };
+    // The scene canvas already carries orange crop handles (~192 px baseline),
+    // so the stroke wait is baseline-relative with the +50 threshold unchanged.
+    const annotationBefore = await canvasOrange(scene);
     await drawRectangle(scene);
-    await scene.waitForFunction(() => {
+    await scene.waitForFunction((baseline) => {
       const canvas = document.querySelector('canvas[aria-label="图片检查画布"]');
       if (!canvas) return false;
       const { data } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
       let orange = 0;
       for (let i = 0; i < data.length; i += 4)
         if (data[i] > 210 && data[i + 1] > 90 && data[i + 1] < 190 && data[i + 2] < 110) orange++;
-      return orange > 50;
-    }, null, { timeout: 10000 });
-    step.annotationUpload = await copyAnnotated(scene, '已复制截图副本');
+      return orange > baseline + 50;
+    }, annotationBefore.orange, { timeout: 10000 });
+    step.annotationPixels = { before: annotationBefore.orange,
+      after: (await canvasOrange(scene)).orange };
     // Public 贴图 pin: passive owned-window diff (stable new visible top-level
     // always-on-top window; transient popups/tooltips drop out) followed by
     // an owned close that must actually remove the window again.
+    // Runs before the copy: pinning keeps the session alive; the copy is terminal.
     const pinBefore = new Set((await windows(child.pid)).filter((item) => item.Visible)
       .map((item) => item.Handle));
     await scene.getByRole('button', { name: '贴图', exact: true }).click();
@@ -707,9 +751,25 @@ async function captureStep(ctx) {
     // window is still open (listener-only data; no bridge commands).
     if (ctx.collector) await ctx.collector.harvest('scene-capture', scene);
     await scene.screenshot({ path: path.join(root, 'capture-scene.png') });
-    const closed = scene.waitForEvent('close', { timeout: 10000 });
-    await scene.getByRole('button', { name: '结束会话', exact: true }).click();
-    await closed;
+    // Scene-terminal copy (goal316): proof is the Node-held request/response/
+    // close timeline; nothing is read from the scene afterwards.
+    step.annotationUpload = await copyAnnotatedTerminal(scene);
+    // The explicit 结束会话 stays covered on its own fresh, independent
+    // session (a different session id), never on the terminal one.
+    const second = await startSceneSession(ctx, fixture);
+    await page.waitForFunction((previous) => {
+      const session = window.__rt214Session;
+      return !!(session && session.sessionId !== previous &&
+        typeof session.inputUrl === 'string');
+    }, session.sessionId, { timeout: 10000 });
+    step.explicitEndSession = {
+      sessionId: (await page.evaluate(() => window.__rt214Session)).sessionId,
+      selectionLabel: second.selectionLabel,
+    };
+    const endClosed = second.scene.waitForEvent('close', { timeout: 10000 });
+    await second.scene.getByRole('button', { name: '结束会话', exact: true }).click();
+    await endClosed;
+    step.explicitEndSession.closed = true;
     step.state = 'passed';
   } finally {
     const owned = ctx.fixture;

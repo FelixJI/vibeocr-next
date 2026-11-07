@@ -7,12 +7,13 @@
 // terminate only the ChildProcess handles this test itself spawned.
 import assert from 'node:assert/strict';
 import { ChildProcess, spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const { stopOwned, closeAppNormally, assertCaptureCanvasLayout } = await import(
+const { stopOwned, closeAppNormally, assertCaptureCanvasLayout, settleSceneCopyTimeline,
+  observeSceneCopyTerminal, createUploadHandoff, raceDeadline } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_native_actions.mjs')).href);
 
 setTimeout(() => {
@@ -268,6 +269,101 @@ console.log('case8 unspawned-child-fail-closed: ok');
     ...valid, box: { x: 1330, y: 750, width: 70, height: 0 },
   }), /positive finite visual bounds/);
   console.log('case13 illegal-geometry-fails: ok');
+}
+
+// 14. Scene-terminal copy lifecycle (goal316): the judge accepts only a
+// complete success timeline - exactly one accepted 201 __annotation upload
+// followed by the scene close - and keeps failing every incomplete or
+// abnormal outcome: no upload, non-201/missing response, crash, no close,
+// duplicate uploads and a close that precedes the accepted response.
+{
+  const base = { requestAt: 1000, requestCount: 1, responseStatus: 201,
+    responseAt: 1010, closedAt: 1020, crashedAt: null,
+    requestOrder: 1, responseOrder: 2, closedOrder: 3 };
+  assert.equal(settleSceneCopyTimeline({ ...base }), true);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, requestAt: null, requestCount: 0 }),
+    /no __annotation POST observed/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, responseStatus: 500 }),
+    /was not accepted/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, responseStatus: null, responseAt: null }),
+    /was not accepted/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, crashedAt: 1015 }),
+    /crashed instead of closing/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, closedAt: null }),
+    /did not close after the accepted copy/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, requestCount: 2 }),
+    /exactly one annotation upload/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, closedAt: 1005, closedOrder: 1 }),
+    /closed before the upload response/);
+  assert.throws(() => settleSceneCopyTimeline({ ...base, noTerminalEvent: true }),
+    /exceeded its deadline/);
+  assert.throws(() => settleSceneCopyTimeline(null), /timeline evidence is missing/);
+  console.log('case14 scene-copy-timeline-lifecycle: ok');
+}
+
+// 15. Real terminal-copy listeners driven by simulated page events: an
+// instant success close (request + 201 + close in the same tick) still
+// leaves the complete Node-held timeline, while a close without any upload
+// fails. This is the no-GUI proof that an immediately closing scene cannot
+// lose the copy evidence held by the pre-registered listeners.
+{
+  const instant = new EventEmitter();
+  const observed = observeSceneCopyTerminal(instant);
+  instant.emit('request', { method: () => 'POST',
+    url: () => 'https://app.vibeocr/__annotation',
+    postDataBuffer: () => Buffer.from([137, 80, 78, 71]) });
+  instant.emit('response', { url: () => 'https://app.vibeocr/__annotation',
+    request: () => ({ method: () => 'POST' }), status: () => 201 });
+  instant.emit('close');
+  await observed.ended;
+  await observed.received;
+  assert.equal(observed.timeline.requestCount, 1);
+  assert.equal(observed.timeline.cdpBodyBytes, 4);
+  assert.equal(settleSceneCopyTimeline(observed.timeline), true);
+  assert.throws(() => settleSceneCopyTimeline({ ...observed.timeline,
+    requestCount: 2 }), /exactly one/);
+
+  const noUpload = new EventEmitter();
+  const closing = observeSceneCopyTerminal(noUpload);
+  noUpload.emit('close');
+  await closing.ended;
+  assert.throws(() => settleSceneCopyTimeline(closing.timeline),
+    /no __annotation POST observed/);
+  const originalNow = Date.now;
+  try {
+    Date.now = () => 1000;
+    const reversed = new EventEmitter();
+    const earlyClose = observeSceneCopyTerminal(reversed);
+    reversed.emit('request', { method: () => 'POST',
+      url: () => 'https://app.vibeocr/__annotation', postDataBuffer: () => null });
+    reversed.emit('close');
+    reversed.emit('response', { url: () => 'https://app.vibeocr/__annotation',
+      request: () => ({ method: () => 'POST' }), status: () => 201 });
+    await earlyClose.ended;
+    assert.throws(() => settleSceneCopyTimeline(earlyClose.timeline),
+      /closed before the upload response/);
+  } finally { Date.now = originalNow; }
+  console.log('case15 terminal-copy-event-simulation: ok');
+}
+
+// 16. The upload handoff sink keeps only the first delivered payload (the
+// binding evidence is one-shot), and raceDeadline settles false on expiry
+// while clear() prevents both firing and a dangling timer.
+{
+  const handoff = createUploadHandoff();
+  handoff.deliver({ count: 1, mimeType: 'image/png', byteLength: 4,
+    bytes: [1, 2, 3, 4], problem: null });
+  handoff.deliver({ count: 2 });
+  assert.deepEqual(await handoff.done, { count: 1, mimeType: 'image/png',
+    byteLength: 4, bytes: [1, 2, 3, 4], problem: null });
+  assert.equal(handoff.payload.count, 1);
+
+  const expired = raceDeadline(1);
+  assert.equal(await expired.promise, false);
+  const cleared = raceDeadline(20000);
+  cleared.clear();
+  assert.equal(cleared.promise instanceof Promise, true);
+  console.log('case16 upload-handoff-and-race-deadline: ok');
 }
 
 console.log('smoke_native_actions contract: passed');
