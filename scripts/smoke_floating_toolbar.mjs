@@ -5,12 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import readline from 'node:readline';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
   native, windows, waitForWindows, area, delay, startFixture, launchApp,
   openSettings, toolbarStatus, setCheckbox, stopOwned, configure,
-  captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
+  captureThroughHotkey, taskbarState, pngPixels, focusRecorder, raceDeadline,
 } from './smoke_native_actions.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -100,10 +101,54 @@ async function setDelay(value) {
   assert.equal(evidence.delaySave.receipt.ok, true, 'Floating toolbar delay save failed; see matched receipt problem.');
   assert.equal(settings().linger_ms, value);
 }
+// Warm the native observer before Show so process startup cannot miss the 1 s visibility window.
 async function show() {
-  await app.page.getByRole('button', { name: '显示', exact: true }).click();
-  await toolbarStatus(app.page, '显示中');
-  return toolbar();
+  const execution = exec('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+    path.join(scriptDir, 'native_actions_fixture.ps1'), '-Action', 'toolbar-show-wait',
+    '-AppPid', String(app.child.pid), '-Handle', String(app.main.Handle),
+    '-SampleMs', '15', '-TimeoutMs', '10000'],
+  { windowsHide: true, timeout: 45000, maxBuffer: 256 * 1024 });
+  const child = execution.child;
+  child.stdin.on('error', () => {}); // The write callback and execution Promise report failures.
+  const output = readline.createInterface({ input: child.stdout });
+  const ready = new Promise((resolve, reject) => {
+    output.once('line', (line) => line === 'ready'
+      ? resolve() : reject(new Error('Toolbar observer did not report ready.')));
+    execution.then(() => reject(new Error('Toolbar observer exited before ready.')), reject);
+  });
+  const bounded = async (promise, milliseconds, message) => {
+    const deadline = raceDeadline(milliseconds);
+    try {
+      const result = await Promise.race([promise.then((value) => ({ value })), deadline.promise]);
+      assert(result !== false, message);
+      return result.value;
+    } finally { deadline.clear(); }
+  };
+  try {
+    await bounded(ready, 30000, 'Toolbar observer startup exceeded 30 seconds.');
+    await app.page.getByRole('button', { name: '显示', exact: true }).click();
+    await new Promise((resolve, reject) => child.stdin.write('go\n', (error) =>
+      error ? reject(error) : resolve()));
+    child.stdin.end();
+    await toolbarStatus(app.page, '显示中');
+    // execFile rejects nonzero exits even if the helper printed a result first.
+    const { stdout } = await bounded(execution, 15000, 'Toolbar observer did not finish after Show.');
+    const lines = stdout.trim().split(/\r?\n/);
+    assert.equal(lines.length, 2, 'Toolbar observer returned unexpected output.');
+    assert.equal(lines[0], 'ready');
+    const seen = JSON.parse(lines[1]);
+    assert(seen.Visible && seen.WaitedMs < 10000, 'Toolbar was not observed inside the native deadline.');
+    (evidence.showWaits ??= []).push(seen);
+    return { Handle: seen.Handle, Visible: seen.Visible, Iconic: seen.Iconic,
+      ClassName: seen.ClassName, Dpi: seen.Dpi, Bounds: seen.Bounds,
+      ExtendedStyle: seen.ExtendedStyle,
+      client: { X: seen.Client.X, Y: seen.Client.Y,
+        Width: seen.Client.Width, Height: seen.Client.Height }, dpi: seen.Dpi };
+  } finally {
+    output.close();
+    if (child.pid && child.exitCode === null && child.signalCode === null) child.kill();
+    await bounded(execution.catch(() => null), 5000, 'Owned toolbar observer did not exit during cleanup.');
+  }
 }
 async function frame(window, name) {
   const file = path.join(work, name);
@@ -133,8 +178,8 @@ try {
         scope: data?.payload?.command?.scope, action: data?.payload?.command?.action };
       window.__toolbarSmokeRequests.push(request);
       window.__toolbarSmokeRequests = window.__toolbarSmokeRequests.slice(-32);
-      if (request.scope === 'settings' && request.action === 'refreshRuntime' && !window.__toolbarSmokeRefreshRequest)
-        window.__toolbarSmokeRefreshRequest = request;
+      if (request.scope === 'shell' && request.action === 'navigate' && !window.__toolbarSmokeNavigationRequest)
+        window.__toolbarSmokeNavigationRequest = request;
       if (request.scope === 'settings' && request.action === 'setFloatingToolbarEnabled')
         window.__toolbarSmokeEnableRequest = request;
       return postMessage(data);
@@ -146,15 +191,18 @@ try {
       window.__toolbarSmokeMessages.push(message);
       window.__toolbarSmokeMessages = window.__toolbarSmokeMessages.slice(-32);
       if (message.kind === 'response' && message.type === 'app.command' &&
-        message.id === window.__toolbarSmokeRefreshRequest?.id) window.__toolbarSmokeRefreshReceipt = message;
+        message.id === window.__toolbarSmokeNavigationRequest?.id) window.__toolbarSmokeNavigationReceipt = message;
     });
   });
   await openSettings(app.page);
   await app.page.waitForURL('https://app.vibeocr/index.html#/settings');
-  await app.page.waitForFunction(() => window.__toolbarSmokeRefreshReceipt, null, { timeout: 60000 });
-  evidence.initialRefresh = await app.page.evaluate(() => ({ request: window.__toolbarSmokeRefreshRequest,
-    receipt: window.__toolbarSmokeRefreshReceipt }));
-  assert.equal(evidence.initialRefresh.receipt.ok, true, 'Initial settings runtime refresh failed.');
+  await app.page.waitForFunction(() => window.__toolbarSmokeNavigationReceipt, null, { timeout: 60000 });
+  evidence.initialNavigation = await app.page.evaluate(() => ({ request: window.__toolbarSmokeNavigationRequest,
+    receipt: window.__toolbarSmokeNavigationReceipt, requests: window.__toolbarSmokeRequests }));
+  assert.equal(evidence.initialNavigation.receipt.ok, true, 'Initial settings navigation failed.');
+  assert(!evidence.initialNavigation.requests.some((request) =>
+    request.scope === 'settings' && request.action === 'refreshRuntime'),
+  'Opening settings implicitly requested Runtime preparation.');
   assert.equal(await app.page.getByLabel('收起时间（毫秒）').inputValue(), '300');
   assert.equal(await app.page.getByLabel('工具栏主题').inputValue(), 'system');
   await setCheckbox(app.page, '启用悬浮工具栏', true);

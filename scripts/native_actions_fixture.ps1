@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -10,6 +10,8 @@ param(
     [int]$OutsideX = 0,
     [int]$OutsideY = 0,
     [ValidateRange(100, 5000)][int]$LingerMs = 300,
+    [ValidateRange(10, 20)][int]$SampleMs = 15,
+    [ValidateRange(1000, 60000)][int]$TimeoutMs = 10000,
     [Guid]$IconGuid = [Guid]::Empty,
     [string]$FilePath = '',
     [string]$EvidenceRoot = ''
@@ -76,6 +78,8 @@ public static class NativeActionsFixture
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr state);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window, ref Point point);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
@@ -547,6 +551,55 @@ public static class NativeActionsFixture
             HiddenAfterSecondExit = !IsWindowVisible(new IntPtr(handle)), SecondExitElapsedMs = watch.ElapsedMilliseconds };
     }
 
+    // Show-flow observer: after the caller's ready+go handshake it bounded-waits
+    // for the app-owned visible 272x44-logical toolbar host and keeps it visible
+    // via the existing guarded Hover; guards/timeouts throw to fail closed.
+    public static object WaitShownToolbar(int appPid, long excludeHandle, int sampleMs, int timeoutMs)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < timeoutMs)
+        {
+            foreach (var window in Windows(appPid))
+            {
+                if (window.Handle == excludeHandle || !window.Visible ||
+                    window.ClassName != "WinUIDesktopWin32WindowClass" ||
+                    (window.ExtendedStyle & 0x80) == 0)
+                    continue;
+                if (!GetClientRect(new IntPtr(window.Handle), out Rect client))
+                    continue;
+                // GetClientRect is client-local (Left/Top are 0); ClientToScreen
+                // yields the screen-space client origin exactly like
+                // ScrollCaptureNative.Geometry in scroll_capture_fixture.ps1.
+                var origin = new Point();
+                if (!ClientToScreen(new IntPtr(window.Handle), ref origin))
+                    continue;
+                int clientWidth = client.Right - client.Left;
+                int clientHeight = client.Bottom - client.Top;
+                double scale = window.Dpi / 96.0;
+                if (Math.Abs(clientWidth / scale - 272) >= 3 ||
+                    Math.Abs(clientHeight / scale - 44) >= 3)
+                    continue;
+                int hoverX = origin.X + clientWidth / 2;
+                int hoverY = origin.Y + clientHeight / 2;
+                Hover(appPid, hoverX, hoverY);
+                if (!IsWindowVisible(new IntPtr(window.Handle)))
+                    throw new InvalidOperationException(
+                        "Toolbar hid immediately after the guarded keep-visible hover.");
+                return new {
+                    Handle = window.Handle, Visible = true, Iconic = window.Iconic,
+                    ClassName = window.ClassName, Dpi = window.Dpi,
+                    Bounds = window.Bounds, ExtendedStyle = window.ExtendedStyle,
+                    Client = new { X = origin.X, Y = origin.Y, Width = clientWidth, Height = clientHeight },
+                    WaitedMs = watch.ElapsedMilliseconds,
+                    HoverX = hoverX, HoverY = hoverY,
+                };
+            }
+            System.Threading.Thread.Sleep(sampleMs);
+        }
+        throw new InvalidOperationException(
+            "Visible owned toolbar with a 272x44 logical client did not appear within the bounded wait.");
+    }
+
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
 
     private static Input MoveTo(int x, int y) => new Input
@@ -1000,6 +1053,19 @@ try {
         'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
         'toolbar-sequence' { [NativeActionsFixture]::ToolbarSequence($Handle, $AppPid, $X, $Y, $OutsideX, $OutsideY, $LingerMs) | ConvertTo-Json -Compress }
+        'toolbar-show-wait' {
+            # ready proves the Add-Type compile finished; the bounded wait and
+            # guarded keep-visible hover start strictly at the stdin 'go' signal
+            # which the caller sends after the public Show click completes.
+            [Console]::Out.WriteLine('ready')
+            [Console]::Out.Flush()
+            $go = [Console]::In.ReadLineAsync()
+            if (-not $go.Wait(60000) -or $go.Result -cne 'go') {
+                throw "Toolbar show wait did not receive the 'go' signal."
+            }
+            [NativeActionsFixture]::WaitShownToolbar($AppPid, $Handle, $SampleMs, $TimeoutMs) |
+                ConvertTo-Json -Compress -Depth 4
+        }
         'toolbar-drag' { [NativeActionsFixture]::ToolbarDrag($AppPid, $FixturePid, $X, $Y, $OutsideX, $OutsideY) | ConvertTo-Json -Compress }
         'toolbar-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7B) }
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }
