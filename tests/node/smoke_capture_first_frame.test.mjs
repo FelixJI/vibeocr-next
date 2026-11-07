@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { zeroEvidence, allowsLocalToolRequest } from '../../scripts/smoke_runtime_demand_tools.mjs';
+import { cleanupLineage, zeroEvidence, allowsLocalToolRequest } from '../../scripts/smoke_runtime_demand_tools.mjs';
 import { statistics, attachWorkingSets, summarize, validateBaseline, checkAfter } from '../../scripts/smoke_capture_first_frame.mjs';
 
 const baselineCounts = { Subscriptions: 1, Resources: 0, AnnotationEntries: 0,
@@ -98,6 +99,9 @@ export function runSelfCheck() {
   assert.throws(() => attachWorkingSets(batches[1].health, [], 99), /missing/);
   assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], at_ms: 5000 }], 99), /No closed/);
   assert.throws(() => attachWorkingSets(batches[1].health, samples, 999), /working set is missing/);
+  const incompleteFirstClosed = { started_at_ms: 2200, at_ms: 2250, procs: [samples[0].procs[0]] };
+  assert.throws(() => attachWorkingSets(batches[1].health, [incompleteFirstClosed, ...samples], 99),
+    /App\/shared WebView working set is missing/);
   assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], started_at_ms: 1999 }], 99), /No closed/);
   assert.throws(() => attachWorkingSets(batches[1].health, [{ ...samples[0], started_at_ms: 2301 }], 99), /sample interval/);
 }
@@ -116,6 +120,7 @@ test('real owned working-set sampling continues while discovery is blocked and s
     // 真实握手回归：延迟 root 登记、错误身份不回执、仅含 root 完整样本落盘后
     // 原子回执、退出后不写。
     assert.match(output, /Root first-sample receipt handshake: passed/);
+    assert.match(output, /Owned per-sample census: passed/);
   });
 
 test('zero-Runtime evidence rejects forbidden owned processes and missing real log evidence', () => {
@@ -125,7 +130,8 @@ test('zero-Runtime evidence rejects forbidden owned processes and missing real l
   fs.mkdirSync(logs, { recursive: true });
   const log = path.join(logs, 'winui-dev-20380119.log');
   fs.writeFileSync(log, '00:00:00.000 [INFO ] OnLaunched: profile=production shellOnly=False');
-  fs.writeFileSync(path.join(root, 'process-samples.jsonl'), '');
+  const samples = path.join(root, 'process-samples.jsonl');
+  fs.writeFileSync(samples, '');
   const starts = path.join(root, 'process-starts.jsonl');
   const writeStarts = (rows) => fs.writeFileSync(starts, rows.map(row => JSON.stringify(row)).join('\n'));
   const owner = { pid: 123, class: 'other' };
@@ -135,6 +141,14 @@ test('zero-Runtime evidence rejects forbidden owned processes and missing real l
     writeStarts([owner, { pid: 124, class: role }]);
     assert(zeroEvidence(copy, root, 123).violations.some(message => message.includes('owned lineage')));
   }
+  writeStarts([owner]);
+  const writeSamples = (procs) => fs.writeFileSync(samples, JSON.stringify({ procs }) + '\n');
+  for (const name of ['PYTHON.EXE', 'VibeOCR-runtime-installer.exe']) {
+    writeSamples([{ pid: 124, name, creation_filetime: '134385582680742311' }]);
+    assert.match(zeroEvidence(copy, root, 123).violations.join('\n'), /working-set samples recorded Installer\/Python/);
+  }
+  writeSamples([{ pid: 124, name: 'msedgewebview2.exe', creation_filetime: '134385582680742311' }]);
+  assert.deepEqual(zeroEvidence(copy, root, 123).violations, []);
   writeStarts([]);
   assert.equal(zeroEvidence(copy, root, 123).root_pid_seen, false);
   writeStarts([owner]);
@@ -143,6 +157,35 @@ test('zero-Runtime evidence rejects forbidden owned processes and missing real l
   fs.writeFileSync(log, '');
   assert.equal(zeroEvidence(copy, root, 123).applog_non_empty, false);
 });
+
+test('cleanup rejects a still-live exact sampled identity without terminating sample-only PIDs',
+  { skip: process.platform !== 'win32', timeout: 60000 }, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-sampled-cleanup-'));
+    const samples = path.join(root, 'process-samples.jsonl');
+    const child = spawn('pwsh', ['-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 60'],
+      { windowsHide: true, stdio: 'ignore' });
+    const exited = once(child, 'exit');
+    exited.catch(() => {});
+    const writeSample = (creation_filetime) => fs.writeFileSync(samples, JSON.stringify({
+      procs: [{ pid: child.pid, name: 'pwsh.exe', creation_filetime }],
+    }) + '\n');
+    try {
+      assert(Number.isSafeInteger(child.pid));
+      const exact = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+        `(Get-Process -Id ${child.pid}).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`],
+      { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
+      writeSample((BigInt(exact) + 1n).toString());
+      await cleanupLineage(root);
+      writeSample(exact);
+      await assert.rejects(cleanupLineage(root), /Owned process from working-set samples survived cleanup/);
+      assert.equal(child.exitCode, null);
+      assert.equal(child.signalCode, null);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await exited;
+    }
+    await cleanupLineage(root);
+  });
 
 test('isolated tool network policy permits only local resources and loopback', () => {
   for (const url of ['https://app.vibeocr/__resource/image', 'http://127.0.0.1:1234/',

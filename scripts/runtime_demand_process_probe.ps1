@@ -9,7 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -31,43 +33,197 @@ public static class DemandProbeArgv {
         } finally { LocalFree(pointer); }
     }
 }
-// CIM discovery can exceed one second on a busy host. Sample only its verified
-// ownership records independently; every value is read inside the recorded interval.
+// Toolhelp provides a cheap PID/PPID census without waiting for CIM command lines.
+// Open candidates under the root to verify their identities. Unrelated snapshot
+// rows stay in memory and are never persisted.
+static class DemandProcessCensus {
+    const uint SnapshotProcesses = 0x00000002;
+    const uint QueryLimitedInformation = 0x00001000;
+    const uint Synchronize = 0x00100000;
+    const uint WaitSignaled = 0;
+    const uint WaitTimeout = 258;
+    const int NoMoreFiles = 18;
+    const int InvalidParameter = 87;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ProcessEntry {
+        public uint Size, Usage, Pid;
+        public UIntPtr DefaultHeap;
+        public uint ModuleId, Threads, ParentPid;
+        public int Priority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string Name;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", ExactSpelling = true, SetLastError = true)]
+    static extern bool Process32First(SafeFileHandle snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", EntryPoint = "Process32NextW", ExactSpelling = true, SetLastError = true)]
+    static extern bool Process32Next(SafeFileHandle snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern SafeProcessHandle OpenProcess(uint access, bool inheritHandle, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(SafeProcessHandle process, out long created,
+        out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(SafeProcessHandle handle, uint milliseconds);
+
+    static SafeProcessHandle OpenLiveProcess(int pid, out long created) {
+        created = 0;
+        var handle = OpenProcess(QueryLimitedInformation | Synchronize, false, pid);
+        try {
+            if (handle.IsInvalid) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == InvalidParameter) return null;
+                throw new Win32Exception(error);
+            }
+            uint state = WaitForSingleObject(handle, 0);
+            if (state == WaitSignaled) return null;
+            if (state != WaitTimeout || !GetProcessTimes(handle, out created, out _, out _, out _))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            var live = handle;
+            handle = null;
+            return live;
+        } finally { handle?.Dispose(); }
+    }
+
+    public static void VisitKnown(int pid, long expectedCreated, string name,
+        Action<int, long, string> visit) {
+        using var handle = OpenLiveProcess(pid, out long created);
+        if (handle != null && created / 10 == expectedCreated / 10) visit(pid, created, name);
+    }
+
+    static IEnumerable<ProcessEntry> Snapshot() {
+        using var snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
+        if (snapshot.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf<ProcessEntry>() };
+        if (!Process32First(snapshot, ref entry)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        do { yield return entry; } while (Process32Next(snapshot, ref entry));
+        int error = Marshal.GetLastWin32Error();
+        if (error != NoMoreFiles) throw new Win32Exception(error);
+    }
+
+    public static void VisitOwned(int rootPid, long rootCreated, long censusStarted,
+        Action<int, long, string> visit) {
+        ProcessEntry? root = null;
+        var children = new Dictionary<int, List<ProcessEntry>>();
+        foreach (var entry in Snapshot()) {
+            if (entry.Pid == rootPid) { root = entry; continue; }
+            int parentPid = (int)entry.ParentPid;
+            if (!children.TryGetValue(parentPid, out var siblings))
+                children.Add(parentPid, siblings = new List<ProcessEntry>());
+            siblings.Add(entry);
+        }
+        if (root is not { } candidate) return;
+
+        var pinned = new Dictionary<int, (SafeProcessHandle Handle, long Created, ProcessEntry Entry)>();
+        var confirmed = new HashSet<int>();
+        try {
+            Pin(candidate, parentCreated: null);
+            if (!pinned.ContainsKey(rootPid)) return;
+            confirmed.Add(rootPid);
+            // Verify PPID/name again with candidate identities pinned, so a
+            // reused PID cannot inherit an old snapshot's parent or role.
+            if (pinned.Count > 1)
+                foreach (var entry in Snapshot())
+                    if (pinned.TryGetValue((int)entry.Pid, out var item) &&
+                        item.Entry.ParentPid == entry.ParentPid && item.Entry.Name == entry.Name)
+                        confirmed.Add((int)entry.Pid);
+            Read(candidate);
+        } finally {
+            foreach (var item in pinned.Values) item.Handle.Dispose();
+        }
+
+        void Pin(ProcessEntry entry, long? parentCreated) {
+            int pid = (int)entry.Pid;
+            var handle = OpenLiveProcess(pid, out long created);
+            // CIM supplies the root on a microsecond grid.
+            if (handle == null || created > censusStarted ||
+                (parentCreated is { } parent ? created < parent : created / 10 != rootCreated / 10)) {
+                handle?.Dispose();
+                return;
+            }
+            pinned.Add(pid, (handle, created, entry));
+            if (children.TryGetValue(pid, out var descendants))
+                foreach (var child in descendants) Pin(child, created);
+        }
+
+        void Read(ProcessEntry entry) {
+            int pid = (int)entry.Pid;
+            if (!confirmed.Contains(pid)) return;
+            visit(pid, pinned[pid].Created, entry.Name);
+            if (children.TryGetValue(pid, out var descendants))
+                foreach (var child in descendants) Read(child);
+        }
+    }
+}
+
+// In capture-first-frame mode, enumerate the rooted tree inside each sample;
+// CIM continues to supply durable lineage, roles and installer arguments.
 public sealed class DemandWorkingSetSampler : IDisposable {
     readonly ConcurrentDictionary<int, (long Created, string Name, string Role)> owned = new();
     readonly CancellationTokenSource stop = new();
     readonly Task worker;
     readonly object receiptGate = new();
+    readonly bool useCensus;
     (int Pid, long Created, string Path)? pendingReceipt;
-    public DemandWorkingSetSampler(string path) {
+    (int Pid, long Created)? censusRoot;
+    public DemandWorkingSetSampler(string path) : this(path, false) { }
+    public DemandWorkingSetSampler(string path, bool useCensus) {
+        this.useCensus = useCensus;
         worker = Task.Run(async () => {
             while (!stop.IsCancellationRequested) {
-                long started = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                DateTimeOffset started = DateTimeOffset.UtcNow;
                 var live = new List<object>();
-                // Identities actually verified inside THIS sample (per-tick live
-                // StartTime check on the microsecond grid); the owned table can be
-                // re-registered later, so receipts must match these tuples.
-                var verified = new List<(int Pid, long Created)>();
+                // Identities actually verified inside this sample, including
+                // any descendants discovered before CIM has their command lines.
+                var verified = new Dictionary<int, long>();
+                (int Pid, long Created)? root;
+                lock (receiptGate) root = censusRoot;
+                if (root is { } identity)
+                    DemandProcessCensus.VisitOwned(identity.Pid, identity.Created, started.ToFileTime(), (pid, created, name) => {
+                        string role = name.Equals("msedgewebview2.exe", StringComparison.OrdinalIgnoreCase) ? "unknown" : "";
+                        if (owned.TryGetValue(pid, out var known) && known.Created / 10 == created / 10)
+                            role = known.Role;
+                        ReadWorkingSet(pid, created, name, role, identityVerified: true);
+                    });
                 foreach (var item in owned) {
+                    if (verified.ContainsKey(item.Key)) continue;
+                    if (root.HasValue)
+                        // Preserve CIM-verified descendants if their parent exited.
+                        DemandProcessCensus.VisitKnown(item.Key, item.Value.Created, item.Value.Name,
+                            (pid, created, name) => ReadWorkingSet(pid, created, name, item.Value.Role, identityVerified: true));
+                    else
+                        ReadWorkingSet(item.Key, item.Value.Created, item.Value.Name, item.Value.Role, identityVerified: false);
+                }
+
+                void ReadWorkingSet(int pid, long created, string name, string role, bool identityVerified) {
+                    if (verified.ContainsKey(pid)) return;
                     try {
-                        using var process = Process.GetProcessById(item.Key);
-                        // CIM CreationDate has microsecond precision; native FILETIME has 100 ns ticks.
-                        if (process.StartTime.ToUniversalTime().ToFileTimeUtc() / 10 != item.Value.Created / 10) continue;
+                        using var process = Process.GetProcessById(pid);
+                        if (!identityVerified) {
+                            // CIM has microsecond precision. Persist the actual live FILETIME.
+                            long actual = process.StartTime.ToUniversalTime().ToFileTimeUtc();
+                            if (actual / 10 != created / 10) return;
+                            created = actual;
+                        }
                         process.Refresh();
                         long bytes = process.WorkingSet64;
-                        if (process.HasExited) continue;
-                        live.Add(new { pid = item.Key, name = item.Value.Name,
-                            ws_bytes = bytes, webview_role = item.Value.Role });
-                        verified.Add((item.Key, item.Value.Created));
+                        if (process.HasExited) return;
+                        live.Add(new { pid, name, ws_bytes = bytes, webview_role = role,
+                            creation_filetime = created.ToString() });
+                        verified.Add(pid, created);
                     } catch (ArgumentException) { // Process exited before opening.
                     } catch (InvalidOperationException) { // Process exited during the read.
-                    } catch (System.ComponentModel.Win32Exception error) when (error.NativeErrorCode == 87) {
+                    } catch (Win32Exception error) when (error.NativeErrorCode == 87) {
                         // The process vanished between enumeration and opening.
                     }
                 }
                 long completed = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 File.AppendAllText(path, JsonSerializer.Serialize(new {
-                    started_at_ms = started, at_ms = completed, procs = live }) + "\n");
+                    started_at_ms = started.ToUnixTimeMilliseconds(), at_ms = completed, procs = live }) + "\n");
                 (int Pid, long Created, string Path)? pending;
                 lock (receiptGate) pending = pendingReceipt;
                 // Root first-sample receipt (capture-first-frame handshake): written
@@ -77,15 +233,12 @@ public sealed class DemandWorkingSetSampler : IDisposable {
                 // sample-side verified value. A pid-only match, a creation on another
                 // grid cell, or a never-sampled identity never receives a receipt.
                 if (pending is { } request) {
-                    int confirmed = verified.FindIndex(identity =>
-                        identity.Pid == request.Pid && identity.Created / 10 == request.Created / 10);
-                    if (confirmed >= 0) {
+                    if (verified.TryGetValue(request.Pid, out long created) && created / 10 == request.Created / 10) {
                         lock (receiptGate) pendingReceipt = null;
-                        var identity = verified[confirmed];
                         string temp = request.Path + ".tmp";
                         File.WriteAllText(temp, JsonSerializer.Serialize(new {
-                            pid = identity.Pid, creation_filetime = identity.Created.ToString(),
-                            sample_started_at_ms = started, sample_at_ms = completed,
+                            pid = request.Pid, creation_filetime = created.ToString(),
+                            sample_started_at_ms = started.ToUnixTimeMilliseconds(), sample_at_ms = completed,
                             issued_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }));
                         File.Move(temp, request.Path, true);
                     }
@@ -97,7 +250,10 @@ public sealed class DemandWorkingSetSampler : IDisposable {
     public void Observe(int pid, long created, string name, string role) =>
         owned[pid] = (created, name, role);
     public void IssueReceiptWhenRootSampled(int pid, long created, string receiptPath) {
-        lock (receiptGate) pendingReceipt = (pid, created, receiptPath);
+        lock (receiptGate) {
+            pendingReceipt = (pid, created, receiptPath);
+            if (useCensus) censusRoot = (pid, created);
+        }
     }
     public void Dispose() {
         stop.Cancel();
@@ -176,6 +332,66 @@ if ($SelfCheck) {
     }).Count) { throw 'Independent real working-set samples are missing or invalid' }
     Write-Output "Windows argv and independent owned working-set sampler: passed ($($samples.Count) samples)"
     Write-Output 'Root first-sample receipt handshake: passed (delayed registration, wrong identity refused, wrong-grid creation refused even with the pid sampled, receipt only after a root-containing sample, nothing written after disposal)'
+
+    # The child is deliberately never registered through CIM or Observe().
+    $censusPath = Join-Path $OutputRoot 'selfcheck-census-samples.jsonl'
+    $badCensusReceipt = Join-Path $OutputRoot 'selfcheck-census-wrong-root.json'
+    $censusReceipt = Join-Path $OutputRoot 'selfcheck-census-root.json'
+    $childInfo = [Diagnostics.ProcessStartInfo]::new([Environment]::ProcessPath)
+    $childInfo.UseShellExecute = $false
+    $childInfo.CreateNoWindow = $true
+    foreach ($argument in @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30')) {
+        $childInfo.ArgumentList.Add($argument)
+    }
+    $fixture = [Diagnostics.Process]::Start($childInfo)
+    try {
+        $censusSampler = [DemandWorkingSetSampler]::new($censusPath, $true)
+        try {
+            $censusSampler.Observe($PID, [long]$created, 'pwsh.exe', $null)
+            $censusSampler.IssueReceiptWhenRootSampled($PID, [long]$created + 10, $badCensusReceipt)
+            $wait = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                if ($wait.Elapsed.TotalSeconds -ge 5) { throw 'No sample with root for census identity check' }
+                Start-Sleep -Milliseconds 50
+                if (-not (Test-Path -LiteralPath $censusPath)) { continue }
+                $sample = Get-Content -LiteralPath $censusPath | Select-Object -Last 1 | ConvertFrom-Json
+            } until ($sample.procs.pid -contains $PID)
+            if ($sample.procs.pid -contains $fixture.Id -or (Test-Path -LiteralPath $badCensusReceipt)) {
+                throw 'Census adopted a child of an invalid root identity'
+            }
+            $censusSampler.IssueReceiptWhenRootSampled($PID, [long]$created, $censusReceipt)
+            $wait.Restart()
+            do {
+                if ($wait.Elapsed.TotalSeconds -ge 5) { throw 'Census missed a live child before CIM registration' }
+                Start-Sleep -Milliseconds 50
+                $sample = Get-Content -LiteralPath $censusPath | Select-Object -Last 1 | ConvertFrom-Json
+                $childSample = @($sample.procs | Where-Object { $_.pid -eq $fixture.Id })
+            } until ((Test-Path -LiteralPath $censusReceipt) -and $childSample.Count -gt 0)
+            $fixtureCreation = $fixture.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+            if ($childSample.Count -ne 1 -or $childSample[0].ws_bytes -le 0 -or $sample.procs.pid -notcontains $PID -or
+                $childSample[0].creation_filetime -isnot [string] -or $childSample[0].creation_filetime -cne $fixtureCreation) {
+                throw 'Census child sample is invalid'
+            }
+            $fixture.Kill()
+            if (-not $fixture.WaitForExit(3000)) { throw 'Census fixture did not exit' }
+            $exitedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $wait.Restart()
+            do {
+                if ($wait.Elapsed.TotalSeconds -ge 5) { throw 'No sample after census fixture exit' }
+                Start-Sleep -Milliseconds 50
+                $sample = Get-Content -LiteralPath $censusPath | Select-Object -Last 1 | ConvertFrom-Json
+            } until ($sample.started_at_ms -ge $exitedAt)
+            if ($sample.procs.pid -contains $fixture.Id) { throw 'Census included an exited child' }
+        } finally { $censusSampler.Dispose() }
+    } finally {
+        try {
+            if (-not $fixture.HasExited) {
+                $fixture.Kill()
+                if (-not $fixture.WaitForExit(3000)) { throw 'Census fixture cleanup timed out' }
+            }
+        } finally { $fixture.Dispose() }
+    }
+    Write-Output 'Owned per-sample census: passed (invalid root refused, real child sampled without CIM, exited child absent)'
     return
 }
 $rootFile = Join-Path $OutputRoot 'root-pid.txt'
@@ -187,14 +403,17 @@ $samplesFile = Join-Path $OutputRoot 'process-samples.jsonl'
 $receiptMarker = Join-Path $OutputRoot 'expect-root-receipt'
 $receiptFile = Join-Path $OutputRoot 'root-first-sample.json'
 $receiptRequested = $false
+$useCensus = Test-Path -LiteralPath $receiptMarker
 $owned = @{}
-@{ source = 'CIM ownership discovery + independent .NET working-set reads'; interval_ms = 250; complete_start_trace = $false
+@{ source = if ($useCensus) { 'CIM lineage + per-sample Toolhelp ownership census + independent .NET working-set reads' }
+    else { 'CIM ownership discovery + independent .NET working-set reads' }
+    interval_ms = 250; complete_start_trace = $false
     sample_interval = 'started_at_ms through at_ms; both bound the actual working-set reads'
     evidence_gap = 'Win32_ProcessStartTrace denied by current Windows account; short-lived processes/calls can be missed' } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputRoot 'monitor-info.json')
 Set-Content -LiteralPath (Join-Path $OutputRoot 'monitor-ready') -Value 'ready'
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-$sampler = [DemandWorkingSetSampler]::new($samplesFile)
+$sampler = [DemandWorkingSetSampler]::new($samplesFile, $useCensus)
 try {
     while (-not (Test-Path -LiteralPath $stopFile)) {
         if ([DateTime]::UtcNow -gt $deadline) { throw 'Process monitor deadline exceeded.' }
@@ -220,7 +439,8 @@ try {
                         $parentId = [int]$process.ParentProcessID
                         $parent = $liveById[$parentId]
                         if (-not $parent -or -not $owned.ContainsKey($parentId) -or
-                            [string]$parent.CreationDate.ToUniversalTime().ToFileTimeUtc() -ne $owned[$parentId].creation_filetime) { continue }
+                            [string]$parent.CreationDate.ToUniversalTime().ToFileTimeUtc() -ne $owned[$parentId].creation_filetime -or
+                            [long]$created -lt [long]$owned[$parentId].creation_filetime) { continue }
                     }
                     $class = 'other'
                     $action = $null

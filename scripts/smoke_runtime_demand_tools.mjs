@@ -5,7 +5,9 @@
 // annotation -> copy -> repaste verify) and a pure screenshot capture through
 // the public 截图 button into the scene editor (manual drag over the synthetic
 // fixture, session BMP verification, annotate, pin + on-site measurement
-// before the scene-terminal copy, explicit end on an independent session).
+// before the scene-terminal copy, explicit end on an independent session,
+// then the #318 real Windows Clipboard readback of that scene copy through
+// the still-alive workbench's public paste input).
 // Combined zero evidence: owned CIM lineage (runtime_demand_process_probe.ps1)
 // records no installer/supervisor/python descendants + candidate AppLog has no
 // "Runtime demand: connect begin" / "Runtime demand: initialize_default begin"
@@ -57,7 +59,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { native, windows, waitForWindows, area, inside, delay,
   startFixture, openSettings, setCheckbox, toolbarStatus, stopOwned,
-  settleSceneCopyTimeline, observeSceneCopyTerminal, raceDeadline } from './smoke_native_actions.mjs';
+  settleSceneCopyTimeline, observeSceneCopyTerminal, assertClipboardReadback,
+  pasteImageEditClipboard, installImageEditClipboardWatch,
+  collectSceneCopyUploadBlob, decodeImageRgba, raceDeadline } from './smoke_native_actions.mjs';
 import { createWorkbenchCollector, runMeasurementSelfCheck } from './workbench_delivery_probe.mjs';
 
 const exec = promisify(execFile);
@@ -183,20 +187,50 @@ export async function monitor(root) {
   return { child, finished };
 }
 
-// Batch owned-lineage cleanup strictly by recorded PID + creation_filetime
-// double ownership (same batch CIM approach as scripts/probe_runtime_demand.mjs
-// cleanupLineage); one command, no per-PID spawns, no name-based kill, no
-// external process trees (PickerHost untouched), no evidence deletion.
+// Only CIM-attested identities are termination candidates. The sampler can
+// observe a child before CIM does, so also reject any remaining sampled identity.
 export async function cleanupLineage(root) {
-  const records = jsonLines(path.join(root, 'process-starts.jsonl'))
+  const starts = jsonLines(path.join(root, 'process-starts.jsonl'))
     .filter((row) => row.creation_filetime !== null && row.creation_filetime !== undefined);
-  for (const row of records)
-    assert(Number.isSafeInteger(row.pid) && /^\d+$/.test(String(row.creation_filetime)),
+  const sampled = jsonLines(path.join(root, 'process-samples.jsonl')).flatMap((sample) => sample.procs);
+  const identityEntries = (rows) => {
+    const keys = new Set();
+    for (const { pid, creation_filetime } of rows) {
+      assert(Number.isSafeInteger(pid) && pid > 0 && pid <= 0x7fffffff &&
+        typeof creation_filetime === 'string' && /^[1-9]\d{0,18}$/.test(creation_filetime),
       'Owned lineage record lacks PID/creation_filetime ownership.');
-  const entries = records.map((row) => `'${row.pid}|${row.creation_filetime}'=$true`).join(';');
+      keys.add(`'${pid}|${creation_filetime}'=$true`);
+    }
+    return [...keys].join(';');
+  };
+  const entries = identityEntries(starts);
+  const sampledEntries = identityEntries(sampled);
+  const sampledPids = [...new Set(sampled.map(({ pid }) => pid))].join(',');
+  const checkSampled = sampledPids ? `
+$sampled = @{${sampledEntries}}
+function Get-Creation([int]$processId, [bool]$requireLive) {
+  try { $p = [Diagnostics.Process]::GetProcessById($processId) }
+  catch [ArgumentException] { return }
+  try {
+    try { $created = $p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() }
+    catch { if ($p.HasExited) { return }; throw }
+    if (-not $requireLive -or -not $p.HasExited) { $created }
+  } finally { $p.Dispose() }
+}
+foreach ($processId in @(${sampledPids})) {
+  $created = Get-Creation $processId $true
+  $key = [string]$processId + '|' + $created
+  # Reread creation from a new Process after the liveness check, so a reused PID
+  # cannot make the old process look alive between the two .NET property reads.
+  if ($sampled.ContainsKey($key) -and (Get-Creation $processId $false) -ceq $created) {
+    throw "Owned process from working-set samples survived cleanup: PID $processId FILETIME $created"
+  }
+}
+` : '';
   const command = `$ErrorActionPreference='Stop';$owned=@{${entries}};` +
     `$live=Get-CimInstance Win32_Process;foreach($p in $live){$key=[string]$p.ProcessId+'|'+[string]$p.CreationDate.ToUniversalTime().ToFileTimeUtc();if($owned.ContainsKey($key)){Stop-Process -Id $p.ProcessId -ErrorAction SilentlyContinue}};` +
-    `Start-Sleep -Milliseconds 500;$live=Get-CimInstance Win32_Process;foreach($p in $live){$key=[string]$p.ProcessId+'|'+[string]$p.CreationDate.ToUniversalTime().ToFileTimeUtc();if($owned.ContainsKey($key)){throw 'Owned process survived cleanup'}}`;
+    `Start-Sleep -Milliseconds 500;$live=Get-CimInstance Win32_Process;foreach($p in $live){$key=[string]$p.ProcessId+'|'+[string]$p.CreationDate.ToUniversalTime().ToFileTimeUtc();if($owned.ContainsKey($key)){throw 'Owned process survived cleanup'}};` +
+    checkSampled + 'exit 0';
   await exec('pwsh', ['-NoProfile', '-NonInteractive', '-Command', command],
     { windowsHide: true, timeout: 20000 });
 }
@@ -275,12 +309,13 @@ function decodePng(page, buffer) {
     const context = canvas.getContext('2d');
     context.drawImage(image, 0, 0);
     const { data } = context.getImageData(0, 0, image.width, image.height);
-    let orange = 0, dark = 0;
+    let orange = 0, dark = 0, light = 0;
     for (let i = 0; i < data.length; i += 4) {
       if (data[i] > 210 && data[i + 1] > 90 && data[i + 1] < 190 && data[i + 2] < 110) orange++;
       if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
+      if (data[i] > 170 && data[i + 1] > 170 && data[i + 2] > 170) light++;
     }
-    return { width: image.width, height: image.height, orange, dark };
+    return { width: image.width, height: image.height, orange, dark, light };
   }, buffer.toString('base64'));
 }
 
@@ -349,8 +384,13 @@ async function copyAnnotated(handoff, page, successText) {
 // observeSceneCopyTerminal, settled by the shared fail-closed judge; no
 // public copy command, non-201, failure receipt, crash or missing close is
 // never a success, and the automatic text-layer upload never counts as the
-// copy (association is by the command's resourceUri).
-async function copyAnnotatedTerminal(scene) {
+// copy (association is by the command's resourceUri). The optional holder
+// receives the Node-held upload Blob bytes via collectSceneCopyUploadBlob
+// (the Blob arrives on an independent CDP path that may land later than the
+// 201/command/close, so the bounded Blob wait runs BEFORE any meta check)
+// so the #318 clipboard readback can compare against this revision's export;
+// the bytes never enter the serialized evidence record.
+async function copyAnnotatedTerminal(scene, holder) {
   const terminal = await observeSceneCopyTerminal(scene);
   const clickError = await scene.getByRole('button', { name: '复制标注图', exact: true })
     .click()
@@ -366,11 +406,58 @@ async function copyAnnotatedTerminal(scene) {
   const command = terminal.timeline.copyCommands[0];
   const upload = terminal.timeline.uploads.find(
     (item) => item.resourceUri === command.resourceUri);
+  if (holder) holder.uploadBlob = await collectSceneCopyUploadBlob(terminal, upload);
   return { status: upload.responseStatus,
     byteLength: upload.blobMeta?.byteLength ?? null,
     requestAt: upload.requestAt, responseAt: upload.responseAt,
     closedAt: terminal.timeline.closedAt,
     clickError: terminal.timeline.clickError ?? null };
+}
+
+// Task #318 clipboard readback: the scene-terminal copy timeline proves the
+// public command, its accepted upload and the close, but not that the
+// Windows Clipboard actually received this revision's composite image. The
+// still-alive workbench reads the real Clipboard back through its public
+// 粘贴图片 input (imageEdit.readClipboard -> host Clipboard.GetContent); the
+// republished input resource and this revision's export PNG are decoded in
+// the SAME WebView and compared byte-for-byte (shared assertClipboardReadback
+// against THIS revision's region). The persistent imageEdit-state watch was
+// installed before imageEditStep first entered 图片编辑, so the real
+// pre-paste session is the baseline and only the paste's terminal non-busy
+// record naming a NEW session OR resource is accepted - StartImageEdit's
+// busy old-URL republish (the stale QR image this smoke copied earlier) can
+// never satisfy
+// the wait. The clipboard image is written to disk only AFTER the comparison
+// passed. The closed scene is never evaluated again, its suppressed receipt
+// stays unrequired, and every wait is bounded with no retry.
+async function readbackSceneClipboard(ctx, uploadPng, region) {
+  const { page, root } = ctx;
+  await focusMain(ctx);
+  await page.getByRole('link', { name: '图片编辑', exact: true }).click();
+  await page.getByRole('heading', { name: '图片编辑', exact: true }).waitFor();
+  const snapshot = await pasteImageEditClipboard(page);
+  const resource = new URL(snapshot.url);
+  assert(resource.origin === 'https://app.vibeocr' && resource.pathname.startsWith('/__resource/'),
+    'Clipboard readback input is not the product resource observed from imageEdit state.');
+  const pasted = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Clipboard readback resource returned ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('Clipboard readback image exceeded 8 MiB');
+    return { mediaType: response.headers.get('content-type'), bytes: Array.from(bytes) };
+  }, snapshot.url);
+  // Verify BEFORE persisting: a failed comparison must not write unknown
+  // clipboard pixels into the evidence root.
+  const expectedRgba = await decodeImageRgba(page, uploadPng, 'image/png');
+  const clipboardBytes = Buffer.from(pasted.bytes);
+  const rgba = await decodeImageRgba(page, clipboardBytes, pasted.mediaType);
+  assertClipboardReadback({ mediaType: pasted.mediaType, rgba }, { width: region.width,
+    height: region.height, expectedRgba }, 'Scene clipboard readback');
+  fs.writeFileSync(path.join(root, 'capture-clipboard-readback.png'), clipboardBytes);
+  return { mediaType: pasted.mediaType, bytes: clipboardBytes.length,
+    pixels: { width: rgba.width, height: rgba.height },
+    inputUrl: snapshot.url, sessionId: snapshot.sessionId, stateSeq: snapshot.seq,
+    matchesRevision: true };
 }
 
 // Pure AppLog zero-evidence scanner (self-checkable without any GUI):
@@ -521,6 +608,11 @@ async function settingsStep(ctx) {
 async function imageEditStep(ctx) {
   const { page, root, child, main } = ctx;
   const step = { state: 'failed' };
+  // #318: the persistent imageEdit-state watch must exist BEFORE this step
+  // first enters 图片编辑, so the captureStep clipboard readback later sees
+  // the real previous session (the busy old-URL republish of the paste can
+  // never satisfy its non-busy NEW-session acceptance).
+  await installImageEditClipboardWatch(page);
   await page.getByRole('link', { name: '图片编辑', exact: true }).click();
   await page.getByRole('heading', { name: '图片编辑', exact: true }).waitFor();
   await watchImageEditInput(page);
@@ -809,7 +901,14 @@ async function captureStep(ctx) {
     await scene.screenshot({ path: path.join(root, 'capture-scene.png') });
     // Scene-terminal copy (goal316): proof is the Node-held request/response/
     // close timeline; nothing is read from the scene afterwards.
-    step.annotationUpload = await copyAnnotatedTerminal(scene);
+    const copyUpload = {};
+    step.annotationUpload = await copyAnnotatedTerminal(scene, copyUpload);
+    // Task #318: the timeline proves command/upload/close only; read the
+    // actual Windows Clipboard back through the still-alive workbench's
+    // public paste input and compare with THIS revision's composite image
+    // (the QR image this smoke itself copied earlier is the only possible
+    // stale content, and its dimensions/pixels cannot pass the judge).
+    step.clipboardReadback = await readbackSceneClipboard(ctx, copyUpload.uploadBlob, region);
     // The explicit 结束会话 stays covered on its own fresh, independent
     // session (a different session id), never on the terminal one.
     const second = await startSceneSession(ctx, fixture);
@@ -844,15 +943,21 @@ async function captureStep(ctx) {
   return step;
 }
 
-// Post-exit combined zero evidence: owned CIM lineage classes, candidate
-// AppLog runtime-demand/Installer markers (must exist and be non-empty) and
-// fresh-state environment surfaces (both possible store anchors).
+// Post-exit combined zero evidence: owned CIM classes and sampled process names,
+// candidate AppLog demand markers and fresh-state environment surfaces.
 export function zeroEvidence(copy, root, appPid) {
   const violations = [];
   const starts = jsonLines(path.join(root, 'process-starts.jsonl'));
   const forbidden = starts.filter((entry) => forbiddenClasses.has(entry.class));
   if (forbidden.length)
     violations.push(`owned lineage recorded Installer/Supervisor work: ${JSON.stringify(forbidden)}`);
+  const samples = jsonLines(path.join(root, 'process-samples.jsonl'));
+  const sampledRuntime = new Set();
+  for (const sample of samples)
+    for (const { pid, name } of sample.procs)
+      if (/runtime-installer|python/i.test(name)) sampledRuntime.add(`${pid}:${name}`);
+  if (sampledRuntime.size)
+    violations.push(`owned working-set samples recorded Installer/Python processes: ${[...sampledRuntime].join(', ')}`);
   const rootSeen = starts.some((entry) => entry.pid === appPid);
   if (!rootSeen)
     violations.push('monitor never observed the spawned App PID (CIM snapshot lower bound)');
@@ -870,7 +975,7 @@ export function zeroEvidence(copy, root, appPid) {
   return {
     violations,
     process_starts: starts,
-    process_samples_count: jsonLines(path.join(root, 'process-samples.jsonl')).length,
+    process_samples_count: samples.length,
     root_pid_seen: rootSeen,
     applog_directory: logsDir,
     applog_files: scan.files,
@@ -878,7 +983,7 @@ export function zeroEvidence(copy, root, appPid) {
     applog_forbidden_hits: scan.hits,
     environment_state_absent: environmentSurfaces.filter((relative) =>
       !fs.existsSync(path.join(copy, relative))),
-    combined: 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independent working-set reads + ' +
+    combined: 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independently sampled owned process names + ' +
       'non-empty AppLog without Installer command starts (any action, incl. list/' +
       'switch reservation) or runtime demand connect/initialize_default + fresh ' +
       'state kept no environment registry/store/plans/cache/marker on the ' +

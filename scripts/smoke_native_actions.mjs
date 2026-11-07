@@ -18,6 +18,7 @@ const requireWebAssets = createRequire(path.resolve(scriptDir,
   '../src/dotnet/VibeOCR.App/WebAssets/package.json'));
 const { chromium, expect } = requireWebAssets('@playwright/test');
 const nativeScript = path.join(scriptDir, 'native_actions_fixture.ps1');
+const clipboardScript = path.join(scriptDir, 'native_codes_clipboard_fixture.ps1');
 const hotkey = 'Ctrl+Alt+Shift+F10';
 const recognizeHotkey = 'Ctrl+Alt+Shift+F11';
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,6 +69,19 @@ async function windows(pid) {
   if (!output || output === 'null') return [];
   const value = JSON.parse(output);
   return Array.isArray(value) ? value : [value];
+}
+
+// Write-only synthetic clipboard sentinel (task #318): primes the real
+// Windows Clipboard with this smoke's own fixture frame before the terminal
+// copy, so the post-copy readback can never import or test user clipboard
+// pixels, and a copy that fails to replace the sentinel fails closed on
+// dimensions/pixels. Same bounded fixture contract as the codes smoke.
+async function setClipboardImage(root, image) {
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive',
+    '-STA', '-File', clipboardScript, '-SmokeRoot', root, '-ImagePath', image],
+  { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  assert.equal(stdout.trim(), 'clipboard-image-set',
+    'Clipboard fixture did not confirm its synthetic image.');
 }
 
 async function waitForWindows(pid, predicate, timeoutMs = 10000) {
@@ -179,6 +193,124 @@ function settleSceneCopyTimeline(timeline, context = 'Scene copy', options = {})
   if (requireClose)
     assert(!timeline.noTerminalEvent, `${context}: scene close exceeded its deadline: ${evidence}`);
   return true;
+}
+
+// Task #318 clipboard readback judge (Node-regression-tested): the
+// scene-terminal copy timeline above proves the public command, its accepted
+// upload and the normal close, but says nothing about the Windows Clipboard
+// itself. The only acceptable proof is the image the still-alive workbench
+// republished from the actual Clipboard through its public paste input
+// (imageEdit.readClipboard). The real readClipboard path
+// (PasteImageForEditAsync -> InputService.ReadClipboardAsync) preserves the
+// WinRT stream's ORIGINAL bytes/ContentType (it is NOT the import reader's
+// unified PNG re-encode), so the judge requires any image/* media type the
+// WebView decoded and then compares the decoded RGBA of the clipboard image
+// byte-for-byte against THIS revision's own export, decoded in the SAME
+// WebView. Aggregate pixel counts cannot prove this revision (mirrors, row
+// shifts, in-threshold RGB or alpha changes keep the totals); a byte-level
+// first difference fails closed. No hashing.
+export function assertClipboardReadback(readback, revision, context = 'Clipboard readback') {
+  assert(readback && typeof readback === 'object', `${context}: readback evidence is missing.`);
+  assert(typeof readback.mediaType === 'string' && /^image\/[a-z0-9.+-]+$/i.test(readback.mediaType),
+    `${context}: clipboard image was not republished with an image media type: ${
+      JSON.stringify(readback.mediaType ?? null)}.`);
+  assert(Number.isSafeInteger(revision?.width) && revision.width > 0 &&
+    Number.isSafeInteger(revision?.height) && revision.height > 0,
+  `${context}: expected physical selection is invalid: ${revision?.width}x${revision?.height}.`);
+  const actual = readback.rgba;
+  const expected = revision.expectedRgba;
+  for (const [name, image] of [['clipboard', actual], ['expected', expected]]) {
+    assert(image && Number.isSafeInteger(image.width) && image.width > 0 &&
+      Number.isSafeInteger(image.height) && image.height > 0 &&
+      typeof image.rgbaBase64 === 'string',
+    `${context}: ${name} image was not decoded into RGBA evidence: ${image?.width}x${image?.height}.`);
+    assert(Buffer.from(image.rgbaBase64, 'base64').length === image.width * image.height * 4,
+      `${context}: ${name} RGBA payload is not width*height*4 bytes.`);
+  }
+  assert.equal(actual.width, revision.width,
+    `${context}: clipboard image is ${actual.width}x${actual.height} instead of the selected ${
+      revision.width}x${revision.height}.`);
+  assert.equal(actual.height, revision.height,
+    `${context}: clipboard image height ${actual.height} differs from the selected physical height ${
+      revision.height}.`);
+  assert.equal(expected.width, revision.width,
+    `${context}: expected export width ${expected.width} differs from the selection.`);
+  assert.equal(expected.height, revision.height,
+    `${context}: expected export height ${expected.height} differs from the selection.`);
+  const left = Buffer.from(actual.rgbaBase64, 'base64');
+  const right = Buffer.from(expected.rgbaBase64, 'base64');
+  for (let index = 0; index < left.length; index++)
+    if (left[index] !== right[index]) {
+      const channels = ['red', 'green', 'blue', 'alpha'];
+      assert.fail(`${context}: clipboard RGBA differs from this revision's export at pixel ${
+        Math.floor(index / 4)} (${channels[index % 4]}): ${left[index]} vs ${right[index]}.`);
+    }
+  return true;
+}
+
+// Only a new terminal state after the paste click can prove clipboard readback.
+export function acceptClipboardReadbackState(record, previous) {
+  return record?.isBusy === false && Number.isSafeInteger(record.seq) &&
+    record.seq > (previous?.seq ?? 0) && typeof record.url === 'string' && record.url.length > 0 &&
+    typeof record.sessionId === 'string' && record.sessionId.length > 0 &&
+    (!previous || record.sessionId !== previous.sessionId || record.url !== previous.url);
+}
+
+export async function installImageEditClipboardWatch(page) {
+  await page.evaluate(() => {
+    if (Array.isArray(window.__clipboardReadbackStates)) return;
+    const ring = [];
+    let sequence = 0;
+    window.__clipboardReadbackStates = ring;
+    window.chrome.webview.addEventListener('message', ({ data }) => {
+      if (data?.kind !== 'event' || data.type !== 'app.state' ||
+          data.payload?.scope !== 'imageEdit') return;
+      const state = data.payload.state ?? {};
+      ring.push({ seq: ++sequence, isBusy: state.isBusy,
+        url: state.input?.url ?? null, sessionId: state.screenshotSession?.sessionId ?? null });
+      if (ring.length > 24) ring.splice(0, ring.length - 24);
+    });
+  });
+}
+
+export async function pasteImageEditClipboard(page) {
+  const previous = await page.evaluate(() => window.__clipboardReadbackStates?.at(-1) ?? null);
+  await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
+  const accepted = await page.waitForFunction((before) => {
+    const ring = window.__clipboardReadbackStates ?? [];
+    return ring.find((record) => record.isBusy === false &&
+      Number.isSafeInteger(record.seq) && record.seq > (before?.seq ?? 0) &&
+      typeof record.url === 'string' && record.url.length > 0 &&
+      typeof record.sessionId === 'string' && record.sessionId.length > 0 &&
+      (!before || record.sessionId !== before.sessionId || record.url !== before.url)) ?? false;
+  }, previous, { timeout: 20000 });
+  try {
+    const snapshot = await accepted.jsonValue();
+    assert(acceptClipboardReadbackState(snapshot, previous), 'Clipboard readback state is invalid.');
+    return snapshot;
+  } finally { await accepted.dispose(); }
+}
+
+// Node-held upload Blob collection for a settled scene-copy timeline
+// (task #318 review fix): the Blob bytes/meta arrive through an INDEPENDENT
+// Blob.arrayBuffer().then/CDP path that may land later than the 201 upload,
+// the copy command and the close - so the bounded wait for the Blob runs
+// FIRST and only then are meta and bytes validated (asserting blobMeta
+// before waiting raced a still-null meta). Bytes never enter the timeline.
+export async function collectSceneCopyUploadBlob(terminal, upload, context = 'Scene copy') {
+  const blobDeadline = raceDeadline(5000);
+  let observed;
+  try {
+    observed = await Promise.race([terminal.waitForUploadBlob(upload.seq), blobDeadline.promise]);
+  } finally { blobDeadline.clear(); }
+  assert(observed, `${context} upload Blob never reached Node: ${JSON.stringify(terminal.timeline)}`);
+  assert(observed.problem == null && observed.mimeType === 'image/png' &&
+    Array.isArray(observed.bytes) && observed.bytes.length === observed.byteLength,
+  `${context} upload Blob evidence is unsound: ${JSON.stringify(observed)}`);
+  assert(upload.blobMeta?.problem == null && Number.isSafeInteger(upload.blobMeta?.byteLength) &&
+    upload.blobMeta.byteLength === observed.byteLength,
+  `${context} upload Blob meta disagrees with the delivered Blob: ${JSON.stringify(terminal.timeline)}`);
+  return Buffer.from(observed.bytes);
 }
 
 // Pre-click passive scene-copy observation (goal316/318), awaited before
@@ -805,6 +937,82 @@ async function pngPixels(page, png, mediaType = 'image/png') {
   }, { encoded: png.toString('base64'), mediaType });
 }
 
+// Decode one image buffer to raw RGBA inside the product's own WebView2 -
+// the SAME decoder renders both sides of the #318 byte comparison, so no
+// cross-decoder drift can pass; the base64 payload keeps the CDP return
+// bounded. No hashing: the judge compares bytes.
+async function decodeImageRgba(page, buffer, mediaType) {
+  return page.evaluate(async ({ encoded, mediaType }) => {
+    const bytes = Uint8Array.from(atob(encoded), (letter) => letter.charCodeAt(0));
+    const image = await createImageBitmap(new Blob([bytes], { type: mediaType }));
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, image.width, image.height);
+    image.close();
+    let binary = '';
+    const chunk = 0x8000;
+    for (let offset = 0; offset < data.length; offset += chunk)
+      binary += String.fromCharCode(...data.subarray(offset, offset + chunk));
+    return { width: canvas.width, height: canvas.height, rgbaBase64: btoa(binary) };
+  }, { encoded: buffer.toString('base64'), mediaType });
+}
+
+// Task #318 clipboard readback: after the scene-terminal copy closed and
+// retired the scene WebView (no receipt is ever required from it - the host
+// normally suppresses it), the still-alive isolated workbench reads the real
+// Windows Clipboard back through its public 粘贴图片 input
+// (imageEdit.readClipboard -> host Clipboard.GetContent). The persistent
+// imageEdit-state watch is installed BEFORE the first 图片编辑 entry, so the
+// real pre-paste session is the baseline and only the paste's terminal
+// non-busy record naming a NEW session OR resource is accepted (the busy
+// old-URL republish that StartImageEdit publishes first can never satisfy
+// the wait). The accepted
+// snapshot is returned once by the wait - never re-read after an await - and
+// both the clipboard image and this revision's export PNG are decoded in the
+// SAME WebView and compared byte-for-byte. The clipboard image is written to
+// disk only AFTER the comparison passed; a mismatch never persists unknown
+// clipboard pixels. Every wait is bounded; there is no retry and no new
+// framework - only the owned restore seam (same ownership foreground guard
+// as every other input step).
+async function readbackSceneCopyClipboard(app, evidenceRoot, manual, selectedRegion, expectedPng) {
+  const page = app.page;
+  await installImageEditClipboardWatch(page);
+  await native('restore', { AppPid: app.child.pid, Handle: app.main.Handle });
+  await waitForWindows(app.child.pid,
+    (item) => item.Handle === app.main.Handle && item.Visible, 12000);
+  await page.bringToFront();
+  await page.getByRole('link', { name: '图片编辑', exact: true }).click();
+  await page.getByRole('heading', { name: '图片编辑', exact: true }).waitFor();
+  const snapshot = await pasteImageEditClipboard(page);
+  const resource = new URL(snapshot.url);
+  assert(resource.origin === 'https://app.vibeocr' && resource.pathname.startsWith('/__resource/'),
+    'Clipboard readback input is not the product resource observed from imageEdit state.');
+  const pasted = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Clipboard readback resource returned ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('Clipboard readback image exceeded 8 MiB');
+    return { mediaType: response.headers.get('content-type'), bytes: Array.from(bytes) };
+  }, snapshot.url);
+  // Verify BEFORE persisting: a failed comparison must not write unknown
+  // clipboard pixels into the evidence root.
+  const expectedRgba = await decodeImageRgba(page, expectedPng, 'image/png');
+  const clipboardBytes = Buffer.from(pasted.bytes);
+  const rgba = await decodeImageRgba(page, clipboardBytes, pasted.mediaType);
+  assertClipboardReadback({ mediaType: pasted.mediaType, rgba }, { width: selectedRegion.width,
+    height: selectedRegion.height, expectedRgba },
+  manual ? 'Manual clipboard readback' : 'Smart clipboard readback');
+  fs.writeFileSync(path.join(evidenceRoot,
+    manual ? 'manual-clipboard-readback.png' : 'clipboard-readback.png'), clipboardBytes);
+  return { mediaType: pasted.mediaType, bytes: clipboardBytes.length,
+    pixels: { width: rgba.width, height: rgba.height },
+    inputUrl: snapshot.url, sessionId: snapshot.sessionId, stateSeq: snapshot.seq,
+    matchesRevision: true };
+}
+
 const handleCursorShapes = ['sizeNWSE', 'sizeNS', 'sizeNESW', 'sizeWE', 'sizeWE', 'sizeNESW', 'sizeNS', 'sizeNWSE'];
 const magnifierLabelPattern = /^(-?\d+), (-?\d+)\r?\n#([0-9A-F]{6})\r?\nRGB (\d+), (\d+), (\d+)$/;
 
@@ -1284,6 +1492,11 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   assert(revision?.sessionId && revision.revision >= 1,
     'Host screenshot session revision did not advance after editing.');
   await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
+  // #318: prime the real Clipboard with this run's own synthetic fixture
+  // frame before the terminal copy, so the post-copy readback below can only
+  // ever observe this smoke's images - user clipboard pixels never enter, and
+  // a copy that fails to replace the sentinel fails closed on pixels.
+  await setClipboardImage(evidenceRoot, fixtureFrame);
   const terminal = await observeSceneCopyTerminal(page);
   pixelEvidence.copyTimeline = terminal.timeline;
   const commandDeadline = raceDeadline(10000);
@@ -1341,12 +1554,21 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   assert(!(await windows(app.child.pid)).some(item =>
     item.Handle === app.main.Handle && item.Visible),
   'Closing the screenshot scene forced the hidden workbench to appear.');
+  // #318 clipboard readback: the timeline above proves command/upload/close;
+  // the actual Clipboard is proven only by reading it back through the
+  // still-alive workbench's public paste input (fixture sentinel was primed
+  // before the click; the closed scene is never evaluated again). The
+  // expected side is THIS revision's exported upload PNG bytes.
+  const clipboardReadback = await readbackSceneCopyClipboard(app, evidenceRoot, manual,
+    selectedRegion, png);
+  pixelEvidence.clipboardReadback = clipboardReadback;
   return { hotkey, overlayHandle: overlay.Handle,
     copyClosedScene: true, copyTimeline: terminal.timeline,
     mainHiddenAfterSelection: true,
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
     background: fixture.backgroundRect, button, selectedRegion, gesture, canvasBefore: before,
     canvasAfter: after, png: pixels, productUploadBytes: uploadBytes,
+    clipboardReadback,
     sessionId: revision.sessionId,
     revision: revision.revision };
 }
@@ -1589,7 +1811,7 @@ export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
   assertCaptureCanvasLayout, settleSceneCopyTimeline, observeSceneCopyTerminal,
-  raceDeadline };
+  decodeImageRgba, raceDeadline };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

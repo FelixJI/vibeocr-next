@@ -10,7 +10,7 @@ import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const { observeSceneCopyTerminal, settleSceneCopyTimeline } = await import(
+const { observeSceneCopyTerminal, settleSceneCopyTimeline, assertClipboardReadback } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts',
     'smoke_native_actions.mjs')).href);
 
@@ -428,6 +428,37 @@ test('installer survives serialization into an isolated context', async () => {
   } finally {
     mounted.restore();
   }
+});
+
+// 6. Task #318 scene clipboard readback (shared judge export): the scene
+// copy timeline proves command/upload/close only; the Windows Clipboard
+// itself is proven by the workbench paste readback, decoded in the SAME
+// WebView as this revision's export and compared byte-for-byte. A stale QR
+// image (this smoke's own pre-copy clipboard content, wrong dimensions), a
+// mirror or an alpha-only change keeps aggregate totals and must still fail.
+test('scene clipboard readback judge rejects stale and rearranged clipboard images', () => {
+  const rgbaImage = (width, height, pixels) => ({ width, height,
+    rgbaBase64: Buffer.from(Uint8Array.from(pixels.flat())).toString('base64') });
+  // 2x2 场景合成图:标注橙 + fixture 明/暗像素。
+  const composite = [[243, 139, 53, 255], [240, 240, 240, 255],
+    [16, 16, 16, 255], [240, 240, 240, 255]];
+  const revision = { width: 2, height: 2, expectedRgba: rgbaImage(2, 2, composite) };
+  assert.equal(assertClipboardReadback({ mediaType: 'image/png',
+    rgba: rgbaImage(2, 2, composite) }, revision, 'Scene clipboard readback'), true);
+  // 复制未落剪贴板时,剪贴板仍是本冒烟自己先前复制的 QR 合成图:
+  // 尺寸与本次选区不符,必须拒绝。
+  assert.throws(() => assertClipboardReadback({ mediaType: 'image/png',
+    rgba: rgbaImage(2, 2, composite) },
+  { width: 320, height: 320, expectedRgba: revision.expectedRgba },
+  'Scene clipboard readback'), /instead of the selected 320x320/);
+  // 同尺寸同颜色总量:行交换(镜像类重排)不能通过。
+  assert.throws(() => assertClipboardReadback({ mediaType: 'image/png',
+    rgba: rgbaImage(2, 2, [composite[1], composite[0], composite[3], composite[2]]) },
+  revision, 'Scene clipboard readback'), /differs from this revision's export at pixel 0 \(red\)/);
+  // 仅 alpha 变化不能通过。
+  assert.throws(() => assertClipboardReadback({ mediaType: 'image/png',
+    rgba: rgbaImage(2, 2, [[243, 139, 53, 254], composite[1], composite[2], composite[3]]) },
+  revision, 'Scene clipboard readback'), /differs from this revision's export at pixel 0 \(alpha\)/);
 });
 
 console.log('smoke_runtime_demand_tools contract: passed');
