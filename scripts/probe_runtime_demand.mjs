@@ -107,8 +107,11 @@ async function measure(page, metric, app, main, fixture, iteration, t0) {
     const failed = await page.evaluate((start) => window.__runtimeDemandEvidence.slice(start)
       .findLast((row) => ['recognition.failed', 'recognition.cancelled'].includes(row.statusCode)), offset);
     assert(!failed, `OCR terminal failure: ${failed?.statusCode}`);
-    await expect(page.locator('.result-document')).toContainText(/VibeOCR\s*123/, { timeout });
-    text = await page.locator('.result-document').textContent();
+    const resultText = page.locator('details')
+      .filter({ has: page.locator('summary').filter({ hasText: /^原始文本$/ }) })
+      .locator('.result-document');
+    await expect(resultText).toContainText(/VibeOCR\s*123/, { timeout });
+    text = await resultText.textContent();
   } else {
     await page.getByRole('button', { name: '打开 PDF', exact: true }).click();
     await native('codes-open-file', { Handle: main.Handle, AppPid: app.pid, FilePath: fixture }, 20000);

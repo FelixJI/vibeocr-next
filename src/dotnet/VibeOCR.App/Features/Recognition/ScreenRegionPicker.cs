@@ -302,6 +302,7 @@ public sealed class ScreenRegionPicker(
                 desktop,
                 background,
                 desktopBgra,
+                desktopBmp,
                 candidates,
                 keepForEditing: !scrolling,
                 cancellationToken,
@@ -451,15 +452,48 @@ public sealed class ScreenRegionPicker(
   internal static async Task<ScreenshotCaptureScene> CreateSyntheticSceneAsync(
     PhysicalRectangle bounds, byte[] pixels, int stride, CancellationToken cancellationToken)
   {
-    BitmapImage background = await LoadBitmapAsync(
-      EncodeTopDownBmp(pixels, bounds.Width, bounds.Height, stride), bounds.Width, bounds.Height);
-    OverlaySelection? selected = await ShowOverlayAsync(bounds, background, pixels,
+    byte[] desktopBmp = EncodeTopDownBmp(pixels, bounds.Width, bounds.Height, stride);
+    BitmapImage background = await LoadBitmapAsync(desktopBmp, bounds.Width, bounds.Height);
+    OverlaySelection? selected = await ShowOverlayAsync(bounds, background, pixels, desktopBmp,
       SmartScreenCandidates.Capture(bounds), keepForEditing: true, cancellationToken,
       automaticSelection: true);
     ScreenshotCaptureScene scene = selected?.Scene ??
       throw new InvalidOperationException("Synthetic screenshot overlay was cancelled.");
     scene.RestoreOwnerOnClose(static () => { });
     return scene;
+  }
+
+  internal static async Task VerifyFrozenBackgroundHandoffSelfCheckAsync()
+  {
+    var bounds = new PhysicalRectangle(40, 40, 320, 120);
+    byte[] pixels = new byte[bounds.Width * bounds.Height * 4];
+    for (int offset = 0; offset < pixels.Length; offset += 4)
+    {
+      pixels[offset] = (byte)(offset % 251);
+      pixels[offset + 1] = 67;
+      pixels[offset + 2] = 191;
+      pixels[offset + 3] = (byte)(offset % 256);
+    }
+    byte[] bmp = EncodeTopDownBmp(pixels, bounds.Width, bounds.Height, bounds.Width * 4);
+    BitmapImage background = await LoadBitmapAsync(bmp, bounds.Width, bounds.Height);
+    OverlaySelection? selected = await ShowOverlayAsync(bounds, background, pixels, bmp,
+      SmartScreenCandidates.Capture(bounds), keepForEditing: true, CancellationToken.None,
+      automaticSelection: true);
+    using ScreenshotCaptureScene scene = selected?.Scene ??
+      throw new InvalidOperationException("Frozen background scene was cancelled.");
+    byte[] claimed = scene.TakeBackground() ??
+      throw new InvalidOperationException("Frozen background was not transferred.");
+    int buffers = ReferenceEquals(bmp, claimed) ? 1 : 2;
+    CaptureUiSmokeTrace.Stage($"frozen-background.buffers={buffers}.bytes={bmp.Length * buffers}");
+    if (buffers != 1)
+      throw new InvalidOperationException($"Frozen background handoff allocated {buffers} BMP buffers ({bmp.Length * buffers} bytes).");
+    if (!claimed.AsSpan(54).SequenceEqual(pixels) || background.PixelWidth != bounds.Width ||
+        background.PixelHeight != bounds.Height || scene.TakeBackground() is not null)
+      throw new InvalidOperationException("Frozen pixels, physical resolution or single transfer changed.");
+    scene.SetBackground(bmp);
+    scene.Dispose();
+    if (scene.TakeBackground() is not null || scene.Root.Children.Count != 0)
+      throw new InvalidOperationException("Closed capture retained its background.");
   }
 
   internal static void EnsureFrozenLayoutCurrent(
@@ -474,6 +508,7 @@ public sealed class ScreenRegionPicker(
     PhysicalRectangle desktop,
     BitmapImage background,
     byte[] pixels,
+    byte[] desktopBmp,
     SmartScreenCandidates candidates,
     bool keepForEditing,
     CancellationToken cancellationToken,
@@ -746,7 +781,8 @@ public sealed class ScreenRegionPicker(
         {
           InitialTool = initialTool,
         };
-        scene.SetBackground(EncodeTopDownBmp(pixels, desktop.Width, desktop.Height, desktop.Width * 4));
+        // 初次编码的冻结底图仅移交所有权，不再构造第二个等价整屏 BMP。
+        scene.SetBackground(desktopBmp);
         completion.TrySetResult(new OverlaySelection(bounds, scene));
       }
       else if (result is { } scrollingBounds && (action is ScreenshotSelectionAction.ScrollCapture || !keepForEditing))
@@ -1294,6 +1330,9 @@ public sealed class ScreenRegionPicker(
       throw new InvalidOperationException("无法将截图选区置于前台，请重试截图。");
     }
     if (!automaticSelection) keyboardSink.Focus(FocusState.Programmatic);
+    using WindowMessageService? cursorQuery = diagnoseSmartQueries
+      ? InstallCursorQuery(overlayHandle, root)
+      : null;
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
     root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
     if (automaticSelection)
@@ -1312,11 +1351,50 @@ public sealed class ScreenRegionPicker(
     }
     finally
     {
+      // 已完成的选区回调不再持有已移交或丢弃的编码缓冲。
+      desktopBmp = [];
       // 编辑窗口接管原冻结画面；其余路径立即释放。
       if (!completion.Task.IsCompletedSuccessfully || completion.Task.Result?.Scene is null)
         root.Children.Clear();
     }
   }
+
+  // native-actions-e2e 光标验收：App 外 GetCursorInfo 与 WinUI island 光标可
+  // 不一致（cursor-source-diagnostic1108），故同步消息读 ContentIsland 的
+  // InputPointerSource.Cursor；LRESULT=1+(int)shape，0=不可用/异常 fail closed。
+  private static WindowMessageService? InstallCursorQuery(nint overlayHandle, Grid root)
+  {
+    uint queryMessage = RegisterWindowMessageW("VibeOCR.ScreenRegionPicker.CursorProbe");
+    if (queryMessage == 0) return null;
+    WindowMessageService messages;
+    try
+    {
+      messages = new WindowMessageService(overlayHandle);
+    }
+    catch (InvalidOperationException)
+    {
+      return null;
+    }
+    messages.MessageHandled += message =>
+    {
+      if (message.Id != queryMessage) return null;
+      try
+      {
+        var island = root.XamlRoot?.ContentIsland;
+        if (island is null) return 0;
+        InputPointerSource? pointerSource = InputPointerSource.GetForIsland(island);
+        if (pointerSource?.Cursor is not InputSystemCursor cursor) return 0;
+        int shape = (int)cursor.CursorShape;
+        return shape >= 0 ? 1 + shape : 0;
+      }
+      catch
+      {
+        return 0;
+      }
+    };
+    return messages;
+  }
+
     // 只映射目录/投影 availability 的稳定词汇，不复制引擎/配方表；准备类
     // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字
     // 图标专用：指向设置 · 默认识别类型，不静默改选其他文字引擎；
@@ -1433,6 +1511,9 @@ public sealed class ScreenRegionPicker(
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X, Y; }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern uint RegisterWindowMessageW(string message);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect { public int Left, Top, Right, Bottom; }

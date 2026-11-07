@@ -2,7 +2,11 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProductRoot,
     [int]$TimeoutSeconds = 30,
-    [string]$DiagnosticsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '.test-results/web-workbench')
+    [string]$DiagnosticsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) '.test-results/web-workbench'),
+    # 仅供 release_smoke 使用:复用它已完整解包、校验过的 current 树,
+    # 避免对预构建 Runtime 做第二次整树复制。默认(直接 publish 输出等)
+    # 仍走完整复制隔离分支。
+    [switch]$ReuseUnpackedProduct
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,9 +59,54 @@ function Save-SmokeFailureDiagnostics {
     Write-Host "Web workbench diagnostic evidence: $destination"
 }
 
+function Assert-ReusedUnpackedProductRoot {
+    param([string]$SourceRoot)
+
+    # 仅接受 release_smoke 独占 TemporaryDirectory 下的 current 解包树:
+    # <当前有效TEMP>\vibeocr-release-smoke-<suffix>\current。逐层精确
+    # 比较(不用宽松 StartsWith),拒绝 reparse 与任何既有产品数据,防止
+    # 把外部目录当作一次性解包树启动或删除。父目录 state/logs 是
+    # Bootstrapper 的合法写入,不在此拒绝。
+    $normalized = [System.IO.Path]::GetFullPath($SourceRoot).TrimEnd('\')
+    $tempRoot = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::GetTempPath()).TrimEnd('\')
+    if ([System.IO.Path]::GetFileName($normalized) -cne 'current') {
+        throw "Web workbench reuse requires the unpacked product root to be named 'current': $normalized"
+    }
+    $holder = [System.IO.Path]::GetFullPath(
+        (Split-Path -Parent $normalized)).TrimEnd('\')
+    if ([System.IO.Path]::GetFileName($holder) -cnotmatch '^vibeocr-release-smoke-[a-z0-9_]+$') {
+        throw "Web workbench reuse requires a dedicated vibeocr-release-smoke- temporary holder: $holder"
+    }
+    $tempLayer = [System.IO.Path]::GetFullPath(
+        (Split-Path -Parent $holder)).TrimEnd('\')
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($tempLayer, $tempRoot)) {
+        throw "Web workbench reuse holder must be a direct child of the current TEMP: $holder"
+    }
+    foreach ($layer in @($holder, $normalized)) {
+        if ((Get-Item -LiteralPath $layer -Force).Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Web workbench reuse rejects reparse points in the unpacked product path: $layer"
+        }
+    }
+    # state/portable-layout.json 可能承载真实用户数据;用目录项枚举而非
+    # Test-Path,连 dangling link 也一并拒绝。
+    $existing = @(Get-ChildItem -LiteralPath $normalized -Force |
+        Where-Object { $_.Name -in @('state', 'portable-layout.json') })
+    if ($existing.Count -gt 0) {
+        throw "Web workbench reuse requires a pristine unpacked product, found existing data: $(($existing.Name) -join ', ')"
+    }
+}
+
 $sourceRoot = (Resolve-Path -LiteralPath $ProductRoot).Path
+if ($ReuseUnpackedProduct) {
+    Assert-ReusedUnpackedProductRoot -SourceRoot $sourceRoot
+}
 $layoutDescriptor = Join-Path $sourceRoot 'app\metadata\product-layout.json'
 $installedLayout = Test-Path -LiteralPath $layoutDescriptor -PathType Leaf
+if ($ReuseUnpackedProduct -and -not $installedLayout) {
+    throw 'Web workbench reuse requires an installed product layout'
+}
 if ($installedLayout) {
     $scriptsRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
     & uv run --no-project python (Join-Path $scriptsRoot 'product_layout.py') inspect `
@@ -82,11 +131,17 @@ if ($TimeoutSeconds -le 0) {
 $healthFile = Join-Path ([System.IO.Path]::GetTempPath()) `
     "vibeocr-web-ready-$([guid]::NewGuid().ToString('N')).json"
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-$isolatedRoot = Join-Path $tempRoot `
-    "vibeocr-web-smoke-$([guid]::NewGuid().ToString('N'))"
+if ($ReuseUnpackedProduct) {
+    # 复用解包树作为运行根;该树的唯一删除者是 release_smoke 的
+    # TemporaryDirectory,此处不复制、不删除。
+    $isolatedRoot = $sourceRoot
+} else {
+    $isolatedRoot = Join-Path $tempRoot `
+        "vibeocr-web-smoke-$([guid]::NewGuid().ToString('N'))"
+}
 $webViewDataRoot = Join-Path $tempRoot `
     "vibeocr-webview-smoke-$([guid]::NewGuid().ToString('N'))"
-if (-not ([System.IO.Path]::GetFullPath($isolatedRoot).StartsWith(
+if (-not $ReuseUnpackedProduct -and -not ([System.IO.Path]::GetFullPath($isolatedRoot).StartsWith(
     $tempRoot,
     [System.StringComparison]::OrdinalIgnoreCase))) {
     throw 'Web workbench smoke isolation path escaped the temporary directory'
@@ -98,9 +153,11 @@ $previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
 $process = $null
 $failureKind = 'process-or-health-failure'
 try {
-    New-Item -ItemType Directory -Path $isolatedRoot | Out-Null
-    Get-ChildItem -LiteralPath $sourceRoot -Force |
-        Copy-Item -Destination $isolatedRoot -Recurse -Force
+    if (-not $ReuseUnpackedProduct) {
+        New-Item -ItemType Directory -Path $isolatedRoot | Out-Null
+        Get-ChildItem -LiteralPath $sourceRoot -Force |
+            Copy-Item -Destination $isolatedRoot -Recurse -Force
+    }
     $executable = Join-Path $isolatedRoot $relativeExecutable
     $env:VIBEOCR_SELF_TEST_SMOKE = 'web-ready'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
@@ -158,20 +215,21 @@ try {
             Remove-Item -LiteralPath $signalFile -Force
         }
     }
-    if (Test-Path -LiteralPath $isolatedRoot) {
-        $resolvedIsolation = [System.IO.Path]::GetFullPath($isolatedRoot)
+    $resolvedIsolation = [System.IO.Path]::GetFullPath($isolatedRoot)
+    # 便携 state 可能携带 WebView2 user-data;先终止引用运行根的浏览器
+    # 进程,避免删除竞态。复用解包树时不删除解包树本身,该树由
+    # release_smoke 的 TemporaryDirectory 统一删除。
+    Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
+        Where-Object { $_.CommandLine -like "*$resolvedIsolation*" } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    if (-not $ReuseUnpackedProduct -and (Test-Path -LiteralPath $isolatedRoot)) {
         if (-not $resolvedIsolation.StartsWith(
             $tempRoot,
             [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'Refusing to remove smoke isolation outside the temporary directory'
         }
-        # 便携 state 可能携带 WebView2 user-data;先终止引用隔离根的浏览器
-        # 进程,避免删除竞态。
-        Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
-            Where-Object { $_.CommandLine -like "*$resolvedIsolation*" } |
-            ForEach-Object {
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
         $removed = $false
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             try {

@@ -22,6 +22,10 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   private readonly TaskCompletionSource<long> presented = new(TaskCreationOptions.RunContinuationsAsynchronously);
   internal long CreatedTimestamp { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
   internal Task<long> Presented => presented.Task;
+  internal long? LoadedTimestamp => ObservedTimestamp(ref loadedTimestamp);
+  internal long? WebViewInitializedTimestamp => ObservedTimestamp(ref webViewInitializedTimestamp);
+  internal long? BootstrapReceivedTimestamp => ObservedTimestamp(ref bootstrapReceivedTimestamp);
+  internal long? BridgeReadyTimestamp => ObservedTimestamp(ref bridgeReadyTimestamp);
   internal static int ActiveWebViewCount => Volatile.Read(ref activeWebViewCount);
   internal WebWorkbenchHost Host => host;
   internal ScreenshotCaptureScene? CaptureScene => captureScene;
@@ -29,6 +33,11 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   private readonly string assetFolder;
   private readonly Window window;
   private readonly ScreenshotCaptureScene? captureScene;
+  private readonly bool measureFirstFrame;
+  private long loadedTimestamp;
+  private long webViewInitializedTimestamp;
+  private long bootstrapReceivedTimestamp;
+  private long bridgeReadyTimestamp;
   private bool closed;
   private bool initialized;
   private bool restoreCaptureFocus;
@@ -72,6 +81,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     this.application = application;
     this.assetFolder = assetFolder;
     this.captureScene = captureScene;
+    measureFirstFrame = captureScene is not null &&
+      Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE") == "capture-first-frame-e2e";
     if (captureScene is not null) webView.Opacity = 0;
     window = captureScene?.Window ?? new Window();
     host = new WebWorkbenchHost(application, broker, annotations,
@@ -202,6 +213,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   {
     if (initialized || closed) return;
     initialized = true;
+    if (measureFirstFrame)
+      Interlocked.CompareExchange(ref loadedTimestamp, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
     try
     {
       if (captureScene is not null)
@@ -260,9 +273,30 @@ internal sealed class ImageEditWindow : IAsyncDisposable
   private void OnSystemHighContrastChanged(ThemeSettings sender, object args) =>
     window.DispatcherQueue.TryEnqueue(ApplyResolvedTheme);
 
+  private static long? ObservedTimestamp(ref long timestamp)
+  {
+    long value = Volatile.Read(ref timestamp);
+    return value == 0 ? null : value;
+  }
+
   private void OnHostStateChanged(string state)
   {
     if (closed) return;
+    if (measureFirstFrame)
+    {
+      switch (state)
+      {
+        case "webview-initialized":
+          Interlocked.CompareExchange(ref webViewInitializedTimestamp, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
+          break;
+        case "bootstrap-received":
+          Interlocked.CompareExchange(ref bootstrapReceivedTimestamp, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
+          break;
+        case "bridge-ready":
+          Interlocked.CompareExchange(ref bridgeReadyTimestamp, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
+          break;
+      }
+    }
     if (captureScene is not null && state == "navigation-starting")
     {
       webView.Opacity = 0;

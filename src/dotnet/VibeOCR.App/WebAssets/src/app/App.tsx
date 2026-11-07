@@ -19,8 +19,8 @@ import {
   lazy,
   Suspense,
   useEffect,
-  useMemo,
   useState,
+  useSyncExternalStore,
   type ReactNode,
   type ComponentType,
 } from "react";
@@ -136,10 +136,14 @@ function createFeaturePage(
   };
   let loaded: FeatureModule | undefined;
   let pending: Promise<FeatureModule> | undefined;
+  const readyListeners = new Set<() => void>();
   const preload = () =>
     (pending ??= load()
       .then((module) => {
         loaded = module;
+        // Notify useSyncExternalStore to re-render with the concrete component,
+        // bypassing the Suspense lazy-retry 300ms throttle (react-dom 19.3.1).
+        for (const listener of readyListeners) listener();
         return module;
       })
       .catch((error: unknown) => {
@@ -148,6 +152,13 @@ function createFeaturePage(
   const LazyPage = lazy(preload);
   return {
     preload,
+    subscribe(listener: () => void) {
+      readyListeners.add(listener);
+      return () => {
+        readyListeners.delete(listener);
+      };
+    },
+    isReady: () => loaded !== undefined,
     get Page() {
       return loaded?.default ?? LazyPage;
     },
@@ -204,7 +215,12 @@ function FeatureRoute({
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [page]);
-  const Page = useMemo(() => featurePages[page].Page, [page]);
+  const feature = featurePages[page];
+  // Subscribe to the ready store: re-renders immediately when the module
+  // resolves so Page is the concrete component, bypassing the Suspense
+  // lazy-retry 300ms throttle (react-dom 19.3.1).
+  useSyncExternalStore(feature.subscribe, feature.isReady);
+  const Page = featurePages[page].Page;
   return (
     <FeatureLoadBoundary key={page} recover={actions.recoverFeatureAssets}>
       <Suspense

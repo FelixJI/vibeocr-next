@@ -22,6 +22,56 @@ public sealed class WorkbenchAnnotationStoreTests : IDisposable
   }
 
   [Fact]
+  public async Task LongAndShortAnnotationPathsProduceDecodableClipboardBitmapReferences()
+  {
+    // 对照：同一条 CreateFromFile→GetBitmapAsync→OpenReadAsync 链在短路径可用，缺陷只在 >260 字符路径触发。
+    string shortPath = Path.Combine(resourceRoot, "short.png");
+    await File.WriteAllBytesAsync(shortPath, Png, TestContext.Current.CancellationToken);
+    Windows.Storage.StorageFile shortFile = await Windows.Storage.StorageFile.GetFileFromPathAsync(shortPath);
+    var filePackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
+    filePackage.SetBitmap(RandomAccessStreamReference.CreateFromFile(shortFile));
+    RandomAccessStreamReference fileBitmap = await filePackage.GetView().GetBitmapAsync();
+    using (IRandomAccessStreamWithContentType fileRead = await fileBitmap.OpenReadAsync())
+    {
+      Assert.Equal(1u, (await BitmapDecoder.CreateAsync(fileRead)).PixelWidth);
+    }
+
+    string directory = Path.Combine(resourceRoot, new string('a', 100), new string('b', 100));
+    Directory.CreateDirectory(directory);
+    string longPath = Path.Combine(directory, "annotation.png");
+    Assert.True(longPath.Length > 260);
+    await File.WriteAllBytesAsync(longPath, Png, TestContext.Current.CancellationToken);
+    Assert.Equal(Png, await File.ReadAllBytesAsync(longPath, TestContext.Current.CancellationToken));
+    foreach (string path in new[] { shortPath, longPath })
+    {
+      using IRandomAccessStream image = await AnnotatedImagePlatform.OpenClipboardImageAsync(
+        path, TestContext.Current.CancellationToken);
+      Assert.Equal((ulong)Png.Length, image.Size);
+      var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+      package.SetBitmap(RandomAccessStreamReference.CreateFromStream(image));
+      RandomAccessStreamReference bitmap = await package.GetView().GetBitmapAsync();
+      using IRandomAccessStreamWithContentType read = await bitmap.OpenReadAsync();
+      BitmapDecoder decoder = await BitmapDecoder.CreateAsync(read);
+      Assert.Equal(1u, decoder.PixelWidth);
+      Assert.Equal(1u, decoder.PixelHeight);
+      Assert.Equal(4, (await decoder.GetPixelDataAsync(BitmapPixelFormat.Bgra8,
+        BitmapAlphaMode.Ignore, new BitmapTransform(), ExifOrientationMode.IgnoreExifOrientation,
+        ColorManagementMode.DoNotColorManage)).DetachPixelData().Length);
+    }
+  }
+
+  [Fact]
+  public async Task OpenClipboardImageFailsFastWhenAlreadyCancelled()
+  {
+    string source = Path.Combine(resourceRoot, "cancelled.png");
+    await File.WriteAllBytesAsync(source, Png, TestContext.Current.CancellationToken);
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+      AnnotatedImagePlatform.OpenClipboardImageAsync(source, cancelled.Token));
+  }
+
+  [Fact]
   public void SnapshotNamesContainTimestampAndIncreasingSequence()
   {
     string first = AnnotatedImagePlatform.NextSnapshotFileName();

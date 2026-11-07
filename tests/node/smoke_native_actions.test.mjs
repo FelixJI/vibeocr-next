@@ -1,18 +1,26 @@
 // Behavioral contract for the seams exported by scripts/smoke_native_actions.mjs:
-// the owned-process cleanup (issues #167/#169) and the capture-scene canvas
-// physical→CSS geometry mapping (issue #216). The children here are
-// real short-lived node processes spawned from process.execPath; no desktop
-// windows are touched (the native close path is only exercised through
-// stopOwned's bounded fallback on a windowless child). Finally blocks
+// the owned-process cleanup (issues #167/#169), the capture-scene canvas
+// physical→CSS geometry mapping (issue #216), and the pre-click passive
+// scene-copy observer (goal316/318) that keeps upload/copy-command/receipt/
+// close evidence in Node even when the scene retires instantly. The children
+// here are real short-lived node processes spawned from process.execPath; no
+// desktop windows are touched (the native close path is only exercised
+// through stopOwned's bounded fallback on a windowless child). Finally blocks
 // terminate only the ChildProcess handles this test itself spawned.
 import assert from 'node:assert/strict';
-import { ChildProcess, spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { ChildProcess, execFile, spawn } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
+import { runInNewContext } from 'node:vm';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const { stopOwned, closeAppNormally, assertCaptureCanvasLayout } = await import(
+const execFileAsync = promisify(execFile);
+const { stopOwned, closeAppNormally, assertCaptureCanvasLayout, settleSceneCopyTimeline,
+  observeSceneCopyTerminal, assertClipboardReadback, installImageEditClipboardWatch,
+  pasteImageEditClipboard, decodeImageRgba,
+  collectSceneCopyUploadBlob, raceDeadline, islandCursorName } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_native_actions.mjs')).href);
 
 setTimeout(() => {
@@ -268,6 +276,485 @@ console.log('case8 unspawned-child-fail-closed: ok');
     ...valid, box: { x: 1330, y: 750, width: 70, height: 0 },
   }), /positive finite visual bounds/);
   console.log('case13 illegal-geometry-fails: ok');
+}
+
+// 14. Scene-terminal copy judge (goal316/318): pass requires one public
+// copyScreenshotImage command naming exactly one accepted 201 upload with a
+// normal close; automatic text-layer uploads (a different resourceUri) never
+// count as the copy. Duplicate copy commands, duplicate association, non-201,
+// missing upload, failure receipts, crash, deadline-exceeded and out-of-order
+// close all fail closed; a success receipt is welcome but never required.
+{
+  const copyUri = `https://app.vibeocr/__annotation/${'c'.repeat(32)}`;
+  const layerUri = `https://app.vibeocr/__annotation/${'d'.repeat(32)}`;
+  const upload = (seq, order, resourceUri, status = 201) => ({ seq, requestAt: 1000,
+    requestOrder: order, responseStatus: status, resourceUri, responseAt: 1000,
+    responseOrder: order + 1, error: null,
+    blobMeta: { mimeType: 'image/png', byteLength: 8, problem: null } });
+  const judgeTimeline = (overrides = {}) => ({
+    uploads: [upload(1, 1, copyUri), upload(2, 5, layerUri)],
+    copyCommands: [{ envelopeId: 'cmd-copy', at: 1000, order: 3, resourceUri: copyUri }],
+    copyReceipts: [], closedAt: 1000, closedOrder: 7, crashedAt: null, ...overrides,
+  });
+  // 同一毫秒内完成全部事件:判定只看到达序,不看壁钟时间。
+  assert.equal(settleSceneCopyTimeline(judgeTimeline()), true);
+  assert.equal(settleSceneCopyTimeline(judgeTimeline({ copyReceipts: [
+    { envelopeId: 'cmd-copy', at: 1000, order: 4, ok: true, problemCode: null }] })), true);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ copyCommands: [] })),
+    /exactly one public copyScreenshotImage command/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ copyCommands: [
+    judgeTimeline().copyCommands[0], { envelopeId: 'cmd-copy-2', at: 1000, order: 4, resourceUri: copyUri }] })),
+    /exactly one public copyScreenshotImage command/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ copyCommands: [
+    { envelopeId: 'cmd-copy', at: 1000, order: 3, resourceUri: null }] })),
+    /carried no resourceUri/);
+  // 自动文字层的上传(不同 resourceUri)不能顶替复制上传。
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline(
+    { uploads: [upload(1, 1, layerUri)] })), /exactly one accepted upload/);
+  // 同一资源被两个上传认领:重复关联 fail closed。
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline(
+    { uploads: [upload(1, 1, copyUri), upload(2, 5, copyUri)] })), /exactly one accepted upload/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline(
+    { uploads: [upload(1, 1, copyUri, 500)] })), /was not accepted/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ crashedAt: 1000 })),
+    /crashed instead of closing/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ closedAt: null, closedOrder: null })),
+    /did not close after the accepted copy/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ noTerminalEvent: true })),
+    /exceeded its deadline/);
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ closedOrder: 2 })),
+    /closed before the public copy was dispatched/);
+  assert.throws(() => settleSceneCopyTimeline(null), /timeline evidence is missing/);
+  // 失败回执(若收到)永远不能通过。
+  assert.throws(() => settleSceneCopyTimeline(judgeTimeline({ copyReceipts: [
+    { envelopeId: 'cmd-copy', at: 1000, order: 4, ok: false,
+      problemCode: 'desktop_command_failed' }] })),
+    /host rejected the public copy command/);
+  console.log('case14 scene-copy-judge-lifecycle: ok');
+}
+
+// Fake page exposing the Playwright surface the observer needs: captured
+// exposeBinding/evaluate plus plain EventEmitter close/crash events.
+function fakeScenePage() {
+  const page = new EventEmitter();
+  page.bindings = new Map();
+  page.installer = null;
+  page.exposeBinding = async (name, handler) => { page.bindings.set(name, handler); };
+  page.evaluate = async (fn) => { page.installer = fn; };
+  return page;
+}
+
+const settleMicrotasks = async (until, limit = 200) => {
+  for (let index = 0; index < limit && !until(); index++)
+    await new Promise((resolve) => setImmediate(resolve));
+};
+
+// 15. Real async json-fulfillment ordering (root pre-review regression):
+// the product flow below mirrors uploadAnnotatedImage with real
+// timer-resolved promises and real json body reads - no pre-arranged
+// synchronous events. Status/responseOrder must be stamped when the fetch
+// Promise resolves (strictly before the product's await continuation), and
+// the resourceUri handover (pass-through wrap of response.json on the same
+// returned Promise) must precede the public copy command even though the
+// json body settles in a later real turn. Promise identities are unchanged,
+// the copy pixels come from the resource-matching upload (never the
+// text-layer Blob), the timeline keeps only Blob meta (bytes stay in the
+// Node-side map), and an instant close keeps every record.
+{
+  const copyUri = `https://app.vibeocr/__annotation/${'a'.repeat(32)}`;
+  const layerUri = `https://app.vibeocr/__annotation/${'b'.repeat(32)}`;
+  const page = fakeScenePage();
+  const observed = await observeSceneCopyTerminal(page);
+  const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
+  const pngMagic = [137, 80, 78, 71, 13, 10, 26, 10];
+  const fetchCalls = [];
+  const createdFetchPromises = [];
+  const returnedFetchPromises = [];
+  const createdJsonPromises = [];
+  const heldJsonPromises = [];
+  const posted = [];
+  const inbound = [];
+  let nextResourceUri = copyUri;
+  const originalFetch = function (...args) {
+    fetchCalls.push(args);
+    const created = new Promise((resolve) => setTimeout(() => resolve({
+      status: 201, ok: true,
+      json: () => {
+        const jsonPromise = new Promise((resolveJson) =>
+          setTimeout(() => resolveJson({ resourceUri: nextResourceUri }), 3));
+        createdJsonPromises.push(jsonPromise);
+        return jsonPromise;
+      },
+    }), 5));
+    createdFetchPromises.push(created);
+    return created;
+  };
+  const channel = {
+    postMessage: function (...args) { posted.push(args); return 'post-ok'; },
+    addEventListener(type, listener) { if (type === 'message') inbound.push(listener); },
+    removeEventListener() {},
+  };
+  const previousWindow = globalThis.window;
+  globalThis.window = { fetch: originalFetch, chrome: { webview: channel } };
+  window.__sceneCopyObserver = emit;
+  page.installer();
+  // 镜像 uploadAnnotatedImage:真实 await 链,每个 Promise 都在后续真实轮次结算。
+  const productCopyFlow = async (bytes) => {
+    const started = window.fetch('/__annotation', { method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: new Blob([Uint8Array.from(bytes)], { type: 'image/png' }) });
+    returnedFetchPromises.push(started);
+    const response = await started;
+    if (!response.ok) throw new Error('annotated image upload failed');
+    const jsonPromise = response.json();
+    heldJsonPromises.push(jsonPromise);
+    const payload = await jsonPromise;
+    channel.postMessage({ version: 2, kind: 'request', id: 'cmd-copy', type: 'app.command',
+      payload: { sessionId: 'bridge', command: { scope: 'recognition',
+        action: 'copyScreenshotImage',
+        arguments: { resourceUri: payload.resourceUri, sessionId: 'scene', revision: 2 } } } });
+  };
+  try {
+    await productCopyFlow(pngMagic);
+    // 自动文字层:不同资源的第二次上传与 prepare 命令都不得计入复制。
+    nextResourceUri = layerUri;
+    const layerStarted = window.fetch('/__annotation', { method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: new Blob([Uint8Array.from([...pngMagic, 1, 2, 3, 4])], { type: 'image/png' }) });
+    returnedFetchPromises.push(layerStarted);
+    const response = await layerStarted;
+    const layerJson = response.json();
+    heldJsonPromises.push(layerJson);
+    const payload = await layerJson;
+    channel.postMessage({ version: 2, kind: 'request', id: 'cmd-layer', type: 'app.command',
+      payload: { sessionId: 'bridge', command: { scope: 'recognition',
+        action: 'prepareScreenshotTextLayer',
+        arguments: { resourceUri: payload.resourceUri, sessionId: 'scene', revision: 2 } } } });
+    // 原 fetch/json Promise 对象未改变:包装器返回的正是原始实现创建的对象。
+    assert.equal(fetchCalls.length, 2);
+    for (let index = 0; index < createdFetchPromises.length; index++)
+      assert.strictEqual(returnedFetchPromises[index], createdFetchPromises[index]);
+    for (let index = 0; index < createdJsonPromises.length; index++)
+      assert.strictEqual(heldJsonPromises[index], createdJsonPromises[index]);
+    // 场景快速关闭:成功回执可缺席,证据已全部由 Node 持有。
+    page.emit('close');
+    await observed.ended;
+    await observed.received;
+    await settleMicrotasks(() => observed.timeline.uploads.every(
+      (upload) => upload.blobMeta && upload.uriOrder !== null));
+    assert.equal(observed.timeline.copyCommands.length, 1);
+    assert.equal(observed.timeline.uploads.length, 2);
+    // 真实异步履行顺序:request < response(结算即刻) < uri 交接 < 复制命令。
+    const copyUpload = observed.timeline.uploads.find((item) => item.resourceUri === copyUri);
+    const layerUpload = observed.timeline.uploads.find((item) => item.resourceUri === layerUri);
+    const command = observed.timeline.copyCommands[0];
+    assert(copyUpload.requestOrder < copyUpload.responseOrder &&
+      copyUpload.responseOrder < copyUpload.uriOrder &&
+      copyUpload.uriOrder < command.order,
+    `real async copy order violated: ${JSON.stringify(observed.timeline)}`);
+    assert(layerUpload.uriOrder > command.order,
+      'layer upload must stay independently ordered');
+    assert.equal(settleSceneCopyTimeline(observed.timeline), true);
+    // timeline 只留 meta:bytes 不进入 timeline/错误串/health,由 Node 侧单独持有。
+    assert(!JSON.stringify(observed.timeline).includes('1,2,3,4,5,6,7,8'));
+    assert(!JSON.stringify(observed.timeline).includes('137,80,78,71'));
+    assert.equal(copyUpload.blobMeta.byteLength, 8);
+    assert.equal(layerUpload.blobMeta.byteLength, 12);
+    // 复制像素必须来自对应 resourceUri 的上传(8 字节),不是文字层 Blob(12 字节)。
+    assert.equal((await observed.waitForUploadBlob(copyUpload.seq)).byteLength, 8);
+    assert.equal((await observed.waitForUploadBlob(layerUpload.seq)).byteLength, 12);
+    // 还原后不再观测任何流量。
+    window.__nativeActionsRestoreFetch();
+    assert.equal(window.fetch, originalFetch);
+    const recordsAfterRestore = observed.timeline.uploads.length +
+      observed.timeline.copyCommands.length;
+    await window.fetch('/__annotation', { method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: new Blob([Uint8Array.from(pngMagic)], { type: 'image/png' }) });
+    channel.postMessage({ version: 2, kind: 'request', id: 'cmd-copy', type: 'app.command',
+      payload: { sessionId: 'bridge', command: { scope: 'recognition',
+        action: 'copyScreenshotImage', arguments: { resourceUri: copyUri } } } });
+    assert.equal(observed.timeline.uploads.length + observed.timeline.copyCommands.length,
+      recordsAfterRestore);
+  } finally {
+    window.__nativeActionsRestoreFetch?.();
+    globalThis.window = previousWindow;
+  }
+  console.log('case15a real-async-json-ordering: ok');
+}
+
+// 15b. A failure receipt for the public copy command can never pass.
+{
+  const page = fakeScenePage();
+  const observed = await observeSceneCopyTerminal(page);
+  const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
+  const uri = `https://app.vibeocr/__annotation/${'e'.repeat(32)}`;
+  emit({ kind: 'upload', seq: 1 });
+  emit({ kind: 'upload-response', seq: 1, status: 201 });
+  emit({ kind: 'upload-uri', seq: 1, resourceUri: uri });
+  emit({ kind: 'copy-command', envelopeId: 'cmd-copy', resourceUri: uri });
+  emit({ kind: 'copy-receipt', envelopeId: 'cmd-copy', ok: false,
+    problemCode: 'desktop_command_failed' });
+  page.emit('close');
+  await observed.ended;
+  assert.throws(() => settleSceneCopyTimeline(observed.timeline),
+    /host rejected the public copy command/);
+  console.log('case15b failure-receipt-fails: ok');
+}
+
+// 15c. A close that arrives before the public copy evidence is illegal
+// ordering, not a success.
+{
+  const page = fakeScenePage();
+  const observed = await observeSceneCopyTerminal(page);
+  const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
+  const uri = `https://app.vibeocr/__annotation/${'f'.repeat(32)}`;
+  page.emit('close');
+  emit({ kind: 'upload', seq: 1 });
+  emit({ kind: 'upload-response', seq: 1, status: 201 });
+  emit({ kind: 'upload-uri', seq: 1, resourceUri: uri });
+  emit({ kind: 'copy-command', envelopeId: 'cmd-copy', resourceUri: uri });
+  await observed.ended;
+  assert.throws(() => settleSceneCopyTimeline(observed.timeline),
+    /closed before the public copy was dispatched/);
+  console.log('case15c close-before-copy-fails: ok');
+}
+
+// 15d. The Node-side Blob waiter stays pending until the per-upload Blob
+// evidence arrives, then resolves with exactly that record.
+{
+  const page = fakeScenePage();
+  const observed = await observeSceneCopyTerminal(page);
+  const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
+  emit({ kind: 'upload', seq: 1 });
+  let blob = 'pending';
+  const waiting = observed.waitForUploadBlob(1).then((value) => { blob = value; return value; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(blob, 'pending');
+  emit({ kind: 'upload-blob', seq: 1,
+    blob: { mimeType: 'image/png', byteLength: 3, bytes: [1, 2, 3], problem: null } });
+  assert.equal((await waiting).byteLength, 3);
+  assert.deepEqual(await observed.waitForUploadBlob(1),
+    { mimeType: 'image/png', byteLength: 3, bytes: [1, 2, 3], problem: null });
+  // timeline 只存 meta,完整 bytes 留在 Node 侧证据 map。
+  assert.deepEqual(observed.timeline.uploads[0].blobMeta,
+    { mimeType: 'image/png', byteLength: 3, problem: null });
+  assert(!JSON.stringify(observed.timeline).includes('1,2,3'));
+  console.log('case15d upload-blob-waiter: ok');
+}
+
+// 16. raceDeadline settles false on expiry while clear() prevents both
+// firing and a dangling timer.
+{
+  const expired = raceDeadline(1);
+  assert.equal(await expired.promise, false);
+  const cleared = raceDeadline(20000);
+  cleared.clear();
+  assert.equal(cleared.promise instanceof Promise, true);
+  console.log('case16 race-deadline: ok');
+}
+
+// 17. Island cursor contract (cursor-source-diagnostic1108): the legacy
+// global-cursor reading can disagree with the WinUI island cursor, so the
+// smoke maps its legacy expectations to InputSystemCursorShape names and the
+// fixture's locked wire map (LRESULT = 1 + raw enum) accepts only the
+// supported shapes - 0/unavailable, enum gaps and out-of-range codes are
+// rejected. Real fixture subprocess, no GUI, no window creation.
+{
+  assert.equal(islandCursorName('cross'), 'Cross');
+  assert.equal(islandCursorName('sizeNWSE'), 'SizeNorthwestSoutheast');
+  assert.equal(islandCursorName('sizeNS'), 'SizeNorthSouth');
+  assert.equal(islandCursorName('sizeNESW'), 'SizeNortheastSouthwest');
+  assert.equal(islandCursorName('sizeWE'), 'SizeWestEast');
+  assert.equal(islandCursorName('sizeAll'), 'SizeAll');
+  assert.equal(islandCursorName('hand'), 'Hand');
+  for (const bad of ['', 'sizeNwse', 'sizeNW', 'cross ', 'arrow-cross', undefined, null,
+    'toString', 'constructor', 'hasOwnProperty'])
+    assert.throws(() => islandCursorName(bad), /Unknown cursor expectation/);
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+    path.join(scriptDir, '..', '..', 'scripts', 'native_actions_fixture.ps1'),
+    '-Action', 'cursor-map'], { timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  assert.equal(stdout.trim(), 'island-cursor-map: ok');
+  console.log('case17 island-cursor-contract: ok');
+}
+
+// 18. Clipboard readback judge (task #318): the scene-terminal copy timeline
+// (upload+command+close) says nothing about the Windows Clipboard, so the
+// only acceptable proof is the image the still-alive workbench republished
+// from the actual Clipboard through the public paste input, decoded in the
+// SAME WebView as this revision's export and compared byte-for-byte on RGBA.
+// Aggregate pixel counts cannot prove the revision: a mirror, a row shift,
+// an in-threshold RGB change or an alpha-only change keeps every total and
+// must still fail closed. The readClipboard path preserves the stream's
+// original encoding, so any image/* media type is accepted - the decoded
+// bytes are the proof, not the container.
+{
+  const rgbaImage = (width, height, pixels) => ({ width, height,
+    rgbaBase64: Buffer.from(Uint8Array.from(pixels.flat())).toString('base64') });
+  const composite = [[243, 139, 53, 255], [16, 16, 16, 255], [240, 240, 240, 255], [10, 10, 10, 255]];
+  const revision = { width: 2, height: 2, expectedRgba: rgbaImage(2, 2, composite) };
+  const readbackOf = (rgba, overrides = {}) => ({ mediaType: 'image/png', rgba, ...overrides });
+  assert.equal(assertClipboardReadback(readbackOf(rgbaImage(2, 2, composite)), revision), true);
+  // 同尺寸同颜色总量:水平镜像(逐像素位置变化)不能通过。
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2,
+    [composite[1], composite[0], composite[3], composite[2]])), revision),
+  /differs from this revision's export at pixel 0 \(red\)/);
+  // 仅 alpha 变化(255→254)不能通过。
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2,
+    [[243, 139, 53, 254], composite[1], composite[2], composite[3]])), revision),
+  /differs from this revision's export at pixel 0 \(alpha\)/);
+  // 阈值内 RGB 变化(light 通道内 240→241)不能通过。
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2,
+    [composite[0], composite[1], [241, 240, 240, 255], composite[3]])), revision),
+  /differs from this revision's export at pixel 2 \(red\)/);
+  // 旧图尺寸(上一修订 140x42)不能通过。
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2, composite)),
+    { width: 140, height: 42, expectedRgba: revision.expectedRgba }),
+  /instead of the selected 140x42/);
+  // 非 image/* 媒体类型、缺失/截断的 RGBA 证据、非法选区均 fail closed。
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2, composite),
+    { mediaType: 'text/plain' }), revision), /image media type/);
+  assert.throws(() => assertClipboardReadback(readbackOf(null), revision), /RGBA evidence/);
+  assert.throws(() => assertClipboardReadback(readbackOf({ width: 2, height: 2,
+    rgbaBase64: Buffer.from('short').toString('base64') }), revision), /width\*height\*4/);
+  assert.throws(() => assertClipboardReadback(readbackOf(rgbaImage(2, 2, composite)),
+    { width: 0, height: 2 }), /expected physical selection is invalid/);
+  assert.throws(() => assertClipboardReadback(null, revision), /readback evidence is missing/);
+  console.log('case18 clipboard-readback-byte-judge: ok');
+}
+
+// Run the real serialized watch/wait callbacks and the returned snapshot judge.
+for (const historyCount of [0, 30]) {
+  let listener, disposed = false, clicked = false;
+  const window = { chrome: { webview: { addEventListener(_event, callback) { listener = callback; } } } };
+  const evaluate = (fn, argument) => runInNewContext('(' + fn.toString() + ')(__argument)',
+    { window, __argument: argument });
+  const emit = (id, isBusy = false) => listener({ data: { kind: 'event', type: 'app.state',
+    payload: { scope: 'imageEdit', state: { isBusy,
+      input: { url: 'https://app.vibeocr/__resource/' + id },
+      screenshotSession: { sessionId: id } } } } });
+  const page = {
+    evaluate: async (fn, argument) => evaluate(fn, argument),
+    getByRole(role, options) {
+      assert.equal(role, 'button');
+      assert.equal(options.name, '粘贴图片');
+      return { click: async () => { clicked = true; } };
+    },
+    async waitForFunction(fn, before, options) {
+      assert(clicked);
+      assert.equal(options.timeout, 20000);
+      assert.equal(evaluate(fn, before), false, 'Historical A must not satisfy the wait for a paste after B.');
+      emit(before?.sessionId ?? 'empty', true);
+      assert.equal(evaluate(fn, before), false, 'The busy old image is not the paste result.');
+      emit('new-C');
+      const snapshot = evaluate(fn, before);
+      assert.equal(snapshot.sessionId, 'new-C');
+      assert.equal(snapshot.isBusy, false);
+      // A later event must not replace the exact snapshot returned by the wait.
+      emit('later-D');
+      return { jsonValue: async () => structuredClone(snapshot),
+        dispose: async () => { disposed = true; } };
+    },
+  };
+  await installImageEditClipboardWatch(page);
+  await installImageEditClipboardWatch(page);
+  for (let index = 0; index < historyCount; index++) emit('filler');
+  if (historyCount) { emit('old-A'); emit('current-B'); }
+  const snapshot = await pasteImageEditClipboard(page);
+  assert.equal(snapshot.sessionId, 'new-C');
+  assert(snapshot.seq > historyCount);
+  assert.equal(window.__clipboardReadbackStates.length, historyCount ? 24 : 3);
+  assert.equal(window.__clipboardReadbackStates.at(-1).seq, snapshot.seq + 1);
+  assert(disposed);
+}
+console.log('case19 serialized-clipboard-state-chain: ok');
+
+// ImageBitmap.close resets its dimensions; exercise the actual decode callback.
+{
+  const pixels = new Uint8Array([243, 139, 53, 255, 16, 16, 16, 255]);
+  let closed = 0;
+  const context = { atob, btoa, Blob, Uint8Array,
+    createImageBitmap: async () => ({ width: 2, height: 1,
+      close() { this.width = 0; this.height = 0; closed++; } }),
+    document: { createElement: () => ({ width: 0, height: 0, getContext: () => ({
+      drawImage() {}, getImageData: () => ({ data: pixels }),
+    }) }) },
+  };
+  const page = { evaluate: async (fn, argument) =>
+    runInNewContext('(' + fn.toString() + ')(__argument)', { ...context, __argument: argument }) };
+  const decoded = await decodeImageRgba(page, Buffer.from([1]), 'image/png');
+  assert.equal(decoded.width, 2);
+  assert.equal(decoded.height, 1);
+  assert.equal(closed, 1);
+  assert.equal(assertClipboardReadback({ mediaType: 'image/png', rgba: decoded },
+    { width: 2, height: 1, expectedRgba: decoded }), true);
+  const secretPixels = Buffer.from('must-not-appear-in-failure-log').toString('base64');
+  assert.throws(() => assertClipboardReadback({ mediaType: 'image/png',
+    rgba: { width: 0, height: 0, rgbaBase64: secretPixels } },
+    { width: 2, height: 1, expectedRgba: decoded }), (error) => !error.message.includes(secretPixels));
+}
+console.log('case21 decoded-clipboard-size: ok');
+
+// 20. Late upload-Blob ordering (task #318 review fix): the Blob bytes/meta
+// travel on an independent Blob.arrayBuffer().then/CDP path that can land
+// AFTER the 201 upload, the copy command and the close, so the holder must
+// await the Blob FIRST and only then validate meta/bytes (the previous
+// meta-first assertion raced a still-null blobMeta). Real async product
+// mirror: timer-resolved fetch/json, close before the Blob, then delivery.
+{
+  const copyUri = `https://app.vibeocr/__annotation/${'9'.repeat(32)}`;
+  const page = fakeScenePage();
+  const terminal = await observeSceneCopyTerminal(page);
+  const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
+  const pngMagic = [137, 80, 78, 71, 13, 10, 26, 10, 1, 2];
+  // 真实晚到路径:观察器自己在 fetch 时调用 body.arrayBuffer(),其异步
+  // 解析可以落在 201/命令/关窗之后;用延迟解析的 Blob 子类确定性复现。
+  class LateBlob extends Blob {
+    arrayBuffer() {
+      return new Promise((resolve) =>
+        setTimeout(() => super.arrayBuffer().then(resolve), 20));
+    }
+  }
+  const channel = { postMessage() {}, addEventListener() {}, removeEventListener() {} };
+  const previousWindow = globalThis.window;
+  globalThis.window = { fetch: function () {
+    return new Promise((resolve) => setTimeout(() => resolve({
+      status: 201, ok: true,
+      json: () => new Promise((resolveJson) =>
+        setTimeout(() => resolveJson({ resourceUri: copyUri }), 2)),
+    }), 4));
+  }, chrome: { webview: channel } };
+  window.__sceneCopyObserver = emit;
+  page.installer();
+  try {
+    const started = window.fetch('/__annotation', { method: 'POST',
+      body: new LateBlob([Uint8Array.from(pngMagic)], { type: 'image/png' }) });
+    await (await started).json();
+    channel.postMessage({ version: 2, kind: 'request', id: 'cmd-copy', type: 'app.command',
+      payload: { sessionId: 'bridge', command: { scope: 'recognition',
+        action: 'copyScreenshotImage', arguments: { resourceUri: copyUri } } } });
+    page.emit('close');
+    await terminal.ended;
+    await settleMicrotasks(() => terminal.timeline.uploads[0]?.uriOrder !== null);
+    assert.equal(settleSceneCopyTimeline(terminal.timeline), true);
+    const upload = terminal.timeline.uploads[0];
+    // 复制时间线已完整成立,而 Blob 证据仍在真实异步途中未到达:
+    // 旧实现先断言 blobMeta 必然失败,新实现先等待再验证。
+    assert.equal(upload.blobMeta, null);
+    const blob = await collectSceneCopyUploadBlob(terminal, upload);
+    assert(Buffer.isBuffer(blob) && blob.equals(Buffer.from(pngMagic)));
+    assert.equal(upload.blobMeta.byteLength, pngMagic.length);
+    assert.equal(upload.blobMeta.mimeType, 'image/png');
+    // 问题 Blob 到达后再次收集必须拒绝(证据不可靠 fail closed)。
+    emit({ kind: 'upload-blob', seq: upload.seq,
+      blob: { mimeType: 'image/png', byteLength: 3, bytes: [1, 2, 3],
+        problem: 'Blob observation failed' } });
+    await assert.rejects(collectSceneCopyUploadBlob(terminal, upload), /evidence is unsound/);
+    console.log('case20 late-upload-blob-ordering: ok');
+  } finally {
+    window.__nativeActionsRestoreFetch?.();
+    globalThis.window = previousWindow;
+  }
 }
 
 console.log('smoke_native_actions contract: passed');
