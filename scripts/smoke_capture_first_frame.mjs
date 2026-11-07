@@ -181,6 +181,10 @@ function option(name, required = true) {
 
 async function batchRun(candidate, root, cycleCount, helpers, replacement = false) {
   fs.mkdirSync(root);
+  // capture-first-frame 握手（非 replacement）：marker 让采样器在 root 登记后
+  // 发出首样本回执；App 端经 VIBEOCR_CAPTURE_FIRST_FRAME_MONITOR 有界等待，
+  // 消除 CIM 晚登记导致的首帧空样本窗口。
+  if (!replacement) fs.writeFileSync(path.join(root, 'expect-root-receipt'), 'ready');
   const copy = path.join(root, 'candidate');
   const record = { root, app_pid: null, health: null, state: 'failed' };
   let child, watch, exit, deadline;
@@ -199,10 +203,12 @@ async function batchRun(candidate, root, cycleCount, helpers, replacement = fals
       VIBEOCR_SELF_TEST_INSTANCE: randomUUID().replaceAll('-', ''),
       VIBEOCR_CAPTURE_FIRST_FRAME_CYCLES: String(cycleCount),
       VIBEOCR_CAPTURE_FIRST_FRAME_HEALTH: path.join(root, 'capture-first-frame-health.json'),
+      VIBEOCR_CAPTURE_FIRST_FRAME_MONITOR: root,
       WEBVIEW2_USER_DATA_FOLDER: path.join(root, 'webview') });
     if (replacement) {
       delete env.VIBEOCR_CAPTURE_FIRST_FRAME_CYCLES;
       delete env.VIBEOCR_CAPTURE_FIRST_FRAME_HEALTH;
+      delete env.VIBEOCR_CAPTURE_FIRST_FRAME_MONITOR;
       env.VIBEOCR_CAPTURE_REPLACEMENT_HEALTH = path.join(root, 'capture-replacement-health.json');
     }
     const executable = path.join(copy, 'app', 'VibeOCR.WinUI.exe');

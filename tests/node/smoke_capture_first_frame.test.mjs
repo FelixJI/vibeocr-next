@@ -111,8 +111,11 @@ test('real owned working-set sampling continues while discovery is blocked and s
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-sampler-selfcheck-'));
     const output = execFileSync('pwsh', ['-NoProfile', '-NonInteractive', '-File',
       path.resolve('scripts/runtime_demand_process_probe.ps1'), '-OutputRoot', root, '-SelfCheck'],
-    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    { encoding: 'utf8', windowsHide: true, timeout: 25000 });
     assert.match(output, /independent owned working-set sampler: passed/);
+    // 真实握手回归：延迟 root 登记、错误身份不回执、仅含 root 完整样本落盘后
+    // 原子回执、退出后不写。
+    assert.match(output, /Root first-sample receipt handshake: passed/);
   });
 
 test('zero-Runtime evidence rejects forbidden owned processes and missing real log evidence', () => {
