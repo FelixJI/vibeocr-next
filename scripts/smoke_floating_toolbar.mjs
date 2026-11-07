@@ -152,11 +152,15 @@ async function show() {
 }
 async function frame(window, name) {
   const file = path.join(work, name);
-  const { client } = await clientGeometry(window.Handle);
+  const { client, dpi } = await clientGeometry(window.Handle);
+  // 只测命令区内部，避免把手或窗口边角替不可见图标提供对比像素。
+  const scale = dpi / 96;
+  const region = { X: client.X + Math.round(32 * scale), Y: client.Y + Math.round(8 * scale),
+    Width: Math.round(232 * scale), Height: Math.round(28 * scale) };
   await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File', path.join(scriptDir, 'scroll_capture_fixture.ps1'),
     '-Action', 'frame', '-FixturePid', String(app.child.pid), '-Handle', String(window.Handle),
-    '-X', String(client.X), '-Y', String(client.Y), '-Width', String(client.Width),
-    '-Height', String(client.Height), '-EvidenceRoot', work, '-OutputPath', file],
+    '-X', String(region.X), '-Y', String(region.Y), '-Width', String(region.Width),
+    '-Height', String(region.Height), '-EvidenceRoot', work, '-OutputPath', file],
   { timeout: 15000, windowsHide: true });
   evidence.screenshots.push(file);
   return pngPixels(app.page, fs.readFileSync(file));
@@ -223,11 +227,11 @@ try {
   await app.page.getByLabel('收起时间（毫秒）').fill('5001');
   assert(await app.page.getByRole('button', { name: '保存时间', exact: true }).isDisabled());
   await app.page.getByLabel('收起时间（毫秒）').fill('1000');
-  let bar = await show();
-  const outside = point(app.main, 0.6, 0.6);
   // CDP settings clicks do not establish native foreground ownership.
   await native('focus-fixture', { FixturePid: app.child.pid, Handle: app.main.Handle,
     X: Math.round((app.main.Bounds.Left + app.main.Bounds.Right) / 2), Y: app.main.Bounds.Top + 20 });
+  let bar = await show();
+  const outside = point(app.main, 0.6, 0.6);
   evidence.timer = JSON.parse(await native('toolbar-sequence', { AppPid: app.child.pid, Handle: bar.Handle,
     ...point(bar), OutsideX: outside.X, OutsideY: outside.Y, LingerMs: 1000 }));
   assert(evidence.timer.BeforeReentry && evidence.timer.ReentryCancelled && evidence.timer.HiddenAfterSecondExit);

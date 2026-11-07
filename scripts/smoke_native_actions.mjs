@@ -140,14 +140,21 @@ function assertCaptureCanvasLayout({ box, selection, desktopClient, viewport }) 
 // normal close. Text-layer uploads (different resourceUri) never count; no
 // command, duplicates, non-201, failure receipts, crash, deadline-exceeded or
 // out-of-order close fail closed. A success receipt is never required.
-function settleSceneCopyTimeline(timeline, context = 'Scene copy') {
+// a0628: options.action/requireScope narrow the selection; requireClose=false drops only the close demands for non-terminal pages.
+function settleSceneCopyTimeline(timeline, context = 'Scene copy', options = {}) {
   assert(timeline && typeof timeline === 'object', `${context}: timeline evidence is missing.`);
   const evidence = JSON.stringify(timeline);
   assert.equal(timeline.crashedAt ?? null, null,
     `${context}: scene crashed instead of closing: ${evidence}`);
-  assert(Array.isArray(timeline.copyCommands) && timeline.copyCommands.length === 1,
-    `${context}: expected exactly one public copyScreenshotImage command: ${evidence}`);
-  const command = timeline.copyCommands[0];
+  const action = options.action;
+  const commands = Array.isArray(timeline.copyCommands) ? timeline.copyCommands : [];
+  const selected = commands.filter((item) =>
+    (action === undefined || item.action === action) &&
+    (options.requireScope === undefined || options.requireScope === null ||
+      item.scope === options.requireScope));
+  assert(commands.length >= 1 && selected.length === 1,
+    `${context}: expected exactly one public ${action ?? 'copyScreenshotImage'} command: ${evidence}`);
+  const command = selected[0];
   assert(typeof command.resourceUri === 'string' && command.resourceUri.length > 0,
     `${context}: public copy command carried no resourceUri: ${evidence}`);
   const associated = (timeline.uploads ?? []).filter(
@@ -157,16 +164,20 @@ function settleSceneCopyTimeline(timeline, context = 'Scene copy') {
   const upload = associated[0];
   assert.equal(upload.responseStatus ?? null, 201,
     `${context}: public annotation upload was not accepted: ${evidence}`);
-  assert(timeline.closedAt !== null && timeline.closedAt !== undefined,
-    `${context}: scene did not close after the accepted copy: ${evidence}`);
+  const requireClose = options.requireClose !== false;
+  if (requireClose)
+    assert(timeline.closedAt !== null && timeline.closedAt !== undefined,
+      `${context}: scene did not close after the accepted copy: ${evidence}`);
   assert(Number.isSafeInteger(upload.requestOrder) && Number.isSafeInteger(upload.responseOrder) &&
-    Number.isSafeInteger(command.order) && Number.isSafeInteger(timeline.closedOrder) &&
+    Number.isSafeInteger(command.order) &&
     upload.requestOrder < upload.responseOrder && upload.responseOrder < command.order &&
-    command.order < timeline.closedOrder,
+    (!requireClose || (Number.isSafeInteger(timeline.closedOrder) &&
+      command.order < timeline.closedOrder)),
   `${context}: scene closed before the public copy was dispatched: ${evidence}`);
   assert(!(timeline.copyReceipts ?? []).some((receipt) => receipt.ok === false),
     `${context}: the host rejected the public copy command: ${evidence}`);
-  assert(!timeline.noTerminalEvent, `${context}: scene close exceeded its deadline: ${evidence}`);
+  if (requireClose)
+    assert(!timeline.noTerminalEvent, `${context}: scene close exceeded its deadline: ${evidence}`);
   return true;
 }
 
@@ -183,7 +194,8 @@ function settleSceneCopyTimeline(timeline, context = 'Scene copy') {
 // unchanged and never delay the command. Works on any object exposing the
 // Playwright page event/binding surface (unit-testable with a plain
 // EventEmitter plus captured exposeBinding/evaluate).
-async function observeSceneCopyTerminal(page) {
+// a0628: options.actions (default ['copyScreenshotImage']) widens the recorded commands (records also carry action/scope).
+async function observeSceneCopyTerminal(page, options = {}) {
   let eventOrder = 0;
   let acceptCommand;
   const received = new Promise((resolve) => { acceptCommand = resolve; });
@@ -192,6 +204,36 @@ async function observeSceneCopyTerminal(page) {
   const uploadBySeq = new Map();
   const blobEvidence = new Map();
   const blobWaiters = new Map();
+  const commandWaiters = new Map();
+  const receiptWaiters = new Map();
+  const settleRecordWaiters = (waiters, key, value) => {
+    const pending = waiters.get(key);
+    if (!pending) return;
+    waiters.delete(key);
+    for (const resolve of pending) resolve(value);
+  };
+  // Bounded waiters: null on the deadline (fail closed); timer/map entry always cleaned; harness-only.
+  const waitForRecord = (waiters, records, field, key, milliseconds) => {
+    const existing = records.find((item) => item[field] === key);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const pending = waiters.get(key) ?? [];
+        const index = pending.indexOf(finish);
+        if (index >= 0) pending.splice(index, 1);
+        if (!pending.length) waiters.delete(key);
+        resolve(value);
+      };
+      const pending = waiters.get(key) ?? [];
+      pending.push(finish);
+      waiters.set(key, pending);
+      const timer = setTimeout(() => finish(null), milliseconds);
+    });
+  };
   const settleBlobWaiters = (seq) => {
     const waiters = blobWaiters.get(seq);
     if (!waiters) return;
@@ -240,15 +282,22 @@ async function observeSceneCopyTerminal(page) {
       }
       settleBlobWaiters(event.seq);
     } else if (event.kind === 'copy-command') {
-      timeline.copyCommands.push({ envelopeId: event.envelopeId, at: Date.now(),
-        order: ++eventOrder, resourceUri: event.resourceUri ?? null });
+      const record = { envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, resourceUri: event.resourceUri ?? null,
+        action: event.action ?? null, scope: event.scope ?? null };
+      timeline.copyCommands.push(record);
       acceptCommand();
+      settleRecordWaiters(commandWaiters, record.action, record);
     } else if (event.kind === 'copy-receipt') {
-      timeline.copyReceipts.push({ envelopeId: event.envelopeId, at: Date.now(),
-        order: ++eventOrder, ok: event.ok ?? null, problemCode: event.problemCode ?? null });
+      const record = { envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, ok: event.ok ?? null, problemCode: event.problemCode ?? null };
+      timeline.copyReceipts.push(record);
+      settleRecordWaiters(receiptWaiters, record.envelopeId, record);
     }
   });
-  await page.evaluate(() => {
+  // a0628: actions cross as a serialized evaluate argument (closures cannot survive in-page).
+  await page.evaluate((watchedActions) => {
+    const actions = new Set(watchedActions ?? ['copyScreenshotImage']);
     const emit = (event) => {
       try {
         // exposeBinding returns a Promise: a quickly retiring page can make
@@ -323,9 +372,10 @@ async function observeSceneCopyTerminal(page) {
         try {
           const command = message && message.kind === 'request' && message.type === 'app.command' &&
             message.payload ? message.payload.command : null;
-          if (command && command.action === 'copyScreenshotImage') {
+          if (command && actions.has(command.action)) {
             state.copyIds[message.id] = true;
-            emit({ kind: 'copy-command', envelopeId: message.id,
+            emit({ kind: 'copy-command', envelopeId: message.id, action: command.action,
+              scope: typeof command.scope === 'string' ? command.scope : null,
               resourceUri: command.arguments &&
                 typeof command.arguments.resourceUri === 'string'
                 ? command.arguments.resourceUri : null });
@@ -348,7 +398,7 @@ async function observeSceneCopyTerminal(page) {
       if (originalPost) channel.postMessage = originalPost;
       delete window.__nativeActionsRestoreFetch;
     };
-  });
+  }, options.actions ?? ['copyScreenshotImage']);
   return {
     timeline, received, ended,
     // Resolves with the Node-held Blob evidence of one upload (bytes or the
@@ -360,6 +410,11 @@ async function observeSceneCopyTerminal(page) {
       waiters.push(resolve);
       blobWaiters.set(seq, waiters);
     }),
+    // Per-action command / per-envelope receipt waits; null on the deadline.
+    waitForCommand: (action, milliseconds = 10000) =>
+      waitForRecord(commandWaiters, timeline.copyCommands, 'action', action, milliseconds),
+    waitForReceipt: (envelopeId, milliseconds = 10000) =>
+      waitForRecord(receiptWaiters, timeline.copyReceipts, 'envelopeId', envelopeId, milliseconds),
   };
 }
 
@@ -1010,7 +1065,15 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
     const start = { AppPid: app.child.pid, X: button.left + 4, Y: button.top + 4 };
     const end = { AppPid: app.child.pid, X: button.right - 4, Y: button.bottom - 4 };
     await native('mouse-move', start);
-    gesture.events.push({ event: 'manual-start-cursor', cursor: JSON.parse(await native('cursor')) });
+    const previewLabel = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
+    assert(/^(控件候选|窗口候选|边界区域)/.test(previewLabel),
+      `Manual setup requires an unconfirmed smart preview: ${previewLabel}`);
+    // Right-click leaves smart preview; its corner is otherwise a resize handle.
+    await native('mouse-right', start);
+    await native('mouse-move', start);
+    const manualCursor = JSON.parse(await native('cursor'));
+    assert(manualCursor.cross, 'Manual selection must start with the crosshair, not a preview handle.');
+    gesture.events.push({ event: 'manual-start-cursor', previewLabel, cursor: manualCursor });
     await native('mouse-down', start);
     try { await native('mouse-move', end); }
     finally { await native('mouse-up', end); }

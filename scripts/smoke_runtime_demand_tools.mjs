@@ -25,6 +25,9 @@
 // confirmed through verified controls), and the scene 贴图 pin is proven by a
 // passive owned-window diff (stable new visible top-level window, transient
 // popups/tooltips excluded) and removed again via owned close.
+// a0628: imageEdit copy/save upload evidence comes from the shared pre-click
+// observer (CDP network events proved lossy on this page); the save picker
+// is only driven after the accepted 201 + public command, fail closed.
 // Not covered (left for the main agent): settings hotkey re-recording. The
 // evidence root is never deleted; owned cleanup
 // follows recorded PID + creation_filetime lineage only.
@@ -315,16 +318,30 @@ async function drawRectangle(page) {
   await page.mouse.up();
 }
 
-async function copyAnnotated(page, successText) {
-  const requestPromise = page.waitForRequest((request) =>
-    request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-  { timeout: 15000 });
-  await page.getByRole('button', { name: '复制标注图', exact: true }).click();
-  const request = await requestPromise;
-  const response = await request.response();
-  assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
+// Non-terminal public copy (a0628): shared-observer timeline + fail-closed
+// judge (non-terminal mode), awaited host receipt, product success text;
+// no CDP waitForRequest.
+async function copyAnnotated(handoff, page, successText) {
+  const clickError = await page.getByRole('button', { name: '复制标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (clickError) handoff.timeline.clickError = clickError;
+  const command = await handoff.waitForCommand('copyScreenshotImage');
+  assert(command, `No public imageEdit.copyScreenshotImage command within 10 seconds: ${
+    JSON.stringify(handoff.timeline)}`);
+  settleSceneCopyTimeline(handoff.timeline, 'ImageEdit copy',
+    { action: 'copyScreenshotImage', requireScope: 'imageEdit', requireClose: false });
+  const upload = handoff.timeline.uploads.find(
+    (item) => item.resourceUri === command.resourceUri);
+  assert(upload?.blobMeta?.problem == null && Number.isSafeInteger(upload?.blobMeta?.byteLength),
+    `ImageEdit copy: unsound upload Blob evidence: ${JSON.stringify(handoff.timeline)}`);
+  const receipt = await handoff.waitForReceipt(command.envelopeId);
+  assert(receipt && receipt.ok === true,
+    `Public copy command receipt missing or failed: ${JSON.stringify(handoff.timeline)}`);
   await page.getByText(successText, { exact: false }).waitFor({ timeout: 15000 });
-  return { status: response.status(), byteLength: request.postDataBuffer()?.length ?? null };
+  return { status: upload.responseStatus, byteLength: upload.blobMeta.byteLength,
+    resourceUri: command.resourceUri, command: 'imageEdit.copyScreenshotImage',
+    receiptOk: receipt.ok, requestAt: upload.requestAt, responseAt: upload.responseAt };
 }
 
 // Scene-terminal copy (goal316/318): the scene closes on copy success, so
@@ -400,7 +417,10 @@ async function watchImageEditInput(page) {
       if (data?.kind !== 'event' || data.type !== 'app.state' ||
           data.payload?.scope !== 'imageEdit') return;
       const url = data.payload.state?.input?.url;
-      if (typeof url === 'string') window.__rt214ImageEditInput = url;
+      if (typeof url !== 'string') return;
+      const session = data.payload.state?.screenshotSession;
+      window.__rt214ImageEditInput = { url,
+        sessionId: typeof session?.sessionId === 'string' ? session.sessionId : null };
     });
   });
 }
@@ -518,11 +538,20 @@ async function imageEditStep(ctx) {
       if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
     return dark > 500;
   }, null, { timeout: 15000 });
-  // Pin the first paste to its observed public input resource URL.
-  await page.waitForFunction(() => typeof window.__rt214ImageEditInput === 'string',
-    null, { timeout: 15000 });
-  const firstInputUrl = await page.evaluate(() => window.__rt214ImageEditInput);
-  step.firstInputUrl = firstInputUrl;
+  // Pin the first paste to its observed public input URL and its session:
+  // the session is the precondition for the copy/save session variants
+  // (imageEdit.copyScreenshotImage / saveScreenshotImage), so it must exist.
+  await page.waitForFunction(() => {
+    const record = window.__rt214ImageEditInput;
+    return !!record && typeof record.url === 'string' &&
+      typeof record.sessionId === 'string' && record.sessionId.length > 0;
+  }, null, { timeout: 15000 });
+  const firstInput = await page.evaluate(() => window.__rt214ImageEditInput);
+  assert(typeof firstInput?.sessionId === 'string' && firstInput.sessionId.length > 0,
+    `Pasted imageEdit session missing; copy/save would use the session-less variants: ${
+      JSON.stringify(firstInput)}`);
+  step.firstInputUrl = firstInput.url;
+  step.firstSessionId = firstInput.sessionId;
   const before = await canvasOrange(page);
   assert(before.dark > 500, 'Pasted QR image never decoded in the editor canvas.');
   await drawRectangle(page);
@@ -538,24 +567,42 @@ async function imageEditStep(ctx) {
   const after = await canvasOrange(page);
   assert(after.orange > before.orange + 50, 'Rectangle edit changed too few canvas pixels.');
   step.annotationPixels = { before: before.orange, after: after.orange };
-  step.annotationUpload = await copyAnnotated(page, '已复制截图副本');
+  // a0628: one pre-click observer for both handoffs; the pasted session
+  // makes the public commands the copyScreenshotImage/saveScreenshotImage
+  // session variants (never the session-less copyAnnotatedImage).
+  const handoff = await observeSceneCopyTerminal(page,
+    { actions: ['copyScreenshotImage', 'saveScreenshotImage'] });
+  step.annotationUpload = await copyAnnotated(handoff, page, '已复制截图副本');
   // Real FileSavePicker through the owned save-file seam: the export upload
-  // is observed first, then the picker dialog (owned by our main window)
-  // receives the target path and its confirmation is driven through the
+  // is observed passively first (a0628: accepted 201 + the public
+  // imageEdit.saveScreenshotImage command BEFORE the picker is driven), then
+  // the picker dialog (owned by our main window) is driven through the
   // fixture's verified UIA/Win32 controls. The saved PNG is then decoded in
   // the product's own WebView2 and checked for exact input dimensions, the
   // QR content and the baked annotation pixels.
   const savedFile = path.join(root, 'imageedit-saved.png');
-  const saveRequest = page.waitForRequest((request) =>
-    request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-  { timeout: 15000 });
-  await page.getByRole('button', { name: '保存标注图', exact: true }).click();
-  const savedResponse = await (await saveRequest).response();
-  assert.equal(savedResponse?.status(), 201, 'Save export upload was not accepted.');
+  const saveClickError = await page.getByRole('button', { name: '保存标注图', exact: true })
+    .click()
+    .then(() => null, (error) => `${error.name}: ${error.message}`);
+  if (saveClickError) handoff.timeline.clickError = saveClickError;
+  const saveCommand = await handoff.waitForCommand('saveScreenshotImage');
+  assert(saveCommand, `No public imageEdit.saveScreenshotImage command within 10 seconds: ${
+    JSON.stringify(handoff.timeline)}`);
+  settleSceneCopyTimeline(handoff.timeline, 'ImageEdit save',
+    { action: 'saveScreenshotImage', requireScope: 'imageEdit', requireClose: false });
+  const saveUpload = handoff.timeline.uploads.find(
+    (item) => item.resourceUri === saveCommand.resourceUri);
+  step.saveUpload = { status: saveUpload.responseStatus,
+    byteLength: saveUpload.blobMeta?.byteLength ?? null,
+    resourceUri: saveCommand.resourceUri, command: 'imageEdit.saveScreenshotImage' };
   await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File', scrollCaptureScript,
     '-Action', 'save-file', '-Handle', String(main.Handle), '-AppPid', String(child.pid),
     '-OutputPath', savedFile, '-EvidenceRoot', root],
   { timeout: 45000, windowsHide: true });
+  const saveReceipt = await handoff.waitForReceipt(saveCommand.envelopeId, 20000);
+  assert(saveReceipt && saveReceipt.ok === true,
+    `Public save command receipt missing or failed: ${JSON.stringify(handoff.timeline)}`);
+  step.saveUpload.receiptOk = saveReceipt.ok;
   await page.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
   const savedStat = fs.statSync(savedFile);
   assert(savedStat.isFile() && savedStat.size > 8, 'Saved annotation PNG is missing or empty.');
@@ -571,10 +618,11 @@ async function imageEditStep(ctx) {
   // pass on the stale pre-paste canvas.
   await focusMain(ctx);
   await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
-  await page.waitForFunction((previous) =>
-    typeof window.__rt214ImageEditInput === 'string' &&
-    window.__rt214ImageEditInput !== previous, firstInputUrl, { timeout: 20000 });
-  step.repastedInputUrl = await page.evaluate(() => window.__rt214ImageEditInput);
+  await page.waitForFunction((previous) => {
+    const record = window.__rt214ImageEditInput;
+    return !!record && typeof record.url === 'string' && record.url !== previous;
+  }, firstInput.url, { timeout: 20000 });
+  step.repastedInputUrl = await page.evaluate(() => window.__rt214ImageEditInput.url);
   await page.waitForFunction(() => {
     const element = document.querySelector('canvas[aria-label="图片检查画布"]');
     if (!element) return false;
@@ -586,6 +634,9 @@ async function imageEditStep(ctx) {
   }, null, { timeout: 20000 });
   await page.screenshot({ path: path.join(root, 'imageedit-annotated.png') });
   step.repastedAnnotatedPixels = true;
+  // Shared restore hook: leave the page surfaces as the product had them.
+  await page.evaluate(() => window.__nativeActionsRestoreFetch?.())
+    .catch(() => { /* page already gone: nothing to restore */ });
   step.state = 'passed';
   return step;
 }
