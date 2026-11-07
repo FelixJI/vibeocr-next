@@ -1009,6 +1009,23 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   return observations;
 }
 
+// Verified manual seed preparation shared by the main manual capture and the
+// explicit end-session coverage: the smart preview must be unconfirmed, one
+// owned right-click leaves it (its corner is otherwise a resize handle), and
+// only a real island crosshair may start the manual drag.
+async function beginManualDragSeed(appPid, overlayHandle, start) {
+  await native('mouse-move', start);
+  const previewLabel = await native('selection', { AppPid: appPid, Handle: overlayHandle });
+  assert(/^(控件候选|窗口候选|边界区域)/.test(previewLabel),
+    `Manual setup requires an unconfirmed smart preview: ${previewLabel}`);
+  await native('mouse-right', start);
+  await native('mouse-move', start);
+  const cursor = JSON.parse(await native('cursor', { AppPid: appPid, Handle: overlayHandle }));
+  assert(cursor.islandCursorShape === islandCursorName('cross'),
+    'Manual selection must start with the crosshair, not a preview handle.');
+  return { previewLabel, cursor };
+}
+
 async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual = false) {
   let page = app.page;
   const toolbarHandles = (await windows(app.child.pid))
@@ -1077,18 +1094,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   if (manual) {
     const start = { AppPid: app.child.pid, X: button.left + 4, Y: button.top + 4 };
     const end = { AppPid: app.child.pid, X: button.right - 4, Y: button.bottom - 4 };
-    await native('mouse-move', start);
-    const previewLabel = await native('selection', { AppPid: app.child.pid, Handle: overlay.Handle });
-    assert(/^(控件候选|窗口候选|边界区域)/.test(previewLabel),
-      `Manual setup requires an unconfirmed smart preview: ${previewLabel}`);
-    // Right-click leaves smart preview; its corner is otherwise a resize handle.
-    await native('mouse-right', start);
-    await native('mouse-move', start);
-    const manualCursor = JSON.parse(await native('cursor',
-      { AppPid: app.child.pid, Handle: overlay.Handle }));
-    assert(manualCursor.islandCursorShape === islandCursorName('cross'),
-      'Manual selection must start with the crosshair, not a preview handle.');
-    gesture.events.push({ event: 'manual-start-cursor', previewLabel, cursor: manualCursor });
+    const seed = await beginManualDragSeed(app.child.pid, overlay.Handle, start);
+    gesture.events.push({ event: 'manual-start-cursor',
+      previewLabel: seed.previewLabel, cursor: seed.cursor });
     await native('mouse-down', start);
     try { await native('mouse-move', end); }
     finally { await native('mouse-up', end); }
@@ -1369,7 +1377,10 @@ async function explicitEndSessionCoverage(app, fixture) {
   const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
   const start = { AppPid: appPid, X: button.left + 4, Y: button.top + 4 };
   const end = { AppPid: appPid, X: button.right - 4, Y: button.bottom - 4 };
-  await native('mouse-move', start);
+  // Same verified manual seed preparation: without leaving the smart preview
+  // the NW corner is a resize handle and the seed drag shrinks the preview
+  // instead of drawing the intended selection.
+  await beginManualDragSeed(appPid, overlay.Handle, start);
   await native('mouse-down', start);
   try { await native('mouse-move', end); }
   finally { await native('mouse-up', end); }
