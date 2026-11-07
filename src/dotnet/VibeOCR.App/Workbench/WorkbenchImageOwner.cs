@@ -1165,6 +1165,14 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     }
   }
 
+  private RecognitionWorkbenchState ScreenshotCaptureState(bool isBusy, string statusCode) =>
+    recognitionChannel.SessionId is not null
+      ? SessionRecognitionState(isBusy, statusCode)
+      : RecognitionState(isBusy, statusCode,
+        ReferenceEquals(latestInputSource, RecognitionVm.CurrentInput) ? latestInput : null,
+        ReferenceEquals(latestPlainTextSource, RecognitionVm.Result) ? latestPlainText : null,
+        ReferenceEquals(latestStructuredResponse, RecognitionVm.Result) ? latestStructuredResult : null);
+
   private WorkbenchState? StartScreenshotSession(
     bool textSelectionRequested, CancellationToken cancellationToken, bool scrolling = false,
     ScreenshotCaptureRequest? request = null)
@@ -1186,7 +1194,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       // 框选取消或失败时保留旧图、标注、结果与修订；成功捕获才替换。
       ScreenshotCaptureStarting?.Invoke();
       return operations.Start(
-        SessionState(recognitionChannel, true, "recognition.running"),
+        ScreenshotCaptureState(true, "recognition.running"),
         () => CompleteScreenshotSessionAsync(generation, textSelectionRequested, scrolling,
           demand, request));
     }
@@ -1230,7 +1238,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           await viewModel.CaptureScreenshotSessionAsync(
             textSelectionRequested ? null : BuildSelectionActions(),
             request,
-            cancellationToken);
+            cancellationToken,
+            input => capturedInput = input);
         if (generation != Volatile.Read(ref recognitionChannel.Generation))
         {
           return;
@@ -1244,14 +1253,18 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           string captureOutcome = viewModel.TerminalState is JobState.Failed
             ? viewModel.CaptureRefusalStatusCode ?? "recognition.failed"
             : "recognition.cancelled";
-          operations.PublishTerminal(SessionState(recognitionChannel, false, captureOutcome));
+          operations.PublishTerminal(ScreenshotCaptureState(false, captureOutcome));
+          return;
+        }
+        if (capturedInput is { SelectionAction: { } localAction })
+        {
+          await CompleteScreenshotLocalOutputAsync(generation, capturedInput, localAction, cancellationToken);
           return;
         }
         if (viewModel.CurrentInput is { } captured)
         {
           capturedInput = captured;
-          // 普通入口动作栏意图：识别/本地输出/打开设置按显式意图完成本次
-          // 截图，不创建编辑会话；编辑或无意图沿用既有会话+现场编辑宿主。
+          // 显式识别或打开设置不创建编辑会话；编辑或无意图保留现场编辑入口。
           switch (captured.SelectionAction)
           {
             case ScreenshotSelectionAction.Recognize
@@ -1266,11 +1279,6 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
               capturedInput = null;
               ReleaseCaptureGuard();
               operations.PublishTerminal(new RecognitionWorkbenchState(false, "recognition.failed"));
-              return;
-            case ScreenshotSelectionAction.Copy or ScreenshotSelectionAction.Save
-              or ScreenshotSelectionAction.Pin:
-              await CompleteScreenshotLocalOutputAsync(
-                generation, captured, captured.SelectionAction.Value, cancellationToken);
               return;
             case ScreenshotSelectionAction.OpenSettings:
               // 放弃本次捕获并显式进入现有设置页；不残留会话或隐式 OCR。
@@ -1353,7 +1361,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     {
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.cancelled"));
+        operations.PublishTerminal(ScreenshotCaptureState(false, "recognition.cancelled"));
       }
     }
     catch (Exception error)
@@ -1361,7 +1369,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Error("Screenshot session capture failed", error);
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(SessionState(recognitionChannel, false, "recognition.failed"));
+        operations.PublishTerminal(ScreenshotCaptureState(false, "recognition.failed"));
       }
     }
     finally
@@ -1628,92 +1636,75 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     }
   }
 
-  /// <summary>
-  /// 普通截图动作栏本地输出（复制/保存/钉图）：选区像素编码为 PNG 走既有
-  /// annotation 快照与会话命令（快照/剪贴板重试/保存取消/贴图上限语义复用），
-  /// 执行后关闭会话；全程不提交识别、不打开现场编辑宿主。
-  /// </summary>
+  /// <summary>本地输出持有本次 PNG，确认成功后才结束旧会话。</summary>
   private async Task CompleteScreenshotLocalOutputAsync(
     long generation,
     RecognitionInput input,
     ScreenshotSelectionAction action,
     CancellationToken cancellationToken)
   {
-    bool failed = false;
+    string statusCode = "recognition.ready";
     WorkbenchAnnotationLease? lease = null;
-    // 捕获被接受即冻结是否录入与 key（编码/上传 await 期间启用不追溯）。
-    bool historyAllowed = pinHistory?.IsEnabled == true;
+    WorkbenchAnnotationFile? annotation = null;
     Guid outputSession = Guid.NewGuid();
-    string? frozenHistoryKey = historyAllowed ? outputSession.ToString("N") : null;
+    // 捕获被接受即冻结是否录入与 key（编码/上传 await 期间启用不追溯）。
+    string? frozenHistoryKey = pinHistory?.IsEnabled == true ? outputSession.ToString("N") : null;
     try
     {
       byte[] png = await QrCodeSavePlatform.EncodeImageAsync(
         input.Data, BitmapEncoder.PngEncoderId, cancellationToken);
-      lease = await annotationStore.UploadPngAsync(
-        new MemoryStream(png), cancellationToken);
+      using var content = new MemoryStream(png);
+      lease = await annotationStore.UploadPngAsync(content, cancellationToken);
       if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
-      ClearScreenshotSession(recognitionChannel);
-      InvalidateScreenshotTextLayer(recognitionChannel);
-      ClearResultActions();
-      recognitionChannel.SessionId = outputSession;
-      recognitionChannel.Revision = 0;
-      recognitionChannel.TextSelectionRequested = false;
-      recognitionChannel.SceneEditing = false;
-      recognitionChannel.SessionInput = null;
-      recognitionChannel.SessionResult = null;
-      recognitionChannel.ExcludeBoxes = [];
-      Guid sessionId = recognitionChannel.SessionId.Value;
-      string resourceUri = lease.ResourceUri.AbsoluteUri;
-      recognitionChannel.HistoryCaptureKey = frozenHistoryKey;
+      cancellationToken.ThrowIfCancellationRequested();
+      annotation = annotationStore.Take(lease.ResourceUri);
       switch (action)
       {
         case ScreenshotSelectionAction.Copy:
-          await CopyScreenshotImageAsync(
-            recognitionChannel,
-            new CopyScreenshotImageCommand(resourceUri, sessionId, 0),
-            cancellationToken);
+          await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
           break;
         case ScreenshotSelectionAction.Save:
-          await SaveScreenshotImageAsync(
-            recognitionChannel,
-            new SaveScreenshotImageCommand(resourceUri, sessionId, 0),
-            cancellationToken);
+          if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
+            throw new AnnotatedImageOperationCancelledException();
           break;
         case ScreenshotSelectionAction.Pin:
-          PinScreenshotImage(
-            recognitionChannel,
-            new PinScreenshotImageCommand(resourceUri, sessionId, 0, []));
+          if (pinScreenshot is null)
+            throw new InvalidOperationException("Desktop pinning is unavailable.");
+          pinScreenshot(annotation, outputSession, 0, null, []);
+          annotation = null; // 贴图窗口接管文件。
           break;
       }
+      cancellationToken.ThrowIfCancellationRequested();
+      if (frozenHistoryKey is not null && generation == Volatile.Read(ref recognitionChannel.Generation))
+        RecordPinHistory(frozenHistoryKey, png);
     }
-    catch (AnnotatedImageOperationCancelledException)
+    catch (Exception error) when (error is AnnotatedImageOperationCancelledException or OperationCanceledException)
     {
-      // 用户在保存对话框取消：静默结束本次截图，不算失败。
+      statusCode = "recognition.cancelled";
     }
     catch (Exception error)
     {
       AppLog.Error($"Screenshot selection local output failed ({action})", error);
-      failed = true;
+      statusCode = "recognition.failed";
     }
     finally
     {
-      // 快照租约确定性回收：命令已 Take 时 Revoke 对已移除条目为无害
-      // no-op；换图/取消/失败（含 Take 之前抛错）不留下未消费 annotation，
-      // 不依赖 TTL 清扫。
+      annotation?.Dispose();
+      // Take 前退出要撤销未消费的租约；已 Take 时 Revoke 无副作用。
       if (lease is not null) annotationStore.Revoke(lease.ResourceUri);
-      if (generation == Volatile.Read(ref recognitionChannel.Generation))
-      {
-        RecognitionWorkbenchState closed = CloseScreenshotSession(recognitionChannel)
-          is RecognitionWorkbenchState closedState
-            ? closedState
-            : new RecognitionWorkbenchState(false, "recognition.ready");
-        ReleaseCaptureGuard();
-        operations.PublishTerminal(
-          failed ? closed with { StatusCode = "recognition.failed" } : closed);
-        // 纯本地动作失败沿用捕获失败语义：AppLog + 状态投影，不借识别
-        // 终态事件激活主窗（显式主窗交接仅限识别终态与设置入口）。
-      }
     }
+
+    if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;
+    if (cancellationToken.IsCancellationRequested) statusCode = "recognition.cancelled";
+    bool succeeded = statusCode == "recognition.ready";
+    WorkbenchState state = succeeded
+      ? CloseScreenshotSession(recognitionChannel)
+      : ScreenshotCaptureState(false, statusCode);
+    // 直接钉图沿用独立快照提示，供用户按贴图原图重新取字。
+    if (succeeded && action == ScreenshotSelectionAction.Pin)
+      ScreenshotSessionDetached?.Invoke(outputSession, 0);
+    ReleaseCaptureGuard();
+    operations.PublishTerminal(state);
   }
 
   private WorkbenchState NotifyScreenshotRevision(
@@ -3153,9 +3144,12 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   private RecognitionWorkbenchState CancelRecognition()
   {
     RecognitionViewModel viewModel = RecognitionVm;
+    bool cancellingCapture = Volatile.Read(ref captureInFlight) != 0 &&
+      recognitionChannel.CaptureDemand is not null;
     AdvanceImageGeneration(recognitionChannel);
     recognitionChannel.CaptureDemand?.Cancel();
     viewModel.Cancel();
+    if (cancellingCapture) return ScreenshotCaptureState(false, "recognition.cancelled");
     viewModel.InvalidateResult();
     ClearResultActions();
     if (recognitionChannel.SessionId is not null)

@@ -45,6 +45,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     public int CaptureCalls;
     public bool CancelCapture;
     public bool FailCapture;
+    public ScreenshotSelectionAction? SelectionAction;
     public byte[] Data = CaptureBytes;
     public byte[] FileData = CaptureBytes;
     public TaskCompletionSource? CaptureGate;
@@ -61,7 +62,10 @@ public sealed class ScreenshotSessionWorkbenchTests
       if (FailCapture) throw new IOException("Synthetic capture failed.");
       if (CancelCapture) return null;
       if (CaptureGate is { } gate) await gate.Task;
-      return new RecognitionInput(Data, "image/bmp", "screenshot.bmp", "screenshot");
+      return new RecognitionInput(Data, "image/bmp", "screenshot.bmp", "screenshot")
+      {
+        SelectionAction = SelectionAction,
+      };
     }
 
     public Task<RecognitionInput?> CaptureScrollingScreenAsync(CancellationToken cancellationToken) =>
@@ -1641,6 +1645,8 @@ public sealed class ScreenshotSessionWorkbenchTests
     public byte[]? CopiedBytes { get; private set; }
     public byte[]? SavedBytes { get; private set; }
     public bool SaveAccepted { get; set; } = true;
+    public bool FailSave { get; set; }
+    public string? SaveSourcePath { get; private set; }
     public TaskCompletionSource? OutputStarted;
     public TaskCompletionSource? OutputGate;
 
@@ -1653,9 +1659,11 @@ public sealed class ScreenshotSessionWorkbenchTests
 
     public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
+      SaveSourcePath = sourcePath;
       SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
       OutputStarted?.TrySetResult();
       if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
+      if (FailSave) throw new IOException("Synthetic save failure.");
       return SaveAccepted;
     }
 
@@ -4210,7 +4218,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   [InlineData(ScreenshotSelectionAction.Copy)]
   [InlineData(ScreenshotSelectionAction.Save)]
   [InlineData(ScreenshotSelectionAction.Pin)]
-  public async Task OrdinaryLocalOutputIntentsReuseExistingSessionCommands(
+  public async Task OrdinaryLocalOutputIntentsDoNotOpenEditorOrSubmitRecognition(
     ScreenshotSelectionAction action)
   {
     string root = TemporaryRoot();
@@ -4238,6 +4246,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         });
       int sessionReady = 0;
       handler.ScreenshotSessionReady += (_, _) => sessionReady++;
+      var detached = new List<(Guid SessionId, long Revision)>();
+      handler.ScreenshotSessionDetached += (id, revision) => detached.Add((id, revision));
       int terminalShown = 0;
       handler.ScreenshotSelectionRecognized += () => terminalShown++;
 
@@ -4250,8 +4260,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         await closed.Task;
       }
 
-      // 本地输出复用既有会话命令（快照/剪贴板重试/保存取消/贴图上限），
-      // 不新建并行管线、不提交识别、不打开现场编辑宿主；结束后关闭会话。
+      // 本地输出复用既有 PNG、剪贴板、保存与贴图平台，不提交识别或打开现场。
       Assert.Equal(0, inference.SubmitCalls);
       Assert.Equal(0, sessionReady);
       Assert.Equal(0, terminalShown);
@@ -4277,6 +4286,7 @@ public sealed class ScreenshotSessionWorkbenchTests
           Assert.Null(layer);
           Assert.Empty(boxes);
           Assert.NotEqual(Guid.Empty, pinnedSession);
+          Assert.Equal((pinnedSession, pinnedRevision), Assert.Single(detached));
           break;
       }
     }
@@ -4284,6 +4294,137 @@ public sealed class ScreenshotSessionWorkbenchTests
     {
       Directory.Delete(root, recursive: true);
     }
+  }
+
+  [Theory]
+  [InlineData("picker", false)]
+  [InlineData("picker", true)]
+  [InlineData("failed", true)]
+  [InlineData("command", true)]
+  [InlineData("stale", true)]
+  [InlineData("saved", true)]
+  public async Task OrdinarySaveCommitsOnlyAfterCurrentSuccessfulOutput(string outcome, bool withResult)
+  {
+    string root = TemporaryRoot();
+    try
+    {
+      CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+      var inference = new EmptyTextStructuredRecognitionClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var platform = new RecordingAnnotatedImagePlatform
+      {
+        SaveAccepted = outcome != "picker",
+        FailSave = outcome == "failed",
+        OutputStarted = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        OutputGate = new(TaskCreationOptions.RunContinuationsAsynchronously),
+      };
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform, pinHistory: history);
+      TaskCompletionSource finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.ScreenshotCaptureFinished += () => finished.TrySetResult();
+      using var first = new RecognitionStateAwaiter(handler,
+        state => state.IsTerminal && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), cancellationToken);
+      RecognitionWorkbenchState initial = await first.Task;
+      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+      Guid sessionId = Guid.Parse(initial.ScreenshotSession!.SessionId);
+      const long revision = 2;
+      WorkbenchCommandOutcome revised = await handler.ExecuteAsync(
+        new NotifyScreenshotSessionRevisionCommand(sessionId, revision), cancellationToken);
+      RecognitionWorkbenchState previous = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(revised.States));
+      if (withResult)
+      {
+        using var recognized = new RecognitionStateAwaiter(handler,
+          state => state.IsTerminal && state.Result is not null);
+        WorkbenchAnnotationLease export = UploadAnnotation(annotations, AnnotationPng);
+        Assert.Null((await handler.ExecuteAsync(new RecognizeScreenshotImageCommand(
+          export.ResourceUri.AbsoluteUri, sessionId, revision, []), cancellationToken)).Error);
+        previous = await recognized.Task;
+        Assert.NotNull(previous.StructuredResult);
+      }
+      RecognitionInput? previousInput = recognition.CurrentInput;
+      RecognizeResponse? previousResult = recognition.Result;
+      Assert.NotNull(previousInput);
+      Assert.Equal(withResult, previousResult is not null);
+      var detached = new List<Guid>();
+      handler.ScreenshotSessionDetached += (id, _) => detached.Add(id);
+
+      history.SetEnabled(true);
+      inputs.SelectionAction = ScreenshotSelectionAction.Save;
+      inputs.Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var terminal = new RecognitionStateAwaiter(handler,
+        state => state.IsTerminal && state.StatusCode is "recognition.ready" or "recognition.cancelled" or "recognition.failed");
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), cancellationToken);
+      await platform.OutputStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+      Assert.Equal(sessionId, handler.CurrentImageSessionId);
+      Assert.Same(previousInput, recognition.CurrentInput);
+      Assert.Same(previousResult, recognition.Result);
+      Assert.Empty(detached);
+      Assert.Empty(history.Projection(null).Entries);
+
+      RecognitionWorkbenchState result;
+      if (outcome == "command")
+      {
+        WorkbenchCommandOutcome cancelled = await handler.ExecuteAsync(new CancelRecognitionCommand(), cancellationToken);
+        result = Assert.IsType<RecognitionWorkbenchState>(Assert.Single(cancelled.States));
+      }
+      else if (outcome == "stale")
+      {
+        using var replacement = new RecognitionStateAwaiter(handler,
+          state => state.IsTerminal && state.ScreenshotSession is not null &&
+            state.ScreenshotSession.SessionId != previous.ScreenshotSession!.SessionId);
+        await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), cancellationToken);
+        result = await replacement.Task;
+      }
+      else
+      {
+        platform.OutputGate.TrySetResult();
+        result = await terminal.Task;
+      }
+      platform.OutputGate.TrySetResult();
+      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+
+      Assert.NotNull(platform.SaveSourcePath);
+      Assert.False(File.Exists(platform.SaveSourcePath));
+      Assert.Equal((0, 0, 0), annotations.ActiveCounts);
+      if (outcome is "saved" or "stale")
+      {
+        Assert.Equal(sessionId, Assert.Single(detached));
+        if (outcome == "saved")
+        {
+          Assert.Equal("recognition.ready", result.StatusCode);
+          Assert.Null(result.ScreenshotSession);
+          Assert.Null(recognition.CurrentInput);
+          Assert.Null(recognition.Result);
+          Assert.Single(history.Projection(null).Entries);
+        }
+        else
+        {
+          Assert.Equal(Guid.Parse(result.ScreenshotSession!.SessionId), handler.CurrentImageSessionId);
+          Assert.NotNull(recognition.CurrentInput);
+          Assert.Empty(history.Projection(null).Entries);
+        }
+        return;
+      }
+
+      Assert.Equal(outcome == "failed" ? "recognition.failed" : "recognition.cancelled", result.StatusCode);
+      Assert.Equal(previous.ScreenshotSession, result.ScreenshotSession);
+      Assert.Equal(previous.Input, result.Input);
+      Assert.Equal(previous.Result, result.Result);
+      Assert.Equal(previous.StructuredResult, result.StructuredResult);
+      Assert.Same(previousInput, recognition.CurrentInput);
+      Assert.Same(previousResult, recognition.Result);
+      Assert.Empty(detached);
+      Assert.Empty(history.Projection(null).Entries);
+      Assert.NotEmpty(await ReadResourceAsync(broker, result.Input!.Url));
+      if (withResult) Assert.NotEmpty(await ReadResourceAsync(broker, result.StructuredResult!.Url));
+    }
+    finally { Directory.Delete(root, recursive: true); }
   }
 
   [Fact]
