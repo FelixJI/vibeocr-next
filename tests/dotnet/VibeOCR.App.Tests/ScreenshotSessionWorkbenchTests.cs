@@ -1357,6 +1357,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       var inference = new ThrowingSubmitClient();
       var inputs = new FixedCaptureInput();
       var recognition = new RecognitionViewModel(inference, inputs);
+      int runtimeReadyCalls = 0;
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
       await using var handler = CreateHandler(
@@ -1365,7 +1366,8 @@ public sealed class ScreenshotSessionWorkbenchTests
         broker,
         annotationStore,
         settings: new SettingsViewModel(inference),
-        inferenceAttached: () => false);
+        inferenceAttached: () => false,
+        ensureRuntimeReady: _ => { Interlocked.Increment(ref runtimeReadyCalls); return Task.CompletedTask; });
 
       using (var capturedAwaiter = new RecognitionStateAwaiter(
         handler,
@@ -1385,6 +1387,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         Assert.Equal(1, inputs.CaptureCalls);
         Assert.False(recognition.IsBusy);
         Assert.Equal(0, inference.SubmitCalls);
+        Assert.Equal(0, runtimeReadyCalls);
         WorkbenchCommandOutcome modeChanged = await handler.ExecuteAsync(
           new SetTaskEngineCommand(null), TestContext.Current.CancellationToken);
         Assert.Null(modeChanged.Error);
@@ -1657,7 +1660,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
     }
 
-    public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken)
+    public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken, nint? pickerOwner = null)
     {
       SaveSourcePath = sourcePath;
       SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
@@ -4232,6 +4235,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       var inputs = new SelectionActionCaptureInput(action, data: captureData);
       var recognition = new RecognitionViewModel(inference, inputs);
       var platform = new RecordingAnnotatedImagePlatform();
+      int runtimeReadyCalls = 0;
       var pins = new List<(Guid SessionId, long Revision, RecognitionTextLayerState? Layer,
         IReadOnlyList<WorkbenchExclusionBox> Boxes)>();
       using var broker = new WorkbenchResourceBroker(root);
@@ -4243,7 +4247,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         {
           pins.Add((sessionId, revision, layer, boxes));
           image.Dispose();
-        });
+        }, ensureRuntimeReady: _ => { Interlocked.Increment(ref runtimeReadyCalls); return Task.CompletedTask; });
       int sessionReady = 0;
       handler.ScreenshotSessionReady += (_, _) => sessionReady++;
       var detached = new List<(Guid SessionId, long Revision)>();
@@ -4262,6 +4266,7 @@ public sealed class ScreenshotSessionWorkbenchTests
 
       // 本地输出复用既有 PNG、剪贴板、保存与贴图平台，不提交识别或打开现场。
       Assert.Equal(0, inference.SubmitCalls);
+      Assert.Equal(0, runtimeReadyCalls);
       Assert.Equal(0, sessionReady);
       Assert.Equal(0, terminalShown);
       Assert.Null(handler.CurrentImageSessionId);
@@ -4380,6 +4385,8 @@ public sealed class ScreenshotSessionWorkbenchTests
             state.ScreenshotSession.SessionId != previous.ScreenshotSession!.SessionId);
         await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), cancellationToken);
         result = await replacement.Task;
+        // 代际替换必须结束保存等待，无须由旧 picker 再回调。
+        await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
       }
       else
       {

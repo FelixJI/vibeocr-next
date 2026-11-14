@@ -51,6 +51,10 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(FrozenBackgroundMovesOnceWithoutReencodingAndReleasesOnClose));
 
   [Fact]
+  public Task SelectionSaveRetainsItsOwnerUntilRelease() =>
+      RunUiSmokeAsync(nameof(SelectionSaveRetainsItsOwnerUntilRelease));
+
+  [Fact]
   public Task CaptureRestoresVisibleMinimizedAndHiddenOwnerState() =>
       RunUiSmokeAsync(nameof(CaptureRestoresVisibleMinimizedAndHiddenOwnerState));
 

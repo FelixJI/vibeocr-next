@@ -100,6 +100,9 @@ public sealed partial class App
         case "FrozenBackgroundMovesOnceWithoutReencodingAndReleasesOnClose":
           await ScreenRegionPicker.VerifyFrozenBackgroundHandoffSelfCheckAsync();
           break;
+        case "SelectionSaveRetainsItsOwnerUntilRelease":
+          await ScreenRegionPicker.VerifySaveOwnerHandoffSelfCheckAsync();
+          break;
         case "CaptureRestoresVisibleMinimizedAndHiddenOwnerState":
           await ScreenRegionPicker.VerifyOwnerRestoreSelfCheckAsync(CancellationToken.None);
           break;

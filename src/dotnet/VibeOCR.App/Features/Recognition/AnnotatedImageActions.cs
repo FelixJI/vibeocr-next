@@ -11,7 +11,7 @@ public interface IAnnotatedImagePlatform
 {
   Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken);
 
-  Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken);
+  Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken, nint? pickerOwner = null);
 
   Task CopyTextAsync(string text, CancellationToken cancellationToken);
 }
@@ -109,9 +109,11 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
 
   public async Task<bool> SaveImageAsync(
     string sourcePath,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    nint? pickerOwner = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+    if (pickerOwner is not null) cancellationToken.ThrowIfCancellationRequested();
     var picker = new FileSavePicker
     {
       SuggestedStartLocation = PickerLocationId.PicturesLibrary,
@@ -119,8 +121,12 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     };
     bool jpeg = string.Equals(Path.GetExtension(sourcePath), ".jpg", StringComparison.OrdinalIgnoreCase);
     picker.FileTypeChoices.Add(jpeg ? "JPEG 图片" : "PNG 图片", [jpeg ? ".jpg" : ".png"]);
-    WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
-    StorageFile? destinationFile = await picker.PickSaveFileAsync();
+    if (pickerOwner == nint.Zero) throw new InvalidOperationException("无法获取截图保存窗口。");
+    WinRT.Interop.InitializeWithWindow.Initialize(picker, pickerOwner ?? windowHandle());
+    StorageFile? destinationFile = pickerOwner is null
+      ? await picker.PickSaveFileAsync()
+      : await picker.PickSaveFileAsync().AsTask(cancellationToken);
+    if (pickerOwner is not null) cancellationToken.ThrowIfCancellationRequested();
     if (destinationFile is null)
     {
       return false;

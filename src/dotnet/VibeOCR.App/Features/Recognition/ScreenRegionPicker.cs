@@ -97,7 +97,7 @@ public sealed record ScreenshotSelectionActions(
     IReadOnlyList<ScreenshotRecognitionModeEntry> Modes,
     WorkbenchTheme Theme = WorkbenchTheme.System);
 
-/// <summary>冻结桌面仅属于本次截图；确认后移交给同一窗口的编辑器。</summary>
+/// <summary>持有本次截图窗口，供现场编辑或选区保存使用。</summary>
 internal sealed class ScreenshotCaptureScene : IDisposable
 {
     private byte[]? background;
@@ -113,6 +113,8 @@ internal sealed class ScreenshotCaptureScene : IDisposable
         Window.Closed += OnClosed;
     }
     internal Window Window { get; }
+    internal nint Handle => closed ? throw new InvalidOperationException("截图窗口已关闭。") :
+      WinRT.Interop.WindowNative.GetWindowHandle(Window);
     internal Grid Root { get; }
     internal PhysicalRectangle Desktop { get; }
     internal PhysicalRectangle Bounds { get; }
@@ -357,7 +359,7 @@ public sealed class ScreenRegionPicker(
         finally
         {
             void RestoreOwner() => RestoreOwnerState(owner, visible, minimized, foreground);
-            // 确认选区与加载编辑器之间不闪回主窗口。
+            // 现场编辑与选区保存接管现有窗口，结束后再恢复截图前的桌面。
             if (scene is null) RestoreOwner();
             else scene.RestoreOwnerOnClose(RestoreOwner);
         }
@@ -496,6 +498,31 @@ public sealed class ScreenRegionPicker(
       throw new InvalidOperationException("Closed capture retained its background.");
   }
 
+  internal static async Task VerifySaveOwnerHandoffSelfCheckAsync()
+  {
+    var bounds = new PhysicalRectangle(40, 40, 320, 120);
+    byte[] pixels = new byte[bounds.Width * bounds.Height * 4];
+    byte[] bmp = EncodeTopDownBmp(pixels, bounds.Width, bounds.Height, bounds.Width * 4);
+    BitmapImage background = await LoadBitmapAsync(bmp, bounds.Width, bounds.Height);
+    OverlaySelection? selected = await ShowOverlayAsync(bounds, background, pixels, bmp,
+      SmartScreenCandidates.Capture(bounds), keepForEditing: true, CancellationToken.None,
+      automaticSelection: true, automaticAction: ScreenshotSelectionAction.Save);
+    using ScreenshotCaptureScene scene = selected?.Scene ??
+      throw new InvalidOperationException("Save did not retain the selection window as its picker owner.");
+    nint handle = scene.Handle;
+    if (selected?.SelectionAction is not ScreenshotSelectionAction.Save || !IsWindowVisible(handle) ||
+        scene.TakeBackground() is not null || scene.Root.Children.Count != 1 ||
+        scene.Root.Children[0] is not Image)
+      throw new InvalidOperationException("The save handoff must keep a visible window with only the frozen image.");
+
+    int restores = 0;
+    scene.RestoreOwnerOnClose(() => restores++);
+    scene.Dispose();
+    scene.Dispose();
+    if (IsWindowVisible(handle) || scene.Root.Children.Count != 0 || restores != 1)
+      throw new InvalidOperationException("Closing the save owner did not release its background and restore its owner once.");
+  }
+
   internal static void EnsureFrozenLayoutCurrent(
       LastRegionCapture frozen, Func<IReadOnlyList<ScreenMonitorTarget>> queryMonitors)
   {
@@ -515,7 +542,8 @@ public sealed class ScreenRegionPicker(
     bool automaticSelection = false,
     ScreenshotSelectionActions? selectionActions = null,
     LastRegionCapture? frozenLayout = null,
-    Func<IReadOnlyList<ScreenMonitorTarget>>? queryMonitors = null)
+    Func<IReadOnlyList<ScreenMonitorTarget>>? queryMonitors = null,
+    ScreenshotSelectionAction automaticAction = ScreenshotSelectionAction.Edit)
   {
     // 普通入口：稳定选区后显示动作栏；专用直接入口保持既有立即确认。
     bool ordinary = selectionActions is not null;
@@ -793,6 +821,15 @@ public sealed class ScreenRegionPicker(
         var scrollScene = new ScreenshotCaptureScene(overlay, root, desktop, scrollingBounds);
         completion.TrySetResult(new OverlaySelection(scrollingBounds, scrollScene, action,
           recognitionModeId, recognitionIntent, overlay));
+      }
+      else if (result is { } saveBounds && action is ScreenshotSelectionAction.Save)
+      {
+        // 保持发起保存的窗口在场，供系统对话框使用；只保留已呈现的底图。
+        overlay.Closed -= closeHandler;
+        var saveScene = new ScreenshotCaptureScene(overlay, root, desktop, saveBounds);
+        completion.TrySetResult(new OverlaySelection(saveBounds, saveScene, action));
+        canvas.ReleasePointerCaptures();
+        root.Children.Remove(canvas);
       }
       else if (result is { } accepted)
       {
@@ -1141,7 +1178,7 @@ public sealed class ScreenRegionPicker(
       args.OriginalSource is UIElement source && source.XamlRoot == root.XamlRoot;
     void CancelPointer(PointerRoutedEventArgs args)
     {
-      if (!IsPickerPointer(args)) return;
+      if (completion.Task.IsCompleted || !IsPickerPointer(args)) return;
       if (activePointerId != args.Pointer.PointerId) return;
       activePointerId = null;
       session.CancelDrag();
@@ -1180,7 +1217,7 @@ public sealed class ScreenRegionPicker(
     }), true);
     canvas.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler((_, args) =>
     {
-      if (!IsPickerPointer(args)) return;
+      if (completion.Task.IsCompleted || !IsPickerPointer(args)) return;
       if (activePointerId is { } id && id != args.Pointer.PointerId) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
       lastPoint = point;
@@ -1191,7 +1228,7 @@ public sealed class ScreenRegionPicker(
     }), true);
     canvas.PointerReleased += (_, args) =>
     {
-      if (!IsPickerPointer(args)) return;
+      if (completion.Task.IsCompleted || !IsPickerPointer(args)) return;
       if (activePointerId != args.Pointer.PointerId ||
           args.GetCurrentPoint(canvas).Properties.IsLeftButtonPressed) return;
       Windows.Foundation.Point point = args.GetCurrentPoint(canvas).Position;
@@ -1334,7 +1371,10 @@ public sealed class ScreenRegionPicker(
       ? InstallCursorQuery(overlayHandle, root)
       : null;
     using CancellationTokenRegistration registration = cancellationToken.Register(() =>
-    root.DispatcherQueue.TryEnqueue(() => { completion.TrySetCanceled(cancellationToken); overlay.Close(); }));
+    root.DispatcherQueue.TryEnqueue(() =>
+    {
+      if (completion.TrySetCanceled(cancellationToken)) overlay.Close();
+    }));
     if (automaticSelection)
     {
       session.Begin(new(0, 0));
@@ -1342,8 +1382,8 @@ public sealed class ScreenRegionPicker(
       Render();
       // 子窗口 synthetic scene 沿用直接交接；带完整布局的 picker smoke
       // 与用户确认共用 FinishAsync，验证冻结后的布局变化检查。
-      if (frozenLayout is null) CompleteSelection(true);
-      else Finish(true);
+      if (frozenLayout is null) CompleteSelection(true, automaticAction);
+      else Finish(true, automaticAction);
     }
     try
     {
@@ -1351,9 +1391,10 @@ public sealed class ScreenRegionPicker(
     }
     finally
     {
-      // 已完成的选区回调不再持有已移交或丢弃的编码缓冲。
+      // 已完成的选区回调不再持有用于命中、放大镜和交接的整屏缓冲。
+      pixels = [];
       desktopBmp = [];
-      // 编辑窗口接管原冻结画面；其余路径立即释放。
+      // 已移交的窗口继续持有底图；其余路径立即释放。
       if (!completion.Task.IsCompletedSuccessfully || completion.Task.Result?.Scene is null)
         root.Children.Clear();
     }

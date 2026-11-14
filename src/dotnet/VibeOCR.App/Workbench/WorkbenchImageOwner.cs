@@ -1258,6 +1258,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         }
         if (capturedInput is { SelectionAction: { } localAction })
         {
+          // 有对话框的本地保存也必须随当前截图代际失效。
+          if (localAction is ScreenshotSelectionAction.Save)
+            recognitionChannel.RecognitionDemand = demand;
           await CompleteScreenshotLocalOutputAsync(generation, capturedInput, localAction, cancellationToken);
           return;
         }
@@ -1664,7 +1667,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           await annotatedImagePlatform.CopyImageAsync(annotation.Path, cancellationToken);
           break;
         case ScreenshotSelectionAction.Save:
-          if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken))
+          if (!await annotatedImagePlatform.SaveImageAsync(annotation.Path, cancellationToken, input.CaptureScene?.Handle))
             throw new AnnotatedImageOperationCancelledException();
           break;
         case ScreenshotSelectionAction.Pin:
@@ -1692,6 +1695,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       annotation?.Dispose();
       // Take 前退出要撤销未消费的租约；已 Take 时 Revoke 无副作用。
       if (lease is not null) annotationStore.Revoke(lease.ResourceUri);
+      // 先归还对话框所有者，再发布终态开放下一次截图。
+      input.DisposeCaptureScene();
     }
 
     if (generation != Volatile.Read(ref recognitionChannel.Generation)) return;

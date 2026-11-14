@@ -1198,7 +1198,8 @@ public sealed class DesktopWorkbenchCommandHandlerTests
 
     public async Task<bool> SaveImageAsync(
       string sourcePath,
-      CancellationToken cancellationToken)
+      CancellationToken cancellationToken,
+      nint? pickerOwner = null)
     {
       SavedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
       return SaveResult;
