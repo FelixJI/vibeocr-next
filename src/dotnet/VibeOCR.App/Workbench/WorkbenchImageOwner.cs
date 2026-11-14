@@ -1258,9 +1258,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         }
         if (capturedInput is { SelectionAction: { } localAction })
         {
-          // 有对话框的本地保存也必须随当前截图代际失效。
-          if (localAction is ScreenshotSelectionAction.Save)
-            recognitionChannel.RecognitionDemand = demand;
+          // 平台等待期间仍可换图，旧快捷输出必须随截图代际取消。
+          recognitionChannel.RecognitionDemand = demand;
           await CompleteScreenshotLocalOutputAsync(generation, capturedInput, localAction, cancellationToken);
           return;
         }

@@ -1655,9 +1655,10 @@ public sealed class ScreenshotSessionWorkbenchTests
 
     public async Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken)
     {
-      CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+      // 复制先进入平台等待（剪贴板打开/重试），门未放开前不触碰模拟剪贴板。
       OutputStarted?.TrySetResult();
       if (OutputGate is { } gate) await gate.Task.WaitAsync(cancellationToken);
+      CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
     }
 
     public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken, nint? pickerOwner = null)
@@ -4432,6 +4433,65 @@ public sealed class ScreenshotSessionWorkbenchTests
       if (withResult) Assert.NotEmpty(await ReadResourceAsync(broker, result.StructuredResult!.Url));
     }
     finally { Directory.Delete(root, recursive: true); }
+  }
+
+  [Fact]
+  public async Task EditorImportDuringGatedLocalCopyCancelsBeforeTouchingClipboard()
+  {
+    string root = TemporaryRoot();
+    RecordingAnnotatedImagePlatform? platform = null;
+    TaskCompletionSource? finished = null;
+    try
+    {
+      CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+      var inference = new ThrowingSubmitClient();
+      var inputs = new FixedCaptureInput();
+      var recognition = new RecognitionViewModel(inference, inputs);
+      // 剪贴板重试门：复制已进入平台，但门未放开前不触碰模拟剪贴板。
+      platform = new RecordingAnnotatedImagePlatform
+      {
+        OutputStarted = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        OutputGate = new(TaskCreationOptions.RunContinuationsAsynchronously),
+      };
+      finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      var history = new PinHistoryStore(root);
+      history.SetEnabled(true);
+      await using var handler = CreateHandler(recognition, root, broker, annotations,
+        new SettingsViewModel(inference), platform, pinHistory: history);
+      handler.ScreenshotCaptureFinished += () => finished.TrySetResult();
+      inputs.SelectionAction = ScreenshotSelectionAction.Copy;
+      inputs.Data = InputService.EncodeTopDownBmp(HistoryPixels, 2, 2, 8);
+      await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(), cancellationToken);
+      await platform.OutputStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+      Assert.Null(platform.CopiedBytes);
+
+      // 不释放平台门：主窗识别页编辑导入换图增代，必须随代际取消直接结束旧复制。
+      using var replacement = new RecognitionStateAwaiter(handler,
+        state => state.IsTerminal && state.ScreenshotSession is not null);
+      await handler.ExecuteAsync(new OpenRecognitionImageForEditCommand(), cancellationToken);
+      RecognitionWorkbenchState replaced = await replacement.Task;
+      await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+
+      // 旧复制无副作用：未触碰剪贴板、未录历史、旧资源已释放，且旧终态
+      // 不覆盖新编辑会话。
+      Assert.Null(platform.CopiedBytes);
+      Assert.Equal((0, 0, 0), annotations.ActiveCounts);
+      Assert.Empty(history.Projection(null).Entries);
+      Assert.Equal(0, inference.SubmitCalls);
+      Assert.Equal(Guid.Parse(replaced.ScreenshotSession!.SessionId), handler.CurrentImageSessionId);
+      Assert.NotNull(recognition.CurrentInput);
+    }
+    finally
+    {
+      // 门仅作清理放开；等待旧流程退出后再删根目录，避免失败路径的文件竞争。
+      platform?.OutputGate?.TrySetResult();
+      if (finished is not null)
+        try { await finished.Task.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None); }
+        catch (TimeoutException) { }
+      Directory.Delete(root, recursive: true);
+    }
   }
 
   [Fact]
