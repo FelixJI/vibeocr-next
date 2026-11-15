@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,45 @@ def _verify_runtime_code(product_root: Path, version: str) -> None:
     )
 
 
+def _verify_bootstrapper(product_root: Path) -> None:
+    command = [str(product_root / "VibeOCR.exe"), "--self-test-prerequisites"]
+    environment = os.environ.copy()
+    environment.pop("VIBEOCR_NEXT_TEST_MODE", None)
+    subprocess.run(command, check=True, timeout=30, cwd=product_root, env=environment)
+
+    def expect_failure(exit_code: int, diagnostic: bytes) -> None:
+        result = subprocess.run(
+            command, capture_output=True, timeout=30, cwd=product_root, env=environment
+        )
+        if result.returncode != exit_code or diagnostic not in result.stderr:
+            raise ValueError(
+                f"Bootstrapper failure should report {diagnostic!r} and exit {exit_code}; "
+                f"got exit {result.returncode}: {result.stderr!r}"
+            )
+
+    # Move originals within the temporary extraction. A root-level extra file
+    # would fail the layout check before reaching the WebView2 version check.
+    velopack = product_root / "Velopack.dll"
+    backup = product_root / "app/Velopack.dll.smoke-backup"
+    velopack.rename(backup)
+    try:
+        expect_failure(5, b"Velopack.dll")
+    finally:
+        backup.replace(velopack)
+
+    browser = product_root / "app/WebView2Runtime/msedgewebview2.exe"
+    backup = browser.with_suffix(".exe.smoke-backup")
+    browser.rename(backup)
+    try:
+        # The bundled managed DLL has a valid, different four-part file version.
+        shutil.copyfile(velopack, browser)
+        expect_failure(2, b"webview2.version-mismatch")
+        browser.write_bytes(b"no version resource")
+        expect_failure(2, b"webview2.invalid-version")
+    finally:
+        backup.replace(browser)
+
+
 def verify(artifacts: Path, version: str) -> None:
     portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
     names = verify_release_assets(
@@ -149,15 +189,7 @@ def verify(artifacts: Path, version: str) -> None:
         if embedded_identity != identity:
             raise ValueError("Portable product identity differs from release asset")
         _verify_runtime_code(product_root, version)
-        subprocess.run(
-            [
-                str(product_root / "VibeOCR.exe"),
-                "--self-test-prerequisites",
-            ],
-            check=True,
-            timeout=30,
-            cwd=product_root,
-        )
+        _verify_bootstrapper(product_root)
         # pwsh 的有效 TEMP 必须与本进程实际解包目录一致（TMPDIR/TEMP
         # 可能指向不同根）；smoke 据此逐层校验复用树的精确归属。
         temp_parent = str(extracted.resolve().parent)

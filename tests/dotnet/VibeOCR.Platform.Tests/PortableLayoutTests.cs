@@ -789,6 +789,38 @@ public sealed class PortableLayoutTests
         }
     }
 
+    [Fact]
+    public void WebView2VersionCheckDistinguishesMismatchFromUnreadableVersion()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-webview2-version-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string executable = Path.Combine(root, "msedgewebview2.exe");
+        try
+        {
+            string source = typeof(ResolvedProductLayout).Assembly.Location;
+            string? version = FileVersionInfo.GetVersionInfo(source).FileVersion;
+            Assert.NotNull(version);
+            File.Copy(source, executable);
+            Assert.Equal(version, ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, version));
+
+            const string expected = "0.0.0.0";
+            var mismatch = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, expected));
+            Assert.Contains("webview2.version-mismatch", mismatch.Message);
+            Assert.Contains(expected, mismatch.Message);
+
+            File.WriteAllText(executable, "no version resource");
+            var unreadable = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, version));
+            Assert.Contains("webview2.invalid-version", unreadable.Message);
+            Assert.Contains(executable, unreadable.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
     private static void CreateProductLayoutFixture(string root)
     {
         string metadata = Path.Combine(root, "app", "metadata");

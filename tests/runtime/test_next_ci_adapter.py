@@ -376,6 +376,9 @@ def _configure_release_smoke_fixture(
         package.writestr("current/LICENSE", b"license")
         package.writestr("current/CHANGELOG.md", b"changelog")
         package.writestr("current/app/VibeOCR.WinUI.exe", b"desktop")
+        package.writestr(
+            "current/app/WebView2Runtime/msedgewebview2.exe", b"locked-browser"
+        )
         package.writestr("current/runtime/env/runtime-env/python.exe", b"runtime")
         package.writestr(
             "current/app/metadata/component-identities.json",
@@ -406,7 +409,7 @@ def _configure_release_smoke_fixture(
 
     def fake_run(
         command: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> subprocess.CompletedProcess[bytes]:
         calls.append(command)
         if Path(command[0]).name == "python.exe":
             assert command[1:4] == ["-I", "-B", "-c"]
@@ -423,7 +426,21 @@ def _configure_release_smoke_fixture(
             assert command[1:] == ["--self-test-prerequisites"]
             assert kwargs["timeout"] == 30
             assert kwargs["cwd"] == Path(command[0]).parent
-            unpack_roots.append(Path(command[0]).parent)
+            product_root = Path(command[0]).parent
+            unpack_roots.append(product_root)
+            velopack = product_root / "Velopack.dll"
+            browser = product_root / "app/WebView2Runtime/msedgewebview2.exe"
+            if kwargs.get("capture_output"):
+                if not velopack.is_file():
+                    return subprocess.CompletedProcess(
+                        command, 5, stderr=b"Velopack.dll"
+                    )
+                reason = (
+                    b"webview2.version-mismatch"
+                    if browser.read_bytes() == velopack.read_bytes()
+                    else b"webview2.invalid-version"
+                )
+                return subprocess.CompletedProcess(command, 2, stderr=reason)
             if fail_bootstrapper:
                 raise subprocess.CalledProcessError(30, command)
         elif "smoke_web_workbench.ps1" in command[2]:
@@ -433,6 +450,10 @@ def _configure_release_smoke_fixture(
             assert product_root.name == "current"
             assert product_root.parent.name.startswith("vibeocr-release-smoke-")
             assert (product_root / "app/VibeOCR.WinUI.exe").is_file()
+            assert (product_root / "Velopack.dll").read_bytes() == b"velopack-runtime"
+            assert (
+                product_root / "app/WebView2Runtime/msedgewebview2.exe"
+            ).read_bytes() == b"locked-browser"
             environment = kwargs["env"]
             assert environment is not None
             assert Path(environment["TEMP"]) == product_root.parent.parent
@@ -458,7 +479,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
-    assert len(calls) == 3
+    assert len(calls) == 6
     assert Path(calls[0][0]).parts[-4:] == (
         "runtime",
         "env",
@@ -467,9 +488,9 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     )
     assert calls[1][0].endswith("VibeOCR.exe")
     assert calls[1][1:] == ["--self-test-prerequisites"]
-    assert calls[2][2].endswith("smoke_web_workbench.ps1")
-    # 三次子进程调用必须共享同一个独占解包根,并在结束后由 Python 清理。
-    assert len(unpack_roots) == 3
+    assert calls[-1][2].endswith("smoke_web_workbench.ps1")
+    # 子进程共享同一个独占解包根,并在结束后由 Python 清理。
+    assert len(unpack_roots) == 6
     assert len({str(path) for path in unpack_roots}) == 1
     reused = unpack_roots[0]
     assert reused.name == "current"
@@ -575,7 +596,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 3
+    assert len(calls) == 6
     # handshake 失败后复用解包树仍由 Python 的 TemporaryDirectory 清理。
     assert not unpack_roots[0].exists()
 
@@ -1195,12 +1216,13 @@ def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
         ".OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate("
         in program
     )
-    assert program.index("LegacyVelopackStateMigration.Resume(") < program.index(
-        "VelopackApp.Build()"
+    assert (
+        program.index("if (!File.Exists(velopackDll))")
+        < program.index("LegacyVelopackStateMigration.Resume(")
+        < program.index("RunVelopack(productRoot);")
+        < program.index("return Launch(args,")
     )
-    assert program.index("VelopackApp.Build()") < program.index(
-        "PortableProductRoots roots"
-    )
+    assert "[MethodImpl(MethodImplOptions.NoInlining)]" in program
     assert '<PackageReference Include="Velopack" />' in project
     child_program = (root / "src/dotnet/VibeOCR.App/Program.cs").read_text(
         encoding="utf-8"

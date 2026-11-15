@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace VibeOCR.ProductLayout;
 
@@ -212,6 +214,36 @@ public sealed class ResolvedProductLayout
                 "layout.invalid-path: 随包 WebView2 浏览器入口是重解析点：" + executable);
         }
         return !attributes.HasFlag(FileAttributes.Directory);
+    }
+
+    public static string ReadWebView2ExecutableVersion(string executable, string? expectedVersion = null)
+    {
+        if (!HasSafeWebView2Executable(executable))
+        {
+            throw new InvalidDataException("layout.missing-entry: " + executable);
+        }
+        string? version;
+        try
+        {
+            version = FileVersionInfo.GetVersionInfo(executable).FileVersion;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                "webview2.invalid-version: 无法读取随包 WebView2 浏览器入口的版本：" + executable,
+                error);
+        }
+        if (version is null || !Regex.IsMatch(version, @"\A[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\z"))
+        {
+            throw new InvalidDataException(
+                "webview2.invalid-version: 无法读取随包 WebView2 浏览器入口的完整四段版本：" + executable);
+        }
+        if (expectedVersion is not null && !string.Equals(version, expectedVersion, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"webview2.version-mismatch: 随包 WebView2 运行库版本 {version} 与锁定版本 {expectedVersion} 不一致：{executable}");
+        }
+        return version;
     }
 
     private static void Validate(ProductLayoutDocument value)

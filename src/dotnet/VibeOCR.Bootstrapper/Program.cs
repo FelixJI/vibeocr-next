@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using VibeOCR.ProductLayout;
 using Velopack;
 
@@ -18,17 +19,23 @@ internal static class Program
   [STAThread]
   private static int Main(string[] args)
   {
-    LegacyVelopackStateMigration.Resume(AppDomain.CurrentDomain.BaseDirectory);
-    VelopackApp.Build()
-        .OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate(
-            AppDomain.CurrentDomain.BaseDirectory))
-        .Run();
-    PortableProductRoots roots = PortableProductRoots.Resolve(
-        AppDomain.CurrentDomain.BaseDirectory);
-    BootstrapperLog.Initialize(Path.Combine(roots.InstallRoot, "state", "logs"));
+    string productRoot = AppDomain.CurrentDomain.BaseDirectory;
+    string velopackDll = Path.Combine(productRoot, "Velopack.dll");
+    if (!File.Exists(velopackDll))
+    {
+      InitializeLog(productRoot);
+      ReportRepair("随包 Velopack 更新组件缺失：" + velopackDll,
+          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          BootstrapperArtifactSmoke.IsRequested());
+      return LayoutInvalid;
+    }
+
+    LegacyVelopackStateMigration.Resume(productRoot);
+    RunVelopack(productRoot);
+    PortableProductRoots roots = InitializeLog(productRoot);
     try
     {
-      return Launch(args);
+      return Launch(args, roots);
     }
     catch (Exception error)
     {
@@ -37,12 +44,24 @@ internal static class Program
     }
   }
 
-  private static int Launch(string[] args)
+  // Keep Velopack out of the entry point's JIT so a missing DLL can be reported.
+  [MethodImpl(MethodImplOptions.NoInlining)]
+  private static void RunVelopack(string productRoot) =>
+      VelopackApp.Build()
+          .OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate(productRoot))
+          .Run();
+
+  private static PortableProductRoots InitializeLog(string productRoot)
+  {
+    PortableProductRoots roots = PortableProductRoots.Resolve(productRoot);
+    BootstrapperLog.Initialize(Path.Combine(roots.InstallRoot, "state", "logs"));
+    return roots;
+  }
+
+  private static int Launch(string[] args, PortableProductRoots roots)
   {
     bool selfTest = args.Contains(SelfTestPrerequisites, StringComparer.Ordinal);
     bool artifactSmoke = BootstrapperArtifactSmoke.IsRequested();
-    PortableProductRoots roots = PortableProductRoots.Resolve(
-        AppDomain.CurrentDomain.BaseDirectory);
     BootstrapperLog.Info(
         $"Bootstrapper starting: installRoot={roots.InstallRoot} productRoot={roots.ProductRoot}");
     ResolvedProductLayout layout;
@@ -71,7 +90,7 @@ internal static class Program
         {
           MissingBundledDotNetRuntime(layout),
           HasBundledWindowsAppRuntime(layout) ? null : "随包 Windows App Runtime 文件缺失：Microsoft.WindowsAppRuntime.dll",
-          HasBundledWebView2Runtime(layout) ? null : "随包 WebView2 文件缺失：msedgewebview2.exe",
+          BundledWebView2RuntimeError(layout),
           HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         })
         .Where(item => item != null).Select(item => item!).ToArray();
@@ -160,8 +179,20 @@ internal static class Program
   private static bool HasBundledWindowsAppRuntime(ResolvedProductLayout layout) =>
       File.Exists(Path.Combine(layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"));
 
-  private static bool HasBundledWebView2Runtime(ResolvedProductLayout layout) =>
-      File.Exists(Path.Combine(layout.WebView2RuntimeRoot, "msedgewebview2.exe"));
+  private static string? BundledWebView2RuntimeError(ResolvedProductLayout layout)
+  {
+    try
+    {
+      ResolvedProductLayout.ReadWebView2ExecutableVersion(
+          Path.Combine(layout.WebView2RuntimeRoot, "msedgewebview2.exe"),
+          WebView2LockVersion.LockedRuntimeVersion);
+      return null;
+    }
+    catch (InvalidDataException error)
+    {
+      return error.Message;
+    }
+  }
 
   private static string Quote(string value) =>
       "\"" + value.Replace("\"", "\\\"") + "\"";

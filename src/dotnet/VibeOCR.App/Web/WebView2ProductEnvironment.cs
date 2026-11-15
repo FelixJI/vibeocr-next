@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.Web.WebView2.Core;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.ProductLayout;
@@ -21,7 +20,7 @@ namespace VibeOCR.App.Web;
 /// 未打包 dev/test（默认构建）：无随包目录时允许系统 Evergreen，外部显式
 /// env 覆盖（测试/隔离）优先；有随包目录的 dev 树仍优先随包目录。
 /// </remarks>
-public static partial class WebView2ProductEnvironment
+public static class WebView2ProductEnvironment
 {
     public const string BundledFolderName = "WebView2Runtime";
     public const string BrowserExecutableName = "msedgewebview2.exe";
@@ -78,17 +77,7 @@ public static partial class WebView2ProductEnvironment
     {
         ArgumentNullException.ThrowIfNull(layout);
 #if VIBEOCR_PRODUCT_WEBVIEW2
-        string folder = ResolveBundledRuntimeFolder(baseDirectory)
-            ?? throw new InvalidOperationException(
-                "VibeOCR 随包 WebView2 运行库缺失（" +
-                Path.Combine(Path.GetFullPath(baseDirectory), BundledFolderName) +
-                "）。请通过应用内更新或重新获取完整安装包修复；应用不会回退使用系统运行库，也不会联网安装。");
-        string version = BundledRuntimeVersionOrThrow(folder);
-        if (version != LockedRuntimeVersion)
-        {
-            throw new InvalidOperationException(
-                $"VibeOCR 随包 WebView2 运行库版本 {version} 与锁定版本 {LockedRuntimeVersion} 不一致；拒绝启动 WebView。");
-        }
+        var (_, version) = ResolveRequiredBundledRuntime(baseDirectory);
         return layout.WebView2FixedRoot(version);
 #else
         return ResolveBundledRuntimeFolder(baseDirectory) is { } devFolder
@@ -144,17 +133,7 @@ public static partial class WebView2ProductEnvironment
 #if VIBEOCR_PRODUCT_WEBVIEW2
         // 发布模式：与 PrepareProductionUserData 同一校验链，任何缺失/失配
         // 都在创建环境之前失败；不读取继承 env（F2）。
-        string folder = ResolveBundledRuntimeFolder(baseDirectory)
-            ?? throw new InvalidOperationException(
-                "VibeOCR 随包 WebView2 运行库缺失或损坏（" +
-                Path.Combine(baseDirectory, BundledFolderName) +
-                "）。请通过应用内更新或重新获取完整安装包修复；应用不会回退使用系统运行库，也不会联网安装。");
-        string version = BundledRuntimeVersionOrThrow(folder);
-        if (version != LockedRuntimeVersion)
-        {
-            throw new InvalidOperationException(
-                $"VibeOCR 随包 WebView2 运行库版本 {version} 与锁定版本 {LockedRuntimeVersion} 不一致；拒绝启动 WebView。");
-        }
+        var (folder, version) = ResolveRequiredBundledRuntime(baseDirectory);
         string userDataFolder = RequiredFixedUserDataFolder(version);
         ApplyAppContainerPermissions(folder);
         // 进程内覆盖与显式传参同值：压制继承 env 与注册表重定向（F2）。
@@ -233,18 +212,28 @@ public static partial class WebView2ProductEnvironment
         }
     }
 
-    internal static string BundledRuntimeVersionOrThrow(string browserFolder)
+#if VIBEOCR_PRODUCT_WEBVIEW2
+    private static (string Folder, string Version) ResolveRequiredBundledRuntime(string baseDirectory)
     {
-        string executable = Path.Combine(browserFolder, BrowserExecutableName);
-        string? version = FileVersionInfo.GetVersionInfo(executable).FileVersion;
-        if (string.IsNullOrWhiteSpace(version) ||
-            !System.Text.RegularExpressions.Regex.IsMatch(
-                version, @"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$"))
+        string folder = ResolveBundledRuntimeFolder(baseDirectory)
+            ?? throw new InvalidOperationException(
+                "VibeOCR 随包 WebView2 运行库缺失或损坏（" +
+                Path.Combine(Path.GetFullPath(baseDirectory), BundledFolderName) +
+                "）。请通过应用内更新或重新获取完整安装包修复；应用不会回退使用系统运行库，也不会联网安装。");
+        return (folder, BundledRuntimeVersionOrThrow(folder, WebView2LockVersion.LockedRuntimeVersion));
+    }
+#endif
+
+    internal static string BundledRuntimeVersionOrThrow(string browserFolder, string? expectedVersion = null)
+    {
+        try
         {
-            throw new InvalidOperationException(
-                "无法从随包 msedgewebview2.exe 读取完整四段运行库版本，拒绝创建 WebView2 环境：" +
-                executable);
+            return ResolvedProductLayout.ReadWebView2ExecutableVersion(
+                Path.Combine(browserFolder, BrowserExecutableName), expectedVersion);
         }
-        return version;
+        catch (InvalidDataException error)
+        {
+            throw new InvalidOperationException(error.Message, error);
+        }
     }
 }
