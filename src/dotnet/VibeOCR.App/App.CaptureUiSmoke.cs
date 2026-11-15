@@ -244,7 +244,7 @@ public sealed partial class App
       PhysicalRectangle monitor = DesktopScreenQuery.GetPrimaryMonitor();
       source.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(monitor.X + 80, monitor.Y + 80, 360, 320));
       await ActivateAndWaitForegroundAsync(source, sourceHandle);
-      await Task.Delay(150, cancellation.Token);
+      await WaitForScrollUiAsync(() => viewer.IsLoaded && rows.ActualHeight > 0, cancellation.Token);
       PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(sourceHandle)
           ?? throw new InvalidOperationException("Owned scroll source has no client bounds.");
       var bounds = new PhysicalRectangle(client.X + 16, client.Y + 16, client.Width - 32, client.Height - 32);
@@ -253,6 +253,37 @@ public sealed partial class App
       nint controllerHandle = WinRT.Interop.WindowNative.GetWindowHandle(session.ControlWindow);
       var root = (DependencyObject)session.ControlWindow.Content;
       await WaitForScrollUiAsync(() => root is FrameworkElement { IsLoaded: true }, cancellation.Token);
+      // Loaded/foreground do not prove that XAML pixels have reached desktop capture.
+      await using (var probe = new ScreenCaptureService(Guid.NewGuid()))
+      {
+        var expectedColors = rows.Children.Cast<Microsoft.UI.Xaml.Controls.Border>()
+          .Select(row => ((Microsoft.UI.Xaml.Media.SolidColorBrush)row.Background).Color)
+          .Select(color => (color.R << 16) | (color.G << 8) | color.B).ToHashSet();
+        var strip = new PhysicalRectangle(bounds.Right - 8, bounds.Y, 1, bounds.Height);
+        int matchingColors = 0;
+        int firstColor = 0;
+        try
+        {
+          await WaitForScrollUiAsync(() =>
+          {
+            nint foreground = ScreenTargetQuery.GetForegroundWindowHandle();
+            Check(foreground == sourceHandle || foreground == controllerHandle,
+                $"Synthetic scroll source was covered by foreground {foreground}.");
+            CapturedFrame frame = probe.Capture(strip, TimeSpan.FromSeconds(1));
+            var observed = new HashSet<int>();
+            for (int offset = 0; offset < frame.Pixels.Length; offset += 4)
+              observed.Add((frame.Pixels[offset + 2] << 16) | (frame.Pixels[offset + 1] << 8) | frame.Pixels[offset]);
+            firstColor = observed.First();
+            matchingColors = observed.Count(expectedColors.Contains);
+            return matchingColors >= 2;
+          }, cancellation.Token);
+        }
+        catch (Exception error)
+        {
+          throw new InvalidOperationException(
+            $"Synthetic scroll rows were not rendered into desktop capture: colors={matchingColors}, first=#{firstColor:X6}, bounds={bounds}.", error);
+        }
+      }
       Microsoft.UI.Xaml.Controls.Button Button(string id) =>
           FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Button>(root, id);
       void Invoke(string id)
@@ -271,17 +302,33 @@ public sealed partial class App
       bool success = scenario == "ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment";
       var confirm = Button("scroll-capture-confirm");
       var finish = Button("scroll-capture-finish");
+      async Task WaitForFirstFrameAsync()
+      {
+        try
+        {
+          await WaitForScrollUiAsync(() => finish.IsEnabled || capture.IsCompleted, cancellation.Token);
+          if (capture.IsCompleted) await capture;
+          Check(finish.IsEnabled, "Capture ended before the first frame became finishable.");
+        }
+        catch (Exception error)
+        {
+          throw new InvalidOperationException(
+            $"{error.Message} source={sourceHandle}, controller={controllerHandle}, " +
+            $"foreground={ScreenTargetQuery.GetForegroundWindowHandle()}, finish={finish.IsEnabled}, " +
+            $"offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
+        }
+      }
       Check(!finish.IsEnabled, "Finishing must stay closed until a direction has been picked and a frame accepted.");
       SelectDirection("scroll-capture-direction-down");
       if (scenario == "ScrollCaptureCancellationDiscardsFramesAndClosesController")
       {
-        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
+        await WaitForFirstFrameAsync();
         Invoke("scroll-capture-cancel");
         Check(await capture is null, "Cancellation after the first accepted frame must not return a partial image.");
       }
       else if (!success)
       {
-        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
+        await WaitForFirstFrameAsync();
         source.Close();
         sourceClosed = true;
         await WaitForScrollUiAsync(() => !finish.IsEnabled && confirm.Visibility == Visibility.Collapsed,
