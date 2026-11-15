@@ -1023,8 +1023,12 @@ public sealed class ScreenRegionPicker(
           // 提示/高亮清晰：可点击时用宿主 Hint（文字按钮携带引擎名），
           // 禁用时同时携带名称与原因，指明在设置中修复。
           if (entry.Hint is { } hint && ready) ToolTipService.SetToolTip(item, hint);
-          else if (!ready) ToolTipService.SetToolTip(item,
-            $"{entry.DisplayName}：{UnavailableReason(entry.Availability, entry.ReasonCode)}");
+          else if (!ready)
+          {
+            toolbarRowMain.Children.Remove(item);
+            toolbarRowMain.Children.Add(ExplainUnavailableAction(item,
+              $"{entry.DisplayName}：{UnavailableReason(entry.Availability, entry.ReasonCode)}"));
+          }
         }
       }
       // 长截图复用当前选区，不再二次框选。
@@ -1435,6 +1439,17 @@ public sealed class ScreenRegionPicker(
     };
     return messages;
   }
+
+    internal static Border ExplainUnavailableAction(Button button, string message)
+    {
+      button.IsEnabled = false;
+      AutomationProperties.SetHelpText(button, message);
+      ToolTipService.SetToolTip(button, null);
+      // Disabled controls cannot receive the pointer events that open a tooltip.
+      var host = new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Child = button };
+      ToolTipService.SetToolTip(host, new ToolTip { Content = message });
+      return host;
+    }
 
     // 只映射目录/投影 availability 的稳定词汇，不复制引擎/配方表；准备类
     // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字

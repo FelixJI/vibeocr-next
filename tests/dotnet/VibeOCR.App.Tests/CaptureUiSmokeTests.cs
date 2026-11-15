@@ -11,6 +11,10 @@ namespace VibeOCR.App.Tests;
 /// <summary>在独立真实 WinUI App 进程执行 UI 断言；testhost 不创建 XAML Application。</summary>
 public sealed class CaptureUiSmokeTests : IDisposable
 {
+  [Fact]
+  public Task DisabledCaptureActionShowsRepairOnHover() =>
+      RunUiSmokeAsync(nameof(DisabledCaptureActionShowsRepairOnHover));
+
   private readonly string _root = Path.Combine(Path.GetTempPath(), $"vibeocr-capture-ui-{Guid.NewGuid():N}");
 
   // 两个功能组各自保留原 30 秒进程上限，避免累积自检挤占退出预算。

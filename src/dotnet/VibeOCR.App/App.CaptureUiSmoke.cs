@@ -39,6 +39,9 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
+        case "DisabledCaptureActionShowsRepairOnHover":
+          await VerifyDisabledCaptureActionHintAsync();
+          break;
         case "PinsSaveSwitchAndRecover":
         case "PinsFormulaWindowLifecycleAndExitRecovery":
           await VerifyPinsUiAsync(layout, lifecycle: scenario == "PinsFormulaWindowLifecycleAndExitRecovery");
@@ -208,6 +211,85 @@ public sealed partial class App
       release.TrySetResult();
       await host.DisposeAsync();
       view.Close();
+      window.Close();
+    }
+  }
+
+  private static async Task VerifyDisabledCaptureActionHintAsync()
+  {
+    var button = new Microsoft.UI.Xaml.Controls.Button { Content = "文字识别" };
+    string message = ScreenRegionPicker.UnavailableReason("unavailable", "product_runtime_damaged");
+    var host = ScreenRegionPicker.ExplainUnavailableAction(button, message);
+    bool pointerEntered = false;
+    host.PointerEntered += (_, _) =>
+    {
+      pointerEntered = true;
+      CaptureUiSmokeTrace.Stage("disabled-hint.pointer-entered");
+    };
+    host.Width = 200;
+    host.Height = 40;
+    host.HorizontalAlignment = HorizontalAlignment.Center;
+    host.VerticalAlignment = VerticalAlignment.Center;
+    var grid = new Microsoft.UI.Xaml.Controls.Grid
+    {
+      Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+    };
+    grid.AddHandler(UIElement.PointerMovedEvent,
+      new Microsoft.UI.Xaml.Input.PointerEventHandler((_, args) =>
+        CaptureUiSmokeTrace.Stage($"disabled-hint.moved point={args.GetCurrentPoint(grid).Position}, source={args.OriginalSource.GetType().Name}")),
+      handledEventsToo: true);
+    grid.Children.Add(host);
+    var window = new Window { Title = "Owned disabled capture hint", Content = grid };
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    Check(GetCursorPos(out PointL original), "Cannot read cursor before hint smoke.");
+    PointL target = original;
+    try
+    {
+      var monitor = DesktopScreenQuery.GetPrimaryMonitor();
+      window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(monitor.X + 80, monitor.Y + 80, 400, 240));
+      await ActivateAndWaitForegroundAsync(window, handle);
+      await WaitForCaptureUiAsync(() => host.IsLoaded && host.ActualWidth > 0);
+      PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(handle)
+          ?? throw new InvalidOperationException("Hint smoke has no client bounds.");
+      Check(SetCursorPos(client.X + 8, client.Y + 8), "Cannot leave hint target.");
+      await Task.Delay(100);
+      Windows.Foundation.Point center = button.TransformToVisual(grid).TransformPoint(
+          new Windows.Foundation.Point(button.ActualWidth / 2, button.ActualHeight / 2));
+      var hits = Microsoft.UI.Xaml.Media.VisualTreeHelper.FindElementsInHostCoordinates(center, grid).ToArray();
+      CaptureUiSmokeTrace.Stage($"disabled-hint.hit-test point={center}, elements={string.Join(',', hits.Select(element => element.GetType().Name))}");
+      Check(hits.Contains(host), "The disabled action must hit its enabled hint container.");
+      double scale = host.XamlRoot.RasterizationScale;
+      target = new PointL
+      {
+        X = client.X + (int)Math.Round(center.X * scale),
+        Y = client.Y + (int)Math.Round(center.Y * scale),
+      };
+      CaptureUiSmokeTrace.Stage($"disabled-hint.geometry client={client}, center={center}, scale={scale}, target=({target.X},{target.Y})");
+      Check(GetAncestor(WindowFromPoint(target), 2) == handle, "Hint target is covered by another window.");
+      Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle, "Hint window lost foreground before mouse input.");
+      // Use the same real pointer injection as the native smoke fixture, not just cursor repositioning.
+      var move = new SmokeInput
+      {
+        MouseX = (int)((((long)target.X - GetSystemMetrics(76)) * 65536 + 32768) / GetSystemMetrics(78)),
+        MouseY = (int)((((long)target.Y - GetSystemMetrics(77)) * 65536 + 32768) / GetSystemMetrics(79)),
+        MouseFlags = 0x0001 | 0x4000 | 0x8000,
+      };
+      Check(SendInput(1, [move], Marshal.SizeOf<SmokeInput>()) == 1, "Cannot deliver hover input.");
+      Check(GetCursorPos(out PointL positioned) && positioned.X == target.X && positioned.Y == target.Y,
+          "Hover input did not reach the owned target.");
+      var tooltip = (Microsoft.UI.Xaml.Controls.ToolTip)Microsoft.UI.Xaml.Controls.ToolTipService.GetToolTip(host);
+      tooltip.Opened += (_, _) => CaptureUiSmokeTrace.Stage("disabled-hint.opened");
+      await WaitForCaptureUiAsync(() => pointerEntered);
+      await WaitForScrollUiAsync(() => tooltip.IsOpen, CancellationToken.None);
+      Check(!button.IsEnabled && Equals(tooltip.Content, message) && message.Contains("完整安装包修复", StringComparison.Ordinal),
+          "Disabled capture action must show the product repair hint without becoming clickable.");
+      Check(Microsoft.UI.Xaml.Automation.AutomationProperties.GetHelpText(button) == message,
+          "The disabled action must expose the same repair reason to accessibility.");
+    }
+    finally
+    {
+      if (GetCursorPos(out PointL current) && current.X == target.X && current.Y == target.Y)
+        SetCursorPos(original.X, original.Y);
       window.Close();
     }
   }
@@ -672,6 +754,8 @@ public sealed partial class App
   private struct SmokeInput
   {
     [FieldOffset(0)] public uint Type;
+    [FieldOffset(8)] public int MouseX;
+    [FieldOffset(12)] public int MouseY;
     [FieldOffset(8)] public ushort VirtualKey;
     [FieldOffset(10)] public ushort Scan;
     [FieldOffset(12)] public uint Flags;
@@ -683,6 +767,9 @@ public sealed partial class App
 
   [DllImport("user32.dll", SetLastError = true)]
   private static extern uint SendInput(uint count, SmokeInput[] inputs, int size);
+
+  [DllImport("user32.dll")]
+  private static extern int GetSystemMetrics(int index);
 
   /// <summary>
   /// 点击本测试窗口取得真实前台，避免后台 testhost 依赖 Windows 的抢焦点许可。
