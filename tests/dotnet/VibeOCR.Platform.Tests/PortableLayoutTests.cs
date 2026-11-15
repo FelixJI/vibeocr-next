@@ -755,6 +755,40 @@ public sealed class PortableLayoutTests
         }
     }
 
+    [Fact]
+    public void ProductRootClosureRejectsLinkedWebView2ExecutableWithReadableVersion()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-webview2-link-{Guid.NewGuid():N}");
+        string product = Path.Combine(root, "product");
+        string executable = Path.Combine(product, "app", "WebView2Runtime", "msedgewebview2.exe");
+        try
+        {
+            CreateProductLayoutFixture(product);
+            File.Delete(executable);
+            string outside = Path.Combine(root, "outside.exe");
+            File.Copy(typeof(ResolvedProductLayout).Assembly.Location, outside);
+            try
+            {
+                File.CreateSymbolicLink(executable, outside);
+            }
+            catch (IOException linkError) when (linkError.HResult == unchecked((int)0x80070522))
+            {
+                Assert.Skip("Windows 未授予创建文件符号链接的权限（ERROR_PRIVILEGE_NOT_HELD）。");
+            }
+
+            Assert.True(File.Exists(executable));
+            Assert.Matches(@"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$",
+                FileVersionInfo.GetVersionInfo(executable).FileVersion ?? "");
+            var error = Assert.Throws<InvalidDataException>(() => ResolvedProductLayout.Open(product));
+            Assert.Contains("重解析点", error.Message);
+            Assert.Contains(executable, error.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
     private static void CreateProductLayoutFixture(string root)
     {
         string metadata = Path.Combine(root, "app", "metadata");

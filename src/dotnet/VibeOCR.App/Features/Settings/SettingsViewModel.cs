@@ -882,7 +882,10 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         _ => source.Id,
     };
 
-    internal static string LocalizeSelection(RuntimeSelectionException error) => error.Kind switch
+    internal static string LocalizeSelection(RuntimeSelectionException error) =>
+        error.ReasonCode == VibeOCR.Platform.Inference.InferenceClientException.ProductRuntimeDamagedReason
+            ? "VibeOCR 随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复。应用不会在线安装依赖。"
+            : error.Kind switch
     {
         RuntimeSelectionErrorKind.CapabilityMissing => "当前 Backend 不支持该选择能力",
         RuntimeSelectionErrorKind.InvalidCatalogEntry or RuntimeSelectionErrorKind.DuplicateCatalogEntry
@@ -895,7 +898,6 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         RuntimeSelectionErrorKind.UnknownFeature => "当前加速器不支持该功能",
         _ => "选择失败",
     };
-
     private static string LocalizeV2(HttpV2ErrorCode code) => code switch
     {
         HttpV2ErrorCode.Unauthorized => "Supervisor 会话无效",

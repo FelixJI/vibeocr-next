@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -178,6 +179,20 @@ def _product_tree(root: Path) -> Path:
     )
     app = root / "app"
     (app / "metadata").mkdir(parents=True)
+    boot_lock = json.loads(
+        (_REPO / "src/dotnet/VibeOCR.Bootstrapper/packages.lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    boot_pin = boot_lock["dependencies"][".NETFramework,Version=v4.7.2"]["Velopack"][
+        "resolved"
+    ]
+    packages = root.parent / "nuget-cache"
+    boot_asset = packages / f"velopack/{boot_pin}/lib/net472/Velopack.dll"
+    boot_asset.parent.mkdir(parents=True)
+    boot_asset.write_bytes(b"velopack net472")
+    (root / "Velopack.dll").write_bytes(boot_asset.read_bytes())
+    (root / "VibeOCR.exe").write_bytes(b"bootstrapper")
     (app / "WebView2Runtime").mkdir(parents=True)
     (app / "VibeOCR.WinUI.exe").write_bytes(b"exe")
     (app / "VibeOCR.WinUI.runtimeconfig.json").write_text(
@@ -255,7 +270,7 @@ def _product_tree(root: Path) -> Path:
     publish_items.write_text(
         json.dumps(
             {
-                "Properties": {"NuGetPackageFolders": "C:/nuget/packages"},
+                "Properties": {"NuGetPackageFolders": f"C:/nuget/packages;{packages}"},
                 "Items": {
                     "ResolvedFileToPublish": [
                         {
@@ -370,11 +385,30 @@ def _locked_version() -> str:
     )["version"]
 
 
-def _build(tmp_path: Path, product: Path, metadata: Path | None = None):
+def _build(
+    tmp_path: Path,
+    product: Path,
+    metadata: Path | None = None,
+    *,
+    portable_updater: bool = True,
+):
     import uuid
 
+    artifacts = _artifacts(tmp_path / f"artifacts-{uuid.uuid4().hex[:8]}")
+    with ZipFile(artifacts / "VibeOCRNext-v0.9.0-win-x64.zip", "w") as portable:
+        portable.writestr(".portable", b"")
+        portable.writestr("VibeOCR.exe", b"stub")
+        if portable_updater:
+            portable.writestr("Update.exe", b"updater")
+        portable.writestr("current/sq.version", b"nuspec")
+        for name in ("Velopack.dll", "VibeOCR.exe"):
+            portable.write(product / name, f"current/{name}")
+    with ZipFile(artifacts / "VibeOCRNext-0.9.0-full.nupkg", "w") as full:
+        full.writestr("lib/app/sq.version", b"nuspec")
+        for name in ("Velopack.dll", "VibeOCR.exe"):
+            full.write(product / name, f"lib/app/{name}")
     return build_spdx_sbom(
-        artifacts_dir=_artifacts(tmp_path / f"artifacts-{uuid.uuid4().hex[:8]}"),
+        artifacts_dir=artifacts,
         repository_name="FelixJI/vibeocr-next",
         version="0.9.0",
         product_root=product,
@@ -448,6 +482,11 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
     )
     assert "ort-native.dll" in packages["onnxruntime-directml"]["sourceInfo"]
     assert "app/WebAssets/assets/main.js" in packages["VibeOCR.WebAssets"]["sourceInfo"]
+    assert "lib/net472/Velopack.dll" in packages["Velopack"]["sourceInfo"]
+    assert "Bootstrapper packages.lock.json" in packages["Velopack"]["sourceInfo"]
+    portable_runtime = packages["Velopack Windows Portable runtime"]
+    assert "vendor/update_x64.exe" in portable_runtime["sourceInfo"]
+    assert "vendor/stub_x64.exe" in portable_runtime["sourceInfo"]
     assert "VibeOCR.WinUI" not in packages
     assert "runtimepack.Microsoft.NETCore.App.Runtime.win-x64" not in packages
     assert [item["name"] for item in value["packages"]].count(
@@ -466,6 +505,14 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
         (item["spdxElementId"], item["relationshipType"], item["relatedSpdxElement"])
         for item in value["relationships"]
     }
+    file_ids = {file["fileName"]: file["SPDXID"] for file in value["files"]}
+    assert {
+        (
+            file_ids["VibeOCRNext-v0.9.0-win-x64.zip"],
+            "CONTAINS",
+            portable_runtime["SPDXID"],
+        )
+    } == {edge for edge in relationships if edge[2] == portable_runtime["SPDXID"]}
     assert {
         ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-WebView2"),
         ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-DotNet"),
@@ -671,6 +718,65 @@ def test_spdx_sbom_rejects_production_web_input_outside_lock(tmp_path: Path) -> 
             tmp_path,
             product,
             _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
+        )
+
+
+@pytest.mark.parametrize("duplicate", [False, True], ids=["unowned", "ambiguous"])
+def test_spdx_sbom_requires_unique_python_native_owner(
+    tmp_path: Path, duplicate: bool
+) -> None:
+    product = _product_tree(tmp_path / "VibeOCR")
+    site = product / "runtime/env/runtime-env/Lib/site-packages"
+    manifest = product / "app/metadata/product-release-manifest.json"
+    if duplicate:
+        native = "ort-native.dll"
+        record = site / "example-upstream-1.2.3.dist-info/RECORD"
+        with record.open("a", encoding="utf-8") as stream:
+            stream.write(f"{native},,\n")
+    else:
+        native = "orphan.pyd"
+        orphan = site / native
+        orphan.write_bytes(b"unowned")
+        closure = json.loads(manifest.read_text(encoding="utf-8"))
+        closure["files"][orphan.relative_to(product).as_posix()] = {"size": 7}
+        manifest.write_text(json.dumps(closure), encoding="utf-8")
+    lock = json.loads(
+        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    with pytest.raises(ValueError, match=re.escape(native)):
+        _build(
+            tmp_path,
+            product,
+            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("wrong_dll", "message"),
+    [
+        (True, "root Velopack.dll differs"),
+        (False, "unexpected Velopack Portable root files"),
+    ],
+)
+def test_spdx_sbom_requires_locked_bootstrapper_dll_and_portable_updater(
+    tmp_path: Path, wrong_dll: bool, message: str
+) -> None:
+    product = _product_tree(tmp_path / "VibeOCR")
+    if wrong_dll:
+        (product / "Velopack.dll").write_bytes(b"wrong framework build of Velopack")
+    lock = json.loads(
+        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    with pytest.raises(ValueError, match=message):
+        _build(
+            tmp_path,
+            product,
+            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
+            portable_updater=wrong_dll,
         )
 
 

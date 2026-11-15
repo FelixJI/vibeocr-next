@@ -91,6 +91,7 @@ export function statusLabel(value: unknown, fallback: string): string {
       "所选识别模式已退役，请在设置或任务面板重新选择可用模式。",
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
+    "recognition.productRuntimeDamaged": PRODUCT_RUNTIME_DAMAGED_LABEL,
     "recognition.captureRefused.missingFixedRegion":
       "尚未设置固定截图区域；请打开截图选项设置后重试",
     "recognition.captureRefused.regionUnavailable":

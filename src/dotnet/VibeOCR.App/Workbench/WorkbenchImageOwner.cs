@@ -466,10 +466,16 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   /// <summary>
   /// 严格模式合同的终态：显式选择的模式不可用时保留引擎目录、用户选择与
   /// 截图会话基准，状态指向环境修复；不发布虚假成功或丢失选择。
+  /// #321 R3-1：目录 reason 为 product_runtime_damaged 时使用专属终态码，
+  /// 前端按产品损坏报修，不提示重选模式；其它不可用/退役行为不变。
   /// </summary>
-  private RecognitionWorkbenchState ModeUnavailableRecognitionState(bool retired) => new(
+  private RecognitionWorkbenchState ModeUnavailableRecognitionState(
+    bool retired, string? reasonCode = null) => new(
     false,
-    retired ? "recognition.modeRetired" : "recognition.modeUnavailable",
+    retired ? "recognition.modeRetired"
+      : reasonCode == VibeOCR.Platform.Inference.InferenceClientException.ProductRuntimeDamagedReason
+        ? "recognition.productRuntimeDamaged"
+        : "recognition.modeUnavailable",
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionInput,
     recognitionChannel.SessionId is null ? null : recognitionChannel.SessionResult,
     selectionPolicy.RecognitionEngines(selectionPolicy.TaskModelPreset),
@@ -1556,8 +1562,11 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         .FirstOrDefault(entry => entry.Engine == modeId);
       if (chosen is not { Availability: "ready" })
       {
+        // #321 R3-1：目录 reason（如产品损坏）随异常贯穿终态，不落到通用
+        // 准备文案；其它不可用语义不变。
         throw new RecognitionModeUnavailableException(
-          $"截图识别模式 {modeId} 当前不可用（{chosen?.Availability ?? "未在目录中"}），已拒绝执行；请在设置中准备后重试。");
+          $"截图识别模式 {modeId} 当前不可用（{chosen?.Availability ?? "未在目录中"}），已拒绝执行；请在设置中准备后重试。",
+          reasonCode: chosen?.ReasonCode);
       }
       // typed 意图冻结为任务模式：模式缺失/不可用直接拒绝，不回退默认；
       // 新版 SynchronizeRecognitionMode 中显式 TaskEngine 优先于继承默认。
@@ -1608,7 +1617,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
         ReleaseCaptureGuard();
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired, error.ReasonCode));
         terminalVisible = true;
       }
     }
@@ -1618,7 +1627,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
         ReleaseCaptureGuard();
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired, error.ReasonCode));
         terminalVisible = true;
       }
     }
@@ -1843,7 +1852,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       ScreenshotRecognitionModeEntry entry = BuildSelectionModeEntries(
         settingsOwner.EnsureModel().RecognitionSelection)[(int)intent.Value];
       if (entry.Availability != "ready" || string.IsNullOrWhiteSpace(entry.ModeId))
-        throw new RecognitionModeUnavailableException("所选识别分类尚未就绪；请检查设置。");
+        throw new RecognitionModeUnavailableException(
+          "所选识别分类尚未就绪；请检查设置。", reasonCode: entry.ReasonCode);
       modeId = entry.ModeId;
       explicitMode = true;
     }
@@ -2130,7 +2140,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Image edit recognition mode refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired, error.ReasonCode));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2138,7 +2148,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Image edit recognition selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired, error.ReasonCode));
       }
     }
     catch (Exception error)
@@ -2245,7 +2255,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Screenshot recognition mode refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired, error.ReasonCode));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2253,7 +2263,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Screenshot recognition selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired, error.ReasonCode));
       }
     }
     catch (Exception error)
@@ -2924,7 +2934,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Recognition mode override refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.IsRetired, error.ReasonCode));
       }
     }
     catch (RuntimeSelectionException error)
@@ -2932,7 +2942,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       AppLog.Warn($"Recognition mode selection refused: {error.Message}");
       if (generation == Volatile.Read(ref recognitionChannel.Generation))
       {
-        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired));
+        operations.PublishTerminal(ModeUnavailableRecognitionState(error.Kind == RuntimeSelectionErrorKind.RecognitionModeRetired, error.ReasonCode));
       }
     }
     catch (Exception error)

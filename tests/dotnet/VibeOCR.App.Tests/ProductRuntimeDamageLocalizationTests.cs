@@ -45,6 +45,39 @@ public sealed class ProductRuntimeDamageLocalizationTests
   }
 
   [Fact]
+  public void SettingsLocalizesProductDamageThroughSelectionError()
+  {
+    // #321 R3-1：选择异常携带 product_runtime_damaged 时，设置页选择错误
+    // 统一报修，不再提示安装依赖/选择其他引擎。
+    var damaged = new VibeOCR.Platform.Bootstrap.RuntimeSelectionException(
+        VibeOCR.Platform.Bootstrap.RuntimeSelectionErrorKind.EngineUnavailable,
+        "Recognition mode 'paddle_text' is unavailable (product_runtime_damaged).",
+        reasonCode: InferenceClientException.ProductRuntimeDamagedReason);
+    string message = SettingsViewModel.LocalizeSelection(damaged);
+    // 对真实错误引导断言（而非禁字）：报修 + 明确不在线安装。
+    Assert.Contains("随包运行组件损坏", message);
+    Assert.Contains("重新获取完整安装包", message);
+    Assert.Contains("不会在线安装依赖", message);
+    Assert.DoesNotContain("安装所需依赖", message);
+    Assert.DoesNotContain("其他引擎", message);
+  }
+
+  [Fact]
+  public void SettingsSelectionKeepsStableKindsForOtherReasons()
+  {
+    var unavailable = new VibeOCR.Platform.Bootstrap.RuntimeSelectionException(
+        VibeOCR.Platform.Bootstrap.RuntimeSelectionErrorKind.EngineUnavailable,
+        "Engine 'paddleocr' is unavailable.");
+    Assert.Equal("该引擎当前不可用，请先安装所需依赖或选择其他引擎",
+        SettingsViewModel.LocalizeSelection(unavailable));
+    var retired = new VibeOCR.Platform.Bootstrap.RuntimeSelectionException(
+        VibeOCR.Platform.Bootstrap.RuntimeSelectionErrorKind.RecognitionModeRetired,
+        "retired");
+    Assert.Equal("识别模式已退役，请重新选择可用模式",
+        SettingsViewModel.LocalizeSelection(retired));
+  }
+
+  [Fact]
   public void SettingsLocalizesProductDamageThroughExceptionOverload()
   {
     var damaged = Error(InferenceClientException.ProductRuntimeDamagedReason);

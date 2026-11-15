@@ -18,6 +18,8 @@
              Link="Bootstrapper/BootstrapperLog.cs" />
     <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/BootstrapperArtifactSmoke.cs"
              Link="Bootstrapper/BootstrapperArtifactSmoke.cs" />
+    <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/BootstrapperRepairPrompt.cs"
+             Link="Bootstrapper/BootstrapperRepairPrompt.cs" />
     <Compile Include="../../../src/dotnet/VibeOCR.Bootstrapper/LegacyVelopackStateMigration.cs"
              Link="Bootstrapper/LegacyVelopackStateMigration.cs" />
   </ItemGroup>

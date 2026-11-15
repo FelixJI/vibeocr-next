@@ -30,7 +30,10 @@ import { Panel } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 
-import { modeAvailabilityLabel } from "./FeatureValues";
+import {
+  isProductRuntimeDamaged,
+  modeAvailabilityLabel,
+} from "./FeatureValues";
 
 interface SourceOptionState {
   readonly kind: string;
@@ -1255,8 +1258,10 @@ function DefaultRecognitionModeEditor({
           当前默认 {current.displayName}（
           {modeAvailabilityLabel(current.availability, current.reasonCode)}：
           {current.reasonCode}
-          ）：未显式选择模式的任务提交会被拒绝，不会静默
-          回退其他识别。请检查识别服务或选择其他可用模式。
+          ）：未显式选择模式的任务提交会被拒绝，不会静默回退其他识别。
+          {isProductRuntimeDamaged(current.reasonCode)
+            ? "随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复，应用不会在线安装依赖。"
+            : "请检查识别服务或选择其他可用模式。"}
         </p>
       ) : null}
       <div className="setting-row">

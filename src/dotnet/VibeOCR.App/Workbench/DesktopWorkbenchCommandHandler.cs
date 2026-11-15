@@ -266,15 +266,23 @@ public sealed class DesktopWorkbenchCommandHandler :
     catch (RecognitionModeUnavailableException error)
     {
       AppLog.Warn($"Recognition mode override refused: {error.Message}");
+      bool productDamaged = error.ReasonCode ==
+          VibeOCR.Platform.Inference.InferenceClientException.ProductRuntimeDamagedReason;
       return new WorkbenchCommandOutcome([], new WorkbenchProblem(
-        error.IsRetired ? "recognition_mode_retired" : "recognition_mode_unavailable",
+        productDamaged ? "recognition_mode_product_runtime_damaged"
+          : error.IsRetired ? "recognition_mode_retired" : "recognition_mode_unavailable",
         WorkbenchProblemCategory.Unavailable, true,
-        error.IsRetired ? "workbench.error.recognitionModeRetired" : "workbench.error.recognitionModeUnavailable"));
+        productDamaged ? "workbench.error.recognitionModeProductRuntimeDamaged"
+          : error.IsRetired ? "workbench.error.recognitionModeRetired" : "workbench.error.recognitionModeUnavailable"));
     }
     catch (RuntimeSelectionException error)
     {
       AppLog.Warn($"Recognition mode selection refused: {error.Message}");
-      (string code, string messageKey) = error.Kind switch
+      bool productDamaged = error.ReasonCode ==
+          VibeOCR.Platform.Inference.InferenceClientException.ProductRuntimeDamagedReason;
+      (string code, string messageKey) = productDamaged
+          ? ("recognition_mode_product_runtime_damaged", "workbench.error.recognitionModeProductRuntimeDamaged")
+          : error.Kind switch
       {
         RuntimeSelectionErrorKind.RecognitionModeRetired => ("recognition_mode_retired", "workbench.error.recognitionModeRetired"),
         RuntimeSelectionErrorKind.UnknownEngine => ("recognition_mode_unknown", "workbench.error.recognitionModeUnknown"),

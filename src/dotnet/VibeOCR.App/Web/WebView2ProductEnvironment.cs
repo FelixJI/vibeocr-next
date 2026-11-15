@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Web.WebView2.Core;
 using VibeOCR.Platform.Bootstrap;
+using VibeOCR.ProductLayout;
 
 namespace VibeOCR.App.Web;
 
@@ -121,9 +122,16 @@ public static partial class WebView2ProductEnvironment
         ArgumentException.ThrowIfNullOrWhiteSpace(baseDirectory);
         string folder = Path.Combine(
             Path.GetFullPath(baseDirectory), BundledFolderName);
-        return File.Exists(Path.Combine(folder, BrowserExecutableName))
-            ? folder
-            : null;
+        try
+        {
+            return ResolvedProductLayout.HasSafeWebView2Executable(Path.Combine(folder, BrowserExecutableName))
+                ? folder
+                : null;
+        }
+        catch (InvalidDataException error)
+        {
+            throw new InvalidOperationException(error.Message, error);
+        }
     }
 
     internal static bool IsPublishedProductLayout(string baseDirectory) =>

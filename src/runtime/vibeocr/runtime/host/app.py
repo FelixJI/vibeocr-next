@@ -418,7 +418,12 @@ def create_app(
                     module.submit_request, manifest, attachments, cancelled=cancelled
                 )
         except MineruConfigError as exc:
-            return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
+            # reason_code 同值补充：客户端按稳定 reason 键消费产品损坏等语义。
+            return _error_response(
+                exc.code,
+                instance_id,
+                detail={"reason": exc.reason, "reason_code": exc.reason},
+            )
         except RecognitionModeError as exc:
             return _recognition_mode_error_response(exc, instance_id)
         except OcrEngineError as exc:
@@ -635,7 +640,12 @@ def create_app(
                 recognition_modes=recognition_modes,
             )
         except MineruConfigError as exc:
-            return _error_response(exc.code, instance_id, detail={"reason": exc.reason})
+            # reason_code 同值补充：客户端按稳定 reason 键消费产品损坏等语义。
+            return _error_response(
+                exc.code,
+                instance_id,
+                detail={"reason": exc.reason, "reason_code": exc.reason},
+            )
         except RuntimeLockTimeout as exc:
             return _error_response(
                 ErrorCode.RUNTIME_BUSY,

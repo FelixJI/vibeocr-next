@@ -39,6 +39,8 @@ internal static class Program
 
   private static int Launch(string[] args)
   {
+    bool selfTest = args.Contains(SelfTestPrerequisites, StringComparer.Ordinal);
+    bool artifactSmoke = BootstrapperArtifactSmoke.IsRequested();
     PortableProductRoots roots = PortableProductRoots.Resolve(
         AppDomain.CurrentDomain.BaseDirectory);
     BootstrapperLog.Info(
@@ -50,7 +52,7 @@ internal static class Program
     }
     catch (InvalidDataException error)
     {
-      Report(error.Message);
+      ReportRepair(error.Message, selfTest, artifactSmoke);
       return LayoutInvalid;
     }
     string appPath = layout.AppEntry;
@@ -60,39 +62,32 @@ internal static class Program
       Report("Unsupported profile: " + profile);
       return InvalidArguments;
     }
-    string[] missing = (BootstrapperArtifactSmoke.IsRequested()
+    string[] missing = (artifactSmoke
         ? new string?[]
         {
-          HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+          HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         }
         : new string?[]
         {
-          HasBundledDotNetRuntime(layout) ? null : "VibeOCR bundled .NET Runtime files",
-          HasBundledWindowsAppRuntime(layout) ? null : "VibeOCR bundled Windows App Runtime files",
-          HasBundledWebView2Runtime(layout) ? null : "VibeOCR bundled WebView2 Fixed Version runtime",
-          HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+          MissingBundledDotNetRuntime(layout),
+          HasBundledWindowsAppRuntime(layout) ? null : "随包 Windows App Runtime 文件缺失：Microsoft.WindowsAppRuntime.dll",
+          HasBundledWebView2Runtime(layout) ? null : "随包 WebView2 文件缺失：msedgewebview2.exe",
+          HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         })
         .Where(item => item != null).Select(item => item!).ToArray();
     if (missing.Length > 0)
     {
-      Report("VibeOCR bundled runtime components require repair:");
-      foreach (string item in missing)
-      {
-        Report("- " + item);
-      }
-
-      Report("No component was downloaded or modified.");
-      Report("Repair with the in-app update or a fresh complete download.");
+      ReportRepair(string.Join(Environment.NewLine, missing), selfTest, artifactSmoke);
       return PrerequisiteMissing;
     }
 
     if (!File.Exists(appPath))
     {
-      Report("WinUI application is missing: " + appPath);
+      ReportRepair("应用入口缺失：" + appPath, selfTest, artifactSmoke);
       return AppMissing;
     }
 
-    if (args.Contains(SelfTestPrerequisites, StringComparer.Ordinal))
+    if (selfTest)
     {
       BootstrapperLog.Info("Bootstrapper prerequisite self-test passed.");
       return 0;
@@ -119,6 +114,18 @@ internal static class Program
     BootstrapperLog.Error(message);
   }
 
+  private static void ReportRepair(string reason, bool selfTest, bool artifactSmoke)
+  {
+    Report(reason);
+    Report("No component was downloaded or modified.");
+    Report("Repair with the in-app update or a fresh complete download.");
+    if (BootstrapperRepairPrompt.CreateMessage(
+        reason, selfTest, artifactSmoke, Environment.UserInteractive) is { } message)
+    {
+      BootstrapperRepairPrompt.Show(message);
+    }
+  }
+
   private static string? ReadOption(string[] args, string name)
   {
     for (int index = 0; index + 1 < args.Length; index++)
@@ -139,10 +146,16 @@ internal static class Program
 
   // #321：随包闭包检查。安装了系统 .NET/Windows App Runtime/WebView2
   // 不再满足检查——损坏的随包载荷必须显式报修，不联网、不回退系统。
-  private static bool HasBundledDotNetRuntime(ResolvedProductLayout layout) =>
-      File.Exists(Path.Combine(layout.AppRoot, "hostfxr.dll")) &&
-      File.Exists(Path.Combine(layout.AppRoot, "hostpolicy.dll")) &&
-      File.Exists(Path.Combine(layout.AppRoot, "coreclr.dll"));
+  private static string? MissingBundledDotNetRuntime(ResolvedProductLayout layout)
+  {
+    string[] missing = new[]
+    {
+      Path.Combine(layout.AppRoot, "hostfxr.dll"),
+      Path.Combine(layout.AppRoot, "hostpolicy.dll"),
+      Path.Combine(layout.AppRoot, "coreclr.dll"),
+    }.Where(path => !File.Exists(path)).Select(path => Path.GetFileName(path)!).ToArray();
+    return missing.Length == 0 ? null : "随包 .NET Runtime 文件缺失：" + string.Join("、", missing);
+  }
 
   private static bool HasBundledWindowsAppRuntime(ResolvedProductLayout layout) =>
       File.Exists(Path.Combine(layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"));

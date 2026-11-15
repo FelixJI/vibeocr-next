@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from importlib.metadata import distributions
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote
+from zipfile import ZipFile
 
 _OUTPUT_FILENAME = "SBOM.spdx.json"
 _CREATED = "1970-01-01T00:00:00Z"
@@ -20,7 +21,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WEBVIEW2_LOCK = _REPO_ROOT / "config" / "runtime" / "webview2-runtime.lock.json"
 _PYTHON_LOCK = _REPO_ROOT / "config" / "runtime" / "python-runtime.lock.json"
 _APP_LOCK = _REPO_ROOT / "src/dotnet/VibeOCR.App/packages.lock.json"
+_BOOTSTRAPPER_LOCK = _REPO_ROOT / "src/dotnet/VibeOCR.Bootstrapper/packages.lock.json"
+_DOTNET_TOOLS = _REPO_ROOT / ".config/dotnet-tools.json"
 _WEB_ASSETS = _REPO_ROOT / "src/dotnet/VibeOCR.App/WebAssets"
+_NATIVE_PYTHON_SUFFIXES = {".dll", ".pyd"}
 
 
 @dataclass(frozen=True)
@@ -159,7 +163,7 @@ def _python_components(product: Path, closure: dict, version: str) -> list[dict]
         for relative in closure
         if relative.startswith(f"{tree}/")
         and not relative.startswith(f"{tree}/Lib/site-packages/")
-        and relative.lower().endswith((".dll", ".pyd"))
+        and PurePosixPath(relative).suffix.lower() in _NATIVE_PYTHON_SUFFIXES
     )
     for relative in native:
         _require_file(product, closure, relative)
@@ -188,6 +192,7 @@ def _python_components(product: Path, closure: dict, version: str) -> list[dict]
         )
     ]
     installed = set()
+    native_owners: dict[PureWindowsPath, str] = {}
     wheel = "vibeocr-next-runtime"
     for distribution in sorted(
         distributions(path=[str(site)]), key=lambda item: item.metadata["Name"] or ""
@@ -231,7 +236,7 @@ def _python_components(product: Path, closure: dict, version: str) -> list[dict]
                 and path.name == "METADATA"
                 and path.parent.name.endswith(".dist-info")
             )
-            if is_metadata or path.suffix.lower() in {".dll", ".pyd"}:
+            if is_metadata or path.suffix.lower() in _NATIVE_PYTHON_SUFFIXES:
                 relative = (
                     distribution.locate_file(path)
                     .resolve()
@@ -240,6 +245,16 @@ def _python_components(product: Path, closure: dict, version: str) -> list[dict]
                 )
                 _require_file(product, closure, relative)
                 (metadata_paths if is_metadata else native_paths).append(relative)
+                if not is_metadata:
+                    owner = f"{name}=={pin}"
+                    previous = native_owners.setdefault(
+                        PureWindowsPath(relative), owner
+                    )
+                    if previous != owner:
+                        raise ValueError(
+                            f"bundled Python native file has multiple owners: {relative} "
+                            f"({previous}, {owner})"
+                        )
         if len(metadata_paths) != 1:
             raise ValueError(
                 f"bundled Python RECORD does not identify METADATA: {name}"
@@ -258,6 +273,24 @@ def _python_components(product: Path, closure: dict, version: str) -> list[dict]
         raise ValueError(f"bundled Python tree must contain {wheel}=={version}")
     if missing := locked.keys() - installed:
         raise ValueError(f"locked Python distributions are missing: {sorted(missing)}")
+    site_prefix = site.relative_to(product).as_posix() + "/"
+    distributed_native = {
+        relative
+        for relative in closure
+        if relative.startswith(site_prefix)
+        and PurePosixPath(relative).suffix.lower() in _NATIVE_PYTHON_SUFFIXES
+    }
+    distributed_native.update(
+        path.relative_to(product).as_posix()
+        for path in site.rglob("*")
+        if path.suffix.lower() in _NATIVE_PYTHON_SUFFIXES and path.is_file()
+    )
+    if unowned := sorted(
+        relative
+        for relative in distributed_native
+        if PureWindowsPath(relative) not in native_owners
+    ):
+        raise ValueError(f"bundled Python native files have no RECORD owner: {unowned}")
     return packages
 
 
@@ -438,11 +471,10 @@ def _app_components(
             "product_root requires --app-publish-items from the actual publish"
         )
     publish = _json(app_publish_items)
-    roots = [
-        PureWindowsPath(path)
-        for path in publish["Properties"]["NuGetPackageFolders"].split(";")
-        if path
+    package_folders = [
+        path for path in publish["Properties"]["NuGetPackageFolders"].split(";") if path
     ]
+    roots = [PureWindowsPath(path) for path in package_folders]
 
     def nuget_origin(source: PureWindowsPath) -> PureWindowsPath | None:
         return next(
@@ -498,6 +530,23 @@ def _app_components(
         raise ValueError(
             "published Windows App SDK item list contains no distributed files"
         )
+    bootstrapper = _json(_BOOTSTRAPPER_LOCK)["dependencies"]
+    net472 = ".NETFramework,Version=v4.7.2"
+    bootstrapper_pin = (bootstrapper[net472] | bootstrapper.get(f"{net472}/{rid}", {}))[
+        "Velopack"
+    ]["resolved"]
+    bootstrapper_asset = f"velopack/{bootstrapper_pin.lower()}/lib/net472/Velopack.dll"
+    _require_file(product, closure, "Velopack.dll")
+    if not any(
+        (source := Path(folder) / bootstrapper_asset).is_file()
+        and filecmp.cmp(source, product / "Velopack.dll", shallow=False)
+        for folder in package_folders
+    ):
+        raise ValueError(
+            f"root Velopack.dll differs from Bootstrapper lock asset {bootstrapper_asset}"
+        )
+    bootstrapper_package = ("Velopack", bootstrapper_pin)
+    nuget_assets.setdefault(bootstrapper_package, set())
     war = resolved.get("microsoft.windowsappsdk")
     if war is None or f"{war[0]}/{war[1]}" not in target:
         raise ValueError("published Windows App SDK does not match the lock")
@@ -510,18 +559,76 @@ def _app_components(
             purl=f"pkg:nuget/{war[0]}@{war[1]}",
         )
     )
-    packages.extend(
-        _component(
-            f"NuGet-{_identifier(name)}-{_identifier(pin)}",
-            name,
-            pin,
-            "Locked NuGet package with files bound by the app deps.json or "
-            f"MSBuild publish items: {', '.join(sorted(assets))}",
-            purl=f"pkg:nuget/{name}@{pin}",
+    for (name, pin), assets in sorted(nuget_assets.items()):
+        sources = []
+        if assets:
+            sources.append(
+                "Locked NuGet files from app deps.json or MSBuild publish items: "
+                + ", ".join(sorted(assets))
+            )
+        if (name, pin) == bootstrapper_package:
+            sources.append(
+                f"Bootstrapper packages.lock.json net472 asset {bootstrapper_asset} "
+                "-> staged Velopack.dll (current/ in Portable, lib/app/ in full)"
+            )
+        packages.append(
+            _component(
+                f"NuGet-{_identifier(name)}-{_identifier(pin)}",
+                name,
+                pin,
+                "; ".join(sources),
+                purl=f"pkg:nuget/{name}@{pin}",
+            )
         )
-        for (name, pin), assets in sorted(nuget_assets.items())
-    )
     return packages
+
+
+def _velopack_archive_component(product: Path, portable: Path, full: Path) -> dict:
+    # Only the Portable ZIP receives the runtime launchers from vpk.
+    outer_files = {".portable", "Update.exe", "VibeOCR.exe"}
+    for artifact, prefix in ((portable, "current/"), (full, "lib/app/")):
+        with ZipFile(artifact) as archive:
+            names = {
+                member.filename for member in archive.infolist() if not member.is_dir()
+            }
+            if artifact == portable:
+                root_files = {name for name in names if "/" not in name}
+                if root_files != outer_files or archive.read(".portable"):
+                    raise ValueError(
+                        f"unexpected Velopack Portable root files: {sorted(root_files)}"
+                    )
+                for launcher in ("Update.exe", "VibeOCR.exe"):
+                    if not archive.getinfo(launcher).file_size:
+                        raise ValueError(
+                            f"empty Velopack Portable launcher: {launcher}"
+                        )
+            elif (names & outer_files) or "lib/app/Update.exe" in names:
+                raise ValueError(
+                    "Velopack full package contains Portable launchers or marker"
+                )
+            if f"{prefix}sq.version" not in names:
+                raise ValueError(
+                    f"missing Velopack version manifest in {artifact.name}"
+                )
+            for filename in ("Velopack.dll", "VibeOCR.exe"):
+                relative = f"{prefix}{filename}"
+                if (
+                    relative not in names
+                    or archive.read(relative) != (product / filename).read_bytes()
+                ):
+                    raise ValueError(
+                        f"{artifact.name} does not contain staged {relative}"
+                    )
+    tool_version = _json(_DOTNET_TOOLS)["tools"]["vpk"]["version"]
+    return _component(
+        "VelopackPortableRuntime",
+        "Velopack Windows Portable runtime",
+        tool_version,
+        f".config/dotnet-tools.json pins vpk {tool_version}; "
+        f"{portable.name} contains Update.exe from vendor/update_x64.exe and "
+        "VibeOCR.exe from vendor/stub_x64.exe (pack supplies icon resources) "
+        "with the .portable marker",
+    )
 
 
 def _product_component_packages(
@@ -532,13 +639,7 @@ def _product_component_packages(
     webview2_metadata: Path | None,
     app_publish_items: Path | None,
 ) -> tuple[list[dict], list[dict]]:
-    """Resolve the actually distributed runtime components of a product tree.
-
-    The portable product closure itself stays bound by the existing
-    per-file release manifest (single integrity contract); this only adds the
-    declared component relationships: self-contained .NET runtime, Windows
-    App SDK self-contained files and the locked WebView2 Fixed Version tree.
-    """
+    """Resolve distributed components against the staged product release manifest."""
 
     app_root = product_root / "app"
     manifest_path = app_root / "metadata" / "product-release-manifest.json"
@@ -598,7 +699,8 @@ def _product_component_packages(
         f"{repository_name}-win-x64-portable",
         version,
         "Portable product closure bound by app/metadata/product-release-manifest.json "
-        f"({len(closure)} files)",
+        f"({len(closure)} files); vpk adds the package version manifest "
+        "at current/sq.version in Portable and lib/app/sq.version in full",
     )
     webview = _component(
         "WebView2",
@@ -661,16 +763,6 @@ def build_spdx_sbom(
         raise ValueError("artifacts_dir must contain at least one artifact")
 
     artifacts = tuple(_artifact(path) for path in paths)
-    extra_packages: list[dict] = []
-    extra_relationships: list[dict] = []
-    if product_root is not None:
-        extra_packages, extra_relationships = _product_component_packages(
-            repository_name=repository_name,
-            version=version,
-            product_root=product_root.resolve(strict=True),
-            webview2_metadata=webview2_metadata,
-            app_publish_items=app_publish_items,
-        )
     files = [
         {
             "SPDXID": f"SPDXRef-File-{index:04d}",
@@ -688,6 +780,31 @@ def build_spdx_sbom(
         }
         for index, artifact in enumerate(artifacts, start=1)
     ]
+    extra_packages: list[dict] = []
+    extra_relationships: list[dict] = []
+    if product_root is not None:
+        product_root = product_root.resolve(strict=True)
+        extra_packages, extra_relationships = _product_component_packages(
+            repository_name=repository_name,
+            version=version,
+            product_root=product_root,
+            webview2_metadata=webview2_metadata,
+            app_publish_items=app_publish_items,
+        )
+        portable = root / f"VibeOCRNext-v{version}-win-x64.zip"
+        full = root / f"VibeOCRNext-{version}-full.nupkg"
+        portable_runtime = _velopack_archive_component(product_root, portable, full)
+        extra_packages.append(portable_runtime)
+        artifacts_by_name = {file["fileName"]: file["SPDXID"] for file in files}
+        portable_id = artifacts_by_name[portable.name]
+        full_id = artifacts_by_name[full.name]
+        extra_relationships.extend(
+            [
+                _relationship(portable_id, "CONTAINS", portable_runtime["SPDXID"]),
+                _relationship(portable_id, "CONTAINS", "SPDXRef-Package-Product"),
+                _relationship(full_id, "CONTAINS", "SPDXRef-Package-Product"),
+            ]
+        )
     package_id = "SPDXRef-Package"
     document = {
         "SPDXID": "SPDXRef-DOCUMENT",

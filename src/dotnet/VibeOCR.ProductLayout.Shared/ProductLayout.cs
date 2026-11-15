@@ -167,7 +167,6 @@ public sealed class ResolvedProductLayout
             Path.Combine(AppRoot, "App.xbf"),
             Path.Combine(AppRoot, "MainWindow.xbf"),
             Path.Combine(WebAssetsRoot, "index.html"),
-            Path.Combine(WebView2RuntimeRoot, "msedgewebview2.exe"),
             Path.Combine(WebView2RuntimeRoot, "icudtl.dat"),
             RuntimeManifest,
             RuntimePython,
@@ -184,6 +183,35 @@ public sealed class ResolvedProductLayout
                 throw new InvalidDataException("layout.missing-entry: " + path);
             }
         }
+        string browserExecutable = Path.Combine(WebView2RuntimeRoot, "msedgewebview2.exe");
+        if (!HasSafeWebView2Executable(browserExecutable))
+        {
+            throw new InvalidDataException("layout.missing-entry: " + browserExecutable);
+        }
+    }
+
+    public static bool HasSafeWebView2Executable(string executable)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(executable);
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                "layout.invalid-path: 无法校验随包 WebView2 浏览器入口：" + executable, error);
+        }
+        if (attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new InvalidDataException(
+                "layout.invalid-path: 随包 WebView2 浏览器入口是重解析点：" + executable);
+        }
+        return !attributes.HasFlag(FileAttributes.Directory);
     }
 
     private static void Validate(ProductLayoutDocument value)
