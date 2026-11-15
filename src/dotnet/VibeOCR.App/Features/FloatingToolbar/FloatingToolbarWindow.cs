@@ -31,8 +31,8 @@ internal enum FloatingToolbarCommand
 /// 子类化拦截 WM_MOUSEACTIVATE 返回 MA_NOACTIVATE，显示走
 /// SW_SHOWNOACTIVATE，悬停、点击与拖动都不抢前台焦点。左侧把手拖动重定位，
 /// 松手由控制器判定贴边吸附。
-/// 主题经 root RequestedTheme 走原生 ThemeResource：命令按钮/图标继承
-/// Fluent 主题化前景与悬停态，高对比时回落系统可见资源；系统变化仅在
+/// 主题经 root RequestedTheme 走原生 ThemeResource：图标与背景使用同次
+/// 主题解析，按钮保留 Fluent 悬停态，高对比时回落系统可见资源；系统变化仅在
 /// 窗口生命周期内订阅一次并封送 UI 线程，不修改用户系统主题。
 /// </summary>
 internal sealed class FloatingToolbarWindow : IFloatingToolbarView
@@ -290,7 +290,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     ApplyResolvedTheme();
   }
 
-  /// <summary>按当前设置与系统状态重涂：RequestedTheme + 少量铬色。</summary>
+  /// <summary>按当前设置与系统状态重涂：RequestedTheme + 铬色与图标前景。</summary>
   private void ApplyResolvedTheme()
   {
     if (_disposed)
@@ -318,7 +318,16 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     }
 
     _root.Background = new SolidColorBrush(background);
-    _gripIcon.Foreground = new SolidColorBrush(foreground);
+    var foregroundBrush = new SolidColorBrush(foreground);
+    _gripIcon.Foreground = foregroundBrush;
+    foreach (Button button in _commandButtons)
+    {
+      // 图标绑定自身 Foreground，须与背景使用同一次主题解析结果。
+      if (button.Content is ContentControl icon)
+      {
+        icon.Foreground = foregroundBrush;
+      }
+    }
   }
 
   private bool IsSystemHighContrast() =>

@@ -217,7 +217,7 @@ public sealed class ImageEditIsolationWorkbenchTests
       CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
     }
 
-    public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken)
+    public async Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken, nint? pickerOwner = null)
     {
       CopiedBytes = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
       return true;

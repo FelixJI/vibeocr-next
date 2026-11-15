@@ -18,6 +18,7 @@ const requireWebAssets = createRequire(path.resolve(scriptDir,
   '../src/dotnet/VibeOCR.App/WebAssets/package.json'));
 const { chromium, expect } = requireWebAssets('@playwright/test');
 const nativeScript = path.join(scriptDir, 'native_actions_fixture.ps1');
+const clipboardScript = path.join(scriptDir, 'native_codes_clipboard_fixture.ps1');
 const hotkey = 'Ctrl+Alt+Shift+F10';
 const recognizeHotkey = 'Ctrl+Alt+Shift+F11';
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,6 +69,19 @@ async function windows(pid) {
   if (!output || output === 'null') return [];
   const value = JSON.parse(output);
   return Array.isArray(value) ? value : [value];
+}
+
+// Write-only synthetic clipboard sentinel (task #318): primes the real
+// Windows Clipboard with this smoke's own fixture frame before the terminal
+// copy, so the post-copy readback can never import or test user clipboard
+// pixels, and a copy that fails to replace the sentinel fails closed on
+// dimensions/pixels. Same bounded fixture contract as the codes smoke.
+async function setClipboardImage(root, image) {
+  const { stdout } = await execFileAsync('pwsh', ['-NoProfile', '-NonInteractive',
+    '-STA', '-File', clipboardScript, '-SmokeRoot', root, '-ImagePath', image],
+  { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
+  assert.equal(stdout.trim(), 'clipboard-image-set',
+    'Clipboard fixture did not confirm its synthetic image.');
 }
 
 async function waitForWindows(pid, predicate, timeoutMs = 10000) {
@@ -133,6 +147,418 @@ function assertCaptureCanvasLayout({ box, selection, desktopClient, viewport }) 
   return { measured: { ...box }, expected, scale, tolerance,
     selection: { ...selection }, desktopClient: { ...desktopClient },
     viewport: { ...viewport } };
+}
+
+// Scene-terminal copy judge (goal316/318): one public copyScreenshotImage
+// command whose resourceUri names exactly one accepted 201 upload, then a
+// normal close. Text-layer uploads (different resourceUri) never count; no
+// command, duplicates, non-201, failure receipts, crash, deadline-exceeded or
+// out-of-order close fail closed. A success receipt is never required.
+// a0628: options.action/requireScope narrow the selection; requireClose=false drops only the close demands for non-terminal pages.
+function settleSceneCopyTimeline(timeline, context = 'Scene copy', options = {}) {
+  assert(timeline && typeof timeline === 'object', `${context}: timeline evidence is missing.`);
+  const evidence = JSON.stringify(timeline);
+  assert.equal(timeline.crashedAt ?? null, null,
+    `${context}: scene crashed instead of closing: ${evidence}`);
+  const action = options.action;
+  const commands = Array.isArray(timeline.copyCommands) ? timeline.copyCommands : [];
+  const selected = commands.filter((item) =>
+    (action === undefined || item.action === action) &&
+    (options.requireScope === undefined || options.requireScope === null ||
+      item.scope === options.requireScope));
+  assert(commands.length >= 1 && selected.length === 1,
+    `${context}: expected exactly one public ${action ?? 'copyScreenshotImage'} command: ${evidence}`);
+  const command = selected[0];
+  assert(typeof command.resourceUri === 'string' && command.resourceUri.length > 0,
+    `${context}: public copy command carried no resourceUri: ${evidence}`);
+  const associated = (timeline.uploads ?? []).filter(
+    (upload) => upload.resourceUri === command.resourceUri);
+  assert.equal(associated.length, 1,
+    `${context}: the copy resource must match exactly one accepted upload: ${evidence}`);
+  const upload = associated[0];
+  assert.equal(upload.responseStatus ?? null, 201,
+    `${context}: public annotation upload was not accepted: ${evidence}`);
+  const requireClose = options.requireClose !== false;
+  if (requireClose)
+    assert(timeline.closedAt !== null && timeline.closedAt !== undefined,
+      `${context}: scene did not close after the accepted copy: ${evidence}`);
+  assert(Number.isSafeInteger(upload.requestOrder) && Number.isSafeInteger(upload.responseOrder) &&
+    Number.isSafeInteger(command.order) &&
+    upload.requestOrder < upload.responseOrder && upload.responseOrder < command.order &&
+    (!requireClose || (Number.isSafeInteger(timeline.closedOrder) &&
+      command.order < timeline.closedOrder)),
+  `${context}: scene closed before the public copy was dispatched: ${evidence}`);
+  assert(!(timeline.copyReceipts ?? []).some((receipt) => receipt.ok === false),
+    `${context}: the host rejected the public copy command: ${evidence}`);
+  if (requireClose)
+    assert(!timeline.noTerminalEvent, `${context}: scene close exceeded its deadline: ${evidence}`);
+  return true;
+}
+
+// Task #318 clipboard readback judge (Node-regression-tested): the
+// scene-terminal copy timeline above proves the public command, its accepted
+// upload and the normal close, but says nothing about the Windows Clipboard
+// itself. The only acceptable proof is the image the still-alive workbench
+// republished from the actual Clipboard through its public paste input
+// (imageEdit.readClipboard). The real readClipboard path
+// (PasteImageForEditAsync -> InputService.ReadClipboardAsync) preserves the
+// WinRT stream's ORIGINAL bytes/ContentType (it is NOT the import reader's
+// unified PNG re-encode), so the judge requires any image/* media type the
+// WebView decoded and then compares the decoded RGBA of the clipboard image
+// byte-for-byte against THIS revision's own export, decoded in the SAME
+// WebView. Aggregate pixel counts cannot prove this revision (mirrors, row
+// shifts, in-threshold RGB or alpha changes keep the totals); a byte-level
+// first difference fails closed. No hashing.
+export function assertClipboardReadback(readback, revision, context = 'Clipboard readback') {
+  assert(readback && typeof readback === 'object', `${context}: readback evidence is missing.`);
+  assert(typeof readback.mediaType === 'string' && /^image\/[a-z0-9.+-]+$/i.test(readback.mediaType),
+    `${context}: clipboard image was not republished with an image media type: ${
+      JSON.stringify(readback.mediaType ?? null)}.`);
+  assert(Number.isSafeInteger(revision?.width) && revision.width > 0 &&
+    Number.isSafeInteger(revision?.height) && revision.height > 0,
+  `${context}: expected physical selection is invalid: ${revision?.width}x${revision?.height}.`);
+  const actual = readback.rgba;
+  const expected = revision.expectedRgba;
+  for (const [name, image] of [['clipboard', actual], ['expected', expected]]) {
+    assert(image && Number.isSafeInteger(image.width) && image.width > 0 &&
+      Number.isSafeInteger(image.height) && image.height > 0 &&
+      typeof image.rgbaBase64 === 'string',
+    `${context}: ${name} image was not decoded into RGBA evidence: ${image?.width}x${image?.height}.`);
+    assert(Buffer.from(image.rgbaBase64, 'base64').length === image.width * image.height * 4,
+      `${context}: ${name} RGBA payload is not width*height*4 bytes.`);
+  }
+  assert.equal(actual.width, revision.width,
+    `${context}: clipboard image is ${actual.width}x${actual.height} instead of the selected ${
+      revision.width}x${revision.height}.`);
+  assert.equal(actual.height, revision.height,
+    `${context}: clipboard image height ${actual.height} differs from the selected physical height ${
+      revision.height}.`);
+  assert.equal(expected.width, revision.width,
+    `${context}: expected export width ${expected.width} differs from the selection.`);
+  assert.equal(expected.height, revision.height,
+    `${context}: expected export height ${expected.height} differs from the selection.`);
+  const left = Buffer.from(actual.rgbaBase64, 'base64');
+  const right = Buffer.from(expected.rgbaBase64, 'base64');
+  for (let index = 0; index < left.length; index++)
+    if (left[index] !== right[index]) {
+      const channels = ['red', 'green', 'blue', 'alpha'];
+      assert.fail(`${context}: clipboard RGBA differs from this revision's export at pixel ${
+        Math.floor(index / 4)} (${channels[index % 4]}): ${left[index]} vs ${right[index]}.`);
+    }
+  return true;
+}
+
+// Only a new terminal state after the paste click can prove clipboard readback.
+export function acceptClipboardReadbackState(record, previous) {
+  return record?.isBusy === false && Number.isSafeInteger(record.seq) &&
+    record.seq > (previous?.seq ?? 0) && typeof record.url === 'string' && record.url.length > 0 &&
+    typeof record.sessionId === 'string' && record.sessionId.length > 0 &&
+    (!previous || record.sessionId !== previous.sessionId || record.url !== previous.url);
+}
+
+export async function installImageEditClipboardWatch(page) {
+  await page.evaluate(() => {
+    if (Array.isArray(window.__clipboardReadbackStates)) return;
+    const ring = [];
+    let sequence = 0;
+    window.__clipboardReadbackStates = ring;
+    window.chrome.webview.addEventListener('message', ({ data }) => {
+      if (data?.kind !== 'event' || data.type !== 'app.state' ||
+          data.payload?.scope !== 'imageEdit') return;
+      const state = data.payload.state ?? {};
+      ring.push({ seq: ++sequence, isBusy: state.isBusy,
+        url: state.input?.url ?? null, sessionId: state.screenshotSession?.sessionId ?? null });
+      if (ring.length > 24) ring.splice(0, ring.length - 24);
+    });
+  });
+}
+
+export async function pasteImageEditClipboard(page) {
+  const previous = await page.evaluate(() => window.__clipboardReadbackStates?.at(-1) ?? null);
+  await page.getByRole('button', { name: '粘贴图片', exact: true }).click();
+  const accepted = await page.waitForFunction((before) => {
+    const ring = window.__clipboardReadbackStates ?? [];
+    return ring.find((record) => record.isBusy === false &&
+      Number.isSafeInteger(record.seq) && record.seq > (before?.seq ?? 0) &&
+      typeof record.url === 'string' && record.url.length > 0 &&
+      typeof record.sessionId === 'string' && record.sessionId.length > 0 &&
+      (!before || record.sessionId !== before.sessionId || record.url !== before.url)) ?? false;
+  }, previous, { timeout: 20000 });
+  try {
+    const snapshot = await accepted.jsonValue();
+    assert(acceptClipboardReadbackState(snapshot, previous), 'Clipboard readback state is invalid.');
+    return snapshot;
+  } finally { await accepted.dispose(); }
+}
+
+// Node-held upload Blob collection for a settled scene-copy timeline
+// (task #318 review fix): the Blob bytes/meta arrive through an INDEPENDENT
+// Blob.arrayBuffer().then/CDP path that may land later than the 201 upload,
+// the copy command and the close - so the bounded wait for the Blob runs
+// FIRST and only then are meta and bytes validated (asserting blobMeta
+// before waiting raced a still-null meta). Bytes never enter the timeline.
+export async function collectSceneCopyUploadBlob(terminal, upload, context = 'Scene copy') {
+  const blobDeadline = raceDeadline(5000);
+  let observed;
+  try {
+    observed = await Promise.race([terminal.waitForUploadBlob(upload.seq), blobDeadline.promise]);
+  } finally { blobDeadline.clear(); }
+  assert(observed, `${context} upload Blob never reached Node: ${JSON.stringify(terminal.timeline)}`);
+  assert(observed.problem == null && observed.mimeType === 'image/png' &&
+    Array.isArray(observed.bytes) && observed.bytes.length === observed.byteLength,
+  `${context} upload Blob evidence is unsound: ${JSON.stringify(observed)}`);
+  assert(upload.blobMeta?.problem == null && Number.isSafeInteger(upload.blobMeta?.byteLength) &&
+    upload.blobMeta.byteLength === observed.byteLength,
+  `${context} upload Blob meta disagrees with the delivered Blob: ${JSON.stringify(terminal.timeline)}`);
+  return Buffer.from(observed.bytes);
+}
+
+// Pre-click passive scene-copy observation (goal316/318), awaited before
+// the copy click: an in-page wrapper keeps every __annotation POST, its real
+// response status (stamped the moment the fetch Promise resolves), the
+// product-side json resourceUri (observed through a pass-through wrap of
+// response.json, so the handover precedes the product's await continuation
+// without an extra clone parse), the same immutable Blob's bytes (Node-held
+// per upload; the timeline keeps only meta), the outgoing public copy
+// command and receipts for it; CDP page events only carry close/crash
+// (network events proved lossy when the scene retires quickly). Wrappers
+// forward arguments, the fetch Promise object and the json Promise object
+// unchanged and never delay the command. Works on any object exposing the
+// Playwright page event/binding surface (unit-testable with a plain
+// EventEmitter plus captured exposeBinding/evaluate).
+// a0628: options.actions (default ['copyScreenshotImage']) widens the recorded commands (records also carry action/scope).
+async function observeSceneCopyTerminal(page, options = {}) {
+  let eventOrder = 0;
+  let acceptCommand;
+  const received = new Promise((resolve) => { acceptCommand = resolve; });
+  const timeline = { uploads: [], copyCommands: [], copyReceipts: [],
+    closedAt: null, closedOrder: null, crashedAt: null };
+  const uploadBySeq = new Map();
+  const blobEvidence = new Map();
+  const blobWaiters = new Map();
+  const commandWaiters = new Map();
+  const receiptWaiters = new Map();
+  const settleRecordWaiters = (waiters, key, value) => {
+    const pending = waiters.get(key);
+    if (!pending) return;
+    waiters.delete(key);
+    for (const resolve of pending) resolve(value);
+  };
+  // Bounded waiters: null on the deadline (fail closed); timer/map entry always cleaned; harness-only.
+  const waitForRecord = (waiters, records, field, key, milliseconds) => {
+    const existing = records.find((item) => item[field] === key);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const pending = waiters.get(key) ?? [];
+        const index = pending.indexOf(finish);
+        if (index >= 0) pending.splice(index, 1);
+        if (!pending.length) waiters.delete(key);
+        resolve(value);
+      };
+      const pending = waiters.get(key) ?? [];
+      pending.push(finish);
+      waiters.set(key, pending);
+      const timer = setTimeout(() => finish(null), milliseconds);
+    });
+  };
+  const settleBlobWaiters = (seq) => {
+    const waiters = blobWaiters.get(seq);
+    if (!waiters) return;
+    blobWaiters.delete(seq);
+    const blob = blobEvidence.get(seq) ?? null;
+    for (const resolve of waiters) resolve(blob);
+  };
+  const ended = new Promise((resolve) => {
+    page.on('close', () => {
+      timeline.closedAt = Date.now(); timeline.closedOrder = ++eventOrder; resolve();
+    });
+    page.on('crash', () => { timeline.crashedAt = Date.now(); resolve(); });
+  });
+  await page.exposeBinding('__sceneCopyObserver', (_source, event) => {
+    if (!event || typeof event !== 'object') return;
+    if (event.kind === 'upload') {
+      const record = { seq: event.seq, requestAt: Date.now(), requestOrder: ++eventOrder,
+        responseStatus: null, responseAt: null, responseOrder: null,
+        resourceUri: null, uriAt: null, uriOrder: null,
+        error: null, blobMeta: null };
+      timeline.uploads.push(record);
+      uploadBySeq.set(event.seq, record);
+    } else if (event.kind === 'upload-response') {
+      const record = uploadBySeq.get(event.seq);
+      if (record && record.responseOrder === null) {
+        record.responseStatus = event.status ?? null;
+        record.responseAt = Date.now();
+        record.responseOrder = ++eventOrder;
+      }
+    } else if (event.kind === 'upload-uri') {
+      const record = uploadBySeq.get(event.seq);
+      if (record && record.uriOrder === null) {
+        record.resourceUri = event.resourceUri ?? null;
+        record.uriAt = Date.now();
+        record.uriOrder = ++eventOrder;
+      }
+    } else if (event.kind === 'upload-error') {
+      const record = uploadBySeq.get(event.seq);
+      if (record) record.error = event.error ?? 'upload failed';
+    } else if (event.kind === 'upload-blob') {
+      const record = uploadBySeq.get(event.seq);
+      blobEvidence.set(event.seq, event.blob ?? null);
+      if (record) {
+        record.blobMeta = event.blob ? { mimeType: event.blob.mimeType ?? null,
+          byteLength: event.blob.byteLength ?? null, problem: event.blob.problem ?? null } : null;
+      }
+      settleBlobWaiters(event.seq);
+    } else if (event.kind === 'copy-command') {
+      const record = { envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, resourceUri: event.resourceUri ?? null,
+        action: event.action ?? null, scope: event.scope ?? null };
+      timeline.copyCommands.push(record);
+      acceptCommand();
+      settleRecordWaiters(commandWaiters, record.action, record);
+    } else if (event.kind === 'copy-receipt') {
+      const record = { envelopeId: event.envelopeId, at: Date.now(),
+        order: ++eventOrder, ok: event.ok ?? null, problemCode: event.problemCode ?? null };
+      timeline.copyReceipts.push(record);
+      settleRecordWaiters(receiptWaiters, record.envelopeId, record);
+    }
+  });
+  // a0628: actions cross as a serialized evaluate argument (closures cannot survive in-page).
+  await page.evaluate((watchedActions) => {
+    const actions = new Set(watchedActions ?? ['copyScreenshotImage']);
+    const emit = (event) => {
+      try {
+        // exposeBinding returns a Promise: a quickly retiring page can make
+        // the observation channel reject; digest only that delivery failure
+        // (Node still fails closed on missing evidence) without touching any
+        // product Promise.
+        const delivery = window.__sceneCopyObserver(event);
+        if (delivery && typeof delivery.catch === 'function') delivery.catch(() => {});
+      } catch { /* passive; Node keeps the timeline */ }
+    };
+    const state = { uploadSeq: 0, copyIds: {} };
+    const originalFetch = window.fetch;
+    const pushBlob = (seq, body) => {
+      if (!(body instanceof Blob))
+        emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: null, byteLength: null, bytes: null,
+            problem: 'upload body was not a Blob' } });
+      else if (body.size > 8 * 1024 * 1024)
+        emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size, bytes: null,
+            problem: 'synthetic PNG exceeded 8 MiB' } });
+      else body.arrayBuffer().then(
+        (buffer) => emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size,
+            bytes: Array.from(new Uint8Array(buffer)), problem: null } }),
+        () => emit({ kind: 'upload-blob', seq,
+          blob: { mimeType: body.type, byteLength: body.size, bytes: null,
+            problem: 'Blob observation failed' } }));
+    };
+    window.fetch = function (input, init) {
+      const isUpload = input === '/__annotation' && init && init.method === 'POST';
+      let seq = 0;
+      if (isUpload) {
+        seq = ++state.uploadSeq;
+        emit({ kind: 'upload', seq });
+        pushBlob(seq, init.body);
+      }
+      const promise = originalFetch.apply(this, arguments);
+      if (isUpload)
+        promise.then((response) => {
+          // Status and responseOrder are stamped at fetch-Promise resolve,
+          // strictly before the product's await continuation (this observer
+          // registers first), so a later json body read can never reorder
+          // them (real-probe regression: command seq 6, clone-json seq 7).
+          emit({ kind: 'upload-response', seq, status: response?.status ?? null });
+          try {
+            if (response && typeof response.json === 'function') {
+              const originalJson = response.json;
+              response.json = function () {
+                const jsonPromise = originalJson.apply(this, arguments);
+                // Registered before the product's await attaches to the same
+                // returned Promise: the resourceUri handover always precedes
+                // the copy command, with no extra clone parse.
+                jsonPromise.then((payload) => {
+                  emit({ kind: 'upload-uri', seq,
+                    resourceUri: payload && typeof payload === 'object' &&
+                      typeof payload.resourceUri === 'string' ? payload.resourceUri : null });
+                }, () => {});
+                return jsonPromise;
+              };
+            }
+          } catch { /* passive */ }
+        }, (error) => emit({ kind: 'upload-error', seq,
+          error: `${error?.name ?? 'Error'}: ${error?.message ?? 'upload failed'}` }));
+      return promise;
+    };
+    const channel = window.chrome && window.chrome.webview;
+    const originalPost = channel && typeof channel.postMessage === 'function'
+      ? channel.postMessage : null;
+    if (originalPost)
+      channel.postMessage = function (message) {
+        try {
+          const command = message && message.kind === 'request' && message.type === 'app.command' &&
+            message.payload ? message.payload.command : null;
+          if (command && actions.has(command.action)) {
+            state.copyIds[message.id] = true;
+            emit({ kind: 'copy-command', envelopeId: message.id, action: command.action,
+              scope: typeof command.scope === 'string' ? command.scope : null,
+              resourceUri: command.arguments &&
+                typeof command.arguments.resourceUri === 'string'
+                ? command.arguments.resourceUri : null });
+          }
+        } catch { /* passive */ }
+        return originalPost.apply(this, arguments);
+      };
+    if (channel && typeof channel.addEventListener === 'function')
+      channel.addEventListener('message', ({ data }) => {
+        if (!data || data.kind !== 'response' || data.type !== 'app.command' ||
+            !Object.prototype.hasOwnProperty.call(state.copyIds, data.id)) return;
+        const problem = data.payload && data.payload.problem;
+        emit({ kind: 'copy-receipt', envelopeId: data.id,
+          ok: typeof (data.payload && data.payload.ok) === 'boolean'
+            ? data.payload.ok : null,
+          problemCode: problem && typeof problem.code === 'string' ? problem.code : null });
+      });
+    window.__nativeActionsRestoreFetch = () => {
+      window.fetch = originalFetch;
+      if (originalPost) channel.postMessage = originalPost;
+      delete window.__nativeActionsRestoreFetch;
+    };
+  }, options.actions ?? ['copyScreenshotImage']);
+  return {
+    timeline, received, ended,
+    // Resolves with the Node-held Blob evidence of one upload (bytes or the
+    // bounded problem record) from the side map - never the timeline, which
+    // keeps only meta; only the harness waits on it, never the page.
+    waitForUploadBlob: (seq) => new Promise((resolve) => {
+      if (blobEvidence.has(seq)) { resolve(blobEvidence.get(seq) ?? null); return; }
+      const waiters = blobWaiters.get(seq) ?? [];
+      waiters.push(resolve);
+      blobWaiters.set(seq, waiters);
+    }),
+    // Per-action command / per-envelope receipt waits; null on the deadline.
+    waitForCommand: (action, milliseconds = 10000) =>
+      waitForRecord(commandWaiters, timeline.copyCommands, 'action', action, milliseconds),
+    waitForReceipt: (envelopeId, milliseconds = 10000) =>
+      waitForRecord(receiptWaiters, timeline.copyReceipts, 'envelopeId', envelopeId, milliseconds),
+  };
+}
+
+// Bounded race timer: a lost race is always cleared by the caller in a
+// finally block, so an expired-or-cleared timer never keeps the Node process
+// alive after the smoke finished.
+function raceDeadline(milliseconds) {
+  let timer;
+  const promise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), milliseconds);
+  });
+  return { promise, clear: () => clearTimeout(timer) };
 }
 
 async function firstLine(child, timeoutMs) {
@@ -511,43 +937,96 @@ async function pngPixels(page, png, mediaType = 'image/png') {
   }, { encoded: png.toString('base64'), mediaType });
 }
 
-async function observeNextAnnotationUpload(page) {
-  await page.evaluate(() => {
-    const originalFetch = window.fetch;
-    const observed = { count: 0, mimeType: null, byteLength: null,
-      bytes: null, problem: null };
-    window.__nativeActionsUpload = observed;
-    window.fetch = function(input, init) {
-      if (input === '/__annotation' && init?.method === 'POST') {
-        observed.count++;
-        try {
-          const body = init.body;
-          if (!(body instanceof Blob)) observed.problem = 'upload body was not a Blob';
-          else {
-            observed.mimeType = body.type;
-            observed.byteLength = body.size;
-            if (body.size > 8 * 1024 * 1024) observed.problem = 'synthetic PNG exceeded 8 MiB';
-            else body.arrayBuffer().then(
-              (buffer) => { observed.bytes = Array.from(new Uint8Array(buffer)); },
-              () => { observed.problem = 'Blob observation failed'; },
-            );
-          }
-        } catch {
-          observed.problem = 'Blob observation failed';
-        }
-      }
-      return originalFetch.apply(this, arguments);
-    };
-    window.__nativeActionsRestoreFetch = () => {
-      window.fetch = originalFetch;
-      delete window.__nativeActionsRestoreFetch;
-      delete window.__nativeActionsUpload;
-    };
-  });
+// Decode one image buffer to raw RGBA inside the product's own WebView2 -
+// the SAME decoder renders both sides of the #318 byte comparison, so no
+// cross-decoder drift can pass; the base64 payload keeps the CDP return
+// bounded. No hashing: the judge compares bytes.
+async function decodeImageRgba(page, buffer, mediaType) {
+  return page.evaluate(async ({ encoded, mediaType }) => {
+    const bytes = Uint8Array.from(atob(encoded), (letter) => letter.charCodeAt(0));
+    const image = await createImageBitmap(new Blob([bytes], { type: mediaType }));
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, image.width, image.height);
+    image.close();
+    let binary = '';
+    const chunk = 0x8000;
+    for (let offset = 0; offset < data.length; offset += chunk)
+      binary += String.fromCharCode(...data.subarray(offset, offset + chunk));
+    return { width: canvas.width, height: canvas.height, rgbaBase64: btoa(binary) };
+  }, { encoded: buffer.toString('base64'), mediaType });
+}
+
+// Task #318 clipboard readback: after the scene-terminal copy closed and
+// retired the scene WebView (no receipt is ever required from it - the host
+// normally suppresses it), the still-alive isolated workbench reads the real
+// Windows Clipboard back through its public 粘贴图片 input
+// (imageEdit.readClipboard -> host Clipboard.GetContent). The persistent
+// imageEdit-state watch is installed BEFORE the first 图片编辑 entry, so the
+// real pre-paste session is the baseline and only the paste's terminal
+// non-busy record naming a NEW session OR resource is accepted (the busy
+// old-URL republish that StartImageEdit publishes first can never satisfy
+// the wait). The accepted
+// snapshot is returned once by the wait - never re-read after an await - and
+// both the clipboard image and this revision's export PNG are decoded in the
+// SAME WebView and compared byte-for-byte. The clipboard image is written to
+// disk only AFTER the comparison passed; a mismatch never persists unknown
+// clipboard pixels. Every wait is bounded; there is no retry and no new
+// framework - only the owned restore seam (same ownership foreground guard
+// as every other input step).
+async function readbackSceneCopyClipboard(app, evidenceRoot, manual, selectedRegion, expectedPng) {
+  const page = app.page;
+  await installImageEditClipboardWatch(page);
+  await native('restore', { AppPid: app.child.pid, Handle: app.main.Handle });
+  await waitForWindows(app.child.pid,
+    (item) => item.Handle === app.main.Handle && item.Visible, 12000);
+  await page.bringToFront();
+  await page.getByRole('link', { name: '图片编辑', exact: true }).click();
+  await page.getByRole('heading', { name: '图片编辑', exact: true }).waitFor();
+  const snapshot = await pasteImageEditClipboard(page);
+  const resource = new URL(snapshot.url);
+  assert(resource.origin === 'https://app.vibeocr' && resource.pathname.startsWith('/__resource/'),
+    'Clipboard readback input is not the product resource observed from imageEdit state.');
+  const pasted = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Clipboard readback resource returned ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('Clipboard readback image exceeded 8 MiB');
+    return { mediaType: response.headers.get('content-type'), bytes: Array.from(bytes) };
+  }, snapshot.url);
+  // Verify BEFORE persisting: a failed comparison must not write unknown
+  // clipboard pixels into the evidence root.
+  const expectedRgba = await decodeImageRgba(page, expectedPng, 'image/png');
+  const clipboardBytes = Buffer.from(pasted.bytes);
+  const rgba = await decodeImageRgba(page, clipboardBytes, pasted.mediaType);
+  assertClipboardReadback({ mediaType: pasted.mediaType, rgba }, { width: selectedRegion.width,
+    height: selectedRegion.height, expectedRgba },
+  manual ? 'Manual clipboard readback' : 'Smart clipboard readback');
+  fs.writeFileSync(path.join(evidenceRoot,
+    manual ? 'manual-clipboard-readback.png' : 'clipboard-readback.png'), clipboardBytes);
+  return { mediaType: pasted.mediaType, bytes: clipboardBytes.length,
+    pixels: { width: rgba.width, height: rgba.height },
+    inputUrl: snapshot.url, sessionId: snapshot.sessionId, stateSeq: snapshot.seq,
+    matchesRevision: true };
 }
 
 const handleCursorShapes = ['sizeNWSE', 'sizeNS', 'sizeNESW', 'sizeWE', 'sizeWE', 'sizeNESW', 'sizeNS', 'sizeNWSE'];
 const magnifierLabelPattern = /^(-?\d+), (-?\d+)\r?\n#([0-9A-F]{6})\r?\nRGB (\d+), (\d+), (\d+)$/;
+
+// Island cursor truth (native-actions-e2e): the legacy global-cursor reading
+// can disagree with the WinUI island cursor, so the fixture reports the
+// overlay's InputSystemCursorShape name; the legacy handle stays evidence-only.
+const islandCursorNames = { cross: 'Cross', hand: 'Hand', arrow: 'Arrow', sizeAll: 'SizeAll',
+  sizeNWSE: 'SizeNorthwestSoutheast', sizeNS: 'SizeNorthSouth',
+  sizeNESW: 'SizeNortheastSouthwest', sizeWE: 'SizeWestEast' };
+export function islandCursorName(legacyShape) {
+  assert(Object.hasOwn(islandCursorNames, legacyShape),
+    `Unknown cursor expectation: ${legacyShape}`);
+  return islandCursorNames[legacyShape];
+}
 
 function manualHandleAnchors(rect) {
   const midX = rect.left + rect.width / 2;
@@ -587,11 +1066,11 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   async function observe(hover, cursorShape, sample, context, tolerance = 0) {
     await native('mouse-move', point(hover.x, hover.y));
     await delay(150);
-    const cursor = JSON.parse(await native('cursor'));
-    assert(cursor.shown && Math.abs(cursor.x - hover.x) <= 1 && Math.abs(cursor.y - hover.y) <= 1,
+    const cursor = JSON.parse(await native('cursor', { AppPid: appPid, Handle: overlayHandle }));
+    assert(Math.abs(cursor.x - hover.x) <= 1 && Math.abs(cursor.y - hover.y) <= 1,
       `OS cursor is not resting at ${hover.x},${hover.y}: ${JSON.stringify(cursor)}`);
-    assert(cursor[cursorShape] === true,
-      `${context} did not show the ${cursorShape} cursor: ${JSON.stringify(cursor)}`);
+    assert(cursor.islandCursorShape === islandCursorName(cursorShape),
+      `${context} did not show the ${cursorShape} island cursor: ${JSON.stringify(cursor)}`);
     const label = await native('magnifier', { AppPid: appPid, Handle: overlayHandle });
     const match = magnifierLabelPattern.exec(label);
     assert(match, `${context} magnifier label is not frozen-pixel evidence: ${JSON.stringify(label)}`);
@@ -601,7 +1080,8 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
       sample: { x: Number(match[1]), y: Number(match[2]) },
       hex: `#${match[3]}`,
       rgb: [Number(match[4]), Number(match[5]), Number(match[6])],
-      cursor: { shape: cursorShape, handle: cursor.handle },
+      cursor: { expected: islandCursorName(cursorShape), island: cursor.islandCursorShape,
+        result: cursor.result, legacyHandle: cursor.legacyHandle },
     };
     for (let channel = 0; channel < 3; channel++)
       assert.equal(parseInt(observed.hex.slice(1 + channel * 2, 3 + channel * 2), 16),
@@ -737,6 +1217,23 @@ async function verifyManualHandleEvidence(app, overlay, desktop, button, gesture
   return observations;
 }
 
+// Verified manual seed preparation shared by the main manual capture and the
+// explicit end-session coverage: the smart preview must be unconfirmed, one
+// owned right-click leaves it (its corner is otherwise a resize handle), and
+// only a real island crosshair may start the manual drag.
+async function beginManualDragSeed(appPid, overlayHandle, start) {
+  await native('mouse-move', start);
+  const previewLabel = await native('selection', { AppPid: appPid, Handle: overlayHandle });
+  assert(/^(控件候选|窗口候选|边界区域)/.test(previewLabel),
+    `Manual setup requires an unconfirmed smart preview: ${previewLabel}`);
+  await native('mouse-right', start);
+  await native('mouse-move', start);
+  const cursor = JSON.parse(await native('cursor', { AppPid: appPid, Handle: overlayHandle }));
+  assert(cursor.islandCursorShape === islandCursorName('cross'),
+    'Manual selection must start with the crosshair, not a preview handle.');
+  return { previewLabel, cursor };
+}
+
 async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual = false) {
   let page = app.page;
   const toolbarHandles = (await windows(app.child.pid))
@@ -805,8 +1302,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   if (manual) {
     const start = { AppPid: app.child.pid, X: button.left + 4, Y: button.top + 4 };
     const end = { AppPid: app.child.pid, X: button.right - 4, Y: button.bottom - 4 };
-    await native('mouse-move', start);
-    gesture.events.push({ event: 'manual-start-cursor', cursor: JSON.parse(await native('cursor')) });
+    const seed = await beginManualDragSeed(app.child.pid, overlay.Handle, start);
+    gesture.events.push({ event: 'manual-start-cursor',
+      previewLabel: seed.previewLabel, cursor: seed.cursor });
     await native('mouse-down', start);
     try { await native('mouse-move', end); }
     finally { await native('mouse-up', end); }
@@ -952,6 +1450,9 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   pixelEvidence.canvasBefore = before;
   assert(before.nonBackground > 1000, 'Real screenshot image never decoded in WebView2.');
   await page.getByRole('button', { name: '矩形', exact: true }).click();
+  // The stroke color defaults to red #e02020; select the public orange swatch
+  // explicitly (same as the demand-tools drawRectangle) for the orange checks.
+  await page.getByRole('button', { name: '常用颜色 #f38b35', exact: true }).click();
   await page.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
   const box = await editor.boundingBox();
   // A CSS size floor would reject the legitimate 140x42 crop at 175% DPI;
@@ -966,81 +1467,183 @@ async function captureThroughHotkey(app, fixture, evidenceRoot, evidence, manual
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
   await page.mouse.up();
-  await page.waitForFunction(() => window.__nativeActionsEvidence?.revision >= 1,
-    null, { timeout: 5000 });
+  // Host revision acknowledgement and the canvas frame complete independently.
+  await page.waitForFunction((baseline) => {
+    if (!(window.__nativeActionsEvidence?.revision >= 1)) return false;
+    const element = document.querySelector('canvas[aria-label="图片检查画布"]');
+    if (!element) return false;
+    const { data } = element.getContext('2d').getImageData(0, 0, element.width, element.height);
+    let orange = 0;
+    for (let i = 0; i < data.length; i += 4)
+      if (data[i] > 210 && data[i + 1] > 90 && data[i + 1] < 190 && data[i + 2] < 110) orange++;
+    return orange > baseline + 50;
+  }, before.orange, { timeout: 5000 });
   const after = await canvasOrange(page);
   assert(after.orange > before.orange + 50, 'Real WebView2 rectangle edit changed too few pixels.');
 
-  await observeNextAnnotationUpload(page);
+  // Scene-terminal copy: a successful 复制标注图 closes the session and
+  // retires this WebView, so all page reads (revision, editor screenshot)
+  // happen before the click and the copy proof is Node-held only. The
+  // pre-click passive observer keeps every upload, the public copy command,
+  // receipts and the close; the copy upload is selected by the command's
+  // resourceUri, so the automatic text-layer upload never stands in for the
+  // copied pixels.
+  const revision = await page.evaluate(() => window.__nativeActionsEvidence);
+  assert(revision?.sessionId && revision.revision >= 1,
+    'Host screenshot session revision did not advance after editing.');
+  await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
+  // #318: prime the real Clipboard with this run's own synthetic fixture
+  // frame before the terminal copy, so the post-copy readback below can only
+  // ever observe this smoke's images - user clipboard pixels never enter, and
+  // a copy that fails to replace the sentinel fails closed on pixels.
+  await setClipboardImage(evidenceRoot, fixtureFrame);
+  const terminal = await observeSceneCopyTerminal(page);
+  pixelEvidence.copyTimeline = terminal.timeline;
+  const commandDeadline = raceDeadline(10000);
+  const commandObserved = Promise.race([terminal.received.then(() => true), commandDeadline.promise]);
   let png;
   let uploadBytes;
   try {
-    const requestPromise = page.waitForRequest((request) =>
-      request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-    { timeout: 10000 });
-    await page.getByRole('button', { name: '复制标注图' }).click();
-    const request = await requestPromise;
-    const response = await request.response();
-    assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
-    // WebView2 CDP may omit a fetch Blob from request.postDataBuffer(). Observe
-    // that same immutable Blob without changing the arguments sent to fetch.
-    const cdpBytes = request.postDataBuffer()?.length ?? null;
+    const clickError = await page.getByRole('button', { name: '复制标注图' })
+      .click()
+      .then(() => null, (error) => `${error.name}: ${error.message}`);
+    if (clickError) terminal.timeline.clickError = clickError;
+    assert(await commandObserved,
+      `No public copyScreenshotImage command within 10 seconds: ${JSON.stringify(terminal.timeline)}`);
+    const endDeadline = raceDeadline(10000);
+    let ended;
     try {
-      await page.waitForFunction(() => {
-        const upload = window.__nativeActionsUpload;
-        return upload && (Array.isArray(upload.bytes) || upload.problem !== null);
-      }, null, { timeout: 5000 });
-    } catch (error) {
-      const observed = await page.evaluate(() => {
-        const upload = window.__nativeActionsUpload;
-        return { count: upload?.count ?? 0, mimeType: upload?.mimeType ?? null,
-          byteLength: upload?.byteLength ?? null, problem: upload?.problem ?? null };
-      }).catch(() => null);
-      throw new Error(`Product Blob observation timed out: ${JSON.stringify(observed)}; ` +
-        `CDP body bytes=${cdpBytes ?? 'unavailable'}.`, { cause: error });
-    }
-    const upload = await page.evaluate(() => window.__nativeActionsUpload);
-    assert.equal(upload.count, 1,
-      `Expected one product PNG upload, saw ${upload.count}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
-    assert.equal(upload.problem, null,
-      `Product Blob observation failed: ${upload.problem}; CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
-    assert.equal(upload.mimeType, 'image/png', 'Product upload Blob was not image/png.');
-    assert(Array.isArray(upload.bytes) && upload.bytes.length === upload.byteLength,
+      ended = await Promise.race([terminal.ended.then(() => true), endDeadline.promise]);
+    } finally { endDeadline.clear(); }
+    if (!ended) terminal.timeline.noTerminalEvent = true;
+    settleSceneCopyTimeline(terminal.timeline);
+    const command = terminal.timeline.copyCommands[0];
+    const upload = terminal.timeline.uploads.find(
+      (item) => item.resourceUri === command.resourceUri);
+    // The immutable Blob evidence of exactly that upload is pushed to Node by
+    // the pre-click binding at fetch time; the scene is never evaluated after
+    // the click, so even an instant close keeps the pixels in Node.
+    const blobDeadline = raceDeadline(5000);
+    let observed;
+    try {
+      observed = await Promise.race([terminal.waitForUploadBlob(upload.seq), blobDeadline.promise]);
+    } finally { blobDeadline.clear(); }
+    if (!observed) observed = { mimeType: null, byteLength: null, bytes: null,
+      problem: `copy upload Blob never reached Node: ${JSON.stringify(terminal.timeline)}` };
+    assert.equal(observed.problem ?? null, null,
+      `Product Blob observation failed: ${JSON.stringify(observed)}; timeline=${JSON.stringify(terminal.timeline)}.`);
+    assert.equal(observed.mimeType, 'image/png', 'Product upload Blob was not image/png.');
+    assert(Array.isArray(observed.bytes) && observed.bytes.length === observed.byteLength,
       'Product upload Blob size changed during observation.');
-    png = Buffer.from(upload.bytes);
-    uploadBytes = upload.byteLength;
+    png = Buffer.from(observed.bytes);
+    uploadBytes = observed.byteLength;
     assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
-      `Product upload Blob is not PNG; bytes=${uploadBytes}, CDP body bytes=${cdpBytes ?? 'unavailable'}.`);
-    await page.getByText('已复制截图副本', { exact: false }).waitFor();
+      `Product upload Blob is not PNG; bytes=${uploadBytes}.`);
   } finally {
+    commandDeadline.clear();
     await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
   fs.writeFileSync(path.join(evidenceRoot, manual ? 'manual-edited.png' : 'synthetic-edited.png'), png);
-  await page.screenshot({ path: path.join(evidenceRoot, manual ? 'manual-screenshot-editor.png' : 'screenshot-editor.png') });
-  const pixels = await pngPixels(page, png);
+  // Decode on the still-alive main workbench page; the scene is closed now.
+  const pixels = await pngPixels(app.page, png);
   pixelEvidence.editedPngPixels = pixels;
-  pixelEvidence.gesture = gesture;
   assert.equal(pixels.width, selectedRegion.width, 'Final crop differs from the selected physical width.');
   assert.equal(pixels.height, selectedRegion.height, 'Final crop differs from the selected physical height.');
   assert(pixels.orange > 20 && pixels.dark > 10 && pixels.light > 100,
     `Synthetic PNG pixels are incomplete: ${JSON.stringify(pixels)}`);
-  const revision = await page.evaluate(() => window.__nativeActionsEvidence);
-  assert(revision?.sessionId && revision.revision >= 1,
-    'Host screenshot session revision did not advance after editing.');
-  const sceneClosed = page.waitForEvent('close', { timeout: 10000 });
-  await page.getByRole('button', { name: '结束会话', exact: true }).click();
-  await sceneClosed;
   assert(!(await windows(app.child.pid)).some(item =>
     item.Handle === app.main.Handle && item.Visible),
   'Closing the screenshot scene forced the hidden workbench to appear.');
+  // #318 clipboard readback: the timeline above proves command/upload/close;
+  // the actual Clipboard is proven only by reading it back through the
+  // still-alive workbench's public paste input (fixture sentinel was primed
+  // before the click; the closed scene is never evaluated again). The
+  // expected side is THIS revision's exported upload PNG bytes.
+  const clipboardReadback = await readbackSceneCopyClipboard(app, evidenceRoot, manual,
+    selectedRegion, png);
+  pixelEvidence.clipboardReadback = clipboardReadback;
   return { hotkey, overlayHandle: overlay.Handle,
-    sceneClosed: true, mainHiddenAfterSelection: true,
+    copyClosedScene: true, copyTimeline: terminal.timeline,
+    mainHiddenAfterSelection: true,
     mainHiddenDuringSelection: true, toolbarHiddenDuringSelection: true,
-    toolbarRestoredAfterSelection: true,
     background: fixture.backgroundRect, button, selectedRegion, gesture, canvasBefore: before,
     canvasAfter: after, png: pixels, productUploadBytes: uploadBytes,
+    clipboardReadback,
     sessionId: revision.sessionId,
     revision: revision.revision };
+}
+
+// The explicit 结束会话 keeps its own coverage on a fresh, independent
+// screenshot session: the annotated captures above end with the
+// scene-terminal copy, so the public end button is proven here instead.
+async function explicitEndSessionCoverage(app, fixture) {
+  const appPid = app.child.pid;
+  const toolbarHandles = (await windows(appPid))
+    .filter((item) => item.Visible && item.Handle !== app.main.Handle && area(item) > 1000)
+    .map((item) => item.Handle);
+  assert(toolbarHandles.length > 0, 'Enabled toolbar has no visible native window.');
+  await native('hide', { AppPid: appPid, Handle: app.main.Handle });
+  await native('focus-fixture', {
+    FixturePid: fixture.pid, Handle: fixture.root,
+    X: fixture.editRect.left + Math.floor(fixture.editRect.width / 2),
+    Y: fixture.editRect.top + Math.floor(fixture.editRect.height / 2),
+  });
+  await native('hotkey', { FixturePid: fixture.pid });
+  const button = fixture.buttonRect;
+  const x = button.left + Math.floor(button.width / 2);
+  const y = button.top + Math.floor(button.height / 2);
+  const overlays = await waitForWindows(appPid, (item) => item.Visible &&
+    item.Handle !== app.main.Handle &&
+    area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
+    inside(item, x, y), 12000);
+  const overlay = overlays.sort((a, b) => area(b) - area(a))[0];
+  const start = { AppPid: appPid, X: button.left + 4, Y: button.top + 4 };
+  const end = { AppPid: appPid, X: button.right - 4, Y: button.bottom - 4 };
+  // Same verified manual seed preparation: without leaving the smart preview
+  // the NW corner is a resize handle and the seed drag shrinks the preview
+  // instead of drawing the intended selection.
+  await beginManualDragSeed(appPid, overlay.Handle, start);
+  await native('mouse-down', start);
+  try { await native('mouse-move', end); }
+  finally { await native('mouse-up', end); }
+  const dragLabel = await native('selection', { AppPid: appPid, Handle: overlay.Handle });
+  assert(dragLabel.includes(`手动 · ${button.width - 8} × ${button.height - 8} px`),
+    `End-session seed selection was not the manual drag: ${dragLabel}`);
+  const click = { AppPid: appPid,
+    X: button.left + 4 + Math.floor((button.width - 8) / 2),
+    Y: button.top + 4 + Math.floor((button.height - 8) / 2) };
+  await native('mouse-move', click);
+  await native('mouse-down', click);
+  try {
+    assert((await windows(appPid)).some((item) => item.Handle === overlay.Handle && item.Visible),
+      'A press confirmed the end-session selection before release.');
+  } finally { await native('mouse-up', click); }
+  await native('enter', { AppPid: appPid });
+  const deadline = Date.now() + 12000;
+  let scene = null;
+  while (Date.now() < deadline && !scene) {
+    scene = app.browser.contexts().flatMap((context) => context.pages())
+      .find((item) => item !== app.page && !item.isClosed() &&
+        item.url().includes('#/imageEdit?scene=1'));
+    if (!scene) await delay(100);
+  }
+  assert(scene, 'End-session scene WebView did not appear.');
+  await scene.locator('html[data-capture-scene="true"]')
+    .waitFor({ state: 'attached', timeout: 12000 });
+  await scene.getByLabel('图片检查画布').waitFor({ timeout: 12000 });
+  const duringScene = await windows(appPid);
+  assert(!duringScene.some((item) => item.Handle === app.main.Handle && item.Visible),
+    'Completed edit capture forced the hidden workbench to appear.');
+  const sceneClosed = scene.waitForEvent('close', { timeout: 10000 });
+  await scene.getByRole('button', { name: '结束会话', exact: true }).click();
+  await sceneClosed;
+  const after = await windows(appPid);
+  assert(!after.some((item) => item.Handle === app.main.Handle && item.Visible),
+    'Closing the screenshot scene forced the hidden workbench to appear.');
+  assert(toolbarHandles.every((handle) => after.some((item) =>
+    item.Handle === handle && item.Visible)), 'Toolbar did not resume after the explicit end.');
+  return { sceneClosed: true, mainHiddenAfterEnd: true,
+    toolbarRestoredAfterEnd: true, selectionLabel: dragLabel };
 }
 
 async function verifyRecognitionHotkeyGuard(app, fixture) {
@@ -1150,6 +1753,9 @@ async function main() {
     fixture = await startFixture();
     evidence.capture = await captureThroughHotkey(app, fixture, smokeRoot, evidence);
     evidence.manualCapture = await captureThroughHotkey(app, fixture, smokeRoot, evidence, true);
+    // Both captures above end with the scene-terminal copy; the explicit end
+    // button keeps its own independent fresh-session coverage.
+    evidence.explicitEndSession = await explicitEndSessionCoverage(app, fixture);
     evidence.recognitionHotkeyGuard = await verifyRecognitionHotkeyGuard(app, fixture);
     await openSettings(app.page);
     await setCheckbox(app.page, '启用悬浮工具栏', false);
@@ -1204,7 +1810,8 @@ async function main() {
 export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
-  assertCaptureCanvasLayout };
+  assertCaptureCanvasLayout, settleSceneCopyTimeline, observeSceneCopyTerminal,
+  decodeImageRgba, raceDeadline };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

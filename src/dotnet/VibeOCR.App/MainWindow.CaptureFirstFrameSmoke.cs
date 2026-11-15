@@ -103,6 +103,9 @@ public sealed partial class MainWindow
         long settledAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         SyntheticScreenRegionPicker.CaptureEvidence capture = screenshotSmokePicker.Evidence ??
           throw new InvalidOperationException("Synthetic capture evidence missing.");
+        double? StageFromCreateMs(long? timestamp) => timestamp is { } observed
+          ? Stopwatch.GetElapsedTime(editor.CreatedTimestamp, observed).TotalMilliseconds
+          : null;
         rows.Add(new
         {
           cycle, temperature = cycle == 1 ? "cold" : "warm", command_at_ms = commandAt,
@@ -111,6 +114,13 @@ public sealed partial class MainWindow
           capture_to_presented_ms = Stopwatch.GetElapsedTime(screenshotSmokePicker.CaptureStartedTimestamp, presented).TotalMilliseconds,
           capture_complete_to_presented_ms = Stopwatch.GetElapsedTime(screenshotSmokePicker.CaptureCompletedTimestamp, presented).TotalMilliseconds,
           editor_to_presented_ms = Stopwatch.GetElapsedTime(editor.CreatedTimestamp, presented).TotalMilliseconds,
+          editor_stages_from_create_ms = new
+          {
+            loaded = StageFromCreateMs(editor.LoadedTimestamp),
+            webview_initialized = StageFromCreateMs(editor.WebViewInitializedTimestamp),
+            bootstrap_received = StageFromCreateMs(editor.BootstrapReceivedTimestamp),
+            bridge_ready = StageFromCreateMs(editor.BridgeReadyTimestamp),
+          },
           command_to_presented_ms = Stopwatch.GetElapsedTime(commandStarted, presented).TotalMilliseconds,
           dispose_ms = Stopwatch.GetElapsedTime(closeStarted, disposed).TotalMilliseconds,
           before, ready, closed = CaptureCounts(), capture, geometry,

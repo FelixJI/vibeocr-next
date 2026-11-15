@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { validateReplacementHealth } from '../../scripts/smoke_capture_replacement.mjs';
 
+const zeroEvidence = () => ({ root_pid_seen: true, applog_non_empty: true, applog_forbidden_hits: [], violations: [] });
+
 function health() {
   const baseline = { Subscriptions: 1, Resources: 0, AnnotationEntries: 0,
     AnnotationReservations: 0, AnnotationOwnedFiles: 0, ResourceFiles: 0, EditorWebViews: 0, TotalWebViews: 1 };
   const held = { ...baseline, EditorWebViews: 1, TotalWebViews: 2 };
   return { smoke: 'capture-replacement-e2e', state: 'passed', baseline,
-    submit_attempts: 0, startup_ensure_attempts: 0, installer_attempts: 0, inference_attached: false,
+    submit_attempts: 0, startup_ensure_attempts: 0, inference_attached: false,
     renderer_failure: 'UNVERIFIED: only Reload was induced', rows: [
       { phase: 'main-reload', counts: baseline },
       { phase: 'two-replacements-held', counts: held, intermediate: 'b', latest: 'c', restorations: 0 },
@@ -19,25 +21,38 @@ function health() {
 }
 
 test('lifecycle evidence requires real bounded replacement and completed cleanup', () => {
-  validateReplacementHealth(health());
+  validateReplacementHealth(health(), zeroEvidence());
   const overlap = health();
   overlap.rows[1].counts.EditorWebViews = 2;
   overlap.rows[1].counts.TotalWebViews = 3;
-  assert.throws(() => validateReplacementHealth(overlap), /WebView bound/);
+  assert.throws(() => validateReplacementHealth(overlap, zeroEvidence()), /WebView bound/);
   const incomplete = health();
   incomplete.rows.pop();
-  assert.throws(() => validateReplacementHealth(incomplete));
+  assert.throws(() => validateReplacementHealth(incomplete, zeroEvidence()));
   const leak = health();
   leak.rows[5].counts.Resources = 1;
-  assert.throws(() => validateReplacementHealth(leak), /Shutdown: Resources/);
+  assert.throws(() => validateReplacementHealth(leak, zeroEvidence()), /Shutdown: Resources/);
 });
 
 test('failure or simulated renderer coverage cannot pass lifecycle evidence', () => {
   const failed = health();
   failed.state = 'failed';
   failed.error = 'native disposal fault';
-  assert.throws(() => validateReplacementHealth(failed), /native disposal fault/);
+  assert.throws(() => validateReplacementHealth(failed, zeroEvidence()), /native disposal fault/);
   const simulated = health();
   simulated.renderer_failure = 'passed';
-  assert.throws(() => validateReplacementHealth(simulated), /ProcessFailed/);
+  assert.throws(() => validateReplacementHealth(simulated, zeroEvidence()), /ProcessFailed/);
+});
+
+test('lifecycle requires observed normal zero-Runtime evidence rather than a nonexistent counter', () => {
+  for (const field of ['root_pid_seen', 'applog_non_empty']) {
+    const zero = zeroEvidence();
+    delete zero[field];
+    assert.throws(() => validateReplacementHealth(health(), zero));
+  }
+  for (const field of ['applog_forbidden_hits', 'violations']) {
+    const zero = zeroEvidence();
+    zero[field].push('Installer activity observed');
+    assert.throws(() => validateReplacementHealth(health(), zero));
+  }
 });

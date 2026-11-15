@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'cursor-map', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -10,6 +10,8 @@ param(
     [int]$OutsideX = 0,
     [int]$OutsideY = 0,
     [ValidateRange(100, 5000)][int]$LingerMs = 300,
+    [ValidateRange(10, 20)][int]$SampleMs = 15,
+    [ValidateRange(1000, 60000)][int]$TimeoutMs = 10000,
     [Guid]$IconGuid = [Guid]::Empty,
     [string]$FilePath = '',
     [string]$EvidenceRoot = ''
@@ -76,6 +78,8 @@ public static class NativeActionsFixture
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr state);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect bounds);
+    [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr window, ref Point point);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
@@ -406,6 +410,73 @@ public static class NativeActionsFixture
         };
     }
 
+    // Locked WinAppSDK 2.6.4 InputSystemCursorShape raw values the picker can
+    // actually show; the App answers LRESULT = 1 + raw. Anything else is rejected.
+    private static readonly Dictionary<int, string> IslandCursorShapes = new Dictionary<int, string>
+    {
+        { 1, "Arrow" }, { 2, "Cross" }, { 4, "Hand" }, { 7, "SizeAll" },
+        { 8, "SizeNortheastSouthwest" }, { 9, "SizeNorthSouth" },
+        { 10, "SizeNorthwestSoutheast" }, { 11, "SizeWestEast" },
+    };
+
+    public static string IslandCursorName(ulong wireResult)
+    {
+        return wireResult >= 1 && wireResult <= int.MaxValue &&
+            IslandCursorShapes.TryGetValue((int)wireResult, out string name) ? name : null;
+    }
+
+    private static void GuardCursorPoint(IntPtr window, int pid, Point point)
+    {
+        if (GetForegroundWindow() != window)
+            throw new InvalidOperationException("Overlay is not the foreground window at the cursor read.");
+        IntPtr hit = WindowFromPoint(point);
+        if (GetAncestor(hit, 2) != window)
+            throw new InvalidOperationException("Cursor point does not hit-test to the overlay root.");
+        GetWindowThreadProcessId(hit, out uint hitPid);
+        if (hitPid != (uint)pid)
+            throw new InvalidOperationException("Cursor point hit-test window is outside this smoke run.");
+    }
+
+    // Same-sample island cursor truth for native-actions-e2e: the physical
+    // cursor must rest on the overlay root with the overlay foreground before
+    // the query and again - at an unchanged position - after it; the legacy
+    // global handle is evidence only (it can disagree with island cursors).
+    public static object PickerCursor(long handle, int pid)
+    {
+        RequireOwner(handle, pid);
+        IntPtr window = new IntPtr(handle);
+        if (!GetCursorPos(out Point physical))
+            throw new InvalidOperationException("Cursor position is unavailable.");
+        GuardCursorPoint(window, pid, physical);
+        uint message = RegisterWindowMessage("VibeOCR.ScreenRegionPicker.CursorProbe");
+        if (message == 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        bool delivered = SendMessageTimeout(window, message, IntPtr.Zero, IntPtr.Zero,
+            2, 1000, out UIntPtr result) != IntPtr.Zero;
+        int error = delivered ? 0 : Marshal.GetLastWin32Error();
+        if (!GetCursorPos(out Point after))
+            throw new InvalidOperationException("Cursor position is unavailable after the read.");
+        if (after.X != physical.X || after.Y != physical.Y)
+            throw new InvalidOperationException(
+                "Cursor moved during the island read: " + physical.X + "," + physical.Y +
+                " -> " + after.X + "," + after.Y);
+        GuardCursorPoint(window, pid, after);
+        string shape = IslandCursorName(result.ToUInt64());
+        if (!delivered || shape is null)
+            throw new InvalidOperationException(
+                "Island cursor read failed closed: delivered=" + delivered + " error=" + error +
+                " result=" + result.ToUInt64() + " shape=" + (shape ?? "null"));
+        var legacyInfo = new CursorInfo { Size = (uint)Marshal.SizeOf<CursorInfo>(), Flags = 1 };
+        bool legacyOk = GetCursorInfo(ref legacyInfo);
+        return new {
+            x = physical.X, y = physical.Y, islandCursorShape = shape,
+            result = result.ToUInt64(), foregroundHandle = window.ToInt64(), pid,
+            legacyShown = legacyOk && (legacyInfo.Flags & 1) != 0,
+            legacyHandle = legacyInfo.Handle.ToInt64(),
+            legacyError = legacyOk ? 0 : Marshal.GetLastWin32Error(),
+        };
+    }
+
     private static void RequirePointOwner(int x, int y, int pid)
     {
         GetWindowThreadProcessId(WindowFromPoint(new Point { X = x, Y = y }), out uint owner);
@@ -545,6 +616,55 @@ public static class NativeActionsFixture
             System.Threading.Thread.Sleep(10);
         return new { BeforeReentry = beforeReentry, ReentryCancelled = reentryCancelled,
             HiddenAfterSecondExit = !IsWindowVisible(new IntPtr(handle)), SecondExitElapsedMs = watch.ElapsedMilliseconds };
+    }
+
+    // Show-flow observer: after the caller's ready+go handshake it bounded-waits
+    // for the app-owned visible 272x44-logical toolbar host and keeps it visible
+    // via the existing guarded Hover; guards/timeouts throw to fail closed.
+    public static object WaitShownToolbar(int appPid, long excludeHandle, int sampleMs, int timeoutMs)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (watch.ElapsedMilliseconds < timeoutMs)
+        {
+            foreach (var window in Windows(appPid))
+            {
+                if (window.Handle == excludeHandle || !window.Visible ||
+                    window.ClassName != "WinUIDesktopWin32WindowClass" ||
+                    (window.ExtendedStyle & 0x80) == 0)
+                    continue;
+                if (!GetClientRect(new IntPtr(window.Handle), out Rect client))
+                    continue;
+                // GetClientRect is client-local (Left/Top are 0); ClientToScreen
+                // yields the screen-space client origin exactly like
+                // ScrollCaptureNative.Geometry in scroll_capture_fixture.ps1.
+                var origin = new Point();
+                if (!ClientToScreen(new IntPtr(window.Handle), ref origin))
+                    continue;
+                int clientWidth = client.Right - client.Left;
+                int clientHeight = client.Bottom - client.Top;
+                double scale = window.Dpi / 96.0;
+                if (Math.Abs(clientWidth / scale - 272) >= 3 ||
+                    Math.Abs(clientHeight / scale - 44) >= 3)
+                    continue;
+                int hoverX = origin.X + clientWidth / 2;
+                int hoverY = origin.Y + clientHeight / 2;
+                Hover(appPid, hoverX, hoverY);
+                if (!IsWindowVisible(new IntPtr(window.Handle)))
+                    throw new InvalidOperationException(
+                        "Toolbar hid immediately after the guarded keep-visible hover.");
+                return new {
+                    Handle = window.Handle, Visible = true, Iconic = window.Iconic,
+                    ClassName = window.ClassName, Dpi = window.Dpi,
+                    Bounds = window.Bounds, ExtendedStyle = window.ExtendedStyle,
+                    Client = new { X = origin.X, Y = origin.Y, Width = clientWidth, Height = clientHeight },
+                    WaitedMs = watch.ElapsedMilliseconds,
+                    HoverX = hoverX, HoverY = hoverY,
+                };
+            }
+            System.Threading.Thread.Sleep(sampleMs);
+        }
+        throw new InvalidOperationException(
+            "Visible owned toolbar with a 272x44 logical client did not appear within the bounded wait.");
     }
 
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
@@ -911,7 +1031,28 @@ try {
             if ($labels.Count -ne 1) { throw 'Owned picker selection label is unavailable or ambiguous.' }
             $labels[0]
         }
-        'cursor' { [NativeActionsFixture]::CursorState() | ConvertTo-Json -Compress }
+        'cursor' {
+            if ($Handle -le 0 -or $AppPid -le 0) {
+                throw 'Island cursor read requires the owned overlay handle and app pid.'
+            }
+            [NativeActionsFixture]::PickerCursor($Handle, $AppPid) | ConvertTo-Json -Compress
+        }
+        'cursor-map' {
+            # 纯映射自检（无 GUI）：锁定线值→名称，0/未知/坏码必须拒绝。
+            $cases = [ordered]@{ 1 = 'Arrow'; 2 = 'Cross'; 4 = 'Hand'; 7 = 'SizeAll';
+                8 = 'SizeNortheastSouthwest'; 9 = 'SizeNorthSouth'; 10 = 'SizeNorthwestSoutheast';
+                11 = 'SizeWestEast' }
+            foreach ($entry in $cases.GetEnumerator()) {
+                $name = [NativeActionsFixture]::IslandCursorName([uint64]$entry.Key)
+                if ($name -cne $entry.Value) { throw "Island cursor map mismatch: $($entry.Key) -> $name" }
+            }
+            foreach ($bad in @(0UL, 3UL, 5UL, 6UL, 12UL, [uint64]::MaxValue)) {
+                if ($null -ne [NativeActionsFixture]::IslandCursorName($bad)) {
+                    throw "Island cursor map accepted an unsupported code: $bad"
+                }
+            }
+            'island-cursor-map: ok'
+        }
         'magnifier' {
             if (-not ([NativeActionsFixture]::Windows($AppPid) | Where-Object { $_.Handle -eq $Handle -and $_.Visible })) {
                 throw 'Magnifier observation window is outside the owned app.'
@@ -1000,6 +1141,19 @@ try {
         'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
         'toolbar-sequence' { [NativeActionsFixture]::ToolbarSequence($Handle, $AppPid, $X, $Y, $OutsideX, $OutsideY, $LingerMs) | ConvertTo-Json -Compress }
+        'toolbar-show-wait' {
+            # ready proves the Add-Type compile finished; the bounded wait and
+            # guarded keep-visible hover start strictly at the stdin 'go' signal
+            # which the caller sends after the public Show click completes.
+            [Console]::Out.WriteLine('ready')
+            [Console]::Out.Flush()
+            $go = [Console]::In.ReadLineAsync()
+            if (-not $go.Wait(60000) -or $go.Result -cne 'go') {
+                throw "Toolbar show wait did not receive the 'go' signal."
+            }
+            [NativeActionsFixture]::WaitShownToolbar($AppPid, $Handle, $SampleMs, $TimeoutMs) |
+                ConvertTo-Json -Compress -Depth 4
+        }
         'toolbar-drag' { [NativeActionsFixture]::ToolbarDrag($AppPid, $FixturePid, $X, $Y, $OutsideX, $OutsideY) | ConvertTo-Json -Compress }
         'toolbar-hotkey' { [NativeActionsFixture]::Hotkey($ForegroundPid, 0x7B) }
         'tab' { [NativeActionsFixture]::OverlayKey($AppPid, 0x09) }

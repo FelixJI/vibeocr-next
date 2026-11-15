@@ -916,6 +916,93 @@ describe("首帧输入身份", () => {
   });
 });
 
+describe("截图现场无标注首帧的前缀缓存分配", () => {
+  it("无标注无草稿首帧不创建等尺寸缓存画布，直接绘制源图", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor({ captureScene });
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 800, 400);
+    harness.flush();
+
+    // 回归（#318）：旧实现即使无任何标注也会先建一张与可见画布同尺寸
+    // 的前缀缓存画布，再整体回贴；首帧凭空多一份等尺寸像素分配与一次
+    // canvas→canvas blit。
+    expect(canvas.width).toBe(800);
+    expect(canvas.height).toBe(400);
+    expect(
+      state.canvases.filter(
+        (entry) => entry.element !== canvas && entry.element.width === 800,
+      ),
+    ).toHaveLength(0);
+
+    const mainCalls = state.canvases.find(
+      (entry) => entry.element === canvas,
+    )!.calls;
+    // 可见画布上不得出现前缀缓存回贴（源为 HTMLCanvasElement 的 drawImage）。
+    expect(
+      mainCalls.filter(
+        (call) =>
+          call.op === "drawImage" && call.args[0] instanceof HTMLCanvasElement,
+      ),
+    ).toHaveLength(0);
+    // 取而代之：直接把源图绘制到可见画布。
+    expect(
+      mainCalls.some(
+        (call) =>
+          call.op === "drawImage" &&
+          !(call.args[0] instanceof HTMLCanvasElement),
+      ),
+    ).toBe(true);
+    unmount();
+  });
+
+  it("出现实际标注后仍建立并复用前缀缓存：切工具不重绘源图", async () => {
+    stubCanvasStack({ width: 800, height: 400 });
+    const harness = stubAnimationFrames();
+    const { unmount } = await renderEditor({ captureScene });
+    const canvas = getEditorCanvas();
+    mockCanvasBox(canvas, 800, 400);
+    harness.flush();
+
+    // 提交一个矩形标注后，缓存前缀应当包含该标注。
+    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
+    harness.flush();
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
+    harness.flush();
+
+    state.canvases.forEach((entry) => {
+      entry.calls.length = 0;
+    });
+    // 连续切换工具只合并为单帧，且帧内不得重绘源图（无直接 drawImage 源图），
+    // 只回贴缓存前缀：有实际标注时前缀缓存语义保持不变。
+    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    fireEvent.click(screen.getByRole("button", { name: "文字" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择" }));
+    expect(harness.frames.size).toBe(1);
+    harness.flush();
+    expect(
+      allCalls().filter(
+        (call) =>
+          call.op === "drawImage" &&
+          !(call.args[0] instanceof HTMLCanvasElement),
+      ),
+    ).toHaveLength(0);
+    const mainCalls = state.canvases.find(
+      (entry) => entry.element === canvas,
+    )!.calls;
+    expect(
+      mainCalls.some(
+        (call) =>
+          call.op === "drawImage" && call.args[0] instanceof HTMLCanvasElement,
+      ),
+    ).toBe(true);
+    unmount();
+  });
+});
+
 describe("Windows document commands on the editor surface (Ctrl+S / Ctrl+W)", () => {
   function focusDocument(focused: boolean) {
     Object.defineProperty(document, "hasFocus", {

@@ -195,6 +195,91 @@ public class CapturePreferencesTests : IDisposable
     Assert.Equal(new CapturePreferences(), preferences);
   }
 
+  [Fact]
+  public void RepeatedSameRegionWithReorderedMonitorsDoesNotRewrite()
+  {
+    PortableLayout layout = CreateLayout();
+    var store = new CapturePreferencesStore(layout);
+    var bounds = new PhysicalRectangle(10, 20, 300, 200);
+    var primary = new MonitorLayoutSnapshot(0, 0, 1920, 1080, true);
+    var secondary = new MonitorLayoutSnapshot(1920, 0, 1280, 720, false);
+    string file = Path.Combine(layout.DataRoot, "capture-preferences.json");
+
+    store.SaveLastRegion(new LastRegionCapture(bounds, new[] { primary, secondary }));
+    string written = File.ReadAllText(file);
+    // 把 mtime 固定到过去：后续任何重写（原子替换）都会重置它；内容一并锁定。
+    var pinned = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    File.SetLastWriteTimeUtc(file, pinned);
+
+    // 完全相同区域 + 显示器枚举顺序互换 → 不重写。
+    store.SaveLastRegion(new LastRegionCapture(bounds, new[] { secondary, primary }));
+
+    Assert.Equal(pinned, File.GetLastWriteTimeUtc(file));
+    Assert.Equal(written, File.ReadAllText(file));
+    Assert.Equal(bounds, store.Load().LastRegion!.Bounds);
+  }
+
+  [Fact]
+  public void RealRegionLayoutOrPrimaryChangesRewriteAndLoad()
+  {
+    PortableLayout layout = CreateLayout();
+    var store = new CapturePreferencesStore(layout);
+    var primary = new MonitorLayoutSnapshot(0, 0, 1920, 1080, true);
+    var secondary = new MonitorLayoutSnapshot(1920, 0, 1280, 720, false);
+    string file = Path.Combine(layout.DataRoot, "capture-preferences.json");
+    var pinned = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    var bounds = new PhysicalRectangle(10, 20, 300, 200);
+    store.SaveLastRegion(new LastRegionCapture(bounds, new[] { primary, secondary }));
+    File.SetLastWriteTimeUtc(file, pinned);
+
+    // 区域坐标真实变化 → 重写并可读回。
+    var moved = new PhysicalRectangle(40, 50, 300, 200);
+    store.SaveLastRegion(new LastRegionCapture(moved, new[] { secondary, primary }));
+    Assert.NotEqual(pinned, File.GetLastWriteTimeUtc(file));
+    Assert.Equal(moved, store.Load().LastRegion!.Bounds);
+    File.SetLastWriteTimeUtc(file, pinned);
+
+    // 显示器拓扑变化（移除副屏）→ 重写并可读回。
+    store.SaveLastRegion(new LastRegionCapture(moved, new[] { primary }));
+    Assert.NotEqual(pinned, File.GetLastWriteTimeUtc(file));
+    var loaded = store.Load().LastRegion!;
+    Assert.Single(loaded.Monitors);
+    store.SaveLastRegion(new LastRegionCapture(moved, new[] { primary, secondary }));
+    File.SetLastWriteTimeUtc(file, pinned);
+
+    // 主屏标记变化（同一几何双屏互换主屏）→ 重写并可读回。
+    store.SaveLastRegion(new LastRegionCapture(moved, new[] {
+            new MonitorLayoutSnapshot(0, 0, 1920, 1080, false),
+            new MonitorLayoutSnapshot(1920, 0, 1280, 720, true) }));
+    Assert.NotEqual(pinned, File.GetLastWriteTimeUtc(file));
+    var flipped = store.Load().LastRegion!;
+    Assert.Equal(2, flipped.Monitors.Count);
+    Assert.Contains(flipped.Monitors, monitor => monitor.IsPrimary && monitor.X == 1920);
+  }
+
+  [Fact]
+  public void MissingFileFirstSaveAndCorruptFileSameSaveBothPersist()
+  {
+    // 缺失首次保存 → 必然写入并可读回。
+    PortableLayout layout = CreateLayout();
+    var store = new CapturePreferencesStore(layout);
+    var region = new LastRegionCapture(
+        new PhysicalRectangle(5, 6, 100, 80),
+        new[] { new MonitorLayoutSnapshot(0, 0, 1920, 1080, true) });
+    store.SaveLastRegion(region);
+    string file = Path.Combine(layout.DataRoot, "capture-preferences.json");
+    Assert.True(File.Exists(file));
+    Assert.Equal(region.Bounds, store.Load().LastRegion!.Bounds);
+
+    // 文件损坏后再次保存同一区域：Load 回落 LastRegion=null，不得误判跳过，
+    // 必须真实重写修复为可读状态。
+    File.WriteAllText(file, "{ not-json");
+    store.SaveLastRegion(region);
+    CapturePreferences recovered = store.Load();
+    Assert.NotNull(recovered.LastRegion);
+    Assert.Equal(region.Bounds, recovered.LastRegion!.Bounds);
+  }
+
   private PortableLayout CreateLayout()
   {
     Directory.CreateDirectory(_root);

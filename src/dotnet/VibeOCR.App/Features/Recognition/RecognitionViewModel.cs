@@ -191,6 +191,13 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         ScreenshotSelectionActions? selectionActions,
         ScreenshotCaptureRequest? request,
         CancellationToken cancellationToken) =>
+        CaptureScreenshotSessionAsync(selectionActions, request, cancellationToken, stageLocalOutput: null);
+
+    internal Task CaptureScreenshotSessionAsync(
+        ScreenshotSelectionActions? selectionActions,
+        ScreenshotCaptureRequest? request,
+        CancellationToken cancellationToken,
+        Action<RecognitionInput>? stageLocalOutput) =>
         RunInputAsync(
             ct => request switch
             {
@@ -204,7 +211,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             },
             cancellationToken,
             recognize: false,
-            persistCurrentInput: true);
+            persistCurrentInput: true,
+            stageLocalOutput: stageLocalOutput);
 
     public Task CaptureScrollingScreenshotSessionAsync(CancellationToken cancellationToken) =>
         RunInputAsync(_inputs.CaptureScrollingScreenAsync, cancellationToken,
@@ -328,7 +336,8 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         bool recognize,
         bool persistCurrentInput,
         Func<CancellationToken, Task<RecognitionSubmitSelection?>>? awaitSelectionBeforeFreeze = null,
-        RecognitionSubmitSelection? frozenSelection = null)
+        RecognitionSubmitSelection? frozenSelection = null,
+        Action<RecognitionInput>? stageLocalOutput = null)
     {
         ArgumentNullException.ThrowIfNull(loadInput);
         // 冷启动尚未绑定模式（目录未加载且无显式选择）时延迟冻结：输入先
@@ -407,6 +416,13 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             if (generation != Volatile.Read(ref _generation))
             {
                 input.DisposeCaptureScene();
+                return;
+            }
+            // 选区本地输出尚可能被用户取消；把候选交给宿主，保留当前输入与结果。
+            if (stageLocalOutput is not null && input.SelectionAction is
+                ScreenshotSelectionAction.Copy or ScreenshotSelectionAction.Save or ScreenshotSelectionAction.Pin)
+            {
+                stageLocalOutput(input);
                 return;
             }
             if (recognize) input.DisposeCaptureScene();

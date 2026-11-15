@@ -170,7 +170,7 @@ public sealed class PinEditChannelWorkbenchTests
   {
     public bool CancelSave;
     public Task CopyImageAsync(string path, CancellationToken token) => Task.CompletedTask;
-    public Task<bool> SaveImageAsync(string path, CancellationToken token) => Task.FromResult(!CancelSave);
+    public Task<bool> SaveImageAsync(string path, CancellationToken token, nint? pickerOwner = null) => Task.FromResult(!CancelSave);
     public Task CopyTextAsync(string text, CancellationToken token) => Task.CompletedTask;
   }
 

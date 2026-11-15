@@ -138,7 +138,7 @@ def verify(artifacts: Path, version: str) -> None:
             f"expected={sorted(expected_names)}, actual={sorted(names)}"
         )
     root = Path(os.environ.get("AUTOMATION_PROJECT_ROOT", Path(__file__).parents[1]))
-    with tempfile.TemporaryDirectory(prefix="vibeocr-web-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="vibeocr-release-smoke-") as temporary:
         extracted = Path(temporary)
         product_root = _extract_product(artifacts / portable_name, extracted)
         embedded_identity = json.loads(
@@ -158,6 +158,9 @@ def verify(artifacts: Path, version: str) -> None:
             timeout=30,
             cwd=product_root,
         )
+        # pwsh 的有效 TEMP 必须与本进程实际解包目录一致（TMPDIR/TEMP
+        # 可能指向不同根）；smoke 据此逐层校验复用树的精确归属。
+        temp_parent = str(extracted.resolve().parent)
         subprocess.run(
             [
                 "pwsh",
@@ -165,11 +168,16 @@ def verify(artifacts: Path, version: str) -> None:
                 str(root / "scripts/smoke_web_workbench.ps1"),
                 "-ProductRoot",
                 str(product_root),
+                # 复用上方已完整解包并校验过的 current 树,避免对预构建
+                # Runtime 再做一次整树复制。
+                "-ReuseUnpackedProduct",
             ],
             check=True,
             # 预构建树冷启动（解释器树首启 + WebView2 初始化）实测可超
-            # 120s；300s 与 CI release_smoke 步骤预算对齐。
+            # 120s。300s 是本入口的完整启动预算;CI release_smoke 步骤
+            # 另有 180s 外层进程树预算(run_ci_command.py),先于本值生效。
             timeout=300,
+            env=os.environ | {"TEMP": temp_parent, "TMP": temp_parent},
         )
 
 

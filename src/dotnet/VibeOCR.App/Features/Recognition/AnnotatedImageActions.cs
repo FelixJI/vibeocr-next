@@ -11,7 +11,7 @@ public interface IAnnotatedImagePlatform
 {
   Task CopyImageAsync(string sourcePath, CancellationToken cancellationToken);
 
-  Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken);
+  Task<bool> SaveImageAsync(string sourcePath, CancellationToken cancellationToken, nint? pickerOwner = null);
 
   Task CopyTextAsync(string text, CancellationToken cancellationToken);
 }
@@ -28,12 +28,13 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     CancellationToken cancellationToken)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
-    StorageFile source = await StorageFile.GetFileFromPathAsync(sourcePath);
+    // CreateFromFile 绑定路径后剪贴板延迟 OpenReadAsync 会在 >260 字符路径上抛 FileNotFoundException，故改走内存引用。
+    using IRandomAccessStream image = await OpenClipboardImageAsync(sourcePath, cancellationToken);
     var package = new DataPackage
     {
       RequestedOperation = DataPackageOperation.Copy,
     };
-    package.SetBitmap(RandomAccessStreamReference.CreateFromFile(source));
+    package.SetBitmap(RandomAccessStreamReference.CreateFromStream(image));
     for (int attempt = 0; ; attempt++)
     {
       cancellationToken.ThrowIfCancellationRequested();
@@ -51,6 +52,28 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
       {
         throw new ClipboardBusyException(error);
       }
+    }
+  }
+
+  internal static async Task<IRandomAccessStream> OpenClipboardImageAsync(
+    string sourcePath,
+    CancellationToken cancellationToken)
+  {
+    ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+    cancellationToken.ThrowIfCancellationRequested();
+    InMemoryRandomAccessStream buffered = new();
+    try
+    {
+      await using FileStream source = File.OpenRead(sourcePath);
+      using IRandomAccessStream random = source.AsRandomAccessStream();
+      await RandomAccessStream.CopyAsync(random, buffered).AsTask(cancellationToken);
+      buffered.Seek(0);
+      return buffered;
+    }
+    catch
+    {
+      buffered.Dispose();
+      throw;
     }
   }
 
@@ -86,9 +109,11 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
 
   public async Task<bool> SaveImageAsync(
     string sourcePath,
-    CancellationToken cancellationToken)
+    CancellationToken cancellationToken,
+    nint? pickerOwner = null)
   {
     ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+    if (pickerOwner is not null) cancellationToken.ThrowIfCancellationRequested();
     var picker = new FileSavePicker
     {
       SuggestedStartLocation = PickerLocationId.PicturesLibrary,
@@ -96,8 +121,12 @@ public sealed class AnnotatedImagePlatform(Func<nint> windowHandle) : IAnnotated
     };
     bool jpeg = string.Equals(Path.GetExtension(sourcePath), ".jpg", StringComparison.OrdinalIgnoreCase);
     picker.FileTypeChoices.Add(jpeg ? "JPEG 图片" : "PNG 图片", [jpeg ? ".jpg" : ".png"]);
-    WinRT.Interop.InitializeWithWindow.Initialize(picker, windowHandle());
-    StorageFile? destinationFile = await picker.PickSaveFileAsync();
+    if (pickerOwner == nint.Zero) throw new InvalidOperationException("无法获取截图保存窗口。");
+    WinRT.Interop.InitializeWithWindow.Initialize(picker, pickerOwner ?? windowHandle());
+    StorageFile? destinationFile = pickerOwner is null
+      ? await picker.PickSaveFileAsync()
+      : await picker.PickSaveFileAsync().AsTask(cancellationToken);
+    if (pickerOwner is not null) cancellationToken.ThrowIfCancellationRequested();
     if (destinationFile is null)
     {
       return false;

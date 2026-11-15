@@ -151,7 +151,29 @@ public sealed class CapturePreferencesStore(PortableLayout layout) : ICapturePre
   public void SaveLastRegion(LastRegionCapture region)
   {
     CapturePreferences current = Load();
+    // 相同区域无需在编辑器创建前再次同步耐久写入。
+    if (current.LastRegion is { } last && last.Bounds == region.Bounds &&
+        SameMonitorLayout(last.Monitors, region.Monitors))
+    {
+      return;
+    }
+
     Save(current with { LastRegion = region });
+  }
+
+  private static bool SameMonitorLayout(
+      IReadOnlyList<MonitorLayoutSnapshot> snapshot, IReadOnlyList<MonitorLayoutSnapshot> incoming)
+  {
+    if (snapshot.Count != incoming.Count)
+    {
+      return false;
+    }
+
+    IOrderedEnumerable<MonitorLayoutSnapshot> Sort(IReadOnlyList<MonitorLayoutSnapshot> monitors) =>
+        monitors.OrderBy(monitor => monitor.X).ThenBy(monitor => monitor.Y)
+            .ThenBy(monitor => monitor.Width).ThenBy(monitor => monitor.Height)
+            .ThenBy(monitor => monitor.IsPrimary);
+    return Sort(snapshot).SequenceEqual(Sort(incoming));
   }
 
   /// <summary>把当前显示器布局快照进区域记录（供保存上次/固定区域复用）。</summary>

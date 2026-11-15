@@ -47,6 +47,14 @@ public sealed class CaptureUiSmokeTests : IDisposable
       RunUiSmokeAsync(nameof(RegionPickerRejectsChangedMonitorLayoutWithSameDesktopBounds));
 
   [Fact]
+  public Task FrozenBackgroundMovesOnceWithoutReencodingAndReleasesOnClose() =>
+      RunUiSmokeAsync(nameof(FrozenBackgroundMovesOnceWithoutReencodingAndReleasesOnClose));
+
+  [Fact]
+  public Task SelectionSaveRetainsItsOwnerUntilRelease() =>
+      RunUiSmokeAsync(nameof(SelectionSaveRetainsItsOwnerUntilRelease));
+
+  [Fact]
   public Task CaptureRestoresVisibleMinimizedAndHiddenOwnerState() =>
       RunUiSmokeAsync(nameof(CaptureRestoresVisibleMinimizedAndHiddenOwnerState));
 
