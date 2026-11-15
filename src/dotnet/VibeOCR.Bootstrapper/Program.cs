@@ -1,8 +1,10 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using VibeOCR.ProductLayout;
 using Velopack;
 
@@ -14,6 +16,7 @@ internal static class Program
   private const int AppMissing = 3;
   private const int InvalidArguments = 4;
   private const int LayoutInvalid = 5;
+  private const uint Windows64BitBinary = 6;
   private const string SelfTestPrerequisites = "--self-test-prerequisites";
 
   [STAThread]
@@ -117,6 +120,12 @@ internal static class Program
       return AppMissing;
     }
 
+    if (!GetBinaryTypeW(appPath, out uint binaryType) || binaryType != Windows64BitBinary)
+    {
+      ReportRepair("app.invalid-image: 应用入口损坏或不是 Windows 64 位程序：" + appPath, selfTest, artifactSmoke);
+      return AppMissing;
+    }
+
     if (selfTest)
     {
       BootstrapperLog.Info("Bootstrapper prerequisite self-test passed.");
@@ -133,10 +142,22 @@ internal static class Program
       WorkingDirectory = Path.GetDirectoryName(appPath),
       UseShellExecute = true,
     };
-    Process.Start(startInfo);
+    try
+    {
+      Process.Start(startInfo);
+    }
+    catch (Win32Exception error)
+    {
+      ReportRepair("app.start-failed: 无法启动随包应用：" + appPath + "\n" + error.Message, selfTest, artifactSmoke);
+      return AppMissing;
+    }
     BootstrapperLog.Info($"Launched WinUI app: {appPath} {arguments}");
     return 0;
   }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetBinaryTypeW(string applicationName, out uint binaryType);
 
   private static void Report(string message)
   {

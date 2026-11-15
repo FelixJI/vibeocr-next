@@ -139,6 +139,15 @@ def _verify_bootstrapper(product_root: Path) -> None:
     finally:
         backup.replace(browser)
 
+    application = product_root / "app/VibeOCR.WinUI.exe"
+    backup = application.with_suffix(".exe.smoke-backup")
+    application.rename(backup)
+    try:
+        application.write_bytes(b"invalid app image")
+        expect_failure(3, b"app.invalid-image")
+    finally:
+        backup.replace(application)
+
 
 def verify(artifacts: Path, version: str) -> None:
     portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
