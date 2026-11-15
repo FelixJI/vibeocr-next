@@ -79,6 +79,7 @@ internal sealed class ScrollCaptureState(CancellationToken external, Func<long>?
   internal bool FinishSamplingStarted { get; private set; }
   internal bool IsActive => Failure is null && !_lifecycle.IsCancellationRequested &&
       !Completion.IsCompleted && !external.IsCancellationRequested;
+  internal bool CanPresentCaptureProgress => _review is null && !FinishRequested;
   internal bool CanFinish => IsActive && Stitcher is not null && !FinishRequested && !OverlapMissing &&
       _review is not { Pending: not null } and not { Segment: not null };
   internal bool NoProgressExpired
@@ -129,7 +130,7 @@ internal sealed class ScrollCaptureState(CancellationToken external, Func<long>?
   internal ScrollCaptureChange ObserveFrame(CapturedFrame frame) =>
       ObserveOwnedFrame(frame with { Pixels = (byte[])frame.Pixels.Clone() });
 
-  internal ScrollCaptureChange ObserveOwnedFrame(CapturedFrame frame)
+  internal ScrollCaptureChange ObserveOwnedFrame(CapturedFrame frame, Action? beforeFailureNotification = null)
   {
     if (!IsActive || _review is not null || _phase == ScrollCapturePhase.Ready) return default;
     long now = Now;
@@ -234,8 +235,13 @@ internal sealed class ScrollCaptureState(CancellationToken external, Func<long>?
             break;
         }
       }
+      if (errorToReport is not null) RecordFailure(errorToReport);
     }
-    if (errorToReport is not null) Fail(errorToReport);
+    if (errorToReport is not null)
+    {
+      try { beforeFailureNotification?.Invoke(); }
+      finally { _lifecycle.Cancel(); }
+    }
     if (!identical) CheckDynamicContent(now);
     return change;
   }
@@ -298,11 +304,22 @@ internal sealed class ScrollCaptureState(CancellationToken external, Func<long>?
   {
     lock (Gate)
     {
-      if (!IsActive) return;
+      if (!CanScrollAutomatically) return;
       _scrollOutstanding = true;
       ResetStableWindow();
       _acceptedForCurrentStreak = false;
     }
+  }
+
+  internal void RejectAutomaticScroll()
+  {
+    lock (Gate)
+    {
+      if (!CanScrollAutomatically) return;
+      RecordFailure(new InvalidOperationException(
+          "标准滚轮输入被拒绝：请松开鼠键及 Ctrl/Shift/Alt，并确认目标支持滚轮且未提权；本次未完成。"));
+    }
+    _lifecycle.Cancel();
   }
 
   internal ScrollCaptureChange OpenReview(

@@ -90,21 +90,9 @@ internal sealed class ScrollCaptureDriver(
 
         if (state.CanScrollAutomatically)
         {
-          ScrollCaptureChange stalled = state.CheckAutomaticProgress();
+          ScrollCaptureChange stalled = AdvanceAutomaticScroll(
+              state, source.Handle, GetForegroundWindow, CheckSource, SendScroll);
           if (stalled.Review is not null) update(stalled, null);
-          else if (state.CanScrollAutomatically)
-          {
-            CheckSource(GetForegroundWindow());
-            if (state.CanScrollAutomatically)
-            {
-              if (!SendScroll())
-              {
-                fail(new InvalidOperationException("标准滚轮输入被拒绝：请松开鼠键及 Ctrl/Shift/Alt，并确认目标支持滚轮且未提权；本次未完成。"));
-                return;
-              }
-              state.WheelSent();
-            }
-          }
         }
         await Task.Delay(CaptureIntervalMs, state.Token);
       }
@@ -118,6 +106,28 @@ internal sealed class ScrollCaptureDriver(
   }
 
   private sealed class SourceChangedException(string message) : Exception(message);
+
+  internal static ScrollCaptureChange AdvanceAutomaticScroll(
+      ScrollCaptureState state, nint source, Func<nint> readForeground, Action<nint> checkSource, Func<bool> send)
+  {
+    bool SourceHasForeground()
+    {
+      nint foreground = readForeground();
+      checkSource(foreground);
+      if (foreground == source) return true;
+      state.PauseSampling();
+      return false;
+    }
+
+    if (!state.CanScrollAutomatically || !SourceHasForeground()) return default;
+    ScrollCaptureChange stalled = state.CheckAutomaticProgress();
+    if (stalled.Review is not null) return stalled;
+    if (!state.CanScrollAutomatically) return default;
+    if (send()) state.WheelSent();
+    // 定位和发送期间控制窗可能接管前台；仍需重查窗口和几何守卫。
+    else if (state.IsActive && SourceHasForeground()) state.RejectAutomaticScroll();
+    return default;
+  }
 
   private async Task LogPublishedSegmentAsync(bool boundary)
   {
@@ -287,7 +297,7 @@ internal sealed class ScrollCaptureDriver(
       Y = bounds.Y + bounds.Height / 2,
     };
     bool sent = ScrollCaptureScrollInput.TrySend(
-        _scrollInput, center, source.Handle, state.Direction);
+        _scrollInput, center, source.Handle, state.Direction, () => state.CanScrollAutomatically);
     ScrollInputDiagnostic = sent ? "system wheel accepted" : "system wheel refused";
     return sent;
   }

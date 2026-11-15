@@ -544,7 +544,7 @@ internal static partial class ScrollCaptureSession
           ReportAccepted(_state.Stitcher!, frame!);
           RunOnUi(() =>
           {
-            if (_state.Review is not null || _state.Stitcher?.FrameCount != 1) return;
+            if (!_state.CanPresentCaptureProgress || _state.Stitcher?.FrameCount != 1) return;
             _statusText.Text = _state.Automatic
                 ? "已收首帧 · 自动滚动中，完成后点击“完成”"
                 : "已收首帧 · 请按所选方向滚动源窗口，完成后点击“完成”";
@@ -633,7 +633,7 @@ internal static partial class ScrollCaptureSession
       string status = $"已收 {stitcher.FrameCount} 帧 · {stitcher.Width} × {stitcher.Height} px";
       RunOnUi(() =>
       {
-        if (_state.Review is not null) return;
+        if (!_state.CanPresentCaptureProgress) return;
         _statusText.Text = status;
         _finishButton.IsEnabled = _state.CanFinish;
       });

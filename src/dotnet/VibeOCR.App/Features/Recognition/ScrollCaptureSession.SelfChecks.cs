@@ -110,8 +110,14 @@ internal static partial class ScrollCaptureSession
         await manual.ObserveFrameAsync(frame);
         Check(manual._finishButton.IsEnabled && manual._state.Stitcher?.FrameCount == 1,
             "Duplicate stable frames must retain single-frame completion without increasing the frame count.");
+        Task.Run(() => manual.PresentChange(new(ScrollCaptureUpdate.FirstAccepted), frame)).GetAwaiter().GetResult();
         manual.OnFinish(manual._finishButton, new RoutedEventArgs());
         Check(manual._state.FinishRequested, "The enabled finish action must request final sampling.");
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Check(manual._window.DispatcherQueue.TryEnqueue(() => drained.SetResult()), "Could not drain queued progress updates.");
+        await drained.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(manual._statusText.Text == "请停止滚动，正在收尾…" && !manual._finishButton.IsEnabled,
+            "Queued frame progress must not replace the finishing status or re-enable finish.");
         var invalid = new CapturedFrame([], 48, 96, 48 * 4, "BGRA8");
         first.ReportAccepted(new VerticalScrollStitcher(frame), invalid);
         first.PauseForReview("synthetic initial frame", null);

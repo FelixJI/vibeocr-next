@@ -13,10 +13,12 @@ internal static class ScrollCaptureScrollInput
 {
   private const uint GaRoot = 2;
 
-  internal static bool TrySend(IScrollInput input, Point center, nint source, ScrollCaptureDirection direction)
+  internal static bool TrySend(
+      IScrollInput input, Point center, nint source, ScrollCaptureDirection direction, Func<bool>? stillRequired = null)
   {
     bool CanSend() => input.IsSourceAt(center, source) &&
-        !new[] { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12 }.Any(input.IsKeyDown);
+        !new[] { 0x01, 0x02, 0x04, 0x05, 0x06, 0x10, 0x11, 0x12 }.Any(input.IsKeyDown) &&
+        stillRequired?.Invoke() != false;
     if (!CanSend() || !input.TryGetCursor(out Point original)) return false;
     try
     {

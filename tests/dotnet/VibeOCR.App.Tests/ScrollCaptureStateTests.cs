@@ -22,7 +22,9 @@ public sealed class ScrollCaptureStateTests
     Assert.Equal(1, state.Stitcher!.FrameCount);
     Assert.Equal(ScrollCaptureUpdate.Accepted, state.ObserveFrame(Frame(40)).Update);
     Assert.Equal(ScrollCaptureUpdate.Accepted, state.ObserveFrame(Frame(80)).Update);
+    Assert.True(state.CanPresentCaptureProgress);
     Assert.True(state.TryRequestFinish());
+    Assert.False(state.CanPresentCaptureProgress);
     Assert.True(state.BeginFinishSampling());
     state.ObserveFrame(Frame(80));
     Assert.False(state.CanPublishFinishedSample);
@@ -167,6 +169,106 @@ public sealed class ScrollCaptureStateTests
   }
 
   [Fact]
+  public async Task AppendFailureIsRecordedBeforeTheStopNotification()
+  {
+    using var external = new CancellationTokenSource();
+    using var state = new ScrollCaptureState(external.Token);
+    state.Start(ScrollCaptureDirection.Down, false, 1, 0);
+    state.ObserveFrame(Frame(0));
+    state.ObserveFrame(Frame(0));
+    CapturedFrame changed = Frame(0);
+    changed.Pixels[0] ^= 0xFF;
+    state.ObserveFrame(changed);
+    Assert.Null(state.Failure);
+
+    state.ObserveOwnedFrame(changed, beforeFailureNotification: () =>
+    {
+      Assert.False(state.Token.IsCancellationRequested);
+      external.Cancel();
+      state.Cancel();
+    });
+
+    Assert.Equal(ScrollCapturePhase.Failed, state.Phase);
+    InvalidDataException error = await Assert.ThrowsAsync<InvalidDataException>(() => state.Completion);
+    Assert.Contains("固定边缘", error.Message);
+  }
+
+  [Fact]
+  public void FinishDuringCursorPositioningSkipsWheelAndKeepsCaptureActive()
+  {
+    using var state = StartAutomaticCapture();
+    var input = new ScrollCaptureScrollInput.SyntheticScrollInput();
+    var center = new ScrollCaptureScrollInput.Point { X = 80, Y = 120 };
+    ScrollCaptureDriver.AdvanceAutomaticScroll(state, 1, () => 1, _ => { }, () =>
+        ScrollCaptureScrollInput.TrySend(input, center, 1, state.Direction, () =>
+        {
+          if (input.Moves == 1) Assert.True(state.TryRequestFinish());
+          return state.CanScrollAutomatically;
+        }));
+
+    Assert.Equal(0, input.Sends);
+    Assert.Equal(2, input.Moves);
+    Assert.Equal(12, input.Position.X);
+    Assert.True(state.FinishRequested);
+    Assert.True(state.IsActive);
+    Assert.Null(state.Failure);
+  }
+
+  [Theory]
+  [InlineData(true, 0)]
+  [InlineData(false, 1)]
+  public void ControllerForegroundDefersAutomaticWheel(bool beforeSend, int expectedSends)
+  {
+    using var state = StartAutomaticCapture();
+    nint foreground = beforeSend ? 2 : 1;
+    int sends = 0;
+    ScrollCaptureDriver.AdvanceAutomaticScroll(state, 1, () => foreground, window =>
+    {
+      Assert.True(window is 1 or 2);
+    }, () =>
+    {
+      sends++;
+      foreground = 2;
+      return false;
+    });
+
+    Assert.Equal(expectedSends, sends);
+    Assert.Equal(ScrollCapturePhase.WaitingForStability, state.Phase);
+    Assert.True(state.Automatic);
+    Assert.Null(state.Failure);
+  }
+
+  [Fact]
+  public void RefusedAutomaticWheelStillFailsWithSourceForeground()
+  {
+    using var state = StartAutomaticCapture();
+    int validations = 0;
+    ScrollCaptureDriver.AdvanceAutomaticScroll(state, 1, () => 1, _ => validations++, () => false);
+
+    Assert.Equal(2, validations);
+    Assert.Equal(ScrollCapturePhase.Failed, state.Phase);
+    Assert.Contains("滚轮输入被拒绝", Assert.IsType<InvalidOperationException>(state.Failure).Message);
+  }
+
+  [Fact]
+  public void RefusedAutomaticWheelStillChecksForUnexpectedWindow()
+  {
+    using var state = StartAutomaticCapture();
+    nint foreground = 1;
+    var sourceChanged = new InvalidOperationException("源窗口已失去前台");
+    InvalidOperationException actual = Assert.Throws<InvalidOperationException>(() =>
+        ScrollCaptureDriver.AdvanceAutomaticScroll(state, 1, () => foreground, window =>
+        {
+          if (window != 1 && window != 2) throw sourceChanged;
+        }, () =>
+        {
+          foreground = 3;
+          return false;
+        }));
+    Assert.Same(sourceChanged, actual);
+  }
+
+  [Fact]
   public async Task SegmentReviewDoesNotExtendTheTotalDeadline()
   {
     long now = 0;
@@ -180,6 +282,15 @@ public sealed class ScrollCaptureStateTests
     state.Cancel();
     Assert.Equal(ScrollCaptureState.DeadlineMessage,
         (await Assert.ThrowsAsync<InvalidOperationException>(() => state.Completion)).Message);
+  }
+
+  private static ScrollCaptureState StartAutomaticCapture()
+  {
+    var state = new ScrollCaptureState(CancellationToken.None);
+    state.Start(ScrollCaptureDirection.Down, true, 0, 0);
+    state.ObserveFrame(Frame(0));
+    state.ObserveFrame(Frame(0));
+    return state;
   }
 
   private static CapturedFrame Frame(int top, int height = 96, int period = 0)
