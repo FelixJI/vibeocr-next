@@ -26,7 +26,7 @@ internal sealed class RuntimeDemandCoordinator(
   private sealed class Attempt(CancellationToken shutdown, bool initialize, bool borrowLease)
   {
     public readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
-    public readonly TaskCompletionSource<bool> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public readonly TaskCompletionSource Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public readonly bool Initialize = initialize;
     public readonly bool BorrowLease = borrowLease;
     public int Waiters;
@@ -93,8 +93,12 @@ internal sealed class RuntimeDemandCoordinator(
       {
         cancellationToken.ThrowIfCancellationRequested();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(shutdown, cancellationToken);
-        if (!await attempt.Completion.Task.WaitAsync(linked.Token))
-          throw new InvalidOperationException("产品识别服务未就绪。");
+        await attempt.Completion.Task.WaitAsync(linked.Token);
+        lock (gate)
+        {
+          // Recovery may disconnect a committed session before its startup waiters resume.
+          if (!ready) throw new InvalidOperationException("产品识别服务未就绪。");
+        }
         return;
       }
       finally
@@ -126,7 +130,6 @@ internal sealed class RuntimeDemandCoordinator(
   {
     IDisposable? lease = null;
     Exception? failure = null;
-    bool attemptReady = false;
     try
     {
       // This lease spans initialization, attach and catalog publication. Update
@@ -155,8 +158,7 @@ internal sealed class RuntimeDemandCoordinator(
         // that caller's wait. Keep the attempt published until its lease is
         // released; even reentrant demand must await the complete transition.
         attempt.Committed = true;
-        // A later recovery can clear global readiness before these waiters resume.
-        ready = attemptReady = Connection is null || Connection.Session is not null;
+        ready = Connection is null || Connection.Session is not null;
         enabled |= ready;
       }
     }
@@ -187,7 +189,7 @@ internal sealed class RuntimeDemandCoordinator(
         else if (failure is not null)
           attempt.Completion.TrySetException(failure);
         else if (!attempt.Completion.Task.IsCompleted)
-          attempt.Completion.TrySetResult(attemptReady);
+          attempt.Completion.TrySetResult();
         attempt.Cancellation.Dispose();
       }
       // Every attempt has a consumer except after all waiters cancel. Observe

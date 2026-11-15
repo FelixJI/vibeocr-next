@@ -413,18 +413,24 @@ public sealed class RuntimeDemandCoordinatorTests
     {
       try
       {
-        // 让已提交启动的共享等待者在恢复断开期间继续，独立于线程池调度先后。
+        // 共享等待者在恢复断开期间继续，此时调用方不能使用产品运行时。
         await disconnectStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), testCancellation);
         Assert.Null(connection.Session);
         (await sharedContinuation.Posted.Task.WaitAsync(TimeSpan.FromSeconds(5), testCancellation))();
-        await Task.WhenAll(startup, shared);
+        var unavailable = await Assert.ThrowsAsync<InvalidOperationException>(() => shared);
+        Assert.Equal("产品识别服务未就绪。", unavailable.Message);
+        // 原等待者可能已在恢复开始前看到就绪，也可能和共享等待者一样遇到断开。
+        if (await Record.ExceptionAsync(() => startup) is { } startupError)
+          Assert.Equal("产品识别服务未就绪。", Assert.IsType<InvalidOperationException>(startupError).Message);
       }
       finally
       {
         finishDisconnect.TrySetResult();
         await recovery;
       }
+      await coordinator.EnsureReadyAsync(testCancellation);
       Assert.Equal(2, connects);
+      Assert.Equal(1, disconnects);
       Assert.Same(restored, connection.Session);
       Assert.Equal(1, recoveries);
     }
