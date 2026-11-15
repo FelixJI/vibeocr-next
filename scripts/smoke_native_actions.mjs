@@ -416,7 +416,8 @@ async function observeSceneCopyTerminal(page, options = {}) {
     } else if (event.kind === 'copy-command') {
       const record = { envelopeId: event.envelopeId, at: Date.now(),
         order: ++eventOrder, resourceUri: event.resourceUri ?? null,
-        action: event.action ?? null, scope: event.scope ?? null };
+        action: event.action ?? null, scope: event.scope ?? null,
+        sessionId: event.sessionId ?? null, revision: event.revision ?? null };
       timeline.copyCommands.push(record);
       acceptCommand();
       settleRecordWaiters(commandWaiters, record.action, record);
@@ -510,7 +511,16 @@ async function observeSceneCopyTerminal(page, options = {}) {
               scope: typeof command.scope === 'string' ? command.scope : null,
               resourceUri: command.arguments &&
                 typeof command.arguments.resourceUri === 'string'
-                ? command.arguments.resourceUri : null });
+                ? command.arguments.resourceUri : null,
+              // #320 prepared flow: public prepare/recognize commands carry
+              // sessionId+revision, letting Node bind each upload lease to
+              // the exact content revision (additive; records stay valid).
+              sessionId: command.arguments &&
+                  typeof command.arguments.sessionId === 'string'
+                ? command.arguments.sessionId : null,
+              revision: command.arguments &&
+                  Number.isSafeInteger(command.arguments.revision)
+                ? command.arguments.revision : null });
           }
         } catch { /* passive */ }
         return originalPost.apply(this, arguments);
@@ -1811,7 +1821,8 @@ export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
   assertCaptureCanvasLayout, settleSceneCopyTimeline, observeSceneCopyTerminal,
-  decodeImageRgba, raceDeadline };
+  decodeImageRgba, raceDeadline, setClipboardImage,
+  readbackSceneCopyClipboard };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

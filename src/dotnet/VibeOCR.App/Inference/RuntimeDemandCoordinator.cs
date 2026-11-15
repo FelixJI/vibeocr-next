@@ -96,6 +96,7 @@ internal sealed class RuntimeDemandCoordinator(
         await attempt.Completion.Task.WaitAsync(linked.Token);
         lock (gate)
         {
+          // Recovery may disconnect a committed session before its startup waiters resume.
           if (!ready) throw new InvalidOperationException("产品识别服务未就绪。");
         }
         return;
