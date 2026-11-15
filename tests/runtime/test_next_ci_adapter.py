@@ -131,13 +131,20 @@ def _run_release_build_fixture(
     tmp_path: Path,
     *,
     fail_stage: str,
+    explicit_version: bool = True,
+    repository_version: str = "1.2.3",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     root = Path(__file__).parents[2]
     project = tmp_path / "src/dotnet/VibeOCR.App/VibeOCR.App.csproj"
     project.parent.mkdir(parents=True)
     project.write_text(
-        "<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup></Project>",
+        "<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup>"
+        "<PropertyGroup Condition=\"'$(VibeOCRProductWebView2)' == 'true'\">"
+        "<AppHostDotNetSearch>AppLocal</AppHostDotNetSearch></PropertyGroup></Project>",
         encoding="utf-8",
+    )
+    (tmp_path / "repository.json").write_text(
+        json.dumps({"version": repository_version}), encoding="utf-8"
     )
     for relative in (".release-input/protocol", ".release-input/backend", "artifacts"):
         (tmp_path / relative).mkdir(parents=True, exist_ok=True)
@@ -149,6 +156,14 @@ def _run_release_build_fixture(
     build_script = scripts / "build-release.ps1"
     shutil.copyfile(root / "scripts/build-release.ps1", build_script)
     call_log = tmp_path / "calls.log"
+    (scripts / "build_internal_runtime.ps1").write_text(
+        """param([string]$Version, [string]$BuildRoot)
+Add-Content -LiteralPath $env:CALL_LOG -Value "runtime|[$Version]"
+if ($Version -cne '1.2.3') { throw "Runtime received wrong version: [$Version]" }
+throw 'fixture reached exact Runtime version'
+""",
+        encoding="utf-8",
+    )
     (scripts / "smoke_web_workbench.ps1").write_text(
         """param([string]$ProductRoot)
 Add-Content -LiteralPath $env:CALL_LOG -Value "smoke|$ProductRoot"
@@ -207,7 +222,8 @@ function dotnet {
         $global:LASTEXITCODE = 23
     } else { $global:LASTEXITCODE = 0 }
 }
-& $env:BUILD_SCRIPT -Version '1.2.3'
+if ($env:EXPLICIT_VERSION -eq '1') { & $env:BUILD_SCRIPT -Version '1.2.3' }
+else { & $env:BUILD_SCRIPT }
 """,
         encoding="utf-8",
     )
@@ -217,6 +233,7 @@ function dotnet {
         "BUILD_SCRIPT": str(build_script),
         "CALL_LOG": str(call_log),
         "FAIL_STAGE": fail_stage,
+        "EXPLICIT_VERSION": "1" if explicit_version else "0",
     }
     completed = subprocess.run(
         [resolve_executable("pwsh"), "-NoProfile", "-File", str(wrapper)],
@@ -227,8 +244,34 @@ function dotnet {
         errors="replace",
         env=environment,
     )
-    calls = call_log.read_text(encoding="utf-8-sig").splitlines()
+    calls = (
+        call_log.read_text(encoding="utf-8-sig").splitlines()
+        if call_log.exists()
+        else []
+    )
     return completed, calls
+
+
+@pytest.mark.parametrize("explicit_version", [False, True])
+def test_release_build_preserves_exact_version_with_multiple_property_groups(
+    tmp_path: Path, explicit_version: bool
+) -> None:
+    completed, calls = _run_release_build_fixture(
+        tmp_path, fail_stage="runtime-version", explicit_version=explicit_version
+    )
+    assert "fixture reached exact Runtime version" in completed.stderr
+    assert calls[-1] == "runtime|[1.2.3]"
+
+
+def test_release_build_rejects_stale_app_version_before_building(
+    tmp_path: Path,
+) -> None:
+    completed, calls = _run_release_build_fixture(
+        tmp_path, fail_stage="runtime-version", repository_version="1.2.4"
+    )
+    assert completed.returncode != 0
+    assert "App must have one Version matching repository.json" in completed.stderr
+    assert calls == []
 
 
 @pytest.mark.parametrize(

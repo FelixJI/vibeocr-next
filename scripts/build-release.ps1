@@ -18,7 +18,11 @@ if (-not [string]::Equals(
 }
 $projectFile = Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj'
 [xml]$project = Get-Content -LiteralPath $projectFile -Raw
-$projectVersion = [string]$project.Project.PropertyGroup.Version
+$versionNodes = @($project.SelectNodes('/Project/PropertyGroup/Version'))
+$projectVersion = [string](Get-Content -LiteralPath (Join-Path $root 'repository.json') -Raw | ConvertFrom-Json).version
+if ($versionNodes.Count -ne 1 -or $versionNodes[0].InnerText -cne $projectVersion) {
+    throw 'App must have one Version matching repository.json'
+}
 if (-not $Version) {
     $Version = $projectVersion
 } else {
