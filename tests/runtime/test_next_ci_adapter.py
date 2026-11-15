@@ -156,6 +156,16 @@ $global:LASTEXITCODE = 0
 """,
         encoding="utf-8",
     )
+    # #321：随包 WebView2 展开步骤在夹具中以桩记录顺序，不接触真实 CAB。
+    (scripts / "expand_webview2_runtime.ps1").write_text(
+        """param([string]$AppPublishRoot, [string]$LockFile, [string]$CacheRoot)
+Add-Content -LiteralPath $env:CALL_LOG -Value "expand|$AppPublishRoot"
+New-Item -ItemType Directory -Path (Join-Path $AppPublishRoot 'WebView2Runtime') -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $AppPublishRoot 'WebView2Runtime/msedgewebview2.exe') -Value 'stub'
+$global:LASTEXITCODE = 0
+""",
+        encoding="utf-8",
+    )
     wrapper = tmp_path / "run-build.ps1"
     wrapper.write_text(
         """$ErrorActionPreference = 'Stop'
@@ -259,13 +269,16 @@ def test_release_build_runs_verified_web_bundle_before_packaged_smoke(
         for index, call in enumerate(calls)
         if call.startswith("dotnet|publish") and "VibeOCR.App.csproj" in call
     )
+    webview2_expand = next(
+        index for index, call in enumerate(calls) if call.startswith("expand|")
+    )
     smoke = next(index for index, call in enumerate(calls) if call.startswith("smoke|"))
     bootstrap_publish = next(
         index
         for index, call in enumerate(calls)
         if call.startswith("dotnet|publish") and "VibeOCR.Bootstrapper" in call
     )
-    assert verifier < app_publish < smoke < bootstrap_publish
+    assert verifier < app_publish < webview2_expand < smoke < bootstrap_publish
     assert not any(call.startswith("python|-m PyInstaller") for call in calls)
 
 
@@ -275,7 +288,11 @@ _PRODUCT_LAYOUT_DESCRIPTOR = {
     "product_id": "vibeocr",
     "public_entry": "VibeOCR.exe",
     "roots": {"app": "app", "runtime": "runtime", "metadata": "app/metadata"},
-    "app": {"entry": "app/VibeOCR.WinUI.exe", "web_assets": "app/WebAssets"},
+    "app": {
+        "entry": "app/VibeOCR.WinUI.exe",
+        "web_assets": "app/WebAssets",
+        "webview2_runtime": "app/WebView2Runtime",
+    },
     "runtime": {
         "manifest": "runtime/backend/runtime-manifest.json",
         "python": "runtime/env/runtime-env/python.exe",
@@ -288,6 +305,13 @@ _PRODUCT_LAYOUT_DESCRIPTOR = {
     "user_data": {"relative": "state"},
     "required": [],
 }
+
+# #321：smoke 验证随包 WebView2 版本时读取仓库锁（不硬编码版本）。
+_LOCKED_WEBVIEW2_VERSION = json.loads(
+    (Path(__file__).parents[2] / "config/runtime/webview2-runtime.lock.json").read_text(
+        encoding="utf-8"
+    )
+)["version"]
 
 
 def _write_installed_product_fixture(product: Path) -> None:
@@ -305,6 +329,8 @@ def _write_installed_product_fixture(product: Path) -> None:
         "app/App.xbf",
         "app/MainWindow.xbf",
         "app/WebAssets/index.html",
+        "app/WebView2Runtime/msedgewebview2.exe",
+        "app/WebView2Runtime/icudtl.dat",
         "app/metadata/component-lock.json",
         "app/metadata/component-identities.json",
         "app/metadata/product-release-manifest.json",
@@ -590,7 +616,7 @@ function Remove-Item {
         [switch]$Recurse,
         [switch]$Force
     )
-    if ($LiteralPath -like '*vibeocr-webview-smoke-*') {
+    if ($LiteralPath -like '*vibeocr-web-smoke-*') {
         $global:webViewCleanupAttempts += 1
         if ($global:webViewCleanupAttempts -eq 1) {
             throw 'simulated WebView2 file handle is still active'
@@ -598,6 +624,7 @@ function Remove-Item {
     }
     Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters
 }
+function Get-CimInstance { param($Filter) @() }
 function Start-Process {
     param(
         [string]$FilePath,
@@ -606,16 +633,29 @@ function Start-Process {
         [string]$WindowStyle,
         [switch]$PassThru
     )
+    $exeDir = Split-Path -Parent $FilePath
+    $script:productRoot = if (Test-Path (Join-Path $Product 'app/metadata/product-layout.json')) { Split-Path -Parent $exeDir } else { $exeDir }
+    $script:userData = [IO.Path]::GetFullPath((Join-Path (Join-Path $script:productRoot 'state') (Join-Path 'webview2-fixed' '__LOCKED_VERSION__')))
+    $script:browserExe = [IO.Path]::GetFullPath((Join-Path (Join-Path $exeDir 'WebView2Runtime') 'msedgewebview2.exe'))
+    New-Item -ItemType Directory -Path $script:userData -Force | Out-Null
     @{
         file = $FilePath
         arguments = @($ArgumentList)
         working_directory = $WorkingDirectory
-        user_data = $env:WEBVIEW2_USER_DATA_FOLDER
+        user_data = $script:userData
         instance_scope = $env:VIBEOCR_SELF_TEST_INSTANCE
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
-    New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
-        Out-Null
-    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2,"owner_restore":"verified"}' |
+    $script:launchedRoot = Split-Path -Parent $FilePath
+    @{
+        schema_version = 1; state = 'bridge-ready'; resources = 'verified';
+        layout_sizes_verified = 2; owner_restore = 'verified'
+        webview2 = @{
+            browser_process_id = 4242
+            browser_version = '__LOCKED_VERSION__'
+            user_data_folder = $script:userData
+            browser_executable_path = $script:browserExe
+        }
+    } | ConvertTo-Json -Compress |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
@@ -630,14 +670,14 @@ if ($env:VIBEOCR_SELF_TEST_INSTANCE -ne 'outer-test-scope') {
     throw 'smoke did not restore the caller instance scope'
 }
 $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
-""",
+""".replace("__LOCKED_VERSION__", _LOCKED_WEBVIEW2_VERSION),
         encoding="utf-8",
     )
 
     if not layout_verified:
         wrapper.write_text(
             wrapper.read_text(encoding="utf-8").replace(
-                ',"layout_sizes_verified":2', ""
+                "layout_sizes_verified = 2", "layout_sizes_verified = $null"
             ),
             encoding="utf-8",
         )
@@ -679,10 +719,15 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
         if installed_layout
         else Path(launched["file"]).parent
     )
-    assert Path(launched["user_data"]).parent == isolated_product.parent
-    assert Path(launched["user_data"]) != Path(launched["working_directory"])
+    user_data = Path(launched["user_data"])
+    # #321：随包 Fixed 模式 userData 必须是隔离树内并列版本化目录。
+    assert user_data.name == _LOCKED_WEBVIEW2_VERSION
+    assert user_data.parent.name == "webview2-fixed"
+    assert user_data.parents[1].name == "state"
+    assert user_data.parents[2] == isolated_product
+    assert user_data != Path(launched["working_directory"])
     assert cleanup.read_text(encoding="utf-8-sig").strip() == "2"
-    assert not Path(launched["user_data"]).exists()
+    assert not user_data.exists()
     assert not Path(launched["working_directory"]).exists()
     if installed_layout:
         assert {path.name for path in product.iterdir()} == {
@@ -720,7 +765,7 @@ function Remove-Item {
         [switch]$Force
     )
     Add-Content -LiteralPath $Removals -Value $LiteralPath
-    if ($LiteralPath -like '*vibeocr-webview-smoke-*') {
+    if ($LiteralPath -like '*vibeocr-web-smoke-*') {
         $global:webViewCleanupAttempts += 1
         if ($global:webViewCleanupAttempts -eq 1) {
             throw 'simulated WebView2 file handle is still active'
@@ -728,6 +773,7 @@ function Remove-Item {
     }
     Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
 }
+function Get-CimInstance { param($Filter) @() }
 function Start-Process {
     param(
         [string]$FilePath,
@@ -736,17 +782,30 @@ function Start-Process {
         [string]$WindowStyle,
         [switch]$PassThru
     )
+    $exeDir = Split-Path -Parent $FilePath
+    $script:productRoot = if (Test-Path (Join-Path $Product 'app/metadata/product-layout.json')) { Split-Path -Parent $exeDir } else { $exeDir }
+    $script:userData = [IO.Path]::GetFullPath((Join-Path (Join-Path $script:productRoot 'state') (Join-Path 'webview2-fixed' '__LOCKED_VERSION__')))
+    $script:browserExe = [IO.Path]::GetFullPath((Join-Path (Join-Path $exeDir 'WebView2Runtime') 'msedgewebview2.exe'))
+    New-Item -ItemType Directory -Path $script:userData -Force | Out-Null
     @{
         file = $FilePath
         arguments = @($ArgumentList)
         working_directory = $WorkingDirectory
-        user_data = $env:WEBVIEW2_USER_DATA_FOLDER
+        user_data = $script:userData
         instance_scope = $env:VIBEOCR_SELF_TEST_INSTANCE
         health = $env:VIBEOCR_WEB_READY_FILE
     } | ConvertTo-Json | Set-Content -LiteralPath $Launch
-    New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER |
-        Out-Null
-    '{"schema_version":1,"state":"bridge-ready","resources":"verified","layout_sizes_verified":2,"owner_restore":"verified"}' |
+    $script:launchedRoot = Split-Path -Parent $FilePath
+    @{
+        schema_version = 1; state = 'bridge-ready'; resources = 'verified';
+        layout_sizes_verified = 2; owner_restore = 'verified'
+        webview2 = @{
+            browser_process_id = 4242
+            browser_version = '__LOCKED_VERSION__'
+            user_data_folder = $script:userData
+            browser_executable_path = $script:browserExe
+        }
+    } | ConvertTo-Json -Compress |
         Set-Content -LiteralPath $env:VIBEOCR_WEB_READY_FILE
     $process = [pscustomobject]@{ ExitCode = 0 }
     $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
@@ -772,7 +831,10 @@ def _run_reuse_smoke(
     cleanup = tmp_path / "cleanup.txt"
     removals = tmp_path / "removals.log"
     wrapper = tmp_path / "run-reuse-smoke.ps1"
-    wrapper.write_text(_REUSE_SMOKE_WRAPPER, encoding="utf-8")
+    wrapper.write_text(
+        _REUSE_SMOKE_WRAPPER.replace("__LOCKED_VERSION__", _LOCKED_WEBVIEW2_VERSION),
+        encoding="utf-8",
+    )
     return subprocess.run(
         [
             resolve_executable("pwsh"),
@@ -817,15 +879,21 @@ def test_web_ready_smoke_reuses_the_release_smoke_unpack_tree_in_place(
         "--install-root",
         str(current),
     ]
-    assert Path(launch["user_data"]).parent == temp_base
-    assert Path(launch["user_data"]) != Path(launch["working_directory"])
-    # 健康/WebView 清理仍由 PowerShell 完成,且从不触碰原解包树。
+    user_data = Path(launch["user_data"])
+    # #321：随包 Fixed userData 是复用解包树内的并列版本化目录，
+    # 本 smoke 不删除它（真实清理由 release_smoke 的临时目录负责）。
+    assert user_data.name == _LOCKED_WEBVIEW2_VERSION
+    assert user_data.parent.name == "webview2-fixed"
+    assert user_data.parents[1].name == "state"
+    assert user_data.parents[2] == current
+    assert user_data != Path(launch["working_directory"])
+    # 健康信号清理仍由 PowerShell 完成,且从不触碰原解包树。
     assert not Path(launch["health"]).exists()
-    assert not Path(launch["user_data"]).exists()
-    assert (tmp_path / "cleanup.txt").read_text(encoding="utf-8-sig").strip() == "2"
+    assert user_data.is_dir()
+    assert (tmp_path / "cleanup.txt").read_text(encoding="utf-8-sig").strip() == "0"
     removed = (tmp_path / "removals.log").read_text(encoding="utf-8-sig").splitlines()
-    assert any("vibeocr-webview-smoke-" in line for line in removed)
     assert any("vibeocr-web-ready-" in line for line in removed)
+    assert not any("webview2-fixed" in line for line in removed)
     assert not any(Path(line) == current for line in removed)
     assert {path.name for path in current.iterdir()} == {
         "VibeOCR.exe",
@@ -834,6 +902,7 @@ def test_web_ready_smoke_reuses_the_release_smoke_unpack_tree_in_place(
         "CHANGELOG.md",
         "app",
         "runtime",
+        "state",
     }
     assert (current / "runtime/env/runtime-env/python.exe").read_bytes() == (
         b"placeholder"
@@ -1141,7 +1210,7 @@ def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
     )
 
 
-def test_bootstrapper_webview_probe_uses_the_packaged_native_loader() -> None:
+def test_bootstrapper_probes_the_bundled_runtime_payload() -> None:
     root = Path(__file__).parents[2]
     program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
         encoding="utf-8"
@@ -1150,34 +1219,30 @@ def test_bootstrapper_webview_probe_uses_the_packaged_native_loader() -> None:
         root / "src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj"
     ).read_text(encoding="utf-8")
 
+    # #321：Bootstrapper 只检查随包载荷，不再探测已安装系统运行库。
     assert "using Microsoft.Web.WebView2.Core;" not in program
     assert '<PackageReference Include="Microsoft.Web.WebView2" />' not in project
-    assert 'Path.Combine(layout.AppRoot, "WebView2Loader.dll")' in program
-    assert "GetAvailableCoreWebView2BrowserVersionString" in program
-
-    version_call = program.index("int result = getVersion")
-    cleanup_try = program.index("try", version_call)
-    failed_result = program.index(
-        "if (result < 0 || versionInfo == IntPtr.Zero)", version_call
-    )
-    cleanup_finally = program.index("finally", failed_result)
-    release_version = program.index("Marshal.FreeCoTaskMem(versionInfo)", failed_result)
-    assert (
-        version_call < cleanup_try < failed_result < cleanup_finally < release_version
-    )
+    assert "DotNetRuntimeProbe" not in program
+    assert "PackageManager" not in program
+    assert "GetAvailableCoreWebView2BrowserVersionString" not in program
+    assert 'layout.AppRoot, "hostpolicy.dll"' in program
+    assert 'layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"' in program
+    assert 'layout.WebView2RuntimeRoot, "msedgewebview2.exe"' in program
+    assert "Repair with the in-app update or a fresh complete download." in program
 
 
-def test_bootstrapper_accepts_historical_and_cbs_windows_app_runtime_identities() -> (
-    None
-):
+def test_windows_app_runtime_identity_checks_stay_in_the_dev_detector() -> None:
     root = Path(__file__).parents[2]
     program = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
         encoding="utf-8"
     )
+    detector = (
+        root / "src/dotnet/VibeOCR.Platform/Bootstrap/PrerequisiteDetector.cs"
+    ).read_text(encoding="utf-8")
 
-    assert 'name.Equals("Microsoft.WindowsAppRuntime.2",' in program
-    assert 'name.Equals("Microsoft.WindowsAppRuntime.CBS.2",' in program
-    assert "Microsoft.WindowsAppRuntime.2.2" not in program
+    # 随包 Bootstrapper 不再接受任何系统包身份；winui-dev 探测保留。
+    assert "Microsoft.WindowsAppRuntime.CBS" not in program
+    assert 'Microsoft.WindowsAppRuntime.CBS.2"' in detector
 
 
 def test_bootstrapper_prerequisite_self_test_never_launches_the_app() -> None:

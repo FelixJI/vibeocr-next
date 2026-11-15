@@ -2,11 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using VibeOCR.ProductLayout;
-using Windows.ApplicationModel;
-using Windows.Management.Deployment;
-using Windows.System;
 using Velopack;
 
 namespace VibeOCR.Bootstrapper;
@@ -71,21 +67,22 @@ internal static class Program
         }
         : new string?[]
         {
-          DotNetRuntimeProbe.FindVersion() != null ? null : ".NET Runtime 10 x64",
-          HasWindowsAppRuntime() ? null : "Windows App Runtime 2.6 x64",
-          HasWebView2(layout) ? null : "Microsoft Edge WebView2 Evergreen Runtime",
+          HasBundledDotNetRuntime(layout) ? null : "VibeOCR bundled .NET Runtime files",
+          HasBundledWindowsAppRuntime(layout) ? null : "VibeOCR bundled Windows App Runtime files",
+          HasBundledWebView2Runtime(layout) ? null : "VibeOCR bundled WebView2 Fixed Version runtime",
           HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
         })
         .Where(item => item != null).Select(item => item!).ToArray();
     if (missing.Length > 0)
     {
-      Report("VibeOCR prerequisites require repair:");
+      Report("VibeOCR bundled runtime components require repair:");
       foreach (string item in missing)
       {
         Report("- " + item);
       }
 
       Report("No component was downloaded or modified.");
+      Report("Repair with the in-app update or a fresh complete download.");
       return PrerequisiteMissing;
     }
 
@@ -140,102 +137,18 @@ internal static class Program
       File.Exists(layout.RuntimeManifest) &&
       File.Exists(layout.RuntimePython);
 
-  // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
-  // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.
-  private const ushort MinimumWindowsAppRuntimeMajor = 2;
-  private const ushort MinimumWindowsAppRuntimeMinor = 6;
+  // #321：随包闭包检查。安装了系统 .NET/Windows App Runtime/WebView2
+  // 不再满足检查——损坏的随包载荷必须显式报修，不联网、不回退系统。
+  private static bool HasBundledDotNetRuntime(ResolvedProductLayout layout) =>
+      File.Exists(Path.Combine(layout.AppRoot, "hostfxr.dll")) &&
+      File.Exists(Path.Combine(layout.AppRoot, "hostpolicy.dll")) &&
+      File.Exists(Path.Combine(layout.AppRoot, "coreclr.dll"));
 
-  private static bool HasWindowsAppRuntime()
-  {
-    try
-    {
-      return new PackageManager().FindPackagesForUser(string.Empty).Any(package =>
-          IsWindowsAppRuntimeSatisfied(package.Id.Name, package.Id.Version) &&
-          (package.Id.Architecture == ProcessorArchitecture.X64 ||
-              package.Id.Architecture == ProcessorArchitecture.Neutral) &&
-          package.Status.VerifyIsOK());
-    }
-    catch
-    {
-      return false;
-    }
-  }
+  private static bool HasBundledWindowsAppRuntime(ResolvedProductLayout layout) =>
+      File.Exists(Path.Combine(layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"));
 
-  private static bool IsWindowsAppRuntimeSatisfied(string name, PackageVersion version) =>
-        (name.Equals("Microsoft.WindowsAppRuntime.2", StringComparison.OrdinalIgnoreCase) ||
-            name.Equals("Microsoft.WindowsAppRuntime.CBS.2", StringComparison.OrdinalIgnoreCase)) &&
-      (version.Major > MinimumWindowsAppRuntimeMajor ||
-          (version.Major == MinimumWindowsAppRuntimeMajor &&
-              version.Minor >= MinimumWindowsAppRuntimeMinor));
-
-  private static bool HasWebView2(ResolvedProductLayout layout)
-  {
-    string loaderPath = Path.Combine(layout.AppRoot, "WebView2Loader.dll");
-    if (!File.Exists(loaderPath))
-    {
-      return false;
-    }
-
-    IntPtr module = LoadLibrary(loaderPath);
-    if (module == IntPtr.Zero)
-    {
-      return false;
-    }
-
-    try
-    {
-      IntPtr entryPoint = GetProcAddress(
-          module,
-          "GetAvailableCoreWebView2BrowserVersionString");
-      if (entryPoint == IntPtr.Zero)
-      {
-        return false;
-      }
-
-      var getVersion = Marshal.GetDelegateForFunctionPointer<
-          GetAvailableCoreWebView2BrowserVersionString>(entryPoint);
-      int result = getVersion(null, out IntPtr versionInfo);
-      try
-      {
-        if (result < 0 || versionInfo == IntPtr.Zero)
-        {
-          return false;
-        }
-
-        return !string.IsNullOrWhiteSpace(Marshal.PtrToStringUni(versionInfo));
-      }
-      finally
-      {
-        if (versionInfo != IntPtr.Zero)
-        {
-          Marshal.FreeCoTaskMem(versionInfo);
-        }
-      }
-    }
-    catch
-    {
-      return false;
-    }
-    finally
-    {
-      FreeLibrary(module);
-    }
-  }
-
-  [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-  private delegate int GetAvailableCoreWebView2BrowserVersionString(
-      string? browserExecutableFolder,
-      out IntPtr versionInfo);
-
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  private static extern IntPtr LoadLibrary(string fileName);
-
-  [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-  private static extern IntPtr GetProcAddress(IntPtr module, string procedureName);
-
-  [DllImport("kernel32.dll", SetLastError = true)]
-  [return: MarshalAs(UnmanagedType.Bool)]
-  private static extern bool FreeLibrary(IntPtr module);
+  private static bool HasBundledWebView2Runtime(ResolvedProductLayout layout) =>
+      File.Exists(Path.Combine(layout.WebView2RuntimeRoot, "msedgewebview2.exe"));
 
   private static string Quote(string value) =>
       "\"" + value.Replace("\"", "\\\"") + "\"";

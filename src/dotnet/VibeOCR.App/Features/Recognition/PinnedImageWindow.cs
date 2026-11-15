@@ -1153,7 +1153,8 @@ internal sealed class PinnedImageWindow : IDisposable
       throw new InvalidOperationException("smoke injected WebView startup failure");
     }
     window.Activate();
-    await view.EnsureCoreWebView2Async();
+    await view.EnsureCoreWebView2Async(
+        await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
     if (disposed) return;
     core = view.CoreWebView2;
     core.Settings.AreDevToolsEnabled = false;
@@ -1233,7 +1234,8 @@ internal sealed class PinnedImageWindow : IDisposable
           SnapshotReceiptLost?.Invoke(this, editSessionId);
       };
       editorHost = host;
-      await overlay.EnsureCoreWebView2Async();
+      await overlay.EnsureCoreWebView2Async(
+          await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
       if (disposed || !editing)
       {
         await TeardownEditorAsync();

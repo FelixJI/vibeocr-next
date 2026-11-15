@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using VibeOCR.ProductLayout;
 using Windows.ApplicationModel;
@@ -18,7 +19,14 @@ public sealed record PrerequisiteSnapshot(
     string? DotNetVersion,
     string? WindowsAppRuntimeVersion,
     string? WebView2Version,
-    bool RuntimePythonPresent);
+    bool RuntimePythonPresent)
+{
+    /// <summary>System probe snapshot (winui-dev only): production uses
+    /// <see cref="BundledProductProbe"/> so installed system components can
+    /// never mask a damaged bundled payload.</summary>
+    public static PrerequisiteSnapshot CaptureSystem(PortableLayout layout) =>
+        WindowsPrerequisiteProbe.Capture(layout);
+}
 
 public sealed record PrerequisiteStatus(
     PrerequisiteKind Kind,
@@ -35,52 +43,63 @@ public sealed record PrerequisiteReport(IReadOnlyList<PrerequisiteStatus> Items)
 
 public sealed class PrerequisiteDetector
 {
+    // Framework-dependent winui-dev floor (Directory.Packages.props
+    // Microsoft.WindowsAppSDK); production readiness never consults the
+    // installed system runtime, only the bundled payload.
     public const string MinimumDotNetVersion = "10.0.0";
-    // Framework-dependent Windows App SDK pin (Directory.Packages.props
-    // Microsoft.WindowsAppSDK); the app cannot start on an older runtime.
     public const string MinimumWindowsAppRuntimeVersion = "2.6.4";
-    private readonly Func<PortableLayout, PrerequisiteSnapshot> _capture;
+    public const string BundledMinimum = "Bundled";
+    public const string ProductRepairUri = "repair://vibeocr/product";
+    private readonly Func<PortableLayout, PrerequisiteSnapshot>? _systemCapture;
 
     public PrerequisiteDetector()
-        : this(WindowsPrerequisiteProbe.Capture)
     {
     }
 
-    public PrerequisiteDetector(Func<PortableLayout, PrerequisiteSnapshot> capture)
+    // Test seam for the winui-dev system snapshot; production always probes
+    // the real bundled payload below.
+    internal PrerequisiteDetector(Func<PortableLayout, PrerequisiteSnapshot> systemCapture)
     {
-        _capture = capture ?? throw new ArgumentNullException(nameof(capture));
+        _systemCapture = systemCapture;
     }
 
-    public PrerequisiteReport Detect(PortableLayout layout)
+    public PrerequisiteReport Detect(PortableLayout layout) => Detect(layout, bundledProduct: false);
+
+    /// <summary>#321 F1：诊断语义随真实产品模式（App 构建属性）而不是 Profile；
+    /// 发布模式按随包载荷判定，已安装系统组件不掩盖损坏。</summary>
+    public PrerequisiteReport Detect(PortableLayout layout, bool bundledProduct)
     {
         ArgumentNullException.ThrowIfNull(layout);
-        PrerequisiteSnapshot snapshot = _capture(layout);
-        return new PrerequisiteReport(
-        [
-            Status(
-                PrerequisiteKind.DotNetRuntime,
-                snapshot.DotNetVersion,
-                MinimumDotNetVersion,
-                "https://dotnet.microsoft.com/download/dotnet/10.0"),
-            Status(
-                PrerequisiteKind.WindowsAppRuntime,
-                snapshot.WindowsAppRuntimeVersion,
-                MinimumWindowsAppRuntimeVersion,
-                "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads"),
-            new PrerequisiteStatus(
-                PrerequisiteKind.WebView2Runtime,
-                !string.IsNullOrWhiteSpace(snapshot.WebView2Version),
-                snapshot.WebView2Version,
-                "Evergreen",
-                "https://developer.microsoft.com/microsoft-edge/webview2/"),
-            new PrerequisiteStatus(
-                PrerequisiteKind.RuntimePython,
-                snapshot.RuntimePythonPresent,
-                snapshot.RuntimePythonPresent ? "Bundled" : null,
-                "Bundled",
-                "repair://vibeocr/product"),
-        ]);
+        return bundledProduct
+            ? BundledProductProbe.Report(layout)
+            : SystemReport((_systemCapture ?? PrerequisiteSnapshot.CaptureSystem)(layout));
     }
+
+    private static PrerequisiteReport SystemReport(PrerequisiteSnapshot snapshot) => new(
+    [
+        Status(
+            PrerequisiteKind.DotNetRuntime,
+            snapshot.DotNetVersion,
+            MinimumDotNetVersion,
+            "https://dotnet.microsoft.com/download/dotnet/10.0"),
+        Status(
+            PrerequisiteKind.WindowsAppRuntime,
+            snapshot.WindowsAppRuntimeVersion,
+            MinimumWindowsAppRuntimeVersion,
+            "https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads"),
+        new PrerequisiteStatus(
+            PrerequisiteKind.WebView2Runtime,
+            !string.IsNullOrWhiteSpace(snapshot.WebView2Version),
+            snapshot.WebView2Version,
+            "Evergreen",
+            "https://developer.microsoft.com/microsoft-edge/webview2/"),
+        new PrerequisiteStatus(
+            PrerequisiteKind.RuntimePython,
+            snapshot.RuntimePythonPresent,
+            snapshot.RuntimePythonPresent ? "Bundled" : null,
+            "Bundled",
+            ProductRepairUri),
+    ]);
 
     private static PrerequisiteStatus Status(
         PrerequisiteKind kind,
@@ -95,6 +114,111 @@ public sealed class PrerequisiteDetector
         return Version.TryParse(normalized, out Version? actual) &&
             Version.TryParse(minimum, out Version? required) &&
             actual >= required;
+    }
+}
+
+/// <summary>
+/// Production readiness probe over the bundled payload: the self-contained
+/// .NET runtime files, the self-contained Windows App SDK runtime DLL, the
+/// bundled WebView2 Fixed Version runtime and the bound CPython tree.
+/// </summary>
+public static class BundledProductProbe
+{
+    public sealed record Snapshot(
+        string? DotNetVersion,
+        string? WindowsAppRuntimeVersion,
+        string? WebView2Version,
+        bool RuntimePythonPresent);
+
+    public static Snapshot Capture(PortableLayout layout)
+    {
+        string appRoot = Path.GetDirectoryName(layout.AppEntry)
+            ?? throw new InvalidOperationException("应用入口缺少目录。");
+        return new Snapshot(
+            FindBundledDotNetVersion(appRoot, layout.AppEntry),
+            FindFileVersion(Path.Combine(appRoot, "Microsoft.WindowsAppRuntime.dll")),
+            FindFileVersion(Path.Combine(appRoot, "WebView2Runtime", "msedgewebview2.exe")),
+            File.Exists(layout.RuntimePython));
+    }
+
+    public static PrerequisiteReport Report(PortableLayout layout)
+    {
+        Snapshot snapshot = Capture(layout);
+        return new PrerequisiteReport(
+        [
+            new PrerequisiteStatus(
+                PrerequisiteKind.DotNetRuntime,
+                snapshot.DotNetVersion is not null,
+                snapshot.DotNetVersion,
+                PrerequisiteDetector.BundledMinimum,
+                PrerequisiteDetector.ProductRepairUri),
+            new PrerequisiteStatus(
+                PrerequisiteKind.WindowsAppRuntime,
+                snapshot.WindowsAppRuntimeVersion is not null,
+                snapshot.WindowsAppRuntimeVersion,
+                PrerequisiteDetector.BundledMinimum,
+                PrerequisiteDetector.ProductRepairUri),
+            new PrerequisiteStatus(
+                PrerequisiteKind.WebView2Runtime,
+                snapshot.WebView2Version is not null,
+                snapshot.WebView2Version,
+                PrerequisiteDetector.BundledMinimum,
+                PrerequisiteDetector.ProductRepairUri),
+            new PrerequisiteStatus(
+                PrerequisiteKind.RuntimePython,
+                snapshot.RuntimePythonPresent,
+                snapshot.RuntimePythonPresent ? "Bundled" : null,
+                PrerequisiteDetector.BundledMinimum,
+                PrerequisiteDetector.ProductRepairUri),
+        ]);
+    }
+
+    // Self-contained .NET marker files (hostfxr/hostpolicy/coreclr，F6：
+    // apphost AppLocal 搜索必需三件)；runtimeconfig 的 includedFrameworks
+    // 是权威版本，损坏/不可解析按缺失处理，不得报 Bundled。
+    private static string? FindBundledDotNetVersion(string appRoot, string appEntry)
+    {
+        if (!File.Exists(Path.Combine(appRoot, "hostpolicy.dll")) ||
+            !File.Exists(Path.Combine(appRoot, "coreclr.dll")) ||
+            !File.Exists(Path.Combine(appRoot, "hostfxr.dll")))
+        {
+            return null;
+        }
+        string runtimeConfig = Path.ChangeExtension(appEntry, ".runtimeconfig.json");
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(
+                File.ReadAllText(runtimeConfig));
+            var frameworks = document.RootElement
+                .GetProperty("runtimeOptions")
+                .GetProperty("includedFrameworks");
+            foreach (var framework in frameworks.EnumerateArray())
+            {
+                if (framework.GetProperty("name").GetString() == "Microsoft.NETCore.App")
+                {
+                    string? version = framework.GetProperty("version").GetString();
+                    return string.IsNullOrWhiteSpace(version) ? null : version;
+                }
+            }
+            return null;
+        }
+        catch (Exception error) when (
+            error is IOException or System.Text.Json.JsonException or
+                UnauthorizedAccessException or KeyNotFoundException)
+        {
+            // runtimeconfig 损坏：随包 .NET 不可用，明确失败。
+            return null;
+        }
+    }
+
+    private static string? FindFileVersion(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+        string version = FileVersionInfo.GetVersionInfo(path).FileVersion ?? "";
+        return string.IsNullOrWhiteSpace(version) ? "Bundled" : version;
     }
 }
 

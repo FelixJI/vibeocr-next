@@ -52,15 +52,33 @@ if ($LASTEXITCODE -ne 0) { throw 'WebAssets production build failed' }
 uv run --no-sync python (Join-Path $root 'scripts/verify_web_assets.py') `
   (Join-Path $webAssets 'dist')
 if ($LASTEXITCODE -ne 0) { throw 'WebAssets production closure verification failed' }
-dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') --locked-mode
+dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') `
+  -p:SelfContained=true -p:WindowsAppSdkSelfContained=true -p:VibeOCRProductWebView2=true --locked-mode
 if ($LASTEXITCODE -ne 0) { throw 'Next restore failed' }
 dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') --locked-mode
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper restore failed' }
 $appPublish = Join-Path $build 'app-publish'
 Write-CiStage 'app-publish'
+# Bundled release mode is selected by explicit MSBuild publish properties
+# (.NET self-contained + Windows App SDK self-contained), not by DEBUG/profile;
+# restore above uses the identical property set with locked mode.
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') `
-  -c Release -r win-x64 --self-contained false --no-restore -o $appPublish
+  -c Release -r win-x64 --self-contained true -p:WindowsAppSdkSelfContained=true `
+  -p:VibeOCRProductWebView2=true --no-restore -o $appPublish
 if ($LASTEXITCODE -ne 0) { throw 'Next publish failed' }
+Write-CiStage 'webview2-runtime'
+# WebView2 Fixed Version runtime: lock-driven download/verify/expand into the
+# app publish tree (msedgewebview2.exe at WebView2Runtime root). Fails closed
+# on any lock mismatch; no latest-version fallback, no Evergreen fallback.
+& (Join-Path $root 'scripts/expand_webview2_runtime.ps1') -AppPublishRoot $appPublish
+if ($LASTEXITCODE -ne 0) { throw 'WebView2 Fixed Version runtime expansion failed' }
+# #321 F5：从实际展开树采集 exe 版本/文件数，供 SBOM 与锁对齐。
+$webview2Metadata = Join-Path $build 'webview2-runtime-metadata.json'
+$browserExe = Join-Path $appPublish 'WebView2Runtime\msedgewebview2.exe'
+@{
+  version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($browserExe).FileVersion
+  file_count = @(Get-ChildItem -LiteralPath (Join-Path $appPublish 'WebView2Runtime') -Recurse -File).Count
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath $webview2Metadata -Encoding utf8
 Write-CiStage 'app-webview-smoke'
 & (Join-Path $root 'scripts/smoke_web_workbench.ps1') -ProductRoot $appPublish
 if ($LASTEXITCODE -ne 0) { throw 'Web workbench bridge-ready smoke failed' }
@@ -194,5 +212,6 @@ uv run --no-sync python (Join-Path $root 'scripts/build_release_checksums.py') $
 if ($LASTEXITCODE -ne 0) { throw 'Release checksum build failed' }
 Remove-Item -LiteralPath (Join-Path $artifacts 'SHA256SUMS') -Force
 uv run --no-sync python (Join-Path $root 'scripts/build_spdx_sbom.py') --artifacts-dir $artifacts `
-  --repository-name FelixJI/vibeocr-next --version $Version
+  --repository-name FelixJI/vibeocr-next --version $Version --product-root $product `
+  --webview2-metadata $webview2Metadata
 if ($LASTEXITCODE -ne 0) { throw 'SBOM build failed' }

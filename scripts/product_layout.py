@@ -48,6 +48,7 @@ CANONICAL_PATHS = {
     "roots.metadata": "app/metadata",
     "app.entry": "app/VibeOCR.WinUI.exe",
     "app.web_assets": "app/WebAssets",
+    "app.webview2_runtime": "app/WebView2Runtime",
     "runtime.manifest": "runtime/backend/runtime-manifest.json",
     "runtime.python": "runtime/env/runtime-env/python.exe",
     "metadata.component_lock": "app/metadata/component-lock.json",
@@ -67,6 +68,7 @@ class ProductLayout:
     app_root: Path
     app_entry: Path
     web_assets: Path
+    webview2_runtime: Path
     runtime_root: Path
     runtime_manifest: Path
     runtime_python: Path
@@ -181,6 +183,7 @@ def _load_product_layout(
         "roots.metadata": roots.get("metadata"),
         "app.entry": app.get("entry"),
         "app.web_assets": app.get("web_assets"),
+        "app.webview2_runtime": app.get("webview2_runtime"),
         "runtime.manifest": runtime.get("manifest"),
         "runtime.python": runtime.get("python"),
         "metadata.component_lock": metadata.get("component_lock"),
@@ -198,6 +201,9 @@ def _load_product_layout(
         app_root=_resolved_relative(root, roots.get("app"), "roots.app"),
         app_entry=_resolved_relative(root, app.get("entry"), "app.entry"),
         web_assets=_resolved_relative(root, app.get("web_assets"), "app.web_assets"),
+        webview2_runtime=_resolved_relative(
+            root, app.get("webview2_runtime"), "app.webview2_runtime"
+        ),
         runtime_root=_resolved_relative(root, roots.get("runtime"), "roots.runtime"),
         runtime_manifest=_resolved_relative(
             root, runtime.get("manifest"), "runtime.manifest"
@@ -226,6 +232,8 @@ def _load_product_layout(
         layout.app_root / "App.xbf",
         layout.app_root / "MainWindow.xbf",
         layout.web_assets / "index.html",
+        layout.webview2_runtime / "msedgewebview2.exe",
+        layout.webview2_runtime / "icudtl.dat",
         layout.runtime_manifest,
         layout.runtime_python,
         layout.component_lock,
@@ -569,6 +577,7 @@ def stage_product_layout(
             "app": {
                 "entry": "app/VibeOCR.WinUI.exe",
                 "web_assets": "app/WebAssets",
+                "webview2_runtime": "app/WebView2Runtime",
             },
             "runtime": {
                 "manifest": "runtime/backend/runtime-manifest.json",

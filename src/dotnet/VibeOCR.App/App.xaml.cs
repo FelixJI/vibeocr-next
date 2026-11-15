@@ -179,11 +179,16 @@ public sealed partial class App : Application
             options.InstallRoot,
             productRootOverride: options.ProductRoot);
         // 便携状态根就绪探针:不可写时 fail closed,不回退用户目录。
-        layout.EnsurePortableState();
-        // WebView2 user-data/cache/cookies 固定在便携 state 内;通过 Loader
-        // 官方环境变量指定(WinRT 投影无带目录的 CreateAsync 重载)。外部
-        // 显式覆盖(测试/隔离)优先。
-        if (string.IsNullOrWhiteSpace(
+        // #321：随包 Fixed 模式先选定并列版本化 userData 目录再准备状态根；
+        // 非 bundled 保持旧 state/webview2 默认，两条路径同一 contained 校验。
+        VibeOCR.App.Web.WebView2ProductEnvironment.Configure(layout);
+        layout.EnsurePortableState(
+            VibeOCR.App.Web.WebView2ProductEnvironment.PrepareProductionUserData(layout));
+        // WebView2 user-data/cache/cookies:dev/test 通过 Loader 官方环境变量
+        // 固定在旧 state/webview2（外部显式覆盖优先）；随包模式不设该默认，
+        // 由产品环境显式传并列 Fixed 目录，避免自设值被当作外部覆盖。
+        if (!VibeOCR.App.Web.WebView2ProductEnvironment.HasBundledRuntime &&
+            string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER")))
         {
             Environment.SetEnvironmentVariable(
@@ -205,7 +210,8 @@ public sealed partial class App : Application
                     $"Production profile migration failed: {migration.Message}");
             }
         }
-        PrerequisiteReport prerequisites = new PrerequisiteDetector().Detect(layout);
+        PrerequisiteReport prerequisites = new PrerequisiteDetector().Detect(
+            layout, VibeOCR.App.Web.WebView2ProductEnvironment.IsProductBuild);
         var diagnostics = new DiagnosticsViewModel(
             options.Profile,
             prerequisites,

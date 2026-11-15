@@ -219,7 +219,8 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     {
       if (captureScene is not null)
       {
-        await webView.EnsureCoreWebView2Async();
+        await webView.EnsureCoreWebView2Async(
+            await Web.WebView2ProductEnvironment.EnsureCreatedAsync());
         if (closed) return;
         webView.DefaultBackgroundColor = Microsoft.UI.Colors.Transparent;
       }

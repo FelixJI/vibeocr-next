@@ -929,9 +929,40 @@ public sealed partial class MainWindow : Window
       resourceBroker.Revoke(lease);
       if (!string.IsNullOrWhiteSpace(healthFile))
       {
+        // #321：记录浏览器进程 ID/版本（随包绑定证据）；外层 smoke 用它
+        // 核对实际镜像路径与 userData，证明未使用系统运行库。
+        Microsoft.Web.WebView2.Core.CoreWebView2Environment environment =
+            WorkbenchWebView.CoreWebView2.Environment;
+        int? browserProcessId = null;
+        foreach (Microsoft.Web.WebView2.Core.CoreWebView2ProcessExtendedInfo info in
+            await environment.GetProcessExtendedInfosAsync())
+        {
+          if (info.ProcessInfo is { } process &&
+              process.Kind == Microsoft.Web.WebView2.Core.CoreWebView2ProcessKind.Browser)
+          {
+            browserProcessId = process.ProcessId;
+            break;
+          }
+        }
+        if (browserProcessId is not > 0)
+        {
+          throw new InvalidOperationException(
+              "Web workbench smoke could not resolve the WebView2 browser process.");
+        }
+        // 宿主存活时解析实际镜像路径写入 health；外层脚本退出后只核对
+        // health 来源，不要求浏览器进程仍活着（消除取证竞态）。
+        using var browserProcess = System.Diagnostics.Process.GetProcessById(
+            browserProcessId.Value);
+        string browserExecutablePath = browserProcess.MainModule?.FileName
+            ?? throw new InvalidOperationException(
+                "Web workbench smoke could not resolve the WebView2 browser image path.");
         File.WriteAllText(healthFile,
           "{\"schema_version\":1,\"state\":\"bridge-ready\",\"resources\":\"verified\"," +
-          "\"layout_sizes_verified\":2,\"owner_restore\":\"verified\"}");
+          "\"layout_sizes_verified\":2,\"owner_restore\":\"verified\"," +
+          $"\"webview2\":{{\"browser_process_id\":{browserProcessId}," +
+          $"\"browser_version\":{JsonSerializer.Serialize(environment.BrowserVersionString)}," +
+          $"\"browser_executable_path\":{JsonSerializer.Serialize(browserExecutablePath)}," +
+          $"\"user_data_folder\":{JsonSerializer.Serialize(environment.UserDataFolder)}}}}}");
       }
       Environment.Exit(0);
     }

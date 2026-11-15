@@ -497,7 +497,10 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
 
     dispatcher = webView.DispatcherQueue;
-    await webView.EnsureCoreWebView2Async();
+    // #321 产品绑定环境：所有宿主共享同一个随包 WebView2 环境。
+    Microsoft.Web.WebView2.Core.CoreWebView2Environment environment =
+        await WebView2ProductEnvironment.EnsureCreatedAsync();
+    await webView.EnsureCoreWebView2Async(environment);
     lifetime.Token.ThrowIfCancellationRequested();
     CoreWebView2 next = webView.CoreWebView2;
     StateChanged?.Invoke("webview-initialized");

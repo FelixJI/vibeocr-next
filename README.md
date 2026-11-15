@@ -46,8 +46,13 @@ worker 仍在独立进程运行。
 3. 解压整个目录后运行根目录的 `VibeOCR.exe`；不要只复制 `current` 子目录。
 4. 应用数据固定保存在解压根的 `state`；应用更新由 Velopack 在应用内检查、下载并应用。
 
-桌面当前仍要求系统具备 .NET 10、Windows App Runtime 和 WebView2，启动器会检查这些前置条件。
-完整依赖随包与干净系统验证见 [#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
+正式发布包自带全部软件运行依赖：.NET 10 运行时、Windows App Runtime 2.6.4 与官方
+WebView2 Fixed Version 运行库（锁定于 `config/runtime/webview2-runtime.lock.json`，构建期
+校验 SHA-256 后展开为 `app/WebView2Runtime`）全部随包分发，模型包单独管理；系统只需满足
+Windows 10/11 x64 最低条件。启动器与诊断检查随包载荷而非系统安装组件，损坏时明确报错并
+引导使用应用内更新或重新获取完整包，首次使用不联网下载或安装运行库。未打包的
+开发/测试树仍使用系统 Evergreen WebView2。完整闭包与干净系统验证见
+[#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
 
 在“关于与诊断 → 更新”检查版本、下载并安装更新。更新由桌面宿主执行，
 无需识别服务就绪；尚未检查时显示“尚未检查更新”，失败会显示原因。
@@ -255,8 +260,12 @@ CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `pre
 
 正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
 （`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`
-和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 调用
-`scripts/build_internal_runtime.ps1` 从当前源码构建内部 wheel，按 `config/runtime/` 的 CPython 归档和锁将其装入随包 Runtime 树。Runtime manifest 绑定解释器树清单、依赖锁与默认模型包。产品内部沿用 `runtime/backend/` 与
+和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 以显式 MSBuild 发布属性
+（.NET 与 Windows App SDK 双 self-contained）产出随包应用，调用
+`scripts/build_internal_runtime.ps1` 从当前源码构建内部 wheel，按 `config/runtime/` 的 CPython 归档和锁将其装入随包 Runtime 树；同目录的
+`config/runtime/webview2-runtime.lock.json` 由 `scripts/expand_webview2_runtime.ps1` 消费，
+构建期校验官方 WebView2 Fixed Version CAB 的 SHA-256/大小/条目数后完整展开到
+`app/WebView2Runtime`（失配 fail closed，不取 latest）。Runtime manifest 绑定解释器树清单、依赖锁与默认模型包。产品内部沿用 `runtime/backend/` 与
 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
 不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为
 `project:{component,repository,version,source_sha}`；`runtime-manifest.json` 的 `product`

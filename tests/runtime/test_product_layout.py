@@ -75,6 +75,8 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
         "MainWindow.xbf",
         "WebAssets/index.html",
         "runtimes/win-x64/native/WebView2Loader.dll",
+        "WebView2Runtime/msedgewebview2.exe",
+        "WebView2Runtime/icudtl.dat",
     ):
         path = app / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +134,9 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     assert (product_root / "app/metadata/component-lock.json").is_file()
     assert (product_root / "app/metadata/component-identities.json").is_file()
     assert (product_root / "runtime/backend/runtime-manifest.json").is_file()
+    # #321：随包 WebView2 Fixed Version 运行库进入产品闭包。
+    assert layout.webview2_runtime == product_root / "app" / "WebView2Runtime"
+    assert (product_root / "app/WebView2Runtime/msedgewebview2.exe").is_file()
     assert layout.runtime_python.read_bytes() == b"python-bin"
     assert not list(product_root.rglob("vibeocr-runtime-installer*"))
     assert not list(product_root.rglob("*.pdb"))
@@ -206,6 +211,17 @@ def test_stage_product_layout_rejects_nonportable_windows_release_filenames(
         ProductLayoutError,
         match="layout.invalid-descriptor: runtime_env.manifest must be a release filename",
     ):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+def test_stage_product_layout_requires_the_bundled_webview2_runtime(
+    tmp_path: Path,
+) -> None:
+    """#321：随包 WebView2 运行库缺失时闭包 fail closed（旧实现不会失败）。"""
+    inputs = _release_inputs(tmp_path)
+    (inputs["app_publish_root"] / "WebView2Runtime" / "msedgewebview2.exe").unlink()
+
+    with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
 
 

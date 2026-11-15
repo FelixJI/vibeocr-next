@@ -409,9 +409,12 @@ def _build_recognition_mode_registry(
                 for descriptor in engine_resolver.probe_descriptors()
             }
             descriptor = descriptors[definition.engine]
+            # #321 F8：只有 Paddle 投影 descriptor.required_component
+            # （产品模式下已降级为 UNAVAILABLE+engine_init_failed+无组件）；
+            # WindowsOCR 等其它引擎保持 None，不引入在线准备语义。
             required_component = (
-                "paddleocr-ort-directml"
-                if definition.mode_id is RecognitionModeId.PADDLE_TEXT
+                descriptor.required_component
+                if descriptor.engine_id.value == "paddleocr"
                 else None
             )
             return ModeAvailability(
@@ -431,9 +434,7 @@ def _build_recognition_mode_registry(
             return ModeAvailability(
                 descriptor.availability.value,
                 reason_code=descriptor.reason_code,
-                required_component=None
-                if descriptor.availability.value == "ready"
-                else "paddleocr-ort-directml",
+                required_component=descriptor.required_component,
             )
         if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             return ModeAvailability(

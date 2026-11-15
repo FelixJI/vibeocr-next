@@ -25,7 +25,16 @@ public sealed partial class App
       string scenario = Environment.GetEnvironmentVariable("VIBEOCR_CAPTURE_UI_SCENARIO") ?? "";
       CaptureUiSmokeTrace.Stage("portable-state.begin");
       var layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "production");
-      layout.EnsurePortableState();
+      VibeOCR.App.Web.WebView2ProductEnvironment.Configure(layout);
+      layout.EnsurePortableState(
+          VibeOCR.App.Web.WebView2ProductEnvironment.PrepareProductionUserData(layout));
+      if (!VibeOCR.App.Web.WebView2ProductEnvironment.HasBundledRuntime &&
+          string.IsNullOrWhiteSpace(
+              Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER")))
+      {
+        Environment.SetEnvironmentVariable(
+            "WEBVIEW2_USER_DATA_FOLDER", layout.WebView2Root);
+      }
       var store = new CapturePreferencesStore(layout);
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
@@ -157,7 +166,8 @@ public sealed partial class App
     window.Activate();
     try
     {
-      await view.EnsureCoreWebView2Async();
+      await view.EnsureCoreWebView2Async(
+          await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
       var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
       view.CoreWebView2.NavigationCompleted += (_, _) => navigation.TrySetResult();
       await host.InitializeAsync(view, Path.Combine(AppContext.BaseDirectory, "WebAssets"));

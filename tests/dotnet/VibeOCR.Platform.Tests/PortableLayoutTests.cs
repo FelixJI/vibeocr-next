@@ -492,6 +492,8 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -512,7 +514,7 @@ public sealed class PortableLayoutTests
               "product_id": "vibeocr",
               "public_entry": "VibeOCR.exe",
               "roots": {"app":"app","runtime":"runtime","metadata":"app/metadata"},
-              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
               "runtime": {"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
               "metadata": {"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
               "user_data": {"relative":"state"}
@@ -632,6 +634,8 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -649,7 +653,7 @@ public sealed class PortableLayoutTests
             """
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
-             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
              "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}
@@ -767,6 +771,8 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -784,7 +790,7 @@ public sealed class PortableLayoutTests
             """
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
-             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
              "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}

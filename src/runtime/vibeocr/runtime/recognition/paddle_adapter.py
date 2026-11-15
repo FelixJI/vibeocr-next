@@ -53,6 +53,14 @@ if TYPE_CHECKING:
 PADDLE_REQUIRED_COMPONENT = "paddleocr-ort-directml"
 
 
+def _product_runtime() -> bool:
+    """#321 F8：产品模式（预构建随包 Runtime）下组件缺失是产品损坏，
+    不能提示在线准备；开发环境保持原有待准备语义。"""
+    import os
+
+    return os.environ.get("VIBEOCR_PRODUCT_RUNTIME") == "1"
+
+
 class _OCRServiceLike(Protocol):
     """Minimal slice of :class:`OCRService` we depend on."""
 
@@ -97,11 +105,20 @@ class PaddlePipelineAdapter:
         """#270：只探测 Paddle ONNX 后端可用性，不再导入原生 Paddle。
 
         非 ORT 环境直接报告待准备（指向对应 Paddle ONNX 组件），不触发
-        原生探测；模型加载不发生。
+        原生探测；模型加载不发生。产品模式（VIBEOCR_PRODUCT_RUNTIME=1）
+        下依赖缺失属于随包闭包损坏：报 UNAVAILABLE + engine_init_failed，
+        不提供 required_component（不引导在线安装）。
         """
         from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
 
         if not is_ort_environment():
+            if _product_runtime():
+                return EngineDescriptor(
+                    engine_id=OcrEngine.PADDLEOCR,
+                    availability=EngineAvailability.UNAVAILABLE,
+                    included_in_base=True,
+                    reason_code=REASON_ENGINE_INIT_FAILED,
+                )
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.PREPARATION_REQUIRED,
@@ -112,6 +129,13 @@ class PaddlePipelineAdapter:
         try:
             __import__("onnxruntime")
         except ImportError:
+            if _product_runtime():
+                return EngineDescriptor(
+                    engine_id=OcrEngine.PADDLEOCR,
+                    availability=EngineAvailability.UNAVAILABLE,
+                    included_in_base=True,
+                    reason_code=REASON_ENGINE_INIT_FAILED,
+                )
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.PREPARATION_REQUIRED,

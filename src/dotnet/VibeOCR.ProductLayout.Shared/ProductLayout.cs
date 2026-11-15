@@ -53,6 +53,7 @@ public sealed class ResolvedProductLayout
         AppRoot = Path.Combine(installRoot, "app");
         AppEntry = Path.Combine(AppRoot, "VibeOCR.WinUI.exe");
         WebAssetsRoot = Path.Combine(AppRoot, "WebAssets");
+        WebView2RuntimeRoot = Path.Combine(AppRoot, "WebView2Runtime");
         RuntimeRoot = Path.Combine(installRoot, "runtime");
         RuntimeManifest = Path.Combine(RuntimeRoot, "backend", "runtime-manifest.json");
         RuntimePython = Path.Combine(
@@ -70,6 +71,7 @@ public sealed class ResolvedProductLayout
     public string AppRoot { get; }
     public string AppEntry { get; }
     public string WebAssetsRoot { get; }
+    public string WebView2RuntimeRoot { get; }
     public string RuntimeRoot { get; }
     public string RuntimeManifest { get; }
     public string RuntimePython { get; }
@@ -165,6 +167,8 @@ public sealed class ResolvedProductLayout
             Path.Combine(AppRoot, "App.xbf"),
             Path.Combine(AppRoot, "MainWindow.xbf"),
             Path.Combine(WebAssetsRoot, "index.html"),
+            Path.Combine(WebView2RuntimeRoot, "msedgewebview2.exe"),
+            Path.Combine(WebView2RuntimeRoot, "icudtl.dat"),
             RuntimeManifest,
             RuntimePython,
             ComponentLock,
@@ -202,6 +206,7 @@ public sealed class ResolvedProductLayout
         Expect(value.Roots.Metadata, "app/metadata", "roots.metadata");
         Expect(value.App.Entry, "app/VibeOCR.WinUI.exe", "app.entry");
         Expect(value.App.WebAssets, "app/WebAssets", "app.web_assets");
+        Expect(value.App.WebView2Runtime, "app/WebView2Runtime", "app.webview2_runtime");
         Expect(
             value.Runtime.Manifest,
             "runtime/backend/runtime-manifest.json",
@@ -286,6 +291,9 @@ public sealed class ResolvedProductLayout
 
         [DataMember(Name = "web_assets")]
         public string? WebAssets { get; set; }
+
+        [DataMember(Name = "webview2_runtime")]
+        public string? WebView2Runtime { get; set; }
 
     }
 
