@@ -293,7 +293,7 @@ async function watchScreenshotSession(page) {
           !window.__scrollCaptureSessions.some((item) =>
             item.sessionId === session.sessionId && item.revision === session.revision))
         window.__scrollCaptureSessions.push({
-          sessionId: session.sessionId, revision: session.revision });
+          sessionId: session.sessionId, revision: session.revision, at: Date.now() });
     });
   });
 }
@@ -394,6 +394,45 @@ async function watchAnnotationUploads(page) {
   // Scene recognition closes this WebView; retain the passive upload evidence
   // in the harness before that handoff instead of reading a closed page.
   return uploads;
+}
+
+// Public annotation edit on the live scene editor (shared by the main round
+// and the reverse-recovery save): rectangle tool, public orange swatch and
+// width 8, with the drag points mapped from expected natural-image fractions
+// through the editor's real fit. Returns the injection plan for the judges.
+async function annotateSceneRectangle(editorPage, natural) {
+  await editorPage.getByRole('button', { name: '矩形', exact: true }).click();
+  await editorPage.getByRole('button', { name: '常用颜色 #f38b35' }).click();
+  await editorPage.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
+  const box = await editorPage.getByLabel('图片检查画布').boundingBox();
+  assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable bounds.');
+  const logical = await editorPage.getByLabel('图片检查画布').evaluate(
+    (canvas) => ({
+      width: Number(canvas.dataset.coordinateWidth) || canvas.width,
+      height: Number(canvas.dataset.coordinateHeight) || canvas.height,
+    }));
+  const plan = planAnnotationInjection({
+    fractions: { x0: 0.35, y0: 0.45, x1: 0.65, y1: 0.55 },
+    natural,
+    logical,
+    css: { x: box.x, y: box.y, width: box.width, height: box.height },
+  });
+  await editorPage.mouse.move(plan.start.x, plan.start.y);
+  await editorPage.mouse.down();
+  await editorPage.mouse.move(plan.end.x, plan.end.y);
+  await editorPage.mouse.up();
+  return { plan, cssBox: box, logical };
+}
+
+// Waits until the public session history reports a revision above the given
+// baseline and returns the live session/revision after the bump.
+async function waitForRevisionBump(app, revisionBefore, timeoutMs = 8000) {
+  await app.page.waitForFunction((before) => {
+    const sessions = window.__scrollCaptureSessions ?? [];
+    const last = sessions.at(-1);
+    return last && Number.isSafeInteger(last.revision) && last.revision > before;
+  }, revisionBefore, { timeout: timeoutMs });
+  return (await screenshotOutput(app.page)).session ?? null;
 }
 
 async function controlBar(appPid, automationId) {
@@ -651,6 +690,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   await delay(5500); // Pausing on the controls must not contaminate frames or trip dynamic-content timeout.
   await recordBar('control-focused-before-finish');
   assert((await controlBar(appPid, 'scroll-capture-finish')).enabled, 'Focusing capture controls invalidated a stable capture.');
+  const finishInvokedAtWall = Date.now();
   try {
     // Finishing delivers the segment directly: the editor is the result
     // preview and the controller closes with the completed session.
@@ -662,9 +702,18 @@ async function runScrollCapture(app, fixture, { cancel }) {
       X: opened.selection.left + 100, Y: opened.selection.top + 100 }));
     throw error;
   }
+  const controlsClosedAtWall = Date.now();
   const restored = await windows(appPid);
   assert(restored.some((item) => item.Handle === app.main.Handle && item.Visible),
     'Finished scroll capture did not restore the main window.');
+  // UIA observation includes helper overhead; session arrival is bound below
+  // after the existing exactly-one-session check, never to the prior session.
+  app.evidence.finishTiming = {
+    invokedAtWall: finishInvokedAtWall,
+    controlsClosedAfterMs: controlsClosedAtWall - finishInvokedAtWall,
+    controlsCloseWaitDeadlineMs: 15000,
+    note: 'Measurement only; product deadlines/limits unchanged.',
+  };
 
   const page = await connectEditor(app);
   const editor = page.getByLabel('图片检查画布');
@@ -760,12 +809,15 @@ async function terminalCopyAndReadback(app, { analysis, annotationRect, original
 // Real native Save on the recovered scene: the public save command and its
 // accepted upload are proven BEFORE the owned picker is driven; the saved
 // file must be exactly the upload bytes bound to that command's resourceUri.
-async function saveRecoveredSession(app, outputName, expectedSessionId) {
+async function saveRecoveredSession(app, outputName, expectedSessionId,
+  { originalRgba, annotationRect } = {}) {
   const page = app.editorPage;
   assert(page && !page.isClosed(), 'Screenshot editor is not available for the native save.');
   const session = (await screenshotOutput(app.page)).session;
   assert.equal(session?.sessionId, expectedSessionId,
     'Native save must address the recovered screenshot session.');
+  assert(Number.isSafeInteger(session.revision) && session.revision >= 1,
+    'Native save must run on the annotated revision of the recovered session.');
   const savedPath = path.join(app.evidence.smokeRoot, outputName);
   const terminal = await observeSceneCopyTerminal(page, { actions: ['saveScreenshotImage'] });
   try {
@@ -802,8 +854,15 @@ async function saveRecoveredSession(app, outputName, expectedSessionId) {
     const savedPng = fs.readFileSync(savedPath);
     assertSceneTerminalExport('saveScreenshotImage', terminal.timeline, savedPng, uploadPng,
       'Scroll capture save');
+    // AC5: the saved artifact is the FINAL annotated revision of THIS session -
+    // the annotation pixels prove it is not an unedited re-export.
+    assert(originalRgba && annotationRect,
+      'Native save requires the recovered session\'s original RGBA and annotation rect.');
+    const savedRgba = await decodeImageRgba(app.page, savedPng, 'image/png');
+    const annotated = assertAnnotatedExportRectangle(savedRgba, originalRgba,
+      annotationRect, { context: 'Recovered save annotation' });
     return { savedPng, uploadPng, savedPath, timeline: terminal.timeline,
-      session: { sessionId: session.sessionId, revision: session.revision } };
+      session: { sessionId: session.sessionId, revision: session.revision }, annotated };
   } finally {
     await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
@@ -1222,6 +1281,23 @@ async function verifyPreparedCandidateRecognition(app, {
     await page.getByRole('button', { name: '识别当前图' }).click();
     await editorClosed;
     const completed = await waitForScreenshotRecognition(app, sessionId, revision);
+    // Direct proof of the ACTUAL recognition input: the completed snapshot's
+    // input must be the same local product resource and its fetched bytes must
+    // equal this revision's exported annotation PNG.
+    assert(typeof completed.input?.url === 'string' && completed.input.url.length > 0,
+      'Explicit recognition completed without an input resource.');
+    const inputResource = new URL(completed.input.url);
+    assert(inputResource.origin === 'https://app.vibeocr' &&
+        inputResource.pathname.startsWith('/__resource/'),
+      'Explicit recognition input is not a product __resource URL.');
+    const inputProbe = await app.page.evaluate(async (url) => {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Recognition input resource returned ${response.status}.`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return Array.from(bytes);
+    }, completed.input.url);
+    assert(Buffer.from(inputProbe).equals(uploadPng),
+      'Actual recognition input bytes differ from this revision\'s exported annotation PNG.');
     await app.page.waitForFunction(() =>
       (document.querySelector('.result-document')?.textContent ?? '').trim().length > 0,
       null, { timeout: 30000 });
@@ -1262,6 +1338,8 @@ async function verifyPreparedCandidateRecognition(app, {
       recognition: {
         statusCode: completed.statusCode,
         session: completed.screenshotSession,
+        inputEqualsRevisionUpload: true,
+        inputUrl: completed.input.url,
         resultChars: resultText.length,
         coveredRows: resultRows,
         uploadCount: recognitionUploads.length,
@@ -1450,21 +1528,35 @@ async function verifyReverseRecovery(app, fixture) {
     added.every((item) => item.sessionId === recoveredId),
     'Explicit completion must create exactly one new screenshot session.');
   await connectEditor(app);
-  const outputName = 'scroll-capture-reverse-recovered.png';
-  // The save is a terminal export of THIS reverse round's own session (its
-  // actual session/revision is recorded below); it is deliberately not
-  // compared against the earlier edited-copy session's binary.
-  const saved = await saveRecoveredSession(app, outputName, recoveredId);
-  const png = saved.savedPng;
+  // AC5: keep the exact reverse-pixel verification on the SAME session's raw
+  // original resource, then annotate THIS session (public edit) and let the
+  // native Save prove its own final annotated revision - never a binary from
+  // a different scene.
+  const reverseOriginal = await fetchScrollOriginal(app);
+  assert.equal(reverseOriginal.sessionId, recoveredId,
+    'Reverse-recovery original belongs to a different session.');
+  const reverseOriginalRgba = await decodeImageRgba(app.page, reverseOriginal.bytes,
+    reverseOriginal.mediaType);
   // The earlier full-capture round left the fixture at wheelSteps * step.
   // The reverse/return pair cancels out; only the final forward step grows it.
   const startOffsetPixels = wheelSteps * fixture.wheelStepPixels;
-  const analysis = await analyzeStitched(app.page, png, fixture, opened.selection, startOffsetPixels);
+  const analysis = await analyzeStitched(app.page, reverseOriginal.bytes, fixture,
+    opened.selection, startOffsetPixels, reverseOriginal.mediaType);
   assert.equal(analysis.width, opened.selection.width, 'Recovered output width changed.');
   assert.equal(analysis.height, expectedHeight, 'Recovered output lost its first viewport or new strip.');
   assert.equal(analysis.badCount, 0,
     `Recovered first-frame/new-strip pixels differ: ${JSON.stringify(analysis.bad)}`);
   assert(analysis.minDark >= 8, 'Recovered complete rows lost rendered text.');
+
+  const reverseRevisionBefore = reverseOriginal.revision ?? 0;
+  const { plan } = await annotateSceneRectangle(app.editorPage,
+    { width: analysis.width, height: analysis.height });
+  const reverseEditedSession = await waitForRevisionBump(app, reverseRevisionBefore);
+  assert.equal(reverseEditedSession?.sessionId, recoveredId,
+    'Reverse-recovery editing switched the screenshot session.');
+  const outputName = 'scroll-capture-reverse-recovered.png';
+  const saved = await saveRecoveredSession(app, outputName, recoveredId,
+    { originalRgba: reverseOriginalRgba, annotationRect: plan.naturalRect });
 
   // Preserve the original reverse cancellation check as a separate real round.
   // Its history now includes the completed recovered output above.
@@ -1486,7 +1578,7 @@ async function verifyReverseRecovery(app, fixture) {
     output: saved.savedPath,
     nativeSave: { path: saved.savedPath, bytes: saved.savedPng.length,
       equalsSaveUpload: true, uploadBytes: saved.uploadPng.length,
-      session: saved.session, saveTimeline: saved.timeline },
+      session: saved.session, annotated: saved.annotated, saveTimeline: saved.timeline },
     noOutputBeforeFinish: true, cancelPreservedHistory: true,
   };
 }
@@ -1546,6 +1638,14 @@ async function main() {
     evidence.stableWaitMs = stableWaitMs;
     evidence.previewPauseMs = previewPauseMs;
     evidence.wheelSteps = wheelSteps;
+    // Direction coverage: this harness drives the physical down/manual path
+    // only; the other three directions are verified by the repository's pure
+    // pixel/input suites (VerticalScrollStitcherTests four-direction exact
+    // stitching, ScrollCaptureScrollInput boundary self-checks).
+    evidence.directionCoverage = {
+      physical: 'down, manual wheel steps (deterministic fixture)',
+      fourDirectionPixelAndInput: 'tests/dotnet/VibeOCR.Platform.Tests/VerticalScrollStitcherTests.cs',
+    };
 
     // 0) Prepared warmup: retained state alone proves no live Supervisor; one
     // real public 单次识别→从剪贴板 OCR over this run's own fixture image
@@ -1664,49 +1764,28 @@ async function main() {
     assert.equal(scrollSessionIds.size, 1,
       'More than one scroll screenshot session was broadcast beyond the preserved baseline.');
     const scrollSessionId = [...scrollSessionIds][0];
+    const arrived = sessionsBeforeEdit.find((item) => item.sessionId === scrollSessionId);
+    assert(Number.isFinite(arrived?.at) && arrived.at >= evidence.finishTiming.invokedAtWall,
+      'Finished capture must publish its new session after the finish action.');
+    evidence.finishTiming.sessionId = scrollSessionId;
+    evidence.finishTiming.sessionArrivalAfterMs = arrived.at - evidence.finishTiming.invokedAtWall;
     const revisionBefore = sessionsBeforeEdit.at(-1).revision ?? 0;
     const editorPage = app.editorPage;
-    await editorPage.getByRole('button', { name: '矩形', exact: true }).click();
-    // Explicitly select the existing public orange swatch so the exported
-    // stroke color is known (#f38b35) and the annotated-pixel judge below can
-    // fail closed on an unannotated or misplaced export.
-    await editorPage.getByRole('button', { name: '常用颜色 #f38b35' }).click();
-    await editorPage.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
-    const box = await editorPage.getByLabel('图片检查画布').boundingBox();
-    assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable bounds.');
-    // Map expected natural-image fractions through the editor's real fit
-    // (logical coordinate space + centering, then the CSS bounding box);
-    // the canvas backing store is deliberately NOT assumed to equal the image.
-    const canvasGeometry = await editorPage.getByLabel('图片检查画布').evaluate(
-      (canvas) => ({ logical: {
-        width: Number(canvas.dataset.coordinateWidth) || canvas.width,
-        height: Number(canvas.dataset.coordinateHeight) || canvas.height,
-      } }));
-    const injection = planAnnotationInjection({
-      fractions: { x0: 0.35, y0: 0.45, x1: 0.65, y1: 0.55 },
-      natural: { width: analysis.width, height: analysis.height },
-      logical: canvasGeometry.logical,
-      css: { x: box.x, y: box.y, width: box.width, height: box.height },
-    });
-    await editorPage.mouse.move(injection.start.x, injection.start.y);
-    await editorPage.mouse.down();
-    await editorPage.mouse.move(injection.end.x, injection.end.y);
-    await editorPage.mouse.up();
-    await app.page.waitForFunction((before) => {
-      const sessions = window.__scrollCaptureSessions ?? [];
-      const last = sessions.at(-1);
-      return last && Number.isSafeInteger(last.revision) && last.revision > before;
-    }, revisionBefore, { timeout: 8000 });
+    const { plan, cssBox, logical } = await annotateSceneRectangle(editorPage,
+      { width: analysis.width, height: analysis.height });
+    const editedSession = await waitForRevisionBump(app, revisionBefore);
+    assert.equal(editedSession?.sessionId, scrollSessionId,
+      'Editing opened or switched the screenshot session.');
     const sessionsAfterEdit = await sessionEvidence(app.page);
     assert(sessionsAfterEdit.every((item) => item.sessionId === scrollSessionId ||
         baselineSessionIds.includes(item.sessionId)),
       'Editing opened or switched the screenshot session.');
-    const annotationRect = injection.naturalRect;
+    const annotationRect = plan.naturalRect;
     evidence.annotation = { color: '#f38b35', strokeWidth: 8, rect: annotationRect,
-      geometry: { logical: canvasGeometry.logical,
-        css: { x: box.x, y: box.y, width: box.width, height: box.height },
+      geometry: { logical,
+        css: { x: cssBox.x, y: cssBox.y, width: cssBox.width, height: cssBox.height },
         image: { width: analysis.width, height: analysis.height },
-        ...injection.layout } };
+        ...plan.layout } };
     evidence.session = {
       sessionId: scrollSessionId,
       revisionBefore, revisionAfter: sessionsAfterEdit.at(-1).revision,

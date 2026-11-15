@@ -234,6 +234,22 @@ bmpBytes[1] = 0x4d;
     assert.equal(plan.start.y, 7 + 135 * 2 * 0.75);
   }
 
+  // Wide short image in a taller logical space (letterbox on Y): width-limited
+  // scale, vertical centering.
+  {
+    const plan = planAnnotationInjection({ fractions,
+      natural: { width: 1000, height: 400 }, logical: { width: 900, height: 600 },
+      css: css(450, 300, 0, 0) });
+    const scale = Math.min(900 / 1000, 600 / 400);
+    assert.equal(plan.layout.scale, scale);
+    assert.equal(plan.layout.offsetX, 0);
+    assert.equal(plan.layout.offsetY, (600 - 400 * scale) / 2);
+    // X fills the width (offsetX=0); only Y is letterboxed.
+    assert.equal(plan.start.x, Math.round(1000 * 0.35) * scale * (450 / 900));
+    assert.equal(plan.start.y,
+      (plan.layout.offsetY + Math.round(400 * 0.45) * scale) * (300 / 600));
+  }
+
   // Out-of-range fractions and unusable geometry fail closed.
   assert.throws(() => planAnnotationInjection({ fractions: { x0: 0.01, y0: 0.45, x1: 0.65, y1: 0.55 },
     natural: { width: 100, height: 100 }, logical: { width: 100, height: 100 },
