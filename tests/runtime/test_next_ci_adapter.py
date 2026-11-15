@@ -1226,10 +1226,13 @@ def test_velopack_startup_hook_runs_in_the_packaged_root_entrypoint() -> None:
         in program
     )
     assert (
-        program.index("if (!File.Exists(velopackDll))")
-        < program.index("LegacyVelopackStateMigration.Resume(")
+        program.index("LegacyVelopackStateMigration.Resume(")
+        < program.index("if (!File.Exists(velopackDll))")
         < program.index("RunVelopack(productRoot);")
         < program.index("return Launch(args,")
+    )
+    assert program.index("LegacyVelopackStateMigration.Resume(") < program.index(
+        "InitializeLog(productRoot);"
     )
     assert "[MethodImpl(MethodImplOptions.NoInlining)]" in program
     assert '<PackageReference Include="Velopack" />' in project

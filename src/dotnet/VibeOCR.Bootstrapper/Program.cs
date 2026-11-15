@@ -23,6 +23,7 @@ internal static class Program
   private static int Main(string[] args)
   {
     string productRoot = AppDomain.CurrentDomain.BaseDirectory;
+    LegacyVelopackStateMigration.Resume(productRoot);
     string velopackDll = Path.Combine(productRoot, "Velopack.dll");
     if (!File.Exists(velopackDll))
     {
@@ -33,7 +34,6 @@ internal static class Program
       return LayoutInvalid;
     }
 
-    LegacyVelopackStateMigration.Resume(productRoot);
     try
     {
       RunVelopack(productRoot);
