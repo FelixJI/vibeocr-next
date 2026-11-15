@@ -18,7 +18,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
-import { stopOwned } from './smoke_native_actions.mjs';
+import { native as pickerNative, stopOwned, observeSceneCopyTerminal,
+  settleSceneCopyTimeline, collectSceneCopyUploadBlob, raceDeadline, setClipboardImage,
+  readbackSceneCopyClipboard, decodeImageRgba } from './smoke_native_actions.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -346,41 +348,6 @@ async function connectEditor(app) {
   return page;
 }
 
-async function observeNextAnnotationUpload(page) {
-  await page.evaluate(() => {
-    const originalFetch = window.fetch;
-    const observed = { count: 0, mimeType: null, byteLength: null,
-      bytes: null, problem: null };
-    window.__scrollCaptureUpload = observed;
-    window.fetch = function(input, init) {
-      if (input === '/__annotation' && init?.method === 'POST') {
-        observed.count++;
-        try {
-          const body = init.body;
-          if (!(body instanceof Blob)) observed.problem = 'upload body was not a Blob';
-          else {
-            observed.mimeType = body.type;
-            observed.byteLength = body.size;
-            if (body.size > 16 * 1024 * 1024) observed.problem = 'stitched PNG exceeded 16 MiB';
-            else body.arrayBuffer().then(
-              (buffer) => { observed.bytes = Array.from(new Uint8Array(buffer)); },
-              () => { observed.problem = 'Blob observation failed'; },
-            );
-          }
-        } catch {
-          observed.problem = 'Blob observation failed';
-        }
-      }
-      return originalFetch.apply(this, arguments);
-    };
-    window.__scrollCaptureRestoreFetch = () => {
-      window.fetch = originalFetch;
-      delete window.__scrollCaptureRestoreFetch;
-      delete window.__scrollCaptureUpload;
-    };
-  });
-}
-
 // Prepared-candidate mode observes every public /__annotation upload (the
 // text-layer preparation and the explicit recognition each export one final
 // PNG) without altering the request. Records stay readable after restore.
@@ -465,7 +432,9 @@ function rectsOverlap(a, b) {
 }
 
 function isOverlay(app, fixture) {
+  // Scroll masks share the app PID and can cover this point outside the inset.
   return (item) => item.Visible && item.Handle !== app.main.Handle &&
+    item.ClassName === 'WinUIDesktopWin32WindowClass' &&
     area(item) > fixture.rootRect.width * fixture.rootRect.height * 2 &&
     inside(item, fixture.clientRect.left + Math.floor(fixture.clientRect.width / 2),
       fixture.clientRect.top + 10);
@@ -487,7 +456,10 @@ async function dragSelection(app, fixture, selection, overlayHandle) {
   await delay(1200);
   app.evidence.selectionText = JSON.parse(await native('window-text', { AppPid: appPid, Handle: overlayHandle }));
   const size = app.evidence.selectionText.map((text) => text.match(/^手动 · (\d+) × (\d+) px/)).find(Boolean);
-  const point = app.evidence.selectionText.map((text) => text.match(/^(-?\d+), (-?\d+)\n#/)).find(Boolean);
+  // The toolbar can fill window-text's bounded prefix before the magnifier.
+  const magnifier = await pickerNative('magnifier', { AppPid: appPid, Handle: overlayHandle });
+  app.evidence.selectionMagnifier = magnifier;
+  const point = magnifier.match(/^(-?\d+), (-?\d+)\r?\n#/);
   assert(size && point, 'Picker did not expose a manual selection and bottom-right sample pixel.');
   // The bottom-right magnifier samples the last included pixel, not the exclusive edge.
   const actual = { width: Number(size[1]), height: Number(size[2]), right: Number(point[1]) + 1, bottom: Number(point[2]) + 1 };
@@ -622,7 +594,7 @@ async function runScrollCapture(app, fixture, { cancel }) {
   // now starts with the direction segments at the left window edge.
   await native('focus', { FixturePid: appPid, Handle: controlWindow.Handle,
     X: Math.floor((controlWindow.Bounds.Left + controlWindow.Bounds.Right) / 2),
-    Y: Math.floor(controlWindow.Bounds.Top + controlWindow.Bounds.Height * 0.75) });
+    Y: Math.floor(controlWindow.Bounds.Top + (controlWindow.Bounds.Bottom - controlWindow.Bounds.Top) * 0.75) });
   await pickDirection(appPid);
   await recordBar('direction-picked');
   // The source window must be activated by the controller before scrolling.
@@ -658,13 +630,24 @@ async function runScrollCapture(app, fixture, { cancel }) {
       EvidenceRoot: app.evidence.smokeRoot, OutputPath: path.join(app.evidence.smokeRoot, `source-wheel-${step}.png`) });
     steps.push(step);
   }
+  // Focus the already-validated owned control window directly: extra UIA
+  // enumerations after the last wheel can push focus past the product's 30 s
+  // no-progress boundary. Same-HWND check follows; every finish assertion and
+  // limit is unchanged.
+  const finishFocusStarted = performance.now();
+  await native('focus', { FixturePid: appPid, Handle: controlWindow.Handle,
+    X: Math.floor((controlWindow.Bounds.Left + controlWindow.Bounds.Right) / 2),
+    Y: Math.floor(controlWindow.Bounds.Top +
+      (controlWindow.Bounds.Bottom - controlWindow.Bounds.Top) * 0.75) });
   const finish = await controlBar(appPid, 'scroll-capture-finish');
   assert(finish.found && finish.enabled, 'scroll-capture-finish is missing or disabled.');
-  const finishingWindow = (await windows(appPid)).find((item) => item.Handle === finish.windowHandle);
-  assert(finishingWindow, 'Owned finish window is missing.');
-  await native('focus', { FixturePid: appPid, Handle: finish.windowHandle,
-    X: Math.floor((finishingWindow.Bounds.Left + finishingWindow.Bounds.Right) / 2),
-    Y: Math.floor(finishingWindow.Bounds.Top + finishingWindow.Bounds.Height * 0.75) });
+  assert.equal(finish.windowHandle, controlWindow.Handle,
+    'Scroll control bar moved to a different window between start and finish.');
+  app.evidence.finishFocusTiming = {
+    helperSequence: 'focus(known owned control window) -> one controlBar sample (same HWND)',
+    helperMs: Math.round(performance.now() - finishFocusStarted),
+    note: 'Timing scope only; product limits and every finish assertion are unchanged.',
+  };
   await delay(5500); // Pausing on the controls must not contaminate frames or trip dynamic-content timeout.
   await recordBar('control-focused-before-finish');
   assert((await controlBar(appPid, 'scroll-capture-finish')).enabled, 'Focusing capture controls invalidated a stable capture.');
@@ -698,46 +681,146 @@ async function runScrollCapture(app, fixture, { cancel }) {
   return { cancelled: false, barTexts, steps, ...opened };
 }
 
-async function copySessionPng(app, evidenceRoot, outputName = 'scroll-capture-stitched.png') {
+// Reads the session's ORIGINAL long image from the product's own public
+// recognition snapshot: the input resource is bound to the just-finished
+// capture (the same pixels the editor renders) and served from the product
+// __resource origin. This is a raw product resource, not a user output: the
+// editor is still open, so no terminal export has happened yet.
+async function fetchScrollOriginal(app) {
+  const output = await screenshotOutput(app.page);
+  assert(output.session?.sessionId,
+    'Scroll capture published no screenshot session for the original input.');
+  const resource = new URL(output.input?.url);
+  assert(resource.origin === 'https://app.vibeocr' && resource.pathname.startsWith('/__resource/'),
+    'Original input must be a product resource before it is fetched.');
+  const probe = await app.page.evaluate(async (url) => {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Original input resource returned ${response.status}.`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 64 * 1024 * 1024) throw new Error('Original input resource exceeded 64 MiB.');
+    return { mediaType: response.headers.get('content-type'), bytes: Array.from(bytes) };
+  }, output.input.url);
+  const bytes = Buffer.from(probe.bytes);
+  const mediaType = assertScrollSessionOriginal(output.input, bytes);
+  assert.equal(probe.mediaType ?? mediaType, mediaType,
+    'Original resource content type disagrees with the published media type.');
+  return { bytes, mediaType, sessionId: output.session.sessionId,
+    revision: output.session.revision, url: output.input.url };
+}
+
+// Terminal copy (#318/#320 semantics: success closes the scene). The
+// clipboard sentinel is this run's own fixture frame; after the scene closes
+// only Node-held evidence is used, and the real Clipboard is proven through
+// the still-alive workbench's public paste input.
+async function terminalCopyAndReadback(app, { analysis, annotationRect, originalRgba }) {
   const page = app.editorPage;
-  assert(page && !page.isClosed(), 'Screenshot editor is not available for export.');
-  await observeNextAnnotationUpload(page);
+  assert(page && !page.isClosed(), 'Screenshot editor is not available for the terminal copy.');
+  const session = (await screenshotOutput(app.page)).session;
+  assert(session?.sessionId, 'Terminal copy found no live screenshot session.');
+  const sentinel = path.join(app.evidence.smokeRoot, 'source-before.png');
+  assert(fs.existsSync(sentinel),
+    'Scroll fixture frame evidence is missing for the clipboard sentinel.');
+  await setClipboardImage(app.evidence.smokeRoot, sentinel);
+  const terminal = await observeSceneCopyTerminal(page);
+  let png;
   try {
-    const requestPromise = page.waitForRequest((request) =>
-      request.method() === 'POST' && request.url() === 'https://app.vibeocr/__annotation',
-    { timeout: 15000 });
-    await page.getByRole('button', { name: '复制标注图' }).click();
-    const request = await requestPromise;
-    const response = await request.response();
-    assert.equal(response?.status(), 201, 'Public annotation upload was not accepted.');
-    await page.waitForFunction(() => {
-      const upload = window.__scrollCaptureUpload;
-      return upload && (Array.isArray(upload.bytes) || upload.problem !== null);
-    }, null, { timeout: 8000 });
-    const upload = await page.evaluate(() => window.__scrollCaptureUpload);
-    assert.equal(upload.count, 1, `Expected one product PNG upload, saw ${upload.count}.`);
-    assert.equal(upload.problem, null, `Product Blob observation failed: ${upload.problem}.`);
-    assert.equal(upload.mimeType, 'image/png', 'Product upload Blob was not image/png.');
-    const png = Buffer.from(upload.bytes);
-    assert(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
-      'Product upload Blob is not PNG.');
-    await page.getByText('已复制截图副本', { exact: false }).waitFor({ timeout: 8000 });
-    fs.writeFileSync(path.join(evidenceRoot, outputName), png);
-    return png;
+    const clickError = await page.getByRole('button', { name: '复制标注图' }).click()
+      .then(() => null, (error) => `${error.name}: ${error.message}`);
+    if (clickError) terminal.timeline.clickError = clickError;
+    const command = await terminal.waitForCommand('copyScreenshotImage', 15000);
+    assert(command,
+      `No public copyScreenshotImage command before the scene closed: ${JSON.stringify(terminal.timeline)}`);
+    const endDeadline = raceDeadline(15000);
+    let ended;
+    try { ended = await Promise.race([terminal.ended.then(() => true), endDeadline.promise]); }
+    finally { endDeadline.clear(); }
+    if (!ended) terminal.timeline.noTerminalEvent = true;
+    const upload = terminal.timeline.uploads.find(
+      (item) => item.resourceUri === command.resourceUri);
+    png = await collectSceneCopyUploadBlob(terminal, upload, 'Scroll capture copy');
   } finally {
-    await page.evaluate(() => window.__scrollCaptureRestoreFetch?.()).catch(() => {});
+    await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
+  }
+  fs.writeFileSync(path.join(app.evidence.smokeRoot, 'scroll-capture-copied.png'), png);
+  assertSceneTerminalExport('copyScreenshotImage', terminal.timeline, png, png,
+    'Scroll capture copy');
+  // The exported PNG must carry THIS revision's annotation in the expected
+  // area - an unannotated original export fails closed on pixels.
+  const exportRgba = await decodeImageRgba(app.page, png, 'image/png');
+  const annotated = assertAnnotatedExportRectangle(exportRgba, originalRgba,
+    annotationRect, { context: 'Terminal copy annotation' });
+  // The scene is closed now; the readback runs on the still-alive main window.
+  const readback = await readbackSceneCopyClipboard(app, app.evidence.smokeRoot, false,
+    { width: analysis.width, height: analysis.height }, png);
+  await app.page.getByRole('link', { name: '单次识别', exact: true }).click();
+  return { session: { sessionId: session.sessionId, revision: session.revision },
+    timeline: terminal.timeline, readback, annotated };
+}
+
+// Real native Save on the recovered scene: the public save command and its
+// accepted upload are proven BEFORE the owned picker is driven; the saved
+// file must be exactly the upload bytes bound to that command's resourceUri.
+async function saveRecoveredSession(app, outputName, expectedSessionId) {
+  const page = app.editorPage;
+  assert(page && !page.isClosed(), 'Screenshot editor is not available for the native save.');
+  const session = (await screenshotOutput(app.page)).session;
+  assert.equal(session?.sessionId, expectedSessionId,
+    'Native save must address the recovered screenshot session.');
+  const savedPath = path.join(app.evidence.smokeRoot, outputName);
+  const terminal = await observeSceneCopyTerminal(page, { actions: ['saveScreenshotImage'] });
+  try {
+    const clickError = await page.getByRole('button', { name: '保存标注图', exact: true }).click()
+      .then(() => null, (error) => `${error.name}: ${error.message}`);
+    if (clickError) terminal.timeline.clickError = clickError;
+    // Command and its accepted upload are proven FIRST; the owned native
+    // picker is driven only afterwards, so the dialog never precedes the
+    // command evidence.
+    const command = await terminal.waitForCommand('saveScreenshotImage', 15000);
+    assert(command,
+      `No public saveScreenshotImage command before the scene closed: ${JSON.stringify(terminal.timeline)}`);
+    const uploadDeadline = Date.now() + 15000;
+    let upload;
+    while (Date.now() < uploadDeadline) {
+      upload = terminal.timeline.uploads.find((item) =>
+        item.resourceUri === command.resourceUri && item.responseStatus === 201);
+      if (upload) break;
+      await delay(150);
+    }
+    assert(upload,
+      `No accepted 201 upload was bound to the save command: ${JSON.stringify(terminal.timeline)}`);
+    await native('save-file', { AppPid: app.child.pid, Handle: app.editorWindow.Handle,
+      OutputPath: savedPath, EvidenceRoot: app.evidence.smokeRoot }, 30000);
+    const endDeadline = raceDeadline(15000);
+    let ended;
+    try { ended = await Promise.race([terminal.ended.then(() => true), endDeadline.promise]); }
+    finally { endDeadline.clear(); }
+    if (!ended) terminal.timeline.noTerminalEvent = true;
+    const uploadPng = await collectSceneCopyUploadBlob(terminal, upload, 'Scroll capture save');
+    const saveFileDeadline = Date.now() + 15000;
+    while (!fs.existsSync(savedPath) && Date.now() < saveFileDeadline) await delay(150);
+    assert(fs.existsSync(savedPath), 'Native file picker did not save the recovered long screenshot.');
+    const savedPng = fs.readFileSync(savedPath);
+    assertSceneTerminalExport('saveScreenshotImage', terminal.timeline, savedPng, uploadPng,
+      'Scroll capture save');
+    return { savedPng, uploadPng, savedPath, timeline: terminal.timeline,
+      session: { sessionId: session.sessionId, revision: session.revision } };
+  } finally {
+    await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
 }
 
-// Decode the stitched PNG inside the real WebView2 context and verify every
-// encoded row: the stripe color at stripeX encodes the document row index, so
-// order, range, gaps and duplicated rows are all detected pixel-exactly.
-async function analyzeStitched(page, png, fixture, selection, startOffsetPixels = 0) {
+// Decode the product-exported stitched image inside the real WebView2 context and
+// verify every encoded row: the stripe color at stripeX encodes the document row
+// index, so order, range, gaps and duplicated rows are all detected pixel-exactly.
+// The scroll capture original is a top-down BMP (InputService.EncodeTopDownBmp);
+// terminal exports are PNG: the media type is always the real artifact type.
+async function analyzeStitched(page, image, fixture, selection, startOffsetPixels = 0,
+  mediaType = 'image/png') {
   assert(Number.isSafeInteger(startOffsetPixels) && startOffsetPixels >= 0,
     'Synthetic source offset must be a non-negative integer.');
-  return page.evaluate(async ({ encoded, rowHeight, stripeX, textX, startY }) => {
+  return page.evaluate(async ({ encoded, rowHeight, stripeX, textX, startY, mediaType }) => {
     const bytes = Uint8Array.from(atob(encoded), (letter) => letter.charCodeAt(0));
-    const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+    const image = await createImageBitmap(new Blob([bytes], { type: mediaType }));
     const canvas = document.createElement('canvas');
     canvas.width = image.width;
     canvas.height = image.height;
@@ -775,17 +858,175 @@ async function analyzeStitched(page, png, fixture, selection, startOffsetPixels 
       blocks, minDark: Math.min(...blocks.map((item) => item.dark)),
     };
   }, {
-    encoded: png.toString('base64'),
+    encoded: image.toString('base64'),
     rowHeight: fixture.rowHeight,
     startY: selection.top - fixture.clientRect.top + startOffsetPixels,
     stripeX: Math.max(0, Math.floor(fixture.stripeWidth / 2) - selectionInset),
     textX: fixture.textLeft - selectionInset + 2,
+    mediaType,
   });
 }
 
-// OCR text comparison ignores whitespace/punctuation differences (the fixture
-// rows read "行 NNNN / Row" and "中文 · line NNNN · VibeOCR"); row coverage is
-// the hard contract, so a missing lower half of the long image cannot pass.
+// Pure judges exported only for the Node regression (the script itself keeps
+// its main-guard below): every check runs on Node-held buffers/timelines so a
+// closed scene page never has to be evaluated again. No hashing.
+export function detectImageMediaType(bytes) {
+  assert(Buffer.isBuffer(bytes) && bytes.length >= 8, 'Image evidence buffer is missing.');
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a)
+    return 'image/png';
+  assert(bytes.length > 54 && bytes[0] === 0x42 && bytes[1] === 0x4d,
+    'Image evidence is neither a production PNG export nor the scroll BMP original.');
+  return 'image/bmp';
+}
+
+// The original long image must come from the product's own session-bound
+// __resource URL (raw product pixels), never from a screen re-capture; the
+// published media type/byte length, when present, must match the bytes.
+export function assertScrollSessionOriginal(input, bytes, context = 'Scroll original') {
+  assert(input && typeof input.url === 'string' && input.url.length > 0,
+    `${context}: no original input resource was published.`);
+  const resource = new URL(input.url);
+  assert(resource.origin === 'https://app.vibeocr' &&
+      resource.pathname.startsWith('/__resource/'),
+    `${context}: original input is not a product __resource URL: ${input.url}`);
+  const mediaType = detectImageMediaType(bytes);
+  if (typeof input.mediaType === 'string')
+    assert.equal(input.mediaType, mediaType,
+      `${context}: published media type ${input.mediaType} differs from the actual ${mediaType} bytes.`);
+  if (Number.isSafeInteger(input.byteLength))
+    assert.equal(input.byteLength, bytes.length,
+      `${context}: published byte length ${input.byteLength} differs from the fetched ${bytes.length}.`);
+  return mediaType;
+}
+
+// Terminal Copy/Save both close the screenshot scene (#318/#320 product
+// semantics). After the page is gone this judge alone decides from the
+// Node-held timeline: exactly one accepted upload bound to this very command,
+// a normal close after it, no failed receipt, and the artifact saved on disk
+// must be those very upload bytes in the production PNG form.
+export function assertSceneTerminalExport(action, timeline, artifactBytes, uploadBytes,
+  context = 'Scene terminal export') {
+  assert(Buffer.isBuffer(artifactBytes) && artifactBytes.length > 0,
+    `${context}: artifact bytes are missing.`);
+  settleSceneCopyTimeline(timeline, context, { action });
+  assert(Buffer.isBuffer(uploadBytes) && uploadBytes.length > 0,
+    `${context}: Node-held upload bytes are missing.`);
+  assert.equal(detectImageMediaType(artifactBytes), 'image/png',
+    `${context}: artifact on disk is not the production PNG export.`);
+  assert.equal(detectImageMediaType(uploadBytes), 'image/png',
+    `${context}: upload bound to the ${action} command is not PNG.`);
+  assert(artifactBytes.equals(uploadBytes),
+    `${context}: artifact bytes differ from the upload bound to this command's resourceUri.`);
+  return true;
+}
+
+// Pure judge for the annotated terminal export (#320 review fix): the export
+// must carry this revision's annotation inside the expected NATURAL-image
+// rectangle; the unannotated original or a misplaced annotation fails closed.
+export function assertAnnotatedExportRectangle(exportRgba, originalRgba, rect,
+  { color = { r: 243, g: 139, b: 53 }, tolerance = 40, margin = 12,
+    minEdgePixels = 12, context = 'Annotated export' } = {}) {
+  for (const [name, image] of [['export', exportRgba], ['original', originalRgba]]) {
+    assert(image && Number.isSafeInteger(image.width) && image.width > 0 &&
+        Number.isSafeInteger(image.height) && image.height > 0 &&
+        typeof image.rgbaBase64 === 'string',
+      `${context}: ${name} RGBA evidence is invalid.`);
+    assert(Buffer.from(image.rgbaBase64, 'base64').length ===
+        image.width * image.height * 4,
+      `${context}: ${name} RGBA payload is not width*height*4 bytes.`);
+  }
+  assert.equal(exportRgba.width, originalRgba.width,
+    `${context}: export width differs from the original.`);
+  assert.equal(exportRgba.height, originalRgba.height,
+    `${context}: export height differs from the original.`);
+  for (const field of ['left', 'top', 'right', 'bottom'])
+    assert(Number.isSafeInteger(rect?.[field]), `${context}: rect.${field} is not an integer.`);
+  assert(rect.left >= 0 && rect.top >= 0 && rect.right > rect.left &&
+      rect.bottom > rect.top && rect.right < exportRgba.width &&
+      rect.bottom < exportRgba.height,
+    `${context}: expected rectangle ${JSON.stringify(rect)} is outside the image.`);
+  const near = (pixels, index) =>
+    Math.abs(pixels[index] - color.r) <= tolerance &&
+    Math.abs(pixels[index + 1] - color.g) <= tolerance &&
+    Math.abs(pixels[index + 2] - color.b) <= tolerance;
+  const countBand = (pixels, x0, y0, x1, y1) => {
+    let count = 0;
+    for (let y = Math.max(0, y0); y <= Math.min(exportRgba.height - 1, y1); y++)
+      for (let x = Math.max(0, x0); x <= Math.min(exportRgba.width - 1, x1); x++)
+        if (near(pixels, (y * exportRgba.width + x) * 4)) count++;
+    return count;
+  };
+  const exportPixels = Buffer.from(exportRgba.rgbaBase64, 'base64');
+  const originalPixels = Buffer.from(originalRgba.rgbaBase64, 'base64');
+  const bands = {
+    top: [rect.left + margin, rect.top - margin, rect.right - margin, rect.top + margin],
+    bottom: [rect.left + margin, rect.bottom - margin, rect.right - margin, rect.bottom + margin],
+    left: [rect.left - margin, rect.top + margin, rect.left + margin, rect.bottom - margin],
+    right: [rect.right - margin, rect.top + margin, rect.right + margin, rect.bottom - margin],
+  };
+  const edgeCounts = {};
+  for (const [edge, band] of Object.entries(bands)) {
+    edgeCounts[edge] = countBand(exportPixels, ...band);
+    assert(edgeCounts[edge] >= minEdgePixels,
+      `${context}: expected ${edge} edge band carries only ${edgeCounts[edge]} ` +
+      `stroke pixels (need ${minEdgePixels}); the export is not annotated there.`);
+    assert.equal(countBand(originalPixels, ...band), 0,
+      `${context}: the ORIGINAL already carries the stroke color in the ` +
+      `${edge} edge band; the fixture baseline is unusable.`);
+  }
+  const ring = {
+    x0: rect.left - margin * 2, y0: rect.top - margin * 2,
+    x1: rect.right + margin * 2, y1: rect.bottom + margin * 2,
+  };
+  let stray = 0;
+  for (let y = 0; y < exportRgba.height; y++)
+    for (let x = 0; x < exportRgba.width; x++)
+      if ((x < ring.x0 || x > ring.x1 || y < ring.y0 || y > ring.y1) &&
+          near(exportPixels, (y * exportRgba.width + x) * 4)) stray++;
+  assert.equal(stray, 0,
+    `${context}: ${stray} stroke-colored pixels appear outside the expected rectangle.`);
+  return { edgeCounts, strayPixels: stray };
+}
+
+// Pure mapping mirroring annotationGeometry.imageTransform at rotation 0: the
+// scroll editor canvas exposes a fixed logical coordinate space
+// (data-coordinate-width/height), the image is fitted with
+// scale=min(logicalW/imgW, logicalH/imgH) and centered; pointer injection goes
+// through the CSS bounding box. The pixel judge works in NATURAL pixels, so
+// the same plan maps expected natural fractions to the injection points.
+export function planAnnotationInjection({ fractions, natural, logical, css }) {
+  assert(natural.width > 0 && natural.height > 0 && logical.width > 0 &&
+      logical.height > 0 && css.width > 0 && css.height > 0,
+    'Annotation mapping geometry is invalid.');
+  for (const [name, value] of Object.entries(fractions))
+    assert(Number.isFinite(value) && value > 0.05 && value < 0.95,
+      `Annotation fraction ${name} is out of the safely drawable range.`);
+  assert(fractions.x1 > fractions.x0 + 0.05 && fractions.y1 > fractions.y0 + 0.05,
+    'Annotation fractions do not describe a usable rectangle.');
+  const scale = Math.min(logical.width / natural.width, logical.height / natural.height);
+  const offsetX = (logical.width - natural.width * scale) / 2;
+  const offsetY = (logical.height - natural.height * scale) / 2;
+  const naturalRect = {
+    left: Math.round(natural.width * fractions.x0),
+    top: Math.round(natural.height * fractions.y0),
+    right: Math.round(natural.width * fractions.x1),
+    bottom: Math.round(natural.height * fractions.y1),
+  };
+  const toCss = (naturalX, naturalY) => ({
+    x: css.x + (offsetX + naturalX * scale) * (css.width / logical.width),
+    y: css.y + (offsetY + naturalY * scale) * (css.height / logical.height),
+  });
+  const start = toCss(naturalRect.left, naturalRect.top);
+  const end = toCss(naturalRect.right, naturalRect.bottom);
+  for (const [name, point] of [['start', start], ['end', end]]) {
+    assert(point.x >= css.x && point.x < css.x + css.width &&
+        point.y >= css.y && point.y < css.y + css.height,
+      `Annotation ${name} point maps outside the canvas bounding box.`);
+  }
+  return { naturalRect, start, end,
+    layout: { scale, offsetX, offsetY } };
+}
 function normalizeOcrText(text) {
   return String(text ?? '')
     .normalize('NFKC')
@@ -872,12 +1113,25 @@ async function waitForScreenshotRecognition(app, sessionId, revision) {
       assert.equal(session.revision, revision,
         'Explicit recognition changed the content revision.');
     }
+    if (snapshot?.statusCode === 'recognition.cancelled')
+      throw new Error('Explicit screenshot recognition was cancelled.');
     if (snapshot?.statusCode === 'recognition.failed' ||
         snapshot?.statusCode === 'recognition.modeUnavailable' ||
         snapshot?.statusCode === 'recognition.expired')
       throw new Error(`Explicit screenshot recognition ended as ${snapshot.statusCode}.`);
-    if (snapshot?.statusCode === 'recognition.completed' && snapshot.result?.url)
+    if (snapshot?.statusCode === 'recognition.completed') {
+      // A completed result WITHOUT this session's binding is a stale result
+      // from an earlier recognition; it must fail instead of passing.
+      assert(session?.sessionId === sessionId && session?.revision === revision,
+        'Explicit recognition completed without the expected screenshot session binding.');
+      assert(typeof snapshot.result?.url === 'string' && snapshot.result.url.length > 0,
+        'Explicit recognition completed without a result resource.');
+      const resource = new URL(snapshot.result.url);
+      assert(resource.origin === 'https://app.vibeocr' &&
+          resource.pathname.startsWith('/__resource/'),
+        'Explicit recognition result is not a product __resource URL.');
       return snapshot;
+    }
     if (Date.now() > until)
       throw new Error('Explicit screenshot recognition did not complete within ' +
         `${recognitionTimeoutMs} ms; last status: ${snapshot?.statusCode ?? 'none'}.`);
@@ -892,7 +1146,8 @@ async function waitForScreenshotRecognition(app, sessionId, revision) {
 // result still references the same screenshot session and covers rows from
 // both the top and the bottom of the long image.
 async function verifyPreparedCandidateRecognition(app, {
-  evidenceRoot, fixture, selection, analysis, sessionId, revision,
+  evidenceRoot, fixture, selection, analysis, sessionId, revision, originalRgba,
+  annotationRect,
 }) {
   const page = app.editorPage;
   const startY = selection.top - fixture.clientRect.top;
@@ -920,6 +1175,11 @@ async function verifyPreparedCandidateRecognition(app, {
     const uploadPng = Buffer.from(uploaded.bytes);
     assert(uploadPng.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
       'Text layer upload Blob is not PNG.');
+    // Same annotated-pixel judge as the terminal copy: this revision's export
+    // must carry the annotation, never a re-upload of the original image.
+    const uploadRgba = await decodeImageRgba(page, uploadPng, 'image/png');
+    const annotated = assertAnnotatedExportRectangle(uploadRgba, originalRgba,
+      annotationRect, { context: 'Text layer annotation' });
     const image = layer.image;
     assert(image?.url, 'Ready text layer published no image resource.');
     assert.equal(image.mediaType, 'image/png', 'Text layer image is not image/png.');
@@ -991,6 +1251,7 @@ async function verifyPreparedCandidateRecognition(app, {
         status: layer.status,
         modeId: layer.modeId,
         binding: layer.binding,
+        annotated,
         image: { width: dimensions.width, height: dimensions.height,
           byteLength: image.byteLength,
           equalsUploadBytes: Buffer.from(imageProbe.bytes).equals(uploadPng) },
@@ -1190,7 +1451,11 @@ async function verifyReverseRecovery(app, fixture) {
     'Explicit completion must create exactly one new screenshot session.');
   await connectEditor(app);
   const outputName = 'scroll-capture-reverse-recovered.png';
-  const png = await copySessionPng(app, app.evidence.smokeRoot, outputName);
+  // The save is a terminal export of THIS reverse round's own session (its
+  // actual session/revision is recorded below); it is deliberately not
+  // compared against the earlier edited-copy session's binary.
+  const saved = await saveRecoveredSession(app, outputName, recoveredId);
+  const png = saved.savedPng;
   // The earlier full-capture round left the fixture at wheelSteps * step.
   // The reverse/return pair cancels out; only the final forward step grows it.
   const startOffsetPixels = wheelSteps * fixture.wheelStepPixels;
@@ -1218,7 +1483,10 @@ async function verifyReverseRecovery(app, fixture) {
   return {
     rejected, discardAction: discard.name, reviewPauseMs: previewPauseMs, resumed: resumed.text,
     sessionId: recoveredId, startOffsetPixels, stitched: analysis,
-    output: path.join(app.evidence.smokeRoot, outputName),
+    output: saved.savedPath,
+    nativeSave: { path: saved.savedPath, bytes: saved.savedPng.length,
+      equalsSaveUpload: true, uploadBytes: saved.uploadPng.length,
+      session: saved.session, saveTimeline: saved.timeline },
     noOutputBeforeFinish: true, cancelPreservedHistory: true,
   };
 }
@@ -1279,10 +1547,58 @@ async function main() {
     evidence.previewPauseMs = previewPauseMs;
     evidence.wheelSteps = wheelSteps;
 
-    // 1) Cancel before any output exists: no session may open.
+    // 0) Prepared warmup: retained state alone proves no live Supervisor; one
+    // real public 单次识别→从剪贴板 OCR over this run's own fixture image
+    // proves the connection before 取字. Its adopted legacy session stays as
+    // the REAL baseline: cancels must preserve it verbatim, and scroll-session
+    // assertions only count sessions beyond that baseline.
+    if (preparedCandidateRoot) {
+      const warmupImage = path.join(smokeRoot, 'source-warmup.png');
+      await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
+        X: fixture.clientRect.left + 16, Y: fixture.clientRect.top + 16,
+        Width: Math.min(400, fixture.clientRect.width - 32),
+        Height: Math.min(240, fixture.clientRect.height - 32),
+        EvidenceRoot: smokeRoot, OutputPath: warmupImage });
+      await setClipboardImage(smokeRoot, warmupImage);
+      await app.page.getByRole('button', { name: '从剪贴板', exact: true }).click();
+      const warmupHandle = await app.page.waitForFunction(() => {
+        const state = window.__scrollCaptureRecognition;
+        return state && state.isBusy === false &&
+          ['recognition.completed', 'recognition.failed',
+            'recognition.modeUnavailable', 'recognition.expired',
+            'recognition.cancelled'].includes(state.statusCode);
+      }, null, { timeout: recognitionTimeoutMs });
+      const warmupState = await warmupHandle.jsonValue();
+      assert.equal(warmupState.statusCode, 'recognition.completed',
+        `Clipboard warmup OCR did not complete: ${warmupState.statusCode}.`);
+      assert(typeof warmupState.result?.url === 'string' && warmupState.result.url.length > 0,
+        'Clipboard warmup OCR completed without a result resource.');
+      const warmupResource = new URL(warmupState.result.url);
+      assert(warmupResource.origin === 'https://app.vibeocr' &&
+          warmupResource.pathname.startsWith('/__resource/'),
+        'Clipboard warmup result is not a product __resource URL.');
+      const warmupText = await app.page.evaluate(async (url) =>
+        (await (await fetch(url, { cache: 'no-store' })).text()), warmupState.result.url);
+      const warmupRows = [...detectedRowNumbers(normalizeOcrText(warmupText), fixture.rows)];
+      assert(warmupRows.length >= 1,
+        `Clipboard warmup OCR covered no fixture rows: ${warmupText.slice(0, 120)}`);
+      fs.writeFileSync(path.join(smokeRoot, 'scroll-warmup-result.txt'), warmupText);
+      evidence.runtimeWarmup = {
+        flow: 'public 单次识别→从剪贴板 over this run\'s own fixture frame',
+        statusCode: warmupState.statusCode, resultChars: warmupText.length,
+        coveredRows: warmupRows.slice(0, 12),
+      };
+    }
+    // Real session baseline (includes the prepared warmup's adopted legacy
+    // session): never cleared - cancel rounds below must preserve it verbatim.
+    const baselineSessions = await sessionEvidence(app.page);
+    const baselineSessionIds = [...new Set(baselineSessions.map((item) => item.sessionId))];
+
+    // 1) Cancel before any scroll output: the preserved baseline must survive
+    // verbatim and no scroll session may open beyond it.
     const cancelledFirst = await runScrollCapture(app, fixture, { cancel: true });
-    assert.equal((await sessionEvidence(app.page)).length, 0,
-      'Cancelled scroll capture broadcast a screenshot session.');
+    assert.deepEqual(await sessionEvidence(app.page), baselineSessions,
+      'Cancelled scroll capture changed the preserved session baseline.');
     evidence.cancelBeforeOutput = {
       cancelled: true, preservedOutput: cancelledFirst.preservedOutput, overlayHandle: cancelledFirst.overlayHandle,
       barTexts: cancelledFirst.barTexts,
@@ -1303,20 +1619,18 @@ async function main() {
     assert(distinctBarTexts.size >= 2,
       'Scroll control bar did not show changing capture state.');
 
-    const png = await copySessionPng(app, smokeRoot);
-    const savedPath = path.join(smokeRoot, 'scroll-capture-native-save.png');
-    const editorPage = app.editorPage;
-    await editorPage.getByRole('button', { name: '保存标注图', exact: true }).click();
-    await native('save-file', { AppPid: app.child.pid, Handle: app.editorWindow.Handle,
-      OutputPath: savedPath, EvidenceRoot: smokeRoot }, 30000);
-    const saveDeadline = Date.now() + 15000;
-    while (!fs.existsSync(savedPath) && Date.now() < saveDeadline) await delay(150);
-    assert(fs.existsSync(savedPath), 'Native file picker did not save the long screenshot.');
-    await editorPage.getByText('已保存截图副本', { exact: false }).waitFor({ timeout: 15000 });
-    const savedPng = fs.readFileSync(savedPath);
-    assert(savedPng.equals(png), 'Native saved PNG differs from the same unedited screenshot export.');
-    evidence.nativeSave = { path: savedPath, bytes: savedPng.length, equalsCopiedImage: true };
-    const analysis = await analyzeStitched(app.page, png, fixture, captured.selection);
+    // The editor stays open: the original stitched image is read from the
+    // product's own session-bound input resource (raw product pixels, not a
+    // screen re-capture). Terminal Copy/Save close the scene (#318/#320
+    // product semantics), so each real export runs later on its own scene.
+    const original = await fetchScrollOriginal(app);
+    const originalRgba = await decodeImageRgba(app.page, original.bytes, original.mediaType);
+    evidence.scrollOriginal = { sessionId: original.sessionId, revision: original.revision,
+      url: original.url, mediaType: original.mediaType, bytes: original.bytes.length };
+    fs.writeFileSync(path.join(smokeRoot,
+      `scroll-capture-stitched-original.${original.mediaType === 'image/png' ? 'png' : 'bmp'}`), original.bytes);
+    const analysis = await analyzeStitched(app.page, original.bytes, fixture,
+      captured.selection, 0, original.mediaType);
     evidence.stitched = analysis;
     const expectedHeight = captured.selection.height + wheelSteps * fixture.wheelStepPixels;
     assert.equal(analysis.width, captured.selection.width,
@@ -1342,18 +1656,41 @@ async function main() {
 
     // 3) Same session editing: an annotation bumps the revision without a new session.
     const sessionsBeforeEdit = await sessionEvidence(app.page);
-    assert(sessionsBeforeEdit.length >= 1 && sessionsBeforeEdit[0].sessionId,
+    assert(sessionsBeforeEdit.length >= 1 && sessionsBeforeEdit.at(-1).sessionId,
       'Scroll capture did not open a screenshot session.');
-    const sessionIds = new Set(sessionsBeforeEdit.map((item) => item.sessionId));
-    assert.equal(sessionIds.size, 1, 'More than one screenshot session was broadcast.');
+    const scrollSessionIds = new Set(sessionsBeforeEdit
+      .filter((item) => !baselineSessionIds.includes(item.sessionId))
+      .map((item) => item.sessionId));
+    assert.equal(scrollSessionIds.size, 1,
+      'More than one scroll screenshot session was broadcast beyond the preserved baseline.');
+    const scrollSessionId = [...scrollSessionIds][0];
     const revisionBefore = sessionsBeforeEdit.at(-1).revision ?? 0;
+    const editorPage = app.editorPage;
     await editorPage.getByRole('button', { name: '矩形', exact: true }).click();
+    // Explicitly select the existing public orange swatch so the exported
+    // stroke color is known (#f38b35) and the annotated-pixel judge below can
+    // fail closed on an unannotated or misplaced export.
+    await editorPage.getByRole('button', { name: '常用颜色 #f38b35' }).click();
     await editorPage.getByRole('combobox', { name: '线条宽度' }).selectOption('8');
     const box = await editorPage.getByLabel('图片检查画布').boundingBox();
     assert(box && box.width > 100 && box.height > 100, 'Editor canvas has no usable bounds.');
-    await editorPage.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.45);
+    // Map expected natural-image fractions through the editor's real fit
+    // (logical coordinate space + centering, then the CSS bounding box);
+    // the canvas backing store is deliberately NOT assumed to equal the image.
+    const canvasGeometry = await editorPage.getByLabel('图片检查画布').evaluate(
+      (canvas) => ({ logical: {
+        width: Number(canvas.dataset.coordinateWidth) || canvas.width,
+        height: Number(canvas.dataset.coordinateHeight) || canvas.height,
+      } }));
+    const injection = planAnnotationInjection({
+      fractions: { x0: 0.35, y0: 0.45, x1: 0.65, y1: 0.55 },
+      natural: { width: analysis.width, height: analysis.height },
+      logical: canvasGeometry.logical,
+      css: { x: box.x, y: box.y, width: box.width, height: box.height },
+    });
+    await editorPage.mouse.move(injection.start.x, injection.start.y);
     await editorPage.mouse.down();
-    await editorPage.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.55);
+    await editorPage.mouse.move(injection.end.x, injection.end.y);
     await editorPage.mouse.up();
     await app.page.waitForFunction((before) => {
       const sessions = window.__scrollCaptureSessions ?? [];
@@ -1361,10 +1698,17 @@ async function main() {
       return last && Number.isSafeInteger(last.revision) && last.revision > before;
     }, revisionBefore, { timeout: 8000 });
     const sessionsAfterEdit = await sessionEvidence(app.page);
-    assert(sessionsAfterEdit.every((item) => item.sessionId === sessionsBeforeEdit[0].sessionId),
+    assert(sessionsAfterEdit.every((item) => item.sessionId === scrollSessionId ||
+        baselineSessionIds.includes(item.sessionId)),
       'Editing opened or switched the screenshot session.');
+    const annotationRect = injection.naturalRect;
+    evidence.annotation = { color: '#f38b35', strokeWidth: 8, rect: annotationRect,
+      geometry: { logical: canvasGeometry.logical,
+        css: { x: box.x, y: box.y, width: box.width, height: box.height },
+        image: { width: analysis.width, height: analysis.height },
+        ...injection.layout } };
     evidence.session = {
-      sessionId: sessionsBeforeEdit[0].sessionId,
+      sessionId: scrollSessionId,
       revisionBefore, revisionAfter: sessionsAfterEdit.at(-1).revision,
       zeroAutoOcr: 'UNVERIFIED in this harness; covered by ScreenshotSessionWorkbenchTests',
     };
@@ -1378,8 +1722,10 @@ async function main() {
         fixture,
         selection: captured.selection,
         analysis,
-        sessionId: sessionsBeforeEdit[0].sessionId,
+        sessionId: scrollSessionId,
         revision: sessionsAfterEdit.at(-1).revision,
+        originalRgba,
+        annotationRect,
       });
       evidence.textLayer = verified.textLayer;
       evidence.explicitRecognition = verified.recognition;
@@ -1388,13 +1734,31 @@ async function main() {
     // 4) Cancel after a finished output: the previous output must not become a new session.
     const cancelledAgain = await runScrollCapture(app, fixture, { cancel: true });
     const sessionsAfterCancel = await sessionEvidence(app.page);
-    assert(sessionsAfterCancel.every((item) => item.sessionId === sessionsBeforeEdit[0].sessionId),
+    assert(sessionsAfterCancel.every((item) => item.sessionId === scrollSessionId ||
+        baselineSessionIds.includes(item.sessionId)),
       'Cancelled capture incorrectly published the previous image as a new session.');
     evidence.cancelAfterOutput = { cancelled: true, preservedOutput: cancelledAgain.preservedOutput,
       barTexts: cancelledAgain.barTexts };
 
+    // 4b) Shell-only terminal copy: after the cancelled round proved the
+    // session/annotation survived, the real Copy closes the scene and the
+    // Clipboard itself is proven through the public paste readback.
+    if (!preparedCandidateRoot) {
+      assert(app.editorPage && !app.editorPage.isClosed(),
+        'Cancelled capture round lost the open screenshot editor.');
+      const editedSession = (await screenshotOutput(app.page)).session;
+      assert.equal(editedSession?.sessionId, scrollSessionId,
+        'Terminal copy must still address the edited screenshot session.');
+      assert(Number.isSafeInteger(editedSession.revision) &&
+          editedSession.revision > revisionBefore,
+        'Terminal copy must run on the annotated revision.');
+      evidence.terminalCopy = await terminalCopyAndReadback(app, {
+        analysis, annotationRect, originalRgba });
+    }
+
     evidence.reverseRecovery = await verifyReverseRecovery(app, fixture);
     evidence.reverseRejected = evidence.reverseRecovery.rejected;
+    evidence.nativeSave = evidence.reverseRecovery.nativeSave;
     evidence.memoryAfterCancel = JSON.parse(await native('metrics', { AppPid: app.child.pid }));
 
     // 5) Controller negatives through the owned fixture scenario switch: real
@@ -1433,7 +1797,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`Scroll capture E2E failed: ${error.name}: ${error.message}`);
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`Scroll capture E2E failed: ${error.name}: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

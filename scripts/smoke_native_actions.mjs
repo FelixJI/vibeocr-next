@@ -1811,7 +1811,8 @@ export { native, windows, waitForWindows, area, inside, delay, startFixture,
   launchApp, openSettings, toolbarStatus, setCheckbox, stopOwned, closeAppNormally, configure,
   captureThroughHotkey, taskbarState, pngPixels, focusRecorder,
   assertCaptureCanvasLayout, settleSceneCopyTimeline, observeSceneCopyTerminal,
-  decodeImageRgba, raceDeadline };
+  decodeImageRgba, raceDeadline, setClipboardImage,
+  readbackSceneCopyClipboard };
 
 if (path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((error) => {

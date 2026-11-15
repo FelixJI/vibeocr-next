@@ -66,6 +66,7 @@ public static class ScrollCaptureNative
     public sealed class WindowInfo
     {
         public long Handle { get; set; }
+        public string ClassName { get; set; }
         public bool Visible { get; set; }
         public bool Enabled { get; set; }
         public long ExtendedStyle { get; set; }
@@ -232,7 +233,7 @@ public static class ScrollCaptureNative
         {
             GetWindowThreadProcessId(window, out uint owner);
             if (owner == (uint)pid && GetWindowRect(window, out Rect bounds))
-                found.Add(new WindowInfo { Handle = window.ToInt64(), Visible = IsWindowVisible(window), Enabled = IsWindowEnabled(window), ExtendedStyle = GetWindowLongPtrW(window, -20).ToInt64(), Bounds = bounds });
+                found.Add(new WindowInfo { Handle = window.ToInt64(), ClassName = ClassName(window), Visible = IsWindowVisible(window), Enabled = IsWindowEnabled(window), ExtendedStyle = GetWindowLongPtrW(window, -20).ToInt64(), Bounds = bounds });
             return true;
         }, IntPtr.Zero);
         return found.ToArray();
