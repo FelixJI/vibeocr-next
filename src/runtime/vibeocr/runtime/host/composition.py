@@ -26,6 +26,7 @@ from vibeocr.runtime.jobs.module import Executor, SupervisorModule, SupervisorOp
 if TYPE_CHECKING:
     from vibeocr.runtime.jobs.registry import JobRecord
     from vibeocr.runtime.recognition.ocr_engines import (
+        EngineDescriptor,
         OcrEngineRegistry,
         OcrEngineResolver,
     )
@@ -192,6 +193,25 @@ def _build_paddle_executor(
         adapter_factory=adapter_factory,
         scheduler=scheduler,
     )
+
+
+def _paddle_mode_required_component(descriptor: EngineDescriptor) -> str | None:
+    """#321：模式目录的组件提示从 descriptor 派生。
+
+    READY 或产品闭包损坏（product_runtime_damaged）时不携带组件
+    （损坏不得引导在线准备）；开发环境待准备保持统一配方提示，
+    descriptor 已声明的组件优先。
+    """
+    from vibeocr.runtime.recognition.ocr_engines import (
+        REASON_PRODUCT_RUNTIME_DAMAGED,
+        EngineAvailability,
+    )
+
+    if descriptor.availability is EngineAvailability.READY:
+        return None
+    if descriptor.reason_code == REASON_PRODUCT_RUNTIME_DAMAGED:
+        return None
+    return descriptor.required_component or "paddleocr-ort-directml"
 
 
 def _paddle_available() -> bool:
@@ -409,11 +429,11 @@ def _build_recognition_mode_registry(
                 for descriptor in engine_resolver.probe_descriptors()
             }
             descriptor = descriptors[definition.engine]
-            # #321 F8：只有 Paddle 投影 descriptor.required_component
-            # （产品模式下已降级为 UNAVAILABLE+engine_init_failed+无组件）；
-            # WindowsOCR 等其它引擎保持 None，不引入在线准备语义。
+            # #321 F8：只有 Paddle 投影随 descriptor 的组件语义
+            # （产品损坏→None；开发待准备→统一配方）；WindowsOCR 等
+            # 其它引擎保持 None，不引入在线准备语义。
             required_component = (
-                descriptor.required_component
+                _paddle_mode_required_component(descriptor)
                 if descriptor.engine_id.value == "paddleocr"
                 else None
             )
@@ -434,7 +454,7 @@ def _build_recognition_mode_registry(
             return ModeAvailability(
                 descriptor.availability.value,
                 reason_code=descriptor.reason_code,
-                required_component=descriptor.required_component,
+                required_component=_paddle_mode_required_component(descriptor),
             )
         if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             return ModeAvailability(

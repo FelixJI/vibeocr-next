@@ -163,15 +163,7 @@ public static partial class WebView2ProductEnvironment
             // 未打包 dev/test：允许系统 Evergreen；外部显式 env 覆盖仍生效。
             return await CoreWebView2Environment.CreateAsync();
         }
-        try
-        {
-            WebView2RuntimePermissions.GrantAppContainerReadAndExecute(browserFolder);
-        }
-        catch (WebView2RuntimePermissionException error)
-        {
-            throw new InvalidOperationException(
-                "VibeOCR 随包 WebView2 运行库目录权限配置失败：" + error.Message, error);
-        }
+        ApplyAppContainerPermissions(browserFolder);
         string? userDataFolder = ResolveDevUserDataFolder(browserFolder);
         Environment.SetEnvironmentVariable("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", browserFolder);
         if (userDataFolder is not null)
@@ -222,7 +214,9 @@ public static partial class WebView2ProductEnvironment
     {
         try
         {
-            WebView2RuntimePermissions.GrantAppContainerReadAndExecute(folder);
+            // shortcut: Fixed 156 needs these ACEs only on Windows 10; review when upgrading the runtime.
+            WebView2RuntimePermissions.GrantAppContainerReadAndExecute(
+                folder, requireAppContainerPermissions: !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000));
         }
         catch (WebView2RuntimePermissionException error)
         {

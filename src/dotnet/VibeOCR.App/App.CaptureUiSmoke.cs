@@ -251,8 +251,8 @@ public sealed partial class App
       var session = new ScrollCaptureSession.Session(ownerHandle, bounds, cancellation.Token);
       capture = session.RunAsync();
       nint controllerHandle = WinRT.Interop.WindowNative.GetWindowHandle(session.ControlWindow);
-      await Task.Delay(150, cancellation.Token);
       var root = (DependencyObject)session.ControlWindow.Content;
+      await WaitForScrollUiAsync(() => root is FrameworkElement { IsLoaded: true }, cancellation.Token);
       Microsoft.UI.Xaml.Controls.Button Button(string id) =>
           FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Button>(root, id);
       void Invoke(string id)
@@ -329,9 +329,18 @@ public sealed partial class App
   private static T FindScrollSmokeControl<T>(DependencyObject root, string id) where T : FrameworkElement
   {
     if (root is T found && Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(found) == id) return found;
-    for (int index = 0; index < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root); index++)
+    // Collapsed confirmation controls need not have a realized visual subtree.
+    IEnumerable<DependencyObject> children = root switch
     {
-      try { return FindScrollSmokeControl<T>(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, index), id); }
+      Microsoft.UI.Xaml.Controls.Panel panel => panel.Children.Cast<DependencyObject>(),
+      Microsoft.UI.Xaml.Controls.ContentControl { Content: DependencyObject content } => [content],
+      Microsoft.UI.Xaml.Controls.UserControl { Content: DependencyObject content } => [content],
+      Microsoft.UI.Xaml.Controls.Border { Child: DependencyObject child } => [child],
+      _ => [],
+    };
+    foreach (DependencyObject child in children)
+    {
+      try { return FindScrollSmokeControl<T>(child, id); }
       catch (KeyNotFoundException) { }
     }
     throw new KeyNotFoundException($"Owned scroll control was not found: {id}");
@@ -526,11 +535,12 @@ public sealed partial class App
             CancellationToken.None);
         throw new InvalidOperationException("Vanished capture target was accepted.");
       }
-      catch (CaptureValidationException)
+      catch (CaptureValidationException error)
       {
-        Check(IsWindowVisible(handle), "Direct capture failure must restore owner visibility.");
+        Check(error.ReasonCode == CaptureRefusal.WindowUnavailable, "Vanished target must report WindowUnavailable.");
+        Check(IsWindowVisible(handle), "Invalid direct capture must preserve owner visibility.");
         Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
-            $"Direct capture failure must restore owned foreground; owner={handle}, current={ScreenTargetQuery.GetForegroundWindowHandle()}.");
+            $"Invalid direct capture must preserve owned foreground; owner={handle}, current={ScreenTargetQuery.GetForegroundWindowHandle()}.");
       }
       using (var stopped = new CancellationTokenSource())
       {
@@ -543,7 +553,9 @@ public sealed partial class App
         }
         catch (OperationCanceledException)
         {
-          Check(IsWindowVisible(handle), "Cancelled direct capture must restore owner visibility.");
+          Check(IsWindowVisible(handle), "Pre-cancelled direct capture must preserve owner visibility.");
+          Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
+              "Pre-cancelled direct capture must preserve owned foreground.");
         }
       }
       var overlay = new DelayedCaptureOverlay(30);

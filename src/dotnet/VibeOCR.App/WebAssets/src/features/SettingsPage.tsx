@@ -30,7 +30,7 @@ import { Panel } from "./FeaturePanels";
 
 import { statusLabel } from "./FeatureValues";
 
-import { availabilityLabel } from "./FeatureValues";
+import { modeAvailabilityLabel } from "./FeatureValues";
 
 interface SourceOptionState {
   readonly kind: string;
@@ -1228,7 +1228,7 @@ function DefaultRecognitionModeEditor({
               value={option.id}
               disabled={option.availability !== "ready"}
             >
-              {`${option.displayName}（${availabilityLabel(option.availability)}）`}
+              {`${option.displayName}（${modeAvailabilityLabel(option.availability, option.reasonCode)}）`}
             </option>
           ))}
         </Select>
@@ -1253,7 +1253,8 @@ function DefaultRecognitionModeEditor({
       {current?.reasonCode && current.availability !== "ready" ? (
         <p className="form-note" role="alert">
           当前默认 {current.displayName}（
-          {availabilityLabel(current.availability)}：{current.reasonCode}
+          {modeAvailabilityLabel(current.availability, current.reasonCode)}：
+          {current.reasonCode}
           ）：未显式选择模式的任务提交会被拒绝，不会静默
           回退其他识别。请检查识别服务或选择其他可用模式。
         </p>

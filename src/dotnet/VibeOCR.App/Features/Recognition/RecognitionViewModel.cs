@@ -554,7 +554,7 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
             {
                 TerminalState = error.Code is HttpV2ErrorCode.Cancelled
                     ? JobState.Cancelled : JobState.Failed;
-                Status = LocalizeV2(error.Code);
+                Status = LocalizeV2(error);
             }
         }
         catch (CaptureValidationException error)
@@ -628,6 +628,13 @@ public sealed class RecognitionViewModel : INotifyPropertyChanged
         HttpV2ErrorCode.OcrEngineLanguageUnavailable => "所选引擎缺少语言包",
         _ => "识别失败",
     };
+
+    /// <summary>#321：随包 Runtime 闭包损坏是产品损坏，不引导重选模式或
+    /// 在线准备；其余按稳定错误码本地化。</summary>
+    internal static string LocalizeV2(InferenceClientException error) =>
+        error.IsProductRuntimeDamaged
+            ? "VibeOCR 随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复。应用不会在线安装依赖。"
+            : LocalizeV2(error.Code);
 
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {

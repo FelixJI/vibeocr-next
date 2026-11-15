@@ -19,8 +19,8 @@ from vibeocr.runtime.jobs.budgets import AdapterCapability, InputItem
 from vibeocr.runtime.processes.utils.job_object import CREATE_SUSPENDED, JobObjectGuard
 from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
 from vibeocr.runtime.recognition.ocr_engines import (
-    REASON_ENGINE_INIT_FAILED,
     REASON_ENGINE_NOT_INSTALLED,
+    REASON_PRODUCT_RUNTIME_DAMAGED,
     EngineAvailability,
     EngineDescriptor,
 )
@@ -99,12 +99,12 @@ class PaddleProcessAdapter:
                 pass
         if not available and _product_runtime():
             # #321 F8：产品模式（预构建随包 Runtime）下探针失败是随包闭包
-            # 损坏：UNAVAILABLE + engine_init_failed，不引导在线准备。
+            # 损坏：UNAVAILABLE + product_runtime_damaged，不引导在线准备。
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
                 availability=EngineAvailability.UNAVAILABLE,
                 included_in_base=True,
-                reason_code=REASON_ENGINE_INIT_FAILED,
+                reason_code=REASON_PRODUCT_RUNTIME_DAMAGED,
             )
         return EngineDescriptor(
             engine_id=OcrEngine.PADDLEOCR,

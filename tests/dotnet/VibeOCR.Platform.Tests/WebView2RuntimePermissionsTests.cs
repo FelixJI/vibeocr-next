@@ -134,8 +134,10 @@ public sealed class WebView2RuntimePermissionsTests
     }
   }
 
-  [Fact]
-  public void RejectsAncestorJunctionWithoutTouchingTheTarget()
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public void RejectsAncestorJunctionWithoutTouchingTheTarget(bool requireAppContainerPermissions)
   {
     string root = Path.Combine(
         Path.GetTempPath(), $"vibeocr-webview2-acl-junction-{Guid.NewGuid():N}");
@@ -158,7 +160,7 @@ public sealed class WebView2RuntimePermissionsTests
 
       Assert.Throws<WebView2RuntimePermissionException>(
           () => WebView2RuntimePermissions.GrantAppContainerReadAndExecute(
-              Path.Combine(junctionParent, "WebView2Runtime")));
+              Path.Combine(junctionParent, "WebView2Runtime"), requireAppContainerPermissions));
 
       // 目标目录 ACL 未被修改。
       Assert.Equal(before, SnapshotAces(realTree));
@@ -174,6 +176,82 @@ public sealed class WebView2RuntimePermissionsTests
           });
       junctionRemoval?.WaitForExit(15000);
       Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void PlatformWithoutAppContainerRequirementLeavesDaclUnchanged()
+  {
+    string runtime = TempRuntimeTree();
+    try
+    {
+      var security = new DirectorySecurity();
+      security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+      security.AddAccessRule(new FileSystemAccessRule(
+          WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl,
+          InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+          PropagationFlags.None, AccessControlType.Allow));
+      new DirectoryInfo(runtime).SetAccessControl(security);
+      string[] before = SnapshotAces(runtime);
+
+      WebView2RuntimePermissions.GrantAppContainerReadAndExecute(
+          runtime, requireAppContainerPermissions: false);
+
+      Assert.Equal(before, SnapshotAces(runtime));
+    }
+    finally { Directory.Delete(Path.GetDirectoryName(runtime)!, recursive: true); }
+  }
+
+  [Fact]
+  public void SatisfiedDirectoryNeedsNoWriteAttempt()
+  {
+    // Reapplying the Windows 10 grants preserves the existing ACL.
+    string runtime = TempRuntimeTree();
+    try
+    {
+      WebView2RuntimePermissions.GrantAppContainerReadAndExecute(runtime);
+      string[] before = SnapshotAces(runtime);
+
+      WebView2RuntimePermissions.GrantAppContainerReadAndExecute(runtime);
+
+      Assert.Equal(before, SnapshotAces(runtime));
+      // 只读句柄链（不申请 WRITE_DAC）对已满足目录可用。
+      using var chain = StableDirectoryHandleChain.OpenDirectoryFromVolumeRoot(
+          runtime, requireWriteDacAccess: false);
+      Assert.False(chain.TargetDirectoryHandle.IsInvalid);
+    }
+    finally
+    {
+      Directory.Delete(Path.GetDirectoryName(runtime)!, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void UnsatisfiedDirectoryRequestsWriteDacOnlyWhenNeeded()
+  {
+    // 结构性契约：未满足时才走需要 WRITE_DAC 的句柄链；满足时不申请。
+    // （Windows 对目录 owner 隐式授予 WRITE_DAC，标准用户非 owner 的真实
+    // 无-WRITE_DAC 场景由 root 在真实候选上验收，无法在单测内伪造。）
+    string runtime = TempRuntimeTree();
+    try
+    {
+      using (StableDirectoryHandleChain writeChain =
+          StableDirectoryHandleChain.OpenDirectoryFromVolumeRoot(
+              runtime, requireWriteDacAccess: true))
+      {
+        Assert.False(writeChain.TargetDirectoryHandle.IsInvalid);
+      }
+      using (StableDirectoryHandleChain readChain =
+          StableDirectoryHandleChain.OpenDirectoryFromVolumeRoot(runtime))
+      {
+        Assert.False(readChain.TargetDirectoryHandle.IsInvalid);
+      }
+      // 未满足目录授予成功后，再次应用不再需要写入（见上一个测试）。
+      WebView2RuntimePermissions.GrantAppContainerReadAndExecute(runtime);
+    }
+    finally
+    {
+      Directory.Delete(Path.GetDirectoryName(runtime)!, recursive: true);
     }
   }
 

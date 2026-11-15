@@ -69,7 +69,15 @@ internal sealed class StableDirectoryHandleChain : IDisposable
   /// 不支持。调用方只通过返回的句柄访问目标，不回落到名字寻址。
   /// </summary>
   public static StableDirectoryHandleChain OpenDirectoryFromVolumeRoot(
-      string targetDirectory)
+      string targetDirectory) =>
+      OpenDirectoryFromVolumeRoot(targetDirectory, requireWriteDacAccess: false);
+
+  /// <summary>同上；<paramref name="requireWriteDacAccess"/> 控制目标句柄
+  /// 是否额外请求 WRITE_DAC（仅在确认需要修改 DACL 时才请求；Win11/
+  /// 已满足场景无需该权限即可运行）。</summary>
+  public static StableDirectoryHandleChain OpenDirectoryFromVolumeRoot(
+      string targetDirectory,
+      bool requireWriteDacAccess)
   {
     string directory = NormalizeDirectory(targetDirectory);
     string? volumeRoot = Path.GetPathRoot(directory);
@@ -96,7 +104,7 @@ internal sealed class StableDirectoryHandleChain : IDisposable
           // 最后一段即目标目录：句柄需带 READ_CONTROL|WRITE_DAC 以支撑
           // 纯句柄 ACL 读写。
           uint access = index == segments.Length - 1
-              ? ReadControlAccess | WriteDacAccess
+              ? ReadControlAccess | (requireWriteDacAccess ? WriteDacAccess : 0)
               : 0;
           string currentFinal = chain.OpenAndHold(current, access);
           if (!IsStrictDescendant(parentFinal, currentFinal))

@@ -197,6 +197,8 @@ public sealed class CaptureUiSmokeTests : IDisposable
     start.Environment["VIBEOCR_SELF_TEST_SMOKE"] = "capture-ui";
     start.Environment["VIBEOCR_CAPTURE_UI_ROOT"] = _root;
     start.Environment["VIBEOCR_CAPTURE_UI_SCENARIO"] = scenario;
+    start.Environment["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(_root, "state", "webview2");
+    start.Environment.Remove("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
     var elapsed = Stopwatch.StartNew();
     using Process child = Process.Start(start) ?? throw new InvalidOperationException("Could not start UI smoke.");
     Task exited = child.WaitForExitAsync(TestContext.Current.CancellationToken);
@@ -322,8 +324,37 @@ public sealed class CaptureUiSmokeTests : IDisposable
     Assert.True(diagnostics.Length < 8500);
   }
 
+  [Fact]
+  public async Task UiSmokeCleanupWaitsForAnOwnedProfileHandle()
+  {
+    Directory.CreateDirectory(_root);
+    using var held = new FileStream(Path.Combine(_root, "lockfile"), FileMode.Create,
+        FileAccess.ReadWrite, FileShare.Read);
+    Task release = Task.Run(async () =>
+    {
+      await Task.Delay(100, TestContext.Current.CancellationToken);
+      held.Dispose();
+    }, TestContext.Current.CancellationToken);
+    try
+    {
+      Dispose();
+      Assert.False(Directory.Exists(_root));
+    }
+    finally { await release; }
+  }
+
   public void Dispose()
   {
-    if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+    // The real WebView smoke observed profile handles closing 5–7 seconds after App exit.
+    var elapsed = Stopwatch.StartNew();
+    while (Directory.Exists(_root))
+    {
+      try { Directory.Delete(_root, recursive: true); }
+      catch (IOException error) when (
+          (error.HResult & 0xFFFF) is 32 or 33 && elapsed.Elapsed < TimeSpan.FromSeconds(10))
+      {
+        Thread.Sleep(50);
+      }
+    }
   }
 }

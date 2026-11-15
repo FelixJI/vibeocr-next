@@ -4,7 +4,7 @@ import type { AppActions } from "../app/types";
 
 import { PaddleOptionsEditor } from "../components/PaddleOptionsEditor";
 
-import { availabilityLabel } from "./FeatureValues";
+import { modeAvailabilityLabel } from "./FeatureValues";
 
 import type { RecognitionEngineState } from "./TaskEngineValues";
 
@@ -49,7 +49,7 @@ export function TaskEngineSelector({
     ? `跟随默认（${defaultMode.displayName}${
         defaultMode.availability === "ready"
           ? ""
-          : `，${availabilityLabel(defaultMode.availability)}`
+          : `，${modeAvailabilityLabel(defaultMode.availability, defaultMode.reasonCode)}`
       }）`
     : "跟随默认（未读取）";
   const activeSupportsModelPreset =
@@ -96,7 +96,7 @@ export function TaskEngineSelector({
               <optgroup key={label} label={label}>
                 {choices.map((engine) => (
                   <option key={engine.engine} value={engine.engine}>
-                    {`${engine.displayName}（${availabilityLabel(engine.availability)}${engine.requiresDownload ? "，需下载" : ""}）`}
+                    {`${engine.displayName}（${modeAvailabilityLabel(engine.availability, engine.reasonCode)}${engine.requiresDownload ? "，需下载" : ""}）`}
                   </option>
                 ))}
               </optgroup>

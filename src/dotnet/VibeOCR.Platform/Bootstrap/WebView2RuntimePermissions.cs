@@ -52,7 +52,8 @@ public static class WebView2RuntimePermissions
     // 起始字节）。
     private const int DaclOffsetInDescriptor = 16;
 
-    public static void GrantAppContainerReadAndExecute(string directory)
+    public static void GrantAppContainerReadAndExecute(
+        string directory, bool requireAppContainerPermissions = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         string full = Path.GetFullPath(directory);
@@ -70,6 +71,7 @@ public static class WebView2RuntimePermissions
         StableDirectoryHandleChain chain;
         try
         {
+            // Validate the directory chain without requesting WRITE_DAC.
             chain = StableDirectoryHandleChain.OpenDirectoryFromVolumeRoot(full);
         }
         catch (PortableLayoutException error)
@@ -78,18 +80,50 @@ public static class WebView2RuntimePermissions
                 $"无法从本地卷根安全固定 WebView2 运行库目录链（重解析点/权限/不存在都会被拒绝）：{full}。原因：{error.Message}",
                 error);
         }
+        byte[] binary;
+        RawSecurityDescriptor descriptor;
+        RawAcl? dacl;
         using (chain)
         {
+            if (!requireAppContainerPermissions) return;
             SafeFileHandle handle = chain.TargetDirectoryHandle;
-            byte[] binary = ReadDescriptorBinary(handle, full);
-            var descriptor = new RawSecurityDescriptor(binary, 0);
-            if (descriptor.DiscretionaryAcl is not { } dacl)
+            binary = ReadDescriptorBinary(handle, full);
+            descriptor = new RawSecurityDescriptor(binary, 0);
+            dacl = descriptor.DiscretionaryAcl;
+            if (dacl is null)
             {
                 throw new WebView2RuntimePermissionException(
                     $"WebView2 运行库目录没有显式 DACL，拒绝重建权限：{full}");
             }
-            int appended = AppendMissingAppContainerAces(dacl);
-            if (appended == 0)
+            if (AppendMissingAppContainerAces(dacl) == 0)
+            {
+                return;
+            }
+        }
+        // 确有缺失才申请 WRITE_DAC 重新固定同一目录并写入；失败 fail closed。
+        StableDirectoryHandleChain writeChain;
+        try
+        {
+            writeChain = StableDirectoryHandleChain.OpenDirectoryFromVolumeRoot(
+                full, requireWriteDacAccess: true);
+        }
+        catch (PortableLayoutException error)
+        {
+            throw new WebView2RuntimePermissionException(
+                $"WebView2 运行库目录需要补 AppContainer 只读权限但无法获得写入 DACL 的权限（标准用户对已满足目录无需该权限）：{full}。原因：{error.Message}",
+                error);
+        }
+        using (writeChain)
+        {
+            SafeFileHandle handle = writeChain.TargetDirectoryHandle;
+            binary = ReadDescriptorBinary(handle, full);
+            descriptor = new RawSecurityDescriptor(binary, 0);
+            if (descriptor.DiscretionaryAcl is not { } updateAcl)
+            {
+                throw new WebView2RuntimePermissionException(
+                    $"WebView2 运行库目录没有显式 DACL，拒绝重建权限：{full}");
+            }
+            if (AppendMissingAppContainerAces(updateAcl) == 0)
             {
                 return;
             }

@@ -29,6 +29,7 @@ from vibeocr.runtime.jobs.budgets import AdapterCapability, ComputeBatch, InputI
 from vibeocr.runtime.recognition.ocr_engines import (
     REASON_ENGINE_INIT_FAILED,
     REASON_ENGINE_NOT_INSTALLED,
+    REASON_PRODUCT_RUNTIME_DAMAGED,
     EngineAvailability,
     EngineDescriptor,
 )
@@ -106,7 +107,7 @@ class PaddlePipelineAdapter:
 
         非 ORT 环境直接报告待准备（指向对应 Paddle ONNX 组件），不触发
         原生探测；模型加载不发生。产品模式（VIBEOCR_PRODUCT_RUNTIME=1）
-        下依赖缺失属于随包闭包损坏：报 UNAVAILABLE + engine_init_failed，
+        下依赖缺失属于随包闭包损坏：报 UNAVAILABLE + product_runtime_damaged，
         不提供 required_component（不引导在线安装）。
         """
         from vibeocr.runtime.recognition.paddle_onnx import is_ort_environment
@@ -117,7 +118,7 @@ class PaddlePipelineAdapter:
                     engine_id=OcrEngine.PADDLEOCR,
                     availability=EngineAvailability.UNAVAILABLE,
                     included_in_base=True,
-                    reason_code=REASON_ENGINE_INIT_FAILED,
+                    reason_code=REASON_PRODUCT_RUNTIME_DAMAGED,
                 )
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,
@@ -134,7 +135,7 @@ class PaddlePipelineAdapter:
                     engine_id=OcrEngine.PADDLEOCR,
                     availability=EngineAvailability.UNAVAILABLE,
                     included_in_base=True,
-                    reason_code=REASON_ENGINE_INIT_FAILED,
+                    reason_code=REASON_PRODUCT_RUNTIME_DAMAGED,
                 )
             return EngineDescriptor(
                 engine_id=OcrEngine.PADDLEOCR,

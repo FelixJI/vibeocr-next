@@ -114,7 +114,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "已保存计算设备。";
             return true;
         }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return false; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error); return false; }
         finally { _settingsGate.Release(); }
     }
     public string WorkerSettingsWarning { get; private set; } = "";
@@ -148,7 +148,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             Status = "已保存空闲后释放资源设置。0 秒表示持久运行。";
             return true;
         }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return false; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error); return false; }
         finally { _settingsGate.Release(); }
     }
 
@@ -248,7 +248,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             catch (InferenceClientException error)
             {
                 if (generation == Volatile.Read(ref _generation))
-                    Status = LocalizeV2(error.Code);
+                    Status = LocalizeV2(error);
             }
             // 已失效的旧 runtime/residency 流程不得继续接管 selection：
             // 否则其 forceReload 会清掉后续新代的选择代并以新代身份投影。
@@ -262,7 +262,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) Status = "已取消"; }
         catch (RuntimeSelectionException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeSelection(error); }
-        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error.Code); }
+        catch (InferenceClientException error) { if (generation == Volatile.Read(ref _generation)) Status = LocalizeV2(error); }
         catch (Exception error) when (generation == Volatile.Read(ref _generation))
         {
             AppLog.Warn($"Settings refresh failed: {error.GetType().Name}: {error.Message}");
@@ -370,7 +370,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch (InferenceClientException error)
         {
-            Status = LocalizeV2(error.Code);
+            Status = LocalizeV2(error);
         }
     }
 
@@ -411,7 +411,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             finally { _settingsGate.Release(); }
         }
         catch (ArgumentException error) { Status = error.Message; return; }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error); return; }
         catch (RuntimeSelectionException error) { Status = LocalizeSelection(error); return; }
         // 写入成功后回读刷新目录：本地/远程切换可能改变 mineru 模式可用性。
         try
@@ -497,7 +497,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         catch (InferenceClientException error)
         {
             // 保存失败：原已提交默认、持久值与投影均不变，仅提示可重试。
-            Status = LocalizeV2(error.Code);
+            Status = LocalizeV2(error);
             return;
         }
         catch (RuntimeSelectionException error)
@@ -589,7 +589,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         }
         catch (OperationCanceledException) { throw; }
         catch (ArgumentException error) { Status = error.Message; return; }
-        catch (InferenceClientException error) { Status = LocalizeV2(error.Code); return; }
+        catch (InferenceClientException error) { Status = LocalizeV2(error); return; }
         // 保存成功：立即重发布偏好，消费方无需等待目录刷新。
         PublishRecognitionSelection(selection, DefaultRecognitionMode);
     }
@@ -685,7 +685,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
                     return "远程 MinerU 服务拒绝了认证：请检查已保存的 API Key 是否正确且对该服务有效；修正后保存再重试。";
             }
         }
-        return LocalizeV2(error.Code);
+        return LocalizeV2(error);
     }
 
     public void Cancel() { }
@@ -772,7 +772,7 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
             // 迟到失败与迟到成功同一代际闸门：旧实例/旧目录读取的失败
             // 不得覆盖新实例状态。
             if (selectionGeneration == Volatile.Read(ref _selectionGeneration))
-                Status = LocalizeV2(error.Code);
+                Status = LocalizeV2(error);
             throw;
         }
     }
@@ -914,6 +914,13 @@ public sealed class SettingsViewModel : INotifyPropertyChanged
         HttpV2ErrorCode.RuntimeCapabilityUnavailable => "当前 Backend 不支持该能力",
         _ => "操作失败",
     };
+
+    /// <summary>#321：随包 Runtime 闭包损坏是产品损坏，不引导重选/在线
+    /// 准备；其余按稳定错误码本地化。</summary>
+    internal static string LocalizeV2(InferenceClientException error) =>
+        error.IsProductRuntimeDamaged
+            ? "VibeOCR 随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复。应用不会在线安装依赖。"
+            : LocalizeV2(error.Code);
 
     private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {

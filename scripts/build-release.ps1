@@ -58,14 +58,20 @@ if ($LASTEXITCODE -ne 0) { throw 'Next restore failed' }
 dotnet restore (Join-Path $root 'src/dotnet/VibeOCR.Bootstrapper/VibeOCR.Bootstrapper.csproj') --locked-mode
 if ($LASTEXITCODE -ne 0) { throw 'Next bootstrapper restore failed' }
 $appPublish = Join-Path $build 'app-publish'
+$appPublishItems = Join-Path $build 'app-publish-items.json'
 Write-CiStage 'app-publish'
 # Bundled release mode is selected by explicit MSBuild publish properties
 # (.NET self-contained + Windows App SDK self-contained), not by DEBUG/profile;
 # restore above uses the identical property set with locked mode.
 dotnet publish (Join-Path $root 'src/dotnet/VibeOCR.App/VibeOCR.App.csproj') `
   -c Release -r win-x64 --self-contained true -p:WindowsAppSdkSelfContained=true `
-  -p:VibeOCRProductWebView2=true --no-restore -o $appPublish
-if ($LASTEXITCODE -ne 0) { throw 'Next publish failed' }
+  -p:VibeOCRProductWebView2=true --no-restore -o $appPublish -nologo -v:q `
+  '-getItem:ResolvedFileToPublish,MicrosoftWindowsAppSDKFiles,MicrosoftWindowsAppSDKFilesRes' `
+  '-getProperty:NuGetPackageFolders' > $appPublishItems
+if ($LASTEXITCODE -ne 0) {
+    Get-Content -LiteralPath $appPublishItems | Write-Host
+    throw 'Next publish failed'
+}
 Write-CiStage 'webview2-runtime'
 # WebView2 Fixed Version runtime: lock-driven download/verify/expand into the
 # app publish tree (msedgewebview2.exe at WebView2Runtime root). Fails closed
@@ -213,5 +219,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Release checksum build failed' }
 Remove-Item -LiteralPath (Join-Path $artifacts 'SHA256SUMS') -Force
 uv run --no-sync python (Join-Path $root 'scripts/build_spdx_sbom.py') --artifacts-dir $artifacts `
   --repository-name FelixJI/vibeocr-next --version $Version --product-root $product `
-  --webview2-metadata $webview2Metadata
+  --webview2-metadata $webview2Metadata --app-publish-items $appPublishItems
 if ($LASTEXITCODE -ne 0) { throw 'SBOM build failed' }
