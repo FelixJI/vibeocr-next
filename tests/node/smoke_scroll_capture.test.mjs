@@ -131,9 +131,9 @@ bmpBytes[1] = 0x4d;
 }
 
 // 4. assertAnnotatedExportRectangle: the annotated-pixel judge for the same
-// revision's exports. The original has no stroke color; the export must carry
-// the stroke inside the expected rectangle (image-pixel mapping from the real
-// editor canvas) and stay clean outside it.
+// revision's exports. The export must carry the stroke inside the expected
+// rectangle (image-pixel mapping from the real editor canvas) and stay clean
+// outside it. Existing ClearType colors cannot prove a new annotation.
 {
   const orange = [243, 139, 53];
   const background = () => [210, 210, 210];
@@ -163,6 +163,8 @@ bmpBytes[1] = 0x4d;
     rgbaImage(80, 60, strokeRect(rect)), original, rect, options);
   assert(verdict.strayPixels === 0 &&
     Object.values(verdict.edgeCounts).every((count) => count >= 6));
+  assert(Object.values(verdict.lineCoordinates)
+    .every((coordinate) => Number.isSafeInteger(coordinate)));
   // Correct strokes cannot conceal corrupt pixels, including alpha or the
   // unpainted interior of the rectangle.
   for (const [x, y, channel] of [[1, 1, 0], [40, 30, 1], [1, 1, 3]]) {
@@ -189,6 +191,104 @@ bmpBytes[1] = 0x4d;
   assert.throws(() => assertAnnotatedExportRectangle(
     rgbaImage(80, 60, strokeRect(rect)), original,
     { left: 70, top: 55, right: 79, bottom: 59 }, options), /is outside the image|not annotated there/);
+
+  // Real ClearType fringes made the former zero-original-color assertion fail.
+  const fringe = [224, 156, 72]; // Inside tolerance of the orange stroke.
+  const coloredBase = rgbaImage(80, 60, (x, y) =>
+    ((x + y) % 7 === 0 ? fringe : background()));
+  const overStroke = strokeRect(rect);
+  const coloredExport = rgbaImage(80, 60, (x, y) => {
+    const [r, g, b] = overStroke(x, y);
+    return (r === orange[0] && g === orange[1] && b === orange[2])
+      ? orange : ((x + y) % 7 === 0 ? fringe : background());
+  });
+  const coloredVerdict = assertAnnotatedExportRectangle(coloredExport, coloredBase,
+    rect, options);
+  assert(Object.values(coloredVerdict.newEdgeCounts).every((count) => count >= 6));
+  assert(Object.values(coloredVerdict.originalEdgeCounts).every((count) => count > 0));
+  assert(Object.values(coloredVerdict.lineCoordinates)
+    .every((coordinate) => Number.isSafeInteger(coordinate)));
+  assert.equal(coloredVerdict.strayPixels, 0);
+  // Re-exporting the colored base supplies no new annotation evidence.
+  assert.throws(() => assertAnnotatedExportRectangle(coloredBase, coloredBase,
+    rect, options), /gained only 0 new exact opaque stroke pixels/);
+
+  // F1: near(export) + any RGBA delta used to count as new stroke, so an
+  // alpha-only edit or a reverse drift that merely stays inside tolerance
+  // could fake >= minEdgePixels per band. Neither is this round's exact
+  // opaque public color, so both must fail closed.
+  const mutate = (image, edits) => {
+    const pixels = Buffer.from(image.rgbaBase64, 'base64');
+    for (const edit of edits) {
+      const index = (edit.y * image.width + edit.x) * 4;
+      if (edit.setAlpha !== undefined) pixels[index + 3] = edit.setAlpha;
+      if (edit.rgb) {
+        pixels[index] = edit.rgb[0];
+        pixels[index + 1] = edit.rgb[1];
+        pixels[index + 2] = edit.rgb[2];
+      }
+    }
+    return { ...image, rgbaBase64: pixels.toString('base64') };
+  };
+  const topBandFringe = [];
+  for (let y = rect.top - 6; y <= rect.top + 6; y++)
+    for (let x = rect.left + 6; x <= rect.right - 6; x++)
+      if ((x + y) % 7 === 0) topBandFringe.push({ x, y });
+  assert(topBandFringe.length >= 20, 'Colored-base density is unusable.');
+  // Alpha-only edit over unchanged fringe RGB (old judge: near + changed).
+  assert.throws(() => assertAnnotatedExportRectangle(
+    mutate(coloredBase, topBandFringe.map((p) => ({ ...p, setAlpha: 100 }))),
+    coloredBase, rect, options), /gained only 0 new exact opaque stroke pixels/);
+  // Reverse drift: R moves FURTHER from the public color yet stays near.
+  assert.throws(() => assertAnnotatedExportRectangle(
+    mutate(coloredBase, topBandFringe.slice(0, 20).map((p) => ({ ...p, rgb: [223, 156, 72] }))),
+    coloredBase, rect, options), /gained only 0 new exact opaque stroke pixels/);
+
+  // F2: counts alone cannot prove a rectangle edge; concentrated or gapped
+  // and misaligned exact-opaque segments must fail the line-shape evidence.
+  const dashEdits = [];
+  for (let x = rect.left + 6; x <= rect.left + 11; x++) dashEdits.push({ x, y: rect.top - 4, rgb: orange });
+  for (let x = rect.right - 12; x <= rect.right - 6; x++) dashEdits.push({ x, y: rect.top + 4, rgb: orange });
+  assert.throws(() => assertAnnotatedExportRectangle(
+    mutate(coloredBase, dashEdits), coloredBase, rect, options),
+    /no complete fixed-coordinate line/);
+  const gapEdits = [];
+  for (let x = rect.left + 6; x <= rect.right - 6; x += 2)
+    gapEdits.push({ x, y: rect.top, rgb: orange });
+  assert.throws(() => assertAnnotatedExportRectangle(
+    mutate(coloredBase, gapEdits), coloredBase, rect, options),
+    /no complete fixed-coordinate line/);
+  // F2 combined counterexample: the ORIGINAL already carries a complete
+  // exact-orange line in every band and the export adds 12 exact dots at
+  // OTHER fixed coordinates per band. Line evidence and count evidence must
+  // come from the SAME line: the pre-existing line contributes zero new
+  // pixels along it, so the pre-fix judge (separate line + separate count)
+  // wrongly passed this; it must fail closed now.
+  const spanX = rect.right - 6 - (rect.left + 6) + 1;
+  const spanY = rect.bottom - 6 - (rect.top + 6) + 1;
+  const prelinedBase = mutate(coloredBase, [
+    ...Array.from({ length: spanX }, (_, i) => ({ x: rect.left + 6 + i, y: rect.top, rgb: orange })),
+    ...Array.from({ length: spanX }, (_, i) => ({ x: rect.left + 6 + i, y: rect.bottom, rgb: orange })),
+    ...Array.from({ length: spanY }, (_, i) => ({ x: rect.left, y: rect.top + 6 + i, rgb: orange })),
+    ...Array.from({ length: spanY }, (_, i) => ({ x: rect.right, y: rect.top + 6 + i, rgb: orange })),
+  ]);
+  const dottedNoNewLine = mutate(prelinedBase, [
+    ...Array.from({ length: 12 }, (_, i) => ({ x: rect.left + 6 + i, y: rect.top - 4, rgb: orange })),
+    ...Array.from({ length: 12 }, (_, i) => ({ x: rect.left + 6 + i, y: rect.bottom - 4, rgb: orange })),
+    ...Array.from({ length: 12 }, (_, i) => ({ x: rect.left - 4, y: rect.top + 6 + i, rgb: orange })),
+    ...Array.from({ length: 12 }, (_, i) => ({ x: rect.right - 4, y: rect.top + 6 + i, rgb: orange })),
+  ]);
+  assert.throws(() => assertAnnotatedExportRectangle(dottedNoNewLine, prelinedBase,
+    rect, options), /no complete fixed-coordinate line/);
+  // An added stroke outside the expected rectangle still fails.
+  const misplaced = rgbaImage(80, 60, (x, y) => {
+    const [r, g, b] = overStroke(x, y);
+    if (r === orange[0] && g === orange[1] && b === orange[2]) return orange;
+    if (x >= 74 && x <= 79 && y >= 10 && y <= 20) return orange; // Outside the ring.
+    return (x + y) % 7 === 0 ? fringe : background();
+  });
+  assert.throws(() => assertAnnotatedExportRectangle(misplaced, coloredBase,
+    rect, options), /NEW stroke-colored pixels appear outside the expected rectangle/);
   console.log('case4 annotated-export-rectangle-judge: ok');
 }
 

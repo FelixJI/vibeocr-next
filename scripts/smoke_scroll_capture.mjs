@@ -983,6 +983,12 @@ export function assertSceneTerminalExport(action, timeline, artifactBytes, uploa
 // Pure judge for the annotated terminal export (#320 review fix): the export
 // must carry this revision's annotation inside the expected NATURAL-image
 // rectangle; the unannotated original or a misplaced annotation fails closed.
+// ClearType fringes can match the stroke color, so per-pixel evidence is the
+// original->export delta: countable pixels are EXACTLY this round's public
+// opaque solid color and were not already that exact RGB in the original
+// (alpha-only edits or drift that merely stays inside tolerance never count),
+// and each edge must contain a complete fixed-coordinate line of them - a
+// real canvas strokeRect edge, not concentrated or gapped spots.
 export function assertAnnotatedExportRectangle(exportRgba, originalRgba, rect,
   { color = { r: 243, g: 139, b: 53 }, tolerance = 40, margin = 12,
     minEdgePixels = 12, context = 'Annotated export' } = {}) {
@@ -1009,30 +1015,94 @@ export function assertAnnotatedExportRectangle(exportRgba, originalRgba, rect,
     Math.abs(pixels[index] - color.r) <= tolerance &&
     Math.abs(pixels[index + 1] - color.g) <= tolerance &&
     Math.abs(pixels[index + 2] - color.b) <= tolerance;
-  const countBand = (pixels, x0, y0, x1, y1) => {
+  const countBand = (predicate, x0, y0, x1, y1) => {
     let count = 0;
     for (let y = Math.max(0, y0); y <= Math.min(exportRgba.height - 1, y1); y++)
       for (let x = Math.max(0, x0); x <= Math.min(exportRgba.width - 1, x1); x++)
-        if (near(pixels, (y * exportRgba.width + x) * 4)) count++;
+        if (predicate((y * exportRgba.width + x) * 4)) count++;
     return count;
   };
   const exportPixels = Buffer.from(exportRgba.rgbaBase64, 'base64');
   const originalPixels = Buffer.from(originalRgba.rgbaBase64, 'base64');
+  const samePixel = (index) =>
+    exportPixels[index] === originalPixels[index] &&
+    exportPixels[index + 1] === originalPixels[index + 1] &&
+    exportPixels[index + 2] === originalPixels[index + 2] &&
+    exportPixels[index + 3] === originalPixels[index + 3];
+  // Misplaced-stroke detection stays the strictest delta: any stroke-colored
+  // pixel that CHANGED anywhere outside the expected rectangle fails closed.
+  const isNewStroke = (index) => near(exportPixels, index) && !samePixel(index);
+  // Countable new-annotation evidence must be this round's public solid color
+  // itself: the export pixel is EXACTLY the opaque stroke color, and the
+  // ORIGINAL did not already carry that exact RGB there (on any alpha), so
+  // alpha-only edits and reverse color drift inside tolerance never count.
+  const isExactSolidStroke = (pixels, index) =>
+    pixels[index] === color.r && pixels[index + 1] === color.g &&
+    pixels[index + 2] === color.b && pixels[index + 3] === 255;
+  const isNewSolidStroke = (index) =>
+    isExactSolidStroke(exportPixels, index) &&
+    !(originalPixels[index] === color.r && originalPixels[index + 1] === color.g &&
+      originalPixels[index + 2] === color.b);
   const bands = {
     top: [rect.left + margin, rect.top - margin, rect.right - margin, rect.top + margin],
     bottom: [rect.left + margin, rect.bottom - margin, rect.right - margin, rect.bottom + margin],
     left: [rect.left - margin, rect.top + margin, rect.left + margin, rect.bottom - margin],
     right: [rect.right - margin, rect.top + margin, rect.right + margin, rect.bottom - margin],
   };
+  // F2 shape evidence: a complete fixed-orthogonal-coordinate run of exact
+  // opaque stroke pixels spanning the band's full cross-section (a horizontal
+  // row for top/bottom, a vertical column for left/right), and THAT SAME LINE
+  // must carry >= minEdgePixels new exact pixels - original pixels already
+  // carrying the exact color may remain on the line but never count as new,
+  // and new pixels on other rows/columns cannot substitute for the line.
+  const completeLineCoordinate = (edge, [x0, y0, x1, y1]) => {
+    const horizontal = edge === 'top' || edge === 'bottom';
+    const fixedStart = horizontal ? Math.max(0, y0) : Math.max(0, x0);
+    const fixedEnd = horizontal ? Math.min(exportRgba.height - 1, y1)
+      : Math.min(exportRgba.width - 1, x1);
+    const runStart = horizontal ? Math.max(0, x0) : Math.max(0, y0);
+    const runEnd = horizontal ? Math.min(exportRgba.width - 1, x1)
+      : Math.min(exportRgba.height - 1, y1);
+    for (let fixed = fixedStart; fixed <= fixedEnd; fixed++) {
+      let complete = true;
+      let newPixels = 0;
+      for (let run = runStart; run <= runEnd; run++) {
+        const x = horizontal ? run : fixed;
+        const y = horizontal ? fixed : run;
+        const index = (y * exportRgba.width + x) * 4;
+        if (!isExactSolidStroke(exportPixels, index)) {
+          complete = false;
+          break;
+        }
+        if (isNewSolidStroke(index)) newPixels++;
+      }
+      if (complete && newPixels >= minEdgePixels) return fixed;
+    }
+    return null;
+  };
   const edgeCounts = {};
+  const newEdgeCounts = {};
+  const originalEdgeCounts = {};
+  const lineCoordinates = {};
   for (const [edge, band] of Object.entries(bands)) {
-    edgeCounts[edge] = countBand(exportPixels, ...band);
+    edgeCounts[edge] = countBand((index) => near(exportPixels, index), ...band);
     assert(edgeCounts[edge] >= minEdgePixels,
       `${context}: expected ${edge} edge band carries only ${edgeCounts[edge]} ` +
       `stroke pixels (need ${minEdgePixels}); the export is not annotated there.`);
-    assert.equal(countBand(originalPixels, ...band), 0,
-      `${context}: the ORIGINAL already carries the stroke color in the ` +
-      `${edge} edge band; the fixture baseline is unusable.`);
+    originalEdgeCounts[edge] = countBand((index) => near(originalPixels, index), ...band);
+    newEdgeCounts[edge] = countBand(isNewSolidStroke, ...band);
+    assert(newEdgeCounts[edge] >= minEdgePixels,
+      `${context}: the ${edge} edge band gained only ${newEdgeCounts[edge]} new ` +
+      `exact opaque stroke pixels over the original (need ${minEdgePixels}); the ` +
+      `original itself already carries ${originalEdgeCounts[edge]} similar-color ` +
+      `pixels, and alpha-only or tolerance-only changes cannot stand in for ` +
+      `this revision's annotation.`);
+    lineCoordinates[edge] = completeLineCoordinate(edge, band);
+    assert(lineCoordinates[edge] !== null,
+      `${context}: the ${edge} edge band contains no complete fixed-coordinate ` +
+      `line of exact opaque stroke pixels carrying ${minEdgePixels}+ new ones; ` +
+      `concentrated spots or gapped and misaligned segments are not this ` +
+      `revision's rectangle stroke.`);
   }
   const ring = {
     x0: rect.left - margin * 2, y0: rect.top - margin * 2,
@@ -1042,25 +1112,23 @@ export function assertAnnotatedExportRectangle(exportRgba, originalRgba, rect,
   let changedBackgroundPixels = 0;
   for (let y = 0; y < exportRgba.height; y++)
     for (let x = 0; x < exportRgba.width; x++) {
+      const index = (y * exportRgba.width + x) * 4;
       if ((x < ring.x0 || x > ring.x1 || y < ring.y0 || y > ring.y1) &&
-          near(exportPixels, (y * exportRgba.width + x) * 4)) stray++;
+          isNewStroke(index)) stray++;
       const strokeNeighborhood =
         (x >= rect.left - margin && x <= rect.right + margin &&
           (Math.abs(y - rect.top) <= margin || Math.abs(y - rect.bottom) <= margin)) ||
         (y >= rect.top - margin && y <= rect.bottom + margin &&
           (Math.abs(x - rect.left) <= margin || Math.abs(x - rect.right) <= margin));
-      const index = (y * exportRgba.width + x) * 4;
-      if (!strokeNeighborhood &&
-          (exportPixels[index] !== originalPixels[index] ||
-           exportPixels[index + 1] !== originalPixels[index + 1] ||
-           exportPixels[index + 2] !== originalPixels[index + 2] ||
-           exportPixels[index + 3] !== originalPixels[index + 3])) changedBackgroundPixels++;
+      if (!strokeNeighborhood && !samePixel(index)) changedBackgroundPixels++;
     }
   assert.equal(stray, 0,
-    `${context}: ${stray} stroke-colored pixels appear outside the expected rectangle.`);
+    `${context}: ${stray} NEW stroke-colored pixels appear outside the ` +
+    `expected rectangle.`);
   assert.equal(changedBackgroundPixels, 0,
     `${context}: unannotated pixels differ from the original (${changedBackgroundPixels}).`);
-  return { edgeCounts, strayPixels: stray, changedBackgroundPixels };
+  return { edgeCounts, newEdgeCounts, originalEdgeCounts, lineCoordinates,
+    strayPixels: stray, changedBackgroundPixels };
 }
 
 // Pure mapping mirroring annotationGeometry.imageTransform at rotation 0: the
