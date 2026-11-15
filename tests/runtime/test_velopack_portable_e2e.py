@@ -57,3 +57,48 @@ def test_result_wait_without_evidence_still_times_out(
     monkeypatch.setattr(portable.time, "sleep", lambda _seconds: None)
     with pytest.raises(RuntimeError, match="timed out"):
         portable._wait_for_result(tmp_path / "result.json", 1, tmp_path)
+
+
+def test_unexpected_external_rejection_hides_paths_and_merges_aliases(
+    tmp_path: Path,
+) -> None:
+    # Mirrors the harness layout: USERPROFILE/HOME and TEMP/TMP alias one
+    # physical directory each.
+    external_roots = {
+        "USERPROFILE": tmp_path / "user-profile",
+        "HOME": tmp_path / "user-profile",
+        "TEMP": tmp_path / "temp",
+        "TMP": tmp_path / "temp",
+    }
+    nested_secret = "Microsoft/Windows/Caches/winstore-cache-identity"
+    home_only = "velopack/home-only.log"
+    temp_only = "velopack/temp-only.log"
+    # Aliases of one physical directory overlap without being identical, so
+    # the unknown count must be the union of their entries (3), not a single
+    # alias snapshot (max would report 2 for TEMP/TMP).
+    unexpected = {
+        "USERPROFILE": (nested_secret,),
+        "HOME": (nested_secret, "velopack/extra.log", home_only),
+        "TEMP": (nested_secret, "velopack/extra.log"),
+        "TMP": (nested_secret, temp_only),
+    }
+    with pytest.raises(RuntimeError) as excinfo:
+        portable._reject_unexpected_external(unexpected, external_roots)
+    message = str(excinfo.value)
+    # Still rejected, but the message leaks no absolute or nested paths.
+    assert "outside the Portable root" in message
+    for leak in (
+        nested_secret,
+        "winstore-cache-identity",
+        "velopack/extra.log",
+        home_only,
+        temp_only,
+        str(tmp_path),
+    ):
+        assert leak not in message
+    # Aliases over one physical directory collapse to one summary entry
+    # reporting only the root aliases and the union unknown-entry count.
+    assert message.count("HOME + USERPROFILE: 3 unexpected entries") == 1
+    assert message.count("TEMP + TMP: 3 unexpected entries") == 1
+    # Nothing unexpected must never raise.
+    portable._reject_unexpected_external({}, external_roots)

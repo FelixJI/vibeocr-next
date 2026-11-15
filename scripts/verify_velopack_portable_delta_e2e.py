@@ -155,6 +155,31 @@ def _tree_inventory(root: Path) -> tuple[str, ...]:
     )
 
 
+def _reject_unexpected_external(
+    unexpected: dict[str, tuple[str, ...]], external_roots: dict[str, Path]
+) -> None:
+    """Reject unexpected writes without exposing OS cache identifiers in paths."""
+    if not unexpected:
+        return
+    aliases_by_directory: dict[Path, set[str]] = {}
+    unknown_by_directory: dict[Path, set[str]] = {}
+    for name in unexpected:
+        directory = external_roots[name]
+        aliases_by_directory.setdefault(directory, set()).add(name)
+        unknown_by_directory.setdefault(directory, set()).update(unexpected[name])
+    summary = "; ".join(
+        f"{' + '.join(sorted(aliases))}: "
+        f"{len(unknown_by_directory[directory])} unexpected entries"
+        for directory, aliases in sorted(
+            aliases_by_directory.items(), key=lambda item: sorted(item[1])
+        )
+    )
+    raise RuntimeError(
+        "Velopack Portable E2E wrote unexpected data outside the Portable root: "
+        f"{summary}"
+    )
+
+
 def _installed_version(root: Path) -> str:
     version = ET.parse(root / "current" / "sq.version").findtext(
         "{*}metadata/{*}version"
@@ -447,11 +472,7 @@ def verify_portable_delta_e2e(
         for name, inventory in external_after.items()
     }
     unexpected = {name: paths for name, paths in unexpected.items() if paths}
-    if unexpected:
-        raise RuntimeError(
-            "Velopack Portable E2E wrote unexpected data outside the Portable root: "
-            f"{unexpected}"
-        )
+    _reject_unexpected_external(unexpected, external_roots)
 
 
 def main() -> int:

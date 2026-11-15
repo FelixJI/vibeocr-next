@@ -482,6 +482,9 @@ async function startScrollSession(app, fixture) {
   app.evidence.mainWindowBeforeCapture = current;
   app.evidence.focusProbe = JSON.parse(await native('probe', { AppPid: app.child.pid, FixturePid: fixture.pid,
     X: Math.floor((current.Bounds.Left + current.Bounds.Right) / 2), Y: current.Bounds.Top + 40 }));
+  // Really activate the owned fixture once before focusing the app: the capture flow needs the fixture-then-main activation order once the main window hides for the picker overlay.
+  await native('focus', { FixturePid: fixture.pid, Handle: fixture.root,
+    X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100 });
   await native('focus', { FixturePid: app.child.pid, Handle: app.main.Handle,
     X: Math.floor((app.main.Bounds.Left + app.main.Bounds.Right) / 2), Y: app.main.Bounds.Top + 40 });
   await native('raise', { FixturePid: fixture.pid, Handle: fixture.root });
