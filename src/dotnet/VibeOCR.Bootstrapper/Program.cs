@@ -31,7 +31,18 @@ internal static class Program
     }
 
     LegacyVelopackStateMigration.Resume(productRoot);
-    RunVelopack(productRoot);
+    try
+    {
+      RunVelopack(productRoot);
+    }
+    catch (Exception error) when (error is BadImageFormatException or FileLoadException or FileNotFoundException)
+    {
+      InitializeLog(productRoot);
+      ReportRepair("随包 Velopack 更新组件无法加载：" + velopackDll + "\n" + error.Message,
+          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          BootstrapperArtifactSmoke.IsRequested());
+      return LayoutInvalid;
+    }
     PortableProductRoots roots = InitializeLog(productRoot);
     try
     {

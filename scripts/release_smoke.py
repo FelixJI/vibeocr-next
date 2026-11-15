@@ -122,6 +122,8 @@ def _verify_bootstrapper(product_root: Path) -> None:
     velopack.rename(backup)
     try:
         expect_failure(5, b"Velopack.dll")
+        velopack.write_bytes(b"invalid managed assembly")
+        expect_failure(5, b"Velopack.dll")
     finally:
         backup.replace(velopack)
 

@@ -431,7 +431,10 @@ def _configure_release_smoke_fixture(
             velopack = product_root / "Velopack.dll"
             browser = product_root / "app/WebView2Runtime/msedgewebview2.exe"
             if kwargs.get("capture_output"):
-                if not velopack.is_file():
+                if (
+                    not velopack.is_file()
+                    or velopack.read_bytes() == b"invalid managed assembly"
+                ):
                     return subprocess.CompletedProcess(
                         command, 5, stderr=b"Velopack.dll"
                     )
@@ -479,7 +482,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert Path(calls[0][0]).parts[-4:] == (
         "runtime",
         "env",
@@ -490,7 +493,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     assert calls[1][1:] == ["--self-test-prerequisites"]
     assert calls[-1][2].endswith("smoke_web_workbench.ps1")
     # 子进程共享同一个独占解包根,并在结束后由 Python 清理。
-    assert len(unpack_roots) == 6
+    assert len(unpack_roots) == 7
     assert len({str(path) for path in unpack_roots}) == 1
     reused = unpack_roots[0]
     assert reused.name == "current"
@@ -596,7 +599,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 6
+    assert len(calls) == 7
     # handshake 失败后复用解包树仍由 Python 的 TemporaryDirectory 清理。
     assert not unpack_roots[0].exists()
 
