@@ -163,6 +163,16 @@ bmpBytes[1] = 0x4d;
     rgbaImage(80, 60, strokeRect(rect)), original, rect, options);
   assert(verdict.strayPixels === 0 &&
     Object.values(verdict.edgeCounts).every((count) => count >= 6));
+  // Correct strokes cannot conceal corrupt pixels, including alpha or the
+  // unpainted interior of the rectangle.
+  for (const [x, y, channel] of [[1, 1, 0], [40, 30, 1], [1, 1, 3]]) {
+    const corrupt = rgbaImage(80, 60, strokeRect(rect));
+    const pixels = Buffer.from(corrupt.rgbaBase64, 'base64');
+    pixels[(y * 80 + x) * 4 + channel] ^= 1;
+    corrupt.rgbaBase64 = pixels.toString('base64');
+    assert.throws(() => assertAnnotatedExportRectangle(corrupt, original, rect, options),
+      /unannotated pixels differ/);
+  }
   // The unannotated original (an export of the wrong revision) fails closed.
   assert.throws(() => assertAnnotatedExportRectangle(original, original, rect, options),
     /is not annotated there/);

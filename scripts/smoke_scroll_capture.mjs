@@ -1039,13 +1039,28 @@ export function assertAnnotatedExportRectangle(exportRgba, originalRgba, rect,
     x1: rect.right + margin * 2, y1: rect.bottom + margin * 2,
   };
   let stray = 0;
+  let changedBackgroundPixels = 0;
   for (let y = 0; y < exportRgba.height; y++)
-    for (let x = 0; x < exportRgba.width; x++)
+    for (let x = 0; x < exportRgba.width; x++) {
       if ((x < ring.x0 || x > ring.x1 || y < ring.y0 || y > ring.y1) &&
           near(exportPixels, (y * exportRgba.width + x) * 4)) stray++;
+      const strokeNeighborhood =
+        (x >= rect.left - margin && x <= rect.right + margin &&
+          (Math.abs(y - rect.top) <= margin || Math.abs(y - rect.bottom) <= margin)) ||
+        (y >= rect.top - margin && y <= rect.bottom + margin &&
+          (Math.abs(x - rect.left) <= margin || Math.abs(x - rect.right) <= margin));
+      const index = (y * exportRgba.width + x) * 4;
+      if (!strokeNeighborhood &&
+          (exportPixels[index] !== originalPixels[index] ||
+           exportPixels[index + 1] !== originalPixels[index + 1] ||
+           exportPixels[index + 2] !== originalPixels[index + 2] ||
+           exportPixels[index + 3] !== originalPixels[index + 3])) changedBackgroundPixels++;
+    }
   assert.equal(stray, 0,
     `${context}: ${stray} stroke-colored pixels appear outside the expected rectangle.`);
-  return { edgeCounts, strayPixels: stray };
+  assert.equal(changedBackgroundPixels, 0,
+    `${context}: unannotated pixels differ from the original (${changedBackgroundPixels}).`);
+  return { edgeCounts, strayPixels: stray, changedBackgroundPixels };
 }
 
 // Pure mapping mirroring annotationGeometry.imageTransform at rotation 0: the
