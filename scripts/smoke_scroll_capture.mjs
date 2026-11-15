@@ -37,8 +37,9 @@ const wheelSteps = 3;
 // need to cover the Supervisor cold start plus one inference each.
 const textLayerTimeoutMs = 300000; // Real text-layer preparation over the final PNG.
 const recognitionTimeoutMs = 900000; // Real explicit OCR result over the same PNG.
-// Public-state preflight before 取字: the engine catalog is only published
-// after the Supervisor attached; no retry loop and no extra OCR request.
+// Public-state preflight before the auto text layer: the engine catalog is
+// only published after the Supervisor attached; no retry loop and no extra
+// OCR request.
 const supervisorReadyTimeoutMs = 180000;
 const runtimePollMs = 1000;
 // Controller negatives: must exceed the product DynamicContentTimeoutMs (5 s)
@@ -346,54 +347,6 @@ async function connectEditor(app) {
   app.editorWindow = editors[0];
   app.evidence.editor = { url: page.url(), handle: app.editorWindow.Handle, sessionId: session.sessionId };
   return page;
-}
-
-// Prepared-candidate mode observes every public /__annotation upload (the
-// text-layer preparation and the explicit recognition each export one final
-// PNG) without altering the request. Records stay readable after restore.
-async function watchAnnotationUploads(page) {
-  const uploads = [];
-  await page.exposeFunction('__scrollCaptureRecordUpload', (entry) => uploads.push(entry));
-  await page.evaluate(() => {
-    const originalFetch = window.fetch;
-    const observed = [];
-    window.__scrollCaptureUploads = observed;
-    window.fetch = function(input, init) {
-      if (input === '/__annotation' && init?.method === 'POST') {
-        const entry = { mimeType: null, byteLength: null, bytes: null, problem: null };
-        observed.push(entry);
-        try {
-          const body = init.body;
-          if (!(body instanceof Blob)) entry.problem = 'upload body was not a Blob';
-          else {
-            entry.mimeType = body.type;
-            entry.byteLength = body.size;
-            body.arrayBuffer().then(
-              (buffer) => {
-                entry.bytes = Array.from(new Uint8Array(buffer));
-                return window.__scrollCaptureRecordUpload(entry);
-              },
-              () => {
-                entry.problem = 'Blob observation failed';
-                return window.__scrollCaptureRecordUpload(entry);
-              },
-            );
-          }
-        } catch {
-          entry.problem = 'Blob observation failed';
-        }
-        if (entry.problem) void window.__scrollCaptureRecordUpload(entry);
-      }
-      return originalFetch.apply(this, arguments);
-    };
-    window.__scrollCaptureRestoreUploads = () => {
-      window.fetch = originalFetch;
-      delete window.__scrollCaptureRestoreUploads;
-    };
-  });
-  // Scene recognition closes this WebView; retain the passive upload evidence
-  // in the harness before that handoff instead of reading a closed page.
-  return uploads;
 }
 
 // Public annotation edit on the live scene editor (shared by the main round
@@ -980,6 +933,67 @@ export function assertSceneTerminalExport(action, timeline, artifactBytes, uploa
   return true;
 }
 
+// Prepared-flow upload binding (#320): the editor now prepares the text
+// layer AUTOMATICALLY per revision (no 取字 tool anymore) and explicit
+// recognition re-exports, so multiple /__annotation uploads for different
+// revisions coexist. Every public prepare/recognize command carries
+// sessionId+revision+resourceUri and each upload consumes its own lease, so
+// the ONLY valid pixel source is the accepted 201 upload whose resourceUri
+// matches the command bound to THIS session/revision - never the first
+// upload and never a stale revision. The command must use the production
+// scene scope (recognition.*), its resource must be a product __annotation
+// URI, the upload must strictly precede the command
+// (requestOrder < responseOrder < command.order), and a failure receipt for
+// the very envelope fails closed.
+export function assertRevisionBoundUpload(timeline, action, sessionId, revision,
+  context = 'Prepared flow upload binding') {
+  assert(timeline && Array.isArray(timeline.copyCommands) &&
+      Array.isArray(timeline.uploads),
+    `${context}: scene timeline evidence is missing.`);
+  const matching = timeline.copyCommands.filter((item) =>
+    item.action === action && item.sessionId === sessionId &&
+    item.revision === revision);
+  assert.equal(matching.length, 1,
+    `${context}: expected exactly one public ${action} command for session ` +
+    `${sessionId} revision ${revision}, found ${matching.length}: ` +
+    `${JSON.stringify(timeline.copyCommands)}`);
+  const command = matching[0];
+  assert.equal(command.scope ?? null, 'recognition',
+    `${context}: the ${action} command did not use the production scene ` +
+    `scope recognition: ${JSON.stringify(command)}`);
+  assert(typeof command.resourceUri === 'string' && command.resourceUri.length > 0,
+    `${context}: the ${action} command carried no resourceUri: ${JSON.stringify(command)}`);
+  let resource;
+  try { resource = new URL(command.resourceUri); }
+  catch { assert.fail(`${context}: the ${action} resourceUri is not a valid URL: ` +
+      `${command.resourceUri}`); }
+  assert(resource.origin === 'https://app.vibeocr' &&
+      resource.pathname.startsWith('/__annotation/'),
+    `${context}: the ${action} command resource is not a product ` +
+    `__annotation URI: ${command.resourceUri}`);
+  const associated = timeline.uploads.filter((upload) =>
+    upload.resourceUri === command.resourceUri);
+  assert.equal(associated.length, 1,
+    `${context}: the ${action} resource must match exactly one upload: ` +
+    `${JSON.stringify(timeline.uploads)}`);
+  const upload = associated[0];
+  assert.equal(upload.responseStatus ?? null, 201,
+    `${context}: the ${action} upload was not accepted: ${JSON.stringify(upload)}`);
+  assert(Number.isSafeInteger(upload.requestOrder) &&
+      Number.isSafeInteger(upload.responseOrder) &&
+      Number.isSafeInteger(command.order) &&
+      upload.requestOrder < upload.responseOrder &&
+      upload.responseOrder < command.order,
+    `${context}: the ${action} upload/command ordering is unsound ` +
+    `(upload must strictly precede the command): ` +
+    `${JSON.stringify({ upload, command })}`);
+  assert(!((timeline.copyReceipts ?? []).some((receipt) =>
+    receipt.envelopeId === command.envelopeId && receipt.ok === false)),
+    `${context}: the host rejected the public ${action} command: ` +
+    `${JSON.stringify(timeline.copyReceipts)}`);
+  return { command, upload };
+}
+
 // Pure judge for the annotated terminal export (#320 review fix): the export
 // must carry this revision's annotation inside the expected NATURAL-image
 // rectangle; the unannotated original or a misplaced annotation fails closed.
@@ -1198,8 +1212,8 @@ function assertRequiredRows(label, normalized, maxRow) {
 
 // Bounded preflight on public state only: the recognition engine catalog is
 // published (non-empty) after the Supervisor attached and the runtime catalog
-// was negotiated. Waiting here keeps 取字 from submitting while the service
-// is still starting; failures are diagnosed from the real public status.
+// was negotiated. Waiting here keeps the auto text layer from racing a
+// still-starting service; failures are diagnosed from the real public status.
 async function waitForRecognitionService(app, timeoutMs) {
   const until = Date.now() + timeoutMs;
   while (true) {
@@ -1281,40 +1295,49 @@ async function waitForScreenshotRecognition(app, sessionId, revision) {
   }
 }
 
-// Prepared-candidate step, inserted after the same-session edit and before the
-// cancel phase: switch to 取字 through the public toolbar button, let the real
-// Runtime prepare the in-place text layer for the current stitched final PNG,
-// verify the binding/image/rows, then click 识别当前图 and verify the real OCR
-// result still references the same screenshot session and covers rows from
-// both the top and the bottom of the long image.
+// Prepared-candidate step, inserted after the same-session edit and before
+// the cancel phase. The product UI now prepares the in-place text layer
+// AUTOMATICALLY for the final annotated revision (no 取字 tool anymore), so
+// the public upload/command observer (observeSceneCopyTerminal widened to
+// prepareScreenshotTextLayer/recognizeScreenshotImage) is installed BEFORE
+// annotateSceneRectangle triggers the revision bump - installing here would
+// miss that first upload. Binding goes through the public command envelope
+// (sessionId+revision+resourceUri) to the accepted upload, never the first
+// record. The public 识别文字 button then submits explicit recognition (the
+// scene hands off and closes) and the real OCR result must still reference
+// the same session and cover rows from both the top and the bottom.
 async function verifyPreparedCandidateRecognition(app, {
   evidenceRoot, fixture, selection, analysis, sessionId, revision, originalRgba,
-  annotationRect,
+  annotationRect, terminal,
 }) {
   const page = app.editorPage;
   const startY = selection.top - fixture.clientRect.top;
   const maxRow = Math.floor((analysis.height - 1 + startY) / fixture.rowHeight);
   assert(requiredTopRow <= maxRow && requiredBottomRow <= maxRow,
     'Stitched document does not reach the required coverage rows for this fixture.');
-  const recognitionUploads = await watchAnnotationUploads(page);
+  assert(terminal && Array.isArray(terminal.timeline?.copyCommands),
+    'Prepared recognition requires the scene observer installed before the annotation.');
+  // Bounded passive wait until one accepted 201 upload is bound to THIS
+  // session/revision's public command (the auto layer re-exports ~400 ms
+  // after the revision bump; a stale-revision upload never satisfies this).
+  const waitForRevisionUpload = async (action, timeoutMs) => {
+    const bound = () => terminal.timeline.copyCommands.some((item) =>
+      item.action === action && item.sessionId === sessionId &&
+      item.revision === revision && terminal.timeline.uploads.some((upload) =>
+        upload.resourceUri === item.resourceUri && upload.responseStatus === 201));
+    const until = Date.now() + timeoutMs;
+    while (!bound() && Date.now() < until) await delay(150);
+    return assertRevisionBoundUpload(terminal.timeline, action, sessionId, revision);
+  };
   try {
-    // Observe public state before submitting anything: the catalog proves the
-    // real Runtime service is up, so 取字 never races Supervisor startup.
+    // Observe public state before reading any layer outcome: the catalog
+    // proves the real Runtime service is up, so a textlayer.unavailable here
+    // is a product/service failure, not a startup race.
     await waitForRecognitionService(app, supervisorReadyTimeoutMs);
-    await page.getByRole('button', { name: '取字', exact: true }).click();
     const layer = await waitForScreenshotTextLayer(app, sessionId, revision);
-    await page.waitForFunction(() => {
-      const uploads = window.__scrollCaptureUploads ?? [];
-      return uploads.length >= 1 &&
-        (Array.isArray(uploads[0].bytes) || uploads[0].problem !== null);
-    }, null, { timeout: 30000 });
-    const uploaded = (await page.evaluate(() => window.__scrollCaptureUploads ?? []))
-      .find((item) => Array.isArray(item.bytes));
-    assert(uploaded, 'Text layer preparation produced no observable PNG upload.');
-    assert.equal(uploaded.problem, null,
-      `Text layer upload observation failed: ${uploaded.problem}.`);
-    assert.equal(uploaded.mimeType, 'image/png', 'Text layer upload was not image/png.');
-    const uploadPng = Buffer.from(uploaded.bytes);
+    const prepareBound = await waitForRevisionUpload('prepareScreenshotTextLayer', 30000);
+    const uploadPng = await collectSceneCopyUploadBlob(terminal, prepareBound.upload,
+      'Prepared text layer upload');
     assert(uploadPng.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
       'Text layer upload Blob is not PNG.');
     // Same annotated-pixel judge as the terminal copy: this revision's export
@@ -1325,7 +1348,7 @@ async function verifyPreparedCandidateRecognition(app, {
     const image = layer.image;
     assert(image?.url, 'Ready text layer published no image resource.');
     assert.equal(image.mediaType, 'image/png', 'Text layer image is not image/png.');
-    assert.equal(image.byteLength, uploaded.byteLength,
+    assert.equal(image.byteLength, uploadPng.length,
       'Text layer image bytes differ from the exported final PNG upload.');
     const imageProbe = await page.evaluate(async (url) => {
       const response = await fetch(url, { cache: 'no-store' });
@@ -1348,6 +1371,7 @@ async function verifyPreparedCandidateRecognition(app, {
       `long image height ${analysis.height}.`);
     fs.writeFileSync(path.join(evidenceRoot, 'scroll-text-layer-input.png'), uploadPng);
 
+    await page.getByRole('button', { name: '选择', exact: true }).click();
     await page.waitForSelector('.image-text-layer', { timeout: 15000 });
     const domLines = await page.$$eval('.image-text-layer .image-text-line',
       (nodes) => nodes.map((node) => node.textContent ?? ''));
@@ -1360,10 +1384,43 @@ async function verifyPreparedCandidateRecognition(app, {
       normalizeOcrText([...layerLines.map((line) => line.text), ...domLines].join('\n')),
       maxRow);
 
-    const editorClosed = page.waitForEvent('close', { timeout: 30000 });
-    await page.getByRole('button', { name: '识别当前图' }).click();
-    await editorClosed;
+    // Explicit recognition through today's public button: the public command
+    // and its accepted upload must bind to THIS session/revision before the
+    // scene hands off and closes. The close itself is observed through the
+    // SAME scene observer (terminal.ended + bounded race), never an early
+    // page.waitForEvent whose unhandled rejection could skip the cleanup;
+    // the scene must close NORMALLY, without a crash, and strictly AFTER the
+    // public recognize command.
+    const clickError = await page.getByRole('button', { name: '识别文字', exact: true }).click()
+      .then(() => null, (error) => `${error.name}: ${error.message}`);
+    let recognizeBound;
+    try {
+      recognizeBound = await waitForRevisionUpload('recognizeScreenshotImage', 30000);
+    } catch (error) {
+      assert(!clickError, `Recognize click failed: ${clickError ?? 'no error'}`);
+      throw error;
+    }
+    const closeDeadline = raceDeadline(30000);
+    let sceneEnded;
+    try {
+      sceneEnded = await Promise.race([terminal.ended.then(() => true), closeDeadline.promise]);
+    } finally {
+      closeDeadline.clear();
+    }
+    assert(sceneEnded,
+      `Recognition scene did not close in time: ${JSON.stringify(terminal.timeline)}`);
+    assert.equal(terminal.timeline.crashedAt ?? null, null,
+      `Recognition scene crashed instead of closing: ${JSON.stringify(terminal.timeline)}`);
+    assert(Number.isSafeInteger(terminal.timeline.closedOrder) &&
+        terminal.timeline.closedOrder > recognizeBound.command.order,
+      `Recognition scene closed before the public recognize command: ` +
+      `${JSON.stringify(terminal.timeline)}`);
     const completed = await waitForScreenshotRecognition(app, sessionId, revision);
+    const recognizePng = await collectSceneCopyUploadBlob(terminal, recognizeBound.upload,
+      'Prepared recognition upload');
+    assert(recognizePng.equals(uploadPng),
+      'Explicit recognition exported different final PNG content after the text layer.');
+    fs.writeFileSync(path.join(evidenceRoot, 'scroll-recognition-input.png'), recognizePng);
     // Direct proof of the ACTUAL recognition input: the completed snapshot's
     // input must be the same local product resource and its fetched bytes must
     // equal this revision's exported annotation PNG.
@@ -1389,21 +1446,13 @@ async function verifyPreparedCandidateRecognition(app, {
     const resultRows = assertRequiredRows('Explicit recognition',
       normalizeOcrText(resultText), maxRow);
     fs.writeFileSync(path.join(evidenceRoot, 'scroll-recognition-result.txt'), resultText);
-    // Both exports must have resolved their async Blob observation before any
-    // byte comparison; length equality alone never counts as content equality.
-    const uploadDeadline = Date.now() + 30000;
-    while (recognitionUploads.length < 2 && Date.now() < uploadDeadline) await delay(100);
-    assert(recognitionUploads.length >= 2,
-      'Text-layer and recognition uploads were not both observed before editor handoff.');
-    const recognized = recognitionUploads[recognitionUploads.length - 1];
-    assert.equal(recognized?.problem, null,
-      `Explicit recognition upload observation failed: ${recognized?.problem}.`);
-    const recognizePng = Buffer.from(recognized?.bytes ?? []);
-    assert(recognizePng.equals(uploadPng),
-      'Explicit recognition exported different final PNG content after the text layer.');
-    if (Array.isArray(recognized?.bytes))
-      fs.writeFileSync(path.join(evidenceRoot, 'scroll-recognition-input.png'),
-        Buffer.from(recognized.bytes));
+    // Final re-check over the COMPLETE timeline: a late duplicate prepare or
+    // recognize command bound to the same session/revision fails closed here,
+    // and the timeline itself is retained as evidence for exactly that.
+    assertRevisionBoundUpload(terminal.timeline, 'prepareScreenshotTextLayer',
+      sessionId, revision, 'Prepared final recheck (prepare)');
+    assertRevisionBoundUpload(terminal.timeline, 'recognizeScreenshotImage',
+      sessionId, revision, 'Prepared final recheck (recognize)');
     await app.page.screenshot({ path: path.join(evidenceRoot, 'scroll-recognition.png') });
     return {
       textLayer: {
@@ -1425,13 +1474,15 @@ async function verifyPreparedCandidateRecognition(app, {
         inputUrl: completed.input.url,
         resultChars: resultText.length,
         coveredRows: resultRows,
-        uploadCount: recognitionUploads.length,
-        recognizeUploadBytes: recognized?.byteLength ?? null,
+        uploadCount: terminal.timeline.uploads.length,
+        recognizeUploadBytes: recognizeBound.upload.blobMeta?.byteLength ?? null,
         recognizeUploadEqualsLayerUpload: recognizePng.equals(uploadPng),
+        finalBindingRecheck: true,
+        timeline: terminal.timeline,
       },
     };
   } finally {
-    await page.evaluate(() => window.__scrollCaptureRestoreUploads?.()).catch(() => {});
+    await page.evaluate(() => window.__nativeActionsRestoreFetch?.()).catch(() => {});
   }
 }
 
@@ -1596,8 +1647,21 @@ async function verifyReverseRecovery(app, fixture) {
   // result preview, so the controller closes with the completed session.
   assert.deepEqual(await sessionEvidence(app.page), sessionsBefore,
     'Capture published output before the finish action.');
-  await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
-  await waitForControlBarGone(appPid, 'scroll-capture-finish', 15000);
+  try {
+    await native('uia-invoke', { AppPid: appPid, AutomationId: 'scroll-capture-finish' });
+    await waitForControlBarGone(appPid, 'scroll-capture-finish', 15000);
+  } catch (error) {
+    app.evidence.reverseFinish = { resumed: resumed.text, error: error.message };
+    try {
+      app.evidence.reverseFinish.probe = JSON.parse(await native('probe', {
+        AppPid: appPid, FixturePid: fixture.pid,
+        X: opened.selection.left + 100, Y: opened.selection.top + 100,
+      }));
+    } catch (probeError) {
+      app.evidence.reverseFinish.probeError = probeError.message;
+    }
+    throw error;
+  }
   await app.page.waitForFunction((ids) => {
     const session = window.__scrollCaptureCurrentSession;
     return typeof session?.sessionId === 'string' && !ids.includes(session.sessionId);
@@ -1732,7 +1796,8 @@ async function main() {
 
     // 0) Prepared warmup: retained state alone proves no live Supervisor; one
     // real public 单次识别→从剪贴板 OCR over this run's own fixture image
-    // proves the connection before 取字. Its adopted legacy session stays as
+    // proves the connection before the auto text layer and explicit
+    // recognition. Its adopted legacy session stays as
     // the REAL baseline: cancels must preserve it verbatim, and scroll-session
     // assertions only count sessions beyond that baseline.
     if (preparedCandidateRoot) {
@@ -1749,7 +1814,7 @@ async function main() {
         return state && state.isBusy === false &&
           ['recognition.completed', 'recognition.failed',
             'recognition.modeUnavailable', 'recognition.expired',
-            'recognition.cancelled'].includes(state.statusCode);
+            'recognition.cancelled'].includes(state.statusCode) ? state : false;
       }, null, { timeout: recognitionTimeoutMs });
       const warmupState = await warmupHandle.jsonValue();
       assert.equal(warmupState.statusCode, 'recognition.completed',
@@ -1854,6 +1919,17 @@ async function main() {
     evidence.finishTiming.sessionArrivalAfterMs = arrived.at - evidence.finishTiming.invokedAtWall;
     const revisionBefore = sessionsBeforeEdit.at(-1).revision ?? 0;
     const editorPage = app.editorPage;
+    // Prepared mode only: the product now re-exports the final annotated PNG
+    // and runs the public prepareScreenshotTextLayer command AUTOMATICALLY
+    // (~400 ms after the revision bump), so the scene observer must wrap
+    // fetch/postMessage BEFORE the annotation drag; installing it inside the
+    // verification would miss that first (and correct) upload. The wrapper is
+    // passive and is torn down with the editor page at the recognition
+    // handoff; Node keeps the timeline and Blob evidence afterwards.
+    const preparedTerminal = preparedCandidateRoot
+      ? await observeSceneCopyTerminal(editorPage,
+        { actions: ['prepareScreenshotTextLayer', 'recognizeScreenshotImage'] })
+      : null;
     const { plan, cssBox, logical } = await annotateSceneRectangle(editorPage,
       { width: analysis.width, height: analysis.height });
     const editedSession = await waitForRevisionBump(app, revisionBefore);
@@ -1876,8 +1952,9 @@ async function main() {
     };
     await editorPage.screenshot({ path: path.join(smokeRoot, 'scroll-capture-editor.png') });
 
-    // 3b) Prepared-candidate mode only: real Runtime text layer plus explicit
-    // OCR over the same stitched final image, before the cancel phase runs.
+    // 3b) Prepared-candidate mode only: real Runtime auto text layer plus
+    // explicit OCR over the same stitched final image, before the cancel
+    // phase runs (the recognition handoff closes this editor scene).
     if (preparedCandidateRoot) {
       const verified = await verifyPreparedCandidateRecognition(app, {
         evidenceRoot: smokeRoot,
@@ -1888,6 +1965,7 @@ async function main() {
         revision: sessionsAfterEdit.at(-1).revision,
         originalRgba,
         annotationRect,
+        terminal: preparedTerminal,
       });
       evidence.textLayer = verified.textLayer;
       evidence.explicitRecognition = verified.recognition;

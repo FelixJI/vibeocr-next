@@ -448,6 +448,8 @@ const settleMicrotasks = async (until, limit = 200) => {
     const copyUpload = observed.timeline.uploads.find((item) => item.resourceUri === copyUri);
     const layerUpload = observed.timeline.uploads.find((item) => item.resourceUri === layerUri);
     const command = observed.timeline.copyCommands[0];
+    assert.equal(command.sessionId, 'scene');
+    assert.equal(command.revision, 2);
     assert(copyUpload.requestOrder < copyUpload.responseOrder &&
       copyUpload.responseOrder < copyUpload.uriOrder &&
       copyUpload.uriOrder < command.order,
@@ -700,7 +702,9 @@ console.log('case21 decoded-clipboard-size: ok');
 // AFTER the 201 upload, the copy command and the close, so the holder must
 // await the Blob FIRST and only then validate meta/bytes (the previous
 // meta-first assertion raced a still-null blobMeta). Real async product
-// mirror: timer-resolved fetch/json, close before the Blob, then delivery.
+// mirror: timer-resolved fetch/json, close before the Blob; the Blob's
+// arrayBuffer is released by an EXPLICIT gate only after the close is
+// observed and blobMeta is proven null (no timer-vs-timer race).
 {
   const copyUri = `https://app.vibeocr/__annotation/${'9'.repeat(32)}`;
   const page = fakeScenePage();
@@ -708,11 +712,12 @@ console.log('case21 decoded-clipboard-size: ok');
   const emit = (event) => page.bindings.get('__sceneCopyObserver')(null, event);
   const pngMagic = [137, 80, 78, 71, 13, 10, 26, 10, 1, 2];
   // 真实晚到路径:观察器自己在 fetch 时调用 body.arrayBuffer(),其异步
-  // 解析可以落在 201/命令/关窗之后;用延迟解析的 Blob 子类确定性复现。
+  // 解析可以落在 201/命令/关窗之后;用显式门控的 Blob 子类确定性复现。
+  let releaseLateBlob;
+  const lateBlobGate = new Promise((resolve) => { releaseLateBlob = resolve; });
   class LateBlob extends Blob {
     arrayBuffer() {
-      return new Promise((resolve) =>
-        setTimeout(() => super.arrayBuffer().then(resolve), 20));
+      return lateBlobGate.then(() => super.arrayBuffer());
     }
   }
   const channel = { postMessage() {}, addEventListener() {}, removeEventListener() {} };
@@ -738,9 +743,10 @@ console.log('case21 decoded-clipboard-size: ok');
     await settleMicrotasks(() => terminal.timeline.uploads[0]?.uriOrder !== null);
     assert.equal(settleSceneCopyTimeline(terminal.timeline), true);
     const upload = terminal.timeline.uploads[0];
-    // 复制时间线已完整成立,而 Blob 证据仍在真实异步途中未到达:
+    // 复制时间线已完整成立,而 Blob 证据仍被门控拦在真实异步途中:
     // 旧实现先断言 blobMeta 必然失败,新实现先等待再验证。
     assert.equal(upload.blobMeta, null);
+    releaseLateBlob();
     const blob = await collectSceneCopyUploadBlob(terminal, upload);
     assert(Buffer.isBuffer(blob) && blob.equals(Buffer.from(pngMagic)));
     assert.equal(upload.blobMeta.byteLength, pngMagic.length);

@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const { detectImageMediaType, assertScrollSessionOriginal,
   assertSceneTerminalExport, assertAnnotatedExportRectangle,
+  assertRevisionBoundUpload,
   planAnnotationInjection } = await import(
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_scroll_capture.mjs')).href);
 
@@ -371,6 +372,97 @@ bmpBytes[1] = 0x4d;
     natural: { width: 0, height: 100 }, logical: { width: 100, height: 100 },
     css: css(100, 100) }), /geometry is invalid/);
   console.log('case5 annotation-injection-mapping: ok');
+}
+
+// 6. assertRevisionBoundUpload: the prepared flow's pixel source must be
+// the accepted 201 upload whose lease (resourceUri) was consumed by the
+// public command bound to THIS session/revision - the auto text layer and
+// the explicit recognition can each export multiple revisions, so the first
+// upload or a stale revision must never satisfy the binding. The command
+// must use the production scene scope (recognition), a product __annotation
+// resource, strict upload-before-command ordering, and no failure receipt.
+{
+  const session = 'scroll-session';
+  const uri = (name) => `https://app.vibeocr/__annotation/${name}`;
+  const command = (name, action, revision, order, scope = 'recognition',
+    resourceUri) => ({ envelopeId: `cmd-${name}`, at: 1000, order, action,
+    scope, resourceUri: resourceUri ?? uri(name), sessionId: session, revision });
+  const upload = (name, requestOrder, responseOrder, responseStatus = 201) =>
+    ({ seq: 1, requestAt: 1000, requestOrder, responseStatus, responseAt: 1000,
+      responseOrder, resourceUri: uri(name), uriAt: 1000, uriOrder: responseOrder,
+      error: null, blobMeta: { mimeType: 'image/png', byteLength: 12, problem: null } });
+  const timeline = {
+    copyCommands: [
+      command('rev0', 'prepareScreenshotTextLayer', 0, 3),
+      command('rev1', 'prepareScreenshotTextLayer', 1, 6),
+      command('rec1', 'recognizeScreenshotImage', 1, 9),
+    ],
+    uploads: [upload('rev0', 1, 2), upload('rev1', 4, 5), upload('rec1', 7, 8)],
+    copyReceipts: [],
+  };
+
+  // The final annotated revision binds to its own command and upload.
+  const bound = assertRevisionBoundUpload(timeline, 'prepareScreenshotTextLayer',
+    session, 1, 'Binding judge');
+  assert.equal(bound.command.resourceUri, uri('rev1'));
+  assert.equal(bound.upload.resourceUri, uri('rev1'));
+  const recognized = assertRevisionBoundUpload(timeline, 'recognizeScreenshotImage',
+    session, 1, 'Binding judge');
+  assert.equal(recognized.upload.resourceUri, uri('rec1'));
+  // A stale revision (the pre-annotation export) never satisfies the binding.
+  assert.throws(() => assertRevisionBoundUpload(timeline, 'recognizeScreenshotImage',
+    session, 0, 'Binding judge'), /found 0/);
+  assert.throws(() => assertRevisionBoundUpload(timeline, 'prepareScreenshotTextLayer',
+    'other-session', 1, 'Binding judge'), /found 0/);
+  // Duplicate commands for the same revision (incl. the verify-time final
+  // re-check catching a LATE duplicate) fail closed.
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    copyCommands: [...timeline.copyCommands,
+      command('dup', 'prepareScreenshotTextLayer', 1, 12)] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'), /found 2/);
+  // A rejected upload never passes.
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    uploads: [upload('rev0', 1, 2), upload('rev1', 4, 5, 413), upload('rec1', 7, 8)] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'), /not accepted/);
+  // A command whose lease has no matching upload record never passes.
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    uploads: [upload('rev0', 1, 2), upload('rec1', 7, 8)] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'),
+    /match exactly one upload/);
+  // Wrong production scope, non-product resource URIs and unsound ordering
+  // each fail closed (minimal one-field counterexamples).
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    copyCommands: [command('rev1', 'prepareScreenshotTextLayer', 1, 6, 'imageEdit'),
+      timeline.copyCommands[0], timeline.copyCommands[2]] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'),
+    /production scene scope/);
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    copyCommands: [timeline.copyCommands[0],
+      command('rev1', 'prepareScreenshotTextLayer', 1, 6, 'recognition',
+        'https://evil.example/__annotation/rev1'),
+      timeline.copyCommands[2]] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'),
+    /not a product .*__annotation/);
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    copyCommands: [timeline.copyCommands[0],
+      command('rev1', 'prepareScreenshotTextLayer', 1, 6, 'recognition',
+        'https://app.vibeocr/__resource/rev1'),
+      timeline.copyCommands[2]] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'),
+    /not a product .*__annotation/);
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    uploads: [upload('rev0', 1, 2), upload('rev1', 5, 6), upload('rec1', 7, 8)] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'),
+    /ordering is unsound/);
+  // A failure receipt for the very matched envelope is a host rejection.
+  assert.throws(() => assertRevisionBoundUpload({ ...timeline,
+    copyReceipts: [{ envelopeId: 'cmd-rev1', at: 1000, order: 7,
+      ok: false, problemCode: 'desktop_command_failed' }] },
+    'prepareScreenshotTextLayer', session, 1, 'Binding judge'), /host rejected/);
+  // Missing timeline evidence fails closed.
+  assert.throws(() => assertRevisionBoundUpload(null, 'prepareScreenshotTextLayer',
+    session, 1, 'Binding judge'), /timeline evidence is missing/);
+  console.log('case6 prepared-revision-upload-binding: ok');
 }
 
 console.log('smoke_scroll_capture pure-judge contract: ok');
