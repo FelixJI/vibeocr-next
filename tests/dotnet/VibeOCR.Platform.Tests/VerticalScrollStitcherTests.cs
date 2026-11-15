@@ -8,6 +8,9 @@ public sealed class VerticalScrollStitcherTests
 {
   private const int Width = 48;
   private const int FrameHeight = 96;
+  private readonly ITestOutputHelper _output;
+
+  public VerticalScrollStitcherTests(ITestOutputHelper output) => _output = output;
 
   // 行首像素编码行号，其余像素随 x/y 变化，保证任意两行内容都不同（可辨识、无周期）。
   private static byte[] RenderDocument(int width, int height)
@@ -728,5 +731,103 @@ public sealed class VerticalScrollStitcherTests
   {
     Assert.Throws<ArgumentOutOfRangeException>(
       () => VerticalScrollStitcher.GetMinimumOverlap(0));
+  }
+
+  [Fact]
+  public void DuplicateFastPathKeepsFixedEdgeAndCancellationSemantics()
+  {
+    byte[] document = RenderDocument(Width, FrameHeight);
+    CapturedFrame Frame() => WithEdges(FrameFromDocument(document, Width, 0, FrameHeight));
+    var stitcher = new VerticalScrollStitcher(Frame(), fixedLeadingPixels: 4, fixedTrailingPixels: 6);
+
+    // 完全相同的紧凑向下帧是重复帧，不增长。
+    Assert.Equal(ScrollAppendStatus.Duplicate,
+      stitcher.Append(Frame(), TestContext.Current.CancellationToken).Status);
+    // 去重快路径必须同样检测固定边缘变化：不能被“主体相同”短路吞掉。
+    CapturedFrame edgeChanged = Frame();
+    edgeChanged.Pixels[2] ^= 1;
+    Assert.Equal(ScrollAppendStatus.FixedContentChanged,
+      stitcher.Append(edgeChanged, TestContext.Current.CancellationToken).Status);
+    // 主体单行变化既不是重复、也没有可靠重叠。
+    CapturedFrame bodyChanged = Frame();
+    bodyChanged.Pixels[(4 + 10) * bodyChanged.Stride] ^= 1;
+    Assert.Equal(ScrollAppendStatus.NoOverlap,
+      stitcher.Append(bodyChanged, TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, stitcher.FrameCount);
+    Assert.Equal(Frame().Pixels, stitcher.BuildFrame(TestContext.Current.CancellationToken).Pixels);
+
+    // 带 padding 的向下帧与需要归一化的向上帧，重复判定语义保持一致。
+    var padded = new VerticalScrollStitcher(
+      FrameFromDocument(document, Width, 0, FrameHeight, stride: Width * 4 + 16));
+    Assert.Equal(ScrollAppendStatus.Duplicate, padded.Append(
+      FrameFromDocument(document, Width, 0, FrameHeight, stride: Width * 4 + 16),
+      TestContext.Current.CancellationToken).Status);
+    CapturedFrame Up() => Orient(FrameFromDocument(document, Width, 0, FrameHeight), ScrollCaptureDirection.Up);
+    var upward = new VerticalScrollStitcher(Up(), ScrollCaptureDirection.Up);
+    Assert.Equal(ScrollAppendStatus.Duplicate,
+      upward.Append(Up(), TestContext.Current.CancellationToken).Status);
+    Assert.Equal(1, upward.FrameCount);
+
+    // 去重路径同样响应取消，且不留任何半改变状态。
+    using var cancelled = new CancellationTokenSource();
+    cancelled.Cancel();
+    Assert.Throws<OperationCanceledException>(
+      () => stitcher.Append(Frame(), cancelled.Token));
+    Assert.Equal(1, stitcher.FrameCount);
+  }
+
+  [Fact]
+  public void AppendHotPathAllocationsAreMeasured()
+  {
+    byte[] document = RenderDocument(Width, FrameHeight + 30);
+    CapturedFrame Frame(int top) => FrameFromDocument(document, Width, top, FrameHeight);
+    CancellationToken token = TestContext.Current.CancellationToken;
+    // 夹具构造在测量区外：口径只覆盖 Append 本身，避免把每帧像素分配计入拼接器。
+    var stitcher = new VerticalScrollStitcher(Frame(0));
+    CapturedFrame warmup = Frame(0), duplicate = Frame(0), accepted = Frame(30);
+    _ = stitcher.Append(warmup, token); // 预热 JIT 分层，避免首次调用噪声。
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    _ = stitcher.Append(duplicate, token);
+    long duplicateAllocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    before = GC.GetAllocatedBytesForCurrentThread();
+    _ = stitcher.Append(accepted, token);
+    long acceptedAllocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+    CapturedFrame upWarmup = Orient(Frame(0), ScrollCaptureDirection.Up);
+    CapturedFrame upDuplicate = Orient(Frame(0), ScrollCaptureDirection.Up);
+    var upward = new VerticalScrollStitcher(upWarmup, ScrollCaptureDirection.Up);
+    _ = upward.Append(upDuplicate, token);
+    before = GC.GetAllocatedBytesForCurrentThread();
+    _ = upward.Append(upDuplicate, token);
+    long upwardDuplicateAllocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+    // 记录同 fixture 的重复帧/接受帧分配口径，作为 before/after 证据；不做随环境抖动的硬阈值断言。
+    _output.WriteLine(
+      $"bodyBytes={Width * FrameHeight * 4} duplicate={duplicateAllocated} accepted={acceptedAllocated} upwardDuplicate={upwardDuplicateAllocated}");
+    Assert.Equal(2, stitcher.FrameCount);
+    Assert.Equal(1, upward.FrameCount);
+  }
+
+  [Fact]
+  public void TightDownDuplicateAppendAllocatesNoScratch()
+  {
+    byte[] document = RenderDocument(Width, FrameHeight + 30);
+    CapturedFrame Frame(int top) => FrameFromDocument(document, Width, top, FrameHeight);
+    CancellationToken token = TestContext.Current.CancellationToken;
+
+    var stitcher = new VerticalScrollStitcher(Frame(0));
+    CapturedFrame warmup = Frame(0), duplicate = Frame(0), accepted = Frame(30);
+    _ = stitcher.Append(warmup, token);
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    _ = stitcher.Append(duplicate, token);
+    long duplicateAllocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    // 紧凑向下重复帧直接在输入上比对：零暂存分配。
+    Assert.Equal(0L, duplicateAllocated);
+
+    before = GC.GetAllocatedBytesForCurrentThread();
+    _ = stitcher.Append(accepted, token);
+    long acceptedAllocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    // 接受帧只分配独立所有权副本（previous 副本 + 新条带），不再有整帧归一化暂存。
+    Assert.InRange(acceptedAllocated, 1, 2L * Width * FrameHeight * 4);
   }
 }

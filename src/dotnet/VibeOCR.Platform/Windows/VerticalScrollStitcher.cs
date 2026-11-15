@@ -58,12 +58,15 @@ public sealed class VerticalScrollStitcher
     _frameWidth = Horizontal ? first.Height : first.Width;
     _frameHeight = axis - fixedLeadingPixels - fixedTrailingPixels;
     _frameRowBytes = checked(_frameWidth * 4);
-    byte[] packed = Normalize(first, CancellationToken.None);
     int leadingRows = Reversed ? fixedTrailingPixels : fixedLeadingPixels;
     int trailingRows = Reversed ? fixedLeadingPixels : fixedTrailingPixels;
-    _leading = packed.AsSpan(0, leadingRows * _frameRowBytes).ToArray();
-    _trailing = packed.AsSpan(packed.Length - trailingRows * _frameRowBytes).ToArray();
-    _firstFrame = packed.AsSpan(_leading.Length, _frameHeight * _frameRowBytes).ToArray();
+    // A tight downward first frame already has the normalized layout; slice the
+    // independent ownership copies directly instead of materializing a full-frame scratch.
+    ReadOnlySpan<byte> normalized =
+        IsNormalizedFrame(first) ? first.Pixels : Normalize(first, CancellationToken.None);
+    _leading = normalized.Slice(0, leadingRows * _frameRowBytes).ToArray();
+    _trailing = normalized.Slice(normalized.Length - trailingRows * _frameRowBytes).ToArray();
+    _firstFrame = normalized.Slice(_leading.Length, _frameHeight * _frameRowBytes).ToArray();
     if (HasNoVerticalVariation(_firstFrame, CancellationToken.None))
       throw new InvalidDataException("The first frame has no vertical variation along the selected scroll axis.");
     _previousFrame = _firstFrame;
@@ -93,20 +96,26 @@ public sealed class VerticalScrollStitcher
     if (next.Width != _sourceWidth || next.Height != _sourceHeight)
       throw new ArgumentException("Frame size does not match the first frame.", nameof(next));
     cancellationToken.ThrowIfCancellationRequested();
-    byte[] full = Normalize(next, cancellationToken);
-    if (!full.AsSpan(0, _leading.Length).SequenceEqual(_leading) ||
-        !full.AsSpan(full.Length - _trailing.Length).SequenceEqual(_trailing))
+    // Pre-acceptance checks (fixed edges, deduplication, texture and matching) run
+    // directly on spans; the full-frame normalized scratch is only needed when the
+    // caller's layout differs from the normalized one. The dedup shortcut keeps the
+    // same token/geometry/fixed-edge checks and never bypasses cancellation.
+    byte[]? scratch = IsNormalizedFrame(next) ? null : Normalize(next, cancellationToken);
+    ReadOnlySpan<byte> normalized = scratch ?? next.Pixels;
+    ReadOnlySpan<byte> body = normalized.Slice(_leading.Length, _frameHeight * _frameRowBytes);
+    cancellationToken.ThrowIfCancellationRequested();
+    if (!normalized.Slice(0, _leading.Length).SequenceEqual(_leading) ||
+        !normalized.Slice(normalized.Length - _trailing.Length).SequenceEqual(_trailing))
       return new(ScrollAppendStatus.FixedContentChanged, 0);
-    byte[] packed = full.AsSpan(_leading.Length, _frameHeight * _frameRowBytes).ToArray();
-    if (_previousFrame.AsSpan().SequenceEqual(packed)) return new(ScrollAppendStatus.Duplicate, 0);
+    if (_previousFrame.AsSpan().SequenceEqual(body)) return new(ScrollAppendStatus.Duplicate, 0);
     if (_frameCount >= MaximumFrames || FullHeight >= MaximumDimension ||
         (long)_frameWidth * (FullHeight + 1) > MaximumPixels)
       return new(ScrollAppendStatus.LimitReached, 0);
-    if (HasNoVerticalVariation(packed, cancellationToken)) return new(ScrollAppendStatus.LowTexture, 0);
+    if (HasNoVerticalVariation(body, cancellationToken)) return new(ScrollAppendStatus.LowTexture, 0);
     int candidate = 0;
     if (confirmedOffset is int offset)
     {
-      if (!VerifyAlignment(_previousFrame, packed, offset, cancellationToken))
+      if (!VerifyAlignment(_previousFrame, body, offset, cancellationToken))
         return new(ScrollAppendStatus.NoOverlap, 0);
       candidate = offset;
     }
@@ -119,7 +128,7 @@ public sealed class VerticalScrollStitcher
         for (int sign = 1; sign >= -1; sign -= 2)
         {
           int signed = scroll * sign;
-          if (!VerifyAlignment(_previousFrame, packed, signed, cancellationToken)) continue;
+          if (!VerifyAlignment(_previousFrame, body, signed, cancellationToken)) continue;
           // Candidates are visited by increasing magnitude. If no earlier
           // positive match fits, a matching positive offset already over the
           // limits rules out every later positive choice too.
@@ -140,6 +149,7 @@ public sealed class VerticalScrollStitcher
     if (ExceedsLimits(candidate))
       return new(ScrollAppendStatus.LimitReached, 0);
     cancellationToken.ThrowIfCancellationRequested();
+    byte[] packed = body.ToArray();
     byte[] strip = packed.AsSpan((_frameHeight - candidate) * _frameRowBytes).ToArray();
     _strips.Add(strip);
     _previousFrame = packed;
@@ -227,6 +237,12 @@ public sealed class VerticalScrollStitcher
     return Math.Max(MinimumOverlapFloor, frameHeight / 4);
   }
 
+  /// <summary>A tight downward frame (stride == row bytes) already stores its rows in
+  /// normalized order, so every pre-acceptance check can run directly on the caller's
+  /// buffer without copying it.</summary>
+  private bool IsNormalizedFrame(CapturedFrame frame) =>
+      !Horizontal && !Reversed && frame.Stride == _frameRowBytes;
+
   private byte[] Normalize(CapturedFrame frame, CancellationToken token)
   {
     byte[] pixels = new byte[checked(frame.Width * frame.Height * 4)];
@@ -258,12 +274,12 @@ public sealed class VerticalScrollStitcher
       throw new ArgumentException("Frame pixel buffer length does not match its geometry.", paramName);
   }
 
-  private bool HasNoVerticalVariation(byte[] packed, CancellationToken token)
+  private bool HasNoVerticalVariation(ReadOnlySpan<byte> packed, CancellationToken token)
   {
     for (int y = 1; y < _frameHeight; y++)
     {
       token.ThrowIfCancellationRequested();
-      if (!packed.AsSpan(0, _frameRowBytes).SequenceEqual(packed.AsSpan(y * _frameRowBytes, _frameRowBytes)))
+      if (!packed.Slice(0, _frameRowBytes).SequenceEqual(packed.Slice(y * _frameRowBytes, _frameRowBytes)))
         return false;
     }
     return true;
