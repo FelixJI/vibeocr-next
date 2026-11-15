@@ -291,6 +291,20 @@ public sealed class RuntimeDemandCoordinatorTests
     Assert.True(maintenance.State.IsIdle);
   }
 
+  [Fact]
+  public async Task CompletedConnectionAttemptWithoutSessionStillReportsNotReady()
+  {
+    var connection = new ManagedRuntimeConnection(PortableLayout.Resolve(Path.GetTempPath(), "production"),
+      new RuntimeStatusViewModel(), (_, _) => { });
+    var maintenance = new ProductMaintenanceCoordinator();
+    CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+    var coordinator = new RuntimeDemandCoordinator((_, _) => Task.CompletedTask,
+      connection.DisconnectAsync, maintenance, cancellationToken, connection);
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.EnsureReadyAsync(cancellationToken));
+    Assert.Equal("产品识别服务未就绪。", error.Message);
+    Assert.True(maintenance.State.IsIdle);
+  }
+
   [Theory]
   [InlineData(false, "none")]
   [InlineData(true, "none")]
@@ -356,6 +370,10 @@ public sealed class RuntimeDemandCoordinatorTests
     await using var restored = StubSession("restored");
     var published = Signal();
     var finish = Signal();
+    var disconnectStarted = Signal();
+    var finishDisconnect = Signal();
+    var sharedContinuation = new DeferredContinuation();
+    CancellationToken testCancellation = TestContext.Current.CancellationToken;
     int connects = 0;
     int disconnects = 0;
     int recoveries = 0;
@@ -372,10 +390,13 @@ public sealed class RuntimeDemandCoordinatorTests
       disconnects++;
       await connection.DisconnectAsync();
       if (failCleanup) throw cleanup;
-    }, new ProductMaintenanceCoordinator(), TestContext.Current.CancellationToken, connection);
-    Task startup = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+      disconnectStarted.SetResult();
+      await finishDisconnect.Task;
+    }, new ProductMaintenanceCoordinator(), testCancellation, connection);
+    Task startup = coordinator.EnsureReadyAsync(testCancellation);
     await published.Task;
-    Task shared = coordinator.EnsureReadyAsync(TestContext.Current.CancellationToken);
+    Task shared = failCleanup ? coordinator.EnsureReadyAsync(testCancellation) :
+      sharedContinuation.Capture(() => coordinator.EnsureReadyAsync(testCancellation));
     Assert.Equal(1, connects);
     Task recovery = coordinator.RecoverAsync(() => ReferenceEquals(connection.Session, original), () => recoveries++);
     Assert.False(recovery.IsCompleted);
@@ -390,13 +411,39 @@ public sealed class RuntimeDemandCoordinatorTests
     }
     else
     {
-      await Task.WhenAll(startup, shared);
-      await recovery;
+      try
+      {
+        // 让已提交启动的共享等待者在恢复断开期间继续，独立于线程池调度先后。
+        await disconnectStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), testCancellation);
+        Assert.Null(connection.Session);
+        (await sharedContinuation.Posted.Task.WaitAsync(TimeSpan.FromSeconds(5), testCancellation))();
+        await Task.WhenAll(startup, shared);
+      }
+      finally
+      {
+        finishDisconnect.TrySetResult();
+        await recovery;
+      }
       Assert.Equal(2, connects);
       Assert.Same(restored, connection.Session);
       Assert.Equal(1, recoveries);
     }
     await connection.DisconnectAsync();
+  }
+
+  private sealed class DeferredContinuation : SynchronizationContext
+  {
+    public TaskCompletionSource<Action> Posted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public override void Post(SendOrPostCallback callback, object? state) => Posted.SetResult(() => callback(state));
+
+    public Task Capture(Func<Task> start)
+    {
+      SynchronizationContext? previous = Current;
+      SetSynchronizationContext(this);
+      try { return start(); }
+      finally { SetSynchronizationContext(previous); }
+    }
   }
 
   [Theory]
