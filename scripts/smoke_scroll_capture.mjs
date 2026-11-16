@@ -1805,11 +1805,17 @@ async function main() {
     // assertions only count sessions beyond that baseline.
     if (preparedCandidateRoot) {
       const warmupImage = path.join(smokeRoot, 'source-warmup.png');
-      await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
-        X: fixture.clientRect.left + 16, Y: fixture.clientRect.top + 16,
-        Width: Math.min(400, fixture.clientRect.width - 32),
-        Height: Math.min(240, fixture.clientRect.height - 32),
-        EvidenceRoot: smokeRoot, OutputPath: warmupImage });
+      // Fixture handles are reported before its message loop shows the window.
+      await native('raise', { FixturePid: fixture.pid, Handle: fixture.root });
+      try {
+        await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
+          X: fixture.clientRect.left + 16, Y: fixture.clientRect.top + 16,
+          Width: Math.min(400, fixture.clientRect.width - 32),
+          Height: Math.min(240, fixture.clientRect.height - 32),
+          EvidenceRoot: smokeRoot, OutputPath: warmupImage });
+      } finally {
+        await native('lower', { FixturePid: fixture.pid, Handle: fixture.root });
+      }
       await setClipboardImage(smokeRoot, warmupImage);
       await app.page.getByRole('button', { name: '从剪贴板', exact: true }).click();
       const warmupHandle = await app.page.waitForFunction(() => {
