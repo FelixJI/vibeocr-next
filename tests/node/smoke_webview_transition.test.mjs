@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { browserUserData, verifyProfile, verifyEvergreenImage, beforeDeadline } from '../../scripts/smoke_webview_transition.mjs';
+import { browserUserData, verifyProfile, verifyEvergreenImage, beforeDeadline,
+  parseProductEnvironment } from '../../scripts/smoke_webview_transition.mjs';
 import { launchApp } from '../../scripts/smoke_native_actions.mjs';
 
 await assert.rejects(launchApp('unused', 'unused', `transition-${'a'.repeat(32)}`), /32-character GUID/);
@@ -27,4 +28,23 @@ await assert.rejects(async () => {
 }, /deadline exceeded/);
 assert.equal(cleanup, true, 'Timed-out observations must unwind through owned cleanup.');
 assert.equal(await beforeDeadline(Promise.resolve(false), { promise: new Promise(() => {}) }), false);
+const validProductEnvironment = {
+  LOCALAPPDATA: 'C:\\owned\\profile\\AppData\\Local',
+  APPDATA: 'C:\\owned\\profile\\AppData\\Roaming',
+  USERPROFILE: 'C:\\owned\\profile',
+  HOME: 'C:\\owned\\profile',
+  TEMP: 'C:\\owned\\temp',
+  TMP: 'C:\\owned\\temp',
+};
+assert.deepEqual(parseProductEnvironment(JSON.stringify(validProductEnvironment)),
+  validProductEnvironment);
+assert.throws(() => parseProductEnvironment(JSON.stringify(
+  { ...validProductEnvironment, SECRET_SENTINEL: 'token' })), /unknown keys/);
+const missingHome = { ...validProductEnvironment };
+delete missingHome.HOME;
+assert.throws(() => parseProductEnvironment(JSON.stringify(missingHome)),
+  /explicit product HOME/);
+assert.throws(() => parseProductEnvironment(
+  JSON.stringify({ ...validProductEnvironment, TEMP: '' })), /non-empty string/);
+assert.throws(() => parseProductEnvironment('[]'), /JSON object/);
 console.log('WebView transition evidence contracts passed.');

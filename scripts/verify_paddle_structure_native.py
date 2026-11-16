@@ -421,6 +421,7 @@ def main():
             "document_columns.png",
             "document_columns_90.png",
             "table_wireless_holdout.png",
+            "document_table_merged_rotated.png",
         ]
     snapshot = paddle_onnx.freeze_request(vars(options), pipeline_id=args.mode)
     report = {

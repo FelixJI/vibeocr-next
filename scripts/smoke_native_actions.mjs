@@ -742,7 +742,8 @@ async function connectPage(child, port) {
   throw new Error(`Isolated WebView2 CDP did not become ready: ${lastError?.message}`);
 }
 
-async function launchApp(candidate, webviewData, instanceId, installRoot = candidate) {
+async function launchApp(candidate, webviewData, instanceId, installRoot = candidate,
+  environment = process.env) {
   assert.match(instanceId, /^[a-f0-9]{32}$/i, 'UI smoke instance must be a 32-character GUID.');
   const port = await freeLocalPort();
   const executable = path.join(candidate, 'app', 'VibeOCR.WinUI.exe');
@@ -751,7 +752,7 @@ async function launchApp(candidate, webviewData, instanceId, installRoot = candi
       '--product-root', candidate], {
       cwd: path.dirname(executable), stdio: 'ignore',
       env: {
-        ...process.env,
+        ...environment,
         VIBEOCR_SELF_TEST_SMOKE: 'native-actions-e2e',
         VIBEOCR_SELF_TEST_INSTANCE: instanceId,
         WEBVIEW2_USER_DATA_FOLDER: webviewData,

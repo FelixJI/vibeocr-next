@@ -49,6 +49,28 @@ async function processInfo(processId) {
   return stdout.trim() ? JSON.parse(stdout) : null;
 }
 
+const productEnvironmentKeys = ['LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'HOME', 'TEMP', 'TMP'];
+
+// Pure parser: the transition accepts exactly the six monitored product path
+// keys and nothing else, so no unrelated caller environment can ride along.
+export function parseProductEnvironment(raw) {
+  const parsed = JSON.parse(raw);
+  assert(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed),
+    'Product environment must be a JSON object.');
+  const actual = new Set(Object.keys(parsed));
+  for (const key of productEnvironmentKeys)
+    assert(actual.has(key), `The monitored launch requires an explicit product ${key}.`);
+  assert.equal(actual.size, productEnvironmentKeys.length,
+    'Product environment must not carry unknown keys.');
+  const product = {};
+  for (const key of productEnvironmentKeys) {
+    assert(typeof parsed[key] === 'string' && parsed[key].length > 0,
+      `Product ${key} must be a non-empty string.`);
+    product[key] = parsed[key];
+  }
+  return product;
+}
+
 function option(name) {
   const index = process.argv.indexOf(name);
   assert(index > 0 && process.argv[index + 1], `Missing ${name}.`);
@@ -61,6 +83,10 @@ async function main() {
   const phase = option('--phase');
   const nonce = option('--nonce');
   const version = option('--runtime-version');
+  // The Python harness runs this tool under an isolated tooling profile; the
+  // product's six monitored environment keys arrive explicitly here so only
+  // the launched app (never Node/PowerShell helpers) writes into them.
+  const productEnvironment = parseProductEnvironment(option('--product-environment'));
   assert.match(nonce, /^[a-f0-9]{32}$/);
   assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
   assert(['before', 'after', 'rollback'].includes(phase));
@@ -89,7 +115,8 @@ async function main() {
   let browser;
   let observationDeadline;
   try {
-    app = await launchApp(current, legacy, nonce, root);
+    app = await launchApp(current, legacy, nonce, root,
+      { ...process.env, ...productEnvironment });
     // Startup owns its bounded cleanup; after it returns, every CDP wait must
     // yield to our finally before the Python parent's last-resort timeout.
     observationDeadline = raceDeadline(60000);

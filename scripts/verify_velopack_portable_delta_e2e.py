@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -189,6 +190,198 @@ def _installed_version(root: Path) -> str:
     return version
 
 
+def _external_layout(work_dir: Path) -> tuple[dict[str, Path], dict[str, Path]]:
+    """Monitor exactly one profile root plus one temp root, with the product's
+    AppData/Local and AppData/Roaming normalized inside the profile so the
+    USERPROFILE and LOCALAPPDATA classifications cannot diverge."""
+    profile = work_dir / "external" / "user-profile"
+    temp = work_dir / "external" / "temp"
+    environment = {
+        "LOCALAPPDATA": profile / "AppData" / "Local",
+        "APPDATA": profile / "AppData" / "Roaming",
+        "USERPROFILE": profile,
+        "HOME": profile,
+        "TEMP": temp,
+        "TMP": temp,
+    }
+    scanned_roots = {"profile": profile, "temp": temp}
+    for path in environment.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return environment, scanned_roots
+
+
+def _allowed_external() -> dict[str, set[str]]:
+    # Velopack 1.2 与 .NET Framework 会创建固定日志和空的 known-folder
+    # 骨架。它们不是产品状态；逐项 allowlist（相对 profile/temp 两个扫描根，
+    # 原 LOCALAPPDATA 精确项已移到 AppData/Local 前缀），不放大也不跳过子树。
+    return {
+        "profile": {
+            "AppData/",
+            "AppData/Roaming/",
+            "AppData/Local/Microsoft/",
+            "AppData/Local/Microsoft/Windows/",
+            "AppData/Local/Microsoft/Windows/Caches/",
+            "AppData/Local/velopack/",
+            "AppData/Local/velopack/velopack_VibeOCRNext.log",
+        },
+        "temp": {"velopack_VibeOCRNext.log"},
+    }
+
+
+_REPARSE_ATTRIBUTE = 0x400  # Windows FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _carries_reparse_metadata(path: Path) -> bool:
+    """lstat-only check: POSIX symlinks and Windows reparse points both
+    reject, and any lstat failure rejects too. File contents are never read."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    return bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_ATTRIBUTE)
+
+
+def _replaces_owned_directory(path: Path) -> bool:
+    """True when a harness-owned directory is missing, is not a plain
+    directory, or has been replaced by a reparse point."""
+    if _carries_reparse_metadata(path):
+        return True
+    try:
+        return not stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return True
+
+
+def _scan_external_root(
+    root: Path, known_directories: frozenset[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Bounded fail-closed inventory of one scanned root: only directories that
+    existed in the baseline or are named verbatim in the exact allowlist are
+    enumerated; every other entry is recorded without descending into it, and
+    reparse points are rejected outright even under an allowed name. File
+    contents are never read."""
+    inventory: list[str] = []
+    violations: list[str] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = sorted(directory.iterdir())
+        except OSError:
+            violations.append("unreadable-directory")
+            continue
+        for child in children:
+            relative = child.relative_to(root).as_posix()
+            if _carries_reparse_metadata(child):
+                violations.append("reparse-point")
+                continue
+            try:
+                is_directory = stat.S_ISDIR(child.lstat().st_mode)
+            except OSError:
+                violations.append("unreadable-entry")
+                continue
+            if is_directory:
+                relative += "/"
+                inventory.append(relative)
+                if relative in known_directories:
+                    pending.append(child)
+            else:
+                inventory.append(relative)
+    return tuple(inventory), tuple(violations)
+
+
+def _check_external_writes(
+    scanned_roots: dict[str, Path],
+    external_before: dict[str, tuple[str, ...]],
+    work_dir: Path,
+) -> None:
+    """The real fail-closed boundary of the E2E: reject any unexpected write
+    in the two scanned physical roots, enumerating only baseline/allowlist
+    directories; the harness-owned chain is verified before any enumeration."""
+    allowed_external = _allowed_external()
+    unexpected: dict[str, tuple[str, ...]] = {}
+    for name, root in scanned_roots.items():
+        # Parent→child: the owned work_dir, its external root, then the scan
+        # root itself. A junction-swapped root must fail before any iterdir.
+        if any(
+            _replaces_owned_directory(owned)
+            for owned in (work_dir, work_dir / "external", root)
+        ):
+            unexpected[name] = ("replaced-owned-root",)
+    if unexpected:
+        _reject_unexpected_external(unexpected, scanned_roots)
+        return
+    for name, root in scanned_roots.items():
+        known_directories = frozenset(
+            entry
+            for entry in (*external_before[name], *allowed_external[name])
+            if entry.endswith("/")
+        )
+        inventory, violations = _scan_external_root(root, known_directories)
+        entries = set(violations) | (
+            set(inventory) - set(external_before[name]) - allowed_external[name]
+        )
+        if entries:
+            unexpected[name] = tuple(sorted(entries))
+    _reject_unexpected_external(unexpected, scanned_roots)
+
+
+_PRODUCT_ENVIRONMENT_KEYS = (
+    "LOCALAPPDATA",
+    "APPDATA",
+    "USERPROFILE",
+    "HOME",
+    "TEMP",
+    "TMP",
+)
+
+
+def _product_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Extract exactly the six monitored product path keys; nothing else may
+    ever reach the transition command line."""
+    product = {name: environment.get(name, "") for name in _PRODUCT_ENVIRONMENT_KEYS}
+    missing = sorted(name for name, value in product.items() if not value)
+    if missing:
+        raise RuntimeError(
+            f"WebView transition requires the monitored product keys: {missing}"
+        )
+    return product
+
+
+def _webview_tooling_environment(
+    environment: dict[str, str], tooling_profile: Path
+) -> dict[str, str]:
+    """Node/PowerShell helpers run on an isolated synthetic profile so tooling
+    writes never reach the two monitored product roots. The caller's already
+    filtered environment is kept except the six product path keys, which are
+    replaced by the tooling profile's normalized home/AppData/Local layout."""
+    home = tooling_profile / "home"
+    local = home / "AppData" / "Local"
+    roaming = home / "AppData" / "Roaming"
+    temp = tooling_profile / "temp"
+    for path in (home, local, roaming, temp):
+        path.mkdir(parents=True, exist_ok=True)
+    tooling = {
+        key: value
+        for key, value in environment.items()
+        if key not in _PRODUCT_ENVIRONMENT_KEYS
+        and not key.upper().startswith(("VIBEOCR_", "WEBVIEW2_"))
+    }
+    tooling.update(
+        {
+            "LOCALAPPDATA": str(local),
+            "APPDATA": str(roaming),
+            "USERPROFILE": str(home),
+            "HOME": str(home),
+            "TEMP": str(temp),
+            "TMP": str(temp),
+        }
+    )
+    return tooling
+
+
 def _webview_probe(
     node: Path,
     root: Path,
@@ -218,9 +411,13 @@ def _webview_probe(
             nonce,
             "--runtime-version",
             lock["version"],
+            "--product-environment",
+            json.dumps(_product_environment(environment)),
             *(["--expected-source", expected_source] if expected_source else []),
         ],
-        env=environment,
+        env=_webview_tooling_environment(
+            environment, evidence_root / "tooling-profile"
+        ),
         # Existing startup/normal-close/CIM bounds can cross their poll deadline;
         # leave room for the 60s Node observation deadline and owned cleanup.
         timeout=240,
@@ -318,26 +515,18 @@ def verify_portable_delta_e2e(
     replaced.write_text("must be replaced", encoding="utf-8")
     result = root / "state" / f"delta-e2e-result-{nonce}.json"
 
-    external = work_dir / "external"
-    external_roots = {
-        "LOCALAPPDATA": external / "local-app-data",
-        "APPDATA": external / "roaming-app-data",
-        "USERPROFILE": external / "user-profile",
-        "TEMP": external / "temp",
-        "TMP": external / "temp",
-        "HOME": external / "user-profile",
-    }
-    for path in set(external_roots.values()):
-        path.mkdir(parents=True, exist_ok=True)
+    external_environment, scanned_roots = _external_layout(work_dir)
     external_before = {
-        name: _tree_inventory(path) for name, path in external_roots.items()
+        name: _tree_inventory(path) for name, path in scanned_roots.items()
     }
     probe_environment = {
         key: value
         for key, value in os.environ.items()
         if not key.upper().startswith(("VIBEOCR_", "WEBVIEW2_"))
     }
-    probe_environment.update({name: str(path) for name, path in external_roots.items()})
+    probe_environment.update(
+        {name: str(path) for name, path in external_environment.items()}
+    )
     webview_evidence = work_dir / "webview-transition"
     if webview_transition_node is not None:
         webview_evidence.mkdir()
@@ -369,7 +558,7 @@ def verify_portable_delta_e2e(
             ),
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
-            **{name: str(path) for name, path in external_roots.items()},
+            **{name: str(path) for name, path in external_environment.items()},
         }
     )
     for name in (
@@ -446,33 +635,7 @@ def verify_portable_delta_e2e(
         for relative, payload in state_markers.items():
             if (root / relative).read_bytes() != payload:
                 raise RuntimeError(f"Rollback lost state marker: {relative}")
-    external_after = {
-        name: _tree_inventory(path) for name, path in external_roots.items()
-    }
-    # Velopack 1.2 与 .NET Framework 会创建固定日志和空的 known-folder
-    # 骨架。它们不是产品状态；逐项 allowlist，避免把任意外写入放行。
-    allowed_external = {
-        "LOCALAPPDATA": {
-            "Microsoft/",
-            "Microsoft/Windows/",
-            "Microsoft/Windows/Caches/",
-            "velopack/",
-            "velopack/velopack_VibeOCRNext.log",
-        },
-        "APPDATA": set(),
-        "USERPROFILE": {"AppData/", "AppData/Roaming/"},
-        "TEMP": {"velopack_VibeOCRNext.log"},
-        "TMP": {"velopack_VibeOCRNext.log"},
-        "HOME": {"AppData/", "AppData/Roaming/"},
-    }
-    unexpected = {
-        name: tuple(
-            sorted(set(inventory) - set(external_before[name]) - allowed_external[name])
-        )
-        for name, inventory in external_after.items()
-    }
-    unexpected = {name: paths for name, paths in unexpected.items() if paths}
-    _reject_unexpected_external(unexpected, external_roots)
+    _check_external_writes(scanned_roots, external_before, work_dir)
 
 
 def main() -> int:

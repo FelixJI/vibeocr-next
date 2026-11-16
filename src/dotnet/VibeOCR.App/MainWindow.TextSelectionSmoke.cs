@@ -541,18 +541,9 @@ public sealed partial class MainWindow
       await SmokeEditorWebView.CoreWebView2.CallDevToolsProtocolMethodAsync(
         "Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Control\",\"windowsVirtualKeyCode\":17}");
     }
-    string? lastClipboard = null;
-    for (int attempt = 0; attempt < 100; attempt++)
-    {
-      DataPackageView content = Clipboard.GetContent();
-      lastClipboard = content.Contains(StandardDataFormats.Text)
-        ? await content.GetTextAsync() : null;
-      if (lastClipboard == selected) return selected;
-      await Task.Delay(100);
-    }
-    throw new InvalidOperationException(
-      $"{(chinese ? "Chinese context-menu" : "Latin Ctrl+C")} clipboard mismatch: " +
-      $"expected={JsonSerializer.Serialize(selected)}, actual={JsonSerializer.Serialize(lastClipboard)}.");
+    return await WaitForSmokeClipboardTextAsync(selected,
+      chinese ? "Chinese context-menu" : "Latin Ctrl+C",
+      ReadSmokeClipboardTextAsync, () => Task.Delay(100));
   }
 
   private async Task ClickTextCopyButtonByMouseAsync()
@@ -697,14 +688,38 @@ public sealed partial class MainWindow
     if (selected != expected || selected.Length != 3)
       throw new InvalidOperationException("Pinned WebView2 mouse selection failed.");
     pin.SmokeInvokeCopySelection();
+    return await WaitForSmokeClipboardTextAsync(selected, "Pinned UIAutomation copy",
+      ReadSmokeClipboardTextAsync, () => Task.Delay(100));
+  }
+
+  private static async Task<string?> ReadSmokeClipboardTextAsync()
+  {
+    DataPackageView content = Clipboard.GetContent();
+    return content.Contains(StandardDataFormats.Text) ? await content.GetTextAsync() : null;
+  }
+
+  internal static async Task<string> WaitForSmokeClipboardTextAsync(
+    string expected, string action, Func<Task<string?>> readOnce, Func<Task> delay)
+  {
+    string? lastClipboard = null;
+    System.Runtime.InteropServices.COMException? lastBusy = null;
     for (int attempt = 0; attempt < 100; attempt++)
     {
-      DataPackageView pending = Clipboard.GetContent();
-      if (pending.Contains(StandardDataFormats.Text) &&
-          await pending.GetTextAsync() == selected) return selected;
-      await Task.Delay(100);
+      try
+      {
+        lastClipboard = await readOnce();
+        lastBusy = null;
+        if (lastClipboard == expected) return expected;
+      }
+      catch (System.Runtime.InteropServices.COMException error)
+        when (error.HResult == unchecked((int)0x800401D0))
+      {
+        // OpenClipboard can race another reader; retain the existing observation budget.
+        lastBusy = error;
+      }
+      await delay();
     }
-    DataPackageView content = Clipboard.GetContent();
-    throw new InvalidOperationException($"Pinned UIAutomation copy failed: {content.Contains(StandardDataFormats.Text)}.");
+    throw new InvalidOperationException($"{action} clipboard mismatch: " +
+      $"expected={JsonSerializer.Serialize(expected)}, actualHasText={lastClipboard is not null}, actualLength={lastClipboard?.Length ?? 0}.", lastBusy);
   }
 }

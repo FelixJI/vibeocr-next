@@ -88,6 +88,40 @@ public sealed partial class MainWindow
           throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch.");
       }
       CaptureUiSmokeTrace.Stage("pins.alternating-band-drags");
+      var firstGeometry = pin.RecoveryState();
+      var secondGeometry = secondPin.RecoveryState();
+      // Only the guarded band points and drag delta must fit; preserve width at high DPI.
+      int bandWidth = (int)Math.Ceiling(Math.Max(firstGeometry.Width, secondGeometry.Width) * 0.75) + 80;
+      var workAreas = Features.Pins.PinSnapshotStore.CurrentWorkAreas()
+        .Where(area => area.Width >= bandWidth && area.Height >= 560).ToArray();
+      if (workAreas.Length == 0)
+        throw new InvalidOperationException("Work area cannot expose both pin activation bands.");
+      var workArea = workAreas.MaxBy(area => area.Height);
+      int testHeight = Math.Min(300, (workArea.Height - 160) / 2);
+      try
+      {
+        pin.RestoreGeometry(firstGeometry with
+        { X = workArea.X + 40, Y = workArea.Y + 40, Height = testHeight });
+        secondPin.RestoreGeometry(secondGeometry with
+        { X = workArea.X + 40, Y = workArea.Y + testHeight + 120, Height = testHeight });
+        secondPin.Activate();
+        await WaitForPinCheckAsync(() => Task.FromResult(
+          VibeOCR.Platform.Windows.ScreenTargetQuery.GetForegroundWindowHandle() == secondPin.Handle), "Sibling pin did not become foreground.");
+        foreach (var (target, sibling) in new[] { (pin, secondPin), (secondPin, pin) })
+        {
+          var before = target.SmokePosition;
+          await target.SmokeDragTitleBarAsync(40, 30, sibling);
+          var after = target.SmokePosition;
+          if (after.X != before.X + 40 || after.Y != before.Y + 30)
+            throw new InvalidOperationException("Inactive pin activation lost the exact drag displacement.");
+        }
+        CaptureUiSmokeTrace.Stage("pins.inactive-sibling-band-drags");
+      }
+      finally
+      {
+        pin.RestoreGeometry(firstGeometry);
+        secondPin.RestoreGeometry(secondGeometry);
+      }
       if (doubleTaps != 0) throw new InvalidOperationException("Pin activation/drag caused DoubleTapped.");
       // #319 菜单可见性契约最小复现：ShowAt 的 Opened/IsOpen 相对单次 WebView
       // 往返异步，与取字 e2e 同一契约，用有界等待真实状态而非固定 sleep。
