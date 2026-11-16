@@ -1701,7 +1701,7 @@ public sealed partial class MainWindow : Window
       throw new PinnedTextPreparationException(
         "整张图都在屏蔽区内：没有可取文字；贴图本身保持不变。");
     string masked = await PinnedTextMask.CreateMaskedPngAsync(
-      imagePath, excludeBoxes, cancellationToken);
+      imagePath, resourceRoot, excludeBoxes, cancellationToken);
     try
     {
       return await preparePinnedTextLayer(

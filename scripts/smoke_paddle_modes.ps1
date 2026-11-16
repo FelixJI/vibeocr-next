@@ -98,7 +98,7 @@ if ($isResume) {
     $smokeRoot = (Resolve-Path -LiteralPath $ResumeRoot).Path.TrimEnd('\')
     $candidate = Join-Path $smokeRoot 'candidate'
     $fixtures = Join-Path $smokeRoot 'fixtures'
-    $exports = Join-Path $smokeRoot 'ui-exports'
+    $exports = Join-Path $candidate 'state/output/paddle-smoke'
     $webViewData = Join-Path $smokeRoot 'webview2'
     foreach ($marker in $candidateMarkers) {
         if (-not (Test-Path -LiteralPath (Join-Path $candidate $marker) -PathType Leaf)) {
@@ -118,7 +118,6 @@ if ($isResume) {
     if ($knownHealth.Count -eq 0) {
         throw 'ResumeRoot 内无任何 paddle-*.json 证据（无法证明为本脚本隔离根）'
     }
-    New-Item -ItemType Directory -Path $exports -Force | Out-Null
     # 恢复模式不重新生成 fixture（Python 入口只读）；所需文件存在性在
     # modeSpec 定义之后统一校验。
 } else {
@@ -140,12 +139,11 @@ if ($isResume) {
     $smokeRoot = Join-Path $work "pm-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
     $candidate = Join-Path $smokeRoot 'candidate'
     $fixtures = Join-Path $smokeRoot 'fixtures'
-    $exports = Join-Path $smokeRoot 'ui-exports'
+    $exports = Join-Path $candidate 'state/output/paddle-smoke'
     $webViewData = Join-Path $smokeRoot 'webview2'
     New-Item -ItemType Directory -Path $candidate | Out-Null
     Get-ChildItem -LiteralPath $source -Force |
         Copy-Item -Destination $candidate -Recurse -Force
-    New-Item -ItemType Directory -Path $exports | Out-Null
 }
 
 # 模式 → fixture / 非默认选项 / 期望管线 / 结果 token / 公共 UI 导出按钮。
@@ -375,7 +373,6 @@ try {
                     }
                 }
                 $inputExports = Join-Path $exports "input-$inputKind$inputSuffix$attemptSuffix"
-                New-Item -ItemType Directory -Path $inputExports -Force | Out-Null
                 $health = Invoke-PaddlePhase @{
                     'VIBEOCR_PADDLE_SMOKE_PHASE' = 'inputs'
                     'VIBEOCR_PADDLE_SMOKE_INPUT_KIND' = $(if ($inputKind -in @('pdf_text_layer', 'pdf_editing', 'pdf_workspace')) { 'pdf' } else { $inputKind })

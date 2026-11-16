@@ -139,6 +139,41 @@ def _verify_bootstrapper(product_root: Path) -> None:
     finally:
         backup.replace(browser)
 
+    # #321：UI.Xaml 缺失时必须显式报修（exit 2），不能放行后让
+    # apphost 异步退出且无报修。
+    xaml = product_root / "app/Microsoft.UI.Xaml.dll"
+    backup = xaml.with_suffix(".dll.smoke-backup")
+    xaml.rename(backup)
+    try:
+        expect_failure(2, b"Microsoft.UI.Xaml.dll")
+    finally:
+        backup.replace(xaml)
+
+    # CoreLib 是 CLR 启动必需；缺失必须报修。
+    corelib = product_root / "app/System.Private.CoreLib.dll"
+    backup = corelib.with_suffix(".dll.smoke-backup")
+    corelib.rename(backup)
+    try:
+        expect_failure(2, b"System.Private.CoreLib.dll")
+    finally:
+        backup.replace(corelib)
+
+    # runtimeconfig 缺失或语法/结构损坏都必须报修，不能放行。
+    runtime_config = product_root / "app/VibeOCR.WinUI.runtimeconfig.json"
+    backup = runtime_config.with_suffix(".json.smoke-backup")
+    runtime_config.rename(backup)
+    try:
+        expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+        runtime_config.write_bytes(b"{")
+        expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+        for field, value in (("framework", {}), ("frameworks", [])):
+            conflicting = json.loads(backup.read_text(encoding="utf-8"))
+            conflicting["runtimeOptions"][field] = value
+            runtime_config.write_text(json.dumps(conflicting), encoding="utf-8")
+            expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+    finally:
+        backup.replace(runtime_config)
+
     application = product_root / "app/VibeOCR.WinUI.exe"
     backup = application.with_suffix(".exe.smoke-backup")
     application.rename(backup)

@@ -74,15 +74,19 @@ public sealed class PinnedTextMaskTests
   {
     string input = await WritePngAsync(
       width: 8, height: 6, seed: 0x10);
+    string temporaryRoot = Directory.CreateDirectory(Path.Combine(
+      Path.GetTempPath(), $"vibeocr-mask-owned-{Guid.NewGuid():N}")).FullName;
     try
     {
       string masked = await PinnedTextMask.CreateMaskedPngAsync(
         input,
+        temporaryRoot,
         [new WorkbenchExclusionBox(0, 0, 250, 1000)],
         TestContext.Current.CancellationToken);
       try
       {
         Assert.EndsWith(".png", masked, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(temporaryRoot, Path.GetDirectoryName(masked));
         var decoded = await ReadPngPixelsAsync(masked);
         Assert.Equal(8u, decoded.width);
         Assert.Equal(6u, decoded.height);
@@ -110,7 +114,7 @@ public sealed class PinnedTextMaskTests
       }
       finally { File.Delete(masked); }
     }
-    finally { File.Delete(input); }
+    finally { File.Delete(input); Directory.Delete(temporaryRoot); }
   }
 
   [Fact]
@@ -121,21 +125,20 @@ public sealed class PinnedTextMaskTests
       Path.GetTempPath(), $"vibeocr-mask-invalid-{Guid.NewGuid():N}.bin");
     await File.WriteAllBytesAsync(invalid, [1, 2, 3, 4, 5, 6, 7, 8],
       TestContext.Current.CancellationToken);
-    int before = Directory.GetFiles(
-      Path.GetTempPath(), "vibeocr-pin-mask-*.png").Length;
+    string temporaryRoot = Directory.CreateDirectory(Path.Combine(
+      Path.GetTempPath(), $"vibeocr-mask-owned-{Guid.NewGuid():N}")).FullName;
     try
     {
       Exception? thrown = await Record.ExceptionAsync(() =>
         PinnedTextMask.CreateMaskedPngAsync(
           invalid,
+          temporaryRoot,
           [new WorkbenchExclusionBox(0, 0, 500, 500)],
           TestContext.Current.CancellationToken));
       Assert.NotNull(thrown);
-      int after = Directory.GetFiles(
-        Path.GetTempPath(), "vibeocr-pin-mask-*.png").Length;
-      Assert.Equal(before, after);
+      Assert.Empty(Directory.EnumerateFileSystemEntries(temporaryRoot));
     }
-    finally { File.Delete(invalid); }
+    finally { File.Delete(invalid); Directory.Delete(temporaryRoot); }
   }
 
   private static async Task<string> WritePngAsync(uint width, uint height, byte seed)

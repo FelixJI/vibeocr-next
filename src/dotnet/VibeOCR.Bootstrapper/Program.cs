@@ -103,7 +103,7 @@ internal static class Program
         : new string?[]
         {
           MissingBundledDotNetRuntime(layout),
-          HasBundledWindowsAppRuntime(layout) ? null : "随包 Windows App Runtime 文件缺失：Microsoft.WindowsAppRuntime.dll",
+          MissingBundledWindowsAppRuntime(layout),
           BundledWebView2RuntimeError(layout),
           HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         })
@@ -199,17 +199,32 @@ internal static class Program
   // 不再满足检查——损坏的随包载荷必须显式报修，不联网、不回退系统。
   private static string? MissingBundledDotNetRuntime(ResolvedProductLayout layout)
   {
-    string[] missing = new[]
+    var missing = BundledRuntimeConfig.MissingClrStartupFiles(layout.AppRoot);
+    string runtimeConfig = Path.ChangeExtension(layout.AppEntry, ".runtimeconfig.json");
+    string?[] problems =
     {
-      Path.Combine(layout.AppRoot, "hostfxr.dll"),
-      Path.Combine(layout.AppRoot, "hostpolicy.dll"),
-      Path.Combine(layout.AppRoot, "coreclr.dll"),
-    }.Where(path => !File.Exists(path)).Select(path => Path.GetFileName(path)!).ToArray();
-    return missing.Length == 0 ? null : "随包 .NET Runtime 文件缺失：" + string.Join("、", missing);
+        missing.Count == 0
+            ? null
+            : "随包 .NET Runtime 文件缺失：" + string.Join("、", missing),
+        BundledRuntimeConfig.FindNetCoreAppVersion(runtimeConfig) is null
+            ? "随包 .NET Runtime 配置缺失或损坏：" + Path.GetFileName(runtimeConfig)
+            : null,
+    };
+    return problems.All(problem => problem is null)
+        ? null
+        : string.Join(Environment.NewLine, problems.Where(problem => problem is not null));
   }
 
-  private static bool HasBundledWindowsAppRuntime(ResolvedProductLayout layout) =>
-      File.Exists(Path.Combine(layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"));
+  // #321：随包 Windows App SDK 启动闭包（与 Platform 诊断共用，缺
+  // Microsoft.UI.Xaml.dll 时 apphost 异步退出无法报修）。
+  private static string? MissingBundledWindowsAppRuntime(ResolvedProductLayout layout)
+  {
+    string[] missing = ResolvedProductLayout.MissingWindowsAppRuntimeFiles(layout.AppRoot)
+        .ToArray();
+    return missing.Length == 0
+        ? null
+        : "随包 Windows App Runtime 文件缺失：" + string.Join("、", missing);
+  }
 
   private static string? BundledWebView2RuntimeError(ResolvedProductLayout layout)
   {

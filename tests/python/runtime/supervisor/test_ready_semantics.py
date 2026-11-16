@@ -40,9 +40,7 @@ STARTUP_DEADLINE_SECONDS = 60.0
 HEALTH_TIMEOUT_SECONDS = 5.0
 
 
-def _spawn_supervisor(
-    token: str, sup_root: str, product_fixture
-) -> subprocess.Popen[str]:
+def _spawn_supervisor(token: str, product_fixture) -> subprocess.Popen[str]:
     product, runtime, manifest, binding, _ = product_fixture
     argv = [str(runtime / "python.exe"), "-I", "-B", "-m", "vibeocr.runtime.host.main"]
     env = dict(os.environ)
@@ -53,7 +51,6 @@ def _spawn_supervisor(
             "VIBEOCR_PRODUCT_ROOT": str(product),
             "VIBEOCR_RUNTIME_MANIFEST": str(manifest),
             "VIBEOCR_COMPONENT_LOCK": str(binding),
-            "VIBEOCR_SUP_ROOT": sup_root,
             "PYTHONIOENCODING": "utf-8",
         }
     )
@@ -62,6 +59,7 @@ def _spawn_supervisor(
         "VIBEOCR_SELF_TEST_SMOKE",
         "VIBEOCR_SELF_TEST_RESULT",
         "VIBEOCR_SUPERVISOR_SETTINGS",
+        "VIBEOCR_LAYOUT_MANIFEST",
     ):
         env.pop(noisy, None)
     return subprocess.Popen(
@@ -116,13 +114,18 @@ def _get_health(port: int, token: str) -> dict:
 def test_ready_envelope_means_listening_and_health_serves(
     tmp_path: Path,
     staged_runtime_product,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token = "r" * 64
-    with _spawn_supervisor(
-        token, str(tmp_path / "sup-root"), staged_runtime_product
-    ) as proc:
+    outside_stager = tmp_path / "inherited-stager-root"
+    monkeypatch.setenv("VIBEOCR_SUP_ROOT", str(outside_stager))
+    product, _, _, _, _ = staged_runtime_product
+    with _spawn_supervisor(token, staged_runtime_product) as proc:
         try:
             ready = json.loads(_read_ready_line(proc))
+            temp = product / "state" / "recognition" / "temp"
+            assert any(path.is_dir() for path in temp.glob("vibeocr-sup-*"))
+            assert not outside_stager.exists()
             with socket.create_connection(
                 ("127.0.0.1", ready["port"]), timeout=CONNECT_BUDGET_SECONDS
             ):
@@ -141,16 +144,14 @@ def test_ready_envelope_means_listening_and_health_serves(
 
 
 def test_real_startup_failure_exits_without_ready_envelope(
-    tmp_path: Path,
     staged_runtime_product,
 ) -> None:
-    # A real assembly failure (stager root cannot be created because the
-    # configured VIBEOCR_SUP_ROOT is an existing file) must exit non-zero
-    # without emitting any ready envelope: the parent treats "first stdout
-    # line" as the serving contract, so a dead server must stay silent.
-    stager_root = tmp_path / "sup-root-is-a-file"
-    stager_root.write_text("not a directory", encoding="utf-8")
-    with _spawn_supervisor("f" * 64, str(stager_root), staged_runtime_product) as proc:
+    # The bound temporary directory must be usable before publishing ready.
+    product, _, _, _, _ = staged_runtime_product
+    blocked_temp = product / "state" / "recognition" / "temp"
+    blocked_temp.parent.mkdir(parents=True)
+    blocked_temp.write_text("not a directory", encoding="utf-8")
+    with _spawn_supervisor("f" * 64, staged_runtime_product) as proc:
         try:
             stdout, _ = proc.communicate(timeout=STARTUP_DEADLINE_SECONDS)
         except subprocess.TimeoutExpired:

@@ -6,6 +6,7 @@ import json
 import ntpath
 import os
 import sys
+import tempfile
 from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path, PureWindowsPath
@@ -189,6 +190,10 @@ def prepare_product_runtime() -> RuntimeSettingsStore:
     device = snapshot.recognition_device
     if device not in {"cpu", "directml", "auto"}:
         raise ValueError("产品计算设备配置无效，请检查识别设置。")
+    temp = cache / "temp"
+    if temp.resolve() != temp:
+        raise ValueError("产品临时目录不可包含重解析点。")
+    temp.mkdir(parents=True, exist_ok=True)
     os.environ.update(
         {
             "VIBEOCR_PRODUCT_RUNTIME": "1",
@@ -204,10 +209,11 @@ def prepare_product_runtime() -> RuntimeSettingsStore:
             "PADDLE_PDX_CACHE_HOME": str(cache / "cache" / "paddlex"),
             "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
             "MINERU_HOME": str(cache / "mineru4"),
-            "TEMP": str(cache / "temp"),
-            "TMP": str(cache / "temp"),
+            "TMPDIR": str(temp),
+            "TEMP": str(temp),
+            "TMP": str(temp),
         }
     )
-    (cache / "temp").mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(temp)
     seed_bundled_paddle_onnx_models(manifest, state / "model-cache", lambda: None)
     return store

@@ -25,8 +25,10 @@ public sealed class PrerequisiteDetectorTests
       ("hostpolicy.dll", "dotnet"),
       ("hostfxr.dll", "dotnet"),
       ("coreclr.dll", "dotnet"),
+      ("System.Private.CoreLib.dll", "clr"),
       ("VibeOCR.WinUI.runtimeconfig.json", BundledRuntimeConfig),
       ("Microsoft.WindowsAppRuntime.dll", "war"),
+      ("Microsoft.UI.Xaml.dll", "xaml"),
       ("RuntimePython", "python"),
       (@"WebView2Runtime\msedgewebview2.exe", "webview2"),
       (@"WebView2Runtime\icudtl.dat", "icu"),
@@ -122,7 +124,10 @@ public sealed class PrerequisiteDetectorTests
   [Theory]
   [InlineData("hostpolicy.dll", PrerequisiteKind.DotNetRuntime)]
   [InlineData("hostfxr.dll", PrerequisiteKind.DotNetRuntime)]
+  [InlineData("System.Private.CoreLib.dll", PrerequisiteKind.DotNetRuntime)]
+  [InlineData("VibeOCR.WinUI.runtimeconfig.json", PrerequisiteKind.DotNetRuntime)]
   [InlineData("Microsoft.WindowsAppRuntime.dll", PrerequisiteKind.WindowsAppRuntime)]
+  [InlineData("Microsoft.UI.Xaml.dll", PrerequisiteKind.WindowsAppRuntime)]
   [InlineData(@"WebView2Runtime\msedgewebview2.exe", PrerequisiteKind.WebView2Runtime)]
   public void ProductionReportsDamagedBundledComponentsAsMissing(
       string missing,
@@ -159,6 +164,44 @@ public sealed class PrerequisiteDetectorTests
       WriteBundledApp(root);
       File.WriteAllText(
           Path.Combine(root, "VibeOCR.WinUI.runtimeconfig.json"), "{ not json");
+
+      PrerequisiteReport report = new PrerequisiteDetector().Detect(
+          BundledLayout(root), bundledProduct: true);
+
+      PrerequisiteStatus dotnet = report.Items.Single(item =>
+          item.Kind == PrerequisiteKind.DotNetRuntime);
+      Assert.False(dotnet.IsInstalled);
+      Assert.Null(dotnet.InstalledVersion);
+      Assert.Contains(report.Missing, item => item.Kind == PrerequisiteKind.DotNetRuntime);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Theory]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":""not-an-array""}}")]
+  [InlineData(@"[{""not"":""an object""}]")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":{}}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[null]}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""broken""}]}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""10.0""}]}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""9.0.15""}]}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""10.0.0""}],""framework"":null}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""10.0.0""}],""framework"":{}}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""10.0.0""}],""frameworks"":null}}")]
+  [InlineData(@"{""runtimeOptions"":{""includedFrameworks"":[{""name"":""Microsoft.NETCore.App"",""version"":""10.0.0""}],""frameworks"":[]}}")]
+  public void StructurallyDamagedRuntimeConfigIsTreatedAsMissing(string runtimeConfig)
+  {
+    // 结构损坏的 runtimeconfig 按随包 .NET 缺失处理，不得抛给调用方。
+    string root = Path.Combine(
+        Path.GetTempPath(), $"vibeocr-bundled-structural-{Guid.NewGuid():N}");
+    try
+    {
+      WriteBundledApp(root);
+      File.WriteAllText(
+          Path.Combine(root, "VibeOCR.WinUI.runtimeconfig.json"), runtimeConfig);
 
       PrerequisiteReport report = new PrerequisiteDetector().Detect(
           BundledLayout(root), bundledProduct: true);

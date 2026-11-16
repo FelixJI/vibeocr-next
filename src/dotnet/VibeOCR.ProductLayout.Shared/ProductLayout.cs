@@ -83,6 +83,33 @@ public sealed class ResolvedProductLayout
     public string ReleaseManifest { get; }
     public string Descriptor { get; }
 
+    /// <summary>#321：随包 Windows App SDK 启动闭包（缺 UI.Xaml 时 apphost
+    /// 异步退出无法报修；Bootstrapper 与 Platform 共用保持一致）。</summary>
+    public static readonly string[] WindowsAppRuntimeStartupFiles =
+    {
+        "Microsoft.WindowsAppRuntime.dll",
+        "Microsoft.UI.Xaml.dll",
+    };
+
+    public static IReadOnlyList<string> MissingWindowsAppRuntimeFiles(string appRoot)
+    {
+        if (string.IsNullOrWhiteSpace(appRoot))
+        {
+            throw new ArgumentException("App root is required.", nameof(appRoot));
+        }
+
+        List<string> missing = new();
+        foreach (string name in WindowsAppRuntimeStartupFiles)
+        {
+            if (!File.Exists(Path.Combine(appRoot, name)))
+            {
+                missing.Add(name);
+            }
+        }
+
+        return missing;
+    }
+
     public static ResolvedProductLayout Open(string installRoot)
     {
         if (string.IsNullOrWhiteSpace(installRoot))

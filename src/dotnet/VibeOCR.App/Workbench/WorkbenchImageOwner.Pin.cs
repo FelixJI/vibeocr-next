@@ -158,7 +158,7 @@ internal sealed partial class WorkbenchImageOwner
 
   private async Task RestorePinProjectAsync(string path, CancellationToken cancellationToken)
   {
-    string extraction = Path.Combine(Path.GetTempPath(), "vibeocr-project-open", Guid.NewGuid().ToString("N"));
+    string extraction = resources.NewProjectExtractionPath();
     try
     {
       VibpProjectArchive archive = await VibpProjectFile.ReadAsync(path, extraction, cancellationToken);

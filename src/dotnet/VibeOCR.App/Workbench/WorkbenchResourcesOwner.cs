@@ -17,6 +17,17 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
   private readonly Dictionary<string, string> resourceFiles = new(StringComparer.Ordinal);
   private readonly Dictionary<string, IReadOnlyList<WorkbenchResourceReference>> structuredResourceChildren = new(StringComparer.Ordinal);
   private readonly Dictionary<string, string> structuredResourceFiles = new(StringComparer.Ordinal);
+
+  internal string NewProjectExtractionPath()
+  {
+    if ((File.GetAttributes(resourceRoot) & FileAttributes.ReparsePoint) != 0)
+      throw new IOException("工程临时目录不可经过重解析点。");
+    DirectoryInfo extractionRoot = Directory.CreateDirectory(Path.Combine(resourceRoot, "project-open"));
+    if ((extractionRoot.Attributes & FileAttributes.ReparsePoint) != 0)
+      throw new IOException("工程临时目录不可经过重解析点。");
+    return Path.Combine(extractionRoot.FullName, Guid.NewGuid().ToString("N"));
+  }
+
   internal Task<WorkbenchResourceReference?> PublishStructuredResultAsync(
     RecognitionViewModel viewModel,
     CancellationToken cancellationToken)

@@ -142,12 +142,15 @@ internal static class PinnedTextMask
   /// <summary>生成临时遮罩 PNG 副本；调用方在识别结束后删除临时文件。</summary>
   internal static async Task<string> CreateMaskedPngAsync(
     string sourcePath,
+    string temporaryRoot,
     IReadOnlyList<WorkbenchExclusionBox> boxes,
     CancellationToken cancellationToken)
   {
+    if ((File.GetAttributes(temporaryRoot) & System.IO.FileAttributes.ReparsePoint) != 0)
+      throw new IOException("遮罩临时目录不可经过重解析点。");
     byte[] bytes = await CreateMaskedPngBytesAsync(sourcePath, boxes, cancellationToken);
     string target = Path.Combine(
-      Path.GetTempPath(), $"vibeocr-pin-mask-{Guid.NewGuid():N}.png");
+      temporaryRoot, $"vibeocr-pin-mask-{Guid.NewGuid():N}.png");
     try
     {
       await File.WriteAllBytesAsync(target, bytes, cancellationToken);

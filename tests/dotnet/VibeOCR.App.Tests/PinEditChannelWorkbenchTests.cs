@@ -593,6 +593,7 @@ public sealed class PinEditChannelWorkbenchTests
     Guid? session = await harness.Handler.TryOpenPinEditSessionAsync(Guid.NewGuid(), Png, TestContext.Current.CancellationToken);
     PinEditWorkbenchState restored = Assert.IsType<PinEditWorkbenchState>(harness.States.Last());
     var descriptor = Assert.IsType<WorkbenchProjectOpenState>(restored.ProjectRestore);
+    Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(harness.Root, "project-open")));
     harness.States.Clear();
     Assert.NotNull(harness.Execute(new RejectPinProjectRestoreCommand(Guid.NewGuid(), session!.Value, 0)).Error);
     WorkbenchCommandOutcome rejected = harness.Execute(new RejectPinProjectRestoreCommand(Guid.Parse(descriptor.PendingId), session.Value, 0));

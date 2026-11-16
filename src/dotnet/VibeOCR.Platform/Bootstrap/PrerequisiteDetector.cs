@@ -136,7 +136,7 @@ public static class BundledProductProbe
             ?? throw new InvalidOperationException("应用入口缺少目录。");
         return new Snapshot(
             FindBundledDotNetVersion(appRoot, layout.AppEntry),
-            FindFileVersion(Path.Combine(appRoot, "Microsoft.WindowsAppRuntime.dll")),
+            FindBundledWindowsAppRuntimeVersion(appRoot),
             FindFileVersion(Path.Combine(appRoot, "WebView2Runtime", "msedgewebview2.exe")),
             File.Exists(layout.RuntimePython));
     }
@@ -173,43 +173,19 @@ public static class BundledProductProbe
         ]);
     }
 
-    // Self-contained .NET marker files (hostfxr/hostpolicy/coreclr，F6：
-    // apphost AppLocal 搜索必需三件)；runtimeconfig 的 includedFrameworks
-    // 是权威版本，损坏/不可解析按缺失处理，不得报 Bundled。
-    private static string? FindBundledDotNetVersion(string appRoot, string appEntry)
-    {
-        if (!File.Exists(Path.Combine(appRoot, "hostpolicy.dll")) ||
-            !File.Exists(Path.Combine(appRoot, "coreclr.dll")) ||
-            !File.Exists(Path.Combine(appRoot, "hostfxr.dll")))
-        {
-            return null;
-        }
-        string runtimeConfig = Path.ChangeExtension(appEntry, ".runtimeconfig.json");
-        try
-        {
-            using var document = System.Text.Json.JsonDocument.Parse(
-                File.ReadAllText(runtimeConfig));
-            var frameworks = document.RootElement
-                .GetProperty("runtimeOptions")
-                .GetProperty("includedFrameworks");
-            foreach (var framework in frameworks.EnumerateArray())
-            {
-                if (framework.GetProperty("name").GetString() == "Microsoft.NETCore.App")
-                {
-                    string? version = framework.GetProperty("version").GetString();
-                    return string.IsNullOrWhiteSpace(version) ? null : version;
-                }
-            }
-            return null;
-        }
-        catch (Exception error) when (
-            error is IOException or System.Text.Json.JsonException or
-                UnauthorizedAccessException or KeyNotFoundException)
-        {
-            // runtimeconfig 损坏：随包 .NET 不可用，明确失败。
-            return null;
-        }
-    }
+    // 随包 Windows App SDK 启动闭包（ResolvedProductLayout.
+    // MissingWindowsAppRuntimeFiles，与 Bootstrapper 自检一致）。
+    private static string? FindBundledWindowsAppRuntimeVersion(string appRoot) =>
+        ResolvedProductLayout.MissingWindowsAppRuntimeFiles(appRoot).Count == 0
+            ? FindFileVersion(Path.Combine(appRoot, "Microsoft.WindowsAppRuntime.dll"))
+            : null;
+
+    // 随包 .NET 启动闭包 + 共享 runtimeconfig 语义（与 Bootstrapper 一致）。
+    private static string? FindBundledDotNetVersion(string appRoot, string appEntry) =>
+        BundledRuntimeConfig.MissingClrStartupFiles(appRoot).Count == 0
+            ? BundledRuntimeConfig.FindNetCoreAppVersion(
+                Path.ChangeExtension(appEntry, ".runtimeconfig.json"))
+            : null;
 
     private static string? FindFileVersion(string path)
     {

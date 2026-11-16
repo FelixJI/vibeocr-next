@@ -202,9 +202,8 @@ public sealed partial class MainWindow
     if (!File.Exists(fixture)) throw new FileNotFoundException("Fixture missing.", fixture);
     if (PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR") is { Length: > 0 } exportDir)
     {
-      // 导出目录同样必须在隔离根内且不在候选副本里；具体导出文件在
-      // RunPaddleUiExportAsync 内再次校验并拒绝已存在目标。
-      ValidatePaddleSmokeOwnedPath(exportDir, "export dir");
+      // 首次创建也必须先通过产品输出目录校验，具体导出仍拒绝覆盖。
+      Directory.CreateDirectory(ValidatePaddleSmokeExportPath(exportDir, layout.OutputRoot));
     }
     string optionName = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_OPTION_NAME");
     string optionValue = RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_OPTION_VALUE");
@@ -706,7 +705,7 @@ public sealed partial class MainWindow
         !viewportEvidence.TryGetProperty("hd_width", out JsonElement hdWidth) || !hdWidth.TryGetInt32(out int width) || width <= 160 ||
         !viewportEvidence.TryGetProperty("hd_height", out JsonElement hdHeight) || !hdHeight.TryGetInt32(out int height) || height <= 0)
       throw new InvalidOperationException($"Save button or current revision HD preview evidence is unavailable: {viewportJson}");
-    string editingScreenshot = Path.Combine(ValidatePaddleSmokeOwnedPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), "pdf editing evidence"), "pdf-editing-narrow.png");
+    string editingScreenshot = Path.Combine(ValidatePaddleSmokeExportPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), layout.OutputRoot), "pdf-editing-narrow.png");
     using (new FileStream(editingScreenshot, FileMode.CreateNew)) { }
     StorageFile editingPreview = await StorageFile.GetFileFromPathAsync(editingScreenshot);
     using (IRandomAccessStream previewStream = await editingPreview.OpenAsync(FileAccessMode.ReadWrite))
@@ -749,7 +748,7 @@ public sealed partial class MainWindow
     string fixtures = Path.GetDirectoryName(Path.GetDirectoryName(fixture))!;
     string second = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "workspace-b", "same.pdf"), "workspace second fixture");
     string external = ValidatePaddleSmokeOwnedPath(Path.Combine(fixtures, "document_mixed.pdf"), "workspace insertion fixture");
-    string exports = ValidatePaddleSmokeOwnedPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), "workspace exports");
+    string exports = ValidatePaddleSmokeExportPath(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR"), layout.OutputRoot);
     var resources = new List<object>();
     async Task SampleResourcesAsync(string stage)
     {
@@ -1573,7 +1572,7 @@ public sealed partial class MainWindow
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
     if (string.IsNullOrWhiteSpace(exportDir))
       throw new InvalidOperationException("Batch export directory is missing.");
-    exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "batch export dir");
+    exportDir = ValidatePaddleSmokeExportPath(exportDir, layout.OutputRoot);
     Directory.CreateDirectory(exportDir);
     string format = buttonLabel switch
     {
@@ -1630,7 +1629,7 @@ public sealed partial class MainWindow
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
     if (string.IsNullOrWhiteSpace(exportDir))
       throw new InvalidOperationException("PDF save directory is missing.");
-    exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "pdf save dir");
+    exportDir = ValidatePaddleSmokeExportPath(exportDir, layout.OutputRoot);
     Directory.CreateDirectory(exportDir);
     string target = Path.Combine(exportDir,
       $"paddle-{RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE")}-ui-save{(suffix is null ? "" : "-" + suffix)}.pdf");
@@ -1668,7 +1667,7 @@ public sealed partial class MainWindow
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
     if (string.IsNullOrWhiteSpace(exportDir))
       throw new InvalidOperationException("Isolated export dir env is missing.");
-    exportDir = ValidatePaddleSmokeOwnedPath(exportDir, "export dir");
+    exportDir = ValidatePaddleSmokeExportPath(exportDir, layout.OutputRoot);
     Directory.CreateDirectory(exportDir);
     string extension = buttonLabel switch
     {
@@ -1872,7 +1871,7 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 路径所有权：fixture/导出目录必须严格位于本次候选父目录（隔离根）
+  /// 路径所有权：fixture必须严格位于本次候选父目录（隔离根）
   /// 之内、候选副本之外；拒绝隔离根外的任意路径。
   /// </summary>
   private string ValidatePaddleSmokeOwnedPath(string raw, string kind)
@@ -1888,6 +1887,21 @@ public sealed partial class MainWindow
     if (full.StartsWith(candidatePrefix, StringComparison.OrdinalIgnoreCase))
       throw new InvalidOperationException(
         $"{kind} must not be inside the candidate copy: {full}");
+    return full;
+  }
+
+  internal static string ValidatePaddleSmokeExportPath(string raw, string outputRoot)
+  {
+    string root = Path.GetFullPath(Path.Combine(outputRoot, "paddle-smoke"));
+    string full = Path.GetFullPath(raw).TrimEnd(Path.DirectorySeparatorChar);
+    if (!full.Equals(root, StringComparison.OrdinalIgnoreCase) &&
+        !full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+      throw new InvalidOperationException("Smoke exports must stay inside state/output/paddle-smoke.");
+    for (var directory = new DirectoryInfo(full); directory is not null; directory = directory.Parent)
+    {
+      if (directory.Exists && (directory.Attributes & System.IO.FileAttributes.ReparsePoint) != 0)
+        throw new InvalidOperationException("Smoke exports must not traverse reparse points.");
+    }
     return full;
   }
 

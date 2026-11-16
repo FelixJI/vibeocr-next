@@ -419,6 +419,21 @@ def _configure_release_smoke_fixture(
         package.writestr("current/LICENSE", b"license")
         package.writestr("current/CHANGELOG.md", b"changelog")
         package.writestr("current/app/VibeOCR.WinUI.exe", b"desktop")
+        package.writestr("current/app/Microsoft.WindowsAppRuntime.dll", b"winappsdk")
+        package.writestr("current/app/Microsoft.UI.Xaml.dll", b"winappsdk-xaml")
+        package.writestr(
+            "current/app/VibeOCR.WinUI.runtimeconfig.json",
+            json.dumps(
+                {
+                    "runtimeOptions": {
+                        "includedFrameworks": [
+                            {"name": "Microsoft.NETCore.App", "version": "10.0.0"}
+                        ]
+                    }
+                }
+            ),
+        )
+        package.writestr("current/app/System.Private.CoreLib.dll", b"clr")
         package.writestr(
             "current/app/WebView2Runtime/msedgewebview2.exe", b"locked-browser"
         )
@@ -487,6 +502,27 @@ def _configure_release_smoke_fixture(
                     return subprocess.CompletedProcess(
                         command, 5, stderr=b"Velopack.dll"
                     )
+                runtime_config = product_root / "app/VibeOCR.WinUI.runtimeconfig.json"
+                if not (product_root / "app/System.Private.CoreLib.dll").is_file():
+                    # 随包 .NET 闭包：CoreLib 缺失 → exit 2。
+                    return subprocess.CompletedProcess(
+                        command, 2, stderr=b"System.Private.CoreLib.dll"
+                    )
+                if not runtime_config.is_file() or runtime_config.read_bytes() == b"{":
+                    # 随包 .NET 闭包：runtimeconfig 缺失/损坏 → exit 2。
+                    return subprocess.CompletedProcess(
+                        command, 2, stderr=b"VibeOCR.WinUI.runtimeconfig.json"
+                    )
+                options = json.loads(runtime_config.read_text())["runtimeOptions"]
+                if "framework" in options or "frameworks" in options:
+                    return subprocess.CompletedProcess(
+                        command, 2, stderr=b"VibeOCR.WinUI.runtimeconfig.json"
+                    )
+                if not (product_root / "app/Microsoft.UI.Xaml.dll").is_file():
+                    # 随包 Windows App SDK 启动闭包：UI.Xaml 缺失 → exit 2。
+                    return subprocess.CompletedProcess(
+                        command, 2, stderr=b"Microsoft.UI.Xaml.dll"
+                    )
                 reason = (
                     b"webview2.version-mismatch"
                     if browser.read_bytes() == velopack.read_bytes()
@@ -531,7 +567,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
-    assert len(calls) == 8
+    assert len(calls) == 14
     assert Path(calls[0][0]).parts[-4:] == (
         "runtime",
         "env",
@@ -542,7 +578,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     assert calls[1][1:] == ["--self-test-prerequisites"]
     assert calls[-1][2].endswith("smoke_web_workbench.ps1")
     # 子进程共享同一个独占解包根,并在结束后由 Python 清理。
-    assert len(unpack_roots) == 8
+    assert len(unpack_roots) == 14
     assert len({str(path) for path in unpack_roots}) == 1
     reused = unpack_roots[0]
     assert reused.name == "current"
@@ -648,7 +684,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 8
+    assert len(calls) == 14
     # handshake 失败后复用解包树仍由 Python 的 TemporaryDirectory 清理。
     assert not unpack_roots[0].exists()
 
@@ -1302,10 +1338,57 @@ def test_bootstrapper_probes_the_bundled_runtime_payload() -> None:
     assert "DotNetRuntimeProbe" not in program
     assert "PackageManager" not in program
     assert "GetAvailableCoreWebView2BrowserVersionString" not in program
-    assert 'layout.AppRoot, "hostpolicy.dll"' in program
-    assert 'layout.AppRoot, "Microsoft.WindowsAppRuntime.dll"' in program
+    assert "BundledRuntimeConfig.MissingClrStartupFiles" in program
+    assert "BundledRuntimeConfig.FindNetCoreAppVersion" in program
+    assert 'Path.ChangeExtension(layout.AppEntry, ".runtimeconfig.json")' in program
+    assert "MissingWindowsAppRuntimeFiles(layout.AppRoot)" in program
     assert 'layout.WebView2RuntimeRoot, "msedgewebview2.exe"' in program
     assert "Repair with the in-app update or a fresh complete download." in program
+
+
+def test_bundled_windows_app_runtime_startup_closure_is_shared_and_covers_xaml() -> (
+    None
+):
+    root = Path(__file__).parents[2]
+    shared = (
+        root / "src/dotnet/VibeOCR.ProductLayout.Shared/ProductLayout.cs"
+    ).read_text(encoding="utf-8")
+    bootstrapper = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    detector = (
+        root / "src/dotnet/VibeOCR.Platform/Bootstrap/PrerequisiteDetector.cs"
+    ).read_text(encoding="utf-8")
+
+    # #321：UI.Xaml 是真实启动关键；闭包两侧共用。
+    closure = shared[shared.index("WindowsAppRuntimeStartupFiles") :]
+    assert "Microsoft.WindowsAppRuntime.dll" in closure
+    assert "Microsoft.UI.Xaml.dll" in closure
+    assert "MissingWindowsAppRuntimeFiles(layout.AppRoot)" in bootstrapper
+    assert "MissingWindowsAppRuntimeFiles(appRoot)" in detector
+
+
+def test_bundled_dotnet_startup_closure_and_runtimeconfig_semantics_are_shared() -> (
+    None
+):
+    root = Path(__file__).parents[2]
+    shared = (
+        root / "src/dotnet/VibeOCR.ProductLayout.Shared/DotNetRuntimeProbe.cs"
+    ).read_text(encoding="utf-8")
+    bootstrapper = (root / "src/dotnet/VibeOCR.Bootstrapper/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    detector = (
+        root / "src/dotnet/VibeOCR.Platform/Bootstrap/PrerequisiteDetector.cs"
+    ).read_text(encoding="utf-8")
+
+    # #321：CoreLib 属 CLR 启动必需；runtimeconfig 语义两侧复用同一解析。
+    closure = shared[shared.index("ClrStartupFiles") :]
+    assert "System.Private.CoreLib.dll" in closure
+    assert "DataContractJsonSerializer" in shared
+    assert "BundledRuntimeConfig.FindNetCoreAppVersion" in bootstrapper
+    assert "BundledRuntimeConfig" in detector
+    assert "System.Text.Json" not in detector
 
 
 def test_windows_app_runtime_identity_checks_stay_in_the_dev_detector() -> None:

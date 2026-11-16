@@ -302,8 +302,7 @@ internal sealed partial class WorkbenchImageOwner
         target.Revision,
         Volatile.Read(ref target.Generation));
 
-      string extractPath = Path.Combine(
-        Path.GetTempPath(), "vibeocr-project-open", Guid.NewGuid().ToString("N"));
+      string extractPath = resources.NewProjectExtractionPath();
       extractDirectory = extractPath;
       VibpProjectArchive archive;
       try

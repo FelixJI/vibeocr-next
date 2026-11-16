@@ -8,15 +8,8 @@ authorized ``GET /v2/health`` succeeds immediately. The session token is
 delivered out of band via the ``VIBEOCR_SUP_TOKEN`` env var (inherited from
 the parent process) so it never appears on stdout/argv/logs.
 
-Usage from a parent process (PySide/WinUI):
-
-    proc = subprocess.Popen(
-        [python, "-m", "vibeocr.runtime.host.main"],
-        env={**os.environ, "VIBEOCR_SUP_TOKEN": token, "VIBEOCR_SUP_ROOT": root},
-        stdout=PIPE,
-    )
-    ready = json.loads(proc.stdout.readline())
-    port = ready["port"]
+The WinUI parent launches this module with the bundled interpreter and product
+binding. The supervisor stages job inputs under the bound product state root.
 """
 
 from __future__ import annotations
@@ -106,12 +99,9 @@ def run_supervisor(
     handle = BootstrapHandle(token)
     sock = bind_loopback_socket()
     port = sock.getsockname()[1]
-    root_env = os.environ.get("VIBEOCR_SUP_ROOT")
-    stager_root = Path(root_env) if root_env else None
 
     module, _ = build_supervisor(
         instance_id=instance_id,
-        stager_root=stager_root,
         bootstrap_handle=handle,
         # The supervisor owns the PDF child so the GUI never talks to it
         # directly (plan §6 / ADR §"Transport"). The child is spawned lazily.
