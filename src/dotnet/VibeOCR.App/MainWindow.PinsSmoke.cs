@@ -53,6 +53,19 @@ public sealed partial class MainWindow
     Action stopFirstTap = pin.SmokeObserveDoubleTap(() => doubleTaps++);
     Action stopSecondTap = secondPin.SmokeObserveDoubleTap(() => doubleTaps++);
     var failures = new List<string>();
+    string TraceDragState(string phase)
+    {
+      string state = $"first=[{pin.SmokeMouseInputState}], second=[{secondPin.SmokeMouseInputState}]";
+      CaptureUiSmokeTrace.Stage($"pins.drag-state.{phase}: {state}");
+      return state;
+    }
+    void CheckDragReleased(PinnedImageWindow target, string phase)
+    {
+      bool released = target.SmokeMouseInputReleased;
+      string state = TraceDragState(phase);
+      if (!released)
+        throw new InvalidOperationException($"Pin drag returned before its mouse input released: target={target.PinId}; {state}");
+    }
     void CheckClient(string phase)
     {
       var expected = pin.SmokeExpectedOriginalClientSize;
@@ -72,8 +85,10 @@ public sealed partial class MainWindow
       await UntilPinStageWidthAsync(pin, original.Width, "Initial pin stage lost physical 1:1 scale.");
       // 直接拖动契约：与 text-selection e2e 同一真实鼠标路径 helper。真实按下
       // 必须先被 band 处理，随后窗口按请求的物理位移精确移动。
+      TraceDragState("initial.before");
       var beforeDrag = pin.SmokePosition;
       await pin.SmokeDragTitleBarAsync(40, 30);
+      CheckDragReleased(pin, "initial.after");
       var afterDrag = pin.SmokePosition;
       if (afterDrag.X != beforeDrag.X + 40 || afterDrag.Y != beforeDrag.Y + 30)
         throw new InvalidOperationException($"Pin band drag moved " +
@@ -81,11 +96,15 @@ public sealed partial class MainWindow
       CaptureUiSmokeTrace.Stage("pins.band-drag");
       foreach (PinnedImageWindow target in new[] { secondPin, pin })
       {
+        TraceDragState($"switch-{target.PinId}.before");
         var before = target.SmokePosition;
         await target.SmokeDragTitleBarAsync(40, 30);
+        CheckDragReleased(target, $"switch-{target.PinId}.after");
         var after = target.SmokePosition;
         if (after.X != before.X + 40 || after.Y != before.Y + 30)
-          throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch.");
+          throw new InvalidOperationException($"Pin {target.PinId} lost its exact physical delta after a window switch: " +
+            $"before=({before.X},{before.Y}), after=({after.X},{after.Y}), " +
+            $"delta=({after.X - before.X},{after.Y - before.Y}), expected=(40,30).");
       }
       CaptureUiSmokeTrace.Stage("pins.alternating-band-drags");
       var firstGeometry = pin.RecoveryState();
@@ -109,11 +128,15 @@ public sealed partial class MainWindow
           VibeOCR.Platform.Windows.ScreenTargetQuery.GetForegroundWindowHandle() == secondPin.Handle), "Sibling pin did not become foreground.");
         foreach (var (target, sibling) in new[] { (pin, secondPin), (secondPin, pin) })
         {
+          TraceDragState($"inactive-{target.PinId}.before");
           var before = target.SmokePosition;
           await target.SmokeDragTitleBarAsync(40, 30, sibling);
+          CheckDragReleased(target, $"inactive-{target.PinId}.after");
           var after = target.SmokePosition;
           if (after.X != before.X + 40 || after.Y != before.Y + 30)
-            throw new InvalidOperationException("Inactive pin activation lost the exact drag displacement.");
+            throw new InvalidOperationException($"Inactive pin activation lost the exact drag displacement: target={target.PinId}, " +
+              $"before=({before.X},{before.Y}), after=({after.X},{after.Y}), " +
+              $"delta=({after.X - before.X},{after.Y - before.Y}), expected=(40,30).");
         }
         CaptureUiSmokeTrace.Stage("pins.inactive-sibling-band-drags");
       }

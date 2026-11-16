@@ -254,6 +254,20 @@ internal sealed class PinnedImageWindow : IDisposable
     }
   }
   internal PointInt32 SmokePosition => window.AppWindow.Position;
+  internal bool SmokeMouseInputReleased => dragOrigin is null && band.PointerCaptures is not { Count: > 0 } &&
+    (GetAsyncKeyState(1) & 0x8000) == 0;
+  internal string SmokeMouseInputState
+  {
+    get
+    {
+      nint handle = Handle;
+      bool hasBounds = GetWindowRect(handle, out RectL bounds);
+      PointInt32 position = SmokePosition;
+      return $"pin={PinId}, handle=0x{(long)handle:X}, position=({position.X},{position.Y}), " +
+        $"nativeBounds={hasBounds}:({bounds.Left},{bounds.Top},{bounds.Right},{bounds.Bottom}), " +
+        $"origin={dragOrigin}, captures={band.PointerCaptures?.Count ?? 0}, leftDown={(GetAsyncKeyState(1) & 0x8000) != 0}";
+    }
+  }
   internal Guid SessionId => sessionId;
   internal long Revision => revision;
   internal bool Editing => editing;
@@ -379,6 +393,16 @@ internal sealed class PinnedImageWindow : IDisposable
     band.DoubleTapped += handler;
     return () => band.DoubleTapped -= handler;
   }
+  private static void SmokePositionMouseForPress(nint handle, PointL target)
+  {
+    if (!SetCursorPos(target.X, target.Y) || !GetCursorPos(out PointL current))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    nint hitRoot = GetAncestor(WindowFromPoint(current), GaRoot);
+    if (current.X != target.X || current.Y != target.Y || hitRoot != handle)
+      throw new InvalidOperationException($"Pin mouse position changed before the press: " +
+        $"target=({target.X},{target.Y}), actual=({current.X},{current.Y}), " +
+        $"handle=0x{(long)handle:X}, hitRoot=0x{(long)hitRoot:X}.");
+  }
   private async Task<int> SmokePrepareMouseActionAsync(PointL actionPoint, nint foregroundSibling = 0)
   {
     nint handle = Handle;
@@ -447,7 +471,7 @@ internal sealed class PinnedImageWindow : IDisposable
       bool down = false;
       try
       {
-        if (!SetCursorPos(activationPoint.X, activationPoint.Y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        SmokePositionMouseForPress(handle, activationPoint);
         MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
         down = true;
         // Keep the press held until the band consumes it, before injecting release.
@@ -517,19 +541,18 @@ internal sealed class PinnedImageWindow : IDisposable
     if (hitRoot != handle)
       throw new InvalidOperationException($"Pin drag point is not its band: " +
         $"{geometry}, hitRoot=0x{(long)hitRoot:X}.");
-    if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    SmokePositionMouseForPress(handle, new PointL { X = x, Y = y });
     bool down = false;
     try
     {
       MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
       down = true;
-      bool activated = false;
-      for (int attempt = 0; attempt < readyAttempts; attempt++)
+      while ((GetForegroundWindow() != handle || dragOrigin is null) && readyAttempts > 0)
       {
-        if (GetForegroundWindow() == handle && dragOrigin is not null) { activated = true; break; }
+        readyAttempts--;
         await Task.Delay(25);
       }
-      if (!activated)
+      if (GetForegroundWindow() != handle || dragOrigin is null)
         throw new InvalidOperationException($"Pin press did not activate its band: " +
           $"{geometry}, fg=0x{(long)GetForegroundWindow():X}, dragOrigin={dragOrigin}.");
       if (!SetCursorPos(x + dx, y + dy))
@@ -549,6 +572,14 @@ internal sealed class PinnedImageWindow : IDisposable
     {
       if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0);
     }
+    // The next window must not move the cursor while this band still owns capture.
+    while (!SmokeMouseInputReleased && readyAttempts > 0)
+    {
+      readyAttempts--;
+      await Task.Delay(25);
+    }
+    if (!SmokeMouseInputReleased)
+      throw new InvalidOperationException($"Pin drag release was not acknowledged: {SmokeMouseInputState}.");
   }
   /// <summary>真实鼠标点击右上角关闭按钮：验证悬浮控件在 WebView2 之上可交互。</summary>
   internal async Task SmokeMouseClickCloseButtonAsync()
@@ -576,7 +607,7 @@ internal sealed class PinnedImageWindow : IDisposable
     bool down = false;
     try
     {
-      if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      SmokePositionMouseForPress(handle, new PointL { X = x, Y = y });
       MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
       down = true;
     }
@@ -1742,7 +1773,7 @@ internal sealed class PinnedImageWindow : IDisposable
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool IsIconic(nint window);
 
-  [DllImport("user32.dll")]
+  [DllImport("user32.dll", SetLastError = true)]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool GetCursorPos(out PointL point);
 
