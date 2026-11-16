@@ -1,10 +1,29 @@
 using VibeOCR.Platform.Windows;
+using System.IO.Pipes;
+using System.Text.Json;
 using Xunit;
 
 namespace VibeOCR.Platform.Tests;
 
 public sealed class WindowsPlatformTests
 {
+    [Fact]
+    public async Task SingleInstanceReadsArgumentsWhenSenderClosesBeforeAccept()
+    {
+        string name = $"VibeOCR-early-close-{Guid.NewGuid():N}";
+        using NamedPipeServerStream server = SingleInstanceService.CreateServer(name);
+        string[] arguments = ["--open", @"C:\input files\scan.png"];
+        await using (var client = new NamedPipeClientStream(
+            ".", name, PipeDirection.Out, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        {
+            await client.ConnectAsync(250, TestContext.Current.CancellationToken);
+            await client.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(arguments), TestContext.Current.CancellationToken);
+            await client.FlushAsync(TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(arguments, SingleInstanceService.ReadArguments(server));
+    }
+
     [Fact]
     public async Task SingleInstanceForwardsSecondaryArguments()
     {
