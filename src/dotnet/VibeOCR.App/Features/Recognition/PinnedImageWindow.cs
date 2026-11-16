@@ -450,6 +450,14 @@ internal sealed class PinnedImageWindow : IDisposable
         if (!SetCursorPos(activationPoint.X, activationPoint.Y)) throw new Win32Exception(Marshal.GetLastWin32Error());
         MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
         down = true;
+        // Keep the press held until the band consumes it, before injecting release.
+        while ((GetForegroundWindow() != handle || dragOrigin is null || !LeftDown()) && readyAttempts > 0)
+        {
+          readyAttempts--;
+          await Task.Delay(25);
+        }
+        if (GetForegroundWindow() != handle || dragOrigin is null || !LeftDown())
+          throw new InvalidOperationException("Pin activation press was not acknowledged by its band.");
       }
       finally { if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0); }
       while ((!activationReleased || GetForegroundWindow() != handle || dragOrigin is not null || LeftDown()) && readyAttempts > 0)
