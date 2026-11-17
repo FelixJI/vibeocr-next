@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import pymupdf as fitz
@@ -66,8 +66,12 @@ from vibeocr.runtime.documents.wire_schemas import (
     PageInspectRequest,
     PageInspectResponse,
     PageListRequest,
+    PdfDemandLoadRequest,
     PdfDocumentMirror,
     PdfPageInfoMirror,
+    PdfReadCancelledOk,
+    PdfReadCancelRequest,
+    PdfReadContext,
     ProgressEvent,
     ProgressPhase,
     RenderPreviewRequest,
@@ -140,6 +144,7 @@ def _page_to_mirror(info: PdfPageInfo, *, summary: bool = False) -> PdfPageInfoM
         else [_text_block_to_mirror(b) for b in info.ocr_text_blocks],
         ocr_preproc_angle=info.ocr_preproc_angle,
         deskewed=info.deskewed,
+        scan_checked=info.scan_checked,
     )
 
 
@@ -188,22 +193,95 @@ def _diff_pages(
 
 
 def _render_page_pixels(
-    doc: fitz.Document, page_index: int, dpi: float
+    doc: fitz.Document,
+    page_index: int,
+    dpi: float,
+    *,
+    max_edge: int | None = None,
+    max_pixels: int | None = None,
+    target_size: int | None = None,
 ) -> tuple[bytes, int, int]:
-    """在调用方持有的文档锁内渲染当前内存修订，分配前限制像素。"""
+    """在调用方持有的文档锁内渲染当前内存修订，分配前限制像素。
+
+    - target_size：直接按目标边长像素栅格化（demand 缩略图，无需大图缩小）；
+    - max_edge：目标长边像素需求（demand 预览）；未指定时按 DPI。
+    - max_pixels：像素预算，与 16M 硬上限取小。
+    """
     import math
 
     if page_index < 0 or page_index >= doc.page_count:
         raise HTTPException(status_code=400, detail="页索引越界")
     if not math.isfinite(dpi) or not 1 <= dpi <= 1200:
         raise HTTPException(status_code=400, detail="DPI 必须在 1–1200 之间")
+    if target_size is not None and not 1 <= target_size <= 8192:
+        raise HTTPException(status_code=400, detail="target_size 必须在 1–8192 之间")
     page = doc[page_index]
-    width = math.ceil(page.rect.width * dpi / 72)
-    height = math.ceil(page.rect.height * dpi / 72)
-    if width * height > 16_000_000:
-        raise HTTPException(status_code=400, detail="页面渲染超过 16,000,000 像素预算")
-    pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+    width, height = page.rect.width, page.rect.height
+    if not (math.isfinite(width) and math.isfinite(height) and min(width, height) > 0):
+        raise HTTPException(status_code=400, detail="页面几何退化，无法渲染")
+
+    budget = min(16_000_000, max_pixels) if max_pixels is not None else 16_000_000
+    edge = target_size if target_size is not None else max_edge
+    scale = (
+        dpi / 72
+        if edge is None
+        else math.nextafter(min(edge, budget) / max(width, height), 0.0)
+    )
+
+    def fits(candidate: float) -> bool:
+        pixels_w, pixels_h = math.ceil(width * candidate), math.ceil(height * candidate)
+        return pixels_w * pixels_h <= budget and (
+            edge is None or max(pixels_w, pixels_h) <= edge
+        )
+
+    if not fits(scale):
+        if edge is None and max_pixels is None:
+            raise HTTPException(
+                status_code=400, detail=f"页面渲染超过 {budget} 像素预算"
+            )
+        # 对栅格整数边界求可用比例，含长窄页和 1 像素预算。
+        low, high = min(scale, 1 / max(width, height)), scale
+        if not fits(low):
+            low = math.nextafter(low, 0.0)
+        for _ in range(40):
+            middle = (low + high) / 2
+            if fits(middle):
+                low = middle
+            else:
+                high = middle
+        scale = low
+
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+    if (
+        min(pix.width, pix.height) < 1
+        or pix.width * pix.height > budget
+        or (edge is not None and max(pix.width, pix.height) > edge)
+    ):
+        raise HTTPException(status_code=400, detail="页面栅格尺寸超出预算")
     return bytes(pix.samples), pix.width, pix.height
+
+
+def _png_response(
+    session: BackendSession,
+    read: PdfReadContext | None,
+    pixels: tuple[bytes, int, int],
+) -> StreamingResponse:
+    if read is not None:
+        _reject_obsolete_read(session, read)
+    encoded = _encode_png(*pixels)
+    if read is not None:
+        _reject_obsolete_read(session, read)
+    return StreamingResponse(io.BytesIO(encoded), media_type="image/png")
+
+
+def _encode_png(samples: bytes, width: int, height: int) -> bytes:
+    """锁外 PNG 编码（无缩放）；独立 seam 供过期丢弃测试注入。"""
+    from PIL import Image
+
+    img = Image.frombytes("RGB", (width, height), samples)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
 
 
 # ---- Session 注册表 -----------------------------------------------------
@@ -237,6 +315,9 @@ class BackendSession:
     state: str = "OPEN"  # OPEN / CLOSING / CLOSED
     active_ops: int = 0
     _ops_cond: threading.Condition = field(default_factory=threading.Condition)
+    # 一次替换发布两个水位，门内只读快照，不取锁。
+    read_watermarks: tuple[int, int] = (0, 0)
+    read_changed: threading.Condition = field(default_factory=threading.Condition)
 
 
 @contextmanager
@@ -299,7 +380,7 @@ class SessionRegistry:
             s.cancel_event.set()
         # 先释放 _ops_cond 再唤醒优先门（防锁反转）：等待中的后台页在门内
         # 重评 CLOSING/cancel_event 即退出，不进入 native，也不占公平配额。
-        s.native_gate.wake_all()
+        _wake_read_waiters(s)
         with s._ops_cond:
             deadline = time.monotonic() + 10.0
             while s.active_ops > 0:
@@ -360,6 +441,12 @@ def _fitz_op(session: BackendSession):
 
 
 @contextmanager
+def _foreground_native(session: BackendSession) -> Iterator[None]:
+    with _fitz_op(session), session.fitz_lock:
+        yield
+
+
+@contextmanager
 def _background_page_native(session: BackendSession) -> Iterator[None]:
     """后台逐页 native 单元：优先门后台等待 → 再次 OPEN 检查/租约 → 原生锁。
 
@@ -384,6 +471,81 @@ def _background_page_native(session: BackendSession) -> Iterator[None]:
         raise HTTPException(
             status_code=409, detail="后台页检测在进入原生执行前被取消"
         ) from error
+
+
+# ---- pdf.demand.v1 scoped 读 -----------------------------------------
+
+
+def _read_aborted(session: BackendSession, read: PdfReadContext) -> bool:
+    cutoff = session.read_watermarks[0 if read.scope == "viewport" else 1]
+    return read.epoch < cutoff or session.state != "OPEN"
+
+
+def _advance_read_watermark(
+    session: BackendSession, scope: str, before_epoch: int
+) -> None:
+    with session.read_changed:
+        viewport, background = session.read_watermarks
+        session.read_watermarks = (
+            max(viewport, before_epoch) if scope != "background" else viewport,
+            max(background, before_epoch) if scope != "viewport" else background,
+        )
+
+
+def _wake_read_waiters(session: BackendSession) -> None:
+    with session.read_changed:
+        session.read_changed.notify_all()
+    session.native_gate.wake_all()
+
+
+def _reject_obsolete_read(session: BackendSession, read: PdfReadContext) -> None:
+    if _read_aborted(session, read):
+        raise HTTPException(status_code=409, detail="read superseded")
+
+
+@contextmanager
+def _revocable_read(
+    session: BackendSession, read: PdfReadContext, *, foreground: bool
+) -> Iterator[None]:
+    """scoped 读 native 单元：水位校验 → 门（可撤销前台/后台）→ 租约 → 原生锁。
+
+    显式 pages 的定向读与可见视口读走可撤销前台（真撤出等待队列并唤醒公平）；
+    自动全档流走后台。等待阶段可被 CLOSING/读水位撤销；进入
+    native 后不可中断，安全完成后由调用方在昂贵编码前复查水位。
+    """
+
+    def _aborted() -> bool:
+        return _read_aborted(session, read)
+
+    entry = (
+        session.native_gate.foreground if foreground else session.native_gate.background
+    )
+    try:
+        with entry(should_abort=_aborted), _ops_lease(session), session.fitz_lock:
+            _reject_obsolete_read(session, read)
+            yield
+    except PdfNativeWaitAborted as error:
+        raise HTTPException(status_code=409, detail="PDF 读已撤销或会话关闭") from error
+
+
+def _demand_self_test_delay_seconds() -> float:
+    """AC1 受控延迟：仅自测 smoke 环境下的自动 body 流（pages 省略）生效。
+
+    门禁：VIBEOCR_SELF_TEST_SMOKE=paddle-modes-e2e 且
+    VIBEOCR_PADDLE_SMOKE_INPUT_KIND=pdf_baseline；幅度
+    VIBEOCR_PDF_DEMAND_TEST_DELAY_MS 夹在 0..500ms。其余环境（含显式
+    pages/legacy load）恒 0，不影响生产行为。
+    """
+    if os.environ.get("VIBEOCR_SELF_TEST_SMOKE") != "paddle-modes-e2e":
+        return 0.0
+    if os.environ.get("VIBEOCR_PADDLE_SMOKE_INPUT_KIND") != "pdf_baseline":
+        return 0.0
+    raw = os.environ.get("VIBEOCR_PDF_DEMAND_TEST_DELAY_MS", "")
+    try:
+        milliseconds = int(raw) if raw else 0
+    except ValueError:
+        return 0.0
+    return max(0, min(500, milliseconds)) / 1000.0
 
 
 # ---- FastAPI 应用 -------------------------------------------------------
@@ -443,91 +605,133 @@ def session_model(sid: str) -> PdfDocumentMirror:
 # ---- 后台逐页文字层检测(打开后流式)----------------------------------
 
 
-def _detect_one_page(session: BackendSession, i: int) -> PdfPageInfo:
-    """检测单页文字层/扫描/几何,写入 session model 并返回 info。
+def _detect_one_page(
+    session: BackendSession,
+    i: int,
+    *,
+    read: PdfReadContext | None = None,
+    foreground: bool = False,
+) -> PdfPageInfo:
+    """检测单页并写入 session model。
 
-    每页是一个后台 native 单位（见 _background_page_native）：前台渲染/
-    变更优先进入 native，本页在门内排队获得有界公平放行；模型替换/扫描
-    判定逻辑保持原样。
+    准入：无 read 走后台逐页单元（legacy）；有 read 走 scoped 可撤销单元，
+    显式 pages 为前台优先、自动流为后台。body 形 demand
+    load 只做几何+文字存在性，不扫描图像覆盖 is_scanned，并保留
+    OCR/preproc/deskewed。文字存在性变化时旧检测结果失效；legacy 完整
+    扫描置 scan_checked=True。
     """
-    with _background_page_native(session):
+    if read is not None:
+        admission = _revocable_read(session, read, foreground=foreground)
+    else:
+        admission = _background_page_native(session)
+    with admission:
+        if not 0 <= i < session.pdf_document.page_count:
+            raise HTTPException(status_code=400, detail="页索引越界")
         rotation = PdfService.page_rotation(session.doc, i)
         page_rect = PdfService.page_rect(session.doc, i)
-        has_text_layer = bool(session.doc[i].get_text("text").strip())
-        is_scanned = not has_text_layer and PdfService.is_page_scanned(session.doc, i)
-        info = PdfPageInfo(
-            page_index=i,
+        has_text_layer = PdfService.page_has_text(session.doc, i)
+        previous = session.pdf_document.pages[i]
+        info = replace(
+            previous,
             rotation=rotation,
             has_text_layer=has_text_layer,
-            text_layers=[],
-            is_scanned=is_scanned,
             rect=page_rect,
         )
-        previous = session.pdf_document.pages[i]
-        info.ocr_text_blocks = previous.ocr_text_blocks
-        info.ocr_preproc_angle = previous.ocr_preproc_angle
+        if previous.has_text_layer != has_text_layer:
+            info.invalidate_text_detection()
+        if read is None:
+            info.is_scanned = not has_text_layer and PdfService.is_page_scanned(
+                session.doc, i
+            )
+            info.scan_checked = True
+        if read is not None:
+            _reject_obsolete_read(session, read)
         session.pdf_document.pages[i] = info
         return info
 
 
 @app.post("/session/{sid}/load")
-def session_load(sid: str) -> StreamingResponse:
-    """流式逐页文字层检测:每完成一页推一条 NDJSON ProgressEvent。
+def session_load(
+    sid: str, req: PdfDemandLoadRequest | None = None
+) -> StreamingResponse:
+    """流式逐页检测，每完成一页推一条 NDJSON ProgressEvent。
 
-    主进程收到后可立即展示页数 + 占位缩略图(open 已返回页数),
-    然后逐页染色文字层状态,无需等全部检测完。
+    无 body（legacy）：完整检测（含图像覆盖率扫描），逐页后台单元。
+    有 body（pdf.demand.v1）：仅几何+文字存在性；显式 pages 为交互前置
+    （前台优先，保留请求 scope），省略 pages 为唯一自动后台流。
+    取消/水位隔栏/失败不伪造全量完成。
 
     每行 JSON:
         {"phase":"load","current":N,"total":T,"page_index":I,
          "page_payload":{PdfPageInfoMirror...}}
-    末行:{"phase":"load","current":检测成功页数,"total":total,
+    末行:{"phase":"load","current":检测成功页数,"total":检测目标页数,
           "message":"done"|"cancelled"|"incomplete"}
-    done=全部页检测成功；cancelled=cancel/会话关闭中止；incomplete=存在
-    失败页。current 只计真实检测成功的页，取消/失败不伪装成全量完成。
     """
     import json as _json
 
     s = _get_registry().get(sid)
     total = s.pdf_document.page_count
+    read = req.read if req is not None else None
+    targeted = req is not None and req.pages is not None
+    pages = (
+        list(dict.fromkeys(req.pages))
+        if req is not None and req.pages is not None
+        else range(total)
+    )
+    sentinel_total = len(pages)
+    delay_seconds = (
+        _demand_self_test_delay_seconds() if read is not None and not targeted else 0.0
+    )
 
-    def gen():
+    def gen() -> Iterator[bytes]:
         succeeded = 0
         cancelled = False
-        for i in range(total):
-            if s.cancel_event.is_set():
-                cancelled = True
-                break
+        for i in pages:
             try:
-                info = _detect_one_page(s, i)
-                succeeded += 1
+                if read is not None and delay_seconds:
+                    # 等待发生在门与租约之前，scoped cancel 可立即唤醒。
+                    with s.read_changed:
+                        s.read_changed.wait_for(
+                            lambda: _read_aborted(s, read), delay_seconds
+                        )
+                info = (
+                    _detect_one_page(s, i)
+                    if read is None
+                    else _detect_one_page(s, i, read=read, foreground=targeted)
+                )
+                if read is not None:
+                    _reject_obsolete_read(s, read)
                 page_mirror = _page_to_mirror(info)
                 ev = ProgressEvent(
                     phase=ProgressPhase.LOAD,
-                    current=i + 1,
-                    total=total,
+                    current=succeeded + 1,
+                    total=sentinel_total,
                     page_index=i,
                     page_payload=page_mirror.model_dump(mode="json"),
                 )
-                yield (_json.dumps(ev.model_dump(mode="json")) + "\n").encode()
+                line = (_json.dumps(ev.model_dump(mode="json")) + "\n").encode()
+                succeeded += 1
+                yield line
             except HTTPException as e:
                 if e.status_code == 409:
-                    # close/取消：本页未进入 native，检测未完成——不得把取消
-                    # 当检测成功，也不能因少处理页面伪造全已知状态；直接停流。
+                    # 未进入 native 或结果已过期，这一页不得计入已知。
                     cancelled = True
                     break
                 logger.error("[pdf-backend] load page %d failed: %s", i, e)
             except Exception as e:
                 logger.error("[pdf-backend] load page %d failed: %s", i, e)
-        # 结束哨兵：current 是真实检测成功的页数（失败页不计入）；取消/
-        # 中止/失败用显式结局标记，不无条件伪造 current=total 的检测完成。
-        if cancelled:
+        # 结束哨兵：current 是真实检测成功页数；取消/失败用显式结局标记。
+        if cancelled or (read is not None and _read_aborted(s, read)):
             outcome = "cancelled"
-        elif succeeded == total:
+        elif succeeded == sentinel_total:
             outcome = "done"
         else:
             outcome = "incomplete"
         done_ev = ProgressEvent(
-            phase=ProgressPhase.LOAD, current=succeeded, total=total, message=outcome
+            phase=ProgressPhase.LOAD,
+            current=succeeded,
+            total=sentinel_total,
+            message=outcome,
         )
         yield (_json.dumps(done_ev.model_dump(mode="json")) + "\n").encode()
 
@@ -541,13 +745,18 @@ def session_load(sid: str) -> StreamingResponse:
 def render_thumbnail(sid: str, req: RenderThumbnailRequest) -> StreamingResponse:
     """渲染缩略图,返回 PNG 字节流。
 
-    直接用 fitz Pixmap → PNG,不经过 QPixmap(后端子进程无 QApplication,
-    不能用 PdfService.render_page)。先按 thumbnail_dpi 渲染再缩放到目标尺寸。
-
-    当前会话 doc 的读取在文档锁内；PIL 缩放/PNG 编码在锁外。
+    携带 read（pdf.demand.v1）：可撤销前台准入 + 直接按目标 size 有界
+    栅格化（无需大图缩小）；复制后过期在昂贵编码前丢弃。无 read 保持
+    legacy：thumbnail_dpi 渲染后锁外 LANCZOS 缩小。PIL 编码均在锁外。
     """
     s = _get_registry().get(sid)
     try:
+        if req.read is not None:
+            with _revocable_read(s, req.read, foreground=True):
+                samples, width, height = _render_page_pixels(
+                    s.doc, req.page, s.pdf_document.thumbnail_dpi, target_size=req.size
+                )
+            return _png_response(s, req.read, (samples, width, height))
         with _fitz_op(s), s.fitz_lock:
             samples, width, height = _render_page_pixels(
                 s.doc, req.page, s.pdf_document.thumbnail_dpi
@@ -570,20 +779,27 @@ def render_thumbnail(sid: str, req: RenderThumbnailRequest) -> StreamingResponse
 def render_preview(sid: str, req: RenderPreviewRequest) -> StreamingResponse:
     """渲染预览页,返回 PNG 字节流(直接 fitz Pixmap → PNG)。
 
-    渲染当前会话内存 doc，完整 PyMuPDF 调用由文档锁保护。
-    PIL/PNG 编码在锁外。
+    指定 max_edge 时按目标像素长边栅格化，缺省按 DPI。携带 read 时走可撤销
+    前台准入，复制后过期在昂贵编码前丢弃。PIL/PNG 编码在锁外。
     """
     s = _get_registry().get(sid)
     try:
-        with _fitz_op(s), s.fitz_lock:
-            samples, width, height = _render_page_pixels(s.doc, req.page, req.dpi)
-        # 锁外:PIL 转 PNG(CPU 密集,无 fitz 调用,可并行)
-        from PIL import Image
-
-        img = Image.frombytes("RGB", (width, height), samples)
-        buf = io.BytesIO()
-        img.save(buf, "PNG")
-        return StreamingResponse(io.BytesIO(buf.getvalue()), media_type="image/png")
+        with (
+            _revocable_read(s, req.read, foreground=True)
+            if req.read is not None
+            else _foreground_native(s)
+        ):
+            if req.max_edge is None and req.max_pixels is None:
+                samples, width, height = _render_page_pixels(s.doc, req.page, req.dpi)
+            else:
+                samples, width, height = _render_page_pixels(
+                    s.doc,
+                    req.page,
+                    req.dpi,
+                    max_edge=req.max_edge,
+                    max_pixels=req.max_pixels,
+                )
+        return _png_response(s, req.read, (samples, width, height))
     except HTTPException:
         raise
     except Exception as e:
@@ -598,10 +814,12 @@ def detect_text_layers(
     try:
         with _fitz_op(s), s.fitz_lock:
             layers = PdfService.detect_text_layers(s.doc, req.page)
-        # 同步更新 model(主进程下次取 model 时可见)
-        if 0 <= req.page < len(s.pdf_document.pages):
-            s.pdf_document.pages[req.page].text_layers = layers
-            s.pdf_document.pages[req.page].has_text_layer = len(layers) > 0
+            if 0 <= req.page < len(s.pdf_document.pages):
+                info = s.pdf_document.pages[req.page]
+                if info.has_text_layer != bool(layers):
+                    info.invalidate_text_detection()
+                info.has_text_layer = bool(layers)
+                info.text_layers = layers
         return DetectTextLayersResponse(
             text_layers=[_text_layer_to_mirror(t) for t in layers]
         )
@@ -885,7 +1103,6 @@ def update_block_text(sid: str, req: UpdateBlockTextRequest) -> MutateResponse:
     返回，不推进 dirty。
     """
     import math
-    from dataclasses import replace
 
     s = _get_registry().get(sid)
     try:
@@ -984,9 +1201,19 @@ def update_block_text(sid: str, req: UpdateBlockTextRequest) -> MutateResponse:
 
 @app.post("/session/{sid}/page_inspect", response_model=PageInspectResponse)
 def page_inspect(sid: str, req: PageInspectRequest) -> PageInspectResponse:
-    """当前页检查 payload：OCR 块与原生文字层的显示空间归一化投影。"""
+    """当前页检查 payload：OCR 块与原生文字层的显示空间归一化投影。
+
+    携带 read（pdf.demand.v1）走可撤销前台准入；原生文字投影在页内复用
+    单个 TextPage 且不解析图像（TEXT_PRESERVE_IMAGES 关闭），复制后过期
+    在返回前丢弃。
+    """
     s = _get_registry().get(sid)
     try:
+        if req.read is not None:
+            with _revocable_read(s, req.read, foreground=True):
+                response = PdfService.page_inspect(s.doc, s.pdf_document, req.page)
+            _reject_obsolete_read(s, req.read)
+            return response
         with _fitz_op(s), s.fitz_lock:
             return PdfService.page_inspect(s.doc, s.pdf_document, req.page)
     except HTTPException:
@@ -1173,18 +1400,31 @@ def deskew(sid: str, req: PageListRequest) -> MutateResponse:
     )
 
 
-@app.post("/session/{sid}/cancel", response_model=EmptyOk)
-def cancel(sid: str) -> EmptyOk:
+@app.post("/session/{sid}/cancel")
+def cancel(
+    sid: str, req: PdfReadCancelRequest | None = None
+) -> EmptyOk | PdfReadCancelledOk:
+    """取消：无 body 保持 T1 写 cancel_event；有 body 只推进读水位。
+
+    读取消单调推进 per-scope 水位（all_reads 原子推进两者）并唤醒门内
+    等待读，绝不触碰写 cancel_event，也不污染写事件。ACK cancelled=true，
+    客户端必须校验。
+    """
     s = _get_registry().get(sid)
-    s.cancel_event.set()
-    # 唤醒优先门中等待的后台页：已取消的待入 native 读立即在唤醒后退出。
-    # 只影响可撤销读；cancel_event/T1 写路径语义不变。
-    s.native_gate.wake_all()
-    return EmptyOk()
+    if req is None:
+        s.cancel_event.set()
+        # 唤醒优先门中等待的后台页：已取消的待入 native 读立即在唤醒后退出。
+        # 只影响可撤销读；cancel_event/T1 写路径语义不变。
+        _wake_read_waiters(s)
+        return EmptyOk()
+    _advance_read_watermark(s, req.scope.value, req.before_epoch)
+    _wake_read_waiters(s)
+    return PdfReadCancelledOk()
 
 
 @app.post("/session/{sid}/reset_cancel", response_model=EmptyOk)
 def reset_cancel(sid: str) -> EmptyOk:
+    # 只清写 cancel_event；读水位只增不减（reset 绝不降低水位）。
     s = _get_registry().get(sid)
     s.cancel_event.clear()
     return EmptyOk()

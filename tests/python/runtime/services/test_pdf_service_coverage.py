@@ -438,7 +438,7 @@ class TestDetectAndScanEdges:
         _create_scanned_pdf(path)
         doc, pdf_doc = PdfService.open_doc(str(path))
         try:
-            PdfService.update_page_info(doc, pdf_doc, 0)
+            PdfService.update_page_info(doc, pdf_doc, 0, full_detection=True)
             assert pdf_doc.pages[0].is_scanned is True
             assert pdf_doc.pages[0].thumbnail is None
         finally:

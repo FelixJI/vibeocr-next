@@ -109,7 +109,32 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                  'type': 'object'},
  'PageInspectRequest': {'additionalProperties': False,
                         'description': '当前页检查 payload 请求（仅单页，不整本拉取）。',
-                        'properties': {'page': {'title': 'Page', 'type': 'integer'}},
+                        'properties': {'page': {'title': 'Page', 'type': 'integer'},
+                                       'read': {'anyOf': [{'additionalProperties': False,
+                                                           'description': 'Scoped read epoch '
+                                                                          '(pdf.demand.v1). The '
+                                                                          'worker fences admission '
+                                                                          'and result publication '
+                                                                          'against per-scope '
+                                                                          'watermark highwater; '
+                                                                          'epochs are '
+                                                                          'monotonically '
+                                                                          'increasing per scope '
+                                                                          'within a session.',
+                                                           'properties': {'epoch': {'format': 'int64',
+                                                                                    'maximum': 9223372036854775807,
+                                                                                    'minimum': 1,
+                                                                                    'type': 'integer'},
+                                                                          'scope': {'enum': ['viewport',
+                                                                                             'background'],
+                                                                                    'type': 'string'}},
+                                                           'required': ['scope', 'epoch'],
+                                                           'type': 'object'},
+                                                          {'type': 'null'}],
+                                                'default': None,
+                                                'description': 'pdf.demand.v1: scoped read context '
+                                                               'for revocable admission.',
+                                                'title': 'Read'}},
                         'required': ['page'],
                         'type': 'object'},
  'PageListRequest': {'additionalProperties': False,
@@ -119,10 +144,55 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                               'type': 'array'}},
                      'required': ['pages'],
                      'type': 'object'},
+ 'PdfDemandLoadRequest': {'additionalProperties': False,
+                          'description': 'pdf.demand.v1 demand load. The body form performs '
+                                         'geometry and text-presence detection only (no image '
+                                         'coverage scan; scan_checked stays as previously '
+                                         'computed). pages omitted means the single automatic '
+                                         'whole-document background stream; explicit pages are '
+                                         'interactive foreground-priority targeted reads that keep '
+                                         'their requested scope (clients send background scope so '
+                                         'scrolling does not revoke them).',
+                          'properties': {'pages': {'items': {'minimum': 0, 'type': 'integer'},
+                                                   'type': 'array'},
+                                         'read': {'additionalProperties': False,
+                                                  'description': 'Scoped read epoch '
+                                                                 '(pdf.demand.v1). The worker '
+                                                                 'fences admission and result '
+                                                                 'publication against per-scope '
+                                                                 'watermark highwater; epochs are '
+                                                                 'monotonically increasing per '
+                                                                 'scope within a session.',
+                                                  'properties': {'epoch': {'format': 'int64',
+                                                                           'maximum': 9223372036854775807,
+                                                                           'minimum': 1,
+                                                                           'type': 'integer'},
+                                                                 'scope': {'enum': ['viewport',
+                                                                                    'background'],
+                                                                           'type': 'string'}},
+                                                  'required': ['scope', 'epoch'],
+                                                  'type': 'object'}},
+                          'required': ['read'],
+                          'type': 'object'},
  'PdfPathRequest': {'additionalProperties': False,
                     'properties': {'path': {'minLength': 1, 'type': 'string'}},
                     'required': ['path'],
                     'type': 'object'},
+ 'PdfReadCancelRequest': {'additionalProperties': False,
+                          'description': 'pdf.demand.v1 scoped read cancel. Rejects pending reads '
+                                         'whose epoch is below before_epoch by advancing the '
+                                         'per-scope watermark monotonically (max with existing '
+                                         'highwater); all_reads advances both scopes atomically. '
+                                         'Never touches the T1 write cancel_event and reset_cancel '
+                                         'never lowers watermarks.',
+                          'properties': {'before_epoch': {'format': 'int64',
+                                                          'maximum': 9223372036854775807,
+                                                          'minimum': 1,
+                                                          'type': 'integer'},
+                                         'scope': {'enum': ['viewport', 'background', 'all_reads'],
+                                                   'type': 'string'}},
+                          'required': ['scope', 'before_epoch'],
+                          'type': 'object'},
  'QrDecodeRequest': {'additionalProperties': False,
                      'properties': {'image': {'contentEncoding': 'base64', 'type': 'string'}},
                      'required': ['image'],
@@ -135,11 +205,77 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                        'type': 'object'},
  'RenderPreviewRequest': {'additionalProperties': False,
                           'properties': {'dpi': {'default': 150, 'title': 'Dpi', 'type': 'integer'},
-                                         'page': {'title': 'Page', 'type': 'integer'}},
+                                         'max_edge': {'description': 'pdf.demand.v1: positive '
+                                                                     'pixel long-edge demand; '
+                                                                     'absent preserves dpi.',
+                                                      'minimum': 1,
+                                                      'title': 'Max Edge',
+                                                      'type': 'integer'},
+                                         'max_pixels': {'description': 'pdf.demand.v1: positive '
+                                                                       'pixels budget; effective '
+                                                                       'cap is min with the worker '
+                                                                       '16000000 hard limit.',
+                                                        'minimum': 1,
+                                                        'title': 'Max Pixels',
+                                                        'type': 'integer'},
+                                         'page': {'title': 'Page', 'type': 'integer'},
+                                         'read': {'anyOf': [{'additionalProperties': False,
+                                                             'description': 'Scoped read epoch '
+                                                                            '(pdf.demand.v1). The '
+                                                                            'worker fences '
+                                                                            'admission and result '
+                                                                            'publication against '
+                                                                            'per-scope watermark '
+                                                                            'highwater; epochs are '
+                                                                            'monotonically '
+                                                                            'increasing per scope '
+                                                                            'within a session.',
+                                                             'properties': {'epoch': {'format': 'int64',
+                                                                                      'maximum': 9223372036854775807,
+                                                                                      'minimum': 1,
+                                                                                      'type': 'integer'},
+                                                                            'scope': {'enum': ['viewport',
+                                                                                               'background'],
+                                                                                      'type': 'string'}},
+                                                             'required': ['scope', 'epoch'],
+                                                             'type': 'object'},
+                                                            {'type': 'null'}],
+                                                  'default': None,
+                                                  'title': 'Read'}},
                           'required': ['page'],
                           'type': 'object'},
  'RenderThumbnailRequest': {'additionalProperties': False,
                             'properties': {'page': {'title': 'Page', 'type': 'integer'},
+                                           'read': {'anyOf': [{'additionalProperties': False,
+                                                               'description': 'Scoped read epoch '
+                                                                              '(pdf.demand.v1). '
+                                                                              'The worker fences '
+                                                                              'admission and '
+                                                                              'result publication '
+                                                                              'against per-scope '
+                                                                              'watermark '
+                                                                              'highwater; epochs '
+                                                                              'are monotonically '
+                                                                              'increasing per '
+                                                                              'scope within a '
+                                                                              'session.',
+                                                               'properties': {'epoch': {'format': 'int64',
+                                                                                        'maximum': 9223372036854775807,
+                                                                                        'minimum': 1,
+                                                                                        'type': 'integer'},
+                                                                              'scope': {'enum': ['viewport',
+                                                                                                 'background'],
+                                                                                        'type': 'string'}},
+                                                               'required': ['scope', 'epoch'],
+                                                               'type': 'object'},
+                                                              {'type': 'null'}],
+                                                    'default': None,
+                                                    'description': 'pdf.demand.v1: scoped read '
+                                                                   'context; presence selects '
+                                                                   'direct bounded target-size '
+                                                                   'rasterization and revocable '
+                                                                   'admission.',
+                                                    'title': 'Read'},
                                            'size': {'default': 160,
                                                     'title': 'Size',
                                                     'type': 'integer'}},
@@ -798,6 +934,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                         'rotation': {'default': 0,
                                                                                                                                                      'title': 'Rotation',
                                                                                                                                                      'type': 'integer'},
+                                                                                                                                        'scan_checked': {'default': False,
+                                                                                                                                                         'description': 'pdf.demand.v1: '
+                                                                                                                                                                        'false '
+                                                                                                                                                                        'explicitly '
+                                                                                                                                                                        'means '
+                                                                                                                                                                        'is_scanned '
+                                                                                                                                                                        'is '
+                                                                                                                                                                        'not '
+                                                                                                                                                                        'a '
+                                                                                                                                                                        'computed '
+                                                                                                                                                                        'result '
+                                                                                                                                                                        '(geometry/text-presence '
+                                                                                                                                                                        'detection '
+                                                                                                                                                                        'only).',
+                                                                                                                                                         'type': 'boolean'},
                                                                                                                                         'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                   'description': '单个文字层信息(对应 '
                                                                                                                                                                                  'models.pdf_document.TextLayerInfo)。',
@@ -995,6 +1146,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                         'rotation': {'default': 0,
                                                                                                                      'title': 'Rotation',
                                                                                                                      'type': 'integer'},
+                                                                                                        'scan_checked': {'default': False,
+                                                                                                                         'description': 'pdf.demand.v1: '
+                                                                                                                                        'false '
+                                                                                                                                        'explicitly '
+                                                                                                                                        'means '
+                                                                                                                                        'is_scanned '
+                                                                                                                                        'is '
+                                                                                                                                        'not '
+                                                                                                                                        'a '
+                                                                                                                                        'computed '
+                                                                                                                                        'result '
+                                                                                                                                        '(geometry/text-presence '
+                                                                                                                                        'detection '
+                                                                                                                                        'only).',
+                                                                                                                         'type': 'boolean'},
                                                                                                         'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                   'description': '单个文字层信息(对应 '
                                                                                                                                                  'models.pdf_document.TextLayerInfo)。',
@@ -1227,6 +1393,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                              'rotation': {'default': 0,
                                                                                                                                                           'title': 'Rotation',
                                                                                                                                                           'type': 'integer'},
+                                                                                                                                             'scan_checked': {'default': False,
+                                                                                                                                                              'description': 'pdf.demand.v1: '
+                                                                                                                                                                             'false '
+                                                                                                                                                                             'explicitly '
+                                                                                                                                                                             'means '
+                                                                                                                                                                             'is_scanned '
+                                                                                                                                                                             'is '
+                                                                                                                                                                             'not '
+                                                                                                                                                                             'a '
+                                                                                                                                                                             'computed '
+                                                                                                                                                                             'result '
+                                                                                                                                                                             '(geometry/text-presence '
+                                                                                                                                                                             'detection '
+                                                                                                                                                                             'only).',
+                                                                                                                                                              'type': 'boolean'},
                                                                                                                                              'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                        'description': '单个文字层信息(对应 '
                                                                                                                                                                                       'models.pdf_document.TextLayerInfo)。',
@@ -1424,6 +1605,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                              'rotation': {'default': 0,
                                                                                                                           'title': 'Rotation',
                                                                                                                           'type': 'integer'},
+                                                                                                             'scan_checked': {'default': False,
+                                                                                                                              'description': 'pdf.demand.v1: '
+                                                                                                                                             'false '
+                                                                                                                                             'explicitly '
+                                                                                                                                             'means '
+                                                                                                                                             'is_scanned '
+                                                                                                                                             'is '
+                                                                                                                                             'not '
+                                                                                                                                             'a '
+                                                                                                                                             'computed '
+                                                                                                                                             'result '
+                                                                                                                                             '(geometry/text-presence '
+                                                                                                                                             'detection '
+                                                                                                                                             'only).',
+                                                                                                                              'type': 'boolean'},
                                                                                                              'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                        'description': '单个文字层信息(对应 '
                                                                                                                                                       'models.pdf_document.TextLayerInfo)。',
@@ -1743,6 +1939,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                        'rotation': {'default': 0,
                                                                                                                                                     'title': 'Rotation',
                                                                                                                                                     'type': 'integer'},
+                                                                                                                                       'scan_checked': {'default': False,
+                                                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                                                       'false '
+                                                                                                                                                                       'explicitly '
+                                                                                                                                                                       'means '
+                                                                                                                                                                       'is_scanned '
+                                                                                                                                                                       'is '
+                                                                                                                                                                       'not '
+                                                                                                                                                                       'a '
+                                                                                                                                                                       'computed '
+                                                                                                                                                                       'result '
+                                                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                                                       'detection '
+                                                                                                                                                                       'only).',
+                                                                                                                                                        'type': 'boolean'},
                                                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -1940,6 +2151,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                        'rotation': {'default': 0,
                                                                                                                     'title': 'Rotation',
                                                                                                                     'type': 'integer'},
+                                                                                                       'scan_checked': {'default': False,
+                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                       'false '
+                                                                                                                                       'explicitly '
+                                                                                                                                       'means '
+                                                                                                                                       'is_scanned '
+                                                                                                                                       'is '
+                                                                                                                                       'not '
+                                                                                                                                       'a '
+                                                                                                                                       'computed '
+                                                                                                                                       'result '
+                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                       'detection '
+                                                                                                                                       'only).',
+                                                                                                                        'type': 'boolean'},
                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -2202,6 +2428,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                           'rotation': {'default': 0,
                                                                                        'title': 'Rotation',
                                                                                        'type': 'integer'},
+                                                                          'scan_checked': {'default': False,
+                                                                                           'description': 'pdf.demand.v1: '
+                                                                                                          'false '
+                                                                                                          'explicitly '
+                                                                                                          'means '
+                                                                                                          'is_scanned '
+                                                                                                          'is '
+                                                                                                          'not '
+                                                                                                          'a '
+                                                                                                          'computed '
+                                                                                                          'result '
+                                                                                                          '(geometry/text-presence '
+                                                                                                          'detection '
+                                                                                                          'only).',
+                                                                                           'type': 'boolean'},
                                                                           'text_layers': {'items': {'additionalProperties': False,
                                                                                                     'description': '单个文字层信息(对应 '
                                                                                                                    'models.pdf_document.TextLayerInfo)。',
@@ -4389,6 +4630,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                            'rotation': {'default': 0,
                                                                                                                                                         'title': 'Rotation',
                                                                                                                                                         'type': 'integer'},
+                                                                                                                                           'scan_checked': {'default': False,
+                                                                                                                                                            'description': 'pdf.demand.v1: '
+                                                                                                                                                                           'false '
+                                                                                                                                                                           'explicitly '
+                                                                                                                                                                           'means '
+                                                                                                                                                                           'is_scanned '
+                                                                                                                                                                           'is '
+                                                                                                                                                                           'not '
+                                                                                                                                                                           'a '
+                                                                                                                                                                           'computed '
+                                                                                                                                                                           'result '
+                                                                                                                                                                           '(geometry/text-presence '
+                                                                                                                                                                           'detection '
+                                                                                                                                                                           'only).',
+                                                                                                                                                            'type': 'boolean'},
                                                                                                                                            'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                      'description': '单个文字层信息(对应 '
                                                                                                                                                                                     'models.pdf_document.TextLayerInfo)。',
@@ -4586,6 +4842,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                            'rotation': {'default': 0,
                                                                                                                         'title': 'Rotation',
                                                                                                                         'type': 'integer'},
+                                                                                                           'scan_checked': {'default': False,
+                                                                                                                            'description': 'pdf.demand.v1: '
+                                                                                                                                           'false '
+                                                                                                                                           'explicitly '
+                                                                                                                                           'means '
+                                                                                                                                           'is_scanned '
+                                                                                                                                           'is '
+                                                                                                                                           'not '
+                                                                                                                                           'a '
+                                                                                                                                           'computed '
+                                                                                                                                           'result '
+                                                                                                                                           '(geometry/text-presence '
+                                                                                                                                           'detection '
+                                                                                                                                           'only).',
+                                                                                                                            'type': 'boolean'},
                                                                                                            'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                      'description': '单个文字层信息(对应 '
                                                                                                                                                     'models.pdf_document.TextLayerInfo)。',
@@ -4819,6 +5090,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                                'rotation': {'default': 0,
                                                                                                                                                             'title': 'Rotation',
                                                                                                                                                             'type': 'integer'},
+                                                                                                                                               'scan_checked': {'default': False,
+                                                                                                                                                                'description': 'pdf.demand.v1: '
+                                                                                                                                                                               'false '
+                                                                                                                                                                               'explicitly '
+                                                                                                                                                                               'means '
+                                                                                                                                                                               'is_scanned '
+                                                                                                                                                                               'is '
+                                                                                                                                                                               'not '
+                                                                                                                                                                               'a '
+                                                                                                                                                                               'computed '
+                                                                                                                                                                               'result '
+                                                                                                                                                                               '(geometry/text-presence '
+                                                                                                                                                                               'detection '
+                                                                                                                                                                               'only).',
+                                                                                                                                                                'type': 'boolean'},
                                                                                                                                                'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                          'description': '单个文字层信息(对应 '
                                                                                                                                                                                         'models.pdf_document.TextLayerInfo)。',
@@ -5016,6 +5302,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                'rotation': {'default': 0,
                                                                                                                             'title': 'Rotation',
                                                                                                                             'type': 'integer'},
+                                                                                                               'scan_checked': {'default': False,
+                                                                                                                                'description': 'pdf.demand.v1: '
+                                                                                                                                               'false '
+                                                                                                                                               'explicitly '
+                                                                                                                                               'means '
+                                                                                                                                               'is_scanned '
+                                                                                                                                               'is '
+                                                                                                                                               'not '
+                                                                                                                                               'a '
+                                                                                                                                               'computed '
+                                                                                                                                               'result '
+                                                                                                                                               '(geometry/text-presence '
+                                                                                                                                               'detection '
+                                                                                                                                               'only).',
+                                                                                                                                'type': 'boolean'},
                                                                                                                'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                          'description': '单个文字层信息(对应 '
                                                                                                                                                         'models.pdf_document.TextLayerInfo)。',
@@ -5366,6 +5667,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                     'rotation': {'default': 0,
                                                                                                                                                  'title': 'Rotation',
                                                                                                                                                  'type': 'integer'},
+                                                                                                                                    'scan_checked': {'default': False,
+                                                                                                                                                     'description': 'pdf.demand.v1: '
+                                                                                                                                                                    'false '
+                                                                                                                                                                    'explicitly '
+                                                                                                                                                                    'means '
+                                                                                                                                                                    'is_scanned '
+                                                                                                                                                                    'is '
+                                                                                                                                                                    'not '
+                                                                                                                                                                    'a '
+                                                                                                                                                                    'computed '
+                                                                                                                                                                    'result '
+                                                                                                                                                                    '(geometry/text-presence '
+                                                                                                                                                                    'detection '
+                                                                                                                                                                    'only).',
+                                                                                                                                                     'type': 'boolean'},
                                                                                                                                     'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                               'description': '单个文字层信息(对应 '
                                                                                                                                                                              'models.pdf_document.TextLayerInfo)。',
@@ -5562,6 +5878,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                     'rotation': {'default': 0,
                                                                                                                  'title': 'Rotation',
                                                                                                                  'type': 'integer'},
+                                                                                                    'scan_checked': {'default': False,
+                                                                                                                     'description': 'pdf.demand.v1: '
+                                                                                                                                    'false '
+                                                                                                                                    'explicitly '
+                                                                                                                                    'means '
+                                                                                                                                    'is_scanned '
+                                                                                                                                    'is '
+                                                                                                                                    'not '
+                                                                                                                                    'a '
+                                                                                                                                    'computed '
+                                                                                                                                    'result '
+                                                                                                                                    '(geometry/text-presence '
+                                                                                                                                    'detection '
+                                                                                                                                    'only).',
+                                                                                                                     'type': 'boolean'},
                                                                                                     'text_layers': {'items': {'additionalProperties': False,
                                                                                                                               'description': '单个文字层信息(对应 '
                                                                                                                                              'models.pdf_document.TextLayerInfo)。',
@@ -6603,6 +6934,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                'rotation': {'default': 0,
                                                                                                             'title': 'Rotation',
                                                                                                             'type': 'integer'},
+                                                                                               'scan_checked': {'default': False,
+                                                                                                                'description': 'pdf.demand.v1: '
+                                                                                                                               'false '
+                                                                                                                               'explicitly '
+                                                                                                                               'means '
+                                                                                                                               'is_scanned '
+                                                                                                                               'is '
+                                                                                                                               'not '
+                                                                                                                               'a '
+                                                                                                                               'computed '
+                                                                                                                               'result '
+                                                                                                                               '(geometry/text-presence '
+                                                                                                                               'detection '
+                                                                                                                               'only).',
+                                                                                                                'type': 'boolean'},
                                                                                                'text_layers': {'items': {'additionalProperties': False,
                                                                                                                          'description': '单个文字层信息(对应 '
                                                                                                                                         'models.pdf_document.TextLayerInfo)。',
@@ -7440,6 +7786,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                         'rotation': {'default': 0,
                                                                                                                                                      'title': 'Rotation',
                                                                                                                                                      'type': 'integer'},
+                                                                                                                                        'scan_checked': {'default': False,
+                                                                                                                                                         'description': 'pdf.demand.v1: '
+                                                                                                                                                                        'false '
+                                                                                                                                                                        'explicitly '
+                                                                                                                                                                        'means '
+                                                                                                                                                                        'is_scanned '
+                                                                                                                                                                        'is '
+                                                                                                                                                                        'not '
+                                                                                                                                                                        'a '
+                                                                                                                                                                        'computed '
+                                                                                                                                                                        'result '
+                                                                                                                                                                        '(geometry/text-presence '
+                                                                                                                                                                        'detection '
+                                                                                                                                                                        'only).',
+                                                                                                                                                         'type': 'boolean'},
                                                                                                                                         'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                   'description': '单个文字层信息(对应 '
                                                                                                                                                                                  'models.pdf_document.TextLayerInfo)。',
@@ -7637,6 +7998,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                         'rotation': {'default': 0,
                                                                                                                      'title': 'Rotation',
                                                                                                                      'type': 'integer'},
+                                                                                                        'scan_checked': {'default': False,
+                                                                                                                         'description': 'pdf.demand.v1: '
+                                                                                                                                        'false '
+                                                                                                                                        'explicitly '
+                                                                                                                                        'means '
+                                                                                                                                        'is_scanned '
+                                                                                                                                        'is '
+                                                                                                                                        'not '
+                                                                                                                                        'a '
+                                                                                                                                        'computed '
+                                                                                                                                        'result '
+                                                                                                                                        '(geometry/text-presence '
+                                                                                                                                        'detection '
+                                                                                                                                        'only).',
+                                                                                                                         'type': 'boolean'},
                                                                                                         'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                   'description': '单个文字层信息(对应 '
                                                                                                                                                  'models.pdf_document.TextLayerInfo)。',
@@ -7875,6 +8251,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                             'rotation': {'default': 0,
                                                                                                                                                          'title': 'Rotation',
                                                                                                                                                          'type': 'integer'},
+                                                                                                                                            'scan_checked': {'default': False,
+                                                                                                                                                             'description': 'pdf.demand.v1: '
+                                                                                                                                                                            'false '
+                                                                                                                                                                            'explicitly '
+                                                                                                                                                                            'means '
+                                                                                                                                                                            'is_scanned '
+                                                                                                                                                                            'is '
+                                                                                                                                                                            'not '
+                                                                                                                                                                            'a '
+                                                                                                                                                                            'computed '
+                                                                                                                                                                            'result '
+                                                                                                                                                                            '(geometry/text-presence '
+                                                                                                                                                                            'detection '
+                                                                                                                                                                            'only).',
+                                                                                                                                                             'type': 'boolean'},
                                                                                                                                             'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                       'description': '单个文字层信息(对应 '
                                                                                                                                                                                      'models.pdf_document.TextLayerInfo)。',
@@ -8072,6 +8463,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                             'rotation': {'default': 0,
                                                                                                                          'title': 'Rotation',
                                                                                                                          'type': 'integer'},
+                                                                                                            'scan_checked': {'default': False,
+                                                                                                                             'description': 'pdf.demand.v1: '
+                                                                                                                                            'false '
+                                                                                                                                            'explicitly '
+                                                                                                                                            'means '
+                                                                                                                                            'is_scanned '
+                                                                                                                                            'is '
+                                                                                                                                            'not '
+                                                                                                                                            'a '
+                                                                                                                                            'computed '
+                                                                                                                                            'result '
+                                                                                                                                            '(geometry/text-presence '
+                                                                                                                                            'detection '
+                                                                                                                                            'only).',
+                                                                                                                             'type': 'boolean'},
                                                                                                             'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                       'description': '单个文字层信息(对应 '
                                                                                                                                                      'models.pdf_document.TextLayerInfo)。',
@@ -8301,6 +8707,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                        'rotation': {'default': 0,
                                                                                                                                                     'title': 'Rotation',
                                                                                                                                                     'type': 'integer'},
+                                                                                                                                       'scan_checked': {'default': False,
+                                                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                                                       'false '
+                                                                                                                                                                       'explicitly '
+                                                                                                                                                                       'means '
+                                                                                                                                                                       'is_scanned '
+                                                                                                                                                                       'is '
+                                                                                                                                                                       'not '
+                                                                                                                                                                       'a '
+                                                                                                                                                                       'computed '
+                                                                                                                                                                       'result '
+                                                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                                                       'detection '
+                                                                                                                                                                       'only).',
+                                                                                                                                                        'type': 'boolean'},
                                                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -8498,6 +8919,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                        'rotation': {'default': 0,
                                                                                                                     'title': 'Rotation',
                                                                                                                     'type': 'integer'},
+                                                                                                       'scan_checked': {'default': False,
+                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                       'false '
+                                                                                                                                       'explicitly '
+                                                                                                                                       'means '
+                                                                                                                                       'is_scanned '
+                                                                                                                                       'is '
+                                                                                                                                       'not '
+                                                                                                                                       'a '
+                                                                                                                                       'computed '
+                                                                                                                                       'result '
+                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                       'detection '
+                                                                                                                                       'only).',
+                                                                                                                        'type': 'boolean'},
                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -8726,6 +9162,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                        'rotation': {'default': 0,
                                                                                                                                                     'title': 'Rotation',
                                                                                                                                                     'type': 'integer'},
+                                                                                                                                       'scan_checked': {'default': False,
+                                                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                                                       'false '
+                                                                                                                                                                       'explicitly '
+                                                                                                                                                                       'means '
+                                                                                                                                                                       'is_scanned '
+                                                                                                                                                                       'is '
+                                                                                                                                                                       'not '
+                                                                                                                                                                       'a '
+                                                                                                                                                                       'computed '
+                                                                                                                                                                       'result '
+                                                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                                                       'detection '
+                                                                                                                                                                       'only).',
+                                                                                                                                                        'type': 'boolean'},
                                                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -8923,6 +9374,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                        'rotation': {'default': 0,
                                                                                                                     'title': 'Rotation',
                                                                                                                     'type': 'integer'},
+                                                                                                       'scan_checked': {'default': False,
+                                                                                                                        'description': 'pdf.demand.v1: '
+                                                                                                                                       'false '
+                                                                                                                                       'explicitly '
+                                                                                                                                       'means '
+                                                                                                                                       'is_scanned '
+                                                                                                                                       'is '
+                                                                                                                                       'not '
+                                                                                                                                       'a '
+                                                                                                                                       'computed '
+                                                                                                                                       'result '
+                                                                                                                                       '(geometry/text-presence '
+                                                                                                                                       'detection '
+                                                                                                                                       'only).',
+                                                                                                                        'type': 'boolean'},
                                                                                                        'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                  'description': '单个文字层信息(对应 '
                                                                                                                                                 'models.pdf_document.TextLayerInfo)。',
@@ -9193,6 +9659,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                                                            'rotation': {'default': 0,
                                                                                                                                                         'title': 'Rotation',
                                                                                                                                                         'type': 'integer'},
+                                                                                                                                           'scan_checked': {'default': False,
+                                                                                                                                                            'description': 'pdf.demand.v1: '
+                                                                                                                                                                           'false '
+                                                                                                                                                                           'explicitly '
+                                                                                                                                                                           'means '
+                                                                                                                                                                           'is_scanned '
+                                                                                                                                                                           'is '
+                                                                                                                                                                           'not '
+                                                                                                                                                                           'a '
+                                                                                                                                                                           'computed '
+                                                                                                                                                                           'result '
+                                                                                                                                                                           '(geometry/text-presence '
+                                                                                                                                                                           'detection '
+                                                                                                                                                                           'only).',
+                                                                                                                                                            'type': 'boolean'},
                                                                                                                                            'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                                                      'description': '单个文字层信息(对应 '
                                                                                                                                                                                     'models.pdf_document.TextLayerInfo)。',
@@ -9390,6 +9871,21 @@ RESPONSE_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'addPdfTextLayer': {'additio
                                                                                                            'rotation': {'default': 0,
                                                                                                                         'title': 'Rotation',
                                                                                                                         'type': 'integer'},
+                                                                                                           'scan_checked': {'default': False,
+                                                                                                                            'description': 'pdf.demand.v1: '
+                                                                                                                                           'false '
+                                                                                                                                           'explicitly '
+                                                                                                                                           'means '
+                                                                                                                                           'is_scanned '
+                                                                                                                                           'is '
+                                                                                                                                           'not '
+                                                                                                                                           'a '
+                                                                                                                                           'computed '
+                                                                                                                                           'result '
+                                                                                                                                           '(geometry/text-presence '
+                                                                                                                                           'detection '
+                                                                                                                                           'only).',
+                                                                                                                            'type': 'boolean'},
                                                                                                            'text_layers': {'items': {'additionalProperties': False,
                                                                                                                                      'description': '单个文字层信息(对应 '
                                                                                                                                                     'models.pdf_document.TextLayerInfo)。',
@@ -9527,7 +10023,9 @@ ROUTE_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {('GET', '/v2/health'):
                                                                   'responses': {'400': {'$ref': '#/components/responses/Error'},
                                                                                 '401': {'$ref': '#/components/responses/Error'},
                                                                                 '403': {'$ref': '#/components/responses/Error'}}},
- ('POST', '/v2/pdf/sessions/{session_id}/cancel'): {'responses': {'401': {'$ref': '#/components/responses/Error'},
+ ('POST', '/v2/pdf/sessions/{session_id}/cancel'): {'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/PdfReadCancelRequest'}}},
+                                                                    'required': False},
+                                                    'responses': {'401': {'$ref': '#/components/responses/Error'},
                                                                   '403': {'$ref': '#/components/responses/Error'},
                                                                   '500': {'$ref': '#/components/responses/Error'}}},
  ('POST', '/v2/pdf/sessions/{session_id}/close'): {'responses': {'401': {'$ref': '#/components/responses/Error'},
@@ -9559,7 +10057,9 @@ ROUTE_CONTRACTS: dict[tuple[str, str], dict[str, Any]] = {('GET', '/v2/health'):
                                                          'responses': {'400': {'$ref': '#/components/responses/Error'},
                                                                        '401': {'$ref': '#/components/responses/Error'},
                                                                        '403': {'$ref': '#/components/responses/Error'}}},
- ('POST', '/v2/pdf/sessions/{session_id}/load'): {'responses': {'200': {'$ref': '#/components/responses/Ndjson'},
+ ('POST', '/v2/pdf/sessions/{session_id}/load'): {'requestBody': {'content': {'application/json': {'schema': {'$ref': '#/components/schemas/PdfDemandLoadRequest'}}},
+                                                                  'required': False},
+                                                  'responses': {'200': {'$ref': '#/components/responses/Ndjson'},
                                                                 '401': {'$ref': '#/components/responses/Error'},
                                                                 '403': {'$ref': '#/components/responses/Error'},
                                                                 '500': {'$ref': '#/components/responses/Error'}}},

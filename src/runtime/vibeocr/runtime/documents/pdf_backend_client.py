@@ -464,11 +464,12 @@ class PdfBackendClient:
         return self._parse(self._post(f"/session/{sid}/model"), PdfDocumentMirror)
 
     def load_stream(self, sid: str) -> Iterator[ProgressEvent]:
-        """打开后流式逐页文字层检测:每页 yield 一个 ProgressEvent。
+        return self._load_stream(sid, None)
 
-        每个事件的 page_payload 是该页的 PdfPageInfoMirror dict。
-        末行 message="done" 表示完成。
-        """
+    def load_demand_stream(self, sid: str, payload: dict) -> Iterator[ProgressEvent]:
+        return self._load_stream(sid, payload)
+
+    def _load_stream(self, sid: str, payload: dict | None) -> Iterator[ProgressEvent]:
         client = self._ensure_started()
         path = f"/session/{sid}/load"
         started = time.perf_counter()
@@ -476,6 +477,7 @@ class PdfBackendClient:
             with client.stream(
                 "POST",
                 path,
+                **({"json": payload} if payload is not None else {}),
                 timeout=_HTTP_LONG_TIMEOUT,
             ) as resp:
                 response_bytes = 0
@@ -512,6 +514,41 @@ class PdfBackendClient:
             )
             raise PdfBackendError(f"load 流式调用失败: {e}") from e
 
+    # ---- pdf.demand.v1 scoped 读 ---------------------------------------
+
+    def render_thumbnail_demand(self, sid: str, payload: dict) -> bytes:
+        """demand 缩略图：携带 read 上下文，直接目标 size 有界栅格化。"""
+        return self._post(
+            f"/session/{sid}/render_thumbnail",
+            payload,
+            timeout=_HTTP_TIMEOUT,
+        ).content
+
+    def render_preview_demand(self, sid: str, payload: dict) -> bytes:
+        """demand 预览：携带 read 上下文与 max_edge/max_pixels 预算。"""
+        return self._post(
+            f"/session/{sid}/render_preview",
+            payload,
+            timeout=_HTTP_LONG_TIMEOUT,
+        ).content
+
+    def inspect_page_demand(self, sid: str, payload: dict) -> PageInspectResponse:
+        """demand 页检查：携带 read 上下文的可撤销读。"""
+        return self._parse(
+            self._post(f"/session/{sid}/page_inspect", payload),
+            PageInspectResponse,
+        )
+
+    def cancel_reads(self, sid: str, scope: str, before_epoch: int) -> None:
+        """scoped 读取消：单调推进水位；必须得到 cancelled==true ACK。"""
+        resp = self._post(
+            f"/session/{sid}/cancel",
+            {"scope": scope, "before_epoch": before_epoch},
+        )
+        ack = resp.json()
+        if not isinstance(ack, dict) or ack.get("cancelled") is not True:
+            raise PdfBackendError("读取消未获得 cancelled==true ACK")
+
     def render_thumbnail(self, sid: str, page: int, size: int = 160) -> bytes:
         """渲染缩略图,返回 PNG 字节。
 
@@ -521,7 +558,7 @@ class PdfBackendClient:
         """
         resp = self._post(
             f"/session/{sid}/render_thumbnail",
-            RenderThumbnailRequest(page=page, size=size).model_dump(),
+            RenderThumbnailRequest(page=page, size=size).model_dump(exclude_none=True),
             timeout=_HTTP_TIMEOUT,
         )
         return resp.content
@@ -530,7 +567,7 @@ class PdfBackendClient:
         """渲染预览页,返回 PNG 字节。"""
         resp = self._post(
             f"/session/{sid}/render_preview",
-            RenderPreviewRequest(page=page, dpi=dpi).model_dump(),
+            RenderPreviewRequest(page=page, dpi=dpi).model_dump(exclude_none=True),
             timeout=_HTTP_LONG_TIMEOUT,
         )
         return resp.content
@@ -726,7 +763,7 @@ class PdfBackendClient:
         return self._parse(
             self._post(
                 f"/session/{sid}/page_inspect",
-                PageInspectRequest(page=page).model_dump(),
+                PageInspectRequest(page=page).model_dump(exclude_none=True),
             ),
             PageInspectResponse,
         )

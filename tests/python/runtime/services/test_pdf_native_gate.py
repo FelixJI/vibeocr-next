@@ -182,6 +182,7 @@ class TestBoundedFairness:
         current = outer
         for _ in range(4):
             nxt = _ForegroundUnit(gate)
+            assert _wait_until(lambda: gate.foreground_waiters == 1)
             current.finish()
             assert nxt.entered.wait(5)
             units.append(nxt)
@@ -227,6 +228,7 @@ class TestCancelledWaiters:
         current = outer
         for _ in range(4):
             nxt = _ForegroundUnit(gate)
+            assert _wait_until(lambda: gate.foreground_waiters == 1)
             current.finish()
             assert nxt.entered.wait(5)
             current = nxt

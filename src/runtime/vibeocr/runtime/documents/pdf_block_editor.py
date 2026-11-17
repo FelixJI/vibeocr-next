@@ -249,6 +249,7 @@ class PdfBlockEditor:
             info.ocr_text_blocks = blocks
             info.ocr_preproc_angle = angle
             info.has_text_layer = True
+            info.invalidate_text_detection()
             info.thumbnail = None
             model.is_modified = True
             return written, skipped

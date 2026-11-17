@@ -33,5 +33,15 @@ public interface IPdfSessionClient : IAsyncDisposable
     Task CancelAsync(string sessionId, CancellationToken ct);
     Task ResetCancelAsync(string sessionId, CancellationToken ct);
     Task<string> SaveWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct);
+    Task LoadDemandAsync(string sessionId, Wire.PdfDemandLoadRequest request, Action<JsonElement> progress, CancellationToken ct) =>
+        Task.FromException(new NotSupportedException("PDF demand reads unavailable."));
+    Task<byte[]> RenderThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
+        Task.FromException<byte[]>(new NotSupportedException("PDF demand reads unavailable."));
+    Task<byte[]> RenderPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct) =>
+        Task.FromException<byte[]>(new NotSupportedException("PDF demand reads unavailable."));
+    Task<Wire.PageInspectResponse> InspectPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct) =>
+        Task.FromException<Wire.PageInspectResponse>(new NotSupportedException("PDF demand reads unavailable."));
+    Task CancelReadsAsync(string sessionId, Wire.PdfReadCancelRequest request, CancellationToken ct) =>
+        Task.FromException(new NotSupportedException("PDF demand reads unavailable."));
     Task CloseAsync(string sessionId, CancellationToken ct);
 }

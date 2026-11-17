@@ -893,7 +893,7 @@ def create_app(
             if not path:
                 raise _PdfBadRequest("missing path")
             adapter = _pdf_adapter()
-            result = adapter.open_session(path)
+            result = await asyncio.to_thread(adapter.open_session, path)
             return _pdf_response(result)
         except Exception as exc:
             return _pdf_error(exc)
@@ -904,7 +904,7 @@ def create_app(
     )
     async def pdf_close(session_id: str) -> JsonResult:
         try:
-            _pdf_adapter().close_session(session_id)
+            await asyncio.to_thread(_pdf_adapter().close_session, session_id)
             return _pdf_response({"closed": True})
         except Exception as exc:
             return _pdf_error(exc)
@@ -915,21 +915,39 @@ def create_app(
     )
     async def pdf_model(session_id: str) -> JsonResult:
         try:
-            return _pdf_response(_pdf_adapter().get_model(session_id))
+            model = await asyncio.to_thread(_pdf_adapter().get_model, session_id)
+            return _pdf_response(model)
         except Exception as exc:
             return _pdf_error(exc)
 
     @app.post("/v2/pdf/sessions/{session_id}/load", response_model=None)
-    async def pdf_load(session_id: str) -> StreamResult:
-        """Stream per-page text-layer detection (NDJSON, one ProgressEvent per line)."""
+    async def pdf_load(session_id: str, request: Request) -> StreamResult:
+        """Stream per-page detection (NDJSON, one ProgressEvent per line).
+
+        Optional body (pdf.demand.v1, PdfDemandLoadRequest) selects the
+        presence-only demand form: explicit pages are foreground-priority
+        targeted reads; omitted pages is the single automatic background
+        stream. No body keeps the legacy full detection.
+        """
         try:
             adapter = _pdf_adapter()
         except Exception as exc:
             return _pdf_error(exc)
+        payload: dict[str, Any] | None = None
+        if await request.body():
+            try:
+                payload = await _pdf_body(request, wire.PdfDemandLoadRequest)
+            except Exception as exc:
+                return _pdf_error(exc)
 
         def gen() -> Iterator[bytes]:
             try:
-                for event in adapter.load_stream(session_id):
+                stream = (
+                    adapter.load_demand_stream(session_id, payload)
+                    if payload is not None
+                    else adapter.load_stream(session_id)
+                )
+                for event in stream:
                     yield event.model_dump_json().encode("utf-8") + b"\n"
             except Exception as exc:
                 # Emit a typed error line so the client can raise rather than hang.
@@ -944,7 +962,16 @@ def create_app(
             body = await _pdf_body(request, wire.RenderThumbnailRequest)
             page = int(body.get("page", 0))
             size = int(body.get("size", 160))
-            data = _pdf_adapter().render_thumbnail(session_id, page, size=size)
+            read = body.get("read")
+            if read is not None:
+                payload = {"page": page, "size": size, "read": read}
+                data = await asyncio.to_thread(
+                    _pdf_adapter().render_thumbnail_demand, session_id, payload
+                )
+            else:
+                data = await asyncio.to_thread(
+                    _pdf_adapter().render_thumbnail, session_id, page, size
+                )
             return Response(content=data, media_type="image/png")
         except Exception as exc:
             return _pdf_error(exc)
@@ -955,7 +982,24 @@ def create_app(
             body = await _pdf_body(request, wire.RenderPreviewRequest)
             page = int(body.get("page", 0))
             dpi = int(body.get("dpi", 150))
-            data = _pdf_adapter().render_preview(session_id, page, dpi=dpi)
+            max_edge = body.get("max_edge")
+            max_pixels = body.get("max_pixels")
+            read = body.get("read")
+            payload: dict[str, Any] = {"page": page, "dpi": dpi}
+            if max_edge is not None:
+                payload["max_edge"] = int(max_edge)
+            if max_pixels is not None:
+                payload["max_pixels"] = int(max_pixels)
+            if read is not None:
+                payload["read"] = read
+            if read is not None or max_edge is not None or max_pixels is not None:
+                data = await asyncio.to_thread(
+                    _pdf_adapter().render_preview_demand, session_id, payload
+                )
+            else:
+                data = await asyncio.to_thread(
+                    _pdf_adapter().render_preview, session_id, page, dpi
+                )
             return Response(content=data, media_type="image/png")
         except Exception as exc:
             return _pdf_error(exc)
@@ -973,7 +1017,9 @@ def create_app(
         try:
             page = int(request.query_params.get("page", 0))
             size = int(request.query_params.get("size", 160))
-            data = _pdf_adapter().render_thumbnail(session_id, page, size=size)
+            data = await asyncio.to_thread(
+                _pdf_adapter().render_thumbnail, session_id, page, size
+            )
             return Response(content=data, media_type="image/png")
         except Exception as exc:
             return _pdf_error(exc)
@@ -1165,7 +1211,17 @@ def create_app(
         try:
             body = await _pdf_body(request, wire.PageInspectRequest)
             page = int(body.get("page", 0))
-            return _pdf_response(_pdf_adapter().page_inspect(session_id, page))
+            read = body.get("read")
+            if read is not None:
+                payload = {"page": page, "read": read}
+                result = await asyncio.to_thread(
+                    _pdf_adapter().inspect_page_demand, session_id, payload
+                )
+            else:
+                result = await asyncio.to_thread(
+                    _pdf_adapter().page_inspect, session_id, page
+                )
+            return _pdf_response(result)
         except Exception as exc:
             return _pdf_error(exc)
 
@@ -1255,9 +1311,22 @@ def create_app(
         "/v2/pdf/sessions/{session_id}/cancel",
         response_model=wire.PdfCancelledResponse,
     )
-    async def pdf_cancel(session_id: str) -> JsonResult:
+    async def pdf_cancel(session_id: str, request: Request) -> JsonResult:
+        """Cancel: no body keeps the T1 write cancel_event; a PdfReadCancelRequest
+        body only advances read watermarks (scope/all_reads, monotonic) and never
+        touches write cancellation. The response ACKs cancelled=true.
+        """
         try:
-            _pdf_adapter().cancel(session_id)
+            if await request.body():
+                body = await _pdf_body(request, wire.PdfReadCancelRequest)
+                await asyncio.to_thread(
+                    _pdf_adapter().cancel_reads,
+                    session_id,
+                    body["scope"],
+                    int(body["before_epoch"]),
+                )
+                return _pdf_response({"cancelled": True})
+            await asyncio.to_thread(_pdf_adapter().cancel, session_id)
             return _pdf_response({"cancelled": True})
         except Exception as exc:
             return _pdf_error(exc)
@@ -1268,7 +1337,8 @@ def create_app(
     )
     async def pdf_reset_cancel(session_id: str) -> JsonResult:
         try:
-            _pdf_adapter().reset_cancel(session_id)
+            # 只清写 cancel_event；读水位只增不减。
+            await asyncio.to_thread(_pdf_adapter().reset_cancel, session_id)
             return _pdf_response({"reset": True})
         except Exception as exc:
             return _pdf_error(exc)

@@ -13,6 +13,55 @@ public sealed class InferenceHttpClientTests
     private static readonly Uri Base = new("http://127.0.0.1:1");
 
     [Fact]
+    public async Task PdfDemandRequestsOmitAbsentFields()
+    {
+        var loadHandler = new FakeHandler("""{"message":"done"}""", mediaType: "application/x-ndjson");
+        var previewHandler = new FakeHandler("PNG", mediaType: "image/png");
+        await using var loadClient = new InferenceHttpClient(Base, "tok", loadHandler);
+        await using var previewClient = new InferenceHttpClient(Base, "tok", previewHandler);
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        var read = new Wire.PdfReadContext { Scope = Wire.PdfReadScope.Background, Epoch = 4294967297L };
+
+        await loadClient.LoadPdfDemandAsync("pdf-1", new Wire.PdfDemandLoadRequest { Read = read }, _ => { }, ct);
+        using var loadBody = JsonDocument.Parse(loadHandler.LastBody!);
+        Assert.False(loadBody.RootElement.TryGetProperty("pages", out _));
+        Assert.Equal("background", loadBody.RootElement.GetProperty("read").GetProperty("scope").GetString());
+        Assert.Equal(4294967297L, loadBody.RootElement.GetProperty("read").GetProperty("epoch").GetInt64());
+
+        await previewClient.RenderPdfPreviewDemandAsync("pdf-1", new Wire.RenderPreviewRequest { Page = 2, Read = read, MaxEdge = 900 }, ct);
+        using var previewBody = JsonDocument.Parse(previewHandler.LastBody!);
+        Assert.Equal(900, previewBody.RootElement.GetProperty("max_edge").GetInt32());
+        Assert.False(previewBody.RootElement.TryGetProperty("max_pixels", out _));
+        Assert.False(previewBody.RootElement.TryGetProperty("dpi", out _));
+    }
+
+    [Theory]
+    [InlineData("{\"cancelled\":true}", true)]
+    [InlineData("{\"cancelled\":false}", false)]
+    [InlineData("{\"cancelled\":\"true\"}", false)]
+    [InlineData("{}", false)]
+    public async Task PdfReadCancellationRequiresExplicitAcknowledgement(string response, bool acknowledged)
+    {
+        var handler = new FakeHandler(response);
+        await using var client = new InferenceHttpClient(Base, "tok", handler);
+        var request = new Wire.PdfReadCancelRequest { Scope = Wire.PdfReadCancelScope.AllReads, BeforeEpoch = 4294967297L };
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        if (acknowledged)
+        {
+            await client.CancelPdfReadsAsync("pdf-1", request, ct);
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<InferenceClientException>(() => client.CancelPdfReadsAsync("pdf-1", request, ct));
+            Assert.Equal(HttpV2ErrorCode.ProtocolMismatch, error.Code);
+        }
+        Assert.Equal("/v2/pdf/sessions/pdf-1/cancel", handler.LastPath);
+        using var body = JsonDocument.Parse(handler.LastBody!);
+        Assert.Equal("all_reads", body.RootElement.GetProperty("scope").GetString());
+        Assert.Equal(4294967297L, body.RootElement.GetProperty("before_epoch").GetInt64());
+    }
+
+    [Fact]
     public async Task PdfLegacySaveOmitsNewFieldsAndWorkspaceSaveStatesItsSemantics()
     {
         var handler = new FakeHandler("""{"schema_version":2,"instance_id":"test","path":"copy.pdf","diff":{}}""");

@@ -531,13 +531,11 @@ class PdfService:
         doc: fitz.Document, page_index: int, *, limit: int | None = None
     ) -> list[TextLayerInfo]:
         page = doc[page_index]
-        # 快速预检：get_text("text") ~4ms vs get_text("dict") ~173ms（扫描件）。
-        # 扫描件绝大多数页无文字层，先 4ms 判空，无文字直接返回避免 173ms dict。
-        # 有文字才调 dict 取 block bbox 详情。
-        if not page.get_text("text").strip():
+        # 在同一页复用文字布局，排除图像并跳过扫描件的详情提取。
+        textpage = page.get_textpage(flags=fitz.TEXTFLAGS_TEXT)
+        if not textpage.extractTEXT().strip():
             return []
-        page_dict: dict[str, Any] = page.get_text("dict")  # type: ignore[assignment]
-        blocks: list[dict[str, Any]] = page_dict["blocks"]
+        blocks: list[dict[str, Any]] = textpage.extractDICT()["blocks"]
 
         # 用 **line 级** bbox（而非 block 级）：PyMuPDF 的 block 会把同一文本列里
         # 纵向相邻但实际相距很远的行合并成一个超大 bbox（实测可跨 300pt+），
@@ -635,6 +633,7 @@ class PdfService:
                     text_layers=text_layers,
                     is_scanned=len(text_layers) == 0
                     and PdfService.is_page_scanned(doc, i),
+                    scan_checked=True,
                     rect=PdfService.page_rect(doc, i),
                 )
             )
@@ -642,21 +641,30 @@ class PdfService:
 
     @staticmethod
     def update_page_info(
-        doc: fitz.Document, pdf_document: PdfDocument, page_index: int
+        doc: fitz.Document,
+        pdf_document: PdfDocument,
+        page_index: int,
+        *,
+        full_detection: bool = False,
     ) -> None:
-        if page_index >= len(pdf_document.pages):
+        """刷新页面几何和文字存在性；显式完整检测时才读取覆盖率。"""
+        if not 0 <= page_index < len(pdf_document.pages):
             return
-        text_layers = PdfService.detect_text_layers(doc, page_index)
         page = doc[page_index]
         info = pdf_document.pages[page_index]
         info.rotation = page.rotation
-        info.has_text_layer = len(text_layers) > 0
-        info.text_layers = text_layers
-        info.is_scanned = not text_layers and PdfService.is_page_scanned(
-            doc, page_index
-        )
-        info.rect = PdfService.page_rect(doc, page_index)
+        info.rect = tuple(page.rect)
         info.thumbnail = None
+        info.invalidate_text_detection()
+        if full_detection:
+            info.text_layers = PdfService.detect_text_layers(doc, page_index)
+            info.has_text_layer = bool(info.text_layers)
+            info.is_scanned = not info.has_text_layer and PdfService.is_page_scanned(
+                doc, page_index
+            )
+            info.scan_checked = True
+        else:
+            info.has_text_layer = PdfService.page_has_text(doc, page_index)
 
     # ---- page mutations ---------------------------------------------
 
@@ -871,6 +879,8 @@ class PdfService:
         info.ocr_text_blocks = text_blocks
         info.ocr_preproc_angle = preproc_angle
         info.has_text_layer = written > 0
+        if written:
+            info.invalidate_text_detection()
         info.thumbnail = None
         return written, skipped
 
@@ -921,8 +931,8 @@ class PdfService:
         invalid_pages: dict[int, tuple[int, int]] = {}
         # 预处理：反序列化、应用防重复守卫，收集实际要写的页
         to_write: list[
-            tuple[int, list, int]
-        ] = []  # (page_index, text_blocks, preproc_angle)
+            tuple[int, list, int, bool]
+        ] = []  # (page_index, text_blocks, preproc_angle, has_text_layer)
         skipped_pages: list[int] = []  # 因已有文字层而跳过的页
         for item in pages_data:
             page_index = item["page"]
@@ -971,12 +981,11 @@ class PdfService:
                 )
                 continue
 
-            page_info = pdf_document.pages[page_index]
-            page_info.has_text_layer = PdfService.page_has_text(doc, page_index)
-            if page_info.has_text_layer and not overwrite:
+            has_text_layer = PdfService.page_has_text(doc, page_index)
+            if has_text_layer and not overwrite:
                 skipped_pages.append(page_index)
                 continue
-            to_write.append((page_index, text_blocks, preproc_angle))
+            to_write.append((page_index, text_blocks, preproc_angle, has_text_layer))
 
         results: dict[int, tuple[int, int]] = {
             **invalid_pages,
@@ -988,7 +997,7 @@ class PdfService:
 
         # 聚合本批所有页的字符 → 一次解析共享子集字体
         all_chars = "".join(
-            b.text for _, blocks, _ in to_write for b in blocks if b.text
+            b.text for _, blocks, _, _ in to_write for b in blocks if b.text
         )
         shared_font_path = font_path or (
             _CJK_RESOLVER.resolve(all_chars) if all_chars else None
@@ -1000,7 +1009,7 @@ class PdfService:
         with fitz.open() as candidate:
             graft = PageResourceGraft(doc, candidate)
             prepared: list[tuple[int, int, list, int, int, int]] = []
-            for page_index, text_blocks, preproc_angle in to_write:
+            for page_index, text_blocks, preproc_angle, has_text_layer in to_write:
                 local_index = candidate.page_count
                 candidate.insert_pdf(
                     doc, from_page=page_index, to_page=page_index, final=False
@@ -1008,14 +1017,14 @@ class PdfService:
                 graft.remember_resources(
                     doc,
                     page_index,
-                    redacting=pdf_document.pages[page_index].has_text_layer,
+                    redacting=has_text_layer,
                 )
                 local_model = PdfDocument(
                     pages=[
                         PdfPageInfo(page_index=i) for i in range(candidate.page_count)
                     ]
                 )
-                if pdf_document.pages[page_index].has_text_layer:
+                if has_text_layer:
                     PdfService.delete_text_layers(candidate, local_model, local_index)
                     if candidate[local_index].get_text().strip():
                         results[page_index] = (0, len(text_blocks))
@@ -1082,6 +1091,7 @@ class PdfService:
                 info.ocr_text_blocks = text_blocks
                 info.ocr_preproc_angle = preproc_angle
                 info.has_text_layer = True
+                info.invalidate_text_detection()
                 info.thumbnail = None
                 results[page_index] = (written, skipped)
 
@@ -1638,7 +1648,9 @@ class PdfService:
         words = page.get_text("words")
         if not words:
             # 无文字 → 不做 redact，直接清状态
-            PdfService._clear_page_layer_info(pdf_document, page_index)
+            PdfService._clear_page_layer_info(
+                pdf_document, page_index, content_changed=False
+            )
             return 0, 0, False
 
         initial_word_count = len(words)
@@ -1667,14 +1679,16 @@ class PdfService:
         return initial_word_count, rounds_used, has_residual
 
     @staticmethod
-    def _clear_page_layer_info(pdf_document: PdfDocument, page_index: int) -> None:
+    def _clear_page_layer_info(
+        pdf_document: PdfDocument, page_index: int, *, content_changed: bool = True
+    ) -> None:
         """删除文字层后清空页状态（替代旧的 update_page_info 冗余重检）。"""
         if page_index >= len(pdf_document.pages):
             return
         info = pdf_document.pages[page_index]
+        if content_changed or info.has_text_layer:
+            info.invalidate_text_detection()
         info.has_text_layer = False
-        info.text_layers = []
-        info.is_scanned = False
         info.ocr_text_blocks = []
         info.ocr_preproc_angle = 0
 

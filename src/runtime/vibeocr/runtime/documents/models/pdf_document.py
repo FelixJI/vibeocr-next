@@ -37,6 +37,14 @@ class PdfPageInfo:
     ocr_text_blocks: list = field(default_factory=list)
     ocr_preproc_angle: int = 0
     deskewed: bool = False  # 本会话内是否被自动摆正纠正过（仅 UI 标记，不持久化）
+    # pdf.demand.v1：is_scanned 是否真是图像覆盖率扫描的算出结果。body 形
+    # demand load 只做几何+文字存在性，不扫描图像，保留旧值并如实回 False。
+    scan_checked: bool = False
+
+    def invalidate_text_detection(self) -> None:
+        self.text_layers = []
+        self.is_scanned = False
+        self.scan_checked = False
 
 
 @dataclass

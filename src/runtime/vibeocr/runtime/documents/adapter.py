@@ -55,6 +55,20 @@ class _PdfChildLike(Protocol):
 
     def load_stream(self, session_id: str) -> Any: ...
 
+    def load_demand_stream(self, session_id: str, payload: dict[str, Any]) -> Any: ...
+
+    def render_thumbnail_demand(
+        self, session_id: str, payload: dict[str, Any]
+    ) -> bytes: ...
+
+    def render_preview_demand(
+        self, session_id: str, payload: dict[str, Any]
+    ) -> bytes: ...
+
+    def inspect_page_demand(self, session_id: str, payload: dict[str, Any]) -> Any: ...
+
+    def cancel_reads(self, session_id: str, scope: str, before_epoch: int) -> None: ...
+
     def render_thumbnail(
         self, session_id: str, page: int, size: int = 160
     ) -> bytes: ...
@@ -217,6 +231,29 @@ class PdfProcessAdapter:
 
     def load_stream(self, session_id: str) -> Iterator[ProgressEvent]:
         return self.ensure_started().load_stream(session_id)
+
+    # ------------------------------------------------------------------
+    # pdf.demand.v1 scoped 读
+    # ------------------------------------------------------------------
+
+    def load_demand_stream(
+        self, session_id: str, payload: dict[str, Any]
+    ) -> Iterator[ProgressEvent]:
+        return self.ensure_started().load_demand_stream(session_id, payload)
+
+    def render_thumbnail_demand(
+        self, session_id: str, payload: dict[str, Any]
+    ) -> bytes:
+        return self.ensure_started().render_thumbnail_demand(session_id, payload)
+
+    def render_preview_demand(self, session_id: str, payload: dict[str, Any]) -> bytes:
+        return self.ensure_started().render_preview_demand(session_id, payload)
+
+    def inspect_page_demand(self, session_id: str, payload: dict[str, Any]) -> Any:
+        return self.ensure_started().inspect_page_demand(session_id, payload)
+
+    def cancel_reads(self, session_id: str, scope: str, before_epoch: int) -> None:
+        self.ensure_started().cancel_reads(session_id, scope, before_epoch)
 
     # ------------------------------------------------------------------
     # Render

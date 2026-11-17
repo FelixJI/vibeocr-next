@@ -122,6 +122,16 @@ public interface IInferenceClient : IAsyncDisposable
     Task<string> SavePdfOperationAsync(string sessionId, string outputPath,
         IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
         => copyExport || rebindTarget || !overwrite ? Task.FromException<string>(new NotSupportedException("PDF copy export unavailable")) : SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct);
+    Task LoadPdfDemandAsync(string sessionId, Wire.PdfDemandLoadRequest request, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) =>
+        Task.FromException(new NotSupportedException("PDF demand reads unavailable."));
+    Task<byte[]> RenderPdfThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
+        Task.FromException<byte[]>(new NotSupportedException("PDF demand reads unavailable."));
+    Task<byte[]> RenderPdfPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct) =>
+        Task.FromException<byte[]>(new NotSupportedException("PDF demand reads unavailable."));
+    Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct) =>
+        Task.FromException<Wire.PageInspectResponse>(new NotSupportedException("PDF demand reads unavailable."));
+    Task CancelPdfReadsAsync(string sessionId, Wire.PdfReadCancelRequest request, CancellationToken ct) =>
+        Task.FromException(new NotSupportedException("PDF demand reads unavailable."));
     Task ClosePdfSessionAsync(string sessionId, CancellationToken ct);
 }
 

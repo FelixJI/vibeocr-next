@@ -6,6 +6,7 @@
 // page_count), authoritative page counts come from full_model or the existing
 // /model endpoint, and the save request/response field is `path`.
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Runtime.Client;
@@ -15,6 +16,8 @@ namespace VibeOCR.Platform.Inference;
 
 public sealed class PdfSessionHttpClient : IPdfSessionClient
 {
+    private static readonly JsonSerializerOptions PdfRequestJson = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
+
     private readonly RuntimeHttpClient _runtime;
     private readonly bool _ownsRuntime;
 
@@ -119,13 +122,16 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
     public Task LoadAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct) =>
         StreamAsync(sessionId, "load", null, progress, ct);
 
+    public Task LoadDemandAsync(string sessionId, Wire.PdfDemandLoadRequest request, Action<JsonElement> progress, CancellationToken ct) =>
+        StreamAsync(sessionId, "load", request, progress, ct);
+
     public Task DeleteTextLayersAsync(string sessionId, int[] pages, Action<JsonElement> progress, CancellationToken ct) =>
         StreamAsync(sessionId, "delete_text_layers", new { pages }, progress, ct);
 
     private async Task StreamAsync(string sessionId, string operation, object? body,
         Action<JsonElement> progress, CancellationToken ct)
     {
-        using StringContent? content = body is null ? null : _runtime.CreateJsonContent(body);
+        using StringContent? content = body is null ? null : _runtime.CreateJsonContent(body, PdfRequestJson);
         using HttpResponseMessage response = await _runtime.PostStreamAsync(
             $"/v2/pdf/sessions/{Uri.EscapeDataString(sessionId)}/{operation}", content, ct);
         await EnsureSuccessAsync(response, ct);
@@ -142,11 +148,19 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         }
     }
 
-    public async Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct)
+    public Task<byte[]> RenderPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) =>
+        RenderPreviewDemandAsync(sessionId, new Wire.RenderPreviewRequest { Page = page, Dpi = dpi }, ct);
+
+    public Task<byte[]> RenderThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
+        RenderBinaryAsync(sessionId, RuntimeOperationPaths.RenderPdfThumbnail, request, ct);
+
+    public Task<byte[]> RenderPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct) =>
+        RenderBinaryAsync(sessionId, RuntimeOperationPaths.RenderPdfPreview, request, ct);
+
+    private async Task<byte[]> RenderBinaryAsync<T>(string sessionId, string path, T request, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { page, dpi });
-        using HttpResponseMessage response = await _runtime.PostAsync(
-            BindSessionPath(RuntimeOperationPaths.RenderPdfPreview, sessionId), content, ct);
+        using StringContent content = _runtime.CreateJsonContent(request, PdfRequestJson);
+        using HttpResponseMessage response = await _runtime.PostAsync(BindSessionPath(path, sessionId), content, ct);
         await EnsureSuccessAsync(response, ct);
         return await _runtime.ReadBinaryAsync(response, "image/png", ct);
     }
@@ -163,9 +177,12 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
             ?? throw new InvalidOperationException("PDF block update result is missing.");
     }
 
-    public async Task<Wire.PageInspectResponse> InspectPageAsync(string sessionId, int page, CancellationToken ct)
+    public Task<Wire.PageInspectResponse> InspectPageAsync(string sessionId, int page, CancellationToken ct) =>
+        InspectPageDemandAsync(sessionId, new Wire.PageInspectRequest { Page = page }, ct);
+
+    public async Task<Wire.PageInspectResponse> InspectPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct)
     {
-        using StringContent content = _runtime.CreateJsonContent(new { page });
+        using StringContent content = _runtime.CreateJsonContent(request, PdfRequestJson);
         using HttpResponseMessage response = await _runtime.PostAsync(
             BindSessionPath(RuntimeOperationPaths.InspectPdfPage, sessionId), content, ct);
         await EnsureSuccessAsync(response, ct);
@@ -184,6 +201,20 @@ public sealed class PdfSessionHttpClient : IPdfSessionClient
         using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
         return document.RootElement.Deserialize<Wire.PdfMutationResponse>()
             ?? throw new InvalidOperationException("PDF write result is missing.");
+    }
+
+    public async Task CancelReadsAsync(string sessionId, Wire.PdfReadCancelRequest request, CancellationToken ct)
+    {
+        using StringContent content = _runtime.CreateJsonContent(request);
+        using HttpResponseMessage response = await _runtime.PostAsync(
+            BindSessionPath(RuntimeOperationPaths.CancelPdfSession, sessionId), content, ct);
+        await EnsureSuccessAsync(response, ct);
+        using JsonDocument document = await _runtime.ReadJsonDocumentAsync(response, ct);
+        if (RequiredProperty(document.RootElement, "cancelled", "read cancel").ValueKind != JsonValueKind.True)
+        {
+            throw new InferenceClientException(
+                HttpV2ErrorCode.ProtocolMismatch, "The v2 PDF read cancellation was not acknowledged.", retryable: false);
+        }
     }
 
     public Task CancelAsync(string sessionId, CancellationToken ct) => SignalAsync(sessionId, "cancel", ct);
