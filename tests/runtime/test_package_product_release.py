@@ -24,6 +24,8 @@ def _stage_product(
         "WebAssets/index.html",
         "WebView2Runtime/msedgewebview2.exe",
         "WebView2Runtime/icudtl.dat",
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
     ):
         path = app / relative
         path.parent.mkdir(parents=True, exist_ok=True)
