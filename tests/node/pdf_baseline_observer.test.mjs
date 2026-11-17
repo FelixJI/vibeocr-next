@@ -1,6 +1,6 @@
 // T2 基线观测脚本契约测试：从 MainWindow.PdfBaselineSmoke.cs 的单一事实源
 // 提取 PdfBaselineObserverScript，在最小 fake DOM 中验证行为合同。
-// 运行：node --test tests/web/pdf_baseline_observer.test.mjs（锁定 Node）。
+// 运行：node --test tests/node/pdf_baseline_observer.test.mjs（锁定 Node）。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";

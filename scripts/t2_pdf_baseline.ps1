@@ -83,8 +83,8 @@ function Read-T2MonitorSamples {
             $bytes = [long]$proc.ws_bytes
             if ($bytes -le 0) { continue }
             $sum += $bytes
-            if (-not $procPeaks.ContainsKey($proc.pid) -or $procPeaks[$proc.pid] -lt $bytes) {
-                $procPeaks[$proc.pid] = $bytes
+            if (-not $procPeaks.ContainsKey([string]$proc.pid) -or $procPeaks[[string]$proc.pid] -lt $bytes) {
+                $procPeaks[[string]$proc.pid] = $bytes
             }
             if ($RootPid -gt 0 -and [int]$proc.pid -eq $RootPid) { $hasRootSample = $true }
         }
@@ -151,6 +151,8 @@ if ($SelfCheck) {
         $aggregate.root_pid -ne 4242) {
         throw "SelfCheck: unexpected aggregate $($aggregate | ConvertTo-Json -Compress)"
     }
+    $roundTrip = $aggregate | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    if ($roundTrip.per_process_ws_peak_bytes.'4242' -ne 1200) { throw 'SelfCheck: serialized process peak missing' }
     Write-Host "SELFCHECK PASSED exit-priority + isolation + monitor evidence ($a)"
     exit 0
 }
@@ -200,7 +202,7 @@ foreach ($name in @(
     'VIBEOCR_PADDLE_SMOKE_DEVICE', 'VIBEOCR_PADDLE_SMOKE_PRESET',
     'VIBEOCR_PADDLE_SMOKE_HEALTH', 'VIBEOCR_PADDLE_SMOKE_PHASE',
     'VIBEOCR_PADDLE_SMOKE_MODE', 'VIBEOCR_PADDLE_SMOKE_PIPELINE',
-    'VIBEOCR_PADDLE_SMOKE_INPUT_KIND', 'VIBEOCR_PADDLE_SMOKE_PDF_BASELINE',
+    'VIBEOCR_PADDLE_SMOKE_INPUT_KIND',
     'VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER', 'VIBEOCR_PADDLE_SMOKE_PDF_EDITING',
     'VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE', 'VIBEOCR_PADDLE_SMOKE_FIXTURE',
     'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE', 'VIBEOCR_PADDLE_SMOKE_OPTION_NAME',
@@ -243,7 +245,6 @@ try {
                 $env:VIBEOCR_PADDLE_SMOKE_MODE = 'paddle_text'
                 $env:VIBEOCR_PADDLE_SMOKE_PIPELINE = 'OCR'
                 $env:VIBEOCR_PADDLE_SMOKE_INPUT_KIND = 'pdf_baseline'
-                $env:VIBEOCR_PADDLE_SMOKE_PDF_BASELINE = '1'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_EDITING = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE = '0'
@@ -311,7 +312,7 @@ try {
                 candidate_reused = $true
             }
             $results += $record
-            Add-Content -LiteralPath (Join-Path $artifacts 'run-index.jsonl') -Value (ConvertTo-Json $record -Compress)
+            Add-Content -LiteralPath (Join-Path $artifacts 'run-index.jsonl') -Value (ConvertTo-Json $record -Depth 8 -Compress)
             $summaryPath = Join-Path $reportDir "$phaseName.json"
             if (Test-Path -LiteralPath $summaryPath) { throw "Refusing to overwrite $summaryPath" }
             Set-Content -LiteralPath $summaryPath -Value (ConvertTo-Json $record -Depth 8) -Encoding utf8

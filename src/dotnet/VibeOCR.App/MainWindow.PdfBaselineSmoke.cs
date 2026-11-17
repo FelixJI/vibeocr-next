@@ -708,7 +708,10 @@ public sealed partial class MainWindow
       long secondOpenAt = PdfBaselineNow();
       await MarkPdfBaselineBrowserAsync("second_doc_open_clicked");
       await ClickWorkbenchSmokeButtonAsync("添加 PDF");
-      await CompletePaddleOpenPickerAsync(second);
+      await CompletePaddleOpenPickerAsync(second, onBeforeConfirm: async () =>
+      {
+        await MarkPdfBaselineBrowserAsync("second_doc_pick_confirm");
+      });
       await RequestPdfBaselineFrameAsync("second_doc", 0);
       PdfBaselineImageWait secondWait = await WaitForPdfBaselineImageAsync(
         "second-doc-first-image", 0, "second_doc_open_clicked", "second_doc",
@@ -751,6 +754,8 @@ public sealed partial class MainWindow
           browser = new
           {
             open_clicked_to_decoded_ms = secondWait.NewWitness!.DecodedAt!.Value - PdfBaselineMark(secondWait.Snapshot, "second_doc_open_clicked"),
+            pick_confirm_to_decoded_ms = secondWait.NewWitness.DecodedAt.Value - PdfBaselineMark(secondWait.Snapshot, "second_doc_pick_confirm"),
+            boundary = "open_clicked 包含文件选择对话框；pick_confirm 排除对话框填写，与 cold/reopen 同口径",
             witness = secondWait.NewWitness,
             frame = FrameFacts(secondWait.Pulse),
           },
@@ -866,7 +871,7 @@ public sealed partial class MainWindow
           witness = coldWitness,
           frame = FrameFacts(cold.Pulse),
           boundary = "file_pick_confirm 于真正提交确认前设置（排除 picker 填写）；open_pdf_clicked 含 picker 时间另披露",
-          first_thumbnail_note = "缩略图不计入首图；快照含其条目供单独分析",
+          first_thumbnail_note = "缩略图不计入首图；本观测器只追踪当前页检查图，不采集缩略图帧事件",
         },
         host = new
         {
