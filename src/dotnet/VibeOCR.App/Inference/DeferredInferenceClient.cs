@@ -313,6 +313,49 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     await probe.MeasureAsync("load_detect", sessionId, -1, 0,
         () => Current.LoadPdfAsync(sessionId, progress, ct));
   }
+  public async Task LoadPdfDemandAsync(string sessionId, Wire.PdfDemandLoadRequest request, Action<System.Text.Json.JsonElement> progress, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    Task Call() => Current.LoadPdfDemandAsync(sessionId, request, progress, ct);
+    if (probe is null) await Call();
+    else await probe.MeasureAsync(request.Pages is null ? "load_detect" : "load_targeted",
+      sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call);
+  }
+
+  public async Task<byte[]> RenderPdfThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    Task<byte[]> Call() => Current.RenderPdfThumbnailDemandAsync(sessionId, request, ct);
+    return probe is null ? await Call() : await probe.MeasureAsync("render_thumbnail", sessionId, request.Page, request.Size ?? 0, Call);
+  }
+
+  public async Task<byte[]> RenderPdfPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    Task<byte[]> Call() => Current.RenderPdfPreviewDemandAsync(sessionId, request, ct);
+    return probe is null ? await Call() : await probe.MeasureAsync("render_preview", sessionId, request.Page, request.MaxEdge ?? request.Dpi ?? 0, Call);
+  }
+
+  public async Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    Task<Wire.PageInspectResponse> Call() => Current.InspectPdfPageDemandAsync(sessionId, request, ct);
+    return probe is null ? await Call() : await probe.MeasureAsync("inspect_page", sessionId, request.Page, 0, Call);
+  }
+
+  public async Task CancelPdfReadsAsync(string sessionId, Wire.PdfReadCancelRequest request, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    Task Call() => Current.CancelPdfReadsAsync(sessionId, request, ct);
+    if (probe is null) await Call();
+    else await probe.MeasureAsync("cancel_reads", sessionId, -1, (int)request.Scope, Call);
+  }
+
   public async Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct)
   {
     await _gate.WaitAsync(ct);

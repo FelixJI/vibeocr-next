@@ -959,6 +959,8 @@ public static class WorkbenchBridgeCodec
       case ("pdf", "setCurrentPage"):
         EnsureObjectWithFields(arguments, new HashSet<string> { "page" }, "command arguments");
         return new SetCurrentPdfPageCommand(arguments.GetProperty("page").GetInt32());
+      case ("pdf", "setDemand"):
+        return ParseSetPdfDemand(arguments);
       case ("pdf", "updateBlockText"):
         EnsureObjectWithFields(arguments, new HashSet<string> { "page", "blockIndex", "newText", "expectedOldText", "revision", "sessionId" }, "command arguments");
         string? expectedOld = arguments.GetProperty("expectedOldText").GetString();
@@ -1358,6 +1360,40 @@ public static class WorkbenchBridgeCodec
         "Workbench PDF rotation is invalid.");
     }
     return new RotatePdfCommand(degrees, arguments.TryGetProperty("range", out _) ? ParsePdfRange(arguments) : "selected");
+  }
+
+  /// <summary>pdf.setDemand 严格解析：仅允许 page/visiblePages/thumbnailSize/
+  /// previewMaxEdge 四字段（另有既有 docId/revision 绑定层负责迟到丢弃）。
+  /// page/visiblePages 必需；尺寸 nullable 正整数，缺省沿用已有有效档；
+  /// page=-1 表示无 preview 需求（此时 previewMaxEdge 必须缺省）。</summary>
+  private static SetPdfDemandCommand ParseSetPdfDemand(JsonElement arguments)
+  {
+    if (arguments.ValueKind != JsonValueKind.Object)
+      throw new WorkbenchBridgeProtocolException("Workbench bridge command arguments must be an object.");
+    HashSet<string> actual = arguments.EnumerateObject().Select(property => property.Name).ToHashSet(StringComparer.Ordinal);
+    if (!actual.IsSubsetOf(new HashSet<string> { "page", "visiblePages", "thumbnailSize", "previewMaxEdge" }) ||
+        !actual.IsSupersetOf(new HashSet<string> { "page", "visiblePages" }))
+      throw new WorkbenchBridgeProtocolException("Workbench command arguments fields are invalid.");
+    int page = arguments.GetProperty("page").GetInt32();
+    if (page < -1) throw new WorkbenchBridgeProtocolException("PDF demand page is invalid.");
+    IReadOnlyList<int> visiblePages = ParsePageIndexes(arguments.GetProperty("visiblePages"));
+    if (visiblePages.Count > 64) throw new WorkbenchBridgeProtocolException("PDF demand visiblePages exceeds the projection window.");
+    int? thumbnailSize = null;
+    if (arguments.TryGetProperty("thumbnailSize", out JsonElement thumbnail) && thumbnail.ValueKind != JsonValueKind.Null)
+    {
+      if (thumbnail.ValueKind != JsonValueKind.Number || !thumbnail.TryGetInt32(out int size) || size <= 0)
+        throw new WorkbenchBridgeProtocolException("PDF demand thumbnailSize is invalid.");
+      thumbnailSize = size;
+    }
+    int? previewMaxEdge = null;
+    if (arguments.TryGetProperty("previewMaxEdge", out JsonElement preview) && preview.ValueKind != JsonValueKind.Null)
+    {
+      if (page < 0) throw new WorkbenchBridgeProtocolException("PDF demand previewMaxEdge requires a current page.");
+      if (preview.ValueKind != JsonValueKind.Number || !preview.TryGetInt32(out int edge) || edge <= 0)
+        throw new WorkbenchBridgeProtocolException("PDF demand previewMaxEdge is invalid.");
+      previewMaxEdge = edge;
+    }
+    return new SetPdfDemandCommand(page, visiblePages, thumbnailSize, previewMaxEdge);
   }
 
   private static string ParsePdfRange(JsonElement arguments)
@@ -1809,6 +1845,8 @@ public static class WorkbenchBridgeCodec
       canCorrectText = pdf.CanCorrectText,
       documentId = pdf.DocumentId, documents = pdf.Documents ?? [], previewPosition = pdf.PreviewPosition,
       canCopyExport = pdf.CanCopyExport, exporting = pdf.Exporting, exportItems = pdf.ExportItems ?? [], exportGeneration = pdf.ExportGeneration,
+      canDemandPages = pdf.CanDemandPages,
+      currentPage = pdf.CurrentPage,
     },
     QrCodeWorkbenchState qrCode => new
     {

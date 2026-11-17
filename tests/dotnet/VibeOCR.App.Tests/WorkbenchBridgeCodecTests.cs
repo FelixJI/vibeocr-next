@@ -580,6 +580,7 @@ public sealed class WorkbenchBridgeCodecTests
       ("pdf", "open", "{}", typeof(OpenPdfCommand)),
       ("pdf", "rotate", "{}", typeof(RotatePdfCommand)),
       ("pdf", "setWindow", "{\"start\":64}", typeof(SetPdfWindowCommand)),
+      ("pdf", "setDemand", "{\"page\":-1,\"visiblePages\":[],\"thumbnailSize\":null}", typeof(SetPdfDemandCommand)),
       ("qrcode", "generate", "{\"text\":\"hello\"}", typeof(GenerateQrCodeCommand)),
       ("qrcode", "decode", "{}", typeof(DecodeQrCodeCommand)),
       ("qrcode", "cancel", "{}", typeof(CancelQrCodeCommand)),

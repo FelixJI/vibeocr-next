@@ -44,7 +44,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   internal void RestoreContext(PdfDocumentEntry? previous) => pdfContext.Value = previous;
   internal WorkbenchState? NormalizeOutcome(WorkbenchState? state) => state is PdfWorkbenchState && ActivePdf is { } active && !ReferenceEquals(pdf, active) ? PdfState(active) : state;
 
-  internal bool Handles(WorkbenchCommand command) => command is SetPdfTaskEngineCommand or SetPdfTaskModelPresetCommand or ActivatePdfDocumentCommand or SavePdfAsCommand or ExportPdfDocumentsCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand or OpenPdfCommand or OpenDroppedPdfCommand or RotatePdfCommand or OrientPdfCommand or CorrectPdfOrientationCommand or InsertPdfBlankCommand or InsertPdfFromCommand or MovePdfPageCommand or ClosePdfCommand or DeletePdfPagesCommand or OcrPdfPagesCommand or AddPdfTextLayersCommand or DeletePdfTextLayersCommand or CancelPdfCommand or SetPdfProcessingSettingsCommand or SavePdfCommand or SelectPdfPagesCommand or SelectAllPdfPagesCommand or SelectPdfPageCommand or SetCurrentPdfPageCommand or UpdatePdfBlockTextCommand or RetryPdfPageInspectCommand or SetPdfWindowCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetPdfTaskEngineCommand or SetPdfTaskModelPresetCommand or ActivatePdfDocumentCommand or SavePdfAsCommand or ExportPdfDocumentsCommand or CancelPdfExportCommand or SetPdfPreviewPositionCommand or OpenPdfCommand or OpenDroppedPdfCommand or RotatePdfCommand or OrientPdfCommand or CorrectPdfOrientationCommand or InsertPdfBlankCommand or InsertPdfFromCommand or MovePdfPageCommand or ClosePdfCommand or DeletePdfPagesCommand or OcrPdfPagesCommand or AddPdfTextLayersCommand or DeletePdfTextLayersCommand or CancelPdfCommand or SetPdfProcessingSettingsCommand or SavePdfCommand or SelectPdfPagesCommand or SelectAllPdfPagesCommand or SelectPdfPageCommand or SetCurrentPdfPageCommand or SetPdfDemandCommand or UpdatePdfBlockTextCommand or RetryPdfPageInspectCommand or SetPdfWindowCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
@@ -77,6 +77,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     SelectAllPdfPagesCommand select => await SelectPdfPagesAsync(new SelectPdfPagesCommand(select.Selected && pdf is not null ? Enumerable.Range(0, pdf.PageCount).ToArray() : []), cancellationToken),
     SelectPdfPageCommand select => await SelectPdfPageAsync(select, cancellationToken),
     SetCurrentPdfPageCommand setCurrent => await SetCurrentPdfPageAsync(setCurrent, cancellationToken),
+    SetPdfDemandCommand setDemand => SetPdfDemand(setDemand),
     UpdatePdfBlockTextCommand edit => await UpdatePdfBlockTextAsync(edit, cancellationToken),
     RetryPdfPageInspectCommand => await RetryPdfPageInspectAsync(cancellationToken),
     SetPdfWindowCommand window => await SetPdfWindowAsync(
@@ -88,6 +89,11 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private readonly HashSet<Task> pdfBackgroundOperations = [];
   private bool pdfExitReview;
   private PdfDocumentEntry? pdfClosingPreviewDrain;
+  // T2 App 全局按需协调器：准入/水位/写栅栏/暖缓存/资源释放观测。
+  // transport 为 null（native wire 未接入/能力未广播）时全部直通 legacy 路径。
+  private PdfDemandCoordinator? pdfDemand;
+  private PdfDemandCoordinator PdfDemand => pdfDemand ??= new(resources, operations, PublishPdfDemand);
+  internal PdfDemandDiagnostics DemandDiagnostics => PdfDemand.Snapshot();
   private readonly PdfWorkspace pdfWorkspace = new();
   // 受控取消正确性冒烟探针（仅 smoke 场景安装，正常 null）：真实 worker 首份
   // 保存返回后、终态落账前挂起，等公共“停止后续导出”按钮驱动的取消回执
@@ -170,6 +176,8 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private PdfViewModel CreatePdfViewModel()
   {
     PdfViewModel model = pdfFactory();
+    // 写栅栏在创建点注入：VM 实际 write RPC 点统一使用（见 PdfViewModel）。
+    model.AttachDemand(PdfDemand);
     if (optionsLayout is not null) model.SetProcessingSettings(PdfProcessingSettings.Load(optionsLayout));
     model.PropertyChanged += OnPdfPropertyChanged;
     model.PagesRemapped += OnPdfPagesRemapped;
@@ -178,7 +186,9 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   }
   private void OnPdfPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
   {
-    if (args.PropertyName is null && sender is PdfViewModel && ActivePdf is { } active) operations.Publish(PdfState(active));
+    if (args.PropertyName is not null || sender is not PdfViewModel model) return;
+    if (model.CanDemandPages) pdfDemand?.ModelChanged(model);
+    if (ActivePdf is { } active) operations.Publish(PdfState(active));
   }
   private PdfWorkbenchState? SetPdfProcessingSettings(SetPdfProcessingSettingsCommand command)
   {
@@ -263,6 +273,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     PdfDocumentEntry entry = pdfWorkspace.For(model)!;
     entry.RequestedPath = path;
     pdfWorkspace.Activate(entry); pdfContext.Value = entry;
+    pdfDemand?.Activate(null);
     Interlocked.Increment(ref pdfGeneration);
     try { await model.OpenPathAsync(path, ct); }
     catch (Exception error) { entry.CloseError = error.Message; AppLog.Error("PDF open failed", error); }
@@ -354,7 +365,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
           if (entry.Model.FilePath is not { } target || !(await entry.Model.SaveAsync(target, ct)).Saved) return false;
         }
       }
-      await entry.Model.CloseSessionAsync(CancellationToken.None);
+      await entry.Model.CloseSessionAsync(ct);
       entry.Model.PropertyChanged -= OnPdfPropertyChanged;
       entry.Model.PagesRemapped -= OnPdfPagesRemapped;
       if (pdfWorkspace.Active == entry) ReleasePdfWindowResources();
@@ -379,7 +390,8 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     try
     {
       pdfWorkspace.CancelExport();
-      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
+      pdfDemand?.Stop();
+    foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
       Task[] operations; lock (pdfBackgroundOperations) operations = pdfBackgroundOperations.ToArray();
       await Task.WhenAll(operations);
       await Task.WhenAll(pdfWorkspace.Documents.Select(entry => entry.Model.WaitForSettlementAsync()));
@@ -683,10 +695,11 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   }
   private PdfWorkbenchState PdfStateCore(PdfViewModel viewModel)
   {
-    if (ReferenceEquals(ActivePdf, viewModel) && pdfPageResourceKey != PdfPageResourceKey(viewModel))
+    if (!viewModel.CanDemandPages && ReferenceEquals(ActivePdf, viewModel) && pdfPageResourceKey != PdfPageResourceKey(viewModel))
       ReleasePdfPageResources();
     SynchronizePdfMode();
     pdfWindowStart = DesktopWorkbenchCommandHandler.ClampWindowStart(pdfWindowStart, viewModel.PageCount, 64);
+    PdfDemandCoordinator.Projection? demand = viewModel.CanDemandPages ? PdfDemand.GetProjection(viewModel) : null;
     return new PdfWorkbenchState(
       viewModel.IsBusy || viewModel.IsSettling,
       PdfStatusCode(viewModel),
@@ -696,33 +709,46 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       Enumerable.Range(
         pdfWindowStart,
         Math.Min(viewModel.PageCount - pdfWindowStart, 64))
-      .Select(index => new PdfWorkbenchPage(
-        index,
-        PdfPageStatus(viewModel, index),
-        pdfThumbnails.GetValueOrDefault(index),
-        index < viewModel.Pages.Count &&
-          viewModel.Pages[index].State == PdfPageState.Done &&
-          viewModel.Pages[index].Result is not null
-          ? pdfStructured.GetValueOrDefault(index).Reference
-          : null,
-        viewModel.Pages[index].Detected, viewModel.Pages[index].HasTextLayer, viewModel.Pages[index].AddedThisSession,
-        viewModel.Pages[index].Rotation, viewModel.Pages[index].Width, viewModel.Pages[index].Height,
-        viewModel.Pages[index].RecognitionRevision, viewModel.Pages[index].CorrectedAfterRecognition))
+      .Select(index => ProjectPage(viewModel, index, includeResources: true))
       .ToArray(),
       pdfWindowStart,
       PdfEngines(),
       pdfTaskEngine, viewModel.Revision, viewModel.IsModified, viewModel.DetectedCount, viewModel.TextLayerCount,
       viewModel.AddedCount, viewModel.Phase, viewModel.ProgressCurrent, viewModel.ProgressTotal, viewModel.Summary,
       viewModel.CanAddTextLayer, viewModel.ProcessingSettings,
-      pdfPagePreview,
-      pdfPageInspect,
-      pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText,
+      demand is null ? pdfPagePreview : demand.Preview,
+      demand is null ? pdfPageInspect : demand.Inspect,
+      demand?.InspectStatus ?? pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText,
       PdfEntry?.Id, pdfWorkspace.Documents.Where(entry => entry.Model.HasRemoteSession || entry.Model.IsBusy).Select(entry => new PdfDocumentSummary(entry.Id,
         entry.DisplayName, entry.Model.PageCount, entry.Model.IsModified,
         entry.Model.IsBusy || entry.Model.IsSettling, entry.Model.Phase, entry.CloseError is not null)).ToArray(),
       PdfEntry?.Preview, viewModel.CanCopyExport, pdfWorkspace.Exporting,
       pdfWorkspace.ExportItems.Select(item => new PdfExportSummary(item.DocumentId, item.Name, item.Revision,
-        item.Status, item.Output is null ? null : Path.GetFileName(item.Output), item.Error)).ToArray(), pdfWorkspace.ExportGeneration);
+        item.Status, item.Output is null ? null : Path.GetFileName(item.Output), item.Error)).ToArray(), pdfWorkspace.ExportGeneration,
+      viewModel.CanDemandPages,
+      viewModel.CanDemandPages && viewModel.SelectedPage >= 0 && viewModel.SelectedPage < viewModel.Pages.Count &&
+        (viewModel.SelectedPage < pdfWindowStart || viewModel.SelectedPage >= pdfWindowStart + 64)
+        ? ProjectPage(viewModel, viewModel.SelectedPage, includeResources: false) : null);
+  }
+
+  private PdfWorkbenchPage ProjectPage(PdfViewModel model, int index, bool includeResources)
+  {
+    PdfPageViewModel page = model.Pages[index];
+    WorkbenchResourceReference? thumb = includeResources
+      ? model.CanDemandPages ? PdfDemand.Thumbnail(model, index) : pdfThumbnails.GetValueOrDefault(index)
+      : null;
+    WorkbenchResourceReference? structured = includeResources && page.State == PdfPageState.Done && page.Result is not null
+      ? pdfStructured.GetValueOrDefault(index).Reference : null;
+    return new(index, PdfPageStatus(model, index), thumb, structured, page.Detected,
+      page.HasTextLayer, page.AddedThisSession, page.Rotation, page.Width, page.Height,
+      page.RecognitionRevision, page.CorrectedAfterRecognition, page.PageKey, page.ContentGeneration,
+      page.DetectionState switch
+      {
+        PdfDetectionState.Known => "known",
+        PdfDetectionState.Detecting => "detecting",
+        PdfDetectionState.Failed => "failed",
+        _ => "unknown",
+      });
   }
 
   /// <summary>
@@ -771,7 +797,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     Interlocked.Increment(ref pdfWindowGeneration);
     foreach (WorkbenchResourceReference reference in pdfThumbnails.Values) resources.ReleaseResource(reference);
     foreach (var value in pdfStructured.Values) resources.ReleaseResource(value.Reference);
-    pdfThumbnails.Clear(); pdfStructured.Clear(); ReleasePdfPageResources(force);
+    pdfThumbnails.Clear(); pdfStructured.Clear(); pdfDemandResults = null; ReleasePdfPageResources(force);
   }
   private void ReleasePdfPageResources(bool force = false)
   {
@@ -876,6 +902,37 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
+  private PdfWorkbenchState? SetPdfDemand(SetPdfDemandCommand command)
+  {
+    if (PdfEntry is not { Closing: false, Model: { CanDemandPages: true } model } entry ||
+        entry != pdfWorkspace.Active || command.Page != model.SelectedPage) return null;
+    int start = DesktopWorkbenchCommandHandler.ClampWindowStart(entry.WindowStart, model.PageCount, 64);
+    int[] visible = command.VisiblePages.Where(page => page >= start && page < Math.Min(model.PageCount, start + 64))
+      .Distinct().Order().ToArray();
+    PdfDemand.Activate(model);
+    bool changed = PdfDemand.SetDemand(model, command.Page, visible, command.ThumbnailSize, command.PreviewMaxEdge);
+    QueuePdfDemandResults(model);
+    return changed ? PdfState(model) : null;
+  }
+
+  private void SynchronizeDemand(PdfViewModel model)
+  {
+    if (!ReferenceEquals(ActivePdf, model)) return;
+    PdfDemand.Activate(model);
+    PdfDemandCoordinator.ViewportDemand? demand = PdfDemand.GetDemand(model);
+    int start = DesktopWorkbenchCommandHandler.ClampWindowStart(pdfWindowStart, model.PageCount, 64);
+    int end = Math.Min(model.PageCount, start + 64);
+    int[] visible = demand?.VisiblePages.Where(page => page >= start && page < end).ToArray() ?? [];
+    if (demand is null || demand.Page != model.SelectedPage || !demand.VisiblePages.SequenceEqual(visible))
+      PdfDemand.SetDemand(model, model.SelectedPage, visible);
+    QueuePdfDemandResults(model);
+  }
+
+  private void PublishPdfDemand(PdfViewModel model)
+  {
+    if (ReferenceEquals(ActivePdf, model) && !operations.IsDisposed) operations.Publish(PdfState(model));
+  }
+
   private async Task<PdfWorkbenchState> UpdatePdfBlockTextAsync(
     UpdatePdfBlockTextCommand command, CancellationToken cancellationToken)
   {
@@ -898,7 +955,8 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private async Task<PdfWorkbenchState> RetryPdfPageInspectAsync(CancellationToken cancellationToken)
   {
     pdf ??= CreatePdfViewModel();
-    ReleasePdfPageResources();
+    if (pdf.CanDemandPages) PdfDemand.RetryInspect(pdf);
+    else ReleasePdfPageResources();
     return await PdfStateAsync(pdf, cancellationToken);
   }
 
@@ -906,7 +964,16 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   {
     PdfDocumentEntry? previous = pdfContext.Value;
     pdfContext.Value = pdfWorkspace.For(viewModel);
-    try { return await PdfResourcesStateAsync(viewModel, cancellationToken); }
+    try
+    {
+      if (!viewModel.CanDemandPages)
+      {
+        if (ReferenceEquals(ActivePdf, viewModel)) pdfDemand?.Activate(null);
+        return await PdfResourcesStateAsync(viewModel, cancellationToken);
+      }
+      SynchronizeDemand(viewModel);
+      return PdfState(viewModel);
+    }
     finally { pdfContext.Value = previous; }
   }
   private async Task<PdfWorkbenchState> PdfResourcesStateAsync(
@@ -939,8 +1006,56 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
         if (!pdfThumbnails.TryAdd(index, reference)) resources.ReleaseResource(reference);
       }
     }
-    await viewModel.PrepareResultsAsync(windowStart, 64, cancellationToken);
+    await PublishPdfStructuredAsync(viewModel, windowStart, visiblePageEnd, Current, cancellationToken);
+    await EnsurePdfPageResourcesAsync(viewModel, cancellationToken);
     if (!Current()) return PdfState(viewModel);
+    return PdfState(viewModel);
+  }
+
+  private Task? pdfDemandResultsTask;
+  private (PdfViewModel Model, long Revision, int Start)? pdfDemandResults;
+  private void QueuePdfDemandResults(PdfViewModel model)
+  {
+    // Deferred results are separate from preview/thumbnail reads and only exist after an OCR run.
+    if (model.IsSettling || !ReferenceEquals(ActivePdf, model)) return;
+    int start = DesktopWorkbenchCommandHandler.ClampWindowStart(pdfWindowStart, model.PageCount, 64);
+    if (!model.Pages.Skip(start).Take(64).Any(page => page.Result is not null || page.ResultReference is not null)) return;
+    var demand = (model, model.Revision, start);
+    if (pdfDemandResults == demand) return;
+    pdfDemandResults = demand;
+    if (pdfDemandResultsTask is { IsCompleted: false }) return;
+    pdfDemandResultsTask = CompletePdfDemandResultsAsync();
+    operations.Track(pdfDemandResultsTask);
+  }
+
+  private async Task CompletePdfDemandResultsAsync()
+  {
+    await Task.Yield();
+    while (pdfDemandResults is { } target && !operations.IsDisposed)
+    {
+      bool Current() => pdfDemandResults == target && ReferenceEquals(ActivePdf, target.Model) &&
+        target.Model.Revision == target.Revision && !target.Model.IsSettling;
+      try
+      {
+        if (Current())
+        {
+          int end = Math.Min(target.Model.PageCount, target.Start + 64);
+          foreach (int index in pdfStructured.Keys.Where(index => index < target.Start || index >= end).ToArray())
+            RemovePdfStructured(index);
+          await PublishPdfStructuredAsync(target.Model, target.Start, end, Current, CancellationToken.None);
+          if (Current()) PublishPdfDemand(target.Model);
+        }
+      }
+      catch (Exception error) { AppLog.Error("PDF structured results could not be published", error); }
+      if (pdfDemandResults == target) return;
+    }
+  }
+
+  private async Task PublishPdfStructuredAsync(PdfViewModel viewModel, int windowStart,
+    int visiblePageEnd, Func<bool> Current, CancellationToken cancellationToken)
+  {
+    await viewModel.PrepareResultsAsync(windowStart, 64, cancellationToken);
+    if (!Current()) return;
     // 已完成页的结构化结果与缩略图同窗口发布：以 Result 对象身份缓存，
     // 旋转/删除/重开文档时整体失效，与单次/批量共用同一发布路径。
     for (int index = windowStart; index < visiblePageEnd; index++)
@@ -961,7 +1076,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
         result.ContentBlocks,
         viewModel.FetchResultAssetAsync,
         cancellationToken);
-      if (!Current()) { if (reference is not null) resources.ReleaseResource(reference); return PdfState(viewModel); }
+      if (!Current()) { if (reference is not null) resources.ReleaseResource(reference); return; }
       if (reference is null)
       {
         RemovePdfStructured(index);
@@ -972,9 +1087,6 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
         pdfStructured[index] = (result, reference);
       }
     }
-    await EnsurePdfPageResourcesAsync(viewModel, cancellationToken);
-    if (!Current()) return PdfState(viewModel);
-    return PdfState(viewModel);
   }
 
   private int[] SelectedPdfPages(PdfViewModel viewModel) => selectedPdfPages
@@ -1012,9 +1124,10 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   internal void Stop()
   {
     Interlocked.Increment(ref pdfGeneration);
+    pdfDemand?.Stop();
     foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
   }
-  internal void Release() => pdfStructured.Clear();
+  internal void Release() { pdfDemand?.Release(); pdfStructured.Clear(); }
 
   /// <summary>受控取消冒烟探针状态；仅 smoke 场景安装，正常路径恒为 null。</summary>
   internal sealed class PdfExportCancelSmokeProbe(string directory, long expectedGeneration)

@@ -178,14 +178,16 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
   {
     lock (gate) return resourceFiles.TryGetValue(resourceUri, out path);
   }
-  internal void ReleaseResource(WorkbenchResourceReference resource)
+  internal void ReleaseResource(WorkbenchResourceReference resource) => TryReleaseResource(resource);
+
+  internal bool TryReleaseResource(WorkbenchResourceReference resource)
   {
     lock (gate)
     {
       structuredResourceFiles.Remove(resource.Url);
       if (structuredResourceChildren.Remove(resource.Url, out var children))
         foreach (WorkbenchResourceReference child in children) ReleaseResource(child);
-      if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return;
+      if (!Uri.TryCreate(resource.Url, UriKind.Absolute, out Uri? uri)) return false;
       resourceBroker.Revoke(new WorkbenchResourceLease(uri, DateTimeOffset.MaxValue));
       // Published input files belong to the app and are retained only while leased.
       if (resourceFiles.TryGetValue(resource.Url, out string? path))
@@ -199,6 +201,7 @@ internal sealed class WorkbenchResourcesOwner(WorkbenchResourceBroker resourceBr
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
       }
+      return !resourceFiles.ContainsKey(resource.Url);
     }
   }
 
