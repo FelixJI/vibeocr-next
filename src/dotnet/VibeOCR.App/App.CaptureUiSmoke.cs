@@ -169,8 +169,7 @@ public sealed partial class App
     window.Activate();
     try
     {
-      await view.EnsureCoreWebView2Async(
-          await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
+      await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(view);
       var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
       view.CoreWebView2.NavigationCompleted += (_, _) => navigation.TrySetResult();
       await host.InitializeAsync(view, Path.Combine(AppContext.BaseDirectory, "WebAssets"));

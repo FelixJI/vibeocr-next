@@ -139,6 +139,27 @@ def _verify_bootstrapper(product_root: Path) -> None:
     finally:
         backup.replace(browser)
 
+    # #321：随包 WebView2 已知原生启动闭包（真实布局：msedge.dll 在运行库根，
+    # EmbeddedBrowserWebView.dll 在 EBWebView 架构子目录）缺损必须进入报修
+    # 路径，不能因浏览器 EXE 仍在而放行（旧实现不会失败）。
+    msedge = product_root / "app/WebView2Runtime/msedge.dll"
+    backup = msedge.with_suffix(".dll.smoke-backup")
+    msedge.rename(backup)
+    try:
+        expect_failure(5, b"msedge.dll")
+    finally:
+        backup.replace(msedge)
+
+    embedded = (
+        product_root / "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll"
+    )
+    backup = embedded.with_suffix(".dll.smoke-backup")
+    embedded.rename(backup)
+    try:
+        expect_failure(5, b"EmbeddedBrowserWebView.dll")
+    finally:
+        backup.replace(embedded)
+
     # #321：UI.Xaml 缺失时必须显式报修（exit 2），不能放行后让
     # apphost 异步退出且无报修。
     xaml = product_root / "app/Microsoft.UI.Xaml.dll"

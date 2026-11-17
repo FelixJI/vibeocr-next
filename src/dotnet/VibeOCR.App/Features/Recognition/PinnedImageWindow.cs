@@ -1197,8 +1197,7 @@ internal sealed class PinnedImageWindow : IDisposable
       throw new InvalidOperationException("smoke injected WebView startup failure");
     }
     window.Activate();
-    await view.EnsureCoreWebView2Async(
-        await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
+    await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(view);
     if (disposed) return;
     core = view.CoreWebView2;
     core.Settings.AreDevToolsEnabled = false;
@@ -1278,8 +1277,7 @@ internal sealed class PinnedImageWindow : IDisposable
           SnapshotReceiptLost?.Invoke(this, editSessionId);
       };
       editorHost = host;
-      await overlay.EnsureCoreWebView2Async(
-          await VibeOCR.App.Web.WebView2ProductEnvironment.EnsureCreatedAsync());
+      await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(overlay);
       if (disposed || !editing)
       {
         await TeardownEditorAsync();
@@ -1292,7 +1290,10 @@ internal sealed class PinnedImageWindow : IDisposable
     {
       VibeOCR.App.Services.AppLog.Error("Pin editor initialization failed", error);
       await ExitEditModeAsync();
-      status.Text = "贴图编辑器启动失败，请重试";
+      // #321：随包 WebView2 可恢复初始化失败显示固定产品报修文案。
+      status.Text = error is VibeOCR.App.Web.WebView2StartupException startup
+        ? startup.Message
+        : "贴图编辑器启动失败，请重试";
       throw;
     }
   }

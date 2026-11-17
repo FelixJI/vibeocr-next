@@ -32,6 +32,8 @@ public sealed class PrerequisiteDetectorTests
       ("RuntimePython", "python"),
       (@"WebView2Runtime\msedgewebview2.exe", "webview2"),
       (@"WebView2Runtime\icudtl.dat", "icu"),
+      (@"WebView2Runtime\msedge.dll", "msedge"),
+      (@"WebView2Runtime\EBWebView\x64\EmbeddedBrowserWebView.dll", "embedded"),
     })
     {
       if (missing.Contains(relative))
@@ -129,6 +131,8 @@ public sealed class PrerequisiteDetectorTests
   [InlineData("Microsoft.WindowsAppRuntime.dll", PrerequisiteKind.WindowsAppRuntime)]
   [InlineData("Microsoft.UI.Xaml.dll", PrerequisiteKind.WindowsAppRuntime)]
   [InlineData(@"WebView2Runtime\msedgewebview2.exe", PrerequisiteKind.WebView2Runtime)]
+  [InlineData(@"WebView2Runtime\msedge.dll", PrerequisiteKind.WebView2Runtime)]
+  [InlineData(@"WebView2Runtime\EBWebView\x64\EmbeddedBrowserWebView.dll", PrerequisiteKind.WebView2Runtime)]
   public void ProductionReportsDamagedBundledComponentsAsMissing(
       string missing,
       PrerequisiteKind kind)

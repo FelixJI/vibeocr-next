@@ -91,6 +91,36 @@ public sealed class ResolvedProductLayout
         "Microsoft.UI.Xaml.dll",
     };
 
+    /// <summary>#321：随包 WebView2 Fixed 运行库已知原生启动闭包（按真实
+    /// 随包布局：msedge.dll 在运行库根；EmbeddedBrowserWebView.dll 在
+    /// EBWebView 架构子目录，不在顶层）。缺 msedge.dll 时启动器自检与
+    /// WebView 初始化才会失败，必须在布局闭包中显式报修。</summary>
+    public static readonly string[] WebView2RuntimeStartupFiles =
+    {
+        "msedge.dll",
+        @"EBWebView\x64\EmbeddedBrowserWebView.dll",
+    };
+
+    public static IReadOnlyList<string> MissingWebView2RuntimeStartupFiles(string webView2RuntimeRoot)
+    {
+        if (string.IsNullOrWhiteSpace(webView2RuntimeRoot))
+        {
+            throw new ArgumentException(
+                "WebView2 runtime root is required.", nameof(webView2RuntimeRoot));
+        }
+
+        List<string> missing = new();
+        foreach (string name in WebView2RuntimeStartupFiles)
+        {
+            if (!File.Exists(Path.Combine(webView2RuntimeRoot, name)))
+            {
+                missing.Add(name);
+            }
+        }
+
+        return missing;
+    }
+
     public static IReadOnlyList<string> MissingWindowsAppRuntimeFiles(string appRoot)
     {
         if (string.IsNullOrWhiteSpace(appRoot))
@@ -216,6 +246,11 @@ public sealed class ResolvedProductLayout
         if (!HasSafeWebView2Executable(browserExecutable))
         {
             throw new InvalidDataException("layout.missing-entry: " + browserExecutable);
+        }
+        foreach (string missingStartup in MissingWebView2RuntimeStartupFiles(WebView2RuntimeRoot))
+        {
+            throw new InvalidDataException(
+                "layout.missing-entry: " + Path.Combine(WebView2RuntimeRoot, missingStartup));
         }
     }
 

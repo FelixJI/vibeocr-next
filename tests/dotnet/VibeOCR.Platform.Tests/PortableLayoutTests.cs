@@ -494,6 +494,8 @@ public sealed class PortableLayoutTests
             "app/WebAssets/index.html",
             "app/WebView2Runtime/msedgewebview2.exe",
             "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -636,6 +638,8 @@ public sealed class PortableLayoutTests
             "app/WebAssets/index.html",
             "app/WebView2Runtime/msedgewebview2.exe",
             "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -821,6 +825,34 @@ public sealed class PortableLayoutTests
         }
     }
 
+    [Theory]
+    [InlineData("app/WebView2Runtime/msedge.dll")]
+    [InlineData("app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll")]
+    public void ProductTreeRequiresTheBundledWebView2NativeStartupClosure(string missing)
+    {
+        // #321 回归：只缺随包原生启动库（msedge.dll / 嵌套
+        // EmbeddedBrowserWebView.dll）时，布局闭包必须报修；旧实现只检查
+        // 浏览器 EXE 与 icudtl.dat，本测试在旧实现上不会失败。
+        string root = Path.Combine(
+            Path.GetTempPath(), $"vibeocr-webview2-startup-{Guid.NewGuid():N}");
+        try
+        {
+            CreateProductLayoutFixture(root);
+            File.Delete(Path.Combine(
+                root, missing.Replace('/', Path.DirectorySeparatorChar)));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.Open(root));
+
+            Assert.Contains("layout.missing-entry", error.Message);
+            Assert.Contains(Path.GetFileName(missing), error.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
     private static void CreateProductLayoutFixture(string root)
     {
         string metadata = Path.Combine(root, "app", "metadata");
@@ -839,6 +871,8 @@ public sealed class PortableLayoutTests
             "app/WebAssets/index.html",
             "app/WebView2Runtime/msedgewebview2.exe",
             "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",

@@ -137,7 +137,7 @@ public static class BundledProductProbe
         return new Snapshot(
             FindBundledDotNetVersion(appRoot, layout.AppEntry),
             FindBundledWindowsAppRuntimeVersion(appRoot),
-            FindFileVersion(Path.Combine(appRoot, "WebView2Runtime", "msedgewebview2.exe")),
+            FindBundledWebView2Version(appRoot),
             File.Exists(layout.RuntimePython));
     }
 
@@ -179,6 +179,17 @@ public static class BundledProductProbe
         ResolvedProductLayout.MissingWindowsAppRuntimeFiles(appRoot).Count == 0
             ? FindFileVersion(Path.Combine(appRoot, "Microsoft.WindowsAppRuntime.dll"))
             : null;
+
+    // 随包 WebView2 已知原生启动闭包（与 ResolvedProductLayout.ValidateTree /
+    // Bootstrapper 自检一致）：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll
+    // 时按随包缺损报修，不因浏览器 EXE 仍在而放行。
+    private static string? FindBundledWebView2Version(string appRoot)
+    {
+        string runtimeRoot = Path.Combine(appRoot, "WebView2Runtime");
+        return ResolvedProductLayout.MissingWebView2RuntimeStartupFiles(runtimeRoot).Count == 0
+            ? FindFileVersion(Path.Combine(runtimeRoot, "msedgewebview2.exe"))
+            : null;
+    }
 
     // 随包 .NET 启动闭包 + 共享 runtimeconfig 语义（与 Bootstrapper 一致）。
     private static string? FindBundledDotNetVersion(string appRoot, string appEntry) =>

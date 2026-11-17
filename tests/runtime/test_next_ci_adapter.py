@@ -374,6 +374,8 @@ def _write_installed_product_fixture(product: Path) -> None:
         "app/WebAssets/index.html",
         "app/WebView2Runtime/msedgewebview2.exe",
         "app/WebView2Runtime/icudtl.dat",
+        "app/WebView2Runtime/msedge.dll",
+        "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
         "app/metadata/component-lock.json",
         "app/metadata/component-identities.json",
         "app/metadata/product-release-manifest.json",
@@ -436,6 +438,11 @@ def _configure_release_smoke_fixture(
         package.writestr("current/app/System.Private.CoreLib.dll", b"clr")
         package.writestr(
             "current/app/WebView2Runtime/msedgewebview2.exe", b"locked-browser"
+        )
+        package.writestr("current/app/WebView2Runtime/msedge.dll", b"msedge")
+        package.writestr(
+            "current/app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+            b"embedded",
         )
         package.writestr("current/runtime/env/runtime-env/python.exe", b"runtime")
         package.writestr(
@@ -523,6 +530,17 @@ def _configure_release_smoke_fixture(
                     return subprocess.CompletedProcess(
                         command, 2, stderr=b"Microsoft.UI.Xaml.dll"
                     )
+                webview2_root = product_root / "app/WebView2Runtime"
+                if not (webview2_root / "msedge.dll").is_file():
+                    # 随包 WebView2 原生启动闭包：msedge.dll 缺失 → exit 5。
+                    return subprocess.CompletedProcess(command, 5, stderr=b"msedge.dll")
+                if not (
+                    webview2_root / "EBWebView/x64/EmbeddedBrowserWebView.dll"
+                ).is_file():
+                    # 嵌套架构子目录内的运行库 DLL 缺失 → exit 5。
+                    return subprocess.CompletedProcess(
+                        command, 5, stderr=b"EmbeddedBrowserWebView.dll"
+                    )
                 reason = (
                     b"webview2.version-mismatch"
                     if browser.read_bytes() == velopack.read_bytes()
@@ -567,7 +585,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
 
     verify(artifacts, "1.2.3")
 
-    assert len(calls) == 14
+    assert len(calls) == 16
     assert Path(calls[0][0]).parts[-4:] == (
         "runtime",
         "env",
@@ -578,7 +596,7 @@ def test_release_smoke_executes_the_extracted_product_handshake(
     assert calls[1][1:] == ["--self-test-prerequisites"]
     assert calls[-1][2].endswith("smoke_web_workbench.ps1")
     # 子进程共享同一个独占解包根,并在结束后由 Python 清理。
-    assert len(unpack_roots) == 14
+    assert len(unpack_roots) == 16
     assert len({str(path) for path in unpack_roots}) == 1
     reused = unpack_roots[0]
     assert reused.name == "current"
@@ -684,7 +702,7 @@ def test_release_smoke_propagates_a_failed_web_ready_handshake(
     with pytest.raises(subprocess.CalledProcessError):
         verify(artifacts, "1.2.3")
 
-    assert len(calls) == 14
+    assert len(calls) == 16
     # handshake 失败后复用解包树仍由 Python 的 TemporaryDirectory 清理。
     assert not unpack_roots[0].exists()
 

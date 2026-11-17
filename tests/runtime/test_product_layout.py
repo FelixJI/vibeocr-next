@@ -77,6 +77,8 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
         "runtimes/win-x64/native/WebView2Loader.dll",
         "WebView2Runtime/msedgewebview2.exe",
         "WebView2Runtime/icudtl.dat",
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
     ):
         path = app / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +222,25 @@ def test_stage_product_layout_requires_the_bundled_webview2_runtime(
     """#321：随包 WebView2 运行库缺失时闭包 fail closed（旧实现不会失败）。"""
     inputs = _release_inputs(tmp_path)
     (inputs["app_publish_root"] / "WebView2Runtime" / "msedgewebview2.exe").unlink()
+
+    with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+@pytest.mark.parametrize(
+    "startup",
+    (
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+    ),
+)
+def test_stage_product_layout_requires_the_bundled_webview2_native_startup_closure(
+    tmp_path: Path, startup: str
+) -> None:
+    """#321：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll 时闭包报修
+    （旧实现只检查浏览器 EXE 与 icudtl.dat，不会失败）。"""
+    inputs = _release_inputs(tmp_path)
+    (inputs["app_publish_root"] / startup).unlink()
 
     with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)

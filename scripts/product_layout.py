@@ -234,6 +234,8 @@ def _load_product_layout(
         layout.web_assets / "index.html",
         layout.webview2_runtime / "msedgewebview2.exe",
         layout.webview2_runtime / "icudtl.dat",
+        layout.webview2_runtime / "msedge.dll",
+        layout.webview2_runtime / "EBWebView/x64/EmbeddedBrowserWebView.dll",
         layout.runtime_manifest,
         layout.runtime_python,
         layout.component_lock,

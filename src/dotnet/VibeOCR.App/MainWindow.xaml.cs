@@ -335,7 +335,11 @@ public sealed partial class MainWindow : Window
     {
       AppLog.Error("Web workbench initialization failed", error);
       WebReadySmokeStatus.Fail("webview-initializing", error);
-      ShowRecovery($"工作台初始化失败：{error.GetType().Name}");
+      // #321：随包 WebView2 可恢复初始化失败显示固定产品报修文案，
+      // 其余保持原有类型名提示；原始异常已完整落盘。
+      ShowRecovery(error is Web.WebView2StartupException startup
+        ? startup.Message
+        : $"工作台初始化失败：{error.GetType().Name}");
     }
   }
 

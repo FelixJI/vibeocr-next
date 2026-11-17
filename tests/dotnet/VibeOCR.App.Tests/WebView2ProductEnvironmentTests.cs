@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using VibeOCR.App.Web;
 using VibeOCR.Platform.Bootstrap;
 using Xunit;
@@ -150,5 +151,82 @@ public sealed class WebView2ProductEnvironmentTests : IDisposable
     {
       Directory.Delete(root, recursive: true);
     }
+  }
+
+  [Fact]
+  public async Task InitializeCoreWebView2RequiresAWebView()
+  {
+    // 窄边界快失败：无 WebView 时直接 ArgumentNullException，不隐藏调用错误。
+    await Assert.ThrowsAsync<ArgumentNullException>(
+        () => WebView2ProductEnvironment.InitializeCoreWebView2Async(null!));
+  }
+
+  [Theory]
+  [InlineData(true, typeof(COMException))]
+  [InlineData(true, typeof(FileNotFoundException))]
+  [InlineData(true, typeof(DllNotFoundException))]
+  [InlineData(true, typeof(FileLoadException))]
+  [InlineData(false, typeof(OperationCanceledException))]
+  [InlineData(false, typeof(OutOfMemoryException))]
+  [InlineData(false, typeof(InvalidOperationException))]
+  public void OnlyRecoverableStartupFailuresEnterTheProductRepairBoundary(
+      bool expected,
+      Type failure)
+  {
+    // #321：随包 WebView 可恢复启动失败（COM/文件加载）才包装产品报修；
+    // 取消、OOM 等无关异常不进入报修边界（旧实现无此边界）。
+    Assert.Equal(
+        expected,
+        WebView2StartupException.IsRecoverableStartupFailure(
+            (Exception)Activator.CreateInstance(failure)!));
+  }
+
+  [Fact]
+  public void OnlyBundledEnvironmentStartupFailuresBecomeProductRepair()
+  {
+    // #321：随包环境的 COM/文件加载失败进入固定产品报修（旧实现把 dev
+    // 系统 Evergreen 的同类失败也包装成随包损坏，本分支测试在其上失败）。
+    var cause = new COMException(
+        "WebView2 environment HRESULT failure", unchecked((int)0x80070002));
+
+    var repair = WebView2ProductEnvironment.WrapHostInitializationFailure(
+        bundledEnvironment: true, cause);
+
+    Assert.NotNull(repair);
+    Assert.IsAssignableFrom<InvalidOperationException>(repair);
+    Assert.Same(cause, repair!.InnerException);
+    Assert.Equal(
+        "VibeOCR 随包 WebView2 运行库初始化失败。" + WebView2StartupException.RepairGuidance,
+        repair.Message);
+    // 报修文案不展示实现类型名；原始异常已供日志。
+    Assert.DoesNotContain("COMException", repair.Message);
+  }
+
+  [Theory]
+  [InlineData(typeof(FileNotFoundException))]
+  [InlineData(typeof(DllNotFoundException))]
+  [InlineData(typeof(FileLoadException))]
+  public void BundledRecoverableStartupFailuresBecomeProductRepair(Type failure)
+  {
+    var repair = WebView2ProductEnvironment.WrapHostInitializationFailure(
+        bundledEnvironment: true,
+        (Exception)Activator.CreateInstance(failure)!);
+
+    Assert.NotNull(repair);
+  }
+
+  [Theory]
+  [InlineData(typeof(COMException))]
+  [InlineData(typeof(FileNotFoundException))]
+  [InlineData(typeof(OperationCanceledException))]
+  [InlineData(typeof(OutOfMemoryException))]
+  public void SystemEvergreenFailuresAndUnrelatedExceptionsPassThrough(
+      Type failure)
+  {
+    // dev 系统 Evergreen 环境的 COM/文件失败、以及取消/OOM，均不进入随包
+    // 报修边界，按原异常透传。
+    Assert.Null(WebView2ProductEnvironment.WrapHostInitializationFailure(
+        bundledEnvironment: false,
+        (Exception)Activator.CreateInstance(failure)!));
   }
 }
