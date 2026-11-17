@@ -39,6 +39,10 @@ from vibeocr.runtime.documents.models.pdf_document import (
     TextLayerInfo,
 )
 from vibeocr.runtime.documents.pdf_block_editor import PdfBlockEditor
+from vibeocr.runtime.documents.pdf_native_gate import (
+    PdfNativeGate,
+    PdfNativeWaitAborted,
+)
 from vibeocr.runtime.documents.pdf_service import (
     PdfSaveError,
     PdfService,
@@ -206,6 +210,11 @@ def _render_page_pixels(
 
 
 _FITZ_LOCK = threading.Lock()
+# 全局原生调度优先门：所有 _FITZ_LOCK / BackendSession.fitz_lock 入场（含
+# SessionRegistry.remove 的 close 收尾）都经此排序（前台优先/后台有界公平，
+# burst=4 与冻结预算 foreground_native_burst 一致）。门只做入场排序，不是
+# 绕过原生锁的假队列；所有 fitz 调用仍在原生锁内执行，PIL 编码保持锁外。
+_NATIVE_GATE = PdfNativeGate()
 
 
 @dataclass
@@ -219,6 +228,8 @@ class BackendSession:
     # fitz(Document) 非线程安全:并发渲染缩略图时串行化 get_pixmap 等 fitz 调用。
     # 锁粒度仅覆盖 fitz 栅格化,PIL 缩放/PNG 编码在锁外可并行。
     fitz_lock: threading.Lock = field(default_factory=lambda: _FITZ_LOCK)
+    # 原生调度优先门（默认绑定全局 _FITZ_LOCK 对应的全局门）。
+    native_gate: PdfNativeGate = field(default_factory=lambda: _NATIVE_GATE)
     # 文字层后台逐页检测线程(打开后异步跑,逐页发 progress)
     _load_thread: threading.Thread | None = None
     # 关闭同步：CLOSING 状态拒绝新操作，active_ops 跟踪进行中的 fitz 操作，
@@ -253,8 +264,8 @@ class SessionRegistry:
 
     def add(self, file_path: str) -> BackendSession:
         sid = uuid.uuid4().hex[:16]
-        # fitz.open + 占位 PdfDocument(轻量,不逐页读)
-        with _FITZ_LOCK:
+        # fitz.open + 占位 PdfDocument(轻量,不逐页读)。open 是前台 native 单位。
+        with _NATIVE_GATE.foreground(), _FITZ_LOCK:
             doc, pdf_document = PdfService.open_doc(file_path)
         session = BackendSession(
             session_id=sid, file_path=file_path, doc=doc, pdf_document=pdf_document
@@ -286,6 +297,10 @@ class SessionRegistry:
         with s._ops_cond:
             s.state = "CLOSING"
             s.cancel_event.set()
+        # 先释放 _ops_cond 再唤醒优先门（防锁反转）：等待中的后台页在门内
+        # 重评 CLOSING/cancel_event 即退出，不进入 native，也不占公平配额。
+        s.native_gate.wake_all()
+        with s._ops_cond:
             deadline = time.monotonic() + 10.0
             while s.active_ops > 0:
                 remaining = deadline - time.monotonic()
@@ -294,7 +309,9 @@ class SessionRegistry:
                         status_code=409, detail="PDF operations have not settled"
                     )
                 s._ops_cond.wait(timeout=min(1.0, remaining))
-        with s.fitz_lock:
+        # close 收尾同样是 native 入场，经优先门 + 原生锁；此刻本会话已无
+        # 等待者（后台页已被 CLOSING 唤醒退出，已登记前台租约已归零）。
+        with s.native_gate.foreground(), s.fitz_lock:
             if s.doc.is_closed is not True:
                 s.doc.close()
             s.block_editor = None
@@ -309,12 +326,11 @@ class SessionRegistry:
 
 
 @contextmanager
-def _fitz_op(session: BackendSession):
-    """fitz 操作的上下文管理器：维护 active_ops 计数。
+def _ops_lease(session: BackendSession):
+    """native 活跃租约：登记 active_ops，退出时唤醒 close 等待。
 
-    开始时检查 session 是否仍 OPEN（非 CLOSING），递增 active_ops；
-    结束时递减并 notify（让 remove() 的等待能感知到 active_ops 归零）。
-    fitz_lock 由调用方在 _fitz_op 内获取（或由本上下文管理器获取）。
+    登记前的 OPEN 检查是临界进入的唯一权威判定（与 remove() 置 CLOSING
+    同在 _ops_cond 内互斥，消除 TOCTOU）；优先门许可由外层持有。
     """
     with session._ops_cond:
         if session.state != "OPEN":
@@ -327,6 +343,47 @@ def _fitz_op(session: BackendSession):
             session.active_ops -= 1
             if session.active_ops == 0:
                 session._ops_cond.notify_all()
+
+
+@contextmanager
+def _fitz_op(session: BackendSession):
+    """fitz 前台操作上下文：活跃租约 → 优先门前台许可。
+
+    既有全部 with 调用点默认前台（write/open/model/render 等同一优先级）。
+    租约先登记（T1 语义）：已受理的前台/写操作在 close 时会被等待安全
+    完成，不会被关闭后拒绝。许可在原生锁释放之后才归还（with 嵌套
+    顺序），与调用方 fitz_lock 一起保证恰一 native 持有者。本路径不套用
+    读取消；后续 scoped 前台 read 另用明确可撤销读入口。
+    """
+    with _ops_lease(session), session.native_gate.foreground():
+        yield
+
+
+@contextmanager
+def _background_page_native(session: BackendSession) -> Iterator[None]:
+    """后台逐页 native 单元：优先门后台等待 → 再次 OPEN 检查/租约 → 原生锁。
+
+    等待阶段可被 CLOSING / cancel_event 撤销（未进入 native，不占租约也
+    不占公平配额）；门内准入后由 _ops_lease 在 _ops_cond 内做权威 OPEN
+    复查（与 remove() 置 CLOSING 互斥，消除 TOCTOU），随后本页 native
+    执行不可中断、安全完成。租约只覆盖本页 native 执行，不跨 NDJSON
+    yield/网络背压。写路径不受本接口影响（write lease / cancel_event
+    语义不变）；后续 viewport/background read epoch 的 highwater 谓词
+    可直接组合进 should_abort，不需要新的取消协议。
+    """
+
+    def _aborted() -> bool:
+        # 免锁读（在门互斥锁内执行，不得获取 _ops_cond）。
+        return session.state != "OPEN" or session.cancel_event.is_set()
+
+    try:
+        with session.native_gate.background(should_abort=_aborted):
+            with _ops_lease(session), session.fitz_lock:
+                yield
+    except PdfNativeWaitAborted as error:
+        raise HTTPException(
+            status_code=409, detail="后台页检测在进入原生执行前被取消"
+        ) from error
 
 
 # ---- FastAPI 应用 -------------------------------------------------------
@@ -387,8 +444,13 @@ def session_model(sid: str) -> PdfDocumentMirror:
 
 
 def _detect_one_page(session: BackendSession, i: int) -> PdfPageInfo:
-    """检测单页文字层/扫描/几何,写入 session model 并返回 info。"""
-    with session.fitz_lock:
+    """检测单页文字层/扫描/几何,写入 session model 并返回 info。
+
+    每页是一个后台 native 单位（见 _background_page_native）：前台渲染/
+    变更优先进入 native，本页在门内排队获得有界公平放行；模型替换/扫描
+    判定逻辑保持原样。
+    """
+    with _background_page_native(session):
         rotation = PdfService.page_rotation(session.doc, i)
         page_rect = PdfService.page_rect(session.doc, i)
         has_text_layer = bool(session.doc[i].get_text("text").strip())
@@ -418,7 +480,10 @@ def session_load(sid: str) -> StreamingResponse:
     每行 JSON:
         {"phase":"load","current":N,"total":T,"page_index":I,
          "page_payload":{PdfPageInfoMirror...}}
-    末行:{"phase":"load","current":total,"total":total,"message":"done"}
+    末行:{"phase":"load","current":检测成功页数,"total":total,
+          "message":"done"|"cancelled"|"incomplete"}
+    done=全部页检测成功；cancelled=cancel/会话关闭中止；incomplete=存在
+    失败页。current 只计真实检测成功的页，取消/失败不伪装成全量完成。
     """
     import json as _json
 
@@ -426,11 +491,15 @@ def session_load(sid: str) -> StreamingResponse:
     total = s.pdf_document.page_count
 
     def gen():
+        succeeded = 0
+        cancelled = False
         for i in range(total):
             if s.cancel_event.is_set():
+                cancelled = True
                 break
             try:
                 info = _detect_one_page(s, i)
+                succeeded += 1
                 page_mirror = _page_to_mirror(info)
                 ev = ProgressEvent(
                     phase=ProgressPhase.LOAD,
@@ -440,11 +509,25 @@ def session_load(sid: str) -> StreamingResponse:
                     page_payload=page_mirror.model_dump(mode="json"),
                 )
                 yield (_json.dumps(ev.model_dump(mode="json")) + "\n").encode()
+            except HTTPException as e:
+                if e.status_code == 409:
+                    # close/取消：本页未进入 native，检测未完成——不得把取消
+                    # 当检测成功，也不能因少处理页面伪造全已知状态；直接停流。
+                    cancelled = True
+                    break
+                logger.error("[pdf-backend] load page %d failed: %s", i, e)
             except Exception as e:
                 logger.error("[pdf-backend] load page %d failed: %s", i, e)
-        # 完成哨兵
+        # 结束哨兵：current 是真实检测成功的页数（失败页不计入）；取消/
+        # 中止/失败用显式结局标记，不无条件伪造 current=total 的检测完成。
+        if cancelled:
+            outcome = "cancelled"
+        elif succeeded == total:
+            outcome = "done"
+        else:
+            outcome = "incomplete"
         done_ev = ProgressEvent(
-            phase=ProgressPhase.LOAD, current=total, total=total, message="done"
+            phase=ProgressPhase.LOAD, current=succeeded, total=total, message=outcome
         )
         yield (_json.dumps(done_ev.model_dump(mode="json")) + "\n").encode()
 
@@ -1094,6 +1177,9 @@ def deskew(sid: str, req: PageListRequest) -> MutateResponse:
 def cancel(sid: str) -> EmptyOk:
     s = _get_registry().get(sid)
     s.cancel_event.set()
+    # 唤醒优先门中等待的后台页：已取消的待入 native 读立即在唤醒后退出。
+    # 只影响可撤销读；cancel_event/T1 写路径语义不变。
+    s.native_gate.wake_all()
     return EmptyOk()
 
 
