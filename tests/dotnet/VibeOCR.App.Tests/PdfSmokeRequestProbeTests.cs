@@ -23,7 +23,8 @@ public class PdfSmokeRequestProbeTests
     Assert.Equal(300, entry.Param);
     Assert.Equal("completed", entry.Outcome);
     Assert.Null(entry.Error);
-    Assert.True(entry.DurationMs >= 0);
+    Assert.True(entry.DurationMs is >= 0);
+    Assert.NotNull(entry.EndedAtMs);
   }
 
   [Fact]
@@ -80,6 +81,33 @@ public class PdfSmokeRequestProbeTests
     var (events, _, overflowed) = probe.Snapshot();
     Assert.True(overflowed);
     Assert.Equal(PdfSmokeRequestProbe.MaxEvents, events.Count);
+  }
+
+  [Fact]
+  public async Task PendingRequestsAppearInSnapshotWithoutFakeCompletion()
+  {
+    var probe = new PdfSmokeRequestProbe();
+    var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task running = probe.MeasureAsync("render_preview", "s1", 2, 300, async () =>
+    {
+      await gate.Task;
+      return Array.Empty<byte>();
+    });
+    var (pending, maxInflight, overflowed) = probe.Snapshot();
+    var entry = Assert.Single(pending);
+    Assert.Equal("pending", entry.Outcome);
+    Assert.Null(entry.EndedAtMs);
+    Assert.Null(entry.DurationMs);
+    Assert.Equal(1, maxInflight);
+    Assert.False(overflowed);
+    gate.SetResult();
+    await running;
+    var (done, finalMax, _) = probe.Snapshot();
+    var completed = Assert.Single(done);
+    Assert.Equal("completed", completed.Outcome);
+    Assert.NotNull(completed.EndedAtMs);
+    Assert.True(completed.DurationMs is >= 0);
+    Assert.Equal(1, finalMax);
   }
 
   [Fact]

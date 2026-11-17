@@ -6,6 +6,69 @@ using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App;
 
+/// <summary>发布身份代次（App.Tests 可直接测试的纯数据）。</summary>
+internal sealed record PdfBaselinePublication(
+  double At, string? SessionId, string? DocumentId, int? Page, long? Revision, string PreviewUrl);
+
+/// <summary>
+/// 首图/最终图归属的纯函数判定：要求 session+document+page+revision 存在且
+/// 完全一致，发布时间不晚于见证成帧；缺字段一律拒绝，不同 session/revision/
+/// 页不得匹配。无状态，不依赖 MainWindow 实例。
+/// </summary>
+internal static class PdfBaselineOwnership
+{
+  internal static bool StrictIdentity(
+      PdfBaselinePublication publication, string session, string document,
+      int page, long revision) =>
+    session.Length > 0 && document.Length > 0 &&
+    publication.SessionId == session && publication.DocumentId == document &&
+    publication.Page == page && publication.Revision == revision;
+
+  internal static (bool Ok, string? Reason) ValidateWitness(
+      IReadOnlyList<PdfBaselinePublication> publications, string session, string document,
+      int page, long revision, string witnessSrc, double frameOpportunityAt)
+  {
+    if (session.Length == 0 || document.Length == 0)
+      return (false, "session/document identity missing");
+    List<PdfBaselinePublication> exact = publications
+      .Where(publication => StrictIdentity(publication, session, document, page, revision)
+        && publication.PreviewUrl == witnessSrc)
+      .ToList();
+    if (exact.Count == 0)
+      return (false, $"witness src not published under exact identity page={page} revision={revision}");
+    if (!exact.Any(publication => publication.At <= frameOpportunityAt))
+      return (false, "publication not bound before witness frame");
+    return (true, null);
+  }
+
+  internal static bool IsPublishedGeneration(
+      IReadOnlyList<PdfBaselinePublication> publications, string session, string document,
+      int page, long revision, string url) =>
+    publications.Any(publication =>
+      StrictIdentity(publication, session, document, page, revision) &&
+      publication.PreviewUrl == url);
+
+  /// <summary>最终 host/DOM/当前见证一致性（纯判定）：finalUrl 缺失、DOM src 不
+  /// 一致、未解码/未布局、或未在发布历史中均拒绝；不做无条件空通过。</summary>
+  internal static (bool Ok, string? Reason) FinalAgreement(
+      IReadOnlyList<PdfBaselinePublication> publications, string session, string document,
+      int page, long revision, string? finalUrl, string? domSrc,
+      bool domComplete, bool domConnected, bool domHasLayout, bool hasFramedWitnessForUrl)
+  {
+    if (finalUrl is null || finalUrl.Length == 0)
+      return (false, "final host PagePreview.Url missing");
+    if (domSrc != finalUrl)
+      return (false, $"final DOM src mismatch: dom={domSrc ?? "<null>"}");
+    if (!domComplete || !domConnected || !domHasLayout)
+      return (false, "final DOM frame not decoded/connected/laid out");
+    if (!IsPublishedGeneration(publications, session, document, page, revision, finalUrl))
+      return (false, "final url not published under exact identity");
+    if (!hasFramedWitnessForUrl)
+      return (false, "no framed witness entry for final url");
+    return (true, null);
+  }
+}
+
 /// <summary>
 /// Goal #325/#327 T2 优化前原生基线观测（INPUT_KIND=pdf_baseline）。只观测、
 /// 不优化：浏览器端 performance.now 记录动作 mark、img.decode() 完成与双 RAF
@@ -23,11 +86,17 @@ public sealed partial class MainWindow
         marks: {}, images: [], pulses: {}, awaiting: null, observer: null,
         disposed: false, phase: 'pre_open', messageHandler: null,
         allKnown: { first: {} },
+        publications: [], publicationKeys: {}, publicationsOverflow: false,
+        loadListener: null,
         stateMessages: {
           phases: {}, totalCount: 0, totalBytesEstimate: 0,
           listenerAvailable: false, measurementErrors: 0,
         },
       };
+      function normalizedAttrSrc(img) {
+        const raw = img.getAttribute('src') || img.currentSrc || '';
+        try { return new URL(raw, location.href).href; } catch (error) { return raw; }
+      }
       function currentImgFacts(img) {
         if (!img) return null;
         return {
@@ -39,10 +108,10 @@ public sealed partial class MainWindow
           hasLayout: img.getClientRects().length > 0,
         };
       }
-      function record(img) {
+      function record(img, fullSrc) {
         const entry = {
           alt: img.getAttribute('alt') || '',
-          fullSrc: img.currentSrc || img.getAttribute('src') || '',
+          fullSrc,
           srcSetAt: performance.now(), decodeStartedAt: null,
           decodedAt: null, frameOpportunityAt: null, decodeError: null,
           superseded: false, naturalWidth: 0, naturalHeight: 0,
@@ -51,13 +120,19 @@ public sealed partial class MainWindow
         };
         state.images.push(entry);
         if (state.images.length > 96) state.images.splice(0, state.images.length - 96);
-        const liveSrc = () => img.currentSrc || img.getAttribute('src') || '';
-        const isCurrentInspectionImage = () =>
-          !state.disposed &&
+        img.__t2entry = entry;
+        runDecode(img, entry);
+      }
+      function runDecode(img, entry) {
+        const presenting = () =>
+          (img.currentSrc || img.getAttribute('src') || '') === entry.fullSrc;
+        // 当前代次校验：旧代次的迟到回调永远不得翻活。
+        const isCurrent = () =>
+          !state.disposed && img.__t2entry === entry &&
           document.querySelector('.pdf-inspection-sheet img') === img;
-        entry.decodeStartedAt = performance.now();
+        if (entry.decodeStartedAt === null) entry.decodeStartedAt = performance.now();
         img.decode().then(() => {
-          if (!isCurrentInspectionImage() || liveSrc() !== entry.fullSrc) {
+          if (!isCurrent() || !presenting()) {
             entry.superseded = true;
             return;
           }
@@ -66,7 +141,7 @@ public sealed partial class MainWindow
           entry.decodedAt = performance.now();
           const firstFrame = performance.now();
           requestAnimationFrame(() => requestAnimationFrame(() => {
-            if (!isCurrentInspectionImage() || liveSrc() !== entry.fullSrc ||
+            if (!isCurrent() || !presenting() ||
                 !img.isConnected || img.getClientRects().length === 0) {
               entry.superseded = true;
               return;
@@ -78,14 +153,33 @@ public sealed partial class MainWindow
             entry.hasFocusAtFrame = document.hasFocus();
             entry.frameOpportunityAt = performance.now();
             entry.rafGapMs = entry.frameOpportunityAt - firstFrame;
+            entry.superseded = false;
           }));
         }, (error) => {
-          if (!isCurrentInspectionImage() || liveSrc() !== entry.fullSrc) {
+          if (!isCurrent() || !presenting()) {
             entry.superseded = true;
             return;
           }
           entry.decodeError = String((error && error.name) || error);
         });
+      }
+      function syncImg(img) {
+        const src = normalizedAttrSrc(img);
+        if (img.__t2src !== src) {
+          img.__t2src = src;
+          record(img, src);
+          return;
+        }
+        // 同代次补救：早 decode 因 currentSrc 滞后被置 superseded，load 追上后
+        // 重试一次；不覆盖原 srcSetAt、不产生重复条目；真正换过代次的旧回调
+        // 不会被翻活（runDecode 内 isCurrent 校验）。
+        const entry = img.__t2entry;
+        if (entry && entry.fullSrc === src && entry.superseded &&
+            entry.decodedAt === null && entry.frameOpportunityAt === null &&
+            (img.currentSrc || img.getAttribute('src') || '') === src) {
+          entry.superseded = false;
+          runDecode(img, entry);
+        }
       }
       function runAwaiting() {
         if (!state.awaiting || state.disposed) return;
@@ -136,6 +230,8 @@ public sealed partial class MainWindow
               measurementErrors: state.stateMessages.measurementErrors,
             },
             allKnownFirst: { ...state.allKnown.first },
+            publications: state.publications.slice(-96),
+            publicationsOverflow: state.publicationsOverflow,
             dpr: devicePixelRatio,
             viewport: { width: innerWidth, height: innerHeight },
           });
@@ -143,6 +239,10 @@ public sealed partial class MainWindow
         dispose() {
           state.disposed = true;
           if (state.observer) { state.observer.disconnect(); state.observer = null; }
+          if (state.loadListener && document.removeEventListener) {
+            document.removeEventListener('load', state.loadListener, true);
+          }
+          state.loadListener = null;
           if (state.messageHandler && window.chrome && chrome.webview &&
               chrome.webview.removeEventListener) {
             chrome.webview.removeEventListener('message', state.messageHandler);
@@ -191,6 +291,32 @@ public sealed partial class MainWindow
                 };
               }
             }
+            // 发布序列（有界）：按完整 (session,document,page,revision,url) 代次
+            // 去重，只保留图像发布身份代次；重复状态不增长，容量 96 与图像历史
+            // 匹配，溢出为显式证据缺口。
+            if (inner && typeof inner === 'object' && inner.pagePreview &&
+                typeof inner.pagePreview.url === 'string' && inner.pagePreview.url) {
+              const key = `${inner.sessionId ?? ''}|${inner.documentId ?? ''}|` +
+                `${inner.selectedPage ?? ''}|${inner.revision ?? ''}|${inner.pagePreview.url}`;
+              if (!state.publicationKeys[key]) {
+                state.publicationKeys[key] = true;
+                if (state.publications.length >= 96) {
+                  const dropped = state.publications.shift();
+                  if (dropped) delete state.publicationKeys[
+                    `${dropped.sessionId ?? ''}|${dropped.documentId ?? ''}|` +
+                    `${dropped.page ?? ''}|${dropped.revision ?? ''}|${dropped.previewUrl}`];
+                  state.publicationsOverflow = true;
+                }
+                state.publications.push({
+                  at: performance.now(),
+                  sessionId: inner.sessionId || null,
+                  documentId: inner.documentId || null,
+                  page: Number.isFinite(inner.selectedPage) ? inner.selectedPage : null,
+                  revision: Number.isFinite(inner.revision) ? inner.revision : null,
+                  previewUrl: inner.pagePreview.url,
+                });
+              }
+            }
           } catch (error) {
             state.stateMessages.measurementErrors += 1;
           }
@@ -198,18 +324,22 @@ public sealed partial class MainWindow
         chrome.webview.addEventListener('message', state.messageHandler);
       }
       function scan() {
-        document.querySelectorAll('.pdf-inspection-sheet img').forEach((img) => {
-          const src = img.currentSrc || img.getAttribute('src') || '';
-          if (img.__t2src !== src) {
-            img.__t2src = src;
-            record(img);
-          }
-        });
+        document.querySelectorAll('.pdf-inspection-sheet img').forEach(syncImg);
       }
       state.observer = new MutationObserver(scan);
       state.observer.observe(document.body, {
         childList: true, subtree: true, attributes: true, attributeFilter: ['src'],
       });
+      // 单个 document 捕获 load 监听：不逐 img 挂钩，dispose 统一移除；
+      // 换代补记与同代次补救都由 syncImg 统一处理。
+      if (document.addEventListener && document.removeEventListener) {
+        state.loadListener = (event) => {
+          if (state.disposed) return;
+          const target = event && event.target;
+          if (target && target.tagName === 'IMG') syncImg(target);
+        };
+        document.addEventListener('load', state.loadListener, true);
+      }
       scan();
       return 'installed';
     })()
@@ -243,6 +373,7 @@ public sealed partial class MainWindow
     int StateMessageTotalCount, long StateMessageTotalBytes,
     bool StateMessageListenerAvailable, int StateMessageMeasurementErrors,
     IReadOnlyDictionary<string, PdfBaselineAllKnown> AllKnownFirst,
+    IReadOnlyList<PdfBaselinePublication> Publications, bool PublicationsOverflow,
     double Dpr, int ViewportWidth, int ViewportHeight);
 
   private sealed record PdfBaselineImageWait(
@@ -351,6 +482,27 @@ public sealed partial class MainWindow
           (int)known.Value.GetProperty("detectedCount").GetDouble());
       }
     }
+    var publications = new List<PdfBaselinePublication>();
+    if (root.TryGetProperty("publications", out JsonElement publicationsElement) &&
+        publicationsElement.ValueKind == JsonValueKind.Array)
+    {
+      foreach (JsonElement publication in publicationsElement.EnumerateArray())
+      {
+        publications.Add(new PdfBaselinePublication(
+          publication.GetProperty("at").GetDouble(),
+          publication.TryGetProperty("sessionId", out JsonElement pubSession) && pubSession.ValueKind == JsonValueKind.String
+            ? pubSession.GetString() : null,
+          publication.TryGetProperty("documentId", out JsonElement pubDocument) && pubDocument.ValueKind == JsonValueKind.String
+            ? pubDocument.GetString() : null,
+          publication.TryGetProperty("page", out JsonElement pubPage) && pubPage.ValueKind == JsonValueKind.Number
+            ? (int)pubPage.GetDouble() : null,
+          publication.TryGetProperty("revision", out JsonElement pubRevision) && pubRevision.ValueKind == JsonValueKind.Number
+            ? pubRevision.GetInt64() : null,
+          publication.GetProperty("previewUrl").GetString() ?? ""));
+      }
+    }
+    bool publicationsOverflow = root.TryGetProperty("publicationsOverflow", out JsonElement overflowElement) &&
+      overflowElement.ValueKind == JsonValueKind.True;
     return new PdfBaselineBrowserSnapshot(
       marks,
       root.GetProperty("phase").GetString() ?? "",
@@ -365,6 +517,8 @@ public sealed partial class MainWindow
       root.GetProperty("stateMessages").GetProperty("listenerAvailable").GetBoolean(),
       (int)root.GetProperty("stateMessages").GetProperty("measurementErrors").GetDouble(),
       allKnown,
+      publications,
+      publicationsOverflow,
       root.GetProperty("dpr").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("width").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("height").GetDouble());
@@ -415,22 +569,33 @@ public sealed partial class MainWindow
       $"document={documentId}; known keys={JsonSerializer.Serialize(snapshot.AllKnownFirst.Keys)}");
   }
 
-  /// <summary>宿主域 load 请求完成参考（App→Runtime /load 真实结束，非检测耗时）。</summary>
+  /// <summary>宿主域 load 请求完成参考。completed 但缺 EndedAtMs/DurationMs 视为
+  /// 证据缺口显式返回，不用 0 充当结束。</summary>
   private static object? PdfBaselineLoadEndReference(
     IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events, string? session,
     long hostPickConfirmTimestamp)
   {
-    double? end = events
-      .Where(request => request.Kind == "load_detect" && request.Outcome == "completed"
-        && request.Session == session)
-      .Select(request => (double?)request.StartedAtMs + request.DurationMs)
-      .DefaultIfEmpty(null)
-      .Max();
-    if (end is null) return null;
+    List<PdfSmokeRequestProbe.RequestEvent> scoped = events
+      .Where(request => request.Kind == "load_detect" && request.Session == session)
+      .ToList();
+    if (scoped.Count == 0) return null;
+    if (scoped.Any(request => request.Outcome == "completed" &&
+        (request.EndedAtMs is null || request.DurationMs is null)))
+    {
+      return new
+      {
+        evidence_gap = "completed load_detect missing EndedAtMs/DurationMs; refusing to fabricate an end time",
+      };
+    }
+    List<PdfSmokeRequestProbe.RequestEvent> completed = scoped
+      .Where(request => request.Outcome == "completed" && request.EndedAtMs is not null)
+      .ToList();
+    if (completed.Count == 0) return null;
+    double end = completed.Max(request => request.EndedAtMs!.Value);
     double pickConfirmMs = hostPickConfirmTimestamp * 1000.0 / Stopwatch.Frequency;
     return new
     {
-      pick_confirm_to_load_request_end_ms = end.Value - pickConfirmMs,
+      pick_confirm_to_load_request_end_ms = end - pickConfirmMs,
       note = "宿主 Stopwatch 域内 App→Runtime /load 请求完成参考；不是检测完成耗时，也不与浏览器域原始时间比较",
     };
   }
@@ -520,26 +685,73 @@ public sealed partial class MainWindow
     }
   }
 
-  /// <summary>宿主资源归属：最终 hostState.PagePreview.Url 必须与该步快照内
-  /// 某个非 superseded 已解码条目的 FullSrc 完全一致且 alt 匹配；不只核页码。
-  /// 缺 PagePreview 或无匹配即 FAIL，不把错文档资源当有效样本。</summary>
+  /// <summary>历史首图按自身发布身份核验（严格 session+document+page+revision，
+  /// 发布时间不晚于见证成帧）；溢出即证据缺口显式失败；不用终态 HQ URL 否定
+  /// 历史低清首图。最终图一致性另由 FinalAgreement 有界等待核验。</summary>
   private static void ValidatePdfBaselineResourceOwnership(
-    string step, PdfWorkbenchState state, PdfBaselineImageWait wait, int expectedPageIndex)
+    string step, PdfWorkbenchState state, PdfBaselineImageWait wait,
+    PdfBaselineBrowserSnapshot lateSnapshot, int expectedPageIndex)
   {
-    string altFragment = $"第 {expectedPageIndex + 1} 页";
-    string? previewUrl = state.PagePreview?.Url;
-    bool owned = previewUrl is not null && previewUrl == wait.Witness.FullSrc && wait.Snapshot.Images.Any(image =>
-      !image.Superseded && image.DecodedAt is not null &&
-      image.FullSrc == previewUrl &&
-      image.Alt.Contains(altFragment, StringComparison.Ordinal));
-    if (!owned)
+    if (wait.Snapshot.PublicationsOverflow || lateSnapshot.PublicationsOverflow)
+      throw new InvalidOperationException(
+        $"PDF baseline publication history overflowed at {step}; ownership evidence gap — failing explicitly.");
+    string session = state.SessionId ?? "";
+    string document = state.DocumentId ?? "";
+    PdfBaselineBrowserImage witness = wait.NewWitness ?? wait.Witness;
+    double frameAt = witness.FrameOpportunityAt ?? double.NegativeInfinity;
+    (bool ok, string? reason) = PdfBaselineOwnership.ValidateWitness(
+      wait.Snapshot.Publications, session, document, expectedPageIndex,
+      state.Revision, witness.FullSrc, frameAt);
+    if (!ok)
     {
       throw new InvalidOperationException(
-        $"PDF baseline resource ownership mismatch at {step}: host PagePreview.Url=" +
-        $"{previewUrl ?? "<null>"}; witness candidates=" +
-        JsonSerializer.Serialize(wait.Snapshot.Images
-          .Where(image => !image.Superseded && image.DecodedAt is not null)
-          .Select(image => new { image.Alt, image.FullSrc })));
+        $"PDF baseline resource ownership mismatch at {step}: {reason}; " +
+        $"identity=session:{session}/document:{document}/page:{expectedPageIndex}/revision:{state.Revision}; " +
+        $"witness={witness.FullSrc}; published=" +
+        JsonSerializer.Serialize(wait.Snapshot.Publications.Concat(lateSnapshot.Publications)
+          .Select(publication => new
+          {
+            publication.SessionId, publication.DocumentId,
+            publication.Page, publication.Revision, publication.PreviewUrl,
+          })));
+    }
+  }
+
+  /// <summary>最终图一致性：有界等待 host PagePreview.Url 与当前 DOM src/已解码
+  /// /已布局/发布身份/已成帧见证全部一致；finalUrl 缺失不是空通过。不用此晚
+  /// 等待重算首图时间。</summary>
+  private async Task ValidatePdfBaselineFinalImageAsync(
+    string step, PdfWorkbenchState state, int expectedPageIndex, TimeSpan timeout)
+  {
+    DateTime deadline = DateTime.UtcNow + timeout;
+    PdfWorkbenchState current = state;
+    while (true)
+    {
+      PdfBaselineBrowserSnapshot snapshot = await PdfBaselineSnapshotAsync();
+      string? finalUrl = current.PagePreview?.Url;
+      bool hasFramedWitness = finalUrl is not null && snapshot.Images.Any(image =>
+        !image.Superseded && image.FullSrc == finalUrl &&
+        image.DecodedAt is not null && image.FrameOpportunityAt is not null);
+      (bool ok, string? reason) = PdfBaselineOwnership.FinalAgreement(
+        snapshot.Publications, state.SessionId ?? "", state.DocumentId ?? "",
+        expectedPageIndex, state.Revision, finalUrl,
+        snapshot.Current?.Src,
+        snapshot.Current?.Complete ?? false,
+        snapshot.Current?.Connected ?? false,
+        snapshot.Current?.HasLayout == true && current.SelectedPage == expectedPageIndex &&
+          snapshot.Current.Alt.Contains($"第 {expectedPageIndex + 1} 页", StringComparison.Ordinal),
+        hasFramedWitness);
+      if (ok) return;
+      if (DateTime.UtcNow >= deadline)
+      {
+        throw new TimeoutException(
+          $"PDF baseline final image agreement missing for {step}: {reason}; " +
+          $"finalUrl={finalUrl ?? "<null>"}; dom={snapshot.Current?.Src ?? "<null>"}; " +
+          $"identity=session:{current.SessionId}/document:{current.DocumentId}/" +
+          $"page:{expectedPageIndex}/revision:{current.Revision}");
+      }
+      current = await WaitForPaddlePdfAsync(_ => true, TimeSpan.FromSeconds(30));
+      await Task.Delay(100);
     }
   }
 
@@ -680,8 +892,10 @@ public sealed partial class MainWindow
       state => !state.IsBusy && state.DetectedCount == state.PageCount && state.PageCount > 0,
       TimeSpan.FromMinutes(timeoutMinutes));
     long detectionDoneAt = PdfBaselineNow();
-    ValidatePdfBaselineResourceOwnership("cold_first_image", detected, cold, 0);
     PdfBaselineBrowserSnapshot coldFinal = await PdfBaselineSnapshotAsync();
+    ValidatePdfBaselineResourceOwnership("cold_first_image", detected, cold, coldFinal, 0);
+    await ValidatePdfBaselineFinalImageAsync("cold_first_image", detected, 0, TimeSpan.FromSeconds(30));
+    coldFinal = await PdfBaselineSnapshotAsync();
     PdfBaselineAllKnown coldAllKnown = PdfBaselineAllKnownFor(coldFinal, detected, "cold");
 
     await SetPdfBaselinePhaseAsync("warm_revisits");
@@ -779,8 +993,10 @@ public sealed partial class MainWindow
       state => !state.IsBusy && state.DetectedCount == state.PageCount && state.PageCount > 0,
       TimeSpan.FromMinutes(timeoutMinutes));
     long reopenDetectionDone = PdfBaselineNow();
-    ValidatePdfBaselineResourceOwnership("reopen_first_image", reopenedDetected, reopen, 0);
     PdfBaselineBrowserSnapshot reopenFinal = await PdfBaselineSnapshotAsync();
+    ValidatePdfBaselineResourceOwnership("reopen_first_image", reopenedDetected, reopen, reopenFinal, 0);
+    await ValidatePdfBaselineFinalImageAsync("reopen_first_image", reopenedDetected, 0, TimeSpan.FromSeconds(30));
+    reopenFinal = await PdfBaselineSnapshotAsync();
     PdfBaselineAllKnown reopenAllKnown = PdfBaselineAllKnownFor(reopenFinal, reopenedDetected, "reopen");
 
     object? reactivation = null;
@@ -812,8 +1028,10 @@ public sealed partial class MainWindow
         state => !state.IsBusy && state.DetectedCount == state.PageCount && state.PageCount > 0,
         TimeSpan.FromMinutes(timeoutMinutes));
       long secondDetectionDone = PdfBaselineNow();
-      ValidatePdfBaselineResourceOwnership("second_doc_first_image", secondSettled, secondWait, 0);
       PdfBaselineBrowserSnapshot secondFinal = await PdfBaselineSnapshotAsync();
+      ValidatePdfBaselineResourceOwnership("second_doc_first_image", secondSettled, secondWait, secondFinal, 0);
+      await ValidatePdfBaselineFinalImageAsync("second_doc_first_image", secondSettled, 0, TimeSpan.FromSeconds(30));
+      secondFinal = await PdfBaselineSnapshotAsync();
       PdfBaselineAllKnown secondAllKnown = PdfBaselineAllKnownFor(secondFinal, secondSettled, "second_doc");
 
       long reactivateAt = PdfBaselineNow();
@@ -831,7 +1049,9 @@ public sealed partial class MainWindow
         TimeSpan.FromSeconds(30), requireNew: false);
       long reactivatedFirstImageAt = PdfBaselineNow();
       ValidatePdfBaselineResourceOwnership(
-        "reactivated_first_image", reactivatedState, reactivated, 0);
+        "reactivated_first_image", reactivatedState, reactivated, reactivated.Snapshot, 0);
+      await ValidatePdfBaselineFinalImageAsync(
+        "reactivated_first_image", reactivatedState, 0, TimeSpan.FromSeconds(30));
       reactivatedClarity = PdfBaselineClarity(
         "reactivated_first_image", reactivated.Witness, reactivated.Pulse, reactivated.Snapshot, reactivated.Snapshot.Dpr);
       reactivation = new
@@ -870,6 +1090,8 @@ public sealed partial class MainWindow
     }
 
     PdfBaselineBrowserSnapshot finalSnapshot = await PdfBaselineSnapshotAsync();
+    if (finalSnapshot.PublicationsOverflow)
+      throw new InvalidOperationException("PDF publication history overflowed; ownership evidence incomplete.");
     if (finalSnapshot.StateMessageMeasurementErrors > 0)
       throw new InvalidOperationException(
         $"PDF state message measurement had {finalSnapshot.StateMessageMeasurementErrors} errors; failing explicitly instead of undercounting.");
@@ -889,10 +1111,18 @@ public sealed partial class MainWindow
     if (secondClarity is not null) clarity.Add(secondClarity);
     if (reactivatedClarity is not null) clarity.Add(reactivatedClarity);
     bool clarityComplete = clarity.All(report => report.Status != "UNKNOWN");
-    // 清晰度升级与首图分离：首图之后出现更高自然像素的检查图条目。
-    var upgrades = cold.Snapshot.Images
+    // 清晰度升级与首图分离：取 cold 阶段结束快照（早于 warm_start，天然限定
+    // 首图后、warm 前时间窗），严格 identity（session+document+page0+revision）
+    // 发布过且更高自然像素；不把其它页/重开 session 的高清图冒充 cold 升级；
+    // 差值仍为 decode 域，首图口径不变。
+    string coldSession = detected.SessionId ?? "";
+    string coldDocument = detected.DocumentId ?? "";
+    long coldRevision = detected.Revision;
+    var upgrades = coldFinal.Images
       .Where(image => image.DecodedAt is not null && image.FrameOpportunityAt is not null
         && !image.Superseded && image.SrcSetAt > coldWitness.SrcSetAt
+        && PdfBaselineOwnership.IsPublishedGeneration(
+            coldFinal.Publications, coldSession, coldDocument, 0, coldRevision, image.FullSrc)
         && image.NaturalWidth * image.NaturalHeight > coldWitness.NaturalWidth * coldWitness.NaturalHeight)
       .Select(image => new
       {

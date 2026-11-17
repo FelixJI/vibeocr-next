@@ -38,6 +38,9 @@ function makeImage({ alt, src, naturalWidth = 800, naturalHeight = 600 }) {
   return {
     _alt: alt,
     currentSrc: src,
+    attrSrc: null,
+    tagName: "IMG",
+    _listeners: {},
     naturalWidth,
     naturalHeight,
     clientWidth: 400,
@@ -45,7 +48,15 @@ function makeImage({ alt, src, naturalWidth = 800, naturalHeight = 600 }) {
     complete: false,
     isConnected: true,
     getAttribute(name) {
-      return name === "alt" ? this._alt : name === "src" ? this.currentSrc : null;
+      if (name === "alt") return this._alt;
+      if (name === "src") return this.attrSrc ?? this.currentSrc;
+      return null;
+    },
+    addEventListener(type, handler) {
+      (this._listeners[type] ??= []).push(handler);
+    },
+    dispatch(type) {
+      for (const handler of [...(this._listeners[type] ?? [])]) handler({ type });
     },
     getClientRects() {
       return this.isConnected ? [{}] : [];
@@ -79,8 +90,24 @@ function createHarness() {
     },
     body: {},
   };
+  state.documentListeners = [];
+  document.addEventListener = (type, handler) => {
+    state.documentListeners.push({ type, handler });
+  };
+  document.removeEventListener = (type, handler) => {
+    state.documentListeners = state.documentListeners.filter(
+      (entry) => !(entry.type === type && entry.handler === handler),
+    );
+  };
   Object.defineProperty(document, "visibilityState", { get: () => state.visibilityState });
   document.hasFocus = () => state.hasFocus;
+  // 模拟捕获阶段：document 捕获监听先于目标自身监听触发。
+  const dispatchLoad = (img) => {
+    for (const { type, handler } of [...state.documentListeners]) {
+      if (type === "load") handler({ type, target: img });
+    }
+    for (const handler of [...(img._listeners.load ?? [])]) handler({ type: "load", target: img });
+  };
   const requestAnimationFrame = (callback) => state.rafQueue.push(callback);
   const chrome = {
     webview: {
@@ -106,6 +133,8 @@ function createHarness() {
     MutationObserver: FakeMutationObserver,
     chrome,
     TextEncoder,
+    URL,
+    location: { href: "https://app.vibeocr/test" },
     innerWidth: 1200,
     innerHeight: 800,
   });
@@ -124,7 +153,7 @@ function createHarness() {
   };
   const flush = () => new Promise((resolve) => setImmediate(resolve));
   const snapshot = () => JSON.parse(baseline.snapshot());
-  return { state, baseline, pumpFrames, triggerScan, flush, snapshot };
+  return { state, baseline, pumpFrames, triggerScan, flush, snapshot, dispatchLoad };
 }
 
 test("install is idempotent and returns installed", () => {
@@ -303,6 +332,111 @@ test("first all-known pdf state event is pinned per runtime session inside neste
   );
   dispatch(pdfState("s3", 5, 2));
   assert.equal(snapshot().allKnownFirst.s3, undefined, "partial detection never recorded");
+});
+
+test("publications dedupe identical states and stay bounded across generations", () => {
+  const { state, baseline, snapshot } = createHarness();
+  const dispatch = (payload) => {
+    for (const handler of state.listeners.message) handler({ data: payload });
+  };
+  const pdfState = (runtimeSession, previewUrl, page = 0, revision = 1) => ({
+    type: "app.state",
+    payload: {
+      sessionId: "bridge-11",
+      revision,
+      scope: "pdf",
+      change: "preview",
+      state: {
+        sessionId: runtimeSession,
+        documentId: `doc-${runtimeSession}`,
+        selectedPage: page,
+        revision,
+        pageCount: 4,
+        detectedCount: 4,
+        pagePreview: previewUrl === null ? null : { url: previewUrl, mediaType: "image/png", byteLength: 10 },
+      },
+    },
+  });
+  state.now = 10;
+  dispatch(pdfState("s1", "https://app.vibeocr/__resource/low-res"));
+  state.now = 20;
+  dispatch(pdfState("s1", "https://app.vibeocr/__resource/hq", 0, 2));
+  let facts = snapshot();
+  assert.equal(facts.publications.length, 2);
+  assert.equal(facts.publications[0].previewUrl, "https://app.vibeocr/__resource/low-res");
+  assert.equal(facts.publications[0].sessionId, "s1");
+  assert.equal(facts.publications[0].page, 0);
+  assert.equal(facts.publications[0].revision, 1);
+  assert.equal(facts.publications[1].previewUrl, "https://app.vibeocr/__resource/hq");
+  assert.equal(facts.publications[1].revision, 2);
+  assert.equal(facts.publicationsOverflow, false);
+  // 同一发布代次重复 200 次不增长不溢出（长篇渐进检测合法场景）。
+  for (let index = 0; index < 200; index++) {
+    dispatch(pdfState("s1", "https://app.vibeocr/__resource/hq", 0, 2));
+  }
+  facts = snapshot();
+  assert.equal(facts.publications.length, 2, "identical states deduped");
+  assert.equal(facts.publicationsOverflow, false);
+  // 无 preview 不入发布序列。
+  dispatch(pdfState("s1", null));
+  assert.equal(snapshot().publications.length, 2);
+  for (let index = 0; index < 120; index++) {
+    dispatch(pdfState("s2", `https://app.vibeocr/__resource/r${index}`, index % 4, 1));
+  }
+  facts = snapshot();
+  assert.equal(facts.publications.length, 96, "bounded publication history");
+  assert.equal(facts.publicationsOverflow, true, "overflow is an explicit evidence gap");
+});
+
+test("attr-leading currentSrc generation swap records via load fallback and retries lagged decode", async () => {
+  const { state, dispatchLoad, triggerScan, flush, pumpFrames, snapshot } = createHarness();
+  const image = makeImage({ alt: "第 1 页", src: "blob:doc-a-page-0" });
+  state.images.push(image);
+  state.inspectionImage = image;
+  const resolvers = [];
+  image.decode = () =>
+    new Promise((resolve) => {
+      resolvers.push(resolve);
+    });
+  triggerScan();
+  let current = snapshot();
+  assert.equal(current.images.length, 1);
+  // 属性换新代次而 currentSrc 滞后：无 mutation 回调，document 捕获 load 补记。
+  image.attrSrc = "blob:doc-b-page-0";
+  dispatchLoad(image);
+  current = snapshot();
+  assert.equal(current.images.length, 2, "load fallback records the missed generation");
+  const second = current.images[1];
+  assert.equal(second.fullSrc, "blob:doc-b-page-0");
+  // 旧代次早 decode 完成：非当前代次，永不翻活。
+  resolvers[0]();
+  await flush();
+  pumpFrames(2);
+  current = snapshot();
+  assert.equal(current.images[0].superseded, true);
+  assert.equal(current.images[0].decodedAt, null);
+  // 新代次首次 decode 在 currentSrc 追上前完成：置 superseded，不产生 decodedAt。
+  resolvers[1]();
+  await flush();
+  pumpFrames(2);
+  current = snapshot();
+  assert.equal(current.images[1].superseded, true, "lagging currentSrc supersedes first attempt");
+  assert.equal(current.images[1].decodedAt, null);
+  // currentSrc 追上 + 同代次 load：补救重试成功，不新增条目、不重置 srcSetAt。
+  image.currentSrc = "blob:doc-b-page-0";
+  dispatchLoad(image);
+  current = snapshot();
+  assert.equal(current.images.length, 2, "retry does not duplicate entries");
+  resolvers[2]();
+  await flush();
+  pumpFrames(2);
+  current = snapshot();
+  assert.equal(current.images.length, 2);
+  assert.equal(current.images[0].decodedAt, null, "old generation never revives");
+  assert.equal(current.images[0].superseded, true);
+  assert.notEqual(current.images[1].decodedAt, null, "current generation retried decode");
+  assert.notEqual(current.images[1].frameOpportunityAt, null);
+  assert.equal(current.images[1].srcSetAt, second.srcSetAt, "srcSetAt preserved");
 });
 
 test("t2_pdf_baseline driver self-check passes (exit priority + report isolation)", () => {

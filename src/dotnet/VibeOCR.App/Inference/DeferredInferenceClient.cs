@@ -13,9 +13,11 @@ public sealed class InferenceClientNotAttachedException(
 /// <summary>
 /// T2 基线 smoke 专用 PDF 请求探针（Goal #325/#327）：只记录 App 侧
 /// DeferredInferenceClient→Runtime 的真实 wire 请求（不含 worker 进程内
-/// native 调用）。仅 smoke 安装；未安装时所有调用只多一次 volatile 读，
-/// 无日志、无等待、不改 wire 语义。事件缓冲有界，溢出显式置标记由调用方
-/// 失败，不静默截断。
+/// native 调用）。事件在发起时即入表（pending），完成/取消/失败原位更新，
+/// 快照覆盖已发未完成的请求；后续新增定向观测过载必须经此探针，不新增
+/// wire。仅 smoke 安装；未安装时每次调用只多一次 volatile 读，安装后多一次
+/// 锁内入表；不新增等待、不改 wire 语义。缓冲有界，溢出显式置标记
+/// 由调用方失败，不静默截断。
 /// </summary>
 internal sealed class PdfSmokeRequestProbe
 {
@@ -23,7 +25,8 @@ internal sealed class PdfSmokeRequestProbe
 
   internal sealed record RequestEvent(
       string Kind, string Session, int Page, int Param,
-      double StartedAtMs, double DurationMs, string Outcome, string? Error);
+      double StartedAtMs, double? EndedAtMs, double? DurationMs,
+      string Outcome, string? Error);
 
   private readonly object _lock = new();
   private readonly List<RequestEvent> _events = [];
@@ -36,26 +39,38 @@ internal sealed class PdfSmokeRequestProbe
   internal async Task<T> MeasureAsync<T>(
       string kind, string session, int page, int param, Func<Task<T>> call)
   {
+    long start = System.Diagnostics.Stopwatch.GetTimestamp();
+    int slot;
     lock (_lock)
     {
       _inflight++;
       if (_inflight > _maxInflight) _maxInflight = _inflight;
+      if (_events.Count >= MaxEvents)
+      {
+        _overflowed = true;
+        slot = -1;
+      }
+      else
+      {
+        slot = _events.Count;
+        _events.Add(new RequestEvent(
+            kind, session, page, param, Ms(start), null, null, "pending", null));
+      }
     }
-    long start = System.Diagnostics.Stopwatch.GetTimestamp();
     try
     {
       T result = await call();
-      Record(kind, session, page, param, start, "completed", null);
+      Finish(slot, start, "completed", null);
       return result;
     }
     catch (OperationCanceledException error)
     {
-      Record(kind, session, page, param, start, "cancelled", error.Message);
+      Finish(slot, start, "cancelled", error.Message);
       throw;
     }
     catch (Exception error)
     {
-      Record(kind, session, page, param, start, "faulted", error.GetType().Name + ": " + error.Message);
+      Finish(slot, start, "faulted", error.GetType().Name + ": " + error.Message);
       throw;
     }
   }
@@ -68,25 +83,27 @@ internal sealed class PdfSmokeRequestProbe
       return null;
     });
 
-  private void Record(
-      string kind, string session, int page, int param, long start,
-      string outcome, string? error)
+  private void Finish(int slot, long start, string outcome, string? error)
   {
     long end = System.Diagnostics.Stopwatch.GetTimestamp();
-    double durationMs = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-    double startedAtMs = start * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     lock (_lock)
     {
       _inflight--;
-      if (_events.Count >= MaxEvents)
+      if (slot < 0 || slot >= _events.Count) return;
+      RequestEvent pending = _events[slot];
+      if (pending.Outcome != "pending") return;
+      _events[slot] = pending with
       {
-        _overflowed = true;
-        return;
-      }
-      _events.Add(new RequestEvent(
-          kind, session, page, param, startedAtMs, durationMs, outcome, error));
+        EndedAtMs = Ms(end),
+        DurationMs = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+        Outcome = outcome,
+        Error = error,
+      };
     }
   }
+
+  private static double Ms(long timestamp) =>
+    timestamp * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
   internal (IReadOnlyList<RequestEvent> Events, int MaxInflight, bool Overflowed) Snapshot()
   {
