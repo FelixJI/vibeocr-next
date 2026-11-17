@@ -199,6 +199,15 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     PdfViewModel viewModel = pdf;
     bool renderChanged = viewModel.ProcessingSettings.RenderDpi != command.Settings.RenderDpi
       || viewModel.ProcessingSettings.MaxPixels != command.Settings.MaxPixels;
+    if (viewModel.CanDemandPages)
+    {
+      // demand 模式设置刷新统一走 coordinator（缓存键含 MaxPixels，精准失效后按
+      // 普通槽位重发）：不发无 read context 的 legacy 检查/预览读，不产生绕过
+      // 两槽位上限的额外 PNG；RenderDpi 仅影响 OCR 业务渲染。
+      if (renderChanged) ReleasePdfPageResources();
+      viewModel.SetProcessingSettings(command.Settings);
+      return PdfState(viewModel);
+    }
     // 先废弃旧资源，让设置变更引发的同步状态通知也不能携带旧分辨率图。
     if (renderChanged) ReleasePdfPageResources();
     viewModel.SetProcessingSettings(command.Settings);

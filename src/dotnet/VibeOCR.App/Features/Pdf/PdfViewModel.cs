@@ -253,6 +253,32 @@ public sealed class PdfViewModel(
   }
 
   /// <summary>
+  /// 当前页检查的已确认几何回填：与 ApplyPage 同一显示空间参考系，仅更新
+  /// Width/Height/Rotation；不改变 presence 状态（unknown 不冒充 known）、
+  /// 文字层/OCR/编辑元数据/dirty，也不推进修订。调用方已核验 session/读
+  /// epoch；这里再以页身份（PageKey/ContentGeneration）丢弃迟到结果。
+  /// </summary>
+  internal void ApplyInspectGeometry(int pageIndex, long pageKey, long contentGeneration, Wire.PageInspectResponse inspect)
+  {
+    if (SessionId is null || pageIndex < 0 || pageIndex >= Pages.Count) return;
+    if (inspect.Rect is not { Count: 4 } rect || Number(rect[0]) is not { } x0 || Number(rect[1]) is not { } y0 ||
+        Number(rect[2]) is not { } x1 || Number(rect[3]) is not { } y1) return;
+    double width = x1 - x0, height = y1 - y0;
+    int rotation = ((inspect.Rotation % 360) + 360) % 360;
+    if (!(width > 0) || !(height > 0)) return;
+    PdfPageViewModel page = Pages[pageIndex];
+    if (page.PageKey != pageKey || page.ContentGeneration != contentGeneration) return;
+    if (page.Width == width && page.Height == height && page.Rotation == rotation) return;
+    page.Width = width;
+    page.Height = height;
+    page.Rotation = rotation;
+    Changed();
+  }
+
+  private static double? Number(JsonElement value) =>
+    value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double number) && double.IsFinite(number) ? number : null;
+
+  /// <summary>
   /// 提交单块文字编辑：复用全 PDF 写门（与 MutateAsync 同构），送出前在门内
   /// 核对调用者预期 session/revision；真正写入不可取消，收尾后释放门。
   /// 无变化明确 noop（不推进修订/dirty）；证据缺失/失联按未确认处理，不假

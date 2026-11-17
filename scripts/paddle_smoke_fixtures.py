@@ -645,6 +645,16 @@ def draw_pdf_baseline_fixtures(out: Path) -> dict[str, object]:
             "unique_page_badges": count,
             "synthetic_only": True,
         }
+    # 受控浏览独立样本：后台尚未到达的横向页，正式基线文件保持不变。
+    with pymupdf.open(destination / "scan_long.pdf") as document:
+        document[55].set_rotation(90)
+        document.save(destination / "scan_long_landscape.pdf", deflate=True)
+    entries["t2-baseline/scan_long_landscape.pdf"] = {
+        **entries["t2-baseline/scan_long.pdf"],
+        "purpose": "T2 受控浏览：未检测的横向页几何与清晰度",
+        "landscape_page": 55,
+        "performance_eligible": False,
+    }
     mixed_scan, mixed_native, mixed_blank = 10, 10, 10
     with pymupdf.open() as document:
         for number in range(1, mixed_scan + 1):

@@ -489,6 +489,141 @@ public sealed class PdfDemandCoordinatorTests
       new(HttpStatusCode.OK) { Content = new StringContent(content + "\n", Encoding.UTF8, "application/x-ndjson") };
   }
 
+  [Fact]
+  public Task UndetectedLandscapePageReceivesInspectionGeometryBeforeBackgroundDetectionArrives() => OnDispatcherAsync(async () =>
+  {
+    // 长文档后部横向页：open_doc 镜像 Rect 为零（IncludeOpenMirrorRects=false 模拟），
+    // 后台全篇 presence 检测被挂起；当前页检查必须先回填真实显示空间几何，供前端
+    // logicalSize/高清需求使用，且不得把文字层 unknown 冒充 known。
+    var client = new Client(60) { IncludeOpenMirrorRects = false };
+    var auto = NewGate();
+    client.OnAuto = _ => auto.Task;
+    client.SetPageRect(55, 842, 595);
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("long.pdf");
+      PdfWorkbenchState selected = await fixture.SelectReadyAsync(55);
+      PdfWorkbenchPage geometry = Assert.Single(selected.Pages!, page => page.Index == 55);
+      Assert.Equal(842, geometry.Width);
+      Assert.Equal(595, geometry.Height);
+      Assert.False(geometry.Detected);
+      Assert.Equal("unknown", geometry.DetectionState);
+      Assert.True(selected.DetectedCount < 55);
+
+      // 几何投递后，高清（更长边）档位的按需预览请求即可被调度（合成 PNG 仅
+      // 证明档位/资源链路，真实清晰度由 runtime 渲染侧负责）。
+      using var cleared = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+        state.SelectedPage == 55 && state.PagePreview is not null &&
+        client.PreviewRequests.Any(request => request.Page == 55 && request.MaxEdge == 2400));
+      await fixture.CommandAsync(new SetPdfDemandCommand(55, [55], 160, 2400));
+      PdfWorkbenchState highResolution = await cleared.Next.WaitAsync(Timeout, Ct);
+      Assert.NotNull(highResolution.PagePreview);
+      Assert.Contains(highResolution.Pages!, page => page.Index == 55 && page.Width == 842 && page.Height == 595);
+      // 同步完成的 stub 不保证达到并发 2；约束是普通槽位上限从未被突破。
+      Assert.InRange(client.MaximumImageReads, 1, 2);
+      Assert.Equal(0, client.LegacyLoads);
+      Assert.Equal(0, client.LegacyInspects + client.LegacyPreviews);
+    }
+    finally { auto.TrySetResult(); }
+  });
+
+  [Fact]
+  public Task StaleInspectionCannotOverwriteRotatedPageGeometry() => OnDispatcherAsync(async () =>
+  {
+    var client = new Client(60) { IncludeOpenMirrorRects = false };
+    var auto = NewGate();
+    client.OnAuto = _ => auto.Task;
+    client.SetPageRect(55, 842, 595);
+    Wire.PageInspectResponse stale = client.InspectOf(55); // 旋转前的横向几何（迟到结果）
+    var staleInspect = NewGate<Wire.PageInspectResponse>();
+    int inspectCalls = 0;
+    client.OnInspect = page => page == 55 && Interlocked.Increment(ref inspectCalls) == 1
+      ? staleInspect.Task
+      : Task.FromResult(client.InspectOf(page));
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("stale.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await fixture.CommandAsync(new SetCurrentPdfPageCommand(55));
+      await WaitUntilAsync(() => client.Inspections.Any(page => page == 55));
+      // 检查在读途中执行写：写栅栏推进读 epoch，写后几何以 diff 镜像为准。
+      long revisionBeforeRotate = model.Revision;
+      await model.RotateAsync([55], 90, Ct);
+      Assert.Equal(1, model.Pages[55].ContentGeneration);
+      Assert.Equal(595, model.Pages[55].Width);
+      Assert.Equal(842, model.Pages[55].Height);
+      // 观察者先于释放创建：释放后的调度链可能在下一个 await 前就把 ready 发布完。
+      using var settled = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+        state.SelectedPage == 55 && state.PageInspectStatusCode == "pdf.inspect.ready");
+      staleInspect.TrySetResult(stale);
+      await WaitUntilAsync(() => client.Inspections.Count(page => page == 55) >= 2);
+      await settled.Next.WaitAsync(Timeout, Ct);
+      // 旧检查结果不得把写后几何改回旋转前的横向值，也不得回退旋转；dirty/修订
+      // 保持写路径语义。
+      Assert.Equal(595, model.Pages[55].Width);
+      Assert.Equal(842, model.Pages[55].Height);
+      Assert.Equal(90, model.Pages[55].Rotation);
+      Assert.Equal(1, model.Pages[55].ContentGeneration);
+      Assert.Equal(PdfDetectionState.Unknown, model.Pages[55].DetectionState);
+      Assert.Equal(revisionBeforeRotate + 1, model.Revision);
+      Assert.True(model.IsModified);
+    }
+    finally { auto.TrySetResult(); staleInspect.TrySetResult(stale); }
+  });
+
+  [Fact]
+  public Task DemandSettingsChangeRefreshesThroughCoordinatorWithoutLegacyReads() => OnDispatcherAsync(async () =>
+  {
+    var client = new Client(3);
+    var held = NewGate<byte[]>();
+    client.OnImage = (_, _, _) => held.Task; // 两个普通读槽位均被在读占满
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("settings.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await fixture.CommandAsync(new SetPdfDemandCommand(0, [0, 1], 160, null));
+      Assert.Equal(("doc-1", "preview", 0), await client.Images.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct));
+      Assert.Equal(("doc-1", "thumbnail", 0), await client.Images.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct));
+      Assert.Equal(2, fixture.Handler.Pdf.DemandDiagnostics.OrdinaryIssued.Current);
+
+      var settings = model.ProcessingSettings with { MaxPixels = 4_000_000 };
+      await fixture.CommandAsync(new SetPdfProcessingSettingsCommand(settings));
+      // demand 模式设置刷新不得发出无 read context 的 legacy 检查/预览读，
+      // 也不得在两个普通槽位占满时追加第三份并发读取。
+      Assert.Equal(0, client.LegacyInspects);
+      Assert.Equal(0, client.LegacyPreviews);
+      Assert.Equal(2, client.MaximumImageReads);
+      Assert.False(client.Images.Reader.TryRead(out _));
+
+      held.TrySetResult(Client.Png); // 旧 PixelLimit 键的读取完成即作废，按新键重排
+      using var ready = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+        state.PageInspectStatusCode == "pdf.inspect.ready" && state.PagePreview is not null &&
+        state.ProcessingSettings == settings &&
+        client.PreviewRequests.Any(request => request.Page == 0 && request.MaxPixels == 4_000_000));
+      PdfWorkbenchState refreshed = await ready.Next.WaitAsync(Timeout, Ct);
+      Assert.NotNull(refreshed.PagePreview);
+      Assert.Equal(2, client.MaximumImageReads);
+      Assert.Equal(0, client.LegacyInspects + client.LegacyPreviews);
+      Assert.Equal(0, client.LegacyLoads);
+      await WaitUntilAsync(() => fixture.Handler.Pdf.DemandDiagnostics.OrdinaryIssued.Current == 0);
+
+      // RenderDpi 仅影响 OCR 业务渲染：按需预览键（MaxPixels）不变，不触发重读，
+      // 协调器缓存的原帧继续投影。
+      int reads = client.ImageLog.Count;
+      var dpiSettings = settings with { RenderDpi = 150 };
+      PdfWorkbenchState dpiState = await fixture.StateAsync(new SetPdfProcessingSettingsCommand(dpiSettings));
+      Assert.Equal("pdf.inspect.ready", dpiState.PageInspectStatusCode);
+      Assert.NotNull(dpiState.PagePreview);
+      Assert.Equal(reads, client.ImageLog.Count);
+      Assert.Equal(0, client.LegacyInspects + client.LegacyPreviews);
+      Assert.Equal(2, client.MaximumImageReads);
+    }
+    finally { held.TrySetResult(Client.Png); }
+  });
+
   [Theory]
   [InlineData(false)]
   [InlineData(true)]
@@ -561,6 +696,16 @@ public sealed class PdfDemandCoordinatorTests
 
   private static TaskCompletionSource NewGate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
   private static TaskCompletionSource<T> NewGate<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+  private static async Task WaitUntilAsync(Func<bool> condition)
+  {
+    DateTime deadline = DateTime.UtcNow + Timeout;
+    while (!condition())
+    {
+      Assert.True(DateTime.UtcNow < deadline, "Expected condition was not met within the timeout.");
+      await Task.Delay(10, Ct);
+    }
+  }
 
   private sealed class StateObserver : IDisposable
   {
@@ -639,13 +784,20 @@ public sealed class PdfDemandCoordinatorTests
     private static readonly JsonElement[] Rect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0),
       JsonSerializer.SerializeToElement(300), JsonSerializer.SerializeToElement(500)];
     private readonly Dictionary<string, JobItem[]> jobs = [];
-    private int opens, activeReads, maxReads;
+    private readonly ConcurrentDictionary<int, JsonElement[]> pageRects = new();
+    private readonly ConcurrentDictionary<int, int> pageRotations = new();
+    private int opens, activeReads, maxReads, legacyInspects, legacyPreviews;
     internal int MaximumImageReads => Volatile.Read(ref maxReads);
     internal int LegacyLoads;
     internal Func<string, string, int, Task<byte[]>>? OnImage;
     internal Func<string, Task>? OnAuto, OnWrite, OnClose;
     internal Func<int, int, Task<byte[]>>? OnPreview;
+    internal Func<int, Task<Wire.PageInspectResponse>>? OnInspect;
     internal Func<string, Wire.PdfReadCancelRequest, Task>? OnAck;
+    internal bool IncludeOpenMirrorRects { get; set; } = true;
+    internal int LegacyInspects => Volatile.Read(ref legacyInspects);
+    internal int LegacyPreviews => Volatile.Read(ref legacyPreviews);
+    internal ConcurrentQueue<(int Page, int? MaxEdge, int? MaxPixels)> PreviewRequests { get; } = [];
     internal ConcurrentQueue<(string, int)> Rotations { get; } = [];
     internal ConcurrentQueue<(string, Wire.PdfReadCancelScope)> Acks { get; } = [];
     internal ConcurrentQueue<(string, string, int)> ImageLog { get; } = [];
@@ -656,9 +808,18 @@ public sealed class PdfDemandCoordinatorTests
     internal Channel<(string, string, int)> Images { get; } = Channel.CreateUnbounded<(string, string, int)>();
     internal Channel<string> Autos { get; } = Channel.CreateUnbounded<string>();
 
-    private static Wire.PdfPageInfoMirror Page(int index, bool text = false) => new()
-      { PageIndex = index, Rect = Rect, HasTextLayer = text, HasOcrTextLayer = text };
-    private Wire.PdfDocumentMirror Model() => new() { Pages = Enumerable.Range(0, pages).Select(index => Page(index)).ToArray() };
+    private static JsonElement[] RectOf(double x0, double y0, double x1, double y1) =>
+      [JsonSerializer.SerializeToElement(x0), JsonSerializer.SerializeToElement(y0), JsonSerializer.SerializeToElement(x1), JsonSerializer.SerializeToElement(y1)];
+    internal void SetPageRect(int index, double width, double height) => pageRects[index] = RectOf(0, 0, width, height);
+    private JsonElement[] RectOf(int index) => pageRects.TryGetValue(index, out JsonElement[]? rect) ? rect : Rect;
+    internal Wire.PageInspectResponse InspectOf(int page) => new() { SchemaVersion = 2, InstanceId = "test",
+      Page = page, Rotation = pageRotations.TryGetValue(page, out int rotation) ? rotation : 0,
+      Rect = RectOf(page), OcrBlocks = [], NativeLines = [] };
+    private Wire.PdfPageInfoMirror Page(int index, bool text = false) => new()
+      { PageIndex = index, Rect = RectOf(index), HasTextLayer = text, HasOcrTextLayer = text };
+    // open_doc 镜像几何默认携带；置 false 模拟“检测未抵达时 Rect 为零/缺失”。
+    private Wire.PdfDocumentMirror Model() => new() { Pages = Enumerable.Range(0, pages).Select(index =>
+      IncludeOpenMirrorRects ? Page(index) : Page(index) with { Rect = null }).ToArray() };
 
     public override Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct) =>
       Task.FromResult(new PdfSessionOpenResult($"doc-{++opens}", pages, path, Model()));
@@ -702,17 +863,41 @@ public sealed class PdfDemandCoordinatorTests
 
     public Task<byte[]> RenderPdfThumbnailDemandAsync(string session, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
       ReadImageAsync(session, "thumbnail", request.Page);
-    public Task<byte[]> RenderPdfPreviewDemandAsync(string session, Wire.RenderPreviewRequest request, CancellationToken ct) =>
-      ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page, request.MaxEdge);
-    public Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string session, Wire.PageInspectRequest request, CancellationToken ct)
+    public Task<byte[]> RenderPdfPreviewDemandAsync(string session, Wire.RenderPreviewRequest request, CancellationToken ct)
+    {
+      PreviewRequests.Enqueue((request.Page, request.MaxEdge, request.MaxPixels));
+      return ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page, request.MaxEdge);
+    }
+    public async Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string session, Wire.PageInspectRequest request, CancellationToken ct)
     {
       Inspections.Enqueue(request.Page);
-      return Task.FromResult(new Wire.PageInspectResponse { SchemaVersion = 2, InstanceId = "test",
-        Page = request.Page, Rotation = 0, Rect = Rect, OcrBlocks = [], NativeLines = [] });
+      if (OnInspect is { } gate) return await gate(request.Page);
+      return InspectOf(request.Page);
+    }
+    // legacy 无 read context 读：计数并计入并发观测（不得出现在 demand 路径）。
+    public override Task<Wire.PageInspectResponse> InspectPdfPageAsync(string session, int page, CancellationToken ct)
+    {
+      Interlocked.Increment(ref legacyInspects);
+      int working = Interlocked.Increment(ref activeReads);
+      if (working > maxReads) Interlocked.Exchange(ref maxReads, working);
+      Interlocked.Decrement(ref activeReads);
+      return Task.FromResult(InspectOf(page));
+    }
+    public override Task<byte[]> RenderPdfPreviewAsync(string session, int page, int dpi, CancellationToken ct)
+    {
+      Interlocked.Increment(ref legacyPreviews);
+      return ReadImageAsync(session, "legacy-preview", page);
     }
     public override Task<PdfMutateResult> RotatePdfPagesAsync(string session, int[] targets, int angle, CancellationToken ct)
     {
       Rotations.Enqueue((session, Assert.Single(targets)));
+      foreach (int index in targets)
+      {
+        // 显示空间 90° 旋转交换宽高（与真实 set_rotation 后 page.rect 一致）。
+        JsonElement[] rect = RectOf(index);
+        pageRects[index] = RectOf(0, 0, rect[3].GetDouble() - rect[1].GetDouble(), rect[2].GetDouble() - rect[0].GetDouble());
+        pageRotations[index] = ((pageRotations.TryGetValue(index, out int rotation) ? rotation : 0) + angle) % 360;
+      }
       return Task.FromResult(new PdfMutateResult(pages, new Wire.ModelDiff { ModifiedFlag = true,
         ReplacedPages = targets.Select(index => Page(index) with { Rotation = angle }).ToArray() }));
     }

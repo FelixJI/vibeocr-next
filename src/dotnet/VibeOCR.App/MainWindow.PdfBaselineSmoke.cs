@@ -608,7 +608,7 @@ public sealed partial class MainWindow
 
   private async Task<PdfBaselineImageWait> WaitForPdfBaselineImageAsync(
     string phase, int expectedPageIndex, string afterMark, string pulseTag,
-    TimeSpan timeout, bool requireNew, bool requireClarity = false)
+    TimeSpan timeout, bool requireNew, bool requireClarity = false, bool requireLandscape = false)
   {
     string altFragment = $"第 {expectedPageIndex + 1} 页";
     using var cancellation = new CancellationTokenSource(timeout);
@@ -651,6 +651,7 @@ public sealed partial class MainWindow
       double witnessFrameAt = currentWitness?.FrameOpportunityAt ?? double.NegativeInfinity;
       if ((!requireNew || firstNew is not null) && pulse is not null && liveMatches
           && currentWitness is not null && pulse.At >= witnessFrameAt
+          && (!requireLandscape || pulse.Current!.ClientWidth > pulse.Current.ClientHeight)
           && (!requireClarity || PdfBaselineClarity(
             phase, currentWitness, pulse, snapshot, snapshot.Dpr).Status == "REACHED"))
       {
@@ -1386,7 +1387,7 @@ public sealed partial class MainWindow
       await stream.FlushAsync();
     }
     var flips = new List<object>();
-    foreach (int page in new[] { 1, 0 })
+    foreach (int page in new[] { 55, 1, 0 })
     {
       string mark = $"delayed_flip_{page}";
       await MarkPdfBaselineBrowserAsync(mark);
@@ -1396,13 +1397,18 @@ public sealed partial class MainWindow
       if (clicked != "true") throw new InvalidOperationException("Delayed PDF page button missing.");
       await RequestPdfBaselineFrameAsync(mark, page);
       PdfBaselineImageWait frame = await WaitForPdfBaselineImageAsync(
-        mark, page, mark, mark, TimeSpan.FromSeconds(30), requireNew: false);
+        mark, page, mark, mark, TimeSpan.FromSeconds(30), requireNew: false,
+        requireClarity: page == 55, requireLandscape: page == 55);
       PdfWorkbenchState state = await WaitForPaddlePdfAsync(
         value => value.SelectedPage == page && value.DocumentId == firstState.DocumentId,
         TimeSpan.FromSeconds(10));
       PdfBaselineOwnership.RequireIncompleteDetection(state.PageCount, state.DetectedCount);
       ValidatePdfBaselineResourceOwnership(mark, state, frame, frame.Snapshot, page);
-      flips.Add(new { page, state.DetectedCount, frame = FrameFacts(frame.Pulse), publications = frame.Snapshot.Publications });
+      PdfWorkbenchPage? geometry = state.Pages?.FirstOrDefault(value => value.Index == page);
+      if (page == 55 && (geometry is null || geometry.Width <= geometry.Height ||
+          geometry.Height <= 0 || geometry.Detected || state.DetectedCount >= 55))
+        throw new InvalidOperationException("Undetected landscape page geometry did not arrive before background detection.");
+      flips.Add(new { page, state.DetectedCount, geometry, frame = FrameFacts(frame.Pulse), publications = frame.Snapshot.Publications });
     }
     return new
     {

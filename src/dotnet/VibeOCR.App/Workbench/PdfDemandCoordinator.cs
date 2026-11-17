@@ -618,6 +618,9 @@ internal sealed class PdfDemandCoordinator(
           httpComplete = true;
         }
         if (!Current()) return;
+        // 检查携带真实显示空间几何：presence 未抵达也先回填，否则后部未知页没有
+        // logicalSize，高清需求无从发起；仅几何，不把文字层 unknown 冒充 known。
+        session.Model.ApplyInspectGeometry(job.Index, job.Key.Page, job.Key.Generation, entry.Inspect);
         entry.InspectIndex = job.Index;
         var payload = JsonSerializer.SerializeToUtf8Bytes(entry.Inspect with { Page = job.Index });
         entry.Bytes = payload.LongLength;

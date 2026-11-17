@@ -257,7 +257,8 @@ try {
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_EDITING = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE = '0'
-                $env:VIBEOCR_PADDLE_SMOKE_FIXTURE = (Join-Path $fixtures "t2-baseline\$kind.pdf")
+                $fixtureKind = if ($DetectionDelayMs -gt 0) { 'scan_long_landscape' } else { $kind }
+                $env:VIBEOCR_PADDLE_SMOKE_FIXTURE = (Join-Path $fixtures "t2-baseline\$fixtureKind.pdf")
                 $secondKind = if ($kind -eq 'mixed') { 'scan_short' } else { 'mixed' }
                 $env:VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE = (Join-Path $fixtures "t2-baseline\$secondKind.pdf")
                 $env:VIBEOCR_PADDLE_SMOKE_OPTION_NAME = 'use_textline_orientation'
