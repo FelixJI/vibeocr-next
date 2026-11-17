@@ -26,6 +26,7 @@ import httpx
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+from vibeocr.runtime.documents.save_outcome import validate_save_outcome
 from vibeocr.runtime.documents.wire_schemas import (
     AddTextLayerRequest,
     BatchAddTextLayerPage,
@@ -77,9 +78,15 @@ class PdfBackendError(RuntimeError):
     供宿主映射为 ValidationError 等可判定未提交的错误码。
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        save_outcome: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.save_outcome = save_outcome
 
 
 class PdfBackendClient:
@@ -407,6 +414,11 @@ class PdfBackendClient:
             raise PdfBackendError(
                 f"后端错误 {path} ({resp.status_code}): {detail}",
                 status=resp.status_code,
+                save_outcome=validate_save_outcome(detail, payload.get("path"))
+                if path.endswith("/save")
+                and resp.status_code == 500
+                and isinstance(payload, dict)
+                else None,
             )
         return resp
 

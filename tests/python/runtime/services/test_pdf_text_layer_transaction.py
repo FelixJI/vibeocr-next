@@ -10,7 +10,7 @@ from PIL import Image
 from vibeocr.runtime.documents import pdf_backend_process as backend
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument, PdfPageInfo
 from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
-from vibeocr.runtime.documents.pdf_service import PdfService
+from vibeocr.runtime.documents.pdf_service import PdfSaveError, PdfService
 
 
 def result(text, angle=0):
@@ -175,8 +175,9 @@ def test_atomic_save_failure_preserves_target_and_dirty_edit(tmp_path, monkeypat
         raise OSError("replace failure")
 
     monkeypatch.setattr(Path, "replace", fail)
-    with pytest.raises(OSError, match="replace failure"):
+    with pytest.raises(PdfSaveError, match="replace failure") as failure:
         PdfService.save_with_rewrite(doc, model, str(target), rewrite_text_layers=False)
+    assert not failure.value.committed and failure.value.new_doc is doc
     assert target.read_bytes() == b"original target"
     assert model.is_modified and "OLD0" in doc[0].get_text()
     assert not list(tmp_path.glob(".existing.pdf.*"))

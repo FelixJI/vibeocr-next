@@ -363,3 +363,120 @@ def test_shared_form_and_soft_mask_keep_pixels_and_replace_old_text(tmp_path):
             assert page.get_pixmap().samples == pixels[index]
             assert page.get_text().strip() == f"NEW{index}"
     doc.close()
+
+
+def test_pattern_images_are_reused_across_batches_and_resource_cycles(tmp_path):
+    doc = fitz.open()
+    jpeg = _jpeg_bytes(23, (32, 32))
+    first = doc.new_page(width=200, height=200)
+    image = first.insert_image(first.rect, stream=jpeg)
+    pattern = doc.get_new_xref()
+    doc.update_object(
+        pattern,
+        f"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 32 32] /XStep 32 /YStep 32 /Resources << /XObject << /Im {image} 0 R >> >> >>",
+    )
+    doc.update_stream(pattern, b"q 32 0 0 32 0 0 cm /Im Do Q")
+    # A harmless reference cycle exercises bounded graph traversal and copying.
+    doc.xref_set_key(pattern, "Resources/Pattern", f"<< /Cycle {pattern} 0 R >>")
+    for index in range(3):
+        page = doc[index] if index == 0 else doc.new_page(width=200, height=200)
+        doc.xref_set_key(
+            page.xref, "Resources", f"<< /Pattern << /P {pattern} 0 R >> >>"
+        )
+        content = doc.get_new_xref()
+        doc.update_object(content, "<<>>")
+        doc.update_stream(content, b"/Pattern cs /P scn 0 0 200 200 re f")
+        doc.xref_set_key(page.xref, "Contents", f"{content} 0 R")
+    assert all(not page.get_images() for page in doc)
+    pixels = [page.get_pixmap().samples for page in doc]
+    model = PdfDocument(pages=[PdfPageInfo(page_index=i) for i in range(3)])
+    for index in range(3):
+        assert PdfService.add_text_layer_batch(
+            doc, model, [{"page": index, "ocr_result": _ocr_result(f"TEXT{index}")}]
+        )[index] == (1, 0)
+    target = tmp_path / "pattern.pdf"
+    PdfService.save_with_rewrite(doc, model, str(target), rewrite_text_layers=False)
+    with fitz.open(target) as disk:
+        assert len(_all_image_xrefs(disk)) == 1
+        assert disk.xref_stream_raw(_all_image_xrefs(disk)[0]) == jpeg
+        for index, page in enumerate(disk):
+            assert page.get_pixmap().samples == pixels[index]
+            assert page.get_text().strip() == f"TEXT{index}"
+    doc.close()
+
+
+def test_pattern_image_reuse_preserves_indirect_generations(tmp_path):
+    from pymupdf import mupdf
+
+    def stream(dictionary, data):
+        return (
+            dictionary
+            + f" /Length {len(data)} >>\nstream\n".encode()
+            + data
+            + b"\nendstream"
+        )
+
+    page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Pattern << /P 8 0 R >> >> /Contents 9 0 R >>"
+    objects = [
+        (0, b"<< /Type /Catalog /Pages 2 0 R >>"),
+        (0, b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"),
+        (0, page),
+        (0, page),
+        (0, page),
+        (
+            7,
+            stream(
+                b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 7 3 R",
+                bytes([120, 40, 200] * 4),
+            ),
+        ),
+        (
+            3,
+            stream(
+                b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8",
+                bytes([127] * 4),
+            ),
+        ),
+        (
+            0,
+            stream(
+                b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 32 32] /XStep 32 /YStep 32 /Resources << /XObject << /Im 6 7 R >> >>",
+                b"q 32 0 0 32 0 0 cm /Im Do Q",
+            ),
+        ),
+        (0, stream(b"<<", b"/Pattern cs /P scn 0 0 200 200 re f")),
+    ]
+    data = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, (generation, body) in enumerate(objects, 1):
+        offsets.append(len(data))
+        data.extend(f"{number} {generation} obj\n".encode() + body + b"\nendobj\n")
+    xref = len(data)
+    data.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+    for offset, (generation, _) in zip(offsets, objects, strict=True):
+        data.extend(f"{offset:010} {generation:05} n \n".encode())
+    data.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    )
+    target = tmp_path / "generation.pdf"
+    target.write_bytes(data)
+    doc, model = PdfService.open_doc(str(target))
+    pixels = [page.get_pixmap().samples for page in doc]
+    for index in range(3):
+        assert PdfService.add_text_layer_batch(
+            doc, model, [{"page": index, "ocr_result": _ocr_result(f"TEXT{index}")}]
+        )[index] == (1, 0)
+        pdf = mupdf.pdf_document_from_fz_document(doc.this)
+        image = pdf.pdf_lookup_page_obj(index).pdf_dict_getp(
+            "Resources/Pattern/P/Resources/XObject/Im"
+        )
+        assert (image.pdf_to_num(), image.pdf_to_gen()) == (6, 7)
+        mask = image.pdf_dict_gets("SMask")
+        assert (mask.pdf_to_num(), mask.pdf_to_gen()) == (7, 3)
+    del pdf, image, mask  # Native PdfObj handles also retain the source file lock.
+    doc = PdfService.save_with_rewrite(doc, model, rewrite_text_layers=False).new_doc
+    assert len(_all_image_xrefs(doc)) == 2
+    for index, page in enumerate(doc):
+        assert page.get_pixmap().samples == pixels[index]
+        assert page.get_text().strip() == f"TEXT{index}"
+    doc.close()

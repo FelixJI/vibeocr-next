@@ -1029,8 +1029,23 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
                     rebind_target=req.rebind_target,
                 )
             except PdfSaveError as error:
+                logger.warning("PDF save outcome: %s", error)
                 _recover_save_session(s, error)
-                raise
+                if error.committed and not req.copy_export:
+                    s.pdf_document.is_modified = False
+                    s.pdf_document.has_structural_change = False
+                    if req.rebind_target and req.path:
+                        s.pdf_document.file_path = os.path.abspath(req.path)
+                        s.file_path = s.pdf_document.file_path
+                detail = {
+                    "reason_code": "pdf_save_outcome",
+                    "committed": error.committed,
+                    "session_usable": not s.doc.is_closed,
+                    "path": os.path.abspath(req.path or error.path),
+                }
+                if error.recovery_path:
+                    detail["recovery_path"] = os.path.abspath(error.recovery_path)
+                raise HTTPException(status_code=500, detail=detail) from error
             if req.rebind_target and not req.copy_export:
                 s.file_path = s.pdf_document.file_path or s.file_path
             # 全量压缩时 doc 被替换。
@@ -1054,8 +1069,8 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
                 else False,
             ),
         )
-    except PdfSaveError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except HTTPException:
+        raise
     except (FileExistsError, ValueError) as e:
         raise HTTPException(status_code=422, detail=f"保存拒绝: {e}") from e
     except Exception as e:

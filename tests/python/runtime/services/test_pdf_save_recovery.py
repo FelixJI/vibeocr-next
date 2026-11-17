@@ -94,12 +94,16 @@ def test_overwrite_failure_has_commit_state_and_editable_retry(
             patch.setattr(fitz, "open", fail_reopen)
         with pytest.raises(HTTPException) as failure:
             backend.save("failure", SaveRequest(rewrite_text_layers=False))
-        assert phase in str(failure.value.detail)
+        detail = failure.value.detail
+        assert detail["reason_code"] == "pdf_save_outcome"
+        assert detail["committed"] is (phase == "reopen")
+        assert detail["session_usable"] is True
+        assert detail["path"] == str(source)
         assert not session.doc.is_closed
         assert "PRECOPY" in session.doc[0].get_text()
         assert model.is_modified is (phase != "reopen")
         if phase == "reopen":
-            assert "saved to disk" in failure.value.detail
+            assert failure.value.detail["committed"] is True
         else:
             assert source.read_bytes() == original
     backend.save("failure", SaveRequest(rewrite_text_layers=False))
@@ -262,3 +266,51 @@ def test_legacy_batch_checkpoints_adopt_fresh_handle(tmp_path, monkeypatch):
         assert "FIRST" in disk[0].get_text()
         assert "SECOND" in disk[1].get_text()
     session.doc.close()
+
+
+@pytest.mark.parametrize("mode", ["overwrite", "rebind", "copy", "copy_no_clobber"])
+@pytest.mark.parametrize("orphan", [False, True])
+def test_existing_target_marker_rejects_without_touching_old_bytes_and_allows_other_target(
+    tmp_path, mode, orphan
+):
+    source, doc, model = opened(tmp_path)
+    target = tmp_path / "old-target.pdf"
+    with fitz.open() as old:
+        old.new_page().insert_text((72, 72), "OLD TARGET")
+        old.save(target)
+    original = target.read_bytes()
+    marker = Path(str(target) + PdfService._INCREMENTAL_MARKER_SUFFIX)
+    marker.write_text(str(len(original)), encoding="ascii")
+    target.write_bytes(original + b"interrupted tail")
+    pending = target.read_bytes()
+    if orphan:
+        target.unlink()
+    marker_bytes = marker.read_bytes()
+    with pytest.raises(PdfSaveError) as failure:
+        save(
+            doc,
+            model,
+            path=str(target),
+            rebind_target=mode == "rebind",
+            copy_export=mode.startswith("copy"),
+            overwrite=mode != "copy_no_clobber",
+        )
+    assert not failure.value.committed and failure.value.new_doc is doc
+    assert failure.value.recovery_path == str(marker)
+    assert model.is_modified and model.file_path == str(source)
+    assert marker.read_bytes() == marker_bytes
+    assert not target.exists() if orphan else target.read_bytes() == pending
+    assert not list(tmp_path.glob(".*.tmp"))
+    other = tmp_path / "other.pdf"
+    doc = save(doc, model, path=str(other), rebind_target=True)
+    assert "PRECOPY" in doc[0].get_text()
+    doc.close()
+    if not orphan:
+        recovered, _ = PdfService.open_doc(str(target))
+        assert "OLD TARGET" in recovered[0].get_text()
+        recovered.close()
+        assert target.read_bytes() == original and not marker.exists()
+        fresh, model = PdfService.open_doc(str(other))
+        fresh = save(fresh, model, path=str(target), rebind_target=True)
+        assert "PRECOPY" in fresh[0].get_text()
+        fresh.close()

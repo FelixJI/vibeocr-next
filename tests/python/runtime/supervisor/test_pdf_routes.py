@@ -492,3 +492,161 @@ async def test_save_forwards_negotiated_workspace_semantics(
     assert response.json()["path"] == "copy.pdf"
     _, _, kwargs = fake_pdf_adapter.calls[-1]
     assert kwargs == {"rewrite_text_layers": False, **fields}
+
+
+@pytest.mark.parametrize(
+    "mode,phase",
+    [
+        ("overwrite", "stage"),
+        ("rebind", "stage"),
+        ("copy", "stage"),
+        ("overwrite", "replace"),
+        ("overwrite", "reopen"),
+        ("rebind", "reopen"),
+        ("overwrite", "lost"),
+        ("overwrite", "unavailable"),
+    ],
+)
+async def test_real_worker_client_host_save_outcome_and_retry(
+    pdf_app, pdf_module, supervisor_token, tmp_path, monkeypatch, mode, phase
+):
+    from pathlib import Path
+
+    import pymupdf as fitz
+    from fastapi.testclient import TestClient
+    from vibeocr.runtime.documents import pdf_backend_process as worker
+    from vibeocr.runtime.documents.adapter import PdfProcessAdapter
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendClient
+    from vibeocr.runtime.documents.pdf_service import PdfService
+
+    source = tmp_path / "source.pdf"
+    with fitz.open() as seed:
+        seed.new_page().insert_text((72, 72), "ORIGINAL")
+        seed.save(source)
+    doc, model = PdfService.open_doc(str(source))
+    doc[0].insert_text((72, 110), "UNSAVED")
+    model.is_modified = True
+    registry = worker.SessionRegistry()
+    session = worker.BackendSession("real", str(source), doc, model)
+    registry._sessions["real"] = session
+    monkeypatch.setattr(worker, "_get_registry", lambda: registry)
+    target = source if mode == "overwrite" else tmp_path / "target.pdf"
+    payload = {
+        "path": str(target),
+        "rewrite_text_layers": False,
+        "copy_export": mode == "copy",
+        "rebind_target": mode == "rebind",
+    }
+    committed = phase in ("reopen", "unavailable")
+    usable = phase not in ("lost", "unavailable")
+    real_save, real_replace, real_open = fitz.Document.save, Path.replace, fitz.open
+
+    def fail_save(self, *args, **kwargs):
+        if kwargs.get("garbage") == 3:
+            raise OSError("stage failure")
+        return real_save(self, *args, **kwargs)
+
+    def fail_replace(self, destination):
+        if Path(destination) == target:
+            raise OSError("replace failure")
+        return real_replace(self, destination)
+
+    def fail_reopen(*args, **kwargs):
+        if args and Path(args[0]) == target:
+            raise OSError("reopen failure")
+        return real_open(*args, **kwargs)
+
+    with TestClient(worker.app) as worker_http:
+        child = PdfBackendClient()
+        monkeypatch.setattr(child, "_ensure_started", lambda: worker_http)
+        pdf_module.pdf_adapter = PdfProcessAdapter(lambda: child, _child=child)
+        async with _http(supervisor_token, pdf_app) as http:
+            with monkeypatch.context() as fault:
+                if phase == "stage":
+                    fault.setattr(fitz.Document, "save", fail_save)
+                elif phase == "replace":
+                    fault.setattr(Path, "replace", fail_replace)
+                elif phase in ("lost", "unavailable"):
+                    if phase == "lost":
+                        fault.setattr(Path, "replace", fail_replace)
+                    fault.setattr(
+                        fitz,
+                        "open",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            OSError("recovery unavailable")
+                        ),
+                    )
+                else:
+                    fault.setattr(fitz, "open", fail_reopen)
+                response = await http.post("/v2/pdf/sessions/real/save", json=payload)
+            assert response.status_code == 500
+            detail = response.json()["detail"]
+            assert detail["reason_code"] == "pdf_save_outcome"
+            assert detail["committed"] is committed
+            assert detail["session_usable"] is usable
+            assert detail["path"] == str(target)
+            assert model.is_modified is not committed
+            assert model.file_path == str(
+                target if committed and mode == "rebind" else source
+            )
+            if not usable:
+                assert session.doc.is_closed
+                with real_open(detail["recovery_path"]) as recovered_doc:
+                    assert "UNSAVED" in recovered_doc[0].get_text()
+                return
+            assert "UNSAVED" in session.doc[0].get_text()
+            recovered = tmp_path / "retry.pdf"
+            response = await http.post(
+                "/v2/pdf/sessions/real/save",
+                json={
+                    "path": str(recovered),
+                    "rewrite_text_layers": False,
+                    "rebind_target": True,
+                },
+            )
+            assert response.status_code == 200
+            with real_open(recovered) as disk:
+                assert "UNSAVED" in disk[0].get_text()
+        session.doc.close()
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"committed": "false"},
+        {"session_usable": 1},
+        {"path": "other.pdf"},
+        {"recovery_path": None},
+        {"reason_code": "unknown"},
+    ],
+)
+async def test_malformed_worker_outcome_is_not_promoted(
+    pdf_app, pdf_module, supervisor_token, tmp_path, monkeypatch, patch
+):
+    from vibeocr.runtime.documents.adapter import PdfProcessAdapter
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendClient
+
+    target = str(tmp_path / "target.pdf")
+    detail = {
+        "reason_code": "pdf_save_outcome",
+        "committed": False,
+        "session_usable": True,
+        "path": target,
+        **patch,
+    }
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(500, json={"detail": detail})
+        ),
+        base_url="http://127.0.0.1",
+    ) as worker_http:
+        child = PdfBackendClient()
+        monkeypatch.setattr(child, "_ensure_started", lambda: worker_http)
+        pdf_module.pdf_adapter = PdfProcessAdapter(lambda: child, _child=child)
+        async with _http(supervisor_token, pdf_app) as http:
+            response = await http.post(
+                "/v2/pdf/sessions/real/save",
+                json={"path": target, "rewrite_text_layers": False},
+            )
+        assert response.status_code == 500
+        assert "reason_code" not in response.json()["detail"]

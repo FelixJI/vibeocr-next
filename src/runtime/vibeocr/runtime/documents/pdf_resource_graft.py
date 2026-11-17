@@ -13,16 +13,31 @@ class PageResourceGraft:
         self.source = mupdf.pdf_document_from_fz_document(candidate.this)
         self.images: dict[int, mupdf.PdfObj] = {}
         self.copied: dict[int, mupdf.PdfObj] = {}
-        self.fonts = mupdf.PdfGraftMap(self.target)
+        self.values = mupdf.PdfGraftMap(self.target)
+        self.visited: set[tuple[int, int]] = set()
 
     def remember_images(self, original: fitz.Document, page: int) -> None:
         mapping = self.candidate.Graftmaps[original._graft_id].this
-        for image in original.get_page_images(page, full=True):
-            for xref in image[:2]:
-                if xref:
-                    ref = self.target.pdf_new_indirect(xref, 0)
-                    copied = mapping.pdf_graft_mapped_object(ref)
-                    self.images[copied.pdf_to_num()] = ref
+        page_object = self.target.pdf_lookup_page_obj(page)
+        pending = [
+            page_object.pdf_dict_get_inheritable(mupdf.pdf_new_name("Resources"))
+        ]
+        while pending:
+            obj = pending.pop()
+            if obj.pdf_is_indirect():
+                identity = (obj.pdf_to_num(), obj.pdf_to_gen())
+                if identity in self.visited:
+                    continue
+                self.visited.add(identity)
+                if obj.pdf_dict_gets("Subtype").pdf_to_name() == "Image":
+                    copied = mapping.pdf_graft_mapped_object(obj)
+                    self.images[copied.pdf_to_num()] = obj
+            if obj.pdf_is_dict():
+                pending.extend(
+                    obj.pdf_dict_get_val(i) for i in range(obj.pdf_dict_len())
+                )
+            elif obj.pdf_is_array():
+                pending.extend(obj.pdf_array_get(i) for i in range(obj.pdf_array_len()))
 
     def copy(self, obj: mupdf.PdfObj) -> mupdf.PdfObj:
         number = obj.pdf_to_num()
@@ -47,20 +62,14 @@ class PageResourceGraft:
             for index in range(obj.pdf_dict_len()):
                 key = obj.pdf_dict_get_key(index)
                 value = obj.pdf_dict_get_val(index)
-                # A single graft map preserves shared font programs and CID mappings.
-                copied = (
-                    self.fonts.pdf_graft_mapped_object(value)
-                    if key.pdf_to_name() == "Font"
-                    else self.copy(value)
-                )
-                result.pdf_dict_put(key, copied)
+                result.pdf_dict_put(key, self.copy(value))
             return result
         if obj.pdf_is_array():
             result = self.target.pdf_new_array(obj.pdf_array_len())
             for index in range(obj.pdf_array_len()):
                 result.pdf_array_push(self.copy(obj.pdf_array_get(index)))
             return result
-        return self.fonts.pdf_graft_mapped_object(obj)
+        return self.values.pdf_graft_mapped_object(obj)
 
     def page_keys(self, page: int) -> tuple[str, str]:
         source = self.source.pdf_lookup_page_obj(page)

@@ -787,9 +787,13 @@ public sealed partial class MainWindow
         // Observe the actual public stop button becoming enabled; click it during the
         // first non-cancellable save, without sleeps or private command injection.
         string armed = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
-          (() => { window.__pdfSmokeCancelled=false; const observer=new MutationObserver(() => {
+          (() => { window.__pdfSmokeCancelled=false; window.__pdfSmokeCancelSnapshot=null; const observer=new MutationObserver(() => {
             const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='停止后续导出');
-            if(b&&!b.disabled){observer.disconnect();b.click();window.__pdfSmokeCancelled=true;}
+            if(b&&!b.disabled){observer.disconnect();
+              window.__pdfSmokeCancelSnapshot={at:performance.now(),
+                status:document.querySelector('.pdf-export-status')?.textContent?.trim(),
+                items:[...document.querySelectorAll('div.pdf-export > ul > li')].map(e=>e.textContent.trim())};
+              b.click();window.__pdfSmokeCancelled=true;}
           }); observer.observe(document.body,{subtree:true,attributes:true,childList:true}); window.__pdfSmokeCancelObserver=observer; return true; })()
           """);
         if (armed != "true") throw new InvalidOperationException("Export cancellation observer was not armed.");
@@ -802,8 +806,9 @@ public sealed partial class MainWindow
       if (cancel)
       {
         string cancelled = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("(() => {window.__pdfSmokeCancelObserver?.disconnect();return window.__pdfSmokeCancelled===true;})()");
+        string snapshot = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("window.__pdfSmokeCancelSnapshot");
         if (cancelled != "true" || !result.ExportItems!.Any(item => item.Status == "saved") || !result.ExportItems!.Any(item => item.Status is "cancelled" or "not_started"))
-          throw new InvalidOperationException($"Batch cancellation did not retain a completed output and stop subsequent files: {JsonSerializer.Serialize(result.ExportItems)}");
+          throw new InvalidOperationException($"Batch cancellation did not retain a completed output and stop subsequent files: clicked={cancelled}; clickSnapshot={snapshot}; finalItems={JsonSerializer.Serialize(result.ExportItems)}");
       }
       return result;
     }

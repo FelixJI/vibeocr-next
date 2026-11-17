@@ -714,6 +714,74 @@ public sealed class PdfWorkspaceTests
     Assert.Empty(client.Saves); Assert.True(model.IsModified); Assert.Equal("source.pdf", model.FilePath);
   }
 
+  [Theory]
+  [InlineData("overwrite", false, true)]
+  [InlineData("rebind", false, true)]
+  [InlineData("copy", false, true)]
+  [InlineData("overwrite", true, true)]
+  [InlineData("rebind", true, true)]
+  [InlineData("copy", true, true)]
+  [InlineData("copy", true, false)]
+  [InlineData("rebind", true, false)]
+  [InlineData("overwrite", false, false)]
+  public async Task SaveOutcomeTraversesHttpClientAndPreservesRecoveryState(string mode, bool committed, bool usable)
+  {
+    string target = Path.GetFullPath("outcome-target.pdf");
+    var handler = new SaveOutcomeHandler(target, committed, usable);
+    await using var transport = new InferenceHttpClient(new Uri("http://127.0.0.1:1"), "token", handler);
+    var client = new Client { SaveClient = transport }; var model = Model(client);
+    await model.OpenPathAsync("source.pdf", CancellationToken.None);
+    PdfSaveResult result = mode == "rebind" ? await model.SaveAsAsync(target, CancellationToken.None)
+      : mode == "copy" ? await model.ExportCopyAsync(target, model.Revision, model.ProcessingSettings, CancellationToken.None)
+      : await model.SaveAsync(target, CancellationToken.None);
+    Assert.Equal(committed ? PdfSaveDisposition.Saved : PdfSaveDisposition.Failed, result.Disposition);
+    Assert.Equal(!committed || mode == "copy", model.IsModified);
+    Assert.Equal(committed && mode == "rebind" ? target : "source.pdf", model.FilePath);
+    Assert.Equal(!usable, model.IsSettling);
+    Assert.Single(client.Saves);
+    Assert.Contains(committed ? "已写入磁盘" : "保存未提交", committed ? model.Summary : model.Status);
+    if (usable && !committed)
+    {
+      client.SaveClient = null;
+      Assert.Equal(PdfSaveDisposition.Saved, (await model.SaveAsAsync(Path.GetFullPath("retry.pdf"), CancellationToken.None)).Disposition);
+    }
+  }
+
+  [Theory]
+  [InlineData("missing")]
+  [InlineData("boolean")]
+  [InlineData("session")]
+  [InlineData("target")]
+  [InlineData("recovery")]
+  [InlineData("reason")]
+  public async Task InvalidSaveOutcomeRemainsUnconfirmedAndBlocksRetry(string malformed)
+  {
+    string target = Path.GetFullPath("outcome-target.pdf");
+    await using var transport = new InferenceHttpClient(new Uri("http://127.0.0.1:1"), "token", new SaveOutcomeHandler(target, false, true, malformed));
+    var client = new Client { SaveClient = transport }; var model = Model(client);
+    await model.OpenPathAsync("source.pdf", CancellationToken.None);
+    Assert.Equal(PdfSaveDisposition.Unconfirmed, (await model.SaveAsync(target, CancellationToken.None)).Disposition);
+    Assert.True(model.IsSettling); Assert.True(model.IsModified); Assert.Equal("source.pdf", model.FilePath);
+    Assert.Equal(PdfSaveDisposition.Rejected, (await model.SaveAsAsync(target, CancellationToken.None)).Disposition);
+    Assert.Single(client.Saves);
+  }
+
+  private sealed class SaveOutcomeHandler(string path, bool committed, bool usable, string? malformed = null) : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+      var detail = new Dictionary<string, object?> { ["reason_code"] = "pdf_save_outcome", ["committed"] = committed, ["session_usable"] = usable, ["path"] = path };
+      if (malformed == "missing") detail.Remove("committed");
+      if (malformed == "boolean") detail["committed"] = "false";
+      if (malformed == "session") detail["session_usable"] = 1;
+      if (malformed == "target") detail["path"] = Path.GetFullPath("another.pdf");
+      if (malformed == "recovery") detail["recovery_path"] = null;
+      if (malformed == "reason") detail["reason_code"] = "unknown";
+      string json = JsonSerializer.Serialize(new { schema_version = 2, instance_id = "test", code = "INTERNAL_ERROR", message = "save failed", retryable = false, category = "internal", detail });
+      return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError) { Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json") });
+    }
+  }
+
   private static PdfViewModel Model(Client client, Source? source = null)
   { var model = new PdfViewModel(client, source ?? new Source()); model.SetInspectionCapabilities(["pdf.copy-export.v1"]); return model; }
   private sealed class Source : IPdfFileSource
@@ -736,6 +804,7 @@ public sealed class PdfWorkspaceTests
     public string? FailCopy { get; set; }
     public string? ThrowCopyAfterSubmit { get; set; }
     public Exception? SaveError { get; set; }
+    public IInferenceClient? SaveClient { get; set; }
     public bool FailClose { get; set; }
     public bool FailOpen { get; set; }
     public int Opens { get; private set; }
@@ -755,6 +824,7 @@ public sealed class PdfWorkspaceTests
     public override Task<string> SavePdfOperationAsync(string sessionId, string path, IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
     {
       Saves.Add((sessionId, path)); SaveEntered.TrySetResult();
+      if (SaveClient is { } transport) return transport.SavePdfOperationAsync(sessionId, path, settings, copyExport, rebindTarget, overwrite, ct);
       if (SaveError is { } error) throw error;
       if (copyExport && ThrowCopyAfterSubmit == sessionId)
       { File.WriteAllBytes(path, [1, 2, 3, 4]); throw new IOException("synthetic response lost after commit"); }
