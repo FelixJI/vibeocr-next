@@ -289,6 +289,140 @@ public sealed class PdfWorkspaceTests
   }
 
   [Fact]
+  public async Task ExportAfterSaveGateSuspendsAfterRealResultAndBeforeTerminalAssignment()
+  {
+    var client = new Client(); var workspace = new PdfWorkspace();
+    for (int i = 0; i < 2; i++)
+    { var model = Model(client); await model.OpenPathAsync(Path.Combine(Path.GetTempPath(), $"gate-{i}.pdf"), CancellationToken.None); workspace.Add(model); }
+    string directory = Path.Combine(Path.GetTempPath(), $"t4-gate-{Guid.NewGuid():N}"); Directory.CreateDirectory(directory);
+    client.PendingSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    var gated = new TaskCompletionSource<PdfSaveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    Task exporting = workspace.ExportAsync(directory, false, false, () => { }, CancellationToken.None,
+      afterSave: result => { gated.TrySetResult(result); return release.Task; });
+    await client.SaveEntered.Task;
+    // 真实保存请求在途：第一项 saving、第二项未开始。
+    Assert.Equal(["saving", "not_started"], workspace.ExportItems.Select(item => item.Status));
+    client.PendingSave.SetResult(client.Saves.Last().Path);
+    PdfSaveResult first = await gated.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    Assert.Equal(PdfSaveDisposition.Saved, first.Disposition);
+    // gate 在真实保存结果之后、终态落账之前：仍是 saving，第二项不推进。
+    Assert.Equal(["saving", "not_started"], workspace.ExportItems.Select(item => item.Status));
+    workspace.CancelExport();
+    release.TrySetResult();
+    await exporting;
+    Assert.Equal(["saved", "cancelled"], workspace.ExportItems.Select(item => item.Status));
+    Assert.All(workspace.Documents, entry => Assert.True(entry.Model.IsModified));
+  }
+
+  [Fact]
+  public async Task OwnerSmokeProbeWitnessesPublicCancelAndIgnoresStaleOrCloseFlowCancel()
+  {
+    using var fixture = new Fixture();
+    string directory = Path.Combine(fixture.Root, "exports"); Directory.CreateDirectory(directory);
+    await using var handler = fixture.Handler(() => Task.FromResult<string?>(directory));
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+    PdfDocumentEntry first = handler.PdfDocuments[0];
+    long generation = Assert.IsType<PdfWorkbenchState>(Assert.Single((await handler.ExecuteAsync(new PdfBoundCommand(first.Id, new ActivatePdfDocumentCommand()), CancellationToken.None)).States)).ExportGeneration;
+    var probe = new WorkbenchPdfOwner.PdfExportCancelSmokeProbe(directory, generation + 1);
+    handler.Pdf.ExportSmokeProbe = probe;
+    var published = new List<PdfWorkbenchState>();
+    void OnStateChanged(WorkbenchState state) { if (state is PdfWorkbenchState pdf) lock (published) published.Add(pdf); }
+    handler.StateChanged += OnStateChanged;
+    try
+    {
+      fixture.Client.PendingSave = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      fixture.Client.SaveEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+      await handler.ExecuteAsync(new ExportPdfDocumentsCommand(false, false), CancellationToken.None);
+      await fixture.Client.SaveEntered.Task;
+      fixture.Client.PendingSave.SetResult(fixture.Client.Saves.Last().Path);
+      PdfSaveResult firstSave = await probe.FirstSave.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      Assert.Equal(PdfSaveDisposition.Saved, firstSave.Disposition);
+      Assert.True(probe.GateAttached); Assert.Null(probe.GateFault);
+      // gate 挂起中已发布的权威状态：第一份 saving、第二份未开始。
+      PdfWorkbenchState gatedState;
+      lock (published) gatedState = published.Last(state => state.Exporting);
+      Assert.Equal(["saving", "not_started"], gatedState.ExportItems!.Select(item => item.Status));
+      // 公共停止按钮驱动的取消命令：回执后才放行，终态保留一份 saved + 一项 cancelled。
+      await handler.ExecuteAsync(new CancelPdfExportCommand(), CancellationToken.None);
+      await probe.PublicCancelApplied.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      probe.Release.TrySetResult();
+      PdfWorkbenchState final;
+      using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+      while (true)
+      {
+        final = Assert.IsType<PdfWorkbenchState>(Assert.Single((await handler.ExecuteAsync(new PdfBoundCommand(first.Id, new ActivatePdfDocumentCommand()), CancellationToken.None)).States));
+        if (!final.Exporting && final.ExportItems is { Count: 2 } && final.ExportItems.All(item => item.Status != "saving")) break;
+        await Task.Delay(50, bounded.Token);
+      }
+      Assert.Equal(["saved", "cancelled"], final.ExportItems!.Select(item => item.Status));
+      Assert.All(handler.PdfDocuments, entry => Assert.True(entry.Model.IsModified));
+    }
+    finally
+    {
+      probe.Release.TrySetResult(); handler.Pdf.ExportSmokeProbe = null; handler.StateChanged -= OnStateChanged;
+    }
+    // 陈旧 generation 与关闭流程（同样调用 Workspace.CancelExport）都不得伪造公共取消回执。
+    var stale = new WorkbenchPdfOwner.PdfExportCancelSmokeProbe(directory, generation + 5);
+    handler.Pdf.ExportSmokeProbe = stale;
+    try
+    {
+      await handler.ExecuteAsync(new CancelPdfExportCommand(), CancellationToken.None);
+      fixture.Decision = PdfCloseDecision.Discard;
+      await handler.RequestCloseAllPdfAsync();
+      Assert.False(stale.PublicCancelApplied.Task.IsCompleted);
+      Assert.False(stale.FirstSave.Task.IsCompleted);
+      Assert.False(stale.GateAttached); Assert.Null(stale.GateFault);
+    }
+    finally { handler.Pdf.ExportSmokeProbe = null; }
+  }
+
+  [Fact]
+  public async Task OwnerSmokeProbeRequiresExactDirectoryAndUnreleasedGateFailsWitnessWithoutHanging()
+  {
+    using var fixture = new Fixture();
+    string directory = Path.Combine(fixture.Root, "exports"); Directory.CreateDirectory(directory);
+    await using var handler = fixture.Handler(() => Task.FromResult<string?>(directory));
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+    async Task<PdfWorkbenchState> ActivateAsync()
+      => Assert.IsType<PdfWorkbenchState>(Assert.Single((await handler.ExecuteAsync(new PdfBoundCommand(handler.PdfDocuments[0].Id, new ActivatePdfDocumentCommand()), CancellationToken.None)).States));
+    async Task<PdfWorkbenchState> WaitForExportSettledAsync()
+    {
+      using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+      while (true)
+      {
+        PdfWorkbenchState state = await ActivateAsync();
+        if (!state.Exporting && state.ExportItems is { Count: 2 } && state.ExportItems.All(item => item.Status != "saving")) return state;
+        await Task.Delay(50, bounded.Token);
+      }
+    }
+    // generation 匹配但目录不匹配：探针不接入 gate，也不获得任何信号。
+    var mismatched = new WorkbenchPdfOwner.PdfExportCancelSmokeProbe(Path.Combine(fixture.Root, "elsewhere"), (await ActivateAsync()).ExportGeneration + 1);
+    handler.Pdf.ExportSmokeProbe = mismatched;
+    try
+    {
+      Assert.Null((await handler.ExecuteAsync(new ExportPdfDocumentsCommand(false, false), CancellationToken.None)).Error);
+      Assert.All((await WaitForExportSettledAsync()).ExportItems!, item => Assert.Equal("saved", item.Status));
+      Assert.False(mismatched.GateAttached); Assert.False(mismatched.FirstSave.Task.IsCompleted); Assert.Null(mismatched.GateFault);
+    }
+    finally { handler.Pdf.ExportSmokeProbe = null; }
+    // 目录匹配但从未释放：兑底超时放行真实队列（不挂死），同时显式记录故障使见证必败。
+    var probe = new WorkbenchPdfOwner.PdfExportCancelSmokeProbe(directory, (await ActivateAsync()).ExportGeneration + 1) { GateTimeout = TimeSpan.FromMilliseconds(100) };
+    handler.Pdf.ExportSmokeProbe = probe;
+    try
+    {
+      Assert.Null((await handler.ExecuteAsync(new ExportPdfDocumentsCommand(false, false), CancellationToken.None)).Error);
+      Assert.All((await WaitForExportSettledAsync()).ExportItems!, item => Assert.Equal("saved", item.Status));
+      Assert.True(probe.GateAttached); Assert.True(probe.FirstSave.Task.IsCompleted);
+      Assert.IsType<TimeoutException>(probe.GateFault);
+      Assert.False(probe.Release.Task.IsCompleted);
+    }
+    finally { probe.Release.TrySetResult(); handler.Pdf.ExportSmokeProbe = null; }
+  }
+
+  [Fact]
   public async Task IdleOrdinaryCloseNeverPublishesCancelled()
   {
     using var fixture = new Fixture(); await using var handler = fixture.Handler();
@@ -849,11 +983,11 @@ public sealed class PdfWorkspaceTests
     public Func<Task<string?>>? SavePicker { get; set; }
     public Fixture(int pages = 2)
     { Directory.CreateDirectory(Root); Client = new(pages); Broker = new(Root); Annotations = new(Root); }
-    public DesktopWorkbenchCommandHandler Handler() => new(
+    public DesktopWorkbenchCommandHandler Handler(Func<Task<string?>>? pickPdfFolder = null) => new(
       () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
       () => Model(Client, Source), () => throw new NotSupportedException(), () => throw new NotSupportedException(), () => throw new NotSupportedException(),
       new DiagnosticsViewModel("test", new PrerequisiteReport([])), Broker, Root, static () => 0, Annotations,
-      confirmPdfClose: entry => Confirm?.Invoke(entry) ?? DecisionPending?.Task ?? Task.FromResult(Decision), pickPdfSavePath: () => SavePicker?.Invoke() ?? Task.FromResult<string?>(SaveTarget),
+      confirmPdfClose: entry => Confirm?.Invoke(entry) ?? DecisionPending?.Task ?? Task.FromResult(Decision), pickPdfSavePath: () => SavePicker?.Invoke() ?? Task.FromResult<string?>(SaveTarget), pickPdfFolder: pickPdfFolder,
       flushPdfPreview: id => PreviewFlush?.Invoke(id) ?? Task.FromResult(true));
     public void Dispose() { Annotations.Dispose(); Broker.Dispose(); }
   }
