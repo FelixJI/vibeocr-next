@@ -365,6 +365,7 @@ public sealed partial class MainWindow
       "pdf" => await RunPaddlePdfInputAsync(mode, pipeline, fixture,
         optionName, optionValue, session, timeoutMinutes),
       "pdf_operations" => await RunPaddlePdfOperationsAsync(mode, fixture, session, timeoutMinutes),
+      "pdf_baseline" => await RunPaddlePdfBaselineAsync(mode, fixture, session, timeoutMinutes),
       _ => throw new InvalidOperationException($"Unknown Paddle input kind: {kind}"),
     };
   }
@@ -1595,12 +1596,12 @@ public sealed partial class MainWindow
     return await completion.Task;
   }
 
-  private async Task CompletePaddleOpenPickerAsync(string fixture)
+  private async Task CompletePaddleOpenPickerAsync(string fixture, Func<Task>? onBeforeConfirm = null)
   {
     nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
     try
     {
-      await CompletePaddlePickerAsync(dialog, fixture);
+      await CompletePaddlePickerAsync(dialog, fixture, onBeforeConfirm: onBeforeConfirm);
     }
     catch
     {
@@ -1784,7 +1785,7 @@ public sealed partial class MainWindow
     };
   }
 
-  private async Task CompletePaddlePickerAsync(nint dialog, string path, bool isFolder = false)
+  private async Task CompletePaddlePickerAsync(nint dialog, string path, bool isFolder = false, Func<Task>? onBeforeConfirm = null)
   {
     nint edit = 0;
     nint confirm = 0;
@@ -1826,6 +1827,7 @@ public sealed partial class MainWindow
       return PaddleSmokeNative.IsWindowEnabled(confirm);
     }, TimeSpan.FromSeconds(10));
     // FolderPicker requires the button click path; file pickers accept IDOK.
+    if (onBeforeConfirm is not null) await onBeforeConfirm();
     bool confirmed = isFolder
       ? PaddleSmokeNative.Click(confirm, 0x00F5, 0, 0, 2, 1000, out _) != 0
       : PaddleSmokeNative.PostMessageW(dialog, 0x0111, 1, confirm);

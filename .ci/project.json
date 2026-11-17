@@ -234,7 +234,8 @@
         "tests/node/smoke_capture_replacement.test.mjs",
         "tests/node/smoke_scroll_capture.test.mjs",
         "tests/node/smoke_windows_interaction.test.mjs",
-        "tests/node/smoke_webview_transition.test.mjs"
+        "tests/node/smoke_webview_transition.test.mjs",
+        "tests/node/pdf_baseline_observer.test.mjs"
       ]
     ],
     "release_build": [
