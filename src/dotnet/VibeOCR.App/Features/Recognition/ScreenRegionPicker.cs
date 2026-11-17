@@ -1023,8 +1023,12 @@ public sealed class ScreenRegionPicker(
           // 提示/高亮清晰：可点击时用宿主 Hint（文字按钮携带引擎名），
           // 禁用时同时携带名称与原因，指明在设置中修复。
           if (entry.Hint is { } hint && ready) ToolTipService.SetToolTip(item, hint);
-          else if (!ready) ToolTipService.SetToolTip(item,
-            $"{entry.DisplayName}：{UnavailableReason(entry.Availability)}");
+          else if (!ready)
+          {
+            toolbarRowMain.Children.Remove(item);
+            toolbarRowMain.Children.Add(ExplainUnavailableAction(item,
+              $"{entry.DisplayName}：{UnavailableReason(entry.Availability, entry.ReasonCode)}"));
+          }
         }
       }
       // 长截图复用当前选区，不再二次框选。
@@ -1436,11 +1440,25 @@ public sealed class ScreenRegionPicker(
     return messages;
   }
 
+    internal static Border ExplainUnavailableAction(Button button, string message)
+    {
+      button.IsEnabled = false;
+      AutomationProperties.SetHelpText(button, message);
+      ToolTipService.SetToolTip(button, null);
+      // Disabled controls cannot receive the pointer events that open a tooltip.
+      var host = new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Child = button };
+      ToolTipService.SetToolTip(host, new ToolTip { Content = message });
+      return host;
+    }
+
     // 只映射目录/投影 availability 的稳定词汇，不复制引擎/配方表；准备类
     // 条目禁用并解释，不自动下载。default_missing/default_invalid 为文字
     // 图标专用：指向设置 · 默认识别类型，不静默改选其他文字引擎；
     // catalog_unavailable 为目录未加载时三类图标的统一指引。
-    internal static string UnavailableReason(string availability) => availability switch
+    internal static string UnavailableReason(string availability, string? reasonCode = null) =>
+      reasonCode == VibeOCR.Platform.Inference.InferenceClientException.ProductRuntimeDamagedReason
+        ? "VibeOCR 随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复。应用不会在线安装依赖。"
+        : availability switch
     {
         "preparation_required" => "需要先准备依赖（可在设置中准备）",
         "unavailable" => "当前运行环境不可用",

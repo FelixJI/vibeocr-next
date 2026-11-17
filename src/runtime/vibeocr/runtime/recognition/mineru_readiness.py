@@ -11,6 +11,16 @@ from urllib.parse import urlsplit
 from vibeocr.runtime.recognition.mineru_config import LANGUAGES, MineruConfigError
 from vibeocr.runtime_contracts import ErrorCode, MineruTier
 
+
+def _product_runtime() -> bool:
+    """#321 R3-2：产品模式判定与 Paddle 侧同一状态定义（不另设第二语义）。"""
+    from vibeocr.runtime.recognition.paddle_adapter import (
+        _product_runtime as paddle_product_runtime,
+    )
+
+    return paddle_product_runtime()
+
+
 _lock = threading.Lock()
 # tier → 观察到该 tier 实际解析成功的连接。旧连接的观察对新连接无效：
 # 即使清观察集后仍有旧结果迟到落地，也不得污染新连接的就绪声明。
@@ -184,6 +194,10 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
     # 本进程可导入官方 parser；本地推理/模型就绪另由 tier 准备流程表达。
     # 仍要求当前进程实际完成该 tier 的准备解析后才标记 ready。
     installed = _mineru4_installed()
+    # #321 R3-2：产品模式（预构建随包 Runtime）下官方 SDK 缺损是产品闭包
+    # 损坏，不是 tier 待准备：unavailable + product_runtime_damaged，不引导
+    # 在线准备/安装器。开发环境保持待准备语义；缺模型/连接无效链不变。
+    product_sdk_damaged = not installed and _product_runtime()
     return {
         "default_tier": "basic",
         # 本地 MinerU 4 无 language 通道且 OCR 恒用内置 ch 模型（覆盖中英），
@@ -193,12 +207,14 @@ def catalog_payload(*, observe_runtime: bool = True) -> dict:
             {
                 "id": tier.value,
                 "availability": "unavailable"
-                if unavailable
+                if unavailable or product_sdk_damaged
                 else "ready"
                 if installed and tier in ready
                 else "preparation_required",
                 "reason_code": "mineru_connection_invalid"
                 if unavailable
+                else "product_runtime_damaged"
+                if product_sdk_damaged
                 else None
                 if installed and tier in ready
                 else (

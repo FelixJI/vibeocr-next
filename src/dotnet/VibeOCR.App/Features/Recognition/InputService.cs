@@ -223,9 +223,13 @@ public sealed class InputService : IInputService, ISystemImportReader
                 $"区域框选模式应走既有选区链路：{request.Kind}", nameof(request));
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         CapturePreferences preferences = _preferences?.Load() ?? new CapturePreferences();
         nint owner = _windowHandle();
         nint foreground = GetForegroundWindow();
+        // Reject a vanished explicit target before hiding the owner transfers focus to another process.
+        if (request.Kind == ScreenshotCaptureKind.ActiveWindow && request.TargetWindow != 0 && request.TargetWindow != owner)
+            _ = ResolveActiveWindow(preferences, request, owner, foreground);
         IReadOnlyList<ScreenMonitorTarget> layoutBefore = ScreenTargetQuery.EnumerateMonitors();
         PhysicalRectangle desktopBefore = ScreenTargetQuery.VirtualDesktop();
         bool visible = IsWindowVisible(owner);

@@ -1238,8 +1238,14 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   await expect(page.getByText("masked base", { exact: true })).toHaveCount(0);
   await expect(page.getByText("masked reused", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await page.getByLabel("排版背景", { exact: true }).selectOption("image");
   const before = uploads.count();
+  await page.getByLabel("排版背景", { exact: true }).selectOption("image");
+  // 背景切换使文字层绑定过期：400ms 去抖的自动取字会以“没有可取文字”变体
+  // 改写同一条状态行；先等该终态落地，识别拒绝消息才不会被定时器覆盖。
+  await expect(
+    page.getByText(/整张图都在屏蔽区内：没有可取文字，已取消文字层准备/),
+  ).toBeVisible();
+  expect(uploads.count()).toBe(before);
   await page.getByRole("button", { name: "识别文字", exact: true }).click();
   await expect(
     page.getByText(/整张图都在屏蔽区内：没有可识别内容/),

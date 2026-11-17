@@ -68,7 +68,10 @@ internal static class VelopackUpdateSelfTest
                 "production",
                 installRootOverride: roots.InstallRoot,
                 productRootOverride: roots.ProductRoot);
-            layout.EnsurePortableState();
+            // #321 F7：自测同样显式选择随包版本化 UDF（发布模式缺随包目录
+            // 会在此失败），不会默认创建/触碰旧 state/webview2。
+            layout.EnsurePortableState(
+                VibeOCR.App.Web.WebView2ProductEnvironment.PrepareProductionUserData(layout));
             var coordinator = new VelopackUpdateCoordinator(
                 [
                     new VelopackFeedEndpoint(feed, new HttpClientFileDownloader()),

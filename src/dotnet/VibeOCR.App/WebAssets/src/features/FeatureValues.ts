@@ -55,6 +55,29 @@ export function availabilityLabel(availability: string): string {
   return labels[availability] ?? availability;
 }
 
+/** #321：随包 Runtime 闭包损坏（product_runtime_damaged）是产品损坏，
+ * 不是可切换/可准备的依赖状态；不引导在线准备。 */
+export const PRODUCT_RUNTIME_DAMAGED_REASON = "product_runtime_damaged";
+
+export const PRODUCT_RUNTIME_DAMAGED_LABEL =
+  "VibeOCR 随包运行组件损坏；请通过应用内更新或重新获取完整安装包修复。应用不会在线安装依赖。";
+
+export function isProductRuntimeDamaged(
+  reasonCode: string | undefined | null,
+): boolean {
+  return reasonCode === PRODUCT_RUNTIME_DAMAGED_REASON;
+}
+
+/** 模式/引擎可用性文案；产品损坏优先于通用可用性文案。 */
+export function modeAvailabilityLabel(
+  availability: string,
+  reasonCode: string | undefined | null,
+): string {
+  return isProductRuntimeDamaged(reasonCode)
+    ? PRODUCT_RUNTIME_DAMAGED_LABEL
+    : availabilityLabel(availability);
+}
+
 export function statusLabel(value: unknown, fallback: string): string {
   const labels: Readonly<Record<string, string>> = {
     "recognition.running": "正在识别",
@@ -68,6 +91,7 @@ export function statusLabel(value: unknown, fallback: string): string {
       "所选识别模式已退役，请在设置或任务面板重新选择可用模式。",
     "recognition.modeUnavailable":
       "所选识别模式在当前环境不可用；请检查模型、设备与运行环境",
+    "recognition.productRuntimeDamaged": PRODUCT_RUNTIME_DAMAGED_LABEL,
     "recognition.captureRefused.missingFixedRegion":
       "尚未设置固定截图区域；请打开截图选项设置后重试",
     "recognition.captureRefused.regionUnavailable":

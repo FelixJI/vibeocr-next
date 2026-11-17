@@ -264,7 +264,7 @@ async function launchApp(candidate, webviewData, instanceId, { shellOnly = true 
     const { browser, page } = await connectPage(child, port);
     const main = (await waitForWindows(child.pid, (item) => item.Visible && area(item) > 20000))
       .sort((a, b) => area(b) - area(a))[0];
-    return { child, browser, page, main, port };
+    return { child, browser, page, main, port, installRoot: candidate };
   } catch (error) {
     try { await stopOwned(child, 'close', {}); }
     catch (cleanupError) {
@@ -482,6 +482,9 @@ async function startScrollSession(app, fixture) {
   app.evidence.mainWindowBeforeCapture = current;
   app.evidence.focusProbe = JSON.parse(await native('probe', { AppPid: app.child.pid, FixturePid: fixture.pid,
     X: Math.floor((current.Bounds.Left + current.Bounds.Right) / 2), Y: current.Bounds.Top + 40 }));
+  // Really activate the owned fixture once before focusing the app: the capture flow needs the fixture-then-main activation order once the main window hides for the picker overlay.
+  await native('focus', { FixturePid: fixture.pid, Handle: fixture.root,
+    X: fixture.clientRect.left + 100, Y: fixture.clientRect.top + 100 });
   await native('focus', { FixturePid: app.child.pid, Handle: app.main.Handle,
     X: Math.floor((app.main.Bounds.Left + app.main.Bounds.Right) / 2), Y: app.main.Bounds.Top + 40 });
   await native('raise', { FixturePid: fixture.pid, Handle: fixture.root });
@@ -771,7 +774,15 @@ async function saveRecoveredSession(app, outputName, expectedSessionId,
     'Native save must address the recovered screenshot session.');
   assert(Number.isSafeInteger(session.revision) && session.revision >= 1,
     'Native save must run on the annotated revision of the recovered session.');
-  const savedPath = path.join(app.evidence.smokeRoot, outputName);
+  // Synthetic Save As target: this run's candidate portable state output
+  // directory (<installRoot>/state/output per PortableLayout); the per-run
+  // suffix keeps the retained prepared candidate reusable (the owned picker
+  // guard only drives a brand-new PNG). Evidence PNGs stay in the evidence root.
+  const saveDir = path.join(app.installRoot, 'state', 'output');
+  fs.mkdirSync(saveDir, { recursive: true });
+  const runId = path.basename(app.evidence.smokeRoot).split('-').pop();
+  const savedPath = path.join(saveDir,
+    outputName.replace(/\.png$/i, '') + `-${runId}.png`);
   const terminal = await observeSceneCopyTerminal(page, { actions: ['saveScreenshotImage'] });
   try {
     const clickError = await page.getByRole('button', { name: '保存标注图', exact: true }).click()
@@ -794,7 +805,7 @@ async function saveRecoveredSession(app, outputName, expectedSessionId,
     assert(upload,
       `No accepted 201 upload was bound to the save command: ${JSON.stringify(terminal.timeline)}`);
     await native('save-file', { AppPid: app.child.pid, Handle: app.editorWindow.Handle,
-      OutputPath: savedPath, EvidenceRoot: app.evidence.smokeRoot }, 30000);
+      OutputPath: savedPath, EvidenceRoot: saveDir }, 30000);
     const endDeadline = raceDeadline(15000);
     let ended;
     try { ended = await Promise.race([terminal.ended.then(() => true), endDeadline.promise]); }
@@ -1802,11 +1813,17 @@ async function main() {
     // assertions only count sessions beyond that baseline.
     if (preparedCandidateRoot) {
       const warmupImage = path.join(smokeRoot, 'source-warmup.png');
-      await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
-        X: fixture.clientRect.left + 16, Y: fixture.clientRect.top + 16,
-        Width: Math.min(400, fixture.clientRect.width - 32),
-        Height: Math.min(240, fixture.clientRect.height - 32),
-        EvidenceRoot: smokeRoot, OutputPath: warmupImage });
+      // Fixture handles are reported before its message loop shows the window.
+      await native('raise', { FixturePid: fixture.pid, Handle: fixture.root });
+      try {
+        await native('frame', { FixturePid: fixture.pid, Handle: fixture.root,
+          X: fixture.clientRect.left + 16, Y: fixture.clientRect.top + 16,
+          Width: Math.min(400, fixture.clientRect.width - 32),
+          Height: Math.min(240, fixture.clientRect.height - 32),
+          EvidenceRoot: smokeRoot, OutputPath: warmupImage });
+      } finally {
+        await native('lower', { FixturePid: fixture.pid, Handle: fixture.root });
+      }
       await setClipboardImage(smokeRoot, warmupImage);
       await app.page.getByRole('button', { name: '从剪贴板', exact: true }).click();
       const warmupHandle = await app.page.waitForFunction(() => {

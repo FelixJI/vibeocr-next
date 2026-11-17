@@ -63,6 +63,25 @@ def _packaged_release(root: Path) -> tuple[Path, Path]:
     return manifest, lock
 
 
+def _minimal_x64_dll_image(
+    machine: int = 0x8664,
+    characteristics: int = 0x2022,
+    optional_magic: int = 0x20B,
+) -> bytes:
+    """最小自洽 Windows x64 DLL PE 头样本。自洽指：COFF 声明的可选头
+    （0xF0）与节表（1×40）都落在实际文件长度内；仅头部/声明范围语义。"""
+    image = bytearray(0x80 + 24 + 0xF0 + 40)
+    image[0:2] = b"MZ"
+    image[0x3C:0x40] = (0x80).to_bytes(4, "little")
+    image[0x80:0x84] = b"PE\x00\x00"
+    image[0x84:0x86] = machine.to_bytes(2, "little")
+    image[0x86:0x88] = (1).to_bytes(2, "little")
+    image[0x94:0x96] = (0xF0).to_bytes(2, "little")
+    image[0x96:0x98] = characteristics.to_bytes(2, "little")
+    image[0x98:0x9A] = optional_magic.to_bytes(2, "little")
+    return bytes(image)
+
+
 def _release_inputs(tmp_path: Path) -> dict[str, Path]:
     app = tmp_path / "app-publish"
     (app / "WebAssets").mkdir(parents=True)
@@ -75,10 +94,20 @@ def _release_inputs(tmp_path: Path) -> dict[str, Path]:
         "MainWindow.xbf",
         "WebAssets/index.html",
         "runtimes/win-x64/native/WebView2Loader.dll",
+        "WebView2Runtime/msedgewebview2.exe",
+        "WebView2Runtime/icudtl.dat",
     ):
         path = app / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(relative.encode())
+    # W17-2：随包启动库写入最小自洽 x64 DLL 映像（映像校验正例）。
+    for relative in (
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+    ):
+        path = app / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_minimal_x64_dll_image())
     (app / "VibeOCR.WinUI.pdb").write_bytes(b"symbols")
 
     bootstrapper = tmp_path / "VibeOCR.Bootstrapper.exe"
@@ -132,6 +161,9 @@ def test_stage_product_layout_builds_the_strict_public_tree(tmp_path: Path) -> N
     assert (product_root / "app/metadata/component-lock.json").is_file()
     assert (product_root / "app/metadata/component-identities.json").is_file()
     assert (product_root / "runtime/backend/runtime-manifest.json").is_file()
+    # #321：随包 WebView2 Fixed Version 运行库进入产品闭包。
+    assert layout.webview2_runtime == product_root / "app" / "WebView2Runtime"
+    assert (product_root / "app/WebView2Runtime/msedgewebview2.exe").is_file()
     assert layout.runtime_python.read_bytes() == b"python-bin"
     assert not list(product_root.rglob("vibeocr-runtime-installer*"))
     assert not list(product_root.rglob("*.pdb"))
@@ -207,6 +239,89 @@ def test_stage_product_layout_rejects_nonportable_windows_release_filenames(
         match="layout.invalid-descriptor: runtime_env.manifest must be a release filename",
     ):
         stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+def test_stage_product_layout_requires_the_bundled_webview2_runtime(
+    tmp_path: Path,
+) -> None:
+    """#321：随包 WebView2 运行库缺失时闭包 fail closed（旧实现不会失败）。"""
+    inputs = _release_inputs(tmp_path)
+    (inputs["app_publish_root"] / "WebView2Runtime" / "msedgewebview2.exe").unlink()
+
+    with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+@pytest.mark.parametrize(
+    "startup",
+    (
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+    ),
+)
+def test_stage_product_layout_requires_the_bundled_webview2_native_startup_closure(
+    tmp_path: Path, startup: str
+) -> None:
+    """#321：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll 时闭包报修
+    （旧实现只检查浏览器 EXE 与 icudtl.dat，不会失败）。"""
+    inputs = _release_inputs(tmp_path)
+    (inputs["app_publish_root"] / startup).unlink()
+
+    with pytest.raises(ProductLayoutError, match="layout.missing-entry"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+@pytest.mark.parametrize(
+    ("startup", "payload", "reason"),
+    (
+        (
+            "WebView2Runtime/msedge.dll",
+            b"invalid webview2 native image payload!".ljust(67, b"\x00"),
+            "W17-2：在位 67 字节非 PE（真实故障形态）必须报修",
+        ),
+        (
+            "WebView2Runtime/msedge.dll",
+            _minimal_x64_dll_image()[:0x40],
+            "DOS 头有效但 NT 头前截断必须报修",
+        ),
+        (
+            "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+            _minimal_x64_dll_image(machine=0x014C),
+            "错误架构（i386）必须报修",
+        ),
+        (
+            "WebView2Runtime/msedge.dll",
+            _minimal_x64_dll_image()[:0x9A],
+            "仅保留 PE32+ magic：声明的可选头范围越过 EOF 必须报修",
+        ),
+        (
+            "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+            _minimal_x64_dll_image()[: 0x80 + 24 + 0xF0],
+            "声明的节表范围越过 EOF 必须报修",
+        ),
+    ),
+)
+def test_stage_product_layout_rejects_invalid_bundled_webview2_startup_images(
+    tmp_path: Path, startup: str, payload: bytes, reason: str
+) -> None:
+    """W17-2：启动库在位但映像无效/截断/错误架构时闭包报修；旧实现
+    只查存在性，本测试在旧实现上不会失败。"""
+    inputs = _release_inputs(tmp_path)
+    (inputs["app_publish_root"] / startup).write_bytes(payload)
+
+    with pytest.raises(ProductLayoutError, match="webview2.invalid-image"):
+        stage_product_layout(product_root=tmp_path / "VibeOCR", **inputs)
+
+
+def test_stage_product_layout_accepts_valid_bundled_webview2_startup_images(
+    tmp_path: Path,
+) -> None:
+    """正例：有效 x64 DLL 映像通过发布闭包（基准不被负例扩大）。"""
+    layout = stage_product_layout(
+        product_root=tmp_path / "VibeOCR", **_release_inputs(tmp_path)
+    )
+
+    assert (layout.webview2_runtime / "msedge.dll").read_bytes()[:2] == b"MZ"
 
 
 @pytest.mark.parametrize(

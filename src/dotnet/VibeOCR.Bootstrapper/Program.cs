@@ -1,12 +1,11 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using VibeOCR.ProductLayout;
-using Windows.ApplicationModel;
-using Windows.Management.Deployment;
-using Windows.System;
 using Velopack;
 
 namespace VibeOCR.Bootstrapper;
@@ -17,22 +16,40 @@ internal static class Program
   private const int AppMissing = 3;
   private const int InvalidArguments = 4;
   private const int LayoutInvalid = 5;
+  private const uint Windows64BitBinary = 6;
   private const string SelfTestPrerequisites = "--self-test-prerequisites";
 
   [STAThread]
   private static int Main(string[] args)
   {
-    LegacyVelopackStateMigration.Resume(AppDomain.CurrentDomain.BaseDirectory);
-    VelopackApp.Build()
-        .OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate(
-            AppDomain.CurrentDomain.BaseDirectory))
-        .Run();
-    PortableProductRoots roots = PortableProductRoots.Resolve(
-        AppDomain.CurrentDomain.BaseDirectory);
-    BootstrapperLog.Initialize(Path.Combine(roots.InstallRoot, "state", "logs"));
+    string productRoot = AppDomain.CurrentDomain.BaseDirectory;
+    LegacyVelopackStateMigration.Resume(productRoot);
+    string velopackDll = Path.Combine(productRoot, "Velopack.dll");
+    if (!File.Exists(velopackDll))
+    {
+      InitializeLog(productRoot);
+      ReportRepair("随包 Velopack 更新组件缺失：" + velopackDll,
+          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          BootstrapperArtifactSmoke.IsRequested());
+      return LayoutInvalid;
+    }
+
     try
     {
-      return Launch(args);
+      RunVelopack(productRoot);
+    }
+    catch (Exception error) when (error is BadImageFormatException or FileLoadException or FileNotFoundException)
+    {
+      InitializeLog(productRoot);
+      ReportRepair("随包 Velopack 更新组件无法加载：" + velopackDll + "\n" + error.Message,
+          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          BootstrapperArtifactSmoke.IsRequested());
+      return LayoutInvalid;
+    }
+    PortableProductRoots roots = InitializeLog(productRoot);
+    try
+    {
+      return Launch(args, roots);
     }
     catch (Exception error)
     {
@@ -41,10 +58,24 @@ internal static class Program
     }
   }
 
-  private static int Launch(string[] args)
+  // Keep Velopack out of the entry point's JIT so a missing DLL can be reported.
+  [MethodImpl(MethodImplOptions.NoInlining)]
+  private static void RunVelopack(string productRoot) =>
+      VelopackApp.Build()
+          .OnAfterUpdateFastCallback(_ => LegacyVelopackStateMigration.Migrate(productRoot))
+          .Run();
+
+  private static PortableProductRoots InitializeLog(string productRoot)
   {
-    PortableProductRoots roots = PortableProductRoots.Resolve(
-        AppDomain.CurrentDomain.BaseDirectory);
+    PortableProductRoots roots = PortableProductRoots.Resolve(productRoot);
+    BootstrapperLog.Initialize(Path.Combine(roots.InstallRoot, "state", "logs"));
+    return roots;
+  }
+
+  private static int Launch(string[] args, PortableProductRoots roots)
+  {
+    bool selfTest = args.Contains(SelfTestPrerequisites, StringComparer.Ordinal);
+    bool artifactSmoke = BootstrapperArtifactSmoke.IsRequested();
     BootstrapperLog.Info(
         $"Bootstrapper starting: installRoot={roots.InstallRoot} productRoot={roots.ProductRoot}");
     ResolvedProductLayout layout;
@@ -54,7 +85,7 @@ internal static class Program
     }
     catch (InvalidDataException error)
     {
-      Report(error.Message);
+      ReportRepair(error.Message, selfTest, artifactSmoke);
       return LayoutInvalid;
     }
     string appPath = layout.AppEntry;
@@ -64,38 +95,38 @@ internal static class Program
       Report("Unsupported profile: " + profile);
       return InvalidArguments;
     }
-    string[] missing = (BootstrapperArtifactSmoke.IsRequested()
+    string[] missing = (artifactSmoke
         ? new string?[]
         {
-          HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+          HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         }
         : new string?[]
         {
-          DotNetRuntimeProbe.FindVersion() != null ? null : ".NET Runtime 10 x64",
-          HasWindowsAppRuntime() ? null : "Windows App Runtime 2.6 x64",
-          HasWebView2(layout) ? null : "Microsoft Edge WebView2 Evergreen Runtime",
-          HasBoundRuntimeAssets(layout) ? null : "VibeOCR bound Runtime assets",
+          MissingBundledDotNetRuntime(layout),
+          MissingBundledWindowsAppRuntime(layout),
+          BundledWebView2RuntimeError(layout),
+          HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         })
         .Where(item => item != null).Select(item => item!).ToArray();
     if (missing.Length > 0)
     {
-      Report("VibeOCR prerequisites require repair:");
-      foreach (string item in missing)
-      {
-        Report("- " + item);
-      }
-
-      Report("No component was downloaded or modified.");
+      ReportRepair(string.Join(Environment.NewLine, missing), selfTest, artifactSmoke);
       return PrerequisiteMissing;
     }
 
     if (!File.Exists(appPath))
     {
-      Report("WinUI application is missing: " + appPath);
+      ReportRepair("应用入口缺失：" + appPath, selfTest, artifactSmoke);
       return AppMissing;
     }
 
-    if (args.Contains(SelfTestPrerequisites, StringComparer.Ordinal))
+    if (!GetBinaryTypeW(appPath, out uint binaryType) || binaryType != Windows64BitBinary)
+    {
+      ReportRepair("app.invalid-image: 应用入口损坏或不是 Windows 64 位程序：" + appPath, selfTest, artifactSmoke);
+      return AppMissing;
+    }
+
+    if (selfTest)
     {
       BootstrapperLog.Info("Bootstrapper prerequisite self-test passed.");
       return 0;
@@ -111,15 +142,39 @@ internal static class Program
       WorkingDirectory = Path.GetDirectoryName(appPath),
       UseShellExecute = true,
     };
-    Process.Start(startInfo);
+    try
+    {
+      Process.Start(startInfo);
+    }
+    catch (Win32Exception error)
+    {
+      ReportRepair("app.start-failed: 无法启动随包应用：" + appPath + "\n" + error.Message, selfTest, artifactSmoke);
+      return AppMissing;
+    }
     BootstrapperLog.Info($"Launched WinUI app: {appPath} {arguments}");
     return 0;
   }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetBinaryTypeW(string applicationName, out uint binaryType);
 
   private static void Report(string message)
   {
     Console.Error.WriteLine(message);
     BootstrapperLog.Error(message);
+  }
+
+  private static void ReportRepair(string reason, bool selfTest, bool artifactSmoke)
+  {
+    Report(reason);
+    Report("No component was downloaded or modified.");
+    Report("Repair with the in-app update or a fresh complete download.");
+    if (BootstrapperRepairPrompt.CreateMessage(
+        reason, selfTest, artifactSmoke, Environment.UserInteractive) is { } message)
+    {
+      BootstrapperRepairPrompt.Show(message);
+    }
   }
 
   private static string? ReadOption(string[] args, string name)
@@ -140,102 +195,51 @@ internal static class Program
       File.Exists(layout.RuntimeManifest) &&
       File.Exists(layout.RuntimePython);
 
-  // Keep in sync with VibeOCR.Platform's PrerequisiteDetector.MinimumWindowsAppRuntimeVersion
-  // (the framework-dependent WindowsAppSDK pin); older runtimes must not satisfy the bootstrapper.
-  private const ushort MinimumWindowsAppRuntimeMajor = 2;
-  private const ushort MinimumWindowsAppRuntimeMinor = 6;
+  // #321：随包闭包检查。安装了系统 .NET/Windows App Runtime/WebView2
+  // 不再满足检查——损坏的随包载荷必须显式报修，不联网、不回退系统。
+  private static string? MissingBundledDotNetRuntime(ResolvedProductLayout layout)
+  {
+    var missing = BundledRuntimeConfig.MissingClrStartupFiles(layout.AppRoot);
+    string runtimeConfig = Path.ChangeExtension(layout.AppEntry, ".runtimeconfig.json");
+    string?[] problems =
+    {
+        missing.Count == 0
+            ? null
+            : "随包 .NET Runtime 文件缺失：" + string.Join("、", missing),
+        BundledRuntimeConfig.FindNetCoreAppVersion(runtimeConfig) is null
+            ? "随包 .NET Runtime 配置缺失或损坏：" + Path.GetFileName(runtimeConfig)
+            : null,
+    };
+    return problems.All(problem => problem is null)
+        ? null
+        : string.Join(Environment.NewLine, problems.Where(problem => problem is not null));
+  }
 
-  private static bool HasWindowsAppRuntime()
+  // #321：随包 Windows App SDK 启动闭包（与 Platform 诊断共用，缺
+  // Microsoft.UI.Xaml.dll 时 apphost 异步退出无法报修）。
+  private static string? MissingBundledWindowsAppRuntime(ResolvedProductLayout layout)
+  {
+    string[] missing = ResolvedProductLayout.MissingWindowsAppRuntimeFiles(layout.AppRoot)
+        .ToArray();
+    return missing.Length == 0
+        ? null
+        : "随包 Windows App Runtime 文件缺失：" + string.Join("、", missing);
+  }
+
+  private static string? BundledWebView2RuntimeError(ResolvedProductLayout layout)
   {
     try
     {
-      return new PackageManager().FindPackagesForUser(string.Empty).Any(package =>
-          IsWindowsAppRuntimeSatisfied(package.Id.Name, package.Id.Version) &&
-          (package.Id.Architecture == ProcessorArchitecture.X64 ||
-              package.Id.Architecture == ProcessorArchitecture.Neutral) &&
-          package.Status.VerifyIsOK());
+      ResolvedProductLayout.ReadWebView2ExecutableVersion(
+          Path.Combine(layout.WebView2RuntimeRoot, "msedgewebview2.exe"),
+          WebView2LockVersion.LockedRuntimeVersion);
+      return null;
     }
-    catch
+    catch (InvalidDataException error)
     {
-      return false;
+      return error.Message;
     }
   }
-
-  private static bool IsWindowsAppRuntimeSatisfied(string name, PackageVersion version) =>
-        (name.Equals("Microsoft.WindowsAppRuntime.2", StringComparison.OrdinalIgnoreCase) ||
-            name.Equals("Microsoft.WindowsAppRuntime.CBS.2", StringComparison.OrdinalIgnoreCase)) &&
-      (version.Major > MinimumWindowsAppRuntimeMajor ||
-          (version.Major == MinimumWindowsAppRuntimeMajor &&
-              version.Minor >= MinimumWindowsAppRuntimeMinor));
-
-  private static bool HasWebView2(ResolvedProductLayout layout)
-  {
-    string loaderPath = Path.Combine(layout.AppRoot, "WebView2Loader.dll");
-    if (!File.Exists(loaderPath))
-    {
-      return false;
-    }
-
-    IntPtr module = LoadLibrary(loaderPath);
-    if (module == IntPtr.Zero)
-    {
-      return false;
-    }
-
-    try
-    {
-      IntPtr entryPoint = GetProcAddress(
-          module,
-          "GetAvailableCoreWebView2BrowserVersionString");
-      if (entryPoint == IntPtr.Zero)
-      {
-        return false;
-      }
-
-      var getVersion = Marshal.GetDelegateForFunctionPointer<
-          GetAvailableCoreWebView2BrowserVersionString>(entryPoint);
-      int result = getVersion(null, out IntPtr versionInfo);
-      try
-      {
-        if (result < 0 || versionInfo == IntPtr.Zero)
-        {
-          return false;
-        }
-
-        return !string.IsNullOrWhiteSpace(Marshal.PtrToStringUni(versionInfo));
-      }
-      finally
-      {
-        if (versionInfo != IntPtr.Zero)
-        {
-          Marshal.FreeCoTaskMem(versionInfo);
-        }
-      }
-    }
-    catch
-    {
-      return false;
-    }
-    finally
-    {
-      FreeLibrary(module);
-    }
-  }
-
-  [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-  private delegate int GetAvailableCoreWebView2BrowserVersionString(
-      string? browserExecutableFolder,
-      out IntPtr versionInfo);
-
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  private static extern IntPtr LoadLibrary(string fileName);
-
-  [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-  private static extern IntPtr GetProcAddress(IntPtr module, string procedureName);
-
-  [DllImport("kernel32.dll", SetLastError = true)]
-  [return: MarshalAs(UnmanagedType.Bool)]
-  private static extern bool FreeLibrary(IntPtr module);
 
   private static string Quote(string value) =>
       "\"" + value.Replace("\"", "\\\"") + "\"";

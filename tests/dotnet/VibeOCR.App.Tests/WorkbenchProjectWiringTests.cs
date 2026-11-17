@@ -989,6 +989,7 @@ public sealed class WorkbenchProjectWiringTests
       WorkbenchCommandOutcome opened = await opener.ExecuteAsync(
         new OpenImageEditProjectCommand(), TestContext.Current.CancellationToken);
       Assert.Null(opened.Error);
+      Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(root, "project-open")));
       WorkbenchImageOwner.ProjectOpenDescriptor? pending = opener.CurrentProjectOpen;
       Assert.NotNull(pending);
       Assert.Equal(64, pending.Manifest.Canvas.Width);

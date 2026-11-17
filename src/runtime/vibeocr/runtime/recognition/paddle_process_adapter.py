@@ -20,10 +20,14 @@ from vibeocr.runtime.processes.utils.job_object import CREATE_SUSPENDED, JobObje
 from vibeocr.runtime.processes.utils.subprocess_log import SubprocessLogForwarder
 from vibeocr.runtime.recognition.ocr_engines import (
     REASON_ENGINE_NOT_INSTALLED,
+    REASON_PRODUCT_RUNTIME_DAMAGED,
     EngineAvailability,
     EngineDescriptor,
 )
-from vibeocr.runtime.recognition.paddle_adapter import PADDLE_REQUIRED_COMPONENT
+from vibeocr.runtime.recognition.paddle_adapter import (
+    PADDLE_REQUIRED_COMPONENT,
+    _product_runtime,
+)
 from vibeocr.runtime.recognition.paddle_onnx import (
     PaddleOnnxCancelled,
     PaddleOnnxError,
@@ -93,6 +97,15 @@ class PaddleProcessAdapter:
                 available = result.returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        if not available and _product_runtime():
+            # #321 F8：产品模式（预构建随包 Runtime）下探针失败是随包闭包
+            # 损坏：UNAVAILABLE + product_runtime_damaged，不引导在线准备。
+            return EngineDescriptor(
+                engine_id=OcrEngine.PADDLEOCR,
+                availability=EngineAvailability.UNAVAILABLE,
+                included_in_base=True,
+                reason_code=REASON_PRODUCT_RUNTIME_DAMAGED,
+            )
         return EngineDescriptor(
             engine_id=OcrEngine.PADDLEOCR,
             availability=EngineAvailability.READY

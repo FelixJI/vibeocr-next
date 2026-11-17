@@ -672,7 +672,7 @@ async function imageEditStep(ctx) {
   // fixture's verified UIA/Win32 controls. The saved PNG is then decoded in
   // the product's own WebView2 and checked for exact input dimensions, the
   // QR content and the baked annotation pixels.
-  const savedFile = path.join(root, 'imageedit-saved.png');
+  const savedFile = path.join(ctx.copy, 'state', 'output', 'imageedit-saved.png');
   const saveClickError = await page.getByRole('button', { name: '保存标注图', exact: true })
     .click()
     .then(() => null, (error) => `${error.name}: ${error.message}`);

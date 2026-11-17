@@ -26,6 +26,7 @@ from vibeocr.runtime.jobs.module import Executor, SupervisorModule, SupervisorOp
 if TYPE_CHECKING:
     from vibeocr.runtime.jobs.registry import JobRecord
     from vibeocr.runtime.recognition.ocr_engines import (
+        EngineDescriptor,
         OcrEngineRegistry,
         OcrEngineResolver,
     )
@@ -192,6 +193,25 @@ def _build_paddle_executor(
         adapter_factory=adapter_factory,
         scheduler=scheduler,
     )
+
+
+def _paddle_mode_required_component(descriptor: EngineDescriptor) -> str | None:
+    """#321：模式目录的组件提示从 descriptor 派生。
+
+    READY 或产品闭包损坏（product_runtime_damaged）时不携带组件
+    （损坏不得引导在线准备）；开发环境待准备保持统一配方提示，
+    descriptor 已声明的组件优先。
+    """
+    from vibeocr.runtime.recognition.ocr_engines import (
+        REASON_PRODUCT_RUNTIME_DAMAGED,
+        EngineAvailability,
+    )
+
+    if descriptor.availability is EngineAvailability.READY:
+        return None
+    if descriptor.reason_code == REASON_PRODUCT_RUNTIME_DAMAGED:
+        return None
+    return descriptor.required_component or "paddleocr-ort-directml"
 
 
 def _paddle_available() -> bool:
@@ -409,9 +429,12 @@ def _build_recognition_mode_registry(
                 for descriptor in engine_resolver.probe_descriptors()
             }
             descriptor = descriptors[definition.engine]
+            # #321 F8：只有 Paddle 投影随 descriptor 的组件语义
+            # （产品损坏→None；开发待准备→统一配方）；WindowsOCR 等
+            # 其它引擎保持 None，不引入在线准备语义。
             required_component = (
-                "paddleocr-ort-directml"
-                if definition.mode_id is RecognitionModeId.PADDLE_TEXT
+                _paddle_mode_required_component(descriptor)
+                if descriptor.engine_id.value == "paddleocr"
                 else None
             )
             return ModeAvailability(
@@ -431,9 +454,7 @@ def _build_recognition_mode_registry(
             return ModeAvailability(
                 descriptor.availability.value,
                 reason_code=descriptor.reason_code,
-                required_component=None
-                if descriptor.availability.value == "ready"
-                else "paddleocr-ort-directml",
+                required_component=_paddle_mode_required_component(descriptor),
             )
         if is_ort_environment() and definition.mode_id.value.startswith("paddle_"):
             return ModeAvailability(
@@ -442,6 +463,24 @@ def _build_recognition_mode_registry(
                 required_component="paddleocr-ort-directml",
             )
         is_mineru = definition.mode_id is RecognitionModeId.MINERU_DOCUMENT
+        if is_mineru:
+            # #321 R3-2：产品模式下官方 SDK（mineru.parser.api_client）缺损
+            # 是产品闭包损坏：unavailable + product_runtime_damaged，不携带
+            # 组件（不引导在线准备）。SDK 存在但模型未准备/开发环境保持
+            # 既有待准备语义。
+            from vibeocr.runtime.recognition.mineru_readiness import (
+                _mineru4_installed,
+            )
+            from vibeocr.runtime.recognition.ocr_engines import (
+                REASON_PRODUCT_RUNTIME_DAMAGED,
+            )
+            from vibeocr.runtime.recognition.paddle_adapter import _product_runtime
+
+            if not _mineru4_installed() and _product_runtime():
+                return ModeAvailability(
+                    RecognitionModeAvailability.UNAVAILABLE,
+                    reason_code=REASON_PRODUCT_RUNTIME_DAMAGED,
+                )
         ready = mineru_document_ready() if is_mineru else use_paddle
         # 组件档位（mineru-cpu/cuda、原生 paddleocr-*）已随统一推理闭包
         # 退役：待准备提示统一指向唯一可安装配方。

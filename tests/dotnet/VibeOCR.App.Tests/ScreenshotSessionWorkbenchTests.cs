@@ -307,6 +307,7 @@ public sealed class ScreenshotSessionWorkbenchTests
   {
     public bool RemoveModeCapability;
     public bool TableUnavailable;
+    public bool TableProductDamaged;
     public string DefaultMode = "paddle_table";
 
     public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
@@ -317,7 +318,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       {
         Capabilities = [.. health.Capabilities!, RuntimeSelectionService.DefaultRecognitionModeCapability],
       };
-      if (!TableUnavailable) return health;
+      if (!TableUnavailable && !TableProductDamaged) return health;
       Wire.CapabilityDescriptor descriptor = health.CapabilityDescriptors!.Single();
       Wire.RecognitionModeCatalog catalog = descriptor.RecognitionModeCatalog!;
       return health with
@@ -327,7 +328,10 @@ public sealed class ScreenshotSessionWorkbenchTests
           RecognitionModeCatalog = catalog with
           {
             Modes = [.. catalog.Modes.Select(mode => mode.Id == Wire.RecognitionModeId.PaddleTable
-              ? mode with { Availability = Wire.RecognitionModeAvailability.Unavailable } : mode)],
+              ? mode with {
+                  Availability = Wire.RecognitionModeAvailability.Unavailable,
+                  ReasonCode = TableProductDamaged ? "product_runtime_damaged" : mode.ReasonCode,
+                } : mode)],
           },
         }],
       };
@@ -405,6 +409,64 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Empty(inference.Requests);
       Assert.Empty(inference.UploadedContent);
       Assert.Equal("recognition.modeUnavailable", result.StatusCode);
+    }
+    finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
+  }
+
+  [Theory]
+  [InlineData("recognition")]
+  [InlineData("imageEdit")]
+  public async Task ProductDamagedDefaultModeSurfacesDedicatedTerminalStatus(string scope)
+  {
+    // 准备期间目录变为产品损坏时，拒绝已接受的操作且不提交推理请求。
+    string root = TemporaryRoot();
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    try
+    {
+      var inference = new RefreshingImageSelectionClient();
+      var recognition = new RecognitionViewModel(inference, new FixedCaptureInput());
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotations = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(recognition, root, broker, annotations, settings,
+        inferenceAttached: () => true, ensureRuntimeReady: async ct =>
+        {
+          entered.TrySetResult();
+          await release.Task.WaitAsync(ct);
+        });
+      await handler.ExecuteAsync(new SetThemeCommand(WorkbenchTheme.Light), TestContext.Current.CancellationToken);
+      var captured = new TaskCompletionSource<RecognitionScreenshotSessionState>(TaskCreationOptions.RunContinuationsAsynchronously);
+      handler.StateChanged += state =>
+      {
+        RecognitionScreenshotSessionState? session = state switch
+        {
+          RecognitionWorkbenchState r when scope == "recognition" && !r.IsBusy => r.ScreenshotSession,
+          ImageEditWorkbenchState e when scope == "imageEdit" && !e.IsBusy => e.ScreenshotSession,
+          _ => null,
+        };
+        if (session is not null) captured.TrySetResult(session);
+      };
+      await handler.ExecuteAsync(scope == "recognition"
+        ? new OpenRecognitionImageForEditCommand() : new SelectImageEditFileCommand(),
+        TestContext.Current.CancellationToken);
+      RecognitionScreenshotSessionState session = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
+      using var terminal = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.productRuntimeDamaged");
+      WorkbenchCommand command = scope == "recognition"
+        ? new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [])
+        : new RecognizeImageEditImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, []);
+      Assert.Null((await handler.ExecuteAsync(command, TestContext.Current.CancellationToken)).Error);
+      await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+      inference.TableProductDamaged = true;
+      Assert.True(await settings.RefreshSelectionAsync(TestContext.Current.CancellationToken));
+      release.TrySetResult();
+      RecognitionWorkbenchState result = await terminal.Task;
+      Assert.Empty(inference.Requests);
+      Assert.Empty(inference.UploadedContent);
+      Assert.Equal("recognition.productRuntimeDamaged", result.StatusCode);
     }
     finally { release.TrySetResult(); Directory.Delete(root, recursive: true); }
   }
@@ -3828,14 +3890,16 @@ public sealed class ScreenshotSessionWorkbenchTests
   }
 
   [Theory]
-  [InlineData("recognition", false, ScreenshotRecognitionIntent.Table)]
-  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Table)]
-  [InlineData("recognition", true, ScreenshotRecognitionIntent.Table)]
-  [InlineData("imageEdit", true, ScreenshotRecognitionIntent.Table)]
-  [InlineData("recognition", false, ScreenshotRecognitionIntent.Text)]
-  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Text)]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Table, false)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Table, false)]
+  [InlineData("recognition", true, ScreenshotRecognitionIntent.Table, false)]
+  [InlineData("imageEdit", true, ScreenshotRecognitionIntent.Table, false)]
+  [InlineData("recognition", false, ScreenshotRecognitionIntent.Text, false)]
+  [InlineData("imageEdit", false, ScreenshotRecognitionIntent.Text, false)]
+  [InlineData("recognition", true, ScreenshotRecognitionIntent.Table, true)]
+  [InlineData("imageEdit", true, ScreenshotRecognitionIntent.Table, true)]
   public async Task ColdEditorIntentSurvivesPreparationAndRefusesUnavailableCatalog(
-    string scope, bool unavailable, ScreenshotRecognitionIntent intent)
+    string scope, bool unavailable, ScreenshotRecognitionIntent intent, bool productDamaged)
   {
     string root = TemporaryRoot();
     var inference = new RefreshingImageSelectionClient { DefaultMode = "paddle_text" };
@@ -3870,7 +3934,7 @@ public sealed class ScreenshotSessionWorkbenchTests
     Assert.False(entered.Task.IsCompleted);
     WorkbenchAnnotationLease lease = UploadAnnotation(annotations, AnnotationPng);
     using var terminal = new RecognitionStateAwaiter(handler,
-      state => !state.IsBusy && (state.StatusCode == "recognition.modeUnavailable" || state.Result is not null));
+      state => !state.IsBusy && (state.StatusCode is "recognition.modeUnavailable" or "recognition.productRuntimeDamaged" || state.Result is not null));
     WorkbenchCommand command = scope == "recognition"
       ? new RecognizeScreenshotImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent)
       : new RecognizeImageEditImageCommand(lease.ResourceUri.AbsoluteUri, Guid.Parse(session.SessionId), session.Revision, [], Intent: intent);
@@ -3878,11 +3942,12 @@ public sealed class ScreenshotSessionWorkbenchTests
     await entered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     await handler.ExecuteAsync(new SetTaskEngineCommand("paddle_text"), TestContext.Current.CancellationToken);
     inference.TableUnavailable = unavailable;
+    inference.TableProductDamaged = productDamaged;
     release.TrySetResult();
     RecognitionWorkbenchState result = await terminal.Task;
     if (unavailable)
     {
-      Assert.Equal("recognition.modeUnavailable", result.StatusCode);
+      Assert.Equal(productDamaged ? "recognition.productRuntimeDamaged" : "recognition.modeUnavailable", result.StatusCode);
       Assert.Empty(inference.Requests);
     }
     else Assert.Equal(intent == ScreenshotRecognitionIntent.Text ? "OCR" : "TABLE_RECOGNITION", Assert.Single(inference.Requests).Pipeline.PipelineId);
@@ -4073,6 +4138,84 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.Empty(inference.Requests);
       Assert.Null(recognition.TaskEngine);
       Assert.Null(handler.CurrentImageSessionId);
+      Assert.Equal(0, sessionReady);
+      await UntilAsync(() => terminalShown == 1);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  /// <summary>动作栏目录携带产品损坏 reason（旧实现落入通用准备文案）。</summary>
+  private sealed class ProductDamagedModeSelectionClient : SelectionSubmitClient
+  {
+    public override async Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
+    {
+      Wire.Health health = await base.GetHealthAsync(cancellationToken);
+      Wire.CapabilityDescriptor? descriptor = health.CapabilityDescriptors?
+        .FirstOrDefault(item => item.RecognitionModeCatalog is not null);
+      if (descriptor is null) return health;
+      Wire.RecognitionModeCatalog catalog = descriptor.RecognitionModeCatalog!;
+      return health with
+      {
+        CapabilityDescriptors = [.. health.CapabilityDescriptors!.Select(item =>
+          ReferenceEquals(item, descriptor)
+            ? item with
+            {
+              RecognitionModeCatalog = catalog with
+              {
+                Modes = [.. catalog.Modes.Select(mode => mode.Id == Wire.RecognitionModeId.PaddleText
+                  ? mode with
+                  {
+                    Availability = Wire.RecognitionModeAvailability.Unavailable,
+                    ReasonCode = "product_runtime_damaged",
+                  }
+                  : mode)],
+              },
+            }
+            : item)],
+      };
+    }
+  }
+
+  [Fact]
+  public async Task OrdinaryRecognizeIntentSurfacesProductDamageTerminal()
+  {
+    // #321 R3-1：截图动作栏入口（typed 意图拒绝路径）在目录 reason 为
+    // product_runtime_damaged 时必须以专属终态报修（旧实现终态为
+    // recognition.modeUnavailable 且文案指向准备，本测试在旧实现上失败）。
+    string root = TemporaryRoot();
+    try
+    {
+      var inference = new ProductDamagedModeSelectionClient();
+      var inputs = new SelectionActionCaptureInput(
+        ScreenshotSelectionAction.Recognize, "paddle_text");
+      var recognition = new RecognitionViewModel(inference, inputs);
+      var settings = new SettingsViewModel(inference);
+      await settings.LoadSelectionAsync(TestContext.Current.CancellationToken);
+      using var broker = new WorkbenchResourceBroker(root);
+      using var annotationStore = new WorkbenchAnnotationStore(root);
+      await using var handler = CreateHandler(
+        recognition, root, broker, annotationStore, settings,
+        inferenceAttached: () => true);
+      int sessionReady = 0;
+      handler.ScreenshotSessionReady += (_, _) => sessionReady++;
+      int terminalShown = 0;
+      handler.ScreenshotSelectionRecognized += () => terminalShown++;
+
+      RecognitionWorkbenchState refused;
+      using (var completed = new RecognitionStateAwaiter(handler,
+        state => !state.IsBusy && state.StatusCode == "recognition.productRuntimeDamaged"))
+      {
+        await handler.ExecuteAsync(new CaptureScreenshotSessionCommand(),
+          TestContext.Current.CancellationToken);
+        refused = await completed.Task;
+      }
+
+      Assert.Equal("recognition.productRuntimeDamaged", refused.StatusCode);
+      Assert.Empty(inference.Requests);
+      Assert.Null(recognition.TaskEngine);
       Assert.Equal(0, sessionReady);
       await UntilAsync(() => terminalShown == 1);
     }

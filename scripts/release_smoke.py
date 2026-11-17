@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,124 @@ def _verify_runtime_code(product_root: Path, version: str) -> None:
     )
 
 
+def _verify_bootstrapper(product_root: Path) -> None:
+    command = [str(product_root / "VibeOCR.exe"), "--self-test-prerequisites"]
+    environment = os.environ.copy()
+    environment.pop("VIBEOCR_NEXT_TEST_MODE", None)
+    subprocess.run(command, check=True, timeout=30, cwd=product_root, env=environment)
+
+    def expect_failure(exit_code: int, diagnostic: bytes) -> None:
+        result = subprocess.run(
+            command, capture_output=True, timeout=30, cwd=product_root, env=environment
+        )
+        if result.returncode != exit_code or diagnostic not in result.stderr:
+            raise ValueError(
+                f"Bootstrapper failure should report {diagnostic!r} and exit {exit_code}; "
+                f"got exit {result.returncode}: {result.stderr!r}"
+            )
+
+    # Move originals within the temporary extraction. A root-level extra file
+    # would fail the layout check before reaching the WebView2 version check.
+    velopack = product_root / "Velopack.dll"
+    backup = product_root / "app/Velopack.dll.smoke-backup"
+    velopack.rename(backup)
+    try:
+        expect_failure(5, b"Velopack.dll")
+        velopack.write_bytes(b"invalid managed assembly")
+        expect_failure(5, b"Velopack.dll")
+    finally:
+        backup.replace(velopack)
+
+    browser = product_root / "app/WebView2Runtime/msedgewebview2.exe"
+    backup = browser.with_suffix(".exe.smoke-backup")
+    browser.rename(backup)
+    try:
+        # The bundled managed DLL has a valid, different four-part file version.
+        shutil.copyfile(velopack, browser)
+        expect_failure(2, b"webview2.version-mismatch")
+        browser.write_bytes(b"no version resource")
+        expect_failure(2, b"webview2.invalid-version")
+    finally:
+        backup.replace(browser)
+
+    # #321：随包 WebView2 已知原生启动闭包（真实布局：msedge.dll 在运行库根，
+    # EmbeddedBrowserWebView.dll 在 EBWebView 架构子目录）缺损必须进入报修
+    # 路径，不能因浏览器 EXE 仍在而放行（旧实现不会失败）。
+    msedge = product_root / "app/WebView2Runtime/msedge.dll"
+    backup = msedge.with_suffix(".dll.smoke-backup")
+    msedge.rename(backup)
+    try:
+        expect_failure(5, b"msedge.dll")
+    finally:
+        backup.replace(msedge)
+
+    embedded = (
+        product_root / "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll"
+    )
+    backup = embedded.with_suffix(".dll.smoke-backup")
+    embedded.rename(backup)
+    try:
+        expect_failure(5, b"EmbeddedBrowserWebView.dll")
+    finally:
+        backup.replace(embedded)
+
+    # W17-2：随包原生启动库在位但映像无效（真实故障形态：67 字节非 PE）
+    # 也必须在 apphost 前报修，不得放行为 WinUI 原生 0xC000027B 退出。
+    # 与其它缺损 seam 同一 rename backup → try 内写故障 → finally 还原模式，
+    # 不叠加完整字节副本。
+    backup = msedge.with_suffix(".dll.smoke-invalid-backup")
+    msedge.rename(backup)
+    try:
+        msedge.write_bytes(b"invalid-msedge.dll-image-payload!".ljust(67, b"\x00"))
+        expect_failure(5, b"webview2.invalid-image")
+    finally:
+        backup.replace(msedge)
+
+    # #321：UI.Xaml 缺失时必须显式报修（exit 2），不能放行后让
+    # apphost 异步退出且无报修。
+    xaml = product_root / "app/Microsoft.UI.Xaml.dll"
+    backup = xaml.with_suffix(".dll.smoke-backup")
+    xaml.rename(backup)
+    try:
+        expect_failure(2, b"Microsoft.UI.Xaml.dll")
+    finally:
+        backup.replace(xaml)
+
+    # CoreLib 是 CLR 启动必需；缺失必须报修。
+    corelib = product_root / "app/System.Private.CoreLib.dll"
+    backup = corelib.with_suffix(".dll.smoke-backup")
+    corelib.rename(backup)
+    try:
+        expect_failure(2, b"System.Private.CoreLib.dll")
+    finally:
+        backup.replace(corelib)
+
+    # runtimeconfig 缺失或语法/结构损坏都必须报修，不能放行。
+    runtime_config = product_root / "app/VibeOCR.WinUI.runtimeconfig.json"
+    backup = runtime_config.with_suffix(".json.smoke-backup")
+    runtime_config.rename(backup)
+    try:
+        expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+        runtime_config.write_bytes(b"{")
+        expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+        for field, value in (("framework", {}), ("frameworks", [])):
+            conflicting = json.loads(backup.read_text(encoding="utf-8"))
+            conflicting["runtimeOptions"][field] = value
+            runtime_config.write_text(json.dumps(conflicting), encoding="utf-8")
+            expect_failure(2, b"VibeOCR.WinUI.runtimeconfig.json")
+    finally:
+        backup.replace(runtime_config)
+
+    application = product_root / "app/VibeOCR.WinUI.exe"
+    backup = application.with_suffix(".exe.smoke-backup")
+    application.rename(backup)
+    try:
+        application.write_bytes(b"invalid app image")
+        expect_failure(3, b"app.invalid-image")
+    finally:
+        backup.replace(application)
+
+
 def verify(artifacts: Path, version: str) -> None:
     portable_name = f"VibeOCRNext-v{version}-win-x64.zip"
     names = verify_release_assets(
@@ -149,15 +268,7 @@ def verify(artifacts: Path, version: str) -> None:
         if embedded_identity != identity:
             raise ValueError("Portable product identity differs from release asset")
         _verify_runtime_code(product_root, version)
-        subprocess.run(
-            [
-                str(product_root / "VibeOCR.exe"),
-                "--self-test-prerequisites",
-            ],
-            check=True,
-            timeout=30,
-            cwd=product_root,
-        )
+        _verify_bootstrapper(product_root)
         # pwsh 的有效 TEMP 必须与本进程实际解包目录一致（TMPDIR/TEMP
         # 可能指向不同根）；smoke 据此逐层校验复用树的精确归属。
         temp_parent = str(extracted.resolve().parent)

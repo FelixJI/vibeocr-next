@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from dataclasses import replace
 from unittest.mock import patch
 from uuid import uuid4
@@ -18,7 +19,7 @@ from vibeocr.runtime_contracts import JobKind, JobPriority, JobState, SettingsSn
 
 @pytest.fixture(autouse=True)
 def isolate_product_runtime_environment():
-    with patch.dict(os.environ):
+    with patch.dict(os.environ), patch.object(tempfile, "tempdir", tempfile.tempdir):
         yield
 
 
@@ -441,7 +442,6 @@ def test_product_prepare_imports_legacy_cache_and_fails_closed_on_wrong_interpre
     }.items():
         monkeypatch.setenv(name, str(value))
     monkeypatch.delenv("VIBEOCR_LAYOUT_MANIFEST", raising=False)
-    import os
 
     for key in (
         "VIBEOCR_RECOGNITION_DEVICE",
@@ -456,6 +456,7 @@ def test_product_prepare_imports_legacy_cache_and_fails_closed_on_wrong_interpre
         "PADDLE_PDX_CACHE_HOME",
         "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK",
         "MINERU_HOME",
+        "TMPDIR",
         "TEMP",
         "TMP",
     ):
@@ -475,12 +476,22 @@ def test_product_prepare_imports_legacy_cache_and_fails_closed_on_wrong_interpre
         product_runtime.prepare_product_runtime()
     assert not (state / "recognition").exists()
     monkeypatch.setattr(sys, "executable", str(runtime / "python.exe"))
+    outside_temp = tmp_path / "inherited-temp"
+    outside_temp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(outside_temp))
+    monkeypatch.setattr(tempfile, "tempdir", str(outside_temp))
     store = product_runtime.prepare_product_runtime()
     snapshot = store.load(SettingsSnapshot())
     assert snapshot.extra["legacy_cache_at_state_root"]
     assert "mineru-huggingface" in snapshot.download_source_ids
     assert Path(os.environ["HF_HOME"]) == state / "cache/huggingface"
     assert Path(os.environ["MINERU_HOME"]) == state / "mineru4"
+    assert {os.environ[key] for key in ("TMPDIR", "TEMP", "TMP")} == {
+        str(state / "temp")
+    }
+    with tempfile.TemporaryDirectory() as temporary:
+        assert Path(temporary).parent == state / "temp"
+    assert not list(outside_temp.iterdir())
     from vibeocr.runtime.environments.runtime_maintenance import (
         runtime_status_from_environment,
     )

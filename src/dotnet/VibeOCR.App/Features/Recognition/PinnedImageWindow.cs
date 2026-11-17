@@ -254,6 +254,20 @@ internal sealed class PinnedImageWindow : IDisposable
     }
   }
   internal PointInt32 SmokePosition => window.AppWindow.Position;
+  internal bool SmokeMouseInputReleased => dragOrigin is null && band.PointerCaptures is not { Count: > 0 } &&
+    (GetAsyncKeyState(1) & 0x8000) == 0;
+  internal string SmokeMouseInputState
+  {
+    get
+    {
+      nint handle = Handle;
+      bool hasBounds = GetWindowRect(handle, out RectL bounds);
+      PointInt32 position = SmokePosition;
+      return $"pin={PinId}, handle=0x{(long)handle:X}, position=({position.X},{position.Y}), " +
+        $"nativeBounds={hasBounds}:({bounds.Left},{bounds.Top},{bounds.Right},{bounds.Bottom}), " +
+        $"origin={dragOrigin}, captures={band.PointerCaptures?.Count ?? 0}, leftDown={(GetAsyncKeyState(1) & 0x8000) != 0}";
+    }
+  }
   internal Guid SessionId => sessionId;
   internal long Revision => revision;
   internal bool Editing => editing;
@@ -379,7 +393,17 @@ internal sealed class PinnedImageWindow : IDisposable
     band.DoubleTapped += handler;
     return () => band.DoubleTapped -= handler;
   }
-  private async Task<int> SmokePrepareMouseActionAsync(PointL actionPoint)
+  private static void SmokePositionMouseForPress(nint handle, PointL target)
+  {
+    if (!SetCursorPos(target.X, target.Y) || !GetCursorPos(out PointL current))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    nint hitRoot = GetAncestor(WindowFromPoint(current), GaRoot);
+    if (current.X != target.X || current.Y != target.Y || hitRoot != handle)
+      throw new InvalidOperationException($"Pin mouse position changed before the press: " +
+        $"target=({target.X},{target.Y}), actual=({current.X},{current.Y}), " +
+        $"handle=0x{(long)handle:X}, hitRoot=0x{(long)hitRoot:X}.");
+  }
+  private async Task<int> SmokePrepareMouseActionAsync(PointL actionPoint, nint foregroundSibling = 0)
   {
     nint handle = Handle;
     int readyAttempts = 40;
@@ -391,7 +415,12 @@ internal sealed class PinnedImageWindow : IDisposable
     }
     if (dragOrigin is not null || LeftDown())
       throw new InvalidOperationException("Previous pin mouse input has not released.");
-    if (GetForegroundWindow() == handle) return readyAttempts;
+    if (foregroundSibling != 0)
+    {
+      if (foregroundSibling == handle || GetForegroundWindow() != foregroundSibling)
+        throw new InvalidOperationException("Pin activation branch requires its inactive target and foreground sibling.");
+    }
+    else if (GetForegroundWindow() == handle) return readyAttempts;
 
     root.UpdateLayout();
     var dip = band.TransformToVisual(root).TransformBounds(new Windows.Foundation.Rect(0, 0, band.ActualWidth, band.ActualHeight));
@@ -442,9 +471,17 @@ internal sealed class PinnedImageWindow : IDisposable
       bool down = false;
       try
       {
-        if (!SetCursorPos(activationPoint.X, activationPoint.Y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        SmokePositionMouseForPress(handle, activationPoint);
         MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
         down = true;
+        // Keep the press held until the band consumes it, before injecting release.
+        while ((GetForegroundWindow() != handle || dragOrigin is null || !LeftDown()) && readyAttempts > 0)
+        {
+          readyAttempts--;
+          await Task.Delay(25);
+        }
+        if (GetForegroundWindow() != handle || dragOrigin is null || !LeftDown())
+          throw new InvalidOperationException("Pin activation press was not acknowledged by its band.");
       }
       finally { if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0); }
       while ((!activationReleased || GetForegroundWindow() != handle || dragOrigin is not null || LeftDown()) && readyAttempts > 0)
@@ -454,7 +491,7 @@ internal sealed class PinnedImageWindow : IDisposable
       }
       if (!activationReleased || GetForegroundWindow() != handle || dragOrigin is not null || LeftDown())
         throw new InvalidOperationException($"Pin activation release did not arrive: released={activationReleased}, " +
-          $"fg=0x{(long)GetForegroundWindow():X}, origin={dragOrigin}.");
+          $"target=0x{(long)handle:X}, fg=0x{(long)GetForegroundWindow():X}, origin={dragOrigin}, leftDown={LeftDown()}.");
       if (!GetWindowRect(handle, out RectL after)) throw new Win32Exception(Marshal.GetLastWin32Error());
       if (doubleTapped || before.Left != after.Left || before.Top != after.Top || before.Right != after.Right || before.Bottom != after.Bottom ||
           IsZoomed(handle) != wasMaximized || GetDpiForWindow(handle) != dpi)
@@ -469,12 +506,12 @@ internal sealed class PinnedImageWindow : IDisposable
       band.DoubleTapped -= tapped;
     }
   }
-  internal async Task SmokeDragTitleBarAsync(int dx, int dy)
+  internal async Task SmokeDragTitleBarAsync(int dx, int dy, PinnedImageWindow? foregroundSibling = null)
   {
     // Use the laid-out band: estimating from the outer frame can hit a button.
     // PointerPressed must capture the live cursor before the mouse moves.
     nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
-    window.Activate();
+    if (foregroundSibling is null) window.Activate();
     if (!GetWindowRect(handle, out RectL bounds))
       throw new Win32Exception(Marshal.GetLastWin32Error());
     uint dpi = GetDpiForWindow(handle);
@@ -497,26 +534,25 @@ internal sealed class PinnedImageWindow : IDisposable
     }
     int x = clientOrigin.X + (int)Math.Round(dragPoint.X * dpi / 96.0);
     int y = clientOrigin.Y + (int)Math.Round(dragPoint.Y * dpi / 96.0);
-    int readyAttempts = await SmokePrepareMouseActionAsync(new PointL { X = x, Y = y });
+    int readyAttempts = await SmokePrepareMouseActionAsync(new PointL { X = x, Y = y }, foregroundSibling?.Handle ?? 0);
     string geometry = $"handle=0x{(long)handle:X}, rect=({bounds.Left},{bounds.Top}," +
       $"{bounds.Right},{bounds.Bottom}), band={bandDip}, dpi={dpi}, point=({x},{y})";
     nint hitRoot = GetAncestor(WindowFromPoint(new PointL { X = x, Y = y }), GaRoot);
     if (hitRoot != handle)
       throw new InvalidOperationException($"Pin drag point is not its band: " +
         $"{geometry}, hitRoot=0x{(long)hitRoot:X}.");
-    if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    SmokePositionMouseForPress(handle, new PointL { X = x, Y = y });
     bool down = false;
     try
     {
       MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
       down = true;
-      bool activated = false;
-      for (int attempt = 0; attempt < readyAttempts; attempt++)
+      while ((GetForegroundWindow() != handle || dragOrigin is null) && readyAttempts > 0)
       {
-        if (GetForegroundWindow() == handle && dragOrigin is not null) { activated = true; break; }
+        readyAttempts--;
         await Task.Delay(25);
       }
-      if (!activated)
+      if (GetForegroundWindow() != handle || dragOrigin is null)
         throw new InvalidOperationException($"Pin press did not activate its band: " +
           $"{geometry}, fg=0x{(long)GetForegroundWindow():X}, dragOrigin={dragOrigin}.");
       if (!SetCursorPos(x + dx, y + dy))
@@ -536,6 +572,14 @@ internal sealed class PinnedImageWindow : IDisposable
     {
       if (down) MouseEvent(MouseEventFLeftUp, 0, 0, 0, 0);
     }
+    // The next window must not move the cursor while this band still owns capture.
+    while (!SmokeMouseInputReleased && readyAttempts > 0)
+    {
+      readyAttempts--;
+      await Task.Delay(25);
+    }
+    if (!SmokeMouseInputReleased)
+      throw new InvalidOperationException($"Pin drag release was not acknowledged: {SmokeMouseInputState}.");
   }
   /// <summary>真实鼠标点击右上角关闭按钮：验证悬浮控件在 WebView2 之上可交互。</summary>
   internal async Task SmokeMouseClickCloseButtonAsync()
@@ -563,7 +607,7 @@ internal sealed class PinnedImageWindow : IDisposable
     bool down = false;
     try
     {
-      if (!SetCursorPos(x, y)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      SmokePositionMouseForPress(handle, new PointL { X = x, Y = y });
       MouseEvent(MouseEventFLeftDown, 0, 0, 0, 0);
       down = true;
     }
@@ -1153,7 +1197,7 @@ internal sealed class PinnedImageWindow : IDisposable
       throw new InvalidOperationException("smoke injected WebView startup failure");
     }
     window.Activate();
-    await view.EnsureCoreWebView2Async();
+    await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(view);
     if (disposed) return;
     core = view.CoreWebView2;
     core.Settings.AreDevToolsEnabled = false;
@@ -1233,7 +1277,7 @@ internal sealed class PinnedImageWindow : IDisposable
           SnapshotReceiptLost?.Invoke(this, editSessionId);
       };
       editorHost = host;
-      await overlay.EnsureCoreWebView2Async();
+      await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(overlay);
       if (disposed || !editing)
       {
         await TeardownEditorAsync();
@@ -1246,7 +1290,10 @@ internal sealed class PinnedImageWindow : IDisposable
     {
       VibeOCR.App.Services.AppLog.Error("Pin editor initialization failed", error);
       await ExitEditModeAsync();
-      status.Text = "贴图编辑器启动失败，请重试";
+      // #321：随包 WebView2 可恢复初始化失败显示固定产品报修文案。
+      status.Text = error is VibeOCR.App.Web.WebView2StartupException startup
+        ? startup.Message
+        : "贴图编辑器启动失败，请重试";
       throw;
     }
   }
@@ -1727,7 +1774,7 @@ internal sealed class PinnedImageWindow : IDisposable
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool IsIconic(nint window);
 
-  [DllImport("user32.dll")]
+  [DllImport("user32.dll", SetLastError = true)]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool GetCursorPos(out PointL point);
 

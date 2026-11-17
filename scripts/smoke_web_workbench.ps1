@@ -139,8 +139,12 @@ if ($ReuseUnpackedProduct) {
     $isolatedRoot = Join-Path $tempRoot `
         "vibeocr-web-smoke-$([guid]::NewGuid().ToString('N'))"
 }
-$webViewDataRoot = Join-Path $tempRoot `
-    "vibeocr-webview-smoke-$([guid]::NewGuid().ToString('N'))"
+# #321：不再通过 WEBVIEW2_USER_DATA_FOLDER 外部覆盖；产品自带 Fixed 模式
+# 必须把 userData 落在隔离树内并列的 state/webview2-fixed/<四段版本>。
+# 旧 state/webview2 仅注入合成 sentinel，验证随包模式绝不写入旧目录。
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$webview2Lock = Get-Content -LiteralPath (Join-Path $repoRoot 'config\runtime\webview2-runtime.lock.json') -Raw | ConvertFrom-Json
+$lockedVersion = [string]$webview2Lock.version
 if (-not $ReuseUnpackedProduct -and -not ([System.IO.Path]::GetFullPath($isolatedRoot).StartsWith(
     $tempRoot,
     [System.StringComparison]::OrdinalIgnoreCase))) {
@@ -149,7 +153,6 @@ if (-not $ReuseUnpackedProduct -and -not ([System.IO.Path]::GetFullPath($isolate
 $previousSmoke = $env:VIBEOCR_SELF_TEST_SMOKE
 $previousInstance = $env:VIBEOCR_SELF_TEST_INSTANCE
 $previousHealth = $env:VIBEOCR_WEB_READY_FILE
-$previousWebViewData = $env:WEBVIEW2_USER_DATA_FOLDER
 $process = $null
 $failureKind = 'process-or-health-failure'
 try {
@@ -159,10 +162,14 @@ try {
             Copy-Item -Destination $isolatedRoot -Recurse -Force
     }
     $executable = Join-Path $isolatedRoot $relativeExecutable
+    $expectedUserData = Join-Path $isolatedRoot ("state\webview2-fixed\$lockedVersion")
+    $legacyUserData = Join-Path $isolatedRoot 'state\webview2'
+    $legacySentinel = Join-Path $legacyUserData 'smoke-legacy-udf-sentinel.txt'
+    New-Item -ItemType Directory -Path $legacyUserData -Force | Out-Null
+    Set-Content -LiteralPath $legacySentinel -Value 'legacy-user-data-must-stay-untouched' -NoNewline
     $env:VIBEOCR_SELF_TEST_SMOKE = 'web-ready'
     $env:VIBEOCR_SELF_TEST_INSTANCE = [guid]::NewGuid().ToString('N')
     $env:VIBEOCR_WEB_READY_FILE = $healthFile
-    $env:WEBVIEW2_USER_DATA_FOLDER = $webViewDataRoot
     $arguments = @('--shell-only', '--profile', 'production')
     if ($installedLayout) {
         $arguments += @('--install-root', $isolatedRoot)
@@ -195,7 +202,55 @@ try {
         $health.owner_restore -ne 'verified') {
         throw 'Web workbench health signal is invalid'
     }
-    Write-Host 'Web workbench smoke verified: bridge-ready, resource GET and annotation POST, visible/minimized/hidden owner-window restoration.'
+    # #321：随包 WebView2 绑定证据。浏览器进程镜像必须来自产品树内的
+    # WebView2Runtime\msedgewebview2.exe，版本匹配锁，userData 指向本次
+    # smoke 的隔离根——证明不是用了系统/Evergreen 运行库。
+    if ($null -eq $health.webview2 -or $null -eq $health.webview2.browser_process_id) {
+        throw 'Web workbench health signal lacks the WebView2 runtime binding'
+    }
+    $browserPid = [int]$health.webview2.browser_process_id
+    if ($browserPid -le 0) {
+        throw "Invalid WebView2 browser process id: $browserPid"
+    }
+    $expectedRuntimeRoot = if ($installedLayout) {
+        Join-Path $isolatedRoot 'app\WebView2Runtime'
+    } else {
+        Join-Path $isolatedRoot 'WebView2Runtime'
+    }
+    $expectedBrowserExe = [System.IO.Path]::GetFullPath(
+        (Join-Path $expectedRuntimeRoot 'msedgewebview2.exe'))
+    # F4：不查询可能已退出的浏览器进程；镜像路径由宿主存活时写入 health，
+    # 此处仅核对 health 来源与预期精确一致。
+    if (-not [string]::Equals(
+            [string]$health.webview2.browser_executable_path,
+            $expectedBrowserExe,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "WebView2 browser executable is not the bundled runtime: health='$($health.webview2.browser_executable_path)' expected='$expectedBrowserExe'"
+    }
+    # 精确版本比对：不接纳同前缀的其它四段版本。
+    if (-not [string]::Equals(
+            [string]$health.webview2.browser_version,
+            $lockedVersion,
+            [System.StringComparison]::Ordinal)) {
+        throw "WebView2 browser version '$($health.webview2.browser_version)' does not exactly match the locked runtime '$lockedVersion'"
+    }
+    # 实际 environment.UserDataFolder 必须精确是并列的版本化 Fixed 目录。
+    if (-not [string]::Equals(
+            [string]$health.webview2.user_data_folder,
+            [System.IO.Path]::GetFullPath($expectedUserData),
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "WebView2 user data folder is not the versioned fixed directory: health='$($health.webview2.user_data_folder)' expected='$([System.IO.Path]::GetFullPath($expectedUserData))'"
+    }
+    if (-not (Test-Path -LiteralPath $expectedUserData -PathType Container)) {
+        throw "WebView2 versioned fixed user data directory was not created: $expectedUserData"
+    }
+    # 旧 state/webview2 不被随包模式打开/写入：sentinel 原样、目录无新增条目。
+    $legacyEntries = @(Get-ChildItem -LiteralPath $legacyUserData -Force)
+    if ($legacyEntries.Count -ne 1 -or $legacyEntries[0].Name -ne 'smoke-legacy-udf-sentinel.txt' -or
+        (Get-Content -LiteralPath $legacySentinel -Raw) -ne 'legacy-user-data-must-stay-untouched') {
+        throw 'The legacy Evergreen user data directory was modified by the bundled fixed runtime'
+    }
+    Write-Host "Web workbench smoke verified: bridge-ready, resource GET and annotation POST, visible/minimized/hidden owner-window restoration, bundled WebView2 runtime $lockedVersion (pid $browserPid), versioned fixed user data under state/webview2-fixed."
 } catch {
     # Capture before cleanup removes the health file and portable state/logs.
     $originalFailure = $_
@@ -209,7 +264,6 @@ try {
     $env:VIBEOCR_SELF_TEST_SMOKE = $previousSmoke
     $env:VIBEOCR_SELF_TEST_INSTANCE = $previousInstance
     $env:VIBEOCR_WEB_READY_FILE = $previousHealth
-    $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebViewData
     foreach ($signalFile in @($healthFile, "$healthFile.writing")) {
         if (Test-Path -LiteralPath $signalFile) {
             Remove-Item -LiteralPath $signalFile -Force
@@ -245,31 +299,6 @@ try {
             throw 'Web workbench smoke isolation cleanup did not complete'
         }
     }
-    Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
-        Where-Object { $_.CommandLine -like "*$webViewDataRoot*" } |
-        ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-    if (Test-Path -LiteralPath $webViewDataRoot) {
-        $resolvedWebViewData = [System.IO.Path]::GetFullPath($webViewDataRoot)
-        if (-not $resolvedWebViewData.StartsWith(
-            $tempRoot,
-            [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Refusing to remove WebView2 smoke data outside the temporary directory'
-        }
-        $removed = $false
-        for ($attempt = 0; $attempt -lt 20; $attempt++) {
-            try {
-                Remove-Item -LiteralPath $resolvedWebViewData -Recurse -Force
-                $removed = $true
-                break
-            } catch {
-                if ($attempt -eq 19) { throw }
-                Start-Sleep -Milliseconds 250
-            }
-        }
-        if (-not $removed) {
-            throw 'WebView2 smoke data cleanup did not complete'
-        }
-    }
+    # #321：版本化 Fixed userData 位于隔离树内，随隔离树/解包树统一删除；
+    # 额外终止仍引用隔离根的浏览器进程即可，不再单独维护外部 userData 目录。
 }

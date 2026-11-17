@@ -11,6 +11,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _minimal_x64_dll_image() -> bytes:
+    """最小自洽 Windows x64 DLL PE 头样本。自洽指：COFF 声明的可选头
+    （0xF0）与节表（1×40）都落在实际文件长度内；仅头部/声明范围语义。"""
+    image = bytearray(0x80 + 24 + 0xF0 + 40)
+    image[0:2] = b"MZ"
+    image[0x3C:0x40] = (0x80).to_bytes(4, "little")
+    image[0x80:0x84] = b"PE\x00\x00"
+    image[0x84:0x86] = (0x8664).to_bytes(2, "little")
+    image[0x86:0x88] = (1).to_bytes(2, "little")
+    image[0x94:0x96] = (0xF0).to_bytes(2, "little")
+    image[0x96:0x98] = (0x2022).to_bytes(2, "little")
+    image[0x98:0x9A] = (0x20B).to_bytes(2, "little")
+    return bytes(image)
+
+
 def _stage_product(
     tmp_path: Path, name: str, backend: Path, component_lock: Path
 ) -> Path:
@@ -22,10 +37,20 @@ def _stage_product(
         "App.xbf",
         "MainWindow.xbf",
         "WebAssets/index.html",
+        "WebView2Runtime/msedgewebview2.exe",
+        "WebView2Runtime/icudtl.dat",
     ):
         path = app / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(relative.encode())
+    # W17-2：随包启动库写入最小自洽 x64 DLL 映像（映像校验正例）。
+    for relative in (
+        "WebView2Runtime/msedge.dll",
+        "WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
+    ):
+        path = app / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_minimal_x64_dll_image())
     bootstrapper = tmp_path / f"{name}-bootstrapper.exe"
     bootstrapper.write_bytes(b"bootstrapper")
     for dependency in (

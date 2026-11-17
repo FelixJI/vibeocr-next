@@ -25,11 +25,23 @@ public sealed partial class App
       string scenario = Environment.GetEnvironmentVariable("VIBEOCR_CAPTURE_UI_SCENARIO") ?? "";
       CaptureUiSmokeTrace.Stage("portable-state.begin");
       var layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "production");
-      layout.EnsurePortableState();
+      VibeOCR.App.Web.WebView2ProductEnvironment.Configure(layout);
+      layout.EnsurePortableState(
+          VibeOCR.App.Web.WebView2ProductEnvironment.PrepareProductionUserData(layout));
+      if (!VibeOCR.App.Web.WebView2ProductEnvironment.HasBundledRuntime &&
+          string.IsNullOrWhiteSpace(
+              Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER")))
+      {
+        Environment.SetEnvironmentVariable(
+            "WEBVIEW2_USER_DATA_FOLDER", layout.WebView2Root);
+      }
       var store = new CapturePreferencesStore(layout);
       CaptureUiSmokeTrace.Stage("scenario.begin");
       switch (scenario)
       {
+        case "DisabledCaptureActionShowsRepairOnHover":
+          await VerifyDisabledCaptureActionHintAsync();
+          break;
         case "PinsSaveSwitchAndRecover":
         case "PinsFormulaWindowLifecycleAndExitRecovery":
           await VerifyPinsUiAsync(layout, lifecycle: scenario == "PinsFormulaWindowLifecycleAndExitRecovery");
@@ -157,7 +169,7 @@ public sealed partial class App
     window.Activate();
     try
     {
-      await view.EnsureCoreWebView2Async();
+      await VibeOCR.App.Web.WebView2ProductEnvironment.InitializeCoreWebView2Async(view);
       var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
       view.CoreWebView2.NavigationCompleted += (_, _) => navigation.TrySetResult();
       await host.InitializeAsync(view, Path.Combine(AppContext.BaseDirectory, "WebAssets"));
@@ -202,6 +214,85 @@ public sealed partial class App
     }
   }
 
+  private static async Task VerifyDisabledCaptureActionHintAsync()
+  {
+    var button = new Microsoft.UI.Xaml.Controls.Button { Content = "文字识别" };
+    string message = ScreenRegionPicker.UnavailableReason("unavailable", "product_runtime_damaged");
+    var host = ScreenRegionPicker.ExplainUnavailableAction(button, message);
+    bool pointerEntered = false;
+    host.PointerEntered += (_, _) =>
+    {
+      pointerEntered = true;
+      CaptureUiSmokeTrace.Stage("disabled-hint.pointer-entered");
+    };
+    host.Width = 200;
+    host.Height = 40;
+    host.HorizontalAlignment = HorizontalAlignment.Center;
+    host.VerticalAlignment = VerticalAlignment.Center;
+    var grid = new Microsoft.UI.Xaml.Controls.Grid
+    {
+      Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+    };
+    grid.AddHandler(UIElement.PointerMovedEvent,
+      new Microsoft.UI.Xaml.Input.PointerEventHandler((_, args) =>
+        CaptureUiSmokeTrace.Stage($"disabled-hint.moved point={args.GetCurrentPoint(grid).Position}, source={args.OriginalSource.GetType().Name}")),
+      handledEventsToo: true);
+    grid.Children.Add(host);
+    var window = new Window { Title = "Owned disabled capture hint", Content = grid };
+    nint handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+    Check(GetCursorPos(out PointL original), "Cannot read cursor before hint smoke.");
+    PointL target = original;
+    try
+    {
+      var monitor = DesktopScreenQuery.GetPrimaryMonitor();
+      window.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(monitor.X + 80, monitor.Y + 80, 400, 240));
+      await ActivateAndWaitForegroundAsync(window, handle);
+      await WaitForCaptureUiAsync(() => host.IsLoaded && host.ActualWidth > 0);
+      PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(handle)
+          ?? throw new InvalidOperationException("Hint smoke has no client bounds.");
+      Check(SetCursorPos(client.X + 8, client.Y + 8), "Cannot leave hint target.");
+      await Task.Delay(100);
+      Windows.Foundation.Point center = button.TransformToVisual(grid).TransformPoint(
+          new Windows.Foundation.Point(button.ActualWidth / 2, button.ActualHeight / 2));
+      var hits = Microsoft.UI.Xaml.Media.VisualTreeHelper.FindElementsInHostCoordinates(center, grid).ToArray();
+      CaptureUiSmokeTrace.Stage($"disabled-hint.hit-test point={center}, elements={string.Join(',', hits.Select(element => element.GetType().Name))}");
+      Check(hits.Contains(host), "The disabled action must hit its enabled hint container.");
+      double scale = host.XamlRoot.RasterizationScale;
+      target = new PointL
+      {
+        X = client.X + (int)Math.Round(center.X * scale),
+        Y = client.Y + (int)Math.Round(center.Y * scale),
+      };
+      CaptureUiSmokeTrace.Stage($"disabled-hint.geometry client={client}, center={center}, scale={scale}, target=({target.X},{target.Y})");
+      Check(GetAncestor(WindowFromPoint(target), 2) == handle, "Hint target is covered by another window.");
+      Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle, "Hint window lost foreground before mouse input.");
+      // Use the same real pointer injection as the native smoke fixture, not just cursor repositioning.
+      var move = new SmokeInput
+      {
+        MouseX = (int)((((long)target.X - GetSystemMetrics(76)) * 65536 + 32768) / GetSystemMetrics(78)),
+        MouseY = (int)((((long)target.Y - GetSystemMetrics(77)) * 65536 + 32768) / GetSystemMetrics(79)),
+        MouseFlags = 0x0001 | 0x4000 | 0x8000,
+      };
+      Check(SendInput(1, [move], Marshal.SizeOf<SmokeInput>()) == 1, "Cannot deliver hover input.");
+      Check(GetCursorPos(out PointL positioned) && positioned.X == target.X && positioned.Y == target.Y,
+          "Hover input did not reach the owned target.");
+      var tooltip = (Microsoft.UI.Xaml.Controls.ToolTip)Microsoft.UI.Xaml.Controls.ToolTipService.GetToolTip(host);
+      tooltip.Opened += (_, _) => CaptureUiSmokeTrace.Stage("disabled-hint.opened");
+      await WaitForCaptureUiAsync(() => pointerEntered);
+      await WaitForScrollUiAsync(() => tooltip.IsOpen, CancellationToken.None);
+      Check(!button.IsEnabled && Equals(tooltip.Content, message) && message.Contains("完整安装包修复", StringComparison.Ordinal),
+          "Disabled capture action must show the product repair hint without becoming clickable.");
+      Check(Microsoft.UI.Xaml.Automation.AutomationProperties.GetHelpText(button) == message,
+          "The disabled action must expose the same repair reason to accessibility.");
+    }
+    finally
+    {
+      if (GetCursorPos(out PointL current) && current.X == target.X && current.Y == target.Y)
+        SetCursorPos(original.X, original.Y);
+      window.Close();
+    }
+  }
+
   private static async Task VerifyScrollCaptureUiAsync(string scenario)
   {
     var rows = new Microsoft.UI.Xaml.Controls.StackPanel();
@@ -234,15 +325,46 @@ public sealed partial class App
       PhysicalRectangle monitor = DesktopScreenQuery.GetPrimaryMonitor();
       source.AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(monitor.X + 80, monitor.Y + 80, 360, 320));
       await ActivateAndWaitForegroundAsync(source, sourceHandle);
-      await Task.Delay(150, cancellation.Token);
+      await WaitForScrollUiAsync(() => viewer.IsLoaded && rows.ActualHeight > 0, cancellation.Token);
       PhysicalRectangle client = ScreenTargetQuery.TryGetClientBounds(sourceHandle)
           ?? throw new InvalidOperationException("Owned scroll source has no client bounds.");
       var bounds = new PhysicalRectangle(client.X + 16, client.Y + 16, client.Width - 32, client.Height - 32);
       var session = new ScrollCaptureSession.Session(ownerHandle, bounds, cancellation.Token);
       capture = session.RunAsync();
       nint controllerHandle = WinRT.Interop.WindowNative.GetWindowHandle(session.ControlWindow);
-      await Task.Delay(150, cancellation.Token);
       var root = (DependencyObject)session.ControlWindow.Content;
+      await WaitForScrollUiAsync(() => root is FrameworkElement { IsLoaded: true }, cancellation.Token);
+      // Loaded/foreground do not prove that XAML pixels have reached desktop capture.
+      await using (var probe = new ScreenCaptureService(Guid.NewGuid()))
+      {
+        var expectedColors = rows.Children.Cast<Microsoft.UI.Xaml.Controls.Border>()
+          .Select(row => ((Microsoft.UI.Xaml.Media.SolidColorBrush)row.Background).Color)
+          .Select(color => (color.R << 16) | (color.G << 8) | color.B).ToHashSet();
+        var strip = new PhysicalRectangle(bounds.Right - 8, bounds.Y, 1, bounds.Height);
+        int matchingColors = 0;
+        int firstColor = 0;
+        try
+        {
+          await WaitForScrollUiAsync(() =>
+          {
+            nint foreground = ScreenTargetQuery.GetForegroundWindowHandle();
+            Check(foreground == sourceHandle || foreground == controllerHandle,
+                $"Synthetic scroll source was covered by foreground {foreground}.");
+            CapturedFrame frame = probe.Capture(strip, TimeSpan.FromSeconds(1));
+            var observed = new HashSet<int>();
+            for (int offset = 0; offset < frame.Pixels.Length; offset += 4)
+              observed.Add((frame.Pixels[offset + 2] << 16) | (frame.Pixels[offset + 1] << 8) | frame.Pixels[offset]);
+            firstColor = observed.First();
+            matchingColors = observed.Count(expectedColors.Contains);
+            return matchingColors >= 2;
+          }, cancellation.Token);
+        }
+        catch (Exception error)
+        {
+          throw new InvalidOperationException(
+            $"Synthetic scroll rows were not rendered into desktop capture: colors={matchingColors}, first=#{firstColor:X6}, bounds={bounds}.", error);
+        }
+      }
       Microsoft.UI.Xaml.Controls.Button Button(string id) =>
           FindScrollSmokeControl<Microsoft.UI.Xaml.Controls.Button>(root, id);
       void Invoke(string id)
@@ -261,17 +383,33 @@ public sealed partial class App
       bool success = scenario == "ScrollCaptureDirectionPickStartsCaptureAndReturnsConfirmedSegment";
       var confirm = Button("scroll-capture-confirm");
       var finish = Button("scroll-capture-finish");
+      async Task WaitForFirstFrameAsync()
+      {
+        try
+        {
+          await WaitForScrollUiAsync(() => finish.IsEnabled || capture.IsCompleted, cancellation.Token);
+          if (capture.IsCompleted) await capture;
+          Check(finish.IsEnabled, "Capture ended before the first frame became finishable.");
+        }
+        catch (Exception error)
+        {
+          throw new InvalidOperationException(
+            $"{error.Message} source={sourceHandle}, controller={controllerHandle}, " +
+            $"foreground={ScreenTargetQuery.GetForegroundWindowHandle()}, finish={finish.IsEnabled}, " +
+            $"offset={viewer.VerticalOffset}, wheelEvents={wheelEvents}; {session.DiagnosticState}", error);
+        }
+      }
       Check(!finish.IsEnabled, "Finishing must stay closed until a direction has been picked and a frame accepted.");
       SelectDirection("scroll-capture-direction-down");
       if (scenario == "ScrollCaptureCancellationDiscardsFramesAndClosesController")
       {
-        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
+        await WaitForFirstFrameAsync();
         Invoke("scroll-capture-cancel");
         Check(await capture is null, "Cancellation after the first accepted frame must not return a partial image.");
       }
       else if (!success)
       {
-        await WaitForScrollUiAsync(() => finish.IsEnabled, cancellation.Token);
+        await WaitForFirstFrameAsync();
         source.Close();
         sourceClosed = true;
         await WaitForScrollUiAsync(() => !finish.IsEnabled && confirm.Visibility == Visibility.Collapsed,
@@ -319,9 +457,18 @@ public sealed partial class App
   private static T FindScrollSmokeControl<T>(DependencyObject root, string id) where T : FrameworkElement
   {
     if (root is T found && Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(found) == id) return found;
-    for (int index = 0; index < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root); index++)
+    // Collapsed confirmation controls need not have a realized visual subtree.
+    IEnumerable<DependencyObject> children = root switch
     {
-      try { return FindScrollSmokeControl<T>(Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, index), id); }
+      Microsoft.UI.Xaml.Controls.Panel panel => panel.Children.Cast<DependencyObject>(),
+      Microsoft.UI.Xaml.Controls.ContentControl { Content: DependencyObject content } => [content],
+      Microsoft.UI.Xaml.Controls.UserControl { Content: DependencyObject content } => [content],
+      Microsoft.UI.Xaml.Controls.Border { Child: DependencyObject child } => [child],
+      _ => [],
+    };
+    foreach (DependencyObject child in children)
+    {
+      try { return FindScrollSmokeControl<T>(child, id); }
       catch (KeyNotFoundException) { }
     }
     throw new KeyNotFoundException($"Owned scroll control was not found: {id}");
@@ -516,11 +663,12 @@ public sealed partial class App
             CancellationToken.None);
         throw new InvalidOperationException("Vanished capture target was accepted.");
       }
-      catch (CaptureValidationException)
+      catch (CaptureValidationException error)
       {
-        Check(IsWindowVisible(handle), "Direct capture failure must restore owner visibility.");
+        Check(error.ReasonCode == CaptureRefusal.WindowUnavailable, "Vanished target must report WindowUnavailable.");
+        Check(IsWindowVisible(handle), "Invalid direct capture must preserve owner visibility.");
         Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
-            $"Direct capture failure must restore owned foreground; owner={handle}, current={ScreenTargetQuery.GetForegroundWindowHandle()}.");
+            $"Invalid direct capture must preserve owned foreground; owner={handle}, current={ScreenTargetQuery.GetForegroundWindowHandle()}.");
       }
       using (var stopped = new CancellationTokenSource())
       {
@@ -533,7 +681,9 @@ public sealed partial class App
         }
         catch (OperationCanceledException)
         {
-          Check(IsWindowVisible(handle), "Cancelled direct capture must restore owner visibility.");
+          Check(IsWindowVisible(handle), "Pre-cancelled direct capture must preserve owner visibility.");
+          Check(ScreenTargetQuery.GetForegroundWindowHandle() == handle,
+              "Pre-cancelled direct capture must preserve owned foreground.");
         }
       }
       var overlay = new DelayedCaptureOverlay(30);
@@ -603,6 +753,8 @@ public sealed partial class App
   private struct SmokeInput
   {
     [FieldOffset(0)] public uint Type;
+    [FieldOffset(8)] public int MouseX;
+    [FieldOffset(12)] public int MouseY;
     [FieldOffset(8)] public ushort VirtualKey;
     [FieldOffset(10)] public ushort Scan;
     [FieldOffset(12)] public uint Flags;
@@ -614,6 +766,9 @@ public sealed partial class App
 
   [DllImport("user32.dll", SetLastError = true)]
   private static extern uint SendInput(uint count, SmokeInput[] inputs, int size);
+
+  [DllImport("user32.dll")]
+  private static extern int GetSystemMetrics(int index);
 
   /// <summary>
   /// 点击本测试窗口取得真实前台，避免后台 testhost 依赖 Windows 的抢焦点许可。

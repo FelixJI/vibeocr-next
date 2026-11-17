@@ -3,7 +3,7 @@
 # the fixture process it started or the app PID supplied by the harness.
 param(
     [Parameter(Mandatory = $true)][ValidateSet(
-        'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario',
+        'fixture', 'windows', 'taskbar-state', 'probe', 'foreground', 'focus', 'raise', 'wheel', 'scenario', 'dynamic-selfcheck',
         'mouse-move', 'mouse-down', 'mouse-up', 'mouse-right', 'key', 'hide', 'lower', 'close', 'quit',
         'selection-scroll', 'uia-find', 'uia-invoke', 'uia-toggle', 'uia-bar-text', 'metrics', 'save-file', 'frame', 'geometry', 'window-text')][string]$Action,
     [int]$AppPid = 0,
@@ -434,15 +434,19 @@ public sealed class ScrollFixtureForm : Form
     public const int WheelStepPixels = 120;
     public const int FixtureClientWidth = 460;
     public const int FixtureClientHeight = 336;
+    public const int PhaseStep = 1;
+    public const int PhaseModulus = 239;
     private const int WM_MOUSEWHEEL = 0x020A;
     private int _scrollOffset;
     private int _paintMode;
     private int _phase;
-    private readonly System.Windows.Forms.Timer _animation = new System.Windows.Forms.Timer { Interval = 100 };
+    // 16 ms is a real-hardware sampling calibration only (product samples stay
+    // >=100 ms apart), not a scheduling guarantee; correctness is the paint below.
+    private readonly System.Windows.Forms.Timer _animation = new System.Windows.Forms.Timer { Interval = 16 };
 
     public ScrollFixtureForm()
     {
-        _animation.Tick += (_, _) => { _phase = (_phase + 1) % 239; Invalidate(); };
+        _animation.Tick += (_, _) => { _phase = (_phase + PhaseStep) % PhaseModulus; Invalidate(); };
         DoubleBuffered = true;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -461,7 +465,12 @@ public sealed class ScrollFixtureForm : Form
     {
         base.OnPaint(e);
         Graphics g = e.Graphics;
-        g.Clear(_paintMode == 2 ? Color.FromArgb(_phase, 128, 200) : Color.White);
+        if (_paintMode == 2)
+        {
+            PaintDynamicFrame(g, ClientSize.Width, ClientSize.Height, _phase);
+            return;
+        }
+        g.Clear(Color.White);
         if (_paintMode != 0) return;
         int first = Math.Max(0, _scrollOffset / RowHeight - 1);
         int last = Math.Min(RowCount - 1, (_scrollOffset + ClientSize.Height) / RowHeight + 1);
@@ -478,6 +487,94 @@ public sealed class ScrollFixtureForm : Form
             g.DrawString($"行 {row:D4} / Row", Font, Brushes.Black, TextLeft, y + 9);
             g.DrawString($"中文 · line {row:D4} · VibeOCR", Font, Brushes.Black, 188, y + 9);
         }
+    }
+
+    // #321 dynamic paint: bands hashed from (row, phase) so every frame has
+    // vertical variation, every phase advances every band, and no in-frame
+    // vertical shift aligns two phases (verified off-screen by DynamicSelfCheck).
+    public static void PaintDynamicFrame(Graphics g, int width, int height, int phase)
+    {
+        for (int band = 0; band * RowHeight < height; band++)
+        {
+            using (SolidBrush brush = new SolidBrush(Color.FromArgb(255,
+                (band * 37 + phase * 61) & 0xFF,
+                (band * 53 + phase * 17) & 0xFF,
+                (band * 29 + phase * 43) & 0xFF)))
+            {
+                g.FillRectangle(brush, 0, band * RowHeight, width, RowHeight);
+            }
+        }
+    }
+
+    // Off-screen content self-check (no window, no input) for the pure-Node
+    // contract test: renders the real dynamic paint at two adjacent tick
+    // phases and fails closed without texture, without per-tick change, or if
+    // any shift meeting the product's minimum overlap aligns the two frames.
+    // A positive control built by shifting real rendered rows must be
+    // recognized by the same judge, so the detector cannot pass hollow.
+    public static object DynamicSelfCheck()
+    {
+        const int width = 428, height = 304; // The smoke's real selection size.
+        // Product overlap floor (VerticalScrollStitcher.GetMinimumOverlap semantics).
+        int minimumOverlap = Math.Max(32, height / 4);
+        int[] RenderRows(int phase)
+        {
+            using (Bitmap bitmap = new Bitmap(width, height))
+            {
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                    PaintDynamicFrame(graphics, width, height, phase);
+                int[] rows = new int[height];
+                for (int y = 0; y < height; y++) rows[y] = bitmap.GetPixel(0, y).ToArgb();
+                return rows;
+            }
+        }
+        // Returns the first non-zero shift whose full overlap region (at least
+        // minimumOverlap rows) aligns previous[y+shift] to current[y].
+        static int? FindTranslatableShift(int[] previous, int[] current, int minimumOverlap)
+        {
+            int height = previous.Length;
+            for (int shift = -(height - minimumOverlap); shift <= height - minimumOverlap; shift++)
+            {
+                if (shift == 0) continue;
+                bool aligned = true;
+                for (int y = Math.Max(0, -shift); y < height && y + shift < height; y++)
+                {
+                    if (previous[y + shift] != current[y]) { aligned = false; break; }
+                }
+                if (aligned) return shift;
+            }
+            return null;
+        }
+        int[] first = RenderRows(0), next = RenderRows(PhaseStep);
+        bool textured = false;
+        for (int y = 1; y < height; y++) if (first[y] != first[0]) { textured = true; break; }
+        bool framesDiffer = false;
+        for (int y = 0; y < height; y++) if (first[y] != next[y]) { framesDiffer = true; break; }
+        // Positive control: one real rendered frame translated down by
+        // RowHeight must be detected by the same judge, at an overlap the
+        // product accepts.
+        int controlShift = RowHeight;
+        int[] control = new int[height];
+        for (int y = 0; y < height; y++)
+            control[y] = y + controlShift < height ? first[y + controlShift] : first[0];
+        int? controlDetected = FindTranslatableShift(first, control, minimumOverlap);
+        if (controlDetected != controlShift)
+            throw new InvalidOperationException(
+                $"Translation detector failed a rendered positive control: detected {controlDetected}, expected {controlShift}.");
+        int? translatableShift = FindTranslatableShift(first, next, minimumOverlap);
+        if (!textured)
+            throw new InvalidOperationException("Dynamic frame has no vertical texture.");
+        if (!framesDiffer)
+            throw new InvalidOperationException("Dynamic frames do not change across tick phases.");
+        if (translatableShift is not null)
+            throw new InvalidOperationException($"Dynamic frames are a stitchable translation (shift {translatableShift}).");
+        return new
+        {
+            ok = true, width, height, phaseStep = PhaseStep, minimumOverlap,
+            distinctRowColors = new HashSet<int>(first).Count,
+            framesDiffer, translatableShift, controlShiftDetected = controlDetected,
+            sampleRows = new[] { first[0], first[height / 2], first[height - 1] },
+        };
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -604,6 +701,9 @@ try {
         'scenario' {
             $mode = switch ($Scenario) { 'normal' { 0 }; 'low-texture' { 1 }; 'dynamic' { 2 }; 'jump' { 3 }; 'move' { 4 } }
             [ScrollCaptureNative]::Scenario($Handle, $FixturePid, $mode)
+        }
+        'dynamic-selfcheck' {
+            [ScrollFixtureForm]::DynamicSelfCheck() | ConvertTo-Json -Compress -Depth 4
         }
         'focus' { [ScrollCaptureNative]::FocusFixture($Handle, $FixturePid, $X, $Y) }
         'wheel' { [ScrollCaptureNative]::Wheel($Handle, $FixturePid, $X, $Y, $Delta) }

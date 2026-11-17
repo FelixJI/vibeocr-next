@@ -100,6 +100,8 @@ internal static partial class ScrollCaptureSession
     internal PhysicalRectangle Bounds => _bounds;
     internal string DiagnosticState =>
         $"automatic={_state.Automatic}, phase={_state.Phase}, " +
+        $"frames={_state.Stitcher?.FrameCount ?? 0}, canFinish={_state.CanFinish}, " +
+        $"overlapMissing={_state.OverlapMissing}, review={_state.Review is not null}, " +
         $"input={_driver?.ScrollInputDiagnostic ?? _lastScrollInputDiagnostic}, failure={_state.Failure?.Message}";
     internal bool HasReleasedCaptureResources => _loop?.IsCompleted != false && _deadlineTask.IsCompleted &&
         _previewTask.IsCompleted && _queuedPreview is null && !_acceptedPreviewQueued &&

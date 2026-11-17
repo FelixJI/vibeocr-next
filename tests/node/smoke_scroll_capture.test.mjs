@@ -8,8 +8,12 @@
 // scene-copy observer itself is covered by smoke_native_actions.test.mjs and
 // is deliberately not restated here.
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const exec = promisify(execFile);
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const { detectImageMediaType, assertScrollSessionOriginal,
@@ -19,9 +23,9 @@ const { detectImageMediaType, assertScrollSessionOriginal,
   pathToFileURL(path.join(scriptDir, '..', '..', 'scripts', 'smoke_scroll_capture.mjs')).href);
 
 setTimeout(() => {
-  console.error('smoke_scroll_capture contract test hung for 30s.');
+  console.error('smoke_scroll_capture contract test hung for 60s.');
   process.exit(1);
-}, 30000).unref();
+}, 60000).unref();
 
 // Importing the smoke module must not run main(): the guard keeps the script
 // importable for these pure judges without requiring --product-root.
@@ -463,6 +467,34 @@ bmpBytes[1] = 0x4d;
   assert.throws(() => assertRevisionBoundUpload(null, 'prepareScreenshotTextLayer',
     session, 1, 'Binding judge'), /timeline evidence is missing/);
   console.log('case6 prepared-revision-upload-binding: ok');
+}
+
+// 7. Dynamic-fixture content contract (#321): executes the fixture's real
+// dynamic paint path off-screen (no window, no input; same non-GUI
+// self-check pattern as smoke_windows_interaction case4). Asserts on the
+// actually rendered rows: vertical texture (the old solid-color paint failed
+// here and let a stray identical sample trip the low-texture first-frame
+// error), per-tick change, no shift the product's minimum overlap would
+// accept as scrolling, and a positive control proving the translation judge
+// really detects a rendered shift.
+if (process.platform === 'win32') {
+  const { stdout } = await exec('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+    path.join(scriptDir, '..', '..', 'scripts', 'scroll_capture_fixture.ps1'),
+    '-Action', 'dynamic-selfcheck'], { timeout: 45000, windowsHide: true });
+  const report = JSON.parse(stdout.trim());
+  assert.equal(report.ok, true,
+    `Dynamic fixture off-screen self-check failed: ${stdout.trim()}`);
+  assert(report.distinctRowColors >= 2,
+    `Dynamic frames must carry vertical texture; got ${report.distinctRowColors} row colors.`);
+  assert.equal(report.framesDiffer, true,
+    'Dynamic frames must change across tick phases.');
+  assert(Number.isInteger(report.controlShiftDetected) && report.controlShiftDetected !== 0,
+    'Positive control shift was not detected by the translation judge.');
+  assert.equal(report.translatableShift, null,
+    'Dynamic frames must never satisfy the product-overlap translation judge.');
+  console.log('case7 dynamic-fixture-content-selfcheck: ok');
+} else {
+  console.log('case7 windows-only: skipped (non-Windows)');
 }
 
 console.log('smoke_scroll_capture pure-judge contract: ok');

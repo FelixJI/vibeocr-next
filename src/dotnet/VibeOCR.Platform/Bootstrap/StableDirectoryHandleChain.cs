@@ -21,6 +21,9 @@ internal sealed class StableDirectoryHandleChain : IDisposable
   private const uint FileFlagBackupSemantics = 0x02000000;
   private const int FileAttributeTagInfoClass = 9;
   private const int FileIdInfoClass = 18;
+  // #321 F3：目标目录句柄需要读/写 DACL 的访问权（祖先只需遍历）。
+  private const uint ReadControlAccess = 0x00020000;
+  private const uint WriteDacAccess = 0x00040000;
 
   private const uint GenericRead = 0x80000000;
   private const uint GenericWrite = 0x40000000;
@@ -56,6 +59,70 @@ internal sealed class StableDirectoryHandleChain : IDisposable
   }
 
   private SafeFileHandle ParentHandle => _handles[^1];
+
+  /// <summary>当前链持有的最深目录句柄（即目标目录自身）。</summary>
+  public SafeFileHandle TargetDirectoryHandle => ParentHandle;
+
+  /// <summary>
+  /// #321 F3：从本地卷根逐段固定目标目录的全部祖先并持有目标目录句柄。
+  /// 链上任一段的重解析点（包括祖先 junction）都会被拒绝；UNC/网络路径
+  /// 不支持。调用方只通过返回的句柄访问目标，不回落到名字寻址。
+  /// </summary>
+  public static StableDirectoryHandleChain OpenDirectoryFromVolumeRoot(
+      string targetDirectory) =>
+      OpenDirectoryFromVolumeRoot(targetDirectory, requireWriteDacAccess: false);
+
+  /// <summary>同上；<paramref name="requireWriteDacAccess"/> 控制目标句柄
+  /// 是否额外请求 WRITE_DAC（仅在确认需要修改 DACL 时才请求；Win11/
+  /// 已满足场景无需该权限即可运行）。</summary>
+  public static StableDirectoryHandleChain OpenDirectoryFromVolumeRoot(
+      string targetDirectory,
+      bool requireWriteDacAccess)
+  {
+    string directory = NormalizeDirectory(targetDirectory);
+    string? volumeRoot = Path.GetPathRoot(directory);
+    if (string.IsNullOrWhiteSpace(volumeRoot) ||
+        volumeRoot.StartsWith(@"\\", StringComparison.Ordinal))
+    {
+      throw new PortableLayoutException($"只支持本地卷内的目录：{directory}。");
+    }
+    string root = volumeRoot;
+    var chain = new StableDirectoryHandleChain(root, root, directory);
+    try
+    {
+      string parentFinal = chain.OpenAndHold(root);
+      string current = root;
+      string relative = Path.GetRelativePath(root, directory);
+      if (relative != ".")
+      {
+        string[] segments = relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        for (int index = 0; index < segments.Length; index++)
+        {
+          current = Path.Combine(current, segments[index]);
+          // 最后一段即目标目录：句柄需带 READ_CONTROL|WRITE_DAC 以支撑
+          // 纯句柄 ACL 读写。
+          uint access = index == segments.Length - 1
+              ? ReadControlAccess | (requireWriteDacAccess ? WriteDacAccess : 0)
+              : 0;
+          string currentFinal = chain.OpenAndHold(current, access);
+          if (!IsStrictDescendant(parentFinal, currentFinal))
+          {
+            throw new PortableLayoutException(
+                $"目录段的最终路径脱离父目录：{current}。");
+          }
+          parentFinal = currentFinal;
+        }
+      }
+      return chain;
+    }
+    catch
+    {
+      chain.Dispose();
+      throw;
+    }
+  }
 
   public static StableDirectoryHandleChain Open(
       string installRoot,
@@ -426,11 +493,13 @@ internal sealed class StableDirectoryHandleChain : IDisposable
     return VerifyAndHoldDirectory(handle, displayPath);
   }
 
-  private string OpenAndHold(string path)
+  private string OpenAndHold(string path) => OpenAndHold(path, 0);
+
+  private string OpenAndHold(string path, uint additionalAccess)
   {
     SafeFileHandle handle = CreateFileW(
         path,
-        FileReadAttributes | FileTraverse,
+        FileReadAttributes | FileTraverse | additionalAccess,
         FileShareRead | FileShareWrite,
         nint.Zero,
         OpenExisting,

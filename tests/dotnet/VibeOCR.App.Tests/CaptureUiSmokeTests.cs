@@ -11,6 +11,10 @@ namespace VibeOCR.App.Tests;
 /// <summary>在独立真实 WinUI App 进程执行 UI 断言；testhost 不创建 XAML Application。</summary>
 public sealed class CaptureUiSmokeTests : IDisposable
 {
+  [Fact]
+  public Task DisabledCaptureActionShowsRepairOnHover() =>
+      RunUiSmokeAsync(nameof(DisabledCaptureActionShowsRepairOnHover));
+
   private readonly string _root = Path.Combine(Path.GetTempPath(), $"vibeocr-capture-ui-{Guid.NewGuid():N}");
 
   // 两个功能组各自保留原 30 秒进程上限，避免累积自检挤占退出预算。
@@ -197,6 +201,8 @@ public sealed class CaptureUiSmokeTests : IDisposable
     start.Environment["VIBEOCR_SELF_TEST_SMOKE"] = "capture-ui";
     start.Environment["VIBEOCR_CAPTURE_UI_ROOT"] = _root;
     start.Environment["VIBEOCR_CAPTURE_UI_SCENARIO"] = scenario;
+    start.Environment["WEBVIEW2_USER_DATA_FOLDER"] = Path.Combine(_root, "state", "webview2");
+    start.Environment.Remove("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
     var elapsed = Stopwatch.StartNew();
     using Process child = Process.Start(start) ?? throw new InvalidOperationException("Could not start UI smoke.");
     Task exited = child.WaitForExitAsync(TestContext.Current.CancellationToken);
@@ -322,8 +328,37 @@ public sealed class CaptureUiSmokeTests : IDisposable
     Assert.True(diagnostics.Length < 8500);
   }
 
+  [Fact]
+  public async Task UiSmokeCleanupWaitsForAnOwnedProfileHandle()
+  {
+    Directory.CreateDirectory(_root);
+    using var held = new FileStream(Path.Combine(_root, "lockfile"), FileMode.Create,
+        FileAccess.ReadWrite, FileShare.Read);
+    Task release = Task.Run(async () =>
+    {
+      await Task.Delay(100, TestContext.Current.CancellationToken);
+      held.Dispose();
+    }, TestContext.Current.CancellationToken);
+    try
+    {
+      Dispose();
+      Assert.False(Directory.Exists(_root));
+    }
+    finally { await release; }
+  }
+
   public void Dispose()
   {
-    if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+    // The real WebView smoke observed profile handles closing 5–7 seconds after App exit.
+    var elapsed = Stopwatch.StartNew();
+    while (Directory.Exists(_root))
+    {
+      try { Directory.Delete(_root, recursive: true); }
+      catch (IOException error) when (
+          (error.HResult & 0xFFFF) is 32 or 33 && elapsed.Elapsed < TimeSpan.FromSeconds(10))
+      {
+        Thread.Sleep(50);
+      }
+    }
   }
 }

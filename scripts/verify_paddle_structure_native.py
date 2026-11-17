@@ -330,7 +330,7 @@ def main():
     parser.add_argument(
         "--source", choices=("modelscope", "huggingface"), required=True
     )
-    parser.add_argument("--device", choices=("cpu", "cuda", "directml"), required=True)
+    parser.add_argument("--device", choices=("cpu", "directml"), required=True)
     parser.add_argument(
         "--preset", choices=("tiny", "small", "medium"), default="small"
     )
@@ -421,6 +421,7 @@ def main():
             "document_columns.png",
             "document_columns_90.png",
             "table_wireless_holdout.png",
+            "document_table_merged_rotated.png",
         ]
     snapshot = paddle_onnx.freeze_request(vars(options), pipeline_id=args.mode)
     report = {
@@ -437,7 +438,8 @@ def main():
             for name in (
                 "paddlex",
                 "paddleocr",
-                "onnxruntime-directml" if args.device == "directml" else "onnxruntime",
+                # 统一 ORT 闭包：onnxruntime-directml 同一发行包供 CPU EP 与 DmlExecutionProvider 使用。
+                "onnxruntime-directml",
             )
         },
         "request_options": vars(options),
@@ -510,7 +512,6 @@ def main():
             try:
                 expected_provider = {
                     "cpu": "CPUExecutionProvider",
-                    "cuda": "CUDAExecutionProvider",
                     "directml": "DmlExecutionProvider",
                 }[args.device]
                 roles = _runner_roles(pipeline.pipeline)

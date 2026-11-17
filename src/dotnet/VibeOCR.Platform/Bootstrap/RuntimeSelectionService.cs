@@ -39,12 +39,26 @@ public enum RuntimeSelectionErrorKind
 public sealed class RuntimeSelectionException : InvalidOperationException
 {
     public RuntimeSelectionException(RuntimeSelectionErrorKind kind, string message)
+        : this(kind, message, reasonCode: null)
+    {
+    }
+
+    public RuntimeSelectionException(
+        RuntimeSelectionErrorKind kind,
+        string message,
+        string? reasonCode)
         : base(message)
     {
         Kind = kind;
+        ReasonCode = reasonCode;
     }
 
     public RuntimeSelectionErrorKind Kind { get; }
+
+    /// <summary>#321 R3-1：目录条目携带的稳定 reason（如
+    /// product_runtime_damaged）；调用方沿选择异常→工作台终态传播，
+    /// 不回退为布尔，也不丢弃为通用文案。</summary>
+    public string? ReasonCode { get; }
 }
 
 /// <summary>
@@ -341,7 +355,8 @@ public sealed class RuntimeSelectionService
                 $"MinerU tier '{tierId}' is unavailable"
                 + (string.IsNullOrWhiteSpace(matches[0].ReasonCode)
                     ? "."
-                    : $" ({matches[0].ReasonCode})."));
+                    : $" ({matches[0].ReasonCode})."),
+                matches[0].ReasonCode);
         }
         if (!catalog.Languages.Contains(preference.Language, StringComparer.Ordinal))
         {
@@ -443,7 +458,11 @@ public sealed class RuntimeSelectionService
         RecognitionModeOption mode = FindRecognitionMode(modeId);
         if (!mode.IsUsable)
             throw Error(RuntimeSelectionErrorKind.EngineUnavailable,
-                $"Recognition mode '{modeId}' is unavailable.");
+                $"Recognition mode '{modeId}' is unavailable"
+                + (string.IsNullOrWhiteSpace(mode.ReasonCode)
+                    ? "."
+                    : $" ({mode.ReasonCode})."),
+                mode.ReasonCode);
         return mode;
     }
 
@@ -495,7 +514,8 @@ public sealed class RuntimeSelectionService
                 $"Engine '{wireId}' is unavailable"
                 + (string.IsNullOrWhiteSpace(descriptor.ReasonCode)
                     ? "."
-                    : $" ({descriptor.ReasonCode})."));
+                    : $" ({descriptor.ReasonCode})."),
+                descriptor.ReasonCode);
         }
         return option;
     }
@@ -607,5 +627,6 @@ public sealed class RuntimeSelectionService
 
     private static RuntimeSelectionException Error(
         RuntimeSelectionErrorKind kind,
-        string message) => new(kind, message);
+        string message,
+        string? reasonCode = null) => new(kind, message, reasonCode);
 }

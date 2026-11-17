@@ -46,8 +46,13 @@ worker 仍在独立进程运行。
 3. 解压整个目录后运行根目录的 `VibeOCR.exe`；不要只复制 `current` 子目录。
 4. 应用数据固定保存在解压根的 `state`；应用更新由 Velopack 在应用内检查、下载并应用。
 
-桌面当前仍要求系统具备 .NET 10、Windows App Runtime 和 WebView2，启动器会检查这些前置条件。
-完整依赖随包与干净系统验证见 [#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
+正式发布包自带全部软件运行依赖：.NET 10 运行时、Windows App Runtime 2.6.4 与官方
+WebView2 Fixed Version 运行库（锁定于 `config/runtime/webview2-runtime.lock.json`，构建期
+校验 SHA-256 后展开为 `app/WebView2Runtime`）全部随包分发，模型包单独管理；系统只需满足
+Windows 10/11 x64 最低条件。启动器与诊断检查随包载荷而非系统安装组件，损坏时明确报错并
+引导使用应用内更新或重新获取完整包，首次使用不联网下载或安装运行库。未打包的
+开发/测试树仍使用系统 Evergreen WebView2。完整闭包实现与实机验证范围见
+[#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
 
 在“关于与诊断 → 更新”检查版本、下载并安装更新。更新由桌面宿主执行，
 无需识别服务就绪；尚未检查时显示“尚未检查更新”，失败会显示原因。
@@ -117,13 +122,15 @@ RapidOCR 与 RapidTable 已退出当前产品的执行路径及发布依赖。�
 
 ### 失败、取消与恢复
 
-- 失败或取消会保留本次结果。按界面给出的原因与可用动作处理：“重新预览上次选择”重试、
-  在“设置 → 运行环境 → 下载来源”调整包或模型来源后再预览，或在“诊断与修复”导出
-  脱敏诊断；修改来源或组件选择后需要重新预览并确认。
-- 安装失败记录保存在目标环境中，刷新或重启后仍可查看原因和恢复动作；旧健康修订保留。
-  安装非活动环境不暂停当前服务；服务恢复不代表本次安装已成功。
-- 依赖包下载源用于安装运行环境，模型下载源由引擎准备模型时使用，两者用途不同。请不要
-  手工执行 pip、删除运行环境目录或下载缓存，也不要为安装问题更改显卡驱动。
+- 失败或取消会保留本次结果。按界面给出的原因与可用动作用原输入重试，或导出脱敏诊断后反馈。
+- 运行环境与全部依赖随包分发，没有依赖包安装、预览或非活动环境安装流程；唯一按需准备的
+  是模型：Paddle 模型按固定清单从选定的 ModelScope 或 Hugging Face 来源准备，MinerU 使用
+  自身模型机制。需要调整模型来源时按上文说明在设置中选择后重试；请不要手工执行 pip、
+  删除运行环境目录或模型缓存，也不要为识别失败更改显卡驱动。
+- 随包载荷（含固定版 WebView2 运行库）缺损时，启动器、诊断与 WebView 初始化会明确报修：
+  按提示使用应用内更新或重新获取完整安装包修复；应用不回退系统运行库，也不联网安装组件。
+- 上述修复与恢复路径的实机验证范围为常规开发与发布验证机；干净 Windows、标准
+  （非管理员）用户与物理断网等组合未测试，这些环境下未验证。
 
 ## 架构
 
@@ -255,8 +262,12 @@ CI 通过 `scripts/automation.py ci` 的声明式 bootstrap 校验计划的 `pre
 
 正式 Release 精确包含 Velopack full nupkg、相邻版本可选 delta nupkg、Portable
 （`VibeOCRNext-v{version}-win-x64.zip`）、feed（`releases.win.json`）、`product-identity.json`
-和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 调用
-`scripts/build_internal_runtime.ps1` 从当前源码构建内部 wheel，按 `config/runtime/` 的 CPython 归档和锁将其装入随包 Runtime 树。Runtime manifest 绑定解释器树清单、依赖锁与默认模型包。产品内部沿用 `runtime/backend/` 与
+和 SPDX SBOM，不再单独发布独立组件锁文件。`scripts/build-release.ps1` 以显式 MSBuild 发布属性
+（.NET 与 Windows App SDK 双 self-contained）产出随包应用，调用
+`scripts/build_internal_runtime.ps1` 从当前源码构建内部 wheel，按 `config/runtime/` 的 CPython 归档和锁将其装入随包 Runtime 树；同目录的
+`config/runtime/webview2-runtime.lock.json` 由 `scripts/expand_webview2_runtime.ps1` 消费，
+构建期校验官方 WebView2 Fixed Version CAB 的 SHA-256/大小/条目数后完整展开到
+`app/WebView2Runtime`（失配 fail closed，不取 latest）。Runtime manifest 绑定解释器树清单、依赖锁与默认模型包。产品内部沿用 `runtime/backend/` 与
 `app/metadata/component-lock.json`、`app/metadata/component-identities.json` 作为兼容稳定路径，
 不是旧仓产品图：`component-identities.json` 与 Release 外部 `product-identity.json` 同为
 `project:{component,repository,version,source_sha}`；`runtime-manifest.json` 的 `product`

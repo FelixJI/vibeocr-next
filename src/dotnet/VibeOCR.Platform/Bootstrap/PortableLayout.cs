@@ -47,6 +47,25 @@ public sealed record PortableLayout(
     public string LocksRoot => Path.Combine(DataRoot, "locks");
     public string WebView2Root => Path.Combine(DataRoot, "webview2");
 
+    private static readonly System.Text.RegularExpressions.Regex RuntimeVersionPattern =
+        new("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>#321：随包 Fixed WebView2 的并列用户数据根。同 Fixed 版本跨
+    /// 应用版本共用；不同 Fixed 版本各自隔离；旧 <c>state/webview2</c>
+    /// （Evergreen 语义）不打开、不迁移、不删除，供回滚。
+    /// 版本必须是完整四段数字，避免路径注入或半版本共享。</summary>
+    public string WebView2FixedRoot(string runtimeVersion)
+    {
+        if (string.IsNullOrWhiteSpace(runtimeVersion) ||
+            !RuntimeVersionPattern.IsMatch(runtimeVersion))
+        {
+            throw new PortableLayoutException(
+                $"随包 WebView2 用户数据目录需要完整四段运行库版本：{runtimeVersion}");
+        }
+        return Path.Combine(DataRoot, "webview2-fixed", runtimeVersion);
+    }
+
     public static PortableLayout Resolve(
         string executable,
         string profile,
@@ -131,10 +150,13 @@ public sealed record PortableLayout(
     /// <summary>
     /// Prepare the portable state root: verify containment, run the
     /// create/write/rename/delete probe, create the stable state directories,
-    /// and (production) write the idempotent portable-layout manifest that
-    /// anchors the runtime settings and model store on <c>state</c>.
+    /// and (production) write the idempotent portable-layout manifest.
+    /// <paramref name="webview2UserDataRoot"/> prepares the actually selected
+    /// WebView2 user-data directory instead of the legacy default
+    /// (<see cref="WebView2Root"/>); null keeps the non-bundled legacy default.
+    /// Both paths go through the same contained/reparse validation.
     /// </summary>
-    public void EnsurePortableState()
+    public void EnsurePortableState(string? webview2UserDataRoot = null)
     {
         ValidateContainment();
         if (Profile != "production")
@@ -151,7 +173,7 @@ public sealed record PortableLayout(
             ModelsRoot,
             OutputRoot,
             LocksRoot,
-            WebView2Root,
+            webview2UserDataRoot ?? WebView2Root,
         })
         {
             EnsureContainedDirectory(directory);

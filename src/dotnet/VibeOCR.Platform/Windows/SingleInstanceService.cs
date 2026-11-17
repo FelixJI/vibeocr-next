@@ -95,7 +95,7 @@ public sealed class SingleInstanceService : IAsyncDisposable
         throw new IOException("Primary instance did not accept forwarded arguments.", lastError);
     }
 
-    private static NamedPipeServerStream CreateServer(string pipeName) => new(
+    internal static NamedPipeServerStream CreateServer(string pipeName) => new(
         pipeName,
         PipeDirection.In,
         1,
@@ -114,12 +114,9 @@ public sealed class SingleInstanceService : IAsyncDisposable
             {
                 server = prepared ?? CreateServer(_pipeName);
                 prepared = null;
-                server.WaitForConnection();
-                using var buffer = new MemoryStream();
-                server.CopyTo(buffer);
-                if (buffer.Length <= 64 * 1024)
+                string[]? arguments = ReadArguments(server);
+                if (arguments is not null)
                 {
-                    string[] arguments = JsonSerializer.Deserialize<string[]>(buffer.ToArray()) ?? [];
                     _argumentHandler(arguments).GetAwaiter().GetResult();
                 }
             }
@@ -132,6 +129,34 @@ public sealed class SingleInstanceService : IAsyncDisposable
             {
                 server?.Dispose();
             }
+        }
+    }
+
+    internal static string[]? ReadArguments(NamedPipeServerStream server)
+    {
+        NamedPipeServerStream? closingConnection = null;
+        try
+        {
+            try
+            {
+                server.WaitForConnection();
+            }
+            catch (IOException error) when (error.HResult == unchecked((int)0x800700E8))
+            {
+                // ERROR_NO_DATA: an early sender closed, but this owned pipe still holds its payload.
+                closingConnection = new NamedPipeServerStream(
+                    PipeDirection.In, isAsync: false, isConnected: true, server.SafePipeHandle);
+            }
+
+            using var buffer = new MemoryStream();
+            (closingConnection ?? server).CopyTo(buffer);
+            return buffer.Length <= 64 * 1024
+                ? JsonSerializer.Deserialize<string[]>(buffer.ToArray()) ?? []
+                : null;
+        }
+        finally
+        {
+            closingConnection?.Dispose();
         }
     }
 

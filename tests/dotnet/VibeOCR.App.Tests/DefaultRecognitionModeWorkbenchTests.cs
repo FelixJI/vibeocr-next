@@ -22,6 +22,15 @@ namespace VibeOCR.App.Tests;
 public sealed class DefaultRecognitionModeWorkbenchTests
 {
   [Theory]
+  [InlineData("product_runtime_damaged", "完整安装包修复")]
+  [InlineData(null, "当前运行环境不可用")]
+  [InlineData("provider_unavailable", "当前运行环境不可用")]
+  public void DisabledCaptureModeExplainsProductRepairWithoutChangingOtherFailures(string? reasonCode, string expected)
+  {
+    Assert.Contains(expected, ScreenRegionPicker.UnavailableReason("unavailable", reasonCode));
+  }
+
+  [Theory]
   [InlineData("paddle_formula")]
   [InlineData("paddle_document_vl")]
   [InlineData("rapid_text")]

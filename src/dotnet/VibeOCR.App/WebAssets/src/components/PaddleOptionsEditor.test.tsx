@@ -13,6 +13,34 @@ const actions = (): AppActions => ({
   setTheme: vi.fn(),
 });
 
+it("explains damaged product runtime in inherited and explicit mode choices", () => {
+  render(
+    <TaskEngineSelector
+      enabled
+      taskEngine={undefined}
+      actions={actions()}
+      engines={[
+        {
+          engine: "paddle_text",
+          displayName: "Paddle OCR",
+          selected: true,
+          isTaskOverride: false,
+          availability: "unavailable",
+          requiresDownload: false,
+          reasonCode: "product_runtime_damaged",
+        },
+      ]}
+    />,
+  );
+  const choices = screen.getAllByRole("option");
+  expect(choices).toHaveLength(2);
+  for (const choice of choices) {
+    expect(choice).toHaveTextContent("随包运行组件损坏");
+    expect(choice).toHaveTextContent("重新获取完整安装包");
+    expect(choice).not.toHaveTextContent("需下载");
+  }
+});
+
 it("submits explicit typed overrides and omits default fields", async () => {
   const run = vi.fn().mockResolvedValue(true);
   const user = userEvent.setup();

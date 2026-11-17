@@ -41,7 +41,7 @@ import {
 import { createPortal, flushSync } from "react-dom";
 import type { AppAction, AppActions } from "../app/types";
 import type { ImageRecognitionMode } from "../features/ScreenshotSession";
-import { availabilityLabel } from "../features/FeatureValues";
+import { modeAvailabilityLabel } from "../features/FeatureValues";
 
 import {
   isImeCompositionEvent,
@@ -7639,7 +7639,10 @@ export function ImageCanvasEditor({
                     : mode.availability === "default_missing" ||
                         mode.availability === "default_invalid"
                       ? "默认文字模式未配置或无效"
-                      : availabilityLabel(mode.availability)
+                      : modeAvailabilityLabel(
+                          mode.availability,
+                          mode.reasonCode,
+                        )
               }${mode.reasonCode ? `（${mode.reasonCode}）` : ""}`,
           );
   const recognizeButton =

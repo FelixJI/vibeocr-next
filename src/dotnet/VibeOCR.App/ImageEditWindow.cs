@@ -219,7 +219,7 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     {
       if (captureScene is not null)
       {
-        await webView.EnsureCoreWebView2Async();
+        await WebView2ProductEnvironment.InitializeCoreWebView2Async(webView);
         if (closed) return;
         webView.DefaultBackgroundColor = Microsoft.UI.Colors.Transparent;
       }
@@ -228,15 +228,26 @@ internal sealed class ImageEditWindow : IAsyncDisposable
     catch (Exception error)
     {
       AppLog.Error("Image editor initialization failed", error);
-      ShowRecovery();
+      // #321：随包 WebView2 可恢复初始化失败显示固定产品报修文案。
+      if (error is WebView2StartupException startup)
+      {
+        ShowRecoveryMessage(startup.Message);
+      }
+      else
+      {
+        ShowRecovery();
+      }
     }
   }
 
-  private void ShowRecovery()
+  private void ShowRecovery() =>
+    ShowRecoveryMessage("图片编辑器暂不可用；退出后可重新截图。");
+
+  private void ShowRecoveryMessage(string message)
   {
     if (closed) return;
     presented.TrySetCanceled();
-    recoveryMessage.Text = "图片编辑器暂不可用；退出后可重新截图。";
+    recoveryMessage.Text = message;
     // 失效 WebView 移出 Tab 链，避免焦点停在不可见错误页。
     webView.Visibility = Visibility.Collapsed;
     recovery.Visibility = Visibility.Visible;

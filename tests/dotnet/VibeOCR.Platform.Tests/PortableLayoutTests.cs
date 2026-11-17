@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.ProductLayout;
@@ -492,6 +493,10 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -502,7 +507,7 @@ public sealed class PortableLayoutTests
         {
             string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, "fixture");
+            WriteFixtureFile(path, relative);
         }
         File.WriteAllText(
             Path.Combine(metadata, "product-layout.json"),
@@ -512,7 +517,7 @@ public sealed class PortableLayoutTests
               "product_id": "vibeocr",
               "public_entry": "VibeOCR.exe",
               "roots": {"app":"app","runtime":"runtime","metadata":"app/metadata"},
-              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+              "app": {"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
               "runtime": {"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
               "metadata": {"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
               "user_data": {"relative":"state"}
@@ -632,6 +637,10 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -642,14 +651,14 @@ public sealed class PortableLayoutTests
         {
             string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, "fixture");
+            WriteFixtureFile(path, relative);
         }
         File.WriteAllText(
             Path.Combine(metadata, "product-layout.json"),
             """
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
-             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
              "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}
@@ -751,6 +760,100 @@ public sealed class PortableLayoutTests
         }
     }
 
+    [Fact]
+    public void ProductRootClosureRejectsLinkedWebView2ExecutableWithReadableVersion()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-webview2-link-{Guid.NewGuid():N}");
+        string product = Path.Combine(root, "product");
+        string executable = Path.Combine(product, "app", "WebView2Runtime", "msedgewebview2.exe");
+        try
+        {
+            CreateProductLayoutFixture(product);
+            File.Delete(executable);
+            string outside = Path.Combine(root, "outside.exe");
+            File.Copy(typeof(ResolvedProductLayout).Assembly.Location, outside);
+            try
+            {
+                File.CreateSymbolicLink(executable, outside);
+            }
+            catch (IOException linkError) when (linkError.HResult == unchecked((int)0x80070522))
+            {
+                Assert.Skip("Windows 未授予创建文件符号链接的权限（ERROR_PRIVILEGE_NOT_HELD）。");
+            }
+
+            Assert.True(File.Exists(executable));
+            Assert.Matches(@"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$",
+                FileVersionInfo.GetVersionInfo(executable).FileVersion ?? "");
+            var error = Assert.Throws<InvalidDataException>(() => ResolvedProductLayout.Open(product));
+            Assert.Contains("重解析点", error.Message);
+            Assert.Contains(executable, error.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WebView2VersionCheckDistinguishesMismatchFromUnreadableVersion()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"vibeocr-webview2-version-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        string executable = Path.Combine(root, "msedgewebview2.exe");
+        try
+        {
+            string source = typeof(ResolvedProductLayout).Assembly.Location;
+            string? version = FileVersionInfo.GetVersionInfo(source).FileVersion;
+            Assert.NotNull(version);
+            File.Copy(source, executable);
+            Assert.Equal(version, ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, version));
+
+            const string expected = "0.0.0.0";
+            var mismatch = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, expected));
+            Assert.Contains("webview2.version-mismatch", mismatch.Message);
+            Assert.Contains(expected, mismatch.Message);
+
+            File.WriteAllText(executable, "no version resource");
+            var unreadable = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.ReadWebView2ExecutableVersion(executable, version));
+            Assert.Contains("webview2.invalid-version", unreadable.Message);
+            Assert.Contains(executable, unreadable.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("app/WebView2Runtime/msedge.dll")]
+    [InlineData("app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll")]
+    public void ProductTreeRequiresTheBundledWebView2NativeStartupClosure(string missing)
+    {
+        // #321 回归：只缺随包原生启动库（msedge.dll / 嵌套
+        // EmbeddedBrowserWebView.dll）时，布局闭包必须报修；旧实现只检查
+        // 浏览器 EXE 与 icudtl.dat，本测试在旧实现上不会失败。
+        string root = Path.Combine(
+            Path.GetTempPath(), $"vibeocr-webview2-startup-{Guid.NewGuid():N}");
+        try
+        {
+            CreateProductLayoutFixture(root);
+            File.Delete(Path.Combine(
+                root, missing.Replace('/', Path.DirectorySeparatorChar)));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.Open(root));
+
+            Assert.Contains("layout.missing-entry", error.Message);
+            Assert.Contains(Path.GetFileName(missing), error.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
     private static void CreateProductLayoutFixture(string root)
     {
         string metadata = Path.Combine(root, "app", "metadata");
@@ -767,6 +870,10 @@ public sealed class PortableLayoutTests
             "app/App.xbf",
             "app/MainWindow.xbf",
             "app/WebAssets/index.html",
+            "app/WebView2Runtime/msedgewebview2.exe",
+            "app/WebView2Runtime/icudtl.dat",
+            "app/WebView2Runtime/msedge.dll",
+            "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll",
             "app/metadata/component-lock.json",
             "app/metadata/component-identities.json",
             "app/metadata/product-release-manifest.json",
@@ -777,19 +884,111 @@ public sealed class PortableLayoutTests
         {
             string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, "fixture");
+            WriteFixtureFile(path, relative);
         }
         File.WriteAllText(
             Path.Combine(metadata, "product-layout.json"),
             """
             {"schema_version":1,"product_id":"vibeocr","public_entry":"VibeOCR.exe",
              "roots":{"app":"app","runtime":"runtime","metadata":"app/metadata"},
-             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets"},
+             "app":{"entry":"app/VibeOCR.WinUI.exe","web_assets":"app/WebAssets","webview2_runtime":"app/WebView2Runtime"},
              "runtime":{"manifest":"runtime/backend/runtime-manifest.json","python":"runtime/env/runtime-env/python.exe"},
              "metadata":{"component_lock":"app/metadata/component-lock.json","component_identities":"app/metadata/component-identities.json","release_manifest":"app/metadata/product-release-manifest.json"},
              "user_data":{"relative":"state"}}
             """);
         File.WriteAllText(Path.Combine(root, "sq.version"), "0.4.2");
+    }
+
+    // 随包 WebView2 已知原生启动库写入最小自洽 x64 DLL 映像，其余条目保持
+    // 文本占位；映像正例由布局闭包校验消费。
+    private static void WriteFixtureFile(string path, string relative) =>
+        File.WriteAllBytes(
+            path,
+            relative is "app/WebView2Runtime/msedge.dll"
+                or "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll"
+                ? MinimalX64DllImage.Create()
+                : Encoding.UTF8.GetBytes("fixture"));
+
+    [Theory]
+    [InlineData("junk-67")]
+    [InlineData("dos-only")]
+    [InlineData("wrong-arch")]
+    [InlineData("non-dll")]
+    [InlineData("pe32-optional")]
+    [InlineData("optional-truncated")]
+    [InlineData("section-truncated")]
+    public void ProductTreeRejectsInvalidBundledWebView2StartupImages(string corrupt)
+    {
+        // W17-2 回归：随包启动库在位但映像无效/截断/错误架构/非 DLL 时，
+        // 布局闭包必须在 apphost 前报修；旧实现只查 File.Exists，本测试在
+        // 旧实现上不会失败。
+        string root = Path.Combine(
+            Path.GetTempPath(), $"vibeocr-webview2-image-{Guid.NewGuid():N}");
+        try
+        {
+            CreateProductLayoutFixture(root);
+            string msedge = Path.Combine(root, "app", "WebView2Runtime", "msedge.dll");
+            File.WriteAllBytes(msedge, CorruptImage(corrupt));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => ResolvedProductLayout.Open(root));
+
+            Assert.Contains("webview2.invalid-image", error.Message);
+            Assert.Contains("msedge.dll", error.Message);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProductTreeAcceptsValidBundledWebView2StartupImages()
+    {
+        // 正例：有效 x64 DLL 映像通过布局闭包（基准不被负例扩大）。
+        string root = Path.Combine(
+            Path.GetTempPath(), $"vibeocr-webview2-image-ok-{Guid.NewGuid():N}");
+        try
+        {
+            CreateProductLayoutFixture(root);
+
+            ResolvedProductLayout layout = ResolvedProductLayout.Open(root);
+
+            Assert.Equal(
+                Path.Combine(root, "app", "WebView2Runtime"),
+                layout.WebView2RuntimeRoot);
+        }
+        finally
+        {
+            TestDirectory.Delete(root, recursive: true);
+        }
+    }
+
+    private static byte[] CorruptImage(string corrupt) => corrupt switch
+    {
+        // 真实故障样本形态：在位 67 字节非 PE 内容（不足处以 0 填充）。
+        "junk-67" => Junk67Bytes(),
+        // DOS 头有效但文件在 NT 头之前截断。
+        "dos-only" => MinimalX64DllImage.Create()[..0x40],
+        // 32 位 i386 DLL（错误架构）。
+        "wrong-arch" => MinimalX64DllImage.Create(machine: MinimalX64DllImage.I386),
+        // x64 可执行映像但缺少 DLL 特征。
+        "non-dll" => MinimalX64DllImage.Create(characteristics: 0x0002),
+        // AMD64 却带 32 位 PE32 可选头。
+        "pe32-optional" => MinimalX64DllImage.Create(optionalHeaderMagic: MinimalX64DllImage.Pe32),
+        // 仅保留 PE32+ magic：COFF 声明的可选头范围越过 EOF（截断仍被旧
+        // 26 字节读取放行，本用例在上一轮实现上失败）。
+        "optional-truncated" => MinimalX64DllImage.Create()[..0x9A],
+        // 可选头范围恰好落在文件内，但声明节表越过 EOF。
+        "section-truncated" => MinimalX64DllImage.Create()[..(0x80 + 24 + 0xF0)],
+        _ => throw new ArgumentOutOfRangeException(nameof(corrupt)),
+    };
+
+    private static byte[] Junk67Bytes()
+    {
+        byte[] junk = new byte[67];
+        Encoding.UTF8.GetBytes("invalid webview2 native image payload!").CopyTo(junk, 0);
+        return junk;
     }
 
     [Theory]

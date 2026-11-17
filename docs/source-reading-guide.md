@@ -5,7 +5,7 @@
 
 ## 五块心智地图
 
-1. **Bootstrapper**：在旧 .NET Framework 环境下处理启动前置条件。
+1. **Bootstrapper**：net472 入口处理随包运行库检查与启动转发（不联网修复）。
 2. **WinUI App**：窗口、ViewModel、用户工作流与应用生命周期。
 3. **VibeOCR.Platform**：Supervisor 进程、typed client 与平台 seam。
 4. **WebAssets**：React 高级 workbench。
@@ -55,8 +55,8 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 ## 20 分钟启动链
 
 1. 读 `global.json`，确认 SDK 锁定策略。
-2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界。
-3. 读 `src/dotnet/VibeOCR.App/App.xaml.cs` 的 `OnLaunched`。
+2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界；正式包的运行库（.NET/Windows App Runtime/WebView2 Fixed Version）全部随包，Bootstrapper 与诊断检查随包载荷而非系统安装组件。
+3. 读 `src/dotnet/VibeOCR.App/App.xaml.cs` 的 `OnLaunched`，注意 `Web/WebView2ProductEnvironment.cs` 如何在首个 WebView 创建前绑定产品私有 WebView2 运行库目录与便携 userData 根（未打包 dev/test 允许系统 Evergreen，随包缺失则明确失败不回退）。
 4. 读 `Inference/RuntimeDemandCoordinator` 与 `ManagedRuntimeConnection`，查看按需准备、共享等待、维护归属与唯一活动连接；再搜索 `InferenceSupervisorProcess` 的 ready envelope 与 shutdown。
 5. 搜索 capability 的消费位置，确认功能如何协商。
 6. 对照 `VibeOCR.Platform.Tests` 与 `VibeOCR.App.Tests` 的启动/失败测试。

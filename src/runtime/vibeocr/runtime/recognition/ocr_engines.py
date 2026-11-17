@@ -51,6 +51,10 @@ _STABLE_ENGINE_ORDER: tuple[OcrEngine, ...] = (
 # 稳定 reason_code（机器可读，前端自行本地化，Backend 不发展示文案）。
 REASON_ENGINE_NOT_INSTALLED = "engine_not_installed"
 REASON_ENGINE_INIT_FAILED = "engine_init_failed"
+# #321：预构建随包 Runtime 的产品闭包损坏（缺依赖/原生 DLL/探针失败）。
+# 与通用 engine_init_failed 区分：客户端据此提示重新获取完整产品，
+# 不触发在线准备，也不把它当成其它引擎的通用初始化失败。
+REASON_PRODUCT_RUNTIME_DAMAGED = "product_runtime_damaged"
 REASON_ENGINE_LANGUAGE_UNAVAILABLE = "engine_language_unavailable"
 REASON_ENGINE_RETIRED = "engine_retired"
 #: 已退役引擎：枚举值仅供历史记录反序列化，解析一律 fail closed。
