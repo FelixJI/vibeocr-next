@@ -608,7 +608,7 @@ public sealed partial class MainWindow
 
   private async Task<PdfBaselineImageWait> WaitForPdfBaselineImageAsync(
     string phase, int expectedPageIndex, string afterMark, string pulseTag,
-    TimeSpan timeout, bool requireNew)
+    TimeSpan timeout, bool requireNew, bool requireClarity = false)
   {
     string altFragment = $"第 {expectedPageIndex + 1} 页";
     using var cancellation = new CancellationTokenSource(timeout);
@@ -650,7 +650,9 @@ public sealed partial class MainWindow
       // 仍取 mark 后最早事件，不因当前 src 升级错失首图。
       double witnessFrameAt = currentWitness?.FrameOpportunityAt ?? double.NegativeInfinity;
       if ((!requireNew || firstNew is not null) && pulse is not null && liveMatches
-          && currentWitness is not null && pulse.At >= witnessFrameAt)
+          && currentWitness is not null && pulse.At >= witnessFrameAt
+          && (!requireClarity || PdfBaselineClarity(
+            phase, currentWitness, pulse, snapshot, snapshot.Dpr).Status == "REACHED"))
       {
         return new PdfBaselineImageWait(firstNew, currentWitness, snapshot, pulse, firstNew is not null);
       }
@@ -971,6 +973,21 @@ public sealed partial class MainWindow
     PdfBaselineImageWait zoomIn = await WaitForPdfBaselineImageAsync(
       "warm-zoom-in", 0, "warm_zoom_in", "zoom_in", TimeSpan.FromSeconds(30), requireNew: false);
     long zoomInWitnessAt = PdfBaselineNow();
+    // 只在非性能样本等待高清，保持冻结基线的默认操作序列不变。
+    PdfBaselineImageWait? zoomClear = null;
+    if (detectionDelayMs > 0 || PaddleSmokeEnv("VIBEOCR_PDF_DEMAND_BROWSE_STRESS") == "1")
+    {
+      zoomClear = await WaitForPdfBaselineImageAsync(
+        "controlled-zoom-clear", 0, "warm_zoom_in", "zoom_in", TimeSpan.FromSeconds(30),
+        requireNew: false, requireClarity: true);
+      if (zoomClear.Pulse.Current!.ClientWidth < zoomIn.Pulse.Current!.ClientWidth ||
+          zoomClear.Pulse.Current.ClientHeight < zoomIn.Pulse.Current.ClientHeight)
+        throw new InvalidOperationException("Controlled zoom clarity lost the enlarged viewport.");
+      ValidatePdfBaselineResourceOwnership("controlled-zoom-clear", warmReturnState,
+        zoomClear with { NewWitness = null }, zoomClear.Snapshot, 0);
+      await ValidatePdfBaselineFinalImageAsync(
+        "controlled-zoom-clear", warmReturnState, 0, TimeSpan.FromSeconds(30));
+    }
     long zoomOutMarkAt = PdfBaselineNow();
     await MarkPdfBaselineBrowserAsync("warm_zoom_out");
     await ClickPdfBaselineZoomAsync("缩小页面");
@@ -1156,6 +1173,14 @@ public sealed partial class MainWindow
       performance_eligible = detectionDelayMs == 0 && !browseStress,
       continuous_browsing = browsing,
       controlled_detection = delayedDetection,
+      controlled_zoom_clarity = zoomClear is null ? null : new
+      {
+        first_frame = WarmFacts(zoomIn, "warm_zoom_in"),
+        clear_frame = WarmFacts(zoomClear, "warm_zoom_in"),
+        clarity = PdfBaselineClarity("controlled-zoom-clear", zoomClear.Witness,
+          zoomClear.Pulse, zoomClear.Snapshot, zoomClear.Snapshot.Dpr),
+        note = "行为样本独立等待高清；不纳入默认序列的性能聚合比较",
+      },
       resource_publications = finalSnapshot.Publications,
       demand_scheduler = commandHandler.Pdf.DemandDiagnostics,
       sample_status_rules = new
