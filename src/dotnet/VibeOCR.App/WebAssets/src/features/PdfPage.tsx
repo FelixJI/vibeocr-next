@@ -20,7 +20,13 @@ import {
   X,
 } from "lucide-react";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import type { AppAction, AppActions } from "../app/types";
 
@@ -67,6 +73,11 @@ interface PdfPageState {
   readonly rotation?: number;
   readonly width?: number;
   readonly height?: number;
+  /** Host 指定的页生命周期稳定键；缺省回退页码。 */
+  readonly pageKey?: number;
+  /** 仅受影响内容/几何变化时递增，不是全局 UI revision。 */
+  readonly contentGeneration?: number;
+  readonly detectionState?: "unknown" | "detecting" | "known" | "failed";
   readonly index: number;
   readonly statusCode: string;
   readonly thumbnail?: ResourceReference | null;
@@ -87,6 +98,36 @@ function pdfPages(value: unknown): readonly PdfPageState[] {
         resource(page.structuredResult) !== undefined)
     );
   });
+}
+
+// detectionState 仅在严格 canDemandPages 且字段存在时生效：unknown/detecting/
+// failed 不冒充确认无文字层；缺字段维持 legacy detected 语义。
+function pageDetectionLabel(
+  page: PdfPageState,
+  canDemandPages: boolean,
+): string {
+  if (canDemandPages && page.detectionState !== undefined)
+    switch (page.detectionState) {
+      case "unknown":
+        return "待检测";
+      case "detecting":
+        return "检测中";
+      case "failed":
+        return "检测失败";
+      case "known":
+        return page.hasTextLayer
+          ? page.addedThisSession
+            ? "本次 OCR 文字层"
+            : "已有文字层 / 来源未知"
+          : "无文字层";
+    }
+  return page.detected
+    ? page.hasTextLayer
+      ? page.addedThisSession
+        ? "本次 OCR 文字层"
+        : "已有文字层 / 来源未知"
+      : "无文字层"
+    : "检测中";
 }
 
 function PdfParameters({
@@ -256,8 +297,12 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   const busy = booleanValue(state.isBusy);
   const detected = numberValue(state.detectedCount);
   const layers = numberValue(state.textLayerCount);
+  const canDemandPages = state.canDemandPages === true;
+  // 按需模式下少量选页添加文字层不因全书 detectedCount 不足禁用；宿主仍做
+  // 必要检查。legacy 无 capability 保留全部检测保护。
   const canAdd =
-    state.canAddTextLayer === true && detected === numberValue(state.pageCount);
+    state.canAddTextLayer === true &&
+    (canDemandPages || detected === numberValue(state.pageCount));
   const engines = recognitionEngines(state.engines);
   const pageCount = numberValue(state.pageCount);
   const selectedPage = numberValue(state.selectedPage);
@@ -268,7 +313,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
   // 包装 run 每次渲染都新建：用 ref 持有最新包装（自动绑定当前
   // documentId/revision），监听器不随其重建。
   const wrappedActionsRef = useRef(actions);
-  useEffect(() => {
+  useLayoutEffect(() => {
     wrappedActionsRef.current = actions;
   });
   // Windows 文档命令快捷键：与工具栏按钮同一包装 run 入口（自动绑定当前
@@ -361,9 +406,254 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
       toIndex,
       revision: numberValue(state.revision),
     });
-  const activePage = pages.find((page) => page.index === selectedPage);
+  const activePage =
+    pages.find((page) => page.index === selectedPage) ??
+    (canDemandPages
+      ? pdfPages([state.currentPage]).find(
+          (page) => page.index === selectedPage,
+        )
+      : undefined);
   const activeStructured = resource(activePage?.structuredResult);
   const activeStructuredText = useResourceText(activeStructured);
+  const activeWidth = activePage?.width;
+  const activeHeight = activePage?.height;
+  const activeLogicalSize =
+    canDemandPages &&
+    typeof activeWidth === "number" &&
+    activeWidth > 0 &&
+    typeof activeHeight === "number" &&
+    activeHeight > 0
+      ? { width: activeWidth, height: activeHeight }
+      : undefined;
+  const activePageKey =
+    typeof activePage?.pageKey === "number" &&
+    Number.isFinite(activePage.pageKey)
+      ? activePage.pageKey
+      : selectedPage;
+  const activeContentGeneration =
+    typeof activePage?.contentGeneration === "number" &&
+    Number.isFinite(activePage.contentGeneration)
+      ? activePage.contentGeneration
+      : "";
+  // 检查组件 key 与预览尺寸采用相同的页内容身份。
+  const demandIdentity = canDemandPages
+    ? `${documentId}:${stringValue(state.sessionId)}:${activePageKey}:${activeContentGeneration}`
+    : "";
+  // 按需页面需求上报（canDemandPages 严格 true 才启用）：合并缩略图可见性与
+  // 检查页预览几何，100ms 量级 debounce + 内容去重；单个在途命令 + 一个最新
+  // pending，响应未确认不自动重试同内容。沿 wrappedActionsRef 自动绑定
+  // documentId/documentRevision，不等待旧整批资源。
+  const pageListRef = useRef<HTMLOListElement>(null);
+  const demandVisibleRef = useRef<ReadonlySet<number>>(new Set());
+  const demandObserverRef = useRef<IntersectionObserver | null>(null);
+  const demandThumbnailEdgeRef = useRef(0);
+  const demandPreviewEdgeRef = useRef<{
+    readonly identity: string;
+    readonly maxEdge: number;
+  } | null>(null);
+  const demandPageRef = useRef(-1);
+  const demandIdentityRef = useRef("");
+  const demandRevisionRef = useRef(0);
+  const demandPendingRef = useRef<{
+    readonly signature: string;
+    readonly page: number;
+    readonly visiblePages: readonly number[];
+    readonly thumbnailSize?: number;
+    readonly previewMaxEdge?: number;
+  } | null>(null);
+  const demandSignatureRef = useRef<string | null>(null);
+  const demandInFlightRef = useRef(false);
+  const demandTimerRef = useRef<number | undefined>(undefined);
+  const demandDispatchRef = useRef<() => void>(() => undefined);
+  const demandAliveRef = useRef(true);
+  const computeDemand = useCallback(() => {
+    const page = demandPageRef.current;
+    const visiblePages = Array.from(demandVisibleRef.current)
+      .filter((index) => Number.isInteger(index) && index >= 0)
+      .sort((a, b) => a - b)
+      .slice(0, 64);
+    // 初始 observer 未回调时可见集为空，不把整个 64 页传输窗当可见。
+    const thumbnailSize =
+      demandThumbnailEdgeRef.current > 0
+        ? Math.max(
+            1,
+            Math.ceil(
+              demandThumbnailEdgeRef.current * (window.devicePixelRatio || 1),
+            ),
+          )
+        : undefined;
+    const previewMaxEdge =
+      page >= 0 &&
+      demandPreviewEdgeRef.current?.identity === demandIdentityRef.current
+        ? Math.max(1, Math.ceil(demandPreviewEdgeRef.current.maxEdge))
+        : undefined;
+    const payload = { page, visiblePages, thumbnailSize, previewMaxEdge };
+    return {
+      ...payload,
+      signature: JSON.stringify([
+        demandRevisionRef.current,
+        demandIdentityRef.current,
+        payload,
+      ]),
+    };
+  }, []);
+  const scheduleDemand = useCallback(() => {
+    demandPendingRef.current = computeDemand();
+    if (demandTimerRef.current !== undefined) return;
+    demandTimerRef.current = window.setTimeout(() => {
+      demandTimerRef.current = undefined;
+      demandDispatchRef.current();
+    }, 100);
+  }, [computeDemand]);
+  const dispatchDemand = useCallback(() => {
+    if (demandInFlightRef.current) return;
+    const current = demandPendingRef.current;
+    if (!current) return;
+    const { signature } = current;
+    if (signature === demandSignatureRef.current) return;
+    demandInFlightRef.current = true;
+    demandSignatureRef.current = signature;
+    void wrappedActionsRef.current
+      .run({
+        type: "pdf.setDemand",
+        page: current.page,
+        visiblePages: [...current.visiblePages],
+        ...(current.thumbnailSize !== undefined
+          ? { thumbnailSize: current.thumbnailSize }
+          : {}),
+        ...(current.previewMaxEdge !== undefined
+          ? { previewMaxEdge: current.previewMaxEdge }
+          : {}),
+      })
+      .catch(() => false)
+      .then(() => {
+        demandInFlightRef.current = false;
+        // 未确认不自动重试同内容；仅在内容更新后派发最新值。
+        if (!demandAliveRef.current) return;
+        const pending = demandPendingRef.current;
+        if (pending && pending.signature !== signature) scheduleDemand();
+      });
+  }, [scheduleDemand]);
+  useEffect(() => {
+    demandDispatchRef.current = dispatchDemand;
+    demandAliveRef.current = true;
+    return () => {
+      demandAliveRef.current = false;
+      if (demandTimerRef.current !== undefined) {
+        window.clearTimeout(demandTimerRef.current);
+        demandTimerRef.current = undefined;
+      }
+    };
+  }, [dispatchDemand]);
+  const measureThumbnailEdge = useCallback(() => {
+    const thumbnail = pageListRef.current?.querySelector(
+      ".pdf-thumbnail-button",
+    );
+    if (!thumbnail) return false;
+    const rect = thumbnail.getBoundingClientRect();
+    const edge = Math.max(rect.width, rect.height);
+    if (!(edge > 0) || edge === demandThumbnailEdgeRef.current) return false;
+    demandThumbnailEdgeRef.current = edge;
+    return true;
+  }, []);
+  // 传输窗内容变化（翻窗/增删页）时重建 observer；旧 observer 回调不再投递。
+  const windowSignature = pages.map((page) => page.index).join(",");
+  useEffect(() => {
+    if (!canDemandPages) return;
+    scheduleDemand();
+    if (windowSignature === "") return;
+    if (typeof IntersectionObserver === "undefined") return;
+    const visible = new Set<number>();
+    const observer = new IntersectionObserver((entries) => {
+      if (demandObserverRef.current !== observer) return;
+      let changed = false;
+      for (const entry of entries) {
+        const index = Number((entry.target as HTMLElement).dataset.pageIndex);
+        if (!Number.isInteger(index) || index < 0) continue;
+        if (entry.isIntersecting) {
+          if (!visible.has(index)) {
+            visible.add(index);
+            changed = true;
+          }
+        } else if (visible.delete(index)) changed = true;
+      }
+      if (measureThumbnailEdge()) changed = true;
+      if (changed) scheduleDemand();
+    });
+    demandObserverRef.current = observer;
+    demandVisibleRef.current = visible;
+    const list = pageListRef.current;
+    if (list)
+      list
+        .querySelectorAll("li[data-page-index]")
+        .forEach((item) => observer.observe(item));
+    let resize: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== "undefined" && list) {
+      resize = new ResizeObserver(() => {
+        if (measureThumbnailEdge()) scheduleDemand();
+      });
+      resize.observe(list);
+    }
+    return () => {
+      if (demandObserverRef.current === observer)
+        demandObserverRef.current = null;
+      if (demandVisibleRef.current === visible)
+        demandVisibleRef.current = new Set();
+      observer.disconnect();
+      resize?.disconnect();
+    };
+  }, [canDemandPages, windowSignature, scheduleDemand, measureThumbnailEdge]);
+  // DPR 变化重新计算 thumbnailSize（CSS 目标边×DPR）；每次变化后重绑当前
+  // resolution 查询，1→1.5 触发后再 1.5→2 也能触发。
+  const [thumbnailDpr, setThumbnailDpr] = useState(
+    () => window.devicePixelRatio || 1,
+  );
+  useEffect(() => {
+    if (!canDemandPages) return;
+    const query = window.matchMedia?.(`(resolution: ${thumbnailDpr}dppx)`);
+    if (!query || typeof query.addEventListener !== "function") return;
+    const onChange = () => {
+      setThumbnailDpr(window.devicePixelRatio || 1);
+      scheduleDemand();
+    };
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [canDemandPages, scheduleDemand, thumbnailDpr]);
+  const inspectionMounted = hasCurrentPage && state.canInspectPage === true;
+  const revisionValue = numberValue(state.revision);
+  useLayoutEffect(() => {
+    demandPageRef.current = hasCurrentPage ? selectedPage : -1;
+    demandIdentityRef.current = demandIdentity;
+    demandRevisionRef.current = revisionValue;
+    if (
+      !inspectionMounted ||
+      demandPreviewEdgeRef.current?.identity !== demandIdentity
+    )
+      demandPreviewEdgeRef.current = null;
+    if (!canDemandPages) demandPendingRef.current = null;
+    if (canDemandPages) scheduleDemand();
+  }, [
+    canDemandPages,
+    hasCurrentPage,
+    inspectionMounted,
+    selectedPage,
+    demandIdentity,
+    revisionValue,
+    scheduleDemand,
+  ]);
+  const handlePreviewDemand = useCallback(
+    (identity: string, maxEdge: number) => {
+      if (identity !== demandIdentityRef.current || maxEdge <= 0) return;
+      demandPreviewEdgeRef.current = { identity, maxEdge };
+      scheduleDemand();
+    },
+    [scheduleDemand],
+  );
+  // 新能力 key：document/session/pageKey（缺省页码）/contentGeneration，禁止
+  // preview/inspect URL 入 key，渐进资源不重挂检查组件；legacy 保留原 key。
+  const inspectionKey = canDemandPages
+    ? `demand:${demandIdentity}`
+    : `${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`;
   return (
     <Workspace
       className="pdf-page"
@@ -479,7 +769,11 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                     已选 {selectedPages.length} / {pageCount} 页
                   </span>
                 </div>
-                <ol className="pdf-page-list" aria-label="PDF 页面缩略图">
+                <ol
+                  ref={pageListRef}
+                  className="pdf-page-list"
+                  aria-label="PDF 页面缩略图"
+                >
                   {pages.map((page) => {
                     const thumbnail = resource(page.thumbnail);
                     return (
@@ -521,26 +815,33 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                             });
                           }}
                         />
-                        {thumbnail ? (
-                          <button
-                            type="button"
-                            className="pdf-thumbnail-button"
-                            aria-label={`检查第 ${page.index + 1} 页`}
-                            onClick={() =>
-                              actions.run({
-                                type: "pdf.setCurrentPage",
-                                page: page.index,
-                              })
-                            }
-                          >
+                        {/* 检查页按钮始终存在：缩略图缺失时用占位内容作
+                         * 按钮，不等缩略图即可选页。 */}
+                        <button
+                          type="button"
+                          className="pdf-thumbnail-button"
+                          aria-label={`检查第 ${page.index + 1} 页`}
+                          onClick={() =>
+                            actions.run({
+                              type: "pdf.setCurrentPage",
+                              page: page.index,
+                            })
+                          }
+                        >
+                          {thumbnail ? (
                             <img
                               alt={`第 ${page.index + 1} 页缩略图`}
                               src={thumbnail.url}
                             />
-                          </button>
-                        ) : (
-                          <span className="pdf-thumbnail-placeholder">PDF</span>
-                        )}
+                          ) : (
+                            <span
+                              className="pdf-thumbnail-placeholder"
+                              aria-hidden="true"
+                            >
+                              PDF
+                            </span>
+                          )}
+                        </button>
                         <span>第 {page.index + 1} 页</span>
                         <div className="pdf-page-move">
                           <Button
@@ -558,15 +859,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                             icon={<ArrowDown size={14} />}
                           />
                         </div>
-                        <span>
-                          {page.detected
-                            ? page.hasTextLayer
-                              ? page.addedThisSession
-                                ? "本次 OCR 文字层"
-                                : "已有文字层 / 来源未知"
-                              : "无文字层"
-                            : "检测中"}
-                        </span>
+                        <span>{pageDetectionLabel(page, canDemandPages)}</span>
                         <span>{statusLabel(page.statusCode, "待处理")}</span>
                         {(page.width ?? 0) > 0 && (
                           <span>
@@ -762,7 +1055,7 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
               <Panel title="页面检查">
                 {hasCurrentPage && state.canInspectPage === true ? (
                   <PdfInspection
-                    key={`${documentId}:${stringValue(state.sessionId)}:${numberValue(state.revision)}:${selectedPage}:${resource(state.pagePreview)?.url ?? ""}:${resource(state.pageInspect)?.url ?? ""}`}
+                    key={inspectionKey}
                     position={
                       state.previewPosition &&
                       typeof state.previewPosition === "object"
@@ -782,6 +1075,12 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                     registerPositionFlush={registerPositionFlush}
                     documentId={documentId}
                     registerNativePositionFlush={registerNativePreviewFlush}
+                    canDemandPages={canDemandPages || undefined}
+                    logicalSize={activeLogicalSize}
+                    demandIdentity={demandIdentity || undefined}
+                    reportPreviewDemand={
+                      canDemandPages ? handlePreviewDemand : undefined
+                    }
                   />
                 ) : hasCurrentPage && activePage?.thumbnail ? (
                   <img

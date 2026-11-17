@@ -4,8 +4,17 @@ import {
   Textarea,
   Tooltip,
 } from "@fluentui/react-components";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { AppActions } from "../app/types";
+
+import { progressivePreviewDecoder } from "./progressivePreviewDecoder";
 
 import { isImeCompositionEvent } from "../app/keyboard";
 
@@ -116,6 +125,10 @@ export function PdfInspection({
   registerPositionFlush,
   registerNativePositionFlush,
   documentId,
+  canDemandPages,
+  logicalSize,
+  demandIdentity,
+  reportPreviewDemand,
 }: {
   readonly position?: Readonly<Record<string, unknown>>;
   readonly page: number;
@@ -133,6 +146,19 @@ export function PdfInspection({
   readonly registerPositionFlush?: (
     flush: (() => Promise<void>) | null,
   ) => void;
+  /** 严格 true 时启用按需预览：逻辑尺寸来自页面 points，渐进资源经共享
+   * decoder decode 完成后再替换旧图；缺字段走 legacy 自然像素语义。 */
+  readonly canDemandPages?: boolean;
+  /** 当前页 PDF points（width/height），仅 canDemandPages 时作为缩放权威。 */
+  readonly logicalSize?: {
+    readonly width: number;
+    readonly height: number;
+  };
+  /** 当前检查身份（doc/session/pageKey/gen）：共享 decoder 的所有权 token。 */
+  readonly demandIdentity?: string;
+  /** 当前页按 CSS 显示几何×DPR 需要的最长像素边（正整数），携带 identity
+   * 供父级配对，避免迟到旧页尺寸绑定到新选中页。 */
+  readonly reportPreviewDemand?: (identity: string, maxEdge: number) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const drag = useRef<{
@@ -145,7 +171,10 @@ export function PdfInspection({
   const [error, setError] = useState("");
   const [truncated, setTruncated] = useState(false);
   const [imageFailed, setImageFailed] = useState(false);
-  const [dimensions, setDimensions] = useState({ width: 612, height: 792 });
+  const [imageDimensions, setImageDimensions] = useState({
+    width: 612,
+    height: 792,
+  });
   const [space, setSpace] = useState({ width: 600, height: 480 });
   const [zoom, setZoom] = useState<number | null>(
     typeof position?.zoom === "number" ? position.zoom : null,
@@ -315,6 +344,78 @@ export function PdfInspection({
       alive.current = false;
     };
   }, []);
+  // 按需预览（canDemandPages 严格 true）：缩放/坐标权威固定来自页面 points
+  // （96/72 转 CSS 像素）；legacy 路径保持 onLoad naturalWidth 语义。
+  const demandMode = canDemandPages === true;
+  const previewUrl = preview?.url ?? "";
+  const logicalDimensions =
+    demandMode && logicalSize && logicalSize.width > 0 && logicalSize.height > 0
+      ? {
+          width: (logicalSize.width * 96) / 72,
+          height: (logicalSize.height * 96) / 72,
+        }
+      : undefined;
+  // 拿不到有效逻辑 geometry 时仅显示基础图，但不用自然像素当缩放权威：
+  // demand 模式下 imageDimensions 永不更新，保持默认几何。
+  const dimensions = demandMode
+    ? (logicalDimensions ?? imageDimensions)
+    : imageDimensions;
+  const [devicePixelRatio, setDevicePixelRatio] = useState(
+    () => window.devicePixelRatio || 1,
+  );
+  // 每次变化后重绑当前 resolution 查询：1→1.5 触发后再 1.5→2 也能触发。
+  useEffect(() => {
+    if (!demandMode) return;
+    const media = window.matchMedia?.(`(resolution: ${devicePixelRatio}dppx)`);
+    if (!media || typeof media.addEventListener !== "function") return;
+    const onChange = () => setDevicePixelRatio(window.devicePixelRatio || 1);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [demandMode, devicePixelRatio]);
+  // 渐进预览：共享 decoder（跨页/文档/路由卸载唯一 issued decode）；首图与
+  // 升级同一路径，空 committed 不回退最新 URL，展示只依赖已提交图。
+  const progressive = useSyncExternalStore(
+    progressivePreviewDecoder.subscribe,
+    progressivePreviewDecoder.getSnapshot,
+  );
+  const [previewOwner] = useState(() => Symbol());
+  useLayoutEffect(() => {
+    if (!demandMode) return;
+    return () => progressivePreviewDecoder.release(previewOwner);
+  }, [demandMode, previewOwner]);
+  useLayoutEffect(() => {
+    if (demandMode) progressivePreviewDecoder.request(previewOwner, previewUrl);
+  }, [demandMode, previewOwner, previewUrl]);
+  const ownsPreview = demandMode && progressive.owner === previewOwner;
+  const decodeFailed = ownsPreview && progressive.failed;
+  const committedImage = ownsPreview ? progressive.committed : null;
+  const previewAlt = `当前第 ${page + 1} 页高清预览`;
+  const restoreImagePosition = useCallback(() => {
+    if (restoredImage.current) return;
+    restoredImage.current = true;
+    requestAnimationFrame(() => {
+      const node = viewport.current;
+      const saved = initialPosition.current;
+      if (alive.current && node && saved && !restoredPosition.current) {
+        node.scrollLeft = typeof saved.left === "number" ? saved.left : 0;
+        node.scrollTop = typeof saved.top === "number" ? saved.top : 0;
+        restoredPosition.current = true;
+      }
+    });
+  }, []);
+  const mountDecodedImage = useCallback(
+    (sheet: HTMLDivElement | null) => {
+      if (!sheet || !committedImage) return;
+      const detach = progressivePreviewDecoder.attach(
+        previewOwner,
+        sheet,
+        previewAlt,
+      );
+      if (detach) restoreImagePosition();
+      return detach;
+    },
+    [committedImage, previewOwner, previewAlt, restoreImagePosition],
+  );
   useEffect(() => {
     const element = viewport.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -360,6 +461,31 @@ export function PdfInspection({
     (space.height - 24) / dimensions.height,
   );
   const scale = zoom ?? Math.max(0.01, fit);
+  // 缩放/fit/viewport resize/DPR 变化重新报告当前页需要的最长像素边；携带
+  // 检查身份供父级配对；拿不到有效逻辑 geometry 时不报告虚构值。
+  const logicalWidth = logicalDimensions?.width ?? 0;
+  const logicalHeight = logicalDimensions?.height ?? 0;
+  useEffect(() => {
+    if (
+      !demandMode ||
+      !reportPreviewDemand ||
+      logicalWidth <= 0 ||
+      logicalHeight <= 0
+    )
+      return;
+    const maxEdge = Math.ceil(
+      Math.max(logicalWidth, logicalHeight) * scale * devicePixelRatio,
+    );
+    if (maxEdge > 0) reportPreviewDemand(demandIdentity ?? "", maxEdge);
+  }, [
+    demandMode,
+    reportPreviewDemand,
+    demandIdentity,
+    logicalWidth,
+    logicalHeight,
+    scale,
+    devicePixelRatio,
+  ]);
   const changeZoom = (factor: number) =>
     setZoom(Math.max(0.05, Math.min(8, scale * factor)));
   const flip = (target: number) => {
@@ -443,13 +569,17 @@ export function PdfInspection({
         </Tooltip>
       </div>
       <p className="pdf-inspection-hint">切页或修订变化会丢弃未提交草稿。</p>
-      {(status === "pdf.inspect.failed" || error || imageFailed) && (
+      {(status === "pdf.inspect.failed" ||
+        error ||
+        imageFailed ||
+        decodeFailed) && (
         <div role="alert">
           <p>{error || "高清页面读取失败，请重试当前页。"}</p>
           <Button
             onClick={() => {
               setError("");
               setImageFailed(false);
+              progressivePreviewDecoder.retry(previewOwner);
               void actions.run({ type: "pdf.retryPageInspect" });
             }}
           >
@@ -532,45 +662,30 @@ export function PdfInspection({
           drag.current = null;
         }}
       >
-        {preview ? (
+        {(demandMode ? committedImage : previewUrl) ? (
           <div
             className="pdf-inspection-sheet"
+            ref={mountDecodedImage}
             style={{
               width: dimensions.width * scale,
               height: dimensions.height * scale,
             }}
           >
-            <img
-              src={preview.url}
-              alt={`当前第 ${page + 1} 页高清预览`}
-              draggable={false}
-              onError={() => setImageFailed(true)}
-              onLoad={(event) => {
-                setDimensions({
-                  width: event.currentTarget.naturalWidth || 612,
-                  height: event.currentTarget.naturalHeight || 792,
-                });
-                if (!restoredImage.current) {
-                  restoredImage.current = true;
-                  requestAnimationFrame(() => {
-                    const node = viewport.current,
-                      saved = initialPosition.current;
-                    if (
-                      alive.current &&
-                      node &&
-                      saved &&
-                      !restoredPosition.current
-                    ) {
-                      node.scrollLeft =
-                        typeof saved.left === "number" ? saved.left : 0;
-                      node.scrollTop =
-                        typeof saved.top === "number" ? saved.top : 0;
-                      restoredPosition.current = true;
-                    }
+            {!demandMode && (
+              <img
+                src={previewUrl}
+                alt={previewAlt}
+                draggable={false}
+                onError={() => setImageFailed(true)}
+                onLoad={(event) => {
+                  setImageDimensions({
+                    width: event.currentTarget.naturalWidth || 612,
+                    height: event.currentTarget.naturalHeight || 792,
                   });
-                }
-              }}
-            />
+                  restoreImagePosition();
+                }}
+              />
+            )}
             {showBoxes &&
               blocks.map((block) => (
                 <button
@@ -603,11 +718,11 @@ export function PdfInspection({
                 />
               ))}
           </div>
-        ) : (
+        ) : !decodeFailed && status !== "pdf.inspect.failed" ? (
           <p aria-live="polite">
             {count > 0 ? "正在读取当前页高清预览…" : "打开文档后检查文字层。"}
           </p>
-        )}
+        ) : null}
       </div>
       {truncated && (
         <p role="status">

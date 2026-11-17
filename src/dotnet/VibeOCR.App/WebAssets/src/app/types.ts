@@ -135,6 +135,7 @@ export type AppActionType =
   | "pdf.exportDocuments"
   | "pdf.cancelExport"
   | "pdf.setPreviewPosition"
+  | "pdf.setDemand"
   | "pdf.open"
   | "pdf.rotate"
   | "pdf.orient"

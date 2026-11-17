@@ -6,7 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppAction, AppActions } from "../app/types";
 import { PdfInspection } from "./PdfInspection";
 
@@ -651,6 +651,461 @@ describe("PDF correction Escape composition boundary", () => {
     expect(value.actions.run).toHaveBeenCalledWith({
       type: "pdf.setCurrentPage",
       page: 1,
+    });
+  });
+});
+
+describe("on-demand preview geometry and progressive swap (canDemandPages)", () => {
+  const identity = "doc-7/p0";
+  let image: HTMLImageElement | undefined;
+  let createImage: ReturnType<typeof vi.fn>;
+  let decode: () => Promise<void>;
+  beforeEach(() => {
+    image = undefined;
+    decode = vi.fn().mockResolvedValue(undefined);
+    createImage = vi.fn(function () {
+      image = document.createElement("img");
+      image.decode = () => decode();
+      return image;
+    });
+    vi.stubGlobal("Image", createImage);
+  });
+  afterEach(() => {
+    cleanup();
+    if (image?.onerror) fireEvent.error(image);
+  });
+  const currentPreviewDecodeVehicle = () => (image?.onload ? image : null);
+  const currentPreviewDecodeUrl = () =>
+    currentPreviewDecodeVehicle()?.getAttribute("src") ?? null;
+  const finishPreviewDecode = () =>
+    act(async () => {
+      fireEvent.load(currentPreviewDecodeVehicle()!);
+    });
+  function installResolutionMedia() {
+    const queries = new Map<string, EventTarget>();
+    vi.stubGlobal("devicePixelRatio", 1);
+    vi.stubGlobal("matchMedia", (query: string) => {
+      const target = queries.get(query) ?? new EventTarget();
+      queries.set(query, target);
+      return target;
+    });
+    return (next: number) => {
+      const previous = window.devicePixelRatio;
+      act(() => {
+        vi.stubGlobal("devicePixelRatio", next);
+        queries
+          .get(`(resolution: ${previous}dppx)`)!
+          .dispatchEvent(new Event("change"));
+      });
+    };
+  }
+
+  it("uses page points as the scale authority, ignores natural pixels and re-reports the pixel edge on zoom", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const reportPreviewDemand = vi.fn();
+    render(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        logicalSize={{ width: 612, height: 792 }}
+        reportPreviewDemand={reportPreviewDemand}
+      />,
+    );
+    // 612×792pt → 816×1056 CSS；默认适页 fit=456/1056，最长边需求 456px（DPR=1）。
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenCalledWith(identity, 456),
+    );
+    expect(screen.getByText("43%")).toBeInTheDocument();
+    // 首图同样经共享 decoder：settle 前不显示。
+    await finishPreviewDecode();
+    expect(await screen.findByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/hd.png",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenLastCalledWith(identity, 1056),
+    );
+    // onLoad 携带的 naturalWidth 不改变缩放/坐标权威。
+    fireEvent.load(screen.getByAltText("当前第 1 页高清预览"));
+    expect(document.querySelector(".pdf-inspection-sheet")).toHaveStyle({
+      width: "816px",
+      height: "1056px",
+    });
+    // 无有效逻辑 geometry 时不报告虚构边缘。
+    const missing = props();
+    const missingReport = vi.fn();
+    render(
+      <PdfInspection
+        {...missing}
+        canDemandPages
+        reportPreviewDemand={missingReport}
+      />,
+    );
+    await finishPreviewDecode();
+    expect(missingReport).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy natural-pixel semantics and no reports without the capability", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const reportPreviewDemand = vi.fn();
+    render(
+      <PdfInspection
+        {...value}
+        logicalSize={{ width: 612, height: 792 }}
+        reportPreviewDemand={reportPreviewDemand}
+      />,
+    );
+    expect(reportPreviewDemand).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    fireEvent.load(screen.getByAltText("当前第 1 页高清预览"));
+    expect(document.querySelector(".pdf-inspection-sheet")).toHaveStyle({
+      width: "612px",
+      height: "792px",
+    });
+  });
+
+  it("swaps the decoded image without resetting zoom or the same-page draft", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        logicalSize={{ width: 612, height: 792 }}
+      />,
+    );
+    await finishPreviewDecode();
+    expect(await screen.findByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/hd.png",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /人工修改 · 原文/ }),
+    );
+    fireEvent.change(screen.getByLabelText("校正文字"), {
+      target: { value: "低清草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    view.rerender(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        logicalSize={{ width: 612, height: 792 }}
+        preview={{ url: "/hd2.png" }}
+      />,
+    );
+    // decode 完成前不替换旧图；共享 decoder 是唯一在途解码。
+    expect(screen.getByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/hd.png",
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/hd2.png");
+    await finishPreviewDecode();
+    expect(screen.getByAltText("当前第 1 页高清预览")).toBe(image);
+    expect(image).toHaveAttribute("src", "/hd2.png");
+    expect(currentPreviewDecodeVehicle()).toBeNull();
+    // zoom 与正在编辑的同页草稿不丢：缩放权威仍是逻辑几何（816×1056）。
+    expect(document.querySelector(".pdf-inspection-sheet")).toHaveStyle({
+      width: "816px",
+      height: "1056px",
+    });
+    expect(screen.getByLabelText("校正文字")).toHaveValue("低清草稿");
+    view.rerender(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        logicalSize={{ width: 612, height: 792 }}
+        preview={undefined}
+      />,
+    );
+    expect(screen.getByAltText("当前第 1 页高清预览")).toBe(image);
+    expect(screen.getByLabelText("校正文字")).toHaveValue("低清草稿");
+  });
+
+  it("serializes rapid URL changes: one issued decode, latest wanted wins after it settles", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection {...value} canDemandPages demandIdentity={identity} />,
+    );
+    await finishPreviewDecode();
+    await screen.findByAltText("当前第 1 页高清预览");
+    view.rerender(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        preview={{ url: "/mid.png" }}
+      />,
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/mid.png");
+    // /mid.png decode 在途：最新 /high.png 只作为最新需求，不累积第二个在途解码。
+    view.rerender(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        preview={{ url: "/high.png" }}
+      />,
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/mid.png");
+    // 在途 decode 安全结束：不提交被替换的 /mid.png，随后处理最新 /high.png。
+    await finishPreviewDecode();
+    expect(screen.getByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/hd.png",
+    );
+    await waitFor(() => expect(currentPreviewDecodeUrl()).toBe("/high.png"));
+    await finishPreviewDecode();
+    expect(screen.getByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/high.png",
+    );
+    expect(currentPreviewDecodeVehicle()).toBeNull();
+  });
+
+  it("drops the wrong-page image and stale decode callbacks after a page switch", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection
+        key="page0"
+        {...value}
+        canDemandPages
+        demandIdentity={`${identity}#0`}
+      />,
+    );
+    await finishPreviewDecode();
+    await screen.findByAltText("当前第 1 页高清预览");
+    view.rerender(
+      <PdfInspection
+        key="page0"
+        {...value}
+        canDemandPages
+        demandIdentity={`${identity}#0`}
+        preview={{ url: "/hd-page0.png" }}
+      />,
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/hd-page0.png");
+    view.rerender(
+      <PdfInspection
+        key="page1"
+        {...value}
+        page={1}
+        inspect={{ url: "/inspect-1.json" }}
+        preview={{ url: "/hd-page1.png" }}
+        canDemandPages
+        demandIdentity={`${identity}#1`}
+      />,
+    );
+    // 换页换 owner：不保留错页图（回到读取占位），旧 issued decode 继续到 settle。
+    expect(screen.getByText("正在读取当前页高清预览…")).toBeInTheDocument();
+    expect(currentPreviewDecodeUrl()).toBe("/hd-page0.png");
+    await finishPreviewDecode();
+    expect(currentPreviewDecodeUrl()).toBe("/hd-page1.png");
+    await finishPreviewDecode();
+    await waitFor(() =>
+      expect(screen.getByAltText("当前第 2 页高清预览")).toHaveAttribute(
+        "src",
+        "/hd-page1.png",
+      ),
+    );
+  });
+
+  it("keeps the previous image when a progressive decode fails and only retries via the explicit retry entry", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection {...value} canDemandPages demandIdentity={identity} />,
+    );
+    await finishPreviewDecode();
+    await screen.findByAltText("当前第 1 页高清预览");
+    view.rerender(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        preview={{ url: "/broken.png" }}
+      />,
+    );
+    const previousImage = screen.getByAltText("当前第 1 页高清预览");
+    fireEvent.error(currentPreviewDecodeVehicle()!);
+    expect(screen.getByAltText("当前第 1 页高清预览")).toBe(previousImage);
+    expect(previousImage).toHaveAttribute("src", "/hd.png");
+    expect(currentPreviewDecodeVehicle()).toBeNull();
+    expect(
+      await screen.findByText("高清页面读取失败，请重试当前页。"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重试当前页" }));
+    expect(value.actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.retryPageInspect",
+    });
+    // 显式重试清除失败障碍后可再次发起同一 URL 的解码。
+    expect(currentPreviewDecodeUrl()).toBe("/broken.png");
+  });
+
+  it("routes the first and later previews through one issued decode without falling back to the latest URL", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection
+        {...value}
+        preview={undefined}
+        canDemandPages
+        demandIdentity={identity}
+      />,
+    );
+    expect(screen.getByText("正在读取当前页高清预览…")).toBeInTheDocument();
+    expect(currentPreviewDecodeVehicle()).toBeNull();
+    view.rerender(
+      <PdfInspection
+        {...value}
+        preview={{ url: "/a.png" }}
+        canDemandPages
+        demandIdentity={identity}
+      />,
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/a.png");
+    // A 未 settle：不显示任何图，也不把最新 URL 直接放进主图。
+    expect(
+      screen.queryByAltText("当前第 1 页高清预览"),
+    ).not.toBeInTheDocument();
+    view.rerender(
+      <PdfInspection
+        {...value}
+        preview={{ url: "/b.png" }}
+        canDemandPages
+        demandIdentity={identity}
+      />,
+    );
+    view.rerender(
+      <PdfInspection
+        {...value}
+        preview={{ url: "/c.png" }}
+        canDemandPages
+        demandIdentity={identity}
+      />,
+    );
+    // 快速 A/B/C：仍只有一个实际 issued decode（A），未 settle 不换图。
+    expect(currentPreviewDecodeUrl()).toBe("/a.png");
+    expect(
+      screen.queryByAltText("当前第 1 页高清预览"),
+    ).not.toBeInTheDocument();
+    await finishPreviewDecode();
+    // A 已被 B/C 取代：结果不提交，直接处理最新 C。
+    await waitFor(() => expect(currentPreviewDecodeUrl()).toBe("/c.png"));
+    expect(
+      screen.queryByAltText("当前第 1 页高清预览"),
+    ).not.toBeInTheDocument();
+    await finishPreviewDecode();
+    expect(await screen.findByAltText("当前第 1 页高清预览")).toHaveAttribute(
+      "src",
+      "/c.png",
+    );
+  });
+
+  it("keeps a single issued decode across repeated remounts and never publishes the stale page", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const value = props();
+    const view = render(
+      <PdfInspection
+        key="p0"
+        {...value}
+        canDemandPages
+        demandIdentity="doc/remount#0"
+        preview={{ url: "/a.png" }}
+      />,
+    );
+    expect(currentPreviewDecodeUrl()).toBe("/a.png");
+    let resolveDecode!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      resolveDecode = resolve;
+    });
+    decode = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(undefined);
+    fireEvent.load(currentPreviewDecodeVehicle()!);
+    expect(decode).toHaveBeenCalledTimes(1);
+    view.unmount();
+    const nextView = render(
+      <PdfInspection
+        key="p1"
+        {...value}
+        canDemandPages
+        demandIdentity="doc/remount#1"
+        preview={{ url: "/b.png" }}
+      />,
+    );
+    nextView.rerender(
+      <PdfInspection
+        key="p2"
+        {...value}
+        page={2}
+        inspect={{ url: "/inspect-2.json" }}
+        canDemandPages
+        demandIdentity="doc/remount#2"
+        preview={{ url: "/c.png" }}
+      />,
+    );
+    // 连续两次重挂、旧 decode 未 settle：唯一 issued 仍是 A，新页等待。
+    expect(createImage).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByAltText("当前第 3 页高清预览"),
+    ).not.toBeInTheDocument();
+    await act(async () => resolveDecode());
+    // 旧 owner（p0）结果丢弃，不展示 /a.png 或 /b.png。
+    await waitFor(() => expect(currentPreviewDecodeUrl()).toBe("/c.png"));
+    expect(
+      screen.queryByAltText("当前第 3 页高清预览"),
+    ).not.toBeInTheDocument();
+    await finishPreviewDecode();
+    expect(await screen.findByAltText("当前第 3 页高清预览")).toHaveAttribute(
+      "src",
+      "/c.png",
+    );
+  });
+
+  it("rebinds the resolution query after each DPR change and keeps CSS geometry stable", async () => {
+    resource({ page: 0, ocr_blocks: [ocr] });
+    const setDpr = installResolutionMedia();
+    const value = props();
+    const reportPreviewDemand = vi.fn();
+
+    render(
+      <PdfInspection
+        {...value}
+        canDemandPages
+        demandIdentity={identity}
+        logicalSize={{ width: 612, height: 792 }}
+        reportPreviewDemand={reportPreviewDemand}
+      />,
+    );
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenCalledWith(identity, 456),
+    );
+    await finishPreviewDecode();
+    fireEvent.click(await screen.findByRole("button", { name: "100%" }));
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenLastCalledWith(identity, 1056),
+    );
+    // 1→1.5 触发重报。
+    setDpr(1.5);
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenLastCalledWith(identity, 1584),
+    );
+    // 重绑当前 resolution 后 1.5→2 仍触发；CSS 几何不随 DPR 漂移。
+    setDpr(2);
+    await waitFor(() =>
+      expect(reportPreviewDemand).toHaveBeenLastCalledWith(identity, 2112),
+    );
+    expect(document.querySelector(".pdf-inspection-sheet")).toHaveStyle({
+      width: "816px",
+      height: "1056px",
     });
   });
 });
