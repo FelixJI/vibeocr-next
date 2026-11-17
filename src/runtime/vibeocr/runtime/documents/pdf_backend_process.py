@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 import socket
 import sys
 import threading
@@ -38,7 +39,11 @@ from vibeocr.runtime.documents.models.pdf_document import (
     TextLayerInfo,
 )
 from vibeocr.runtime.documents.pdf_block_editor import PdfBlockEditor
-from vibeocr.runtime.documents.pdf_service import PdfService, TextLayerBatchError
+from vibeocr.runtime.documents.pdf_service import (
+    PdfSaveError,
+    PdfService,
+    TextLayerBatchError,
+)
 from vibeocr.runtime.documents.wire_schemas import (
     AddTextLayerRequest,
     BatchAddTextLayerRequest,
@@ -706,46 +711,28 @@ def add_text_layer_batch(sid: str, req: BatchAddTextLayerRequest) -> MutateRespo
         if req.save and written_pages:
             save_path = s.pdf_document.file_path
             if save_path:
-                # save_incremental 成功失败都不 close doc，无需替换 s.doc
+                s.block_editor = None
                 try:
-                    saved = PdfService.save_incremental(s.doc, save_path)
-                except Exception as e:
-                    logger.error(
-                        "[pdf-backend] add_text_layer_batch 增量落盘失败"
-                        "（文字层已在内存，不影响后续保存）: %s",
-                        e,
-                    )
-                    saved = False
-                if not saved:
-                    # 增量保存不可用（can_save_incrementally()=False 等）：文字层与
-                    # 子集字体留在内存 doc 跨批累积，末尾 _compress_in_place 对累积
-                    # 字体做 garbage=4 全量重写会触发 PyMuPDF 1.28.0 原生内存破坏
-                    # （0xC0000409）。这里每批失败就立即全量压缩落盘，把累积字体
-                    # 收敛到磁盘，末尾压缩面对的是干净文档。
-                    # _compress_in_place 失败会 close 原 doc（无法恢复原对象），
-                    # 需从备份回滚后的文件重新打开以保证 s.doc 始终可用。
                     try:
-                        s.block_editor = None
-                        s.doc = PdfService._compress_in_place(
+                        fresh = PdfService.save_incremental(s.doc, save_path)
+                    except PdfSaveError:
+                        raise
+                    except Exception:
+                        logger.exception("Incremental checkpoint unavailable")
+                        fresh = False
+                    if fresh is False:
+                        fresh = PdfService._compress_in_place(
                             s.doc, save_path, clean=False
                         )
-                        saved = True
-                    except Exception as e2:
-                        logger.error(
-                            "[pdf-backend] add_text_layer_batch 全量压缩回退也失败"
-                            "（文字层仍在内存 doc，但本批未落盘）: %s",
-                            e2,
-                        )
-                        # _compress_in_place 已 close 原 doc 并回滚文件，需重开
-                        try:
-                            s.block_editor = None
-                            s.doc = fitz.open(save_path)
-                        except Exception:
-                            logger.error(
-                                "[pdf-backend] 全量压缩失败后重开 doc 也失败",
-                                exc_info=True,
-                            )
-                        saved = False
+                    s.doc = fresh
+                    saved = True
+                except PdfSaveError as error:
+                    _recover_save_session(s, error)
+                    saved = error.committed
+                    logger.exception("PDF checkpoint recovery: %s", error)
+                except Exception:
+                    saved = False
+                    logger.exception("PDF checkpoint failed; edits remain unsaved")
             if saved:
                 # 本批文字层已经持久化；保持后端规范模型与磁盘状态一致。后续 OCR
                 # 收尾可据此跳过没有必要的整文档重写。
@@ -1007,32 +994,58 @@ def delete_text_layers(sid: str, req: PageListRequest) -> StreamingResponse:
     return _stream_generator(_gen())
 
 
+def _recover_save_session(s: BackendSession, error: PdfSaveError) -> None:
+    s.block_editor = None
+    if error.new_doc is not None:
+        s.doc = error.new_doc
+    if (
+        error.committed
+        and s.pdf_document.file_path
+        and os.path.normcase(os.path.abspath(error.path))
+        == os.path.normcase(os.path.abspath(s.pdf_document.file_path))
+    ):
+        s.pdf_document.is_modified = False
+        s.pdf_document.has_structural_change = False
+
+
 @app.post("/session/{sid}/save", response_model=SaveResponse)
 def save(sid: str, req: SaveRequest) -> SaveResponse:
     """保存(rewrite + 落盘)。doc 可能被 close+reopen 替换。"""
     s = _get_registry().get(sid)
     try:
-        with (
-            _fitz_op(s),
-            s.fitz_lock,
-            _invalidate_block_edits(
-                s,
-                list(range(s.doc.page_count))
-                if req.rewrite_text_layers
-                or (req.pdf_settings or {}).get("clean_on_save")
-                else [],
-            ),
-        ):
-            result = PdfService.save_with_rewrite(
-                s.doc,
-                s.pdf_document,
-                path=req.path,
-                pdf_settings=_settings_from_dict(req.pdf_settings),
-                rewrite_text_layers=req.rewrite_text_layers,
-                copy_export=req.copy_export,
-                overwrite=req.overwrite,
-                rebind_target=req.rebind_target,
-            )
+        with _fitz_op(s), s.fitz_lock:
+            # Full saves can renumber xrefs even for copy export; stale editor
+            # cleanup must not prune objects in the renumbered live document.
+            s.block_editor = None
+            try:
+                result = PdfService.save_with_rewrite(
+                    s.doc,
+                    s.pdf_document,
+                    path=req.path,
+                    pdf_settings=_settings_from_dict(req.pdf_settings),
+                    rewrite_text_layers=req.rewrite_text_layers,
+                    copy_export=req.copy_export,
+                    overwrite=req.overwrite,
+                    rebind_target=req.rebind_target,
+                )
+            except PdfSaveError as error:
+                logger.warning("PDF save outcome: %s", error)
+                _recover_save_session(s, error)
+                if error.committed and not req.copy_export:
+                    s.pdf_document.is_modified = False
+                    s.pdf_document.has_structural_change = False
+                    if req.rebind_target and req.path:
+                        s.pdf_document.file_path = os.path.abspath(error.path)
+                        s.file_path = s.pdf_document.file_path
+                detail = {
+                    "reason_code": "pdf_save_outcome",
+                    "committed": error.committed,
+                    "session_usable": not s.doc.is_closed,
+                    "path": os.path.abspath(error.path),
+                }
+                if error.recovery_path:
+                    detail["recovery_path"] = os.path.abspath(error.recovery_path)
+                raise HTTPException(status_code=500, detail=detail) from error
             if req.rebind_target and not req.copy_export:
                 s.file_path = s.pdf_document.file_path or s.file_path
             # 全量压缩时 doc 被替换。
@@ -1056,6 +1069,8 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
                 else False,
             ),
         )
+    except HTTPException:
+        raise
     except (FileExistsError, ValueError) as e:
         raise HTTPException(status_code=422, detail=f"保存拒绝: {e}") from e
     except Exception as e:

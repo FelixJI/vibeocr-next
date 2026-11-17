@@ -864,6 +864,12 @@ def create_app(
             return _error_response(
                 ErrorCode.VALIDATION_ERROR, instance_id, detail={"reason": str(exc)}
             )
+        from vibeocr.runtime.documents.pdf_backend_client import PdfBackendError
+
+        if isinstance(exc, PdfBackendError) and exc.save_outcome is not None:
+            return _error_response(
+                ErrorCode.INTERNAL_ERROR, instance_id, detail=exc.save_outcome
+            )
         backend_status = getattr(exc, "status", None)
         if isinstance(backend_status, int) and 400 <= backend_status < 500:
             # 后端 4xx 逐状态归类；未覆盖状态（如 409 session closing）无通用

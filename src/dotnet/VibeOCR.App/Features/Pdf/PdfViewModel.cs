@@ -694,6 +694,28 @@ public sealed class PdfViewModel(
     }
     catch (OperationCanceledException) when (!submitted)
     { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; return new(PdfSaveDisposition.Cancelled, path); }
+    catch (InferenceClientException e) when (submitted && SessionId == session && Revision == revision
+      && TrySaveOutcome(e, path, out bool committed, out bool usable, out string? recovery))
+    {
+      _requiresReopen = !usable;
+      if (committed)
+      {
+        if (!copy) { IsModified = false; if (rebind) FilePath = path; }
+        Summary = copy ? "副本已写入磁盘，当前修改状态保留" : "当前修订已写入磁盘";
+        if (!usable) Summary += "，请重开已保存文档";
+        Status = $"已保存到 {path}";
+        return new(PdfSaveDisposition.Saved, path, Summary);
+      }
+      TerminalIssue = PdfIssueKind.Failed;
+      Status = "保存未提交，保留修改与目标";
+      Summary = usable ? "可重试或另存到其他路径" : "会话不可用，请从恢复位置恢复修改";
+      if (recovery is not null)
+      {
+        if (usable) Summary = "目标存在未完成保存，请先打开目标恢复，或另存到其他路径";
+        Summary += $"；恢复位置：{recovery}";
+      }
+      return new(PdfSaveDisposition.Failed, path, Status);
+    }
     catch (InferenceClientException e) when (e.Code is HttpV2ErrorCode.ValidationError or HttpV2ErrorCode.Unauthorized or HttpV2ErrorCode.ForbiddenLoopback or HttpV2ErrorCode.ResourceNotFound or HttpV2ErrorCode.RuntimeCapabilityUnavailable or HttpV2ErrorCode.RuntimeOperationNotFound)
     { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); return new(PdfSaveDisposition.Failed, path, Status); }
     catch (Exception)
@@ -703,6 +725,33 @@ public sealed class PdfViewModel(
       return new(submitted ? PdfSaveDisposition.Unconfirmed : PdfSaveDisposition.Failed, path, Status);
     }
     finally { await FinishRunAsync(generation, run); }
+  }
+
+  private static bool TrySaveOutcome(InferenceClientException error, string path,
+    out bool committed, out bool usable, out string? recovery)
+  {
+    committed = usable = false; recovery = null;
+    var detail = error.Detail;
+    if (error.Code != HttpV2ErrorCode.InternalError || error.ReasonCode != "pdf_save_outcome"
+      || detail.Keys.Any(key => key is not ("reason_code" or "committed" or "session_usable" or "path" or "recovery_path"))
+      || !detail.TryGetValue("committed", out JsonElement saved) || saved.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+      || !detail.TryGetValue("session_usable", out JsonElement active) || active.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+      || !detail.TryGetValue("path", out JsonElement target) || target.ValueKind != JsonValueKind.String)
+      return false;
+    try
+    {
+      string? targetPath = target.GetString();
+      if (string.IsNullOrWhiteSpace(targetPath) || !Path.IsPathFullyQualified(targetPath)
+        || !string.Equals(Path.GetFullPath(targetPath), path, StringComparison.OrdinalIgnoreCase)) return false;
+      if (detail.TryGetValue("recovery_path", out JsonElement location))
+      {
+        if (location.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(location.GetString())
+          || !Path.IsPathFullyQualified(location.GetString()!)) return false;
+        recovery = Path.GetFullPath(location.GetString()!);
+      }
+    }
+    catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+    committed = saved.GetBoolean(); usable = active.GetBoolean(); return true;
   }
 
   public void Cancel()

@@ -16,8 +16,10 @@ def test_save_incremental_persists_and_keeps_doc_usable(tmp_path):
     doc[0].insert_text((50, 100), "world")
 
     ok = PdfService.save_incremental(doc, str(pdf))
-    assert ok is True
-    # doc 仍可用（不重开，不 close）
+    assert ok is not False
+    assert doc.is_closed
+    doc = ok
+    # Returned document remains usable after reopening.
     assert doc.page_count == 1
     # 重开验证内容落盘
     doc.close()
@@ -77,11 +79,12 @@ def test_save_incremental_does_not_copy_whole_pdf(tmp_path, monkeypatch):
     def reject_copy(*args, **kwargs):
         raise AssertionError("incremental checkpoint must not copy the whole PDF")
 
-    monkeypatch.setattr(
-        "vibeocr.runtime.documents.pdf_service.shutil.copy2", reject_copy
-    )
-    assert PdfService.save_incremental(doc, str(pdf)) is True
-    doc.close()
+    import shutil
+
+    monkeypatch.setattr(shutil, "copy2", reject_copy)
+    fresh = PdfService.save_incremental(doc, str(pdf))
+    assert fresh is not False
+    fresh.close()
 
 
 def test_open_doc_recovers_interrupted_incremental_append(tmp_path):
@@ -113,7 +116,7 @@ def test_compress_in_place_after_incremental_unavailable_does_not_crash(
     1. doc.can_save_incrementally() 恒返回 False（加密/表单/某些扫描件触发）
     2. 多批 add_text_layer_batch 每批写层后 save_incremental 都失败、不落盘，
        子集字体跨批累积在内存 doc 里
-    3. 末尾 _compress_in_place 做全量 garbage=4 重写——本测试验证此步不崩、
+    3. 末尾 _compress_in_place 做全量 garbage=3 重写——本测试验证此步不崩、
        产出的文件可重新打开、字体收敛。
 
     本测试是 pdf_backend_process.add_text_layer_batch 回退到 _compress_in_place

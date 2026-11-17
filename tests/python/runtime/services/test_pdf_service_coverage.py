@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pymupdf as fitz
 import pytest
-from vibeocr.runtime.documents.pdf_service import PdfService, SaveResult
+from vibeocr.runtime.documents.pdf_service import PdfSaveError, PdfService, SaveResult
 from vibeocr.runtime.recognition.models.ocr_result import OCRResult, TextBlock
 
 
@@ -66,7 +66,8 @@ class TestSaveEdgeCases:
         try:
             PdfService.rotate_pages(doc, pdf_doc, [0], 90)
             settings = PdfGlobalSettings(compress_on_save=False)
-            assert PdfService.save(doc, pdf_doc, pdf_settings=settings) is None
+            doc = PdfService.save(doc, pdf_doc, pdf_settings=settings)
+            assert doc is not None
             assert pdf_doc.is_modified is False
             # .bak 应已清理
             assert not Path(str(path) + ".bak").exists()
@@ -90,8 +91,9 @@ class TestSaveEdgeCases:
 
             monkeypatch.setattr(fitz.Document, "save", _fail_save)
             settings = PdfGlobalSettings(compress_on_save=False)
-            with pytest.raises(RuntimeError, match="incremental boom"):
-                PdfService.save(doc, pdf_doc, pdf_settings=settings)
+            doc = PdfService.save(doc, pdf_doc, pdf_settings=settings)
+            assert doc is not None
+            assert doc[0].get_text().strip() == "Page 1"
         finally:
             monkeypatch.setattr(fitz.Document, "save", original_save)
             doc.close()
@@ -175,9 +177,12 @@ class TestSaveWithRewriteEdgeCases:
                 pdf_settings=settings,
                 rewrite_text_layers=False,
             )
-            # 增量成功 → new_doc=None
-            assert res.new_doc is None
-            assert res.path is None
+            # Incremental success returns a fresh handle.
+            assert res.new_doc is not None
+            doc = res.new_doc
+            assert res.path == str(path)
+            with fitz.open(path) as saved:
+                assert saved[0].rotation == 90
         finally:
             doc.close()
 
@@ -194,10 +199,12 @@ class TestSaveWithRewriteEdgeCases:
                 fitz.Document, "can_save_incrementally", lambda self: False
             )
             settings = PdfGlobalSettings(compress_on_save=False)
-            with pytest.raises(RuntimeError, match="incremental save failed"):
-                PdfService.save_with_rewrite(
-                    doc, pdf_doc, path=None, pdf_settings=settings
-                )
+            saved = PdfService.save_with_rewrite(
+                doc, pdf_doc, path=None, pdf_settings=settings
+            )
+            assert saved.new_doc is not None
+            doc = saved.new_doc
+            assert doc[0].get_text().strip() == "Page 1"
         finally:
             doc.close()
 
@@ -932,7 +939,10 @@ class TestRemainingBranches:
             "_truncate_incremental",
             lambda p, m, s: (_ for _ in ()).throw(RuntimeError("truncate boom")),
         )
-        assert PdfService.save_incremental(doc, str(path)) is False
+        with pytest.raises(PdfSaveError, match="truncate boom") as failure:
+            PdfService.save_incremental(doc, str(path))
+        assert not failure.value.committed
+        assert failure.value.new_doc is doc
         monkeypatch.setattr(fitz.Document, "save", original_save)
         doc.close()
 

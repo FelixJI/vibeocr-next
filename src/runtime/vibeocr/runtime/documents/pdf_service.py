@@ -8,10 +8,9 @@ from __future__ import annotations
 import logging
 import math
 import os
-import shutil
-import time
+import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 import pymupdf as fitz
@@ -24,6 +23,7 @@ from vibeocr.runtime.documents.models.pdf_document import (
     PdfPageInfo,
     TextLayerInfo,
 )
+from vibeocr.runtime.documents.pdf_resource_graft import PageResourceGraft
 from vibeocr.runtime.documents.utils.cjk_font_resolver import _CJK_RESOLVER
 from vibeocr.runtime.recognition.models.ocr_result import TextBlock
 
@@ -60,11 +60,33 @@ _FALLBACK_INK_RATIO = 0.955
 _FALLBACK_ASCENT_RATIO = 0.83
 
 
+class PdfSaveError(RuntimeError):
+    """A save failure with an explicit disk commit and editable recovery handle."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        path: str,
+        committed: bool,
+        new_doc: fitz.Document | None = None,
+        recovery_path: str | None = None,
+    ) -> None:
+        state = (
+            "saved to disk; session recovery failed" if committed else "not committed"
+        )
+        super().__init__(f"{state}: {message}; target={path}; recovery={recovery_path}")
+        self.path = path
+        self.committed = committed
+        self.new_doc = new_doc
+        self.recovery_path = recovery_path
+
+
 class SaveResult(NamedTuple):
     rewritten_pages: list[int]
     path: str | None
     # 全量压缩覆盖原文件时，doc 必须关闭重开（Windows 锁），新 doc 通过此字段
-    # 返回，由调用方更新 session.doc 引用。incremental/另存为时为 None（doc 不变）。
+    # 返回，由调用方更新 session.doc 引用。增量保存同样刷新句柄。
     new_doc: fitz.Document | None = None
 
 
@@ -106,139 +128,131 @@ class PdfService:
         path: str | None = None,
         pdf_settings: object | None = None,
     ) -> fitz.Document | None:
-        """落盘 PDF，返回覆盖保存后的新 doc（全量压缩时 doc 已重开）。
+        """Save the current content; callers must adopt a returned fresh handle."""
+        return PdfService.save_with_rewrite(
+            doc, pdf_document, path, pdf_settings, rewrite_text_layers=False
+        ).new_doc
 
-        覆盖保存（path is None）按 compress_on_save 分流：True（默认）= 全量
-        压缩（garbage=3 + deflate + object streams）。PyMuPDF 不能全量保存覆盖自身已打开
-        源文件，且 Windows 锁定打开的文件，因此全量压缩采用
-        save(tmp)→close→replace→reopen：先写同目录临时文件、关闭释放文件锁、
-        原子替换原路径，再打开并返回新 doc（调用方需更新其 doc 引用）。
-        False = 增量追加快路径（incremental，doc 不变，返回 None）。
-        另存为（path 指定）统一 deflate + clean（新文件，doc 不变）。
-        """
-        from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
+    @staticmethod
+    def _check_target_recovery(doc: fitz.Document, path: str) -> None:
+        marker = Path(os.path.abspath(path) + PdfService._INCREMENTAL_MARKER_SUFFIX)
+        try:
+            pending = marker.exists()
+        except OSError as error:
+            raise PdfSaveError(
+                str(error), path=os.path.abspath(path), committed=False, new_doc=doc
+            ) from error
+        if pending:
+            raise PdfSaveError(
+                "Target has an interrupted save; open it to recover or choose another path",
+                path=os.path.abspath(path),
+                committed=False,
+                new_doc=doc,
+                recovery_path=str(marker),
+            )
 
-        settings = pdf_settings if pdf_settings is not None else PdfGlobalSettings()
-        compress = getattr(settings, "compress_on_save", True)
-        # clean_on_save 默认 False：加文字层是纯增量场景，clean=True 会解压并重写
-        # 扫描件内容流，叠加 MuPDF 无法保留 ObjStm/CrossRefStream 压缩，体积可翻倍。
-        clean = getattr(settings, "clean_on_save", False)
+    @staticmethod
+    def _save_full(
+        doc: fitz.Document, path: str, *, compress: bool, clean: bool
+    ) -> None:
+        # MuPDF clears incremental bookkeeping even on copy-export/full-save attempts.
+        doc._vibeocr_incremental_unsafe = True
+        doc.save(
+            path,
+            garbage=3,
+            deflate=compress,
+            clean=clean,
+            encryption=0,
+            use_objstms=1 if compress else 0,
+            compression_effort=1,
+        )
+        with open(path, "r+b") as stream:
+            os.fsync(stream.fileno())
 
-        if path is None:
-            save_path = pdf_document.file_path
-            if save_path is None:
-                return None
-            if compress:
-                new_doc = PdfService._compress_in_place(doc, save_path, clean=clean)
-                pdf_document.is_modified = False
-                return new_doc
-            # 增量快路径：incremental 可原地追加，doc 不变
-            backup_path = save_path + ".bak"
-            shutil.copy2(save_path, backup_path)
-            try:
-                doc.save(save_path, incremental=True, encryption=0)
-                Path(backup_path).unlink(missing_ok=True)
-            except Exception:
-                shutil.copy2(backup_path, save_path)
-                Path(backup_path).unlink(missing_ok=True)
-                raise
-            pdf_document.is_modified = False
-            return None
-        doc.save(path, deflate=True, clean=clean)
-        pdf_document.is_modified = False
-        return None
+    @staticmethod
+    def _reopen_saved(doc: fitz.Document, path: str) -> fitz.Document:
+        try:
+            fresh = fitz.open(path)
+        except Exception as error:
+            recovered = doc if not doc.is_closed else None
+            if recovered is None:
+                try:
+                    recovered = fitz.open(
+                        stream=Path(path).read_bytes(), filetype="pdf"
+                    )
+                except Exception:
+                    logger.exception("Cannot recover committed PDF handle: %s", path)
+            raise PdfSaveError(
+                str(error),
+                path=path,
+                committed=True,
+                new_doc=recovered,
+                recovery_path=path,
+            ) from error
+        try:
+            if not doc.is_closed:
+                doc.close()
+        except Exception as error:
+            if doc.is_closed:
+                return fresh
+            fresh.close()
+            raise PdfSaveError(
+                str(error), path=path, committed=True, new_doc=doc, recovery_path=path
+            ) from error
+        return fresh
 
     @staticmethod
     def _compress_in_place(
-        doc: fitz.Document, save_path: str, clean: bool = True
+        doc: fitz.Document,
+        save_path: str,
+        clean: bool = False,
+        *,
+        compress: bool = True,
     ) -> fitz.Document:
-        """全量压缩覆盖原文件（Windows 兼容），返回重开后的新 doc。
-
-        流程：先备份原文件 → doc.save(tmp, garbage+deflate[+clean]) 落到临时文件
-        → 关闭 doc 释放文件锁 → os.replace(tmp, save_path) 原子替换 → 重开。
-
-        **关键：用 doc.save 而非 doc.tobytes**。旧版 tobytes(garbage=4) 在 doc 累积大量
-        insert_text 修改后，会留下不一致的内部 xref/对象状态，随后的 doc.close()
-        遍历这些失效引用触发原生内存破坏（0xC0000409 STATUS_STACK_BUFFER_OVERRUN，
-        PyMuPDF 1.28.0 实测稳定复现）。doc.save 是官方推荐的"修改后落盘"路径，
-        在写文件时正确 finalize 文档内部状态，使后续 close 安全。
-
-        落到临时文件而非直接覆盖原文件：Windows 锁定被 fitz 打开的文件，不能在
-        doc 仍打开时覆盖原路径；save 到新路径无锁冲突，close 后再 os.replace。
-        默认采用 garbage=3 + object streams；garbage=4 会比较大型 stream 去重，
-        对数百页扫描件可能从秒级恶化到数分钟。
-
-        Args:
-            clean: 是否深度清理内容流（PyMuPDF clean 参数）。True 重写规范化
-            内容流；False 保留原始内容流压缩——对用 ObjStm/CrossRefStream
-            高度压缩的扫描件，False 避免解压重写导致的体积膨胀。
-        """
-        backup_path = save_path + ".bak"
-        tmp_path = save_path + ".tmp"
-        started_at = time.monotonic()
-        source_size = Path(save_path).stat().st_size
-        page_count = doc.page_count
-        stage_started = time.monotonic()
-        shutil.copy2(save_path, backup_path)
-        backup_elapsed = time.monotonic() - stage_started
-        # 清理可能残留的临时文件（上次崩溃留下的）
-        Path(tmp_path).unlink(missing_ok=True)
+        """Stage, close, atomically replace, reopen; never undo a completed commit."""
+        PdfService._check_target_recovery(doc, save_path)
+        target = Path(save_path)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        os.close(fd)
+        keep_stage = False
         try:
-            stage_started = time.monotonic()
-            doc.save(
-                tmp_path,
-                garbage=3,
-                deflate=True,
-                clean=clean,
-                encryption=0,
-                use_objstms=1,
-                compression_effort=1,
-            )
-            save_elapsed = time.monotonic() - stage_started
-            output_size = Path(tmp_path).stat().st_size
-            stage_started = time.monotonic()
-            doc.close()
-            # close 释放了原文件锁，现在可以原子替换
-            Path(tmp_path).replace(save_path)
-            replace_elapsed = time.monotonic() - stage_started
-            stage_started = time.monotonic()
-            new_doc = fitz.open(save_path)
-            reopen_elapsed = time.monotonic() - stage_started
-            Path(backup_path).unlink(missing_ok=True)
-            logger.info(
-                "PDF 全量压缩完成: pages=%d clean=%s size=%d->%d "
-                "backup=%.2fs save=%.2fs replace=%.2fs reopen=%.2fs total=%.2fs",
-                page_count,
-                clean,
-                source_size,
-                output_size,
-                backup_elapsed,
-                save_elapsed,
-                replace_elapsed,
-                reopen_elapsed,
-                time.monotonic() - started_at,
-            )
-            return new_doc
-        except Exception:
-            logger.exception(
-                "PDF 全量压缩失败: pages=%d clean=%s source_size=%d elapsed=%.2fs",
-                page_count,
-                clean,
-                source_size,
-                time.monotonic() - started_at,
-            )
-            # 失败回滚：doc 可能已关闭，原文件从备份恢复，清理临时文件
+            PdfService._save_full(doc, temporary, compress=compress, clean=clean)
             try:
+                PdfService._check_target_recovery(doc, save_path)
                 doc.close()
-            except Exception:
-                pass
-            try:
-                Path(backup_path).replace(save_path)
-            except OSError:
-                shutil.copy2(backup_path, save_path)
-            Path(backup_path).unlink(missing_ok=True)
-            Path(tmp_path).unlink(missing_ok=True)
-            raise
+                Path(temporary).replace(target)
+            except PdfSaveError:
+                raise
+            except Exception as error:
+                recovered = doc if not doc.is_closed else None
+                if recovered is None:
+                    try:
+                        # A memory handle releases the stage and cannot incrementally
+                        # append against the old source's now unrelated xref table.
+                        recovered = fitz.open(
+                            stream=Path(temporary).read_bytes(), filetype="pdf"
+                        )
+                    except Exception:
+                        keep_stage = True
+                        logger.exception("Editable PDF retained at %s", temporary)
+                raise PdfSaveError(
+                    str(error),
+                    path=save_path,
+                    committed=False,
+                    new_doc=recovered,
+                    recovery_path=temporary if keep_stage else None,
+                ) from error
+            return PdfService._reopen_saved(doc, save_path)
+        finally:
+            if not keep_stage:
+                try:
+                    Path(temporary).unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "Cannot remove PDF stage: %s", temporary, exc_info=True
+                    )
 
     @staticmethod
     def save_with_rewrite(
@@ -252,24 +266,11 @@ class PdfService:
         overwrite: bool = True,
         rebind_target: bool = False,
     ) -> SaveResult:
-        """对所有有 OCR 块的页重写文字层后落盘（保存/另存为共用）。
+        """Optionally rewrite OCR text, then save using the shared full-save profile.
 
-        rewrite 阶段用词级 redact（delete_text_layers 循环验证），并对全文档
-        共享单一子集字体（整文档聚合字符一次解析，避免每页一份字体）。
-        落盘覆盖原文件时：有结构改动或 compress_on_save=True → 全量压缩
-        （garbage+deflate+clean，临时文件原子替换）；否则 incremental（快）。
-        另存为永远 deflate+clean。
-
-        Args:
-            doc: fitz.Document 实例。
-            pdf_document: PdfDocument 状态对象。
-            path: None=覆盖原文件；str=另存为到该路径。
-            pdf_settings: PdfGlobalSettings（rewrite 用）。
-            rewrite_text_layers: False 表示文字层已由批量 OCR 正确写入，仅做
-                最终落盘/压缩；普通保存必须保持默认 True 以应用编辑后的块。
-
-        Returns:
-            SaveResult(rewritten_pages, path)。
+        Compression-off appends only through a safe file-backed handle. Full saves
+        stage beside the target; copy preserves the application's binding and dirty
+        state. A successful append or rebind returns a replacement live handle.
         """
         from vibeocr.runtime.documents.models.pdf_ocr_options import PdfGlobalSettings
 
@@ -288,156 +289,163 @@ class PdfService:
             == os.path.normcase(os.path.abspath(pdf_document.file_path))
         ):
             raise ValueError("copy export cannot replace the document target")
-        # An explicit source target still needs Windows close/replace/reopen.
-        if (
-            path is not None
-            and not copy_export
+        # The model owns the logical target; the live handle may still name an
+        # older source after a committed Save As whose reopen failed.
+        target_path = path or pdf_document.file_path
+        same_binding = bool(
+            target_path
+            and pdf_document.file_path
+            and os.path.normcase(os.path.abspath(target_path))
+            == os.path.normcase(os.path.abspath(pdf_document.file_path))
+        )
+        same_handle = bool(
+            target_path
             and doc.name
-            and os.path.normcase(os.path.abspath(path))
+            and os.path.normcase(os.path.abspath(target_path))
             == os.path.normcase(os.path.abspath(doc.name))
-        ):
-            if not overwrite:
-                raise FileExistsError(path)
-            path = None
+        )
+        if same_handle and not overwrite:
+            raise FileExistsError(target_path)
+        if target_path:
+            PdfService._check_target_recovery(doc, target_path)
 
         # clean_on_save 决定全量压缩时是否深度清理内容流。默认 False：加文字层
         # 是纯增量场景，clean=True 会解压并重写扫描件内容流，叠加 MuPDF 无法保留
         # ObjStm/CrossRefStream 压缩，可使 1.6MB 扫描件膨胀到 3MB+。
         clean = getattr(settings, "clean_on_save", False)
 
-        # 整文档一次聚合子集字体：把所有有 OCR 块的页字符汇成一个子集，
-        # 全文档共享单一字体对象，避免每页一份独立子集放大体积。
-        # （探测失败为 None → rewrite_text_layer 内部回退 china-s。）
-        target_pages = (
-            [info for info in pdf_document.pages if info.ocr_text_blocks]
-            if rewrite_text_layers
-            else []
-        )
-        shared_font_path: str | None = None
-        if target_pages:
-            all_chars = "".join(
-                b.text for info in target_pages for b in info.ocr_text_blocks if b.text
+        try:
+            # 整文档一次聚合子集字体：把所有有 OCR 块的页字符汇成一个子集，
+            # 全文档共享单一字体对象，避免每页一份独立子集放大体积。
+            # （探测失败为 None → rewrite_text_layer 内部回退 china-s。）
+            target_pages = (
+                [info for info in pdf_document.pages if info.ocr_text_blocks]
+                if rewrite_text_layers
+                else []
             )
-            shared_font_path = _CJK_RESOLVER.resolve(all_chars)
+            shared_font_path: str | None = None
+            if target_pages:
+                all_chars = "".join(
+                    b.text
+                    for info in target_pages
+                    for b in info.ocr_text_blocks
+                    if b.text
+                )
+                shared_font_path = _CJK_RESOLVER.resolve(all_chars)
 
-        from vibeocr.runtime.recognition.models.ocr_result_serializer import (
-            text_block_to_dict,
-        )
-
-        rewritten: list[int] = []
-        for offset in range(0, len(target_pages), 16):
-            data = [
-                {
-                    "page": info.page_index,
-                    "ocr_result": {
-                        "preproc_angle": info.ocr_preproc_angle,
-                        "text_blocks": [
-                            text_block_to_dict(block) for block in info.ocr_text_blocks
-                        ],
-                    },
-                }
-                for info in target_pages[offset : offset + 16]
-            ]
-            results = PdfService.add_text_layer_batch(
-                doc,
-                pdf_document,
-                data,
-                pdf_settings=settings,
-                overwrite=True,
-                font_path=shared_font_path,
+            from vibeocr.runtime.recognition.models.ocr_result_serializer import (
+                text_block_to_dict,
             )
-            if any(not count[0] for count in results.values()):
-                raise RuntimeError("文字层重写未成功，保留未提交页原层")
-            rewritten.extend(page for page, count in results.items() if count[0])
 
-        new_doc: fitz.Document | None = None
-        if path is None:
-            save_path = pdf_document.file_path
-            if save_path is None:
+            rewritten: list[int] = []
+            for offset in range(0, len(target_pages), 16):
+                data = [
+                    {
+                        "page": info.page_index,
+                        "ocr_result": {
+                            "preproc_angle": info.ocr_preproc_angle,
+                            "text_blocks": [
+                                text_block_to_dict(block)
+                                for block in info.ocr_text_blocks
+                            ],
+                        },
+                    }
+                    for info in target_pages[offset : offset + 16]
+                ]
+                results = PdfService.add_text_layer_batch(
+                    doc,
+                    pdf_document,
+                    data,
+                    pdf_settings=settings,
+                    overwrite=True,
+                    font_path=shared_font_path,
+                )
+                if any(not count[0] for count in results.values()):
+                    raise RuntimeError("文字层重写未成功，保留未提交页原层")
+                rewritten.extend(page for page, count in results.items() if count[0])
+
+            new_doc: fitz.Document | None = None
+            if target_path is None:
+                return SaveResult(rewritten, None)
+            need_full = pdf_document.has_structural_change or compress or clean
+            if same_binding and not copy_export and overwrite and not need_full:
+                incremental = PdfService.save_incremental(doc, target_path)
+                if incremental is not False:
+                    new_doc = incremental
+            if new_doc is None and same_handle:
+                # Only the actual live handle determines Windows file locking.
+                new_doc = PdfService._compress_in_place(
+                    doc, target_path, clean=clean, compress=compress
+                )
+            elif new_doc is None:
+                # 另存也先写相邻临时文件，再提交；失败时编辑模型仍 dirty。
+                target = Path(target_path)
+                fd, temporary = tempfile.mkstemp(
+                    prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+                )
+                os.close(fd)
+                try:
+                    PdfService._save_full(
+                        doc, temporary, compress=compress, clean=clean
+                    )
+                    PdfService._check_target_recovery(doc, str(target))
+                    if overwrite:
+                        Path(temporary).replace(target)
+                    elif os.name == "nt":
+                        # Windows rename is atomic and refuses an existing destination.
+                        os.rename(temporary, target)
+                    else:
+                        # Both names are on the same filesystem; link is a no-clobber commit.
+                        os.link(temporary, target)
+                    if not copy_export and (rebind_target or same_binding):
+                        # Open the committed PDF before releasing the old source handle.
+                        # Subsequent saves/another entry opening the old source remain safe.
+                        new_doc = PdfService._reopen_saved(doc, str(target))
+                finally:
+                    try:
+                        Path(temporary).unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "Cannot remove PDF stage: %s", temporary, exc_info=True
+                        )
+
+            if not copy_export:
+                if rebind_target and path is not None:
+                    pdf_document.file_path = str(Path(path).absolute())
                 pdf_document.is_modified = False
                 pdf_document.has_structural_change = False
-                return SaveResult(rewritten, None)
-            # 需要全量压缩（结构改动或 compress_on_save）→ _compress_in_place
-            # （Windows 锁要求 close+write+reopen，返回新 doc）。
-            need_full = pdf_document.has_structural_change or compress
-            if need_full:
-                new_doc = PdfService._compress_in_place(doc, save_path, clean=clean)
-            else:
-                if not PdfService.save_incremental(doc, save_path):
-                    raise RuntimeError("incremental save failed and was rolled back")
-        else:
-            # 另存也先写相邻临时文件，再提交；失败时编辑模型仍 dirty。
-            import tempfile
-
-            target = Path(path)
-            fd, temporary = tempfile.mkstemp(
-                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-            )
-            os.close(fd)
-            try:
-                doc.save(temporary, deflate=compress, clean=clean)
-                with open(temporary, "r+b") as stream:
-                    os.fsync(stream.fileno())
-                if overwrite:
-                    Path(temporary).replace(target)
-                elif os.name == "nt":
-                    # Windows rename is atomic and refuses an existing destination.
-                    os.rename(temporary, target)
-                else:
-                    # Both names are on the same filesystem; link is a no-clobber commit.
-                    os.link(temporary, target)
-                if rebind_target and not copy_export:
-                    # Open the committed PDF before releasing the old source handle.
-                    # Subsequent saves/another entry opening the old source remain safe.
-                    new_doc = fitz.open(target)
-                    try:
-                        doc.close()
-                    except Exception:
-                        new_doc.close()
-                        raise
-            finally:
-                Path(temporary).unlink(missing_ok=True)
-
-        if not copy_export:
-            if rebind_target and path is not None:
-                pdf_document.file_path = str(Path(path).absolute())
-            pdf_document.is_modified = False
-            pdf_document.has_structural_change = False
-        return SaveResult(rewritten, path, new_doc)
+            return SaveResult(rewritten, target_path, new_doc)
+        except (PdfSaveError, FileExistsError):
+            raise
+        except Exception as error:
+            raise PdfSaveError(
+                str(error),
+                path=os.path.abspath(target_path or ""),
+                committed=False,
+                new_doc=doc if not doc.is_closed else None,
+            ) from error
 
     @staticmethod
-    def save_incremental(doc: fitz.Document, save_path: str) -> bool:
-        """增量保存（纯加文字层场景）。doc 不 close/重开，内存对象始终可用。
-
-        PDF incremental save 只在文件尾追加。保存前把原长度写入一个小型恢复
-        marker；异常时按长度截断，进程若在写入中退出则下次 open_doc 也会先
-        截断恢复。避免每个 OCR 批次都复制整份、持续增长的 PDF。
-        供 OCR 逐批落盘使用：每批写层后调用，崩溃只丢最后一批。
-
-        Args:
-            doc: fitz.Document 实例（已写好本批文字层）。无论成功失败都不 close。
-
-        Returns:
-            True 已落盘；False 失败已回滚文件（doc 内存文字层保留可用，调用方
-            不应标记该批已落盘/不写 sidecar）。
-        """
+    def save_incremental(
+        doc: fitz.Document, save_path: str
+    ) -> fitz.Document | Literal[False]:
+        """Append once and return a fresh handle; False means disk was not committed."""
+        PdfService._check_target_recovery(doc, save_path)
         path = Path(save_path)
         marker = Path(save_path + PdfService._INCREMENTAL_MARKER_SUFFIX)
         try:
-            if not doc.can_save_incrementally():
-                # 记录诊断字段，便于定位为何增量不可用：
-                # - is_encrypted/needs_pass：加密 PDF（open_doc 已拦截，但防御）
-                # - is_form_pdf：表单 PDF（AcroForm/XFA）MuPDF 标记结构变更后不可增量
-                # - is_dirty：内存 doc 有未保存修改（正常，加文字层即如此）
-                # 实测稳定复现 0xC0000409 的场景：增量恒 False → 跨批字体累积 →
-                # 末尾 _compress_in_place 全量重写崩。见 add_text_layer_batch 回退。
+            if (
+                not doc.name
+                or os.path.normcase(os.path.abspath(doc.name))
+                != os.path.normcase(os.path.abspath(save_path))
+                or getattr(doc, "_vibeocr_incremental_unsafe", False) is True
+                or not doc.can_save_incrementally()
+            ):
                 logger.error(
-                    "save_incremental: 当前文档不支持增量保存 "
-                    "(is_encrypted=%s, needs_pass=%s, is_form_pdf=%s, is_dirty=%s)",
+                    "不支持增量保存 (is_encrypted=%s, is_form_pdf=%s, is_dirty=%s)",
                     doc.is_encrypted,
-                    doc.needs_pass,
-                    getattr(doc, "is_form_pdf", None),
-                    getattr(doc, "is_dirty", None),
+                    doc.is_form_pdf,
+                    doc.is_dirty,
                 )
                 return False
             original_size = path.stat().st_size
@@ -445,23 +453,30 @@ class PdfService:
                 stream.write(str(original_size))
                 stream.flush()
                 os.fsync(stream.fileno())
-        except Exception as e:
-            logger.error("save_incremental: 创建恢复标记失败，跳过本批落盘: %s", e)
+        except Exception:
+            logger.exception("Cannot create incremental recovery marker")
             return False
+        # Both a full save and an earlier append make this handle unsafe to append again.
+        doc._vibeocr_incremental_unsafe = True
         try:
             doc.save(save_path, incremental=True, encryption=0)
             marker.unlink()
-            return True
-        except Exception as e:
-            # incremental save 失败：文件可能只追加了一部分，截断到写前长度。
-            # doc 内存对象未受影响（fitz save 失败不改内存 doc），保持可用，
-            # 内存文字层保留。调用方据此返回 saved=False，不写 sidecar。
-            logger.error("save_incremental: 增量保存失败，按原长度回滚: %s", e)
+        except Exception:
+            logger.exception("Incremental save failed; rolling back appended bytes")
             try:
                 PdfService._truncate_incremental(path, marker, original_size)
-            except Exception:
-                logger.error("save_incremental: 长度回滚失败", exc_info=True)
+            except Exception as error:
+                # Do not attempt another save while a pending marker could truncate it.
+                raise PdfSaveError(
+                    str(error),
+                    path=save_path,
+                    committed=False,
+                    new_doc=doc,
+                    recovery_path=str(marker),
+                ) from error
             return False
+        # The marker is gone: a reopen error must never truncate the committed file.
+        return PdfService._reopen_saved(doc, save_path)
 
     @staticmethod
     def _truncate_incremental(path: Path, marker: Path, original_size: int) -> None:
@@ -983,10 +998,18 @@ class PdfService:
             raise ValueError("文字层写入批次最多 16 页")
         # 有界候选文档共享字体/CID 映射。原页内容直到提交成功前均未改变。
         with fitz.open() as candidate:
+            graft = PageResourceGraft(doc, candidate)
             prepared: list[tuple[int, int, list, int, int, int]] = []
             for page_index, text_blocks, preproc_angle in to_write:
                 local_index = candidate.page_count
-                candidate.insert_pdf(doc, from_page=page_index, to_page=page_index)
+                candidate.insert_pdf(
+                    doc, from_page=page_index, to_page=page_index, final=False
+                )
+                graft.remember_resources(
+                    doc,
+                    page_index,
+                    redacting=pdf_document.pages[page_index].has_text_layer,
+                )
                 local_model = PdfDocument(
                     pages=[
                         PdfPageInfo(page_index=i) for i in range(candidate.page_count)
@@ -1045,31 +1068,14 @@ class PdfService:
                 target = doc.page_xref(page_index)
                 old_contents = doc.xref_get_key(target, "Contents")[1]
                 old_resources = doc.xref_get_key(target, "Resources")[1]
-                original_count = doc.page_count
                 try:
-                    doc.insert_pdf(
-                        candidate,
-                        from_page=local_index,
-                        to_page=local_index,
-                        links=False,
-                        annots=False,
-                        widgets=False,
-                        final=local_index == prepared[-1][1],
-                    )
-                    source = doc.page_xref(original_count)
-                    # 保留原页身份、CropBox、Rotate、注解、入链与文档元数据。
-                    doc.xref_set_key(
-                        target, "Contents", doc.xref_get_key(source, "Contents")[1]
-                    )
-                    doc.xref_set_key(
-                        target, "Resources", doc.xref_get_key(source, "Resources")[1]
-                    )
-                    doc.delete_page(original_count)
+                    contents, resources = graft.page_keys(local_index)
+                    # Keep page identity, geometry, annotations and incoming links.
+                    doc.xref_set_key(target, "Contents", contents)
+                    doc.xref_set_key(target, "Resources", resources)
                 except Exception as error:
                     doc.xref_set_key(target, "Contents", old_contents)
                     doc.xref_set_key(target, "Resources", old_resources)
-                    if doc.page_count > original_count:
-                        doc.delete_page(original_count)
                     raise TextLayerBatchError(str(error), results) from error
                 pdf_document.is_modified = True
                 info = pdf_document.pages[page_index]

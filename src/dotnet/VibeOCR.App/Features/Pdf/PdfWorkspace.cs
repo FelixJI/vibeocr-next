@@ -88,7 +88,7 @@ public sealed class PdfWorkspace
     ? ExportItems.Where(item => item.Status is "failed" or "cancelled" or "not_started").ToArray()
     : documents.Where(entry => entry.Model.HasSession && (!modifiedOnly || entry.Model.IsModified))
       .Select(entry => new PdfExportItem(entry.Id, Path.GetFileName(entry.Model.FilePath ?? "document.pdf"), entry.Model.Revision, entry.Model.ProcessingSettings)).ToArray();
-  public async Task ExportAsync(string directory, bool modifiedOnly, bool retry, Action changed, CancellationToken ct, PdfExportItem[]? snapshot = null)
+  public async Task ExportAsync(string directory, bool modifiedOnly, bool retry, Action changed, CancellationToken ct, PdfExportItem[]? snapshot = null, Func<PdfSaveResult, Task>? afterSave = null)
   {
     if (Exporting) throw new InvalidOperationException("副本导出尚未收尾");
     var previous = ExportItems;
@@ -111,6 +111,8 @@ public sealed class PdfWorkspace
           target = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(item.Name)}_{suffix}.pdf");
         targets.Add(target); items[index] = item with { Status = "saving", Output = target }; changed();
         PdfSaveResult result = await entry.Model.ExportCopyAsync(target, item.Revision, item.Settings, CancellationToken.None);
+        // 受控取消冒烟 gate：真实保存结果返回后、终态落账前可短暂挂起；正常 null 无新 await。
+        if (afterSave is { } onSaved) await onSaved(result);
         // Unconfirmed：副本提交后响应丢失，服务端可能已写入真实目标。保留
         // result.Target 与独立状态，明确告知用户检查该输出且不自动重试。
         items[index] = item with

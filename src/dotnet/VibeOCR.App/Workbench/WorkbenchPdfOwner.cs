@@ -89,6 +89,10 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   private bool pdfExitReview;
   private PdfDocumentEntry? pdfClosingPreviewDrain;
   private readonly PdfWorkspace pdfWorkspace = new();
+  // 受控取消正确性冒烟探针（仅 smoke 场景安装，正常 null）：真实 worker 首份
+  // 保存返回后、终态落账前挂起，等公共“停止后续导出”按钮驱动的取消回执
+  // 后由冒烟释放；Owner 侧有界超时兑底，探针未释放也不挂死真实导出队列。
+  internal PdfExportCancelSmokeProbe? ExportSmokeProbe { get; set; }
   // Capture document ownership at command entry; the async flow retains it across pickers/awaits.
   private readonly AsyncLocal<PdfDocumentEntry?> pdfContext = new();
   private PdfDocumentEntry? PdfEntry => pdfContext.Value ?? pdfWorkspace.Active;
@@ -584,10 +588,32 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       directory = (await picker.PickSingleFolderAsync())?.Path;
     }
     if (directory is null || ActivePdf is null) return ActivePdf is { } model ? PdfState(model) : EmptyPdfState();
+    PdfExportCancelSmokeProbe? probe = ExportSmokeProbe;
+    bool gate = probe is not null && !command.Retry && probe.ExpectedGeneration == pdfWorkspace.ExportGeneration + 1 &&
+      string.Equals(Path.GetFullPath(directory), probe.Directory, StringComparison.OrdinalIgnoreCase);
     return PublishPdfStartThenTrack(PdfState(ActivePdf), () => pdfWorkspace.ExportAsync(directory, command.ModifiedOnly, command.Retry,
-      () => { if (ActivePdf is { } active) operations.Publish(PdfState(active)); }, ct, plan));
+      () => { if (ActivePdf is { } active) operations.Publish(PdfState(active)); }, ct, plan,
+      gate ? result => GateFirstRealExportSaveAsync(probe!, result) : null));
   }
-  private PdfWorkbenchState CancelPdfExport() { pdfWorkspace.CancelExport(); return ActivePdf is { } active ? PdfState(active) : EmptyPdfState(); }
+  private static async Task GateFirstRealExportSaveAsync(PdfExportCancelSmokeProbe probe, PdfSaveResult result)
+  {
+    // 仅第一份真实结果挂起（TrySetResult 一次性）；超时兑底放行保证不挂死
+    // 真实队列，但必须显式记录故障——冒烟在检查点强制 throw，不得静默记 pass。
+    probe.GateAttached = true;
+    if (!probe.FirstSave.TrySetResult(result)) return;
+    try { await probe.Release.Task.WaitAsync(probe.GateTimeout); }
+    catch (TimeoutException error) { probe.GateFault = error; }
+  }
+  private PdfWorkbenchState CancelPdfExport()
+  {
+    pdfWorkspace.CancelExport();
+    // 仅实际接入匹配导出轮次的探针且公共停止按钮驱动的取消才见证；关闭
+    // 流程同样调用 Workspace.CancelExport，挂在那里会伪造回执。
+    if (ExportSmokeProbe is { } probe && probe.GateAttached && pdfWorkspace.Exporting &&
+      pdfWorkspace.ExportGeneration == probe.ExpectedGeneration)
+      probe.PublicCancelApplied.TrySetResult();
+    return ActivePdf is { } active ? PdfState(active) : EmptyPdfState();
+  }
   private PdfWorkbenchState? SetPdfPreviewPosition(SetPdfPreviewPositionCommand command)
   {
     // 纯预览状态命令：按修订/页码校验后写入所属条目，过期迟到值直接忽略；
@@ -986,4 +1012,20 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
   }
   internal void Release() => pdfStructured.Clear();
+
+  /// <summary>受控取消冒烟探针状态；仅 smoke 场景安装，正常路径恒为 null。</summary>
+  internal sealed class PdfExportCancelSmokeProbe(string directory, long expectedGeneration)
+  {
+    internal string Directory { get; } = Path.GetFullPath(directory);
+    internal long ExpectedGeneration { get; } = expectedGeneration;
+    /// <summary>兑底释放上限：探针未被释放时真实导出队列最多挂起此时长。</summary>
+    internal TimeSpan GateTimeout { get; set; } = TimeSpan.FromMinutes(2);
+    /// <summary>gate 已真实接入当前导出轮次（首个回调写入）；未接入的探针不获得取消回执。</summary>
+    internal volatile bool GateAttached;
+    /// <summary>兑底超时故障：放行真实队列的同时必须让见证失败，不得静默记 pass。</summary>
+    internal volatile Exception? GateFault;
+    internal TaskCompletionSource<PdfSaveResult> FirstSave { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal TaskCompletionSource PublicCancelApplied { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  }
 }

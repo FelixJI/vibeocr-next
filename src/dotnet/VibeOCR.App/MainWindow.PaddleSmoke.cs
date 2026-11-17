@@ -776,36 +776,75 @@ public sealed partial class MainWindow
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelectorAll('.pdf-documents button')[{index}].click()");
       await WaitForPaddlePdfAsync(state => state.DocumentId == documentId && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     }
+    object? cancelWitness = null;
+    string? cancelFirstOutput = null;
     async Task<PdfWorkbenchState> ExportCopiesAsync(string directory, bool retry = false, bool cancel = false)
     {
       Directory.CreateDirectory(directory);
       // 重试轮次会保留上一批的逐文件失败残留为 pdf.failed；快照不触终态守卫。
       long previousGeneration = (await WaitForPaddlePdfAsync(_ => true, TimeSpan.FromSeconds(30), tolerateDocumentTerminalIssue: true)).ExportGeneration;
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("(() => { const e=document.querySelector('details.pdf-export'); if(!e.open)e.querySelector('summary').click(); })()");
-      if (cancel)
+      if (!cancel)
       {
-        // Observe the actual public stop button becoming enabled; click it during the
-        // first non-cancellable save, without sleeps or private command injection.
-        string armed = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("""
-          (() => { window.__pdfSmokeCancelled=false; const observer=new MutationObserver(() => {
-            const b=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='停止后续导出');
-            if(b&&!b.disabled){observer.disconnect();b.click();window.__pdfSmokeCancelled=true;}
-          }); observer.observe(document.body,{subtree:true,attributes:true,childList:true}); window.__pdfSmokeCancelObserver=observer; return true; })()
-          """);
-        if (armed != "true") throw new InvalidOperationException("Export cancellation observer was not armed.");
+        await ClickWorkbenchSmokeButtonAsync(retry ? "重试未完成项" : "选择目录并导出");
+        nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+        try { await CompletePaddlePickerAsync(dialog, directory, isFolder: true); }
+        catch { CancelPaddleDialog(dialog); throw; }
+        return await WaitForPaddlePdfAsync(state => state.ExportGeneration > previousGeneration && !state.Exporting && state.ExportItems?.Count == 2 && state.ExportItems.All(item => item.Status != "saving"), TimeSpan.FromMinutes(2), tolerateDocumentTerminalIssue: true);
       }
-      await ClickWorkbenchSmokeButtonAsync(retry ? "重试未完成项" : "选择目录并导出");
-      nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
-      try { await CompletePaddlePickerAsync(dialog, directory, isFolder: true); }
-      catch { CancelPaddleDialog(dialog); throw; }
-      PdfWorkbenchState result = await WaitForPaddlePdfAsync(state => state.ExportGeneration > previousGeneration && !state.Exporting && state.ExportItems?.Count == 2 && state.ExportItems.All(item => item.Status != "saving"), TimeSpan.FromMinutes(2), tolerateDocumentTerminalIssue: true);
-      if (cancel)
+      // 受控取消正确性 gate（仅本冒烟场景安装，正常恒为 null）：真实 worker 首份
+      // 保存返回后、终态落账前由 Owner 探针挂起；点公共“停止后续导出”按钮并等
+      // 到真实取消回执后释放。不加固定 sleep/重试，不放宽终态断言。
+      var probe = new WorkbenchPdfOwner.PdfExportCancelSmokeProbe(directory, previousGeneration + 1);
+      long armedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+      commandHandler.Pdf.ExportSmokeProbe = probe;
+      try
       {
-        string cancelled = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("(() => {window.__pdfSmokeCancelObserver?.disconnect();return window.__pdfSmokeCancelled===true;})()");
-        if (cancelled != "true" || !result.ExportItems!.Any(item => item.Status == "saved") || !result.ExportItems!.Any(item => item.Status is "cancelled" or "not_started"))
-          throw new InvalidOperationException($"Batch cancellation did not retain a completed output and stop subsequent files: {JsonSerializer.Serialize(result.ExportItems)}");
+        await ClickWorkbenchSmokeButtonAsync("选择目录并导出");
+        nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+        try { await CompletePaddlePickerAsync(dialog, directory, isFolder: true); }
+        catch { CancelPaddleDialog(dialog); throw; }
+        PdfSaveResult firstSave = await probe.FirstSave.Task.WaitAsync(TimeSpan.FromMinutes(2));
+        ThrowIfPaddleExportGateFaulted(probe);
+        long firstSaveAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (firstSave.Disposition != PdfSaveDisposition.Saved || !File.Exists(firstSave.Target))
+          throw new InvalidOperationException($"Controlled cancellation gate did not observe a saved first output: {firstSave.Disposition}; {firstSave.Target}");
+        // gate 挂起中的权威宿主状态：第一项 saving、第二项未开始。
+        PdfWorkbenchState gated = await WaitForPaddlePdfAsync(state => state.Exporting && state.ExportItems?.Count == 2 &&
+          state.ExportItems[0].Status == "saving" && state.ExportItems[1].Status == "not_started", TimeSpan.FromSeconds(30), tolerateDocumentTerminalIssue: true);
+        string domSnapshot = await PaddleSmokeDomTextAsync(".pdf-export") ?? "";
+        await ClickWorkbenchSmokeButtonAsync("停止后续导出");
+        await probe.PublicCancelApplied.Task.WaitAsync(TimeSpan.FromMinutes(2));
+        long cancelAppliedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        probe.Release.TrySetResult();
+        long releasedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        PdfWorkbenchState result = await WaitForPaddlePdfAsync(state => state.ExportGeneration > previousGeneration && !state.Exporting && state.ExportItems?.Count == 2 && state.ExportItems.All(item => item.Status != "saving"), TimeSpan.FromMinutes(2), tolerateDocumentTerminalIssue: true);
+        ThrowIfPaddleExportGateFaulted(probe);
+        if (!result.ExportItems!.Any(item => item.Status == "saved") || !result.ExportItems!.Any(item => item.Status is "cancelled" or "not_started"))
+          throw new InvalidOperationException($"Batch cancellation did not retain a completed output and stop subsequent files: finalItems={JsonSerializer.Serialize(result.ExportItems)}");
+        cancelFirstOutput = firstSave.Target;
+        cancelWitness = new
+        {
+          witness = "controlled cancellation witness (smoke-installed gate; correctness only, not a performance benchmark)",
+          host_clock = "System.Diagnostics.Stopwatch.GetTimestamp (single host clock; DOM performance.now never compared)",
+          expected_generation = previousGeneration + 1,
+          armed = armedAt,
+          first_real_save = new { firstSave.Disposition, firstSave.Target, at = firstSaveAt },
+          gated_items = gated.ExportItems,
+          dom_at_gate = domSnapshot,
+          public_cancel_applied = cancelAppliedAt,
+          release = releasedAt,
+          terminal = System.Diagnostics.Stopwatch.GetTimestamp(),
+          final_items = result.ExportItems,
+        };
+        return result;
       }
-      return result;
+      finally
+      {
+        // 任何异常都释放探针并清理，不挂住真实导出队列。
+        probe.Release.TrySetResult();
+        commandHandler.Pdf.ExportSmokeProbe = null;
+      }
     }
     RecordPaddleSmokeStage("workspace overwrite, explicit native deletion, orientation and structure");
     await SampleResourcesAsync("initial-75");
@@ -882,6 +921,7 @@ public sealed partial class MainWindow
     string partialDirectory = Path.Combine(exports, "partial"); Directory.CreateDirectory(partialDirectory);
     string competitor = Path.Combine(partialDirectory, Path.GetFileName(saveTarget));
     var raceObserved = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    PdfWorkbenchState? partialBatch = null;
     using (var watcher = new FileSystemWatcher(partialDirectory, ".*.tmp"))
     {
       watcher.Created += (_, change) => {
@@ -890,7 +930,7 @@ public sealed partial class MainWindow
         catch (Exception error) { raceObserved.TrySetException(error); }
       };
       watcher.EnableRaisingEvents = true;
-      PdfWorkbenchState partial = await ExportCopiesAsync(partialDirectory);
+      PdfWorkbenchState partial = partialBatch = await ExportCopiesAsync(partialDirectory);
       await raceObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
       if (partial.ExportItems!.Select(item => item.Status).SequenceEqual(new[] { "failed", "saved" }) != true || File.ReadAllText(competitor) != "T4_SYNTHETIC_COMPETITOR")
         throw new InvalidOperationException($"Final commit competition was not reported per file: {JsonSerializer.Serialize(partial.ExportItems)}");
@@ -900,6 +940,13 @@ public sealed partial class MainWindow
     if (retried.ExportItems!.Any(item => item.Status != "saved") || retried.Documents!.Any(document => !document.IsModified)) throw new InvalidOperationException("Retry failed or copy cleared source dirty flags.");
     string cancelDirectory = Path.Combine(exports, "cancelled");
     PdfWorkbenchState cancelledBatch = await ExportCopiesAsync(cancelDirectory, cancel: true);
+    // 重试前核对磁盘事实：受控取消只留下 gate 内已确认的第一份真实输出，第二份从未生成。
+    string[] cancelledFiles = Directory.GetFiles(cancelDirectory, "*.pdf");
+    if (cancelledFiles.Length != 1 || cancelFirstOutput is null ||
+      !string.Equals(cancelledFiles[0], cancelFirstOutput, StringComparison.OrdinalIgnoreCase) ||
+      cancelledBatch.ExportItems!.Count(item => item.Output is null) != 1)
+      throw new InvalidOperationException($"Cancelled batch did not leave exactly the gated first output: files=[{string.Join(", ", cancelledFiles)}]; items={JsonSerializer.Serialize(cancelledBatch.ExportItems)}");
+    paddleSmokePartialEvidence = new { input_kind = "pdf_workspace", editing, partial_items = partialBatch!.ExportItems, retry_items = retried.ExportItems, competitor, cancel_witness = cancelWitness, resources };
     PdfWorkbenchState completedBatch = await ExportCopiesAsync(cancelDirectory, retry: true);
     if (completedBatch.ExportItems!.Any(item => item.Status != "saved") || completedBatch.Documents!.Any(document => !document.IsModified)) throw new InvalidOperationException("Cancelled batch retry failed or lost modifications.");
     object aSaved = await SaveCurrentWorkspaceTargetAsync(saveTarget);
@@ -918,9 +965,17 @@ public sealed partial class MainWindow
     return new { editing, oriented.Summary, original_paths = new[] { fixture, second }, a_saved = aSaved, b_saved = bSaved,
       partial_directory = partialDirectory, retry_items = retried.ExportItems, competitor,
       cancelled_directory = cancelDirectory, cancelled_items = cancelledBatch.ExportItems, completed_items = completedBatch.ExportItems,
+      cancel_witness = cancelWitness,
       before_copy_documents = beforeCopies.Documents, after_copy_documents = completedBatch.Documents, reopened.PageCount,
       exit_cancel = new { real_window_close = true, public_dialog_cancel = true, afterExitCancel.DocumentId, retained_documents = afterExitCancel.Documents?.Count, continued_export = true },
       resources, full_text_verification = "external-extraction-required" };
+  }
+
+  /// <summary>gate 兑底超时必须使见证显式失败：放行队列是为了不挂死，不是默许 pass。</summary>
+  private static void ThrowIfPaddleExportGateFaulted(WorkbenchPdfOwner.PdfExportCancelSmokeProbe probe)
+  {
+    if (probe.GateFault is { } fault)
+      throw new InvalidOperationException($"Controlled cancellation gate timed out before release; the witness must fail: {fault.Message}", fault);
   }
 
   private async Task<object> SaveCurrentWorkspaceTargetAsync(string target)
