@@ -451,3 +451,11 @@ test("t2_pdf_baseline driver self-check passes (exit priority + report isolation
     `driver self-check failed:\n${result.stdout}\n${result.stderr}`,
   );
 });
+
+test("controlled detection samples reject default short/mixed kinds", () => {
+  const script = path.join(repoRoot, "scripts", "t2_pdf_baseline.ps1");
+  const result = spawnSync("pwsh", ["-NoProfile", "-File", script,
+    "-SelfCheck", "-DetectionDelayMs", "500"], { encoding: "utf8", cwd: repoRoot });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /requires Kinds=scan_long/);
+});

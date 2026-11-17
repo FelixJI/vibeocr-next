@@ -4,6 +4,22 @@ namespace VibeOCR.App.Tests;
 
 public class PdfBaselineOwnershipTests
 {
+  [Theory]
+  [InlineData(99, 0)]
+  [InlineData(120, -1)]
+  [InlineData(120, 120)]
+  [InlineData(120, 121)]
+  public void ControlledBrowsingRejectsShortOrCompletedDetection(int pages, int detected)
+  {
+    Assert.Throws<InvalidOperationException>(() =>
+      PdfBaselineOwnership.RequireIncompleteDetection(pages, detected));
+  }
+
+  [Fact]
+  public void ControlledBrowsingAcceptsLongDocumentWithRemainingPages()
+  {
+    PdfBaselineOwnership.RequireIncompleteDetection(120, 119);
+  }
   private static PdfBaselinePublication Publication(
       string session, string document, int? page, long? revision, string url, double at = 10) =>
     new(at, session, document, page, revision, url);

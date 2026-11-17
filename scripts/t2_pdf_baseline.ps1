@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Goal #325/#327 T2 优化前原生 PDF 基线观测驱动（只观测，不优化）。
+Goal #325/#327 T2 原生 PDF 前后对比与受控检测验证。
 
 .DESCRIPTION
 单一隔离 candidate 副本复用于所有进程；每种合成 fixture（scan_short /
@@ -30,11 +30,17 @@ param(
     [ValidateSet('cpu', 'directml')][string]$Provider = 'cpu',
     [ValidateSet('tiny', 'small', 'medium')][string]$ModelPreset = 'small',
     [int]$TimeoutMinutes = 40,
+    # 非零仅用于 AC1 行为验证，不纳入前后性能对比。
+    [ValidateRange(0, 500)][int]$DetectionDelayMs = 0,
+    [switch]$BrowseStress,
     # 最小自检：不启动 App/monitor，只验证退出码优先级与报告目录隔离逻辑。
     [switch]$SelfCheck
 )
 $ErrorActionPreference = 'Stop'
 if ($TimeoutMinutes -le 0) { throw 'TimeoutMinutes must be positive' }
+if (($DetectionDelayMs -gt 0 -or $BrowseStress) -and (@($Kinds).Count -ne 1 -or $Kinds[0] -ne 'scan_long')) {
+    throw 'DetectionDelayMs/BrowseStress requires Kinds=scan_long; controlled runs are behavior-only'
+}
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifacts = Join-Path $repoRoot 'artifacts\t2_baseline'
 
@@ -208,7 +214,8 @@ foreach ($name in @(
     'VIBEOCR_PADDLE_SMOKE_SECOND_FIXTURE', 'VIBEOCR_PADDLE_SMOKE_OPTION_NAME',
     'VIBEOCR_PADDLE_SMOKE_OPTION_VALUE', 'VIBEOCR_PADDLE_SMOKE_OPTION_KIND',
     'VIBEOCR_PADDLE_SMOKE_TOKENS', 'VIBEOCR_PADDLE_SMOKE_EXPORT_BUTTONS',
-    'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES', 'WEBVIEW2_USER_DATA_FOLDER'
+    'VIBEOCR_PADDLE_SMOKE_TIMEOUT_MINUTES', 'WEBVIEW2_USER_DATA_FOLDER',
+    'VIBEOCR_PDF_DEMAND_TEST_DELAY_MS', 'VIBEOCR_PDF_DEMAND_BROWSE_STRESS'
 )) { $previous[$name] = [Environment]::GetEnvironmentVariable($name) }
 
 $results = @()
@@ -245,6 +252,8 @@ try {
                 $env:VIBEOCR_PADDLE_SMOKE_MODE = 'paddle_text'
                 $env:VIBEOCR_PADDLE_SMOKE_PIPELINE = 'OCR'
                 $env:VIBEOCR_PADDLE_SMOKE_INPUT_KIND = 'pdf_baseline'
+                $env:VIBEOCR_PDF_DEMAND_TEST_DELAY_MS = [string]$DetectionDelayMs
+                $env:VIBEOCR_PDF_DEMAND_BROWSE_STRESS = if ($BrowseStress) { '1' } else { '0' }
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_TEXT_LAYER = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_EDITING = '0'
                 $env:VIBEOCR_PADDLE_SMOKE_PDF_WORKSPACE = '0'
@@ -335,6 +344,9 @@ try {
                 process_tree = Read-T2MonitorSamples $monitorDir
                 process_cold = 'new app process + fresh per-run WebView2 user data folder; not OS/disk cold'
                 candidate_reused = $true
+                detection_delay_ms = $DetectionDelayMs
+                browse_stress = [bool]$BrowseStress
+                performance_eligible = ($DetectionDelayMs -eq 0 -and -not $BrowseStress)
             }
             $results += $record
             Add-Content -LiteralPath (Join-Path $artifacts 'run-index.jsonl') -Value (ConvertTo-Json $record -Depth 8 -Compress)
@@ -357,9 +369,9 @@ try {
 $exitCode = Get-T2ExitCode $states
 Write-Host ''
 if ($results.Count -gt 0) {
-    Write-Host "==== T2 原生基线观测汇总：$($results.Count) 次采样（本工具只观测；优化未启动）===="
+    Write-Host "==== T2 原生基线观测汇总：$($results.Count) 次采样===="
 } else {
-    Write-Host '==== T2 原生基线观测：尚未采样（优化未启动）===='
+    Write-Host '==== T2 原生基线观测：尚未采样===='
 }
 $results | Format-Table phase, kind, run, state, app_exit_code, monitor_valid -AutoSize | Out-String | Write-Host
 Write-Host "隔离证据（候选/fixtures/health/monitor/receipts）保留在: $smokeRoot"

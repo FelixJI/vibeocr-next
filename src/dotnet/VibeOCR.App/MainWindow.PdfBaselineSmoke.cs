@@ -41,6 +41,12 @@ internal static class PdfBaselineOwnership
     return (true, null);
   }
 
+  internal static void RequireIncompleteDetection(int pageCount, int detectedCount)
+  {
+    if (pageCount < 100 || detectedCount < 0 || detectedCount >= pageCount)
+      throw new InvalidOperationException("Controlled PDF browsing requires >=100 pages and unfinished detection.");
+  }
+
   internal static bool IsPublishedGeneration(
       IReadOnlyList<PdfBaselinePublication> publications, string session, string document,
       int page, long revision, string url) =>
@@ -888,6 +894,11 @@ public sealed partial class MainWindow
     int coldDpi = baselineSettings.RenderDpi;
     int maxPixels = baselineSettings.MaxPixels;
     double pickConfirmToDecoded = coldWitness.DecodedAt!.Value - PdfBaselineMark(cold.Snapshot, "file_pick_confirm");
+    string delaySetting = PaddleSmokeEnv("VIBEOCR_PDF_DEMAND_TEST_DELAY_MS") ?? "0";
+    if (!int.TryParse(delaySetting, out int detectionDelayMs) || detectionDelayMs is < 0 or > 500)
+      throw new InvalidOperationException("Invalid controlled PDF detection delay.");
+    object? delayedDetection = detectionDelayMs == 0 ? null
+      : await VerifyPdfBrowsingBeforeDetectionAsync(coldState, cold, detectionDelayMs);
     PdfWorkbenchState detected = await WaitForPaddlePdfAsync(
       state => !state.IsBusy && state.DetectedCount == state.PageCount && state.PageCount > 0,
       TimeSpan.FromMinutes(timeoutMinutes));
@@ -897,6 +908,9 @@ public sealed partial class MainWindow
     await ValidatePdfBaselineFinalImageAsync("cold_first_image", detected, 0, TimeSpan.FromSeconds(30));
     coldFinal = await PdfBaselineSnapshotAsync();
     PdfBaselineAllKnown coldAllKnown = PdfBaselineAllKnownFor(coldFinal, detected, "cold");
+    if (detectionDelayMs > 0 && coldAllKnown.At - PdfBaselineMark(coldFinal, "file_pick_confirm") <
+        (detected.PageCount - 1) * (double)detectionDelayMs)
+      throw new InvalidOperationException("Controlled detection delay was not observed across the document.");
 
     await SetPdfBaselinePhaseAsync("warm_revisits");
     long warmStartAt = PdfBaselineNow();
@@ -964,6 +978,8 @@ public sealed partial class MainWindow
     PdfBaselineImageWait zoomOut = await WaitForPdfBaselineImageAsync(
       "warm-zoom-out", 0, "warm_zoom_out", "zoom_out", TimeSpan.FromSeconds(30), requireNew: false);
     long warmDoneAt = PdfBaselineNow();
+    bool browseStress = PaddleSmokeEnv("VIBEOCR_PDF_DEMAND_BROWSE_STRESS") == "1";
+    object? browsing = browseStress ? await RunPdfBrowseStressAsync(detected.DocumentId) : null;
 
     await SetPdfBaselinePhaseAsync("reopen");
     long reopenStartAt = PdfBaselineNow();
@@ -1137,6 +1153,11 @@ public sealed partial class MainWindow
     {
       input_kind = "pdf_baseline",
       sample_status = "valid",
+      performance_eligible = detectionDelayMs == 0 && !browseStress,
+      continuous_browsing = browsing,
+      controlled_detection = delayedDetection,
+      resource_publications = finalSnapshot.Publications,
+      demand_scheduler = commandHandler.Pdf.DemandDiagnostics,
       sample_status_rules = new
       {
         valid = "必需见证（首图 decode+帧机会+页归属、检测收尾、reopen、请求探针无溢出）全部成立",
@@ -1179,7 +1200,7 @@ public sealed partial class MainWindow
         page_count = detected.PageCount,
         synthetic_only = true,
         ocr_performed = false,
-        artificial_delays = "none",
+        artificial_detection_delay_ms = detectionDelayMs,
       },
       cold_first_image = new
       {
@@ -1237,6 +1258,12 @@ public sealed partial class MainWindow
         },
         state_after_target = PdfBaselineStateFacts(warmPageState),
         state_after_return = PdfBaselineStateFacts(warmReturnState),
+        return_page0_requests = events.Where(request => request.Session == detected.SessionId
+            && request.Page == 0
+            && request.StartedAtMs >= warmReturnMarkAt * 1000.0 / Stopwatch.Frequency
+            && request.StartedAtMs < zoomInMarkAt * 1000.0 / Stopwatch.Frequency)
+          .GroupBy(request => request.Kind).ToDictionary(group => group.Key, group => group.Count()),
+        return_requests_scope = "从选择返回第0页到缩放前；含尚未完成请求，同档位缓存命中应无 render_preview/inspect_page",
       },
       reopen = new
       {
@@ -1265,6 +1292,7 @@ public sealed partial class MainWindow
       {
         note = "DeferredInferenceClient 冒烟探针记录的 App→Runtime PDF wire 请求；不含 worker 进程内 native 调用",
         max_inflight = maxInflight,
+        max_inflight_scope = "全部 HTTP 请求（含取消控制）；2普通+1自动检测门禁以 demand_scheduler 的实际租约峰值为准",
         counts = events.GroupBy(request => request.Kind)
           .ToDictionary(group => group.Key, group => group.Count()),
         outcomes = events.GroupBy(request => request.Outcome)
@@ -1278,11 +1306,87 @@ public sealed partial class MainWindow
           request.Page,
           request.Param,
           request.StartedAtMs,
+          request.EndedAtMs,
           request.DurationMs,
           request.Outcome,
           request.Error,
         }),
       },
+    };
+  }
+
+  private async Task<object> RunPdfBrowseStressAsync(string? documentId)
+  {
+    await SetPdfBaselinePhaseAsync("continuous_browsing");
+    var visits = new List<object>();
+    for (int cycle = 0; cycle < 3; cycle++)
+    {
+      foreach (int page in new[] { 7, 15, 23, 31, 39, 47, 55, 0 })
+      {
+        string mark = $"browse_{cycle}_{page}";
+        await MarkPdfBaselineBrowserAsync(mark);
+        string selector = $"button[aria-label='检查第 {page + 1} 页']";
+        string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+          $$"""(() => { const b = document.querySelector({{JsonSerializer.Serialize(selector)}}); if (!b) return false; b.scrollIntoView({block:'center'}); b.click(); return true; })()""");
+        if (clicked != "true") throw new InvalidOperationException("Continuous PDF page button missing.");
+        await RequestPdfBaselineFrameAsync(mark, page);
+        PdfBaselineImageWait frame = await WaitForPdfBaselineImageAsync(
+          mark, page, mark, mark, TimeSpan.FromSeconds(30), requireNew: false);
+        PdfWorkbenchState state = await WaitForPaddlePdfAsync(
+          value => value.DocumentId == documentId && value.SelectedPage == page,
+          TimeSpan.FromSeconds(10));
+        if (state.PageCount < 100) throw new InvalidOperationException("Continuous PDF fixture must have >=100 pages.");
+        ValidatePdfBaselineResourceOwnership(mark, state, frame, frame.Snapshot, page);
+        visits.Add(new { cycle, page, frame = FrameFacts(frame.Pulse) });
+      }
+    }
+    return new { visits, memory_source = "driver process-tree samples; entire run peak includes this phase", performance_eligible = false };
+  }
+
+  private async Task<object> VerifyPdfBrowsingBeforeDetectionAsync(
+    PdfWorkbenchState firstState, PdfBaselineImageWait first, int delayMs)
+  {
+    PdfBaselineOwnership.RequireIncompleteDetection(firstState.PageCount, firstState.DetectedCount);
+    ValidatePdfBaselineResourceOwnership("delayed_first", firstState, first, first.Snapshot, 0);
+    string screenshot = ValidatePaddleSmokeOwnedPath(
+      Path.ChangeExtension(RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_HEALTH"), ".before-detection.png"),
+      "delayed PDF screenshot");
+    using (new FileStream(screenshot, FileMode.CreateNew)) { }
+    Windows.Storage.StorageFile preview = await Windows.Storage.StorageFile.GetFileFromPathAsync(screenshot);
+    using (Windows.Storage.Streams.IRandomAccessStream stream =
+      await preview.OpenAsync(Windows.Storage.FileAccessMode.ReadWrite))
+    {
+      await WorkbenchWebView.CoreWebView2.CapturePreviewAsync(
+        Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat.Png, stream);
+      await stream.FlushAsync();
+    }
+    var flips = new List<object>();
+    foreach (int page in new[] { 1, 0 })
+    {
+      string mark = $"delayed_flip_{page}";
+      await MarkPdfBaselineBrowserAsync(mark);
+      string selector = $"button[aria-label='检查第 {page + 1} 页']";
+      string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        $$"""(() => { const b = document.querySelector({{JsonSerializer.Serialize(selector)}}); if (!b) return false; b.scrollIntoView({block:'center'}); b.click(); return true; })()""");
+      if (clicked != "true") throw new InvalidOperationException("Delayed PDF page button missing.");
+      await RequestPdfBaselineFrameAsync(mark, page);
+      PdfBaselineImageWait frame = await WaitForPdfBaselineImageAsync(
+        mark, page, mark, mark, TimeSpan.FromSeconds(30), requireNew: false);
+      PdfWorkbenchState state = await WaitForPaddlePdfAsync(
+        value => value.SelectedPage == page && value.DocumentId == firstState.DocumentId,
+        TimeSpan.FromSeconds(10));
+      PdfBaselineOwnership.RequireIncompleteDetection(state.PageCount, state.DetectedCount);
+      ValidatePdfBaselineResourceOwnership(mark, state, frame, frame.Snapshot, page);
+      flips.Add(new { page, state.DetectedCount, frame = FrameFacts(frame.Pulse), publications = frame.Snapshot.Publications });
+    }
+    return new
+    {
+      delay_ms = delayMs,
+      first_state = PdfBaselineStateFacts(firstState),
+      first_frame = FrameFacts(first.Pulse),
+      screenshot,
+      flips,
+      note = "仅受控行为样本，不纳入性能对比；截图为 WebView 内容，不证明未被系统弹窗遮挡。",
     };
   }
 
