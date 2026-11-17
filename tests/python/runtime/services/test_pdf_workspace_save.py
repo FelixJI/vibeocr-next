@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pymupdf as fitz
 import pytest
 from vibeocr.runtime.documents.models.pdf_document import PdfDocument
-from vibeocr.runtime.documents.pdf_service import PdfService
+from vibeocr.runtime.documents.pdf_service import PdfSaveError, PdfService
 
 
 def opened(tmp_path):
@@ -125,6 +125,7 @@ def test_rebind_close_failure_releases_opened_target_and_keeps_dirty(
     source, doc, model = opened(tmp_path)
     proxy = MagicMock()
     proxy.name = str(source)
+    proxy.is_closed = False
     proxy.save.side_effect = doc.save
     proxy.close.side_effect = OSError("old source close failed")
     target_docs = []
@@ -138,7 +139,7 @@ def test_rebind_close_failure_releases_opened_target_and_keeps_dirty(
     monkeypatch.setattr(
         "vibeocr.runtime.documents.pdf_service.fitz.open", recorded_open
     )
-    with pytest.raises(OSError, match="old source"):
+    with pytest.raises(PdfSaveError, match="old source") as failure:
         PdfService.save_with_rewrite(
             proxy,
             model,
@@ -146,6 +147,7 @@ def test_rebind_close_failure_releases_opened_target_and_keeps_dirty(
             rewrite_text_layers=False,
             rebind_target=True,
         )
+    assert failure.value.committed
     assert len(target_docs) == 1 and target_docs[0].is_closed
     assert (
         model.file_path == str(source)

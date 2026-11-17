@@ -96,7 +96,8 @@ class TestSaveWithRewrite:
 
         assert result.rewritten_pages == []
         assert rewrite_calls == []
-        doc.close()
+        assert result.new_doc is not None
+        result.new_doc.close()
         verify = fitz.open(str(path))
         assert "Fast" in verify[0].get_text()
         verify.close()
@@ -148,7 +149,8 @@ class TestSaveCompressOnSave:
         PdfService.add_text_layer(doc, pdf_doc, 0, result)
 
         settings = PdfGlobalSettings(compress_on_save=False)
-        PdfService.save(doc, pdf_doc, pdf_settings=settings)
+        doc = PdfService.save(doc, pdf_doc, pdf_settings=settings)
+        assert doc is not None
 
         verify = fitz.open(str(path))
         assert "World" in verify[0].get_text()
