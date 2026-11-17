@@ -201,13 +201,26 @@ test("webview message listener filters real app.state/pdf envelope per phase", (
   const dispatch = (payload) => {
     for (const handler of state.listeners.message) handler({ data: payload });
   };
+  const pdfState = (runtimeSession, pages) => ({
+    type: "app.state",
+    payload: {
+      sessionId: "bridge-7",
+      revision: 3,
+      scope: "pdf",
+      change: "pages",
+      state: { sessionId: runtimeSession, documentId: `doc-${runtimeSession}`, pageCount: pages, detectedCount: pages },
+    },
+  });
   baseline.setPhase("cold_open");
-  dispatch({ type: "app.state", payload: { scope: "pdf", pages: 1 } });
-  dispatch({ type: "app.state", payload: { scope: "pdf", pages: 2 } });
-  dispatch({ type: "app.state", payload: { scope: "batch", items: [] } });
+  dispatch(pdfState("s1", 1));
+  dispatch(pdfState("s1", 2));
+  dispatch({
+    type: "app.state",
+    payload: { sessionId: "bridge-7", revision: 4, scope: "batch", change: "items", state: { items: [] } },
+  });
   dispatch({ type: "command.receipt", payload: { scope: "pdf" } });
   baseline.setPhase("warm");
-  dispatch({ type: "app.state", payload: { scope: "pdf", pages: 3 } });
+  dispatch(pdfState("s1", 3));
   const facts = snapshot().stateMessages;
   assert.equal(facts.listenerAvailable, true);
   assert.equal(facts.measurementErrors, 0);
@@ -252,6 +265,44 @@ test("dispose disconnects observer, stops frame waits and removes the message li
   const counted = snapshot().stateMessages.totalCount;
   assert.equal(before, 0, "listener removed by dispose");
   assert.equal(counted, 0, "no counting after dispose");
+});
+
+test("first all-known pdf state event is pinned per runtime session inside nested state", () => {
+  const { state, baseline, snapshot } = createHarness();
+  const dispatch = (payload) => {
+    for (const handler of state.listeners.message) handler({ data: payload });
+  };
+  const pdfState = (runtimeSession, pageCount, detectedCount) => ({
+    type: "app.state",
+    payload: {
+      sessionId: "bridge-9",
+      revision: 5,
+      scope: "pdf",
+      change: "pages",
+      state: {
+        sessionId: runtimeSession,
+        documentId: `doc-${runtimeSession}`,
+        pageCount,
+        detectedCount,
+      },
+    },
+  });
+  state.now = 100;
+  dispatch(pdfState("s1", 6, 6));
+  state.now = 500;
+  dispatch(pdfState("s1", 6, 6));
+  dispatch(pdfState("s2", 3, 3));
+  const allKnown = snapshot().allKnownFirst;
+  assert.equal(allKnown.s1.at, 100, "first event pinned; later polls must not overwrite");
+  assert.equal(allKnown.s1.pageCount, 6);
+  assert.equal(allKnown.s2.at, 500, "new runtime session gets its own record");
+  assert.equal(
+    allKnown["bridge-9"],
+    undefined,
+    "bridge session id must never be used as the key",
+  );
+  dispatch(pdfState("s3", 5, 2));
+  assert.equal(snapshot().allKnownFirst.s3, undefined, "partial detection never recorded");
 });
 
 test("t2_pdf_baseline driver self-check passes (exit priority + report isolation)", () => {

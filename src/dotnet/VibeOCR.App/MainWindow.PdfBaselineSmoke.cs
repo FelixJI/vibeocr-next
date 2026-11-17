@@ -22,6 +22,7 @@ public sealed partial class MainWindow
       const state = {
         marks: {}, images: [], pulses: {}, awaiting: null, observer: null,
         disposed: false, phase: 'pre_open', messageHandler: null,
+        allKnown: { first: {} },
         stateMessages: {
           phases: {}, totalCount: 0, totalBytesEstimate: 0,
           listenerAvailable: false, measurementErrors: 0,
@@ -134,6 +135,7 @@ public sealed partial class MainWindow
               listenerAvailable: state.stateMessages.listenerAvailable,
               measurementErrors: state.stateMessages.measurementErrors,
             },
+            allKnownFirst: { ...state.allKnown.first },
             dpr: devicePixelRatio,
             viewport: { width: innerWidth, height: innerHeight },
           });
@@ -169,6 +171,26 @@ public sealed partial class MainWindow
             bucket.bytesEstimate += bytes;
             state.stateMessages.totalCount += 1;
             state.stateMessages.totalBytesEstimate += bytes;
+            // 真实 codec 形状：payload = { sessionId(bridge), revision, scope, change,
+            // state: statePayload }；PDF 字段在 payload.state 内，不能取 payload 顶层。
+            const payload = data.payload;
+            const inner = payload.state;
+            if (inner && typeof inner === 'object' &&
+                Number.isFinite(inner.pageCount) && inner.pageCount > 0 &&
+                inner.detectedCount === inner.pageCount) {
+              const key = inner.sessionId || inner.documentId || '';
+              if (key && !state.allKnown.first[key]) {
+                const keys = Object.keys(state.allKnown.first);
+                if (keys.length >= 8) delete state.allKnown.first[keys[0]];
+                state.allKnown.first[key] = {
+                  at: performance.now(),
+                  sessionId: inner.sessionId || null,
+                  documentId: inner.documentId || null,
+                  pageCount: inner.pageCount,
+                  detectedCount: inner.detectedCount,
+                };
+              }
+            }
           } catch (error) {
             state.stateMessages.measurementErrors += 1;
           }
@@ -209,6 +231,9 @@ public sealed partial class MainWindow
 
   private sealed record PdfBaselineStateMessagePhase(int Count, long BytesEstimate);
 
+  private sealed record PdfBaselineAllKnown(
+    double At, string? SessionId, string? DocumentId, int PageCount, int DetectedCount);
+
   private sealed record PdfBaselineBrowserSnapshot(
     IReadOnlyDictionary<string, double> Marks, string Phase,
     IReadOnlyDictionary<string, PdfBaselinePulse> Pulses,
@@ -217,6 +242,7 @@ public sealed partial class MainWindow
     IReadOnlyDictionary<string, PdfBaselineStateMessagePhase> StateMessagePhases,
     int StateMessageTotalCount, long StateMessageTotalBytes,
     bool StateMessageListenerAvailable, int StateMessageMeasurementErrors,
+    IReadOnlyDictionary<string, PdfBaselineAllKnown> AllKnownFirst,
     double Dpr, int ViewportWidth, int ViewportHeight);
 
   private sealed record PdfBaselineImageWait(
@@ -309,6 +335,22 @@ public sealed partial class MainWindow
         (int)phase.Value.GetProperty("count").GetDouble(),
         phase.Value.GetProperty("bytesEstimate").GetInt64());
     }
+    var allKnown = new Dictionary<string, PdfBaselineAllKnown>();
+    if (root.TryGetProperty("allKnownFirst", out JsonElement allKnownElement) &&
+        allKnownElement.ValueKind == JsonValueKind.Object)
+    {
+      foreach (JsonProperty known in allKnownElement.EnumerateObject())
+      {
+        allKnown[known.Name] = new PdfBaselineAllKnown(
+          known.Value.GetProperty("at").GetDouble(),
+          known.Value.TryGetProperty("sessionId", out JsonElement session) && session.ValueKind == JsonValueKind.String
+            ? session.GetString() : null,
+          known.Value.TryGetProperty("documentId", out JsonElement documentElement) && documentElement.ValueKind == JsonValueKind.String
+            ? documentElement.GetString() : null,
+          (int)known.Value.GetProperty("pageCount").GetDouble(),
+          (int)known.Value.GetProperty("detectedCount").GetDouble());
+      }
+    }
     return new PdfBaselineBrowserSnapshot(
       marks,
       root.GetProperty("phase").GetString() ?? "",
@@ -322,6 +364,7 @@ public sealed partial class MainWindow
       root.GetProperty("stateMessages").GetProperty("totalBytesEstimate").GetInt64(),
       root.GetProperty("stateMessages").GetProperty("listenerAvailable").GetBoolean(),
       (int)root.GetProperty("stateMessages").GetProperty("measurementErrors").GetDouble(),
+      allKnown,
       root.GetProperty("dpr").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("width").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("height").GetDouble());
@@ -357,6 +400,41 @@ public sealed partial class MainWindow
   /// （warm 重访/缩放/reactivate）：缓存无新解码可接受，但必须有动作后匹配
   /// 当前页的帧机会见证与已解码当前帧。旧 RAF/旧历史帧不算新见证。
   /// </summary>
+  /// <summary>按宿主 session/document 取浏览器域首次 all-known 记录；缺失显式 FAIL。</summary>
+  private static PdfBaselineAllKnown PdfBaselineAllKnownFor(
+    PdfBaselineBrowserSnapshot snapshot, PdfWorkbenchState state, string phase)
+  {
+    string session = state.SessionId ?? "";
+    string documentId = state.DocumentId ?? "";
+    if (session.Length > 0 && snapshot.AllKnownFirst.TryGetValue(session, out var bySession))
+      return bySession;
+    if (documentId.Length > 0 && snapshot.AllKnownFirst.TryGetValue(documentId, out var byDocument))
+      return byDocument;
+    throw new InvalidOperationException(
+      $"PDF baseline web-state all-known record missing for {phase}: session={session} " +
+      $"document={documentId}; known keys={JsonSerializer.Serialize(snapshot.AllKnownFirst.Keys)}");
+  }
+
+  /// <summary>宿主域 load 请求完成参考（App→Runtime /load 真实结束，非检测耗时）。</summary>
+  private static object? PdfBaselineLoadEndReference(
+    IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events, string? session,
+    long hostPickConfirmTimestamp)
+  {
+    double? end = events
+      .Where(request => request.Kind == "load_detect" && request.Outcome == "completed"
+        && request.Session == session)
+      .Select(request => (double?)request.StartedAtMs + request.DurationMs)
+      .DefaultIfEmpty(null)
+      .Max();
+    if (end is null) return null;
+    double pickConfirmMs = hostPickConfirmTimestamp * 1000.0 / Stopwatch.Frequency;
+    return new
+    {
+      pick_confirm_to_load_request_end_ms = end.Value - pickConfirmMs,
+      note = "宿主 Stopwatch 域内 App→Runtime /load 请求完成参考；不是检测完成耗时，也不与浏览器域原始时间比较",
+    };
+  }
+
   private async Task<PdfBaselineImageWait> WaitForPdfBaselineImageAsync(
     string phase, int expectedPageIndex, string afterMark, string pulseTag,
     TimeSpan timeout, bool requireNew)
@@ -396,8 +474,12 @@ public sealed partial class MainWindow
       PdfBaselineBrowserImage? currentWitness = matching
         .Where(image => image.FullSrc == snapshot.Current?.Src)
         .OrderByDescending(image => image.SrcSetAt).FirstOrDefault();
+      // pulse 必须不早于当前 witness 的帧机会：防止旧 pulse（React 更新前的帧，
+      // 尺寸/布局可能不同）配新 witness；不满足则走重发帧请求路径。firstNew
+      // 仍取 mark 后最早事件，不因当前 src 升级错失首图。
+      double witnessFrameAt = currentWitness?.FrameOpportunityAt ?? double.NegativeInfinity;
       if ((!requireNew || firstNew is not null) && pulse is not null && liveMatches
-          && currentWitness is not null)
+          && currentWitness is not null && pulse.At >= witnessFrameAt)
       {
         return new PdfBaselineImageWait(firstNew, currentWitness, snapshot, pulse, firstNew is not null);
       }
@@ -599,6 +681,8 @@ public sealed partial class MainWindow
       TimeSpan.FromMinutes(timeoutMinutes));
     long detectionDoneAt = PdfBaselineNow();
     ValidatePdfBaselineResourceOwnership("cold_first_image", detected, cold, 0);
+    PdfBaselineBrowserSnapshot coldFinal = await PdfBaselineSnapshotAsync();
+    PdfBaselineAllKnown coldAllKnown = PdfBaselineAllKnownFor(coldFinal, detected, "cold");
 
     await SetPdfBaselinePhaseAsync("warm_revisits");
     long warmStartAt = PdfBaselineNow();
@@ -696,6 +780,8 @@ public sealed partial class MainWindow
       TimeSpan.FromMinutes(timeoutMinutes));
     long reopenDetectionDone = PdfBaselineNow();
     ValidatePdfBaselineResourceOwnership("reopen_first_image", reopenedDetected, reopen, 0);
+    PdfBaselineBrowserSnapshot reopenFinal = await PdfBaselineSnapshotAsync();
+    PdfBaselineAllKnown reopenAllKnown = PdfBaselineAllKnownFor(reopenFinal, reopenedDetected, "reopen");
 
     object? reactivation = null;
     PdfBaselineClarityReport? secondClarity = null;
@@ -727,6 +813,8 @@ public sealed partial class MainWindow
         TimeSpan.FromMinutes(timeoutMinutes));
       long secondDetectionDone = PdfBaselineNow();
       ValidatePdfBaselineResourceOwnership("second_doc_first_image", secondSettled, secondWait, 0);
+      PdfBaselineBrowserSnapshot secondFinal = await PdfBaselineSnapshotAsync();
+      PdfBaselineAllKnown secondAllKnown = PdfBaselineAllKnownFor(secondFinal, secondSettled, "second_doc");
 
       long reactivateAt = PdfBaselineNow();
       await MarkPdfBaselineBrowserAsync("reactivate_first_doc");
@@ -762,7 +850,8 @@ public sealed partial class MainWindow
           host = new
           {
             open_to_first_image_ms = PdfBaselineElapsedMs(secondOpenAt, secondFirstImageAt),
-            detection_wait_ms = PdfBaselineElapsedMs(secondFirstImageAt, secondDetectionDone),
+            observed_after_first_image_ms = PdfBaselineElapsedMs(secondFirstImageAt, secondDetectionDone),
+            web_state_first_all_known_pick_confirm_to_ms = secondAllKnown.At - PdfBaselineMark(secondFinal, "second_doc_pick_confirm"),
           },
           state_after_open = PdfBaselineStateFacts(secondState),
         },
@@ -812,7 +901,8 @@ public sealed partial class MainWindow
         image.NaturalHeight,
         first_image_to_decoded_ms = image.DecodedAt!.Value - coldWitness.DecodedAt!.Value,
       }).Take(8).ToList();
-    paddleSmokeOutcome = "passed";
+
+    RecordPaddleSmokeStage("pdf baseline: measurements complete");
     return new
     {
       input_kind = "pdf_baseline",
@@ -882,11 +972,18 @@ public sealed partial class MainWindow
       },
       detection = new
       {
-        host = new
+        web_state_first_all_known = new
         {
-          pick_confirm_to_detection_settled_ms = PdfBaselineElapsedMs(pickConfirmAt, detectionDoneAt),
-          first_image_to_detection_settled_ms = PdfBaselineElapsedMs(coldFirstImageAt, detectionDoneAt),
+          pick_confirm_to_all_known_ms = coldAllKnown.At - PdfBaselineMark(coldFinal, "file_pick_confirm"),
+          semantics = "浏览器 app.state/pdf 事件中该 session 首次 pageCount>0 且 detectedCount==pageCount 的 performance.now；为 Web 状态首次全部已知，非 native 检测完成瞬间；与 pick_confirm 同域差；后续轮询/新 session 不覆盖",
+          record = coldAllKnown,
         },
+        host_wait = new
+        {
+          observed_after_first_image_ms = PdfBaselineElapsedMs(coldFirstImageAt, detectionDoneAt),
+          note = "宿主后验轮询等待：旧实现检测多在首图前已完成，此值不是检测完成耗时",
+        },
+        host_load_request_end = PdfBaselineLoadEndReference(events, detected.SessionId, pickConfirmAt),
         state_at_settle = PdfBaselineStateFacts(detected),
       },
       warm = new
@@ -918,12 +1015,14 @@ public sealed partial class MainWindow
           close_to_first_image_ms = PdfBaselineElapsedMs(reopenStartAt, reopenFirstImageAt),
           pick_confirm_to_first_image_ms = PdfBaselineElapsedMs(reopenPickConfirmAt, reopenFirstImageAt),
           picker_done_to_first_image_ms = PdfBaselineElapsedMs(reopenFileSelectedAt, reopenFirstImageAt),
-          first_image_to_detection_settled_ms = PdfBaselineElapsedMs(reopenFirstImageAt, reopenDetectionDone),
-          detection_wait_ms = PdfBaselineElapsedMs(reopenDetectionStart, reopenDetectionDone),
+          first_image_to_all_known_state_ms = PdfBaselineElapsedMs(reopenFirstImageAt, reopenDetectionDone),
+          observed_after_first_image_ms = PdfBaselineElapsedMs(reopenDetectionStart, reopenDetectionDone),
         },
         browser = new
         {
           pick_confirm_to_decoded_ms = reopenWitness.DecodedAt!.Value - PdfBaselineMark(reopen.Snapshot, "reopen_pick_confirm"),
+          pick_confirm_to_all_known_ms = reopenAllKnown.At - PdfBaselineMark(reopenFinal, "reopen_pick_confirm"),
+          all_known_semantics = "Web 状态首次全部已知（非 native 检测完成瞬间）",
           witness = reopenWitness,
           frame = FrameFacts(reopen.Pulse),
         },
@@ -967,11 +1066,61 @@ public sealed partial class MainWindow
     current = pulse.Current,
   };
 
+  /// <summary>
+  /// baseline 专用收尾：在公共 CompletePaddleModesSmokeAsync 完成 CapturePreview/
+  /// Flush 之后、写入 passed health 之前调用（仅 INPUT_KIND=pdf_baseline）。通过
+  /// 公开“关闭文档”逐个关闭本次合成文档，不绕过 flush/close 保护；等待宿主文档
+  /// 数减少/新活跃文档与 DOM 可交互，最终 PageCount==0/文档空且“打开 PDF”
+  /// 可达。超时沿既有失败路径写 failed health 并保留阶段名。
+  /// </summary>
+  private async Task CleanupPaddlePdfBaselineDocumentsAsync()
+  {
+    RecordPaddleSmokeStage("pdf baseline: cleanup documents");
+    PdfWorkbenchState before = await WaitForPaddlePdfAsync(
+      _ => true, TimeSpan.FromSeconds(30));
+    int remaining = before.Documents?.Count ?? (before.PageCount > 0 ? 1 : 0);
+    for (int index = 0; index < remaining; index++)
+    {
+      await ClickWorkbenchSmokeButtonAsync("关闭文档");
+      int expectedLeft = remaining - index - 1;
+      PdfWorkbenchState afterClose = await WaitForPaddlePdfAsync(state => expectedLeft == 0
+          ? state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0
+          : state.Documents?.Count == expectedLeft && state.PageCount > 0 &&
+            state.DocumentId is not null && state.PagePreview is not null &&
+            state.PageInspectStatusCode == "pdf.inspect.ready",
+        TimeSpan.FromSeconds(60));
+      if (expectedLeft == 0) continue;
+      // 新活跃文档的 DOM/img 资源已注册且可交互才继续下一close：避免宿主计数
+      // 已减而投影未切换的 close-all 同类竞态。此时 observer 已随 RunCore
+      // 返回 dispose，改用直接 DOM 核对：当前 img src == 宿主 PagePreview.Url、
+      // 已解码且有布局，再等一帧。
+      string expectedUrl = JsonSerializer.Serialize(afterClose.PagePreview?.Url ?? "");
+      await WaitForSmokeDomAsync(
+        "(() => { const img = document.querySelector('.pdf-inspection-sheet img'); " +
+        $"return !!img && img.src === {expectedUrl} && img.complete && " +
+        "img.naturalWidth > 0 && img.getClientRects().length > 0; })()",
+        TimeSpan.FromSeconds(30));
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        "window.__t2CleanupReady = false; requestAnimationFrame(() => " +
+        "requestAnimationFrame(() => { window.__t2CleanupReady = true; }));");
+      await WaitForSmokeDomAsync("window.__t2CleanupReady === true", TimeSpan.FromSeconds(30));
+    }
+    await WaitForPaddlePdfAsync(
+      state => state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0,
+      TimeSpan.FromSeconds(30));
+    await WaitForSmokeDomAsync(
+      "[...document.querySelectorAll('button')].some(b => b.textContent.trim() === '打开 PDF')",
+      TimeSpan.FromSeconds(30));
+    RecordPaddleSmokeStage("pdf baseline: complete");
+    paddleSmokeOutcome = "passed";
+  }
+
   private static object WarmFacts(PdfBaselineImageWait wait, string mark) => new
   {
     new_image_observed = wait.NewImageObserved,
     mark_to_decoded_ms = wait.NewImageObserved
       ? wait.NewWitness!.DecodedAt!.Value - PdfBaselineMark(wait.Snapshot, mark) : (double?)null,
+    mark_to_frame_opportunity_ms = wait.Pulse.At - PdfBaselineMark(wait.Snapshot, mark),
     frame = FrameFacts(wait.Pulse),
     witness = wait.Witness,
   };

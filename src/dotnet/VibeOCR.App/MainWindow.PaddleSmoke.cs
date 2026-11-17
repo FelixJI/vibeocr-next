@@ -108,6 +108,13 @@ public sealed partial class MainWindow
           CoreWebView2CapturePreviewImageFormat.Png, preview);
         await preview.FlushAsync();
       }
+      // baseline 专用收尾：截图/Flush 完成后、写 passed health 前，仅
+      // INPUT_KIND=pdf_baseline 逐个公开关闭本次合成文档；不复制截图逻辑，
+      // 不改其他 smoke 语义。
+      if (phase == "inputs" && PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_INPUT_KIND") == "pdf_baseline")
+      {
+        await CleanupPaddlePdfBaselineDocumentsAsync();
+      }
       File.WriteAllText(path, JsonSerializer.Serialize(new
       {
         schema_version = 1,

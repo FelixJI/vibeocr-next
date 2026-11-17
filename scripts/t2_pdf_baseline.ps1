@@ -264,12 +264,34 @@ try {
                     -WorkingDirectory (Split-Path -Parent $executable) `
                     -WindowStyle Hidden -PassThru
                 Set-Content -LiteralPath (Join-Path $monitorDir 'root-pid.txt') -Value $app.Id
-                if (-not $app.WaitForExit(($TimeoutMinutes + 20) * 60000)) {
-                    $app.Kill($true)
-                    if (-not $app.WaitForExit(5000)) {
-                        throw "$phaseName app tree did not exit after forced termination"
+                # health 文件出现后 60s 退出宽限：避免已生成 health 后继续空等全程上限；
+                # 未退出明确 failed 并精确结束本 App 树（Kill(true) 仅 $app 进程树），
+                # 保留全程上限，不引入重试。health passed 不等于 exit0。
+                $overallCapMs = ($TimeoutMinutes + 20) * 60000
+                $exitGraceMs = 60000
+                $exitFailure = $null
+                $healthSeen = $null
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                while (-not $app.WaitForExit(500)) {
+                    if ($null -eq $healthSeen -and (Test-Path -LiteralPath $healthPath -PathType Leaf)) {
+                        $healthSeen = [DateTime]::UtcNow
                     }
-                    throw "$phaseName timed out（现场与 health/monitor 证据已保留: $smokeRoot）"
+                    if ($null -ne $healthSeen -and
+                        ([DateTime]::UtcNow - $healthSeen).TotalMilliseconds -ge $exitGraceMs) {
+                        $exitFailure = "app pid $($app.Id) did not exit within 60s grace after health file appeared"
+                        $app.Kill($true)
+                        if (-not $app.WaitForExit(5000)) {
+                            throw "$phaseName app tree did not exit after forced termination"
+                        }
+                        break
+                    }
+                    if ($watch.ElapsedMilliseconds -ge $overallCapMs) {
+                        $app.Kill($true)
+                        if (-not $app.WaitForExit(5000)) {
+                            throw "$phaseName app tree did not exit after forced termination"
+                        }
+                        throw "$phaseName timed out（现场与 health/monitor 证据已保留: $smokeRoot）"
+                    }
                 }
             } finally {
                 Set-Content -LiteralPath (Join-Path $monitorDir 'stop-monitor') -Value 'stop' -ErrorAction SilentlyContinue
@@ -291,8 +313,9 @@ try {
                 }
             }
             $state = 'failed'
-            if ($app.ExitCode -eq 0 -and $health.state -eq 'passed' -and $monitorValid) { $state = 'passed' }
-            elseif ($health.state -eq 'blocked') { $state = 'blocked' }
+            if ($null -eq $exitFailure -and $app.ExitCode -eq 0 -and
+                $health.state -eq 'passed' -and $monitorValid) { $state = 'passed' }
+            elseif ($null -eq $exitFailure -and $health.state -eq 'blocked') { $state = 'blocked' }
             if ($state -eq 'passed') {
                 $receiptDir = Join-Path $smokeRoot 'receipts'
                 New-Item -ItemType Directory -Path $receiptDir -Force | Out-Null
@@ -303,6 +326,8 @@ try {
             $record = [pscustomobject]@{
                 phase = $phaseName; kind = $kind; run = $run; state = $state
                 app_exit_code = $app.ExitCode; app_pid = $app.Id
+                exit_failure = $exitFailure
+                exit_grace_seconds = 60
                 monitor_exit_code = $monitor.ExitCode; monitor_valid = $monitorValid
                 monitor_evidence_gap = $monitorEvidenceGap
                 health_stage = $health.stage; health_state = $health.state
