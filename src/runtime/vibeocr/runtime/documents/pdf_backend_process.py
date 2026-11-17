@@ -355,9 +355,12 @@ class SessionRegistry:
             self._sessions[sid] = session
         return session
 
-    def get(self, session_id: str) -> BackendSession:
+    def find(self, session_id: str) -> BackendSession | None:
         with self._lock:
-            s = self._sessions.get(session_id)
+            return self._sessions.get(session_id)
+
+    def get(self, session_id: str) -> BackendSession:
+        s = self.find(session_id)
         if s is None:
             raise HTTPException(
                 status_code=404, detail=f"session not found: {session_id}"
@@ -370,8 +373,7 @@ class SessionRegistry:
         return s
 
     def remove(self, session_id: str) -> None:
-        with self._lock:
-            s = self._sessions.get(session_id)
+        s = self.find(session_id)
         if s is None:
             return
         # Keep the entry until close is confirmed; a timeout/exception is retryable.
@@ -1410,15 +1412,19 @@ def cancel(
     等待读，绝不触碰写 cancel_event，也不污染写事件。ACK cancelled=true，
     客户端必须校验。
     """
-    s = _get_registry().get(sid)
+    registry = _get_registry()
     if req is None:
+        s = registry.get(sid)
         s.cancel_event.set()
         # 唤醒优先门中等待的后台页：已取消的待入 native 读立即在唤醒后退出。
         # 只影响可撤销读；cancel_event/T1 写路径语义不变。
         _wake_read_waiters(s)
         return EmptyOk()
-    _advance_read_watermark(s, req.scope.value, req.before_epoch)
-    _wake_read_waiters(s)
+    # 关闭重试仍需确认两域已隔栏。CLOSING 不可逆；已移除会话无可准入读。
+    s = registry.find(sid) if req.scope == "all_reads" else registry.get(sid)
+    if s is not None:
+        _advance_read_watermark(s, req.scope.value, req.before_epoch)
+        _wake_read_waiters(s)
     return PdfReadCancelledOk()
 
 

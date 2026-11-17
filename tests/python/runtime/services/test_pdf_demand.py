@@ -328,3 +328,64 @@ async def test_presence_change_and_insert_do_not_recompute_scan_details(
     inserted = s.pdf_document.pages[3:6]
     assert [info.has_text_layer for info in inserted] == [True, False, False]
     assert not any(info.scan_checked or info.text_layers for info in inserted)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "native_close"])
+def test_all_reads_ack_allows_close_retry_and_lost_response(
+    demand_session, monkeypatch, failure
+):
+    from types import SimpleNamespace
+
+    s = demand_session
+    sid = s.session_id
+    _cancel(s, "all_reads", 2)
+    if failure == "timeout":
+        s.active_ops = 1
+        try:
+            with monkeypatch.context() as patch:
+                ticks = iter((0.0, 11.0))
+                patch.setattr(
+                    backend, "time", SimpleNamespace(monotonic=lambda: next(ticks))
+                )
+                with pytest.raises(HTTPException, match="operations have not settled"):
+                    backend.session_close(sid)
+        finally:
+            s.active_ops = 0
+    else:
+
+        def failed_close(_doc):
+            raise OSError("native close failed")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fitz.Document, "close", failed_close)
+            with pytest.raises(OSError, match="native close failed"):
+                backend.session_close(sid)
+
+    assert s.state == "CLOSING" and not s.doc.is_closed
+    _cancel(s, "all_reads", 3)
+    assert s.read_watermarks == (3, 3)
+    with pytest.raises(HTTPException, match="409"):
+        backend.cancel(sid)
+    with pytest.raises(HTTPException, match="409"):
+        backend.cancel(
+            sid,
+            PdfReadCancelRequest.model_validate(
+                {"scope": "viewport", "before_epoch": 3}
+            ),
+        )
+    with pytest.raises(HTTPException, match="409"):
+        backend.session_model(sid)
+
+    # The worker completes the retry; the caller may lose that response.
+    backend.session_close(sid)
+    assert s.state == "CLOSED" and s.doc.is_closed
+    assert backend._get_registry().find(sid) is None
+    _cancel(s, "all_reads", 4)
+    assert backend.session_close(sid).ok is True
+    with pytest.raises(HTTPException, match="404"):
+        backend.cancel(
+            sid,
+            PdfReadCancelRequest.model_validate(
+                {"scope": "background", "before_epoch": 4}
+            ),
+        )

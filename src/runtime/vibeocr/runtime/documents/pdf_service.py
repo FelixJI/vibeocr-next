@@ -531,8 +531,12 @@ class PdfService:
         doc: fitz.Document, page_index: int, *, limit: int | None = None
     ) -> list[TextLayerInfo]:
         page = doc[page_index]
-        # 在同一页复用文字布局，排除图像并跳过扫描件的详情提取。
+        if limit is not None and limit <= 0:
+            return []
+        # 在同一页复用文字布局，排除图像。
         textpage = page.get_textpage(flags=fitz.TEXTFLAGS_TEXT)
+        if limit is not None:
+            return PdfService._bounded_text_layers(textpage, limit)
         if not textpage.extractTEXT().strip():
             return []
         blocks: list[dict[str, Any]] = textpage.extractDICT()["blocks"]
@@ -569,7 +573,65 @@ class PdfService:
                     )
                 )
                 layer_index += 1
-                if limit is not None and len(layers) >= limit:
+        return layers
+
+    @staticmethod
+    def _bounded_text_layers(
+        textpage: fitz.TextPage, limit: int
+    ) -> list[TextLayerInfo]:
+        """Copy bounded line previews from the native layout.
+
+        TextPage creation still parses the page in MuPDF. The projection
+        retains at most 30 characters per line, even for an oversized span.
+        """
+        mupdf = fitz.mupdf
+        native = textpage.this
+        clip = native.m_internal.mediabox
+        infinite = mupdf.ll_fz_is_infinite_rect(clip)
+        layers: list[TextLayerInfo] = []
+        for block in native:
+            if block.m_internal.type != mupdf.FZ_STEXT_BLOCK_TEXT:
+                continue
+            for line in block:
+                if not infinite and mupdf.ll_fz_is_empty_rect(
+                    mupdf.ll_fz_intersect_rect(clip, line.m_internal.bbox)
+                ):
+                    continue
+                bbox = mupdf.fz_empty_rect
+                preview: list[str] = []
+                chars = trimmed_count = 0
+                for glyph in line:
+                    # Match extractDICT's crop filter and corrected glyph bounds.
+                    rect = fitz.extra.JM_char_bbox(line, glyph)
+                    if not infinite and not fitz.JM_rects_overlap(clip, rect):
+                        continue
+                    bbox = mupdf.ll_fz_union_rect(bbox, rect)
+                    code = glyph.m_internal.c
+                    char = (
+                        chr(code)
+                        if 0 <= code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF
+                        else "\ufffd"
+                    )
+                    if not chars and char.isspace():
+                        continue
+                    chars += 1
+                    if len(preview) < 30:
+                        preview.append(char)
+                    if not char.isspace():
+                        trimmed_count = chars
+                if not trimmed_count or mupdf.ll_fz_is_empty_rect(bbox):
+                    continue
+                index = len(layers)
+                layers.append(
+                    TextLayerInfo(
+                        index=index,
+                        text_preview="".join(preview[:trimmed_count]),
+                        char_count=trimmed_count,
+                        bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+                        color_id=index % 8,
+                    )
+                )
+                if len(layers) == limit:
                     return layers
         return layers
 

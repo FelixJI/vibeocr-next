@@ -251,3 +251,59 @@ def test_native_inspection_is_bounded_without_replacing_complete_model_cache(
         payload = PdfService.page_inspect(doc, model, 0)
         assert payload.truncated and len(payload.native_lines) == 1000
         assert model.pages[0].text_layers is layers
+
+
+def test_bounded_native_projection_matches_legacy_mixed_and_clipped_line_geometry():
+    with fitz.open() as doc:
+        page = doc.new_page(width=320, height=450)
+        page.insert_text((20, 40), "  ABC abc  ")
+        page.insert_text((70, 40), "mixed style", fontsize=10, fontname="cour")
+        page.insert_text((40, 200), "vertical", rotate=90)
+        page.insert_text((170, 180), "cutoff edge check", fontsize=18)
+        page.set_cropbox(fitz.Rect(10, 5, 216, 300))
+        page.set_rotation(90)
+
+        complete = PdfService.detect_text_layers(doc, 0)
+        bounded = PdfService.detect_text_layers(doc, 0, limit=3)
+        assert [line.text_preview for line in complete] == [
+            "ABC abc  mixed style",
+            "vertical",
+            "cutoff",
+        ]
+        assert bounded == complete
+        assert PdfService.detect_text_layers(doc, 0, limit=2) == complete[:2]
+
+
+def test_dense_native_inspection_bounds_python_projection_and_counts_long_line(
+    monkeypatch,
+):
+    with fitz.open() as doc:
+        page = doc.new_page(width=10000, height=7000)
+        long_text = "ABC " * 2400 + "end"
+        page.insert_text((20, 20), "  " + long_text + "  ", fontsize=1)
+        page.insert_text(
+            (20, 100), "\n".join(f"row {i}" for i in range(1010)), fontsize=4
+        )
+        get_textpage = fitz.Page.get_textpage
+        calls = 0
+
+        def textpage(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            assert not (kwargs["flags"] & fitz.TEXT_PRESERVE_IMAGES)
+            return get_textpage(self, **kwargs)
+
+        def whole_page(*_args, **_kwargs):
+            pytest.fail(
+                "inspection must not materialize whole-page text or dictionaries"
+            )
+
+        monkeypatch.setattr(fitz.Page, "get_textpage", textpage)
+        monkeypatch.setattr(fitz.TextPage, "extractTEXT", whole_page)
+        monkeypatch.setattr(fitz.TextPage, "extractDICT", whole_page)
+        result = PdfService.page_inspect(doc, _model(doc), 0)
+        assert calls == 1
+        assert result.truncated and len(result.native_lines) == 1000
+        assert result.native_lines[0].text_preview == long_text[:30]
+        assert result.native_lines[0].char_count == len(long_text)
+        assert result.native_lines[-1].text_preview == "row 998"
