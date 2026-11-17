@@ -37,6 +37,23 @@ def test_pdf_baseline_fixtures_match_manifest(tmp_path):
                     f"pages {index} and {other} share the identical image xref set"
                 )
 
+    landscape_entry = manifest["t2-baseline/scan_long_landscape.pdf"]
+    assert landscape_entry["performance_eligible"] is False
+    with fitz.open(tmp_path / "t2-baseline" / "scan_long_landscape.pdf") as doc:
+        assert doc.page_count == 120
+        _assert_scan_pages(doc, range(doc.page_count))
+        assert doc[55].rotation == 90
+        assert doc[55].rect.width > doc[55].rect.height
+        assert all(
+            doc[index].rect.width < doc[index].rect.height
+            for index in range(120)
+            if index != 55
+        )
+    with fitz.open(tmp_path / "t2-baseline" / "scan_long.pdf") as doc:
+        assert all(
+            page.rotation == 0 and page.rect.width < page.rect.height for page in doc
+        )
+
     short_entry = manifest["t2-baseline/scan_short.pdf"]
     assert 1 <= short_entry["pages"] <= 10
     with fitz.open(tmp_path / "t2-baseline" / "scan_short.pdf") as doc:
@@ -67,7 +84,12 @@ def test_pdf_baseline_fixtures_match_manifest(tmp_path):
 
 def test_pdf_baseline_manifest_declares_synthetic_only(tmp_path):
     manifest = draw_pdf_baseline_fixtures(tmp_path)
-    assert len(manifest) == 3
+    assert set(manifest) == {
+        "t2-baseline/scan_short.pdf",
+        "t2-baseline/scan_long.pdf",
+        "t2-baseline/scan_long_landscape.pdf",
+        "t2-baseline/mixed.pdf",
+    }
     for entry in manifest.values():
         assert entry["synthetic_only"] is True
         assert entry["pages"] > 0
