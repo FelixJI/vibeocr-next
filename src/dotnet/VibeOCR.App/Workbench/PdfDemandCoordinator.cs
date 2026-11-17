@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Net.Http;
 using System.Text.Json;
 using VibeOCR.App.Features.Pdf;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
@@ -317,7 +316,7 @@ internal sealed class PdfDemandCoordinator(
     Session session = Get(model, id);
     session.Foreground = true;
     foregroundWaiters++;
-    bool slot = false, waiting = true, sent = false, complete = false, ambiguous = false;
+    bool slot = false, waiting = true, sent = false, complete = false;
     long readEpoch = 0;
     try
     {
@@ -351,14 +350,9 @@ internal sealed class PdfDemandCoordinator(
       ct.ThrowIfCancellationRequested();
       return result;
     }
-    catch (Exception error) when (sent && !complete && Ambiguous(error))
-    {
-      ambiguous = true;
-      throw;
-    }
     finally
     {
-      if (slot && (!ambiguous ||
+      if (slot && (!sent || complete ||
           !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, () => LeaveOrdinary(session))))
         LeaveOrdinary(session);
       if (waiting) foregroundWaiters--;
@@ -548,18 +542,20 @@ internal sealed class PdfDemandCoordinator(
   private async Task DetectAsync(Session session)
   {
     long readEpoch = session.Background;
-    bool ambiguous = false;
+    bool complete = false;
     void Release() { auto = null; LeaveRead(session); }
     try
     {
       await session.Model.ReadPresenceAsync(session.Id, readEpoch, null,
         () => !stopped && active == session && !session.Writing && session.Background == readEpoch);
+      complete = true;
     }
-    catch (Exception error) { ambiguous = Ambiguous(error); }
+    catch (Exception) { }
     finally
     {
-      if (!ambiguous || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, Release)) Release();
-      if (ambiguous) session.AutoAttempted = true;
+      bool failedCurrentAttempt = !complete && session.Background == readEpoch;
+      if (complete || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, Release)) Release();
+      if (failedCurrentAttempt) session.AutoAttempted = true;
       Kick();
     }
   }
@@ -607,15 +603,20 @@ internal sealed class PdfDemandCoordinator(
     bool Current() => !stopped && session == active && !session.Writing && readEpoch == session.Viewport &&
       session.Model.SessionId == session.Id && Matches(session, job.Index, job.Key);
     var entry = new Entry(job.Key);
-    bool httpComplete = false, ambiguous = false;
+    bool sent = false, httpComplete = false;
     void Release() { issued.Remove(job.Key); LeaveOrdinary(session); }
     try
     {
       if (job.Key.Kind == Kind.Inspect)
       {
-        entry.Inspect = Find(job.Key)?.Inspect ?? await session.Model.Inference.InspectPdfPageDemandAsync(
-          session.Id, new Wire.PageInspectRequest { Page = job.Index, Read = read }, CancellationToken.None);
-        httpComplete = true;
+        entry.Inspect = Find(job.Key)?.Inspect;
+        if (entry.Inspect is null)
+        {
+          sent = true;
+          entry.Inspect = await session.Model.Inference.InspectPdfPageDemandAsync(
+            session.Id, new Wire.PageInspectRequest { Page = job.Index, Read = read }, CancellationToken.None);
+          httpComplete = true;
+        }
         if (!Current()) return;
         entry.InspectIndex = job.Index;
         var payload = JsonSerializer.SerializeToUtf8Bytes(entry.Inspect with { Page = job.Index });
@@ -625,6 +626,7 @@ internal sealed class PdfDemandCoordinator(
       }
       else
       {
+        sent = true;
         byte[] bytes = job.Key.Kind == Kind.Thumbnail
           ? await session.Model.Inference.RenderPdfThumbnailDemandAsync(session.Id,
             new Wire.RenderThumbnailRequest { Page = job.Index, Size = job.Key.Tier, Read = read }, CancellationToken.None)
@@ -646,27 +648,22 @@ internal sealed class PdfDemandCoordinator(
       if (entry.Warm is null && job.Key.Kind != Kind.Preview) session.Failed.Add(job.Key);
       publish(session.Model);
     }
-    catch (Exception error)
+    catch (Exception)
     {
       if (Current())
       {
         session.Failed.Add(job.Key);
         publish(session.Model);
       }
-      ambiguous = !httpComplete && Ambiguous(error);
     }
     finally
     {
       ReleaseIfUnowned(entry);
-      if (!ambiguous || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Viewport, readEpoch, Release)) Release();
+      if (!sent || httpComplete ||
+          !KeepUntilAcknowledged(session, Wire.PdfReadScope.Viewport, readEpoch, Release)) Release();
       Kick();
     }
   }
-
-  private static bool Ambiguous(Exception error) =>
-    error is HttpRequestException or IOException or OperationCanceledException or VibeOCR.Runtime.Client.RuntimeClientException ||
-    error is VibeOCR.Platform.Inference.InferenceClientException { Code:
-      VibeOCR.Contracts.HttpV2.HttpV2ErrorCode.TransientBackend or VibeOCR.Contracts.HttpV2.HttpV2ErrorCode.BackendUnavailable };
 
   private Entry? Find(Key key) => current?.Key == key ? current : previous?.Key == key ? previous : warm.GetValueOrDefault(key);
 

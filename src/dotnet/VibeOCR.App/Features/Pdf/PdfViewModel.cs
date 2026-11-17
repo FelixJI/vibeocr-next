@@ -1382,9 +1382,13 @@ public sealed class PdfViewModel(
         Pages = pages,
       }, progress =>
       {
-        if (!current()) return;
+        // The response can settle the issued read even after its UI owner changed.
         if (progress.TryGetProperty("message", out JsonElement msg) && msg.ValueKind == JsonValueKind.String)
-          terminal = msg.GetString();
+        {
+          string? outcome = msg.GetString();
+          if (outcome is "done" or "cancelled" or "incomplete") terminal = outcome;
+        }
+        if (!current()) return;
         if (progress.TryGetProperty("page_payload", out JsonElement payload) && payload.ValueKind == JsonValueKind.Object &&
             payload.Deserialize<Wire.PdfPageInfoMirror>() is { } page && requested.Contains(page.PageIndex))
         {
@@ -1396,6 +1400,7 @@ public sealed class PdfViewModel(
         }
         if (foreground) UpdateProgress(progress);
       }, CancellationToken.None);
+      if (terminal is null) throw new InvalidDataException("PDF presence stream ended without a terminal response.");
       return current() && terminal == "done" && targets.All(index => Pages[index].HasReliableGeometry);
     }
     finally

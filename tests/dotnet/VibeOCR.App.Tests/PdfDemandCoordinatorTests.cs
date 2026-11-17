@@ -1,4 +1,8 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using VibeOCR.App.Features.Pdf;
@@ -232,22 +236,33 @@ public sealed class PdfDemandCoordinatorTests
   {
     var client = new Client();
     var highFailed = NewGate();
+    var failHigh = NewGate();
     bool failing = true;
     int previewCalls = 0;
-    client.OnPreview = (page, tier) =>
+    client.OnPreview = async (page, tier) =>
     {
-      if (page != 0) return Task.FromResult(Client.Png);
+      if (page != 0) return Client.Png;
       Interlocked.Increment(ref previewCalls);
-      if (failing && tier > 768) highFailed.TrySetResult();
-      return failing && (failLow || tier > 768)
-        ? Task.FromException<byte[]>(new InvalidOperationException("injected preview failure"))
-        : Task.FromResult(Client.Png);
+      if (!failing) return Client.Png;
+      if (tier > 768)
+      {
+        await failHigh.Task;
+        highFailed.TrySetResult();
+      }
+      else if (!failLow) return Client.Png;
+      throw new InvalidOperationException("injected preview failure");
     };
     await using var fixture = new Fixture(client);
     using var failed = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
       state.PageInspectStatusCode == "pdf.inspect.failed" && state.PageInspect is not null &&
       (state.PagePreview is null) == failLow && highFailed.Task.IsCompleted);
-    await fixture.OpenAsync("preview.pdf");
+    using var inspected = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" && state.PageInspect is not null);
+    try
+    {
+      await fixture.OpenAsync("preview.pdf");
+      await inspected.Next.WaitAsync(Timeout, Ct);
+    }
+    finally { failHigh.TrySetResult(); }
     PdfWorkbenchState failure = await failed.Next.WaitAsync(Timeout, Ct);
     string inspectUrl = failure.PageInspect!.Url;
     Assert.Equal(2, previewCalls);
@@ -319,6 +334,160 @@ public sealed class PdfDemandCoordinatorTests
     }
     finally { lostImages.TrySetResult(Client.Png); lostAuto.TrySetResult(); firstAck.TrySetResult(); }
   });
+
+  [Theory]
+  [InlineData("worker-error", false)]
+  [InlineData("malformed", true)]
+  [InlineData("missing-terminal", false)]
+  [InlineData("bad-page", false)]
+  public Task HttpFaultsKeepBothOrdinarySlotsAndAutoUntilAcknowledged(string streamFault, bool rejectFirstAck) =>
+    OnDispatcherAsync(async () =>
+    {
+      using var http = new DemandHttpHandler(streamFault, rejectFirstAck);
+      await using var transport = new InferenceHttpClient(new Uri("http://127.0.0.1:1"), "test-token", http);
+      await using var fixture = new Fixture(transport);
+      try
+      {
+        await fixture.OpenAsync("lost-http.pdf");
+        await fixture.CommandAsync(new SetPdfDemandCommand(0, [0], 160, 1600));
+        var issued = new HashSet<string>();
+        for (int i = 0; i < 3; i++) issued.Add((await http.Reads.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct)).Operation);
+        Assert.Equal(new[] { "load", "render_preview", "render_thumbnail" }, issued.Order());
+
+        // Worker work becomes unobservable, while the real client parses the
+        // HTTP problem/stream and the fake server gates its cutoff receipt.
+        using var failedPreview = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+          state.PageInspectStatusCode == "pdf.inspect.failed");
+        using var failedDetection = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+          state.Pages?.Any(page => page.Index == 1 && page.DetectionState == "failed") == true);
+        http.RespondToOldPreview.TrySetResult();
+        await failedPreview.Next.WaitAsync(Timeout, Ct);
+        http.RespondToOldReads.TrySetResult();
+        await failedDetection.Next.WaitAsync(Timeout, Ct);
+        await http.FirstAckEntered.Task.WaitAsync(Timeout, Ct);
+        Assert.Equal(1, http.AckAttempts);
+        using var ready = new StateObserver(fixture.Handler, state => state.SessionId == "doc-2" && state.PagePreview is not null);
+        using var incomplete = new StateObserver(fixture.Handler, state => state.SessionId == "doc-2" &&
+          state.Pages?.FirstOrDefault()?.DetectionState == "failed");
+        await fixture.OpenAsync("http-other.pdf");
+        if (rejectFirstAck) await http.RetryAckEntered.Task.WaitAsync(Timeout, Ct);
+
+        PdfDemandDiagnostics held = fixture.Handler.Pdf.DemandDiagnostics;
+        Assert.Equal(2, held.OrdinaryIssued.Current);
+        Assert.Equal(1, held.BackgroundIssued.Current);
+        Assert.False(http.Reads.Reader.TryRead(out _));
+        Assert.False(ready.Next.IsCompleted);
+
+        http.ConfirmOldCutoff.TrySetResult();
+        Assert.NotNull((await ready.Next.WaitAsync(Timeout, Ct)).PagePreview);
+        bool receivedOtherLoad = false;
+        while (!receivedOtherLoad)
+        {
+          var read = await http.Reads.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct);
+          Assert.Equal("doc-2", read.Session);
+          receivedOtherLoad = read.Operation == "load";
+        }
+        await incomplete.Next.WaitAsync(Timeout, Ct);
+        Assert.Equal(0, http.OtherAckAttempts);
+        Assert.Equal(0, fixture.Handler.Pdf.DemandDiagnostics.BackgroundIssued.Current);
+      }
+      finally
+      {
+        http.RespondToOldPreview.TrySetResult();
+        http.RespondToOldReads.TrySetResult();
+        http.ConfirmOldCutoff.TrySetResult();
+      }
+    });
+
+  private sealed class DemandHttpHandler(string streamFault, bool rejectFirstAck) : HttpMessageHandler
+  {
+    private const string PageZero = """{"phase":"load","current":1,"total":3,"page_index":0,"page_payload":{"page_index":0,"rect":[0,0,300,500]}}""";
+    private int openCalls, ackAttempts, otherAckAttempts;
+    internal int AckAttempts => Volatile.Read(ref ackAttempts);
+    internal int OtherAckAttempts => Volatile.Read(ref otherAckAttempts);
+    internal readonly TaskCompletionSource RespondToOldReads = NewGate();
+    internal readonly TaskCompletionSource RespondToOldPreview = NewGate();
+    internal readonly TaskCompletionSource FirstAckEntered = NewGate();
+    internal readonly TaskCompletionSource RetryAckEntered = NewGate();
+    internal readonly TaskCompletionSource ConfirmOldCutoff = NewGate();
+    internal readonly Channel<(string Session, string Operation)> Reads = Channel.CreateUnbounded<(string, string)>();
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+      string[] path = request.RequestUri!.AbsolutePath.Split('/');
+      string session = path[^2], op = path[^1];
+      switch (op)
+      {
+        case "open":
+          using (JsonDocument input = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)))
+          {
+            var model = new Wire.PdfDocumentMirror
+            {
+              FilePath = input.RootElement.GetProperty("path").GetString(),
+              Pages = Enumerable.Range(0, 3).Select(page => new Wire.PdfPageInfoMirror { PageIndex = page }).ToArray(),
+            };
+            return Json(JsonSerializer.Serialize(new { session_id = $"doc-{++openCalls}", model }));
+          }
+        case "cancel":
+          if (session == "doc-1")
+          {
+            if (Interlocked.Increment(ref ackAttempts) == 1)
+            {
+              FirstAckEntered.TrySetResult();
+              if (rejectFirstAck) return Json("""{"cancelled":false}""");
+            }
+            else RetryAckEntered.TrySetResult();
+            await ConfirmOldCutoff.Task;
+          }
+          else Interlocked.Increment(ref otherAckAttempts);
+          return Json("""{"cancelled":true}""");
+        case "render_preview":
+        case "render_thumbnail":
+          Reads.Writer.TryWrite((session, op));
+          if (session == "doc-1")
+          {
+            await (op == "render_preview" ? RespondToOldPreview.Task : RespondToOldReads.Task);
+            return Json("""{"schema_version":2,"instance_id":"test","code":"INTERNAL_ERROR","message":"worker transport lost","category":"internal","retryable":false,"detail":{}}""",
+              HttpStatusCode.InternalServerError);
+          }
+          return new HttpResponseMessage(HttpStatusCode.OK)
+          {
+            Content = new ByteArrayContent(Client.Png) { Headers = { ContentType = new MediaTypeHeaderValue("image/png") } },
+          };
+        case "load":
+          Reads.Writer.TryWrite((session, op));
+          if (session == "doc-1")
+          {
+            await RespondToOldReads.Task;
+            string body = streamFault switch
+            {
+              "worker-error" => """{"phase":"load","current":0,"total":3,"message":"error: worker disconnected"}""",
+              "malformed" => "{invalid-json",
+              "missing-terminal" => PageZero,
+              "bad-page" => PageZero.Replace("300", "\"invalid\"", StringComparison.Ordinal),
+              _ => throw new InvalidOperationException("Unknown stream test case."),
+            };
+            return Ndjson(body);
+          }
+          return Ndjson("""{"phase":"load","current":0,"total":3,"message":"incomplete"}""");
+        case "page_inspect":
+          return Json(JsonSerializer.Serialize(new Wire.PageInspectResponse
+          {
+            SchemaVersion = 2, InstanceId = "test", Page = 0, Rotation = 0, Rect = [], OcrBlocks = [], NativeLines = [],
+          }));
+        case "close":
+          return Json("""{"ok":true}""");
+        default:
+          throw new InvalidOperationException($"Unexpected PDF request: {op}");
+      }
+    }
+
+    private static HttpResponseMessage Json(string content, HttpStatusCode status = HttpStatusCode.OK) =>
+      new(status) { Content = new StringContent(content, Encoding.UTF8, "application/json") };
+
+    private static HttpResponseMessage Ndjson(string content) =>
+      new(HttpStatusCode.OK) { Content = new StringContent(content + "\n", Encoding.UTF8, "application/x-ndjson") };
+  }
 
   [Theory]
   [InlineData(false)]
@@ -415,7 +584,7 @@ public sealed class PdfDemandCoordinatorTests
     internal WorkbenchResourceBroker Broker { get; }
     internal DesktopWorkbenchCommandHandler Handler { get; }
 
-    internal Fixture(Client client, Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirm = null)
+    internal Fixture(IInferenceClient client, Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirm = null)
     {
       Directory.CreateDirectory(root);
       Broker = new(root);
