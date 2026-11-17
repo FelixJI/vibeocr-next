@@ -383,7 +383,10 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       Task[] operations; lock (pdfBackgroundOperations) operations = pdfBackgroundOperations.ToArray();
       await Task.WhenAll(operations);
       await Task.WhenAll(pdfWorkspace.Documents.Select(entry => entry.Model.WaitForSettlementAsync()));
-      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents.ToArray())
+      // 非活动文档先关、原活动文档最后关：避免 Remove 提升新活动文档后立即 flush 其尚未投影的 Web 预览。
+      PdfDocumentEntry? activeAtStart = pdfWorkspace.Active;
+      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents.ToArray()
+          .OrderBy(entry => ReferenceEquals(entry, activeAtStart) ? 1 : 0))
         if (!await ClosePdfEntryAsync(entry, CancellationToken.None)) return false;
       return true;
     }
