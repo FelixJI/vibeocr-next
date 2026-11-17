@@ -1005,7 +1005,11 @@ class PdfService:
                 candidate.insert_pdf(
                     doc, from_page=page_index, to_page=page_index, final=False
                 )
-                graft.remember_images(doc, page_index)
+                graft.remember_resources(
+                    doc,
+                    page_index,
+                    redacting=pdf_document.pages[page_index].has_text_layer,
+                )
                 local_model = PdfDocument(
                     pages=[
                         PdfPageInfo(page_index=i) for i in range(candidate.page_count)
