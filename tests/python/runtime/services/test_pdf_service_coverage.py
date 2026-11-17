@@ -180,7 +180,9 @@ class TestSaveWithRewriteEdgeCases:
             # Incremental success returns a fresh handle.
             assert res.new_doc is not None
             doc = res.new_doc
-            assert res.path is None
+            assert res.path == str(path)
+            with fitz.open(path) as saved:
+                assert saved[0].rotation == 90
         finally:
             doc.close()
 

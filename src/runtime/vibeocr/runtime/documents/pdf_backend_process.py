@@ -1035,13 +1035,13 @@ def save(sid: str, req: SaveRequest) -> SaveResponse:
                     s.pdf_document.is_modified = False
                     s.pdf_document.has_structural_change = False
                     if req.rebind_target and req.path:
-                        s.pdf_document.file_path = os.path.abspath(req.path)
+                        s.pdf_document.file_path = os.path.abspath(error.path)
                         s.file_path = s.pdf_document.file_path
                 detail = {
                     "reason_code": "pdf_save_outcome",
                     "committed": error.committed,
                     "session_usable": not s.doc.is_closed,
-                    "path": os.path.abspath(req.path or error.path),
+                    "path": os.path.abspath(error.path),
                 }
                 if error.recovery_path:
                     detail["recovery_path"] = os.path.abspath(error.recovery_path)

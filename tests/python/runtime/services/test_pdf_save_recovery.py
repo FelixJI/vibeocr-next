@@ -314,3 +314,147 @@ def test_existing_target_marker_rejects_without_touching_old_bytes_and_allows_ot
         fresh = save(fresh, model, path=str(target), rebind_target=True)
         assert "PRECOPY" in fresh[0].get_text()
         fresh.close()
+
+
+@pytest.mark.parametrize("compress", [False, True])
+@pytest.mark.parametrize("reverse", ["rebind", "reopen_failure", "copy"])
+def test_reverse_save_after_rebind_reopen_failure_uses_requested_target(
+    tmp_path, monkeypatch, compress, reverse
+):
+    from fastapi.testclient import TestClient
+
+    source, doc, model = opened(tmp_path)
+    original = source.read_bytes()
+    target = tmp_path / "forward.pdf"
+    session = backend.BackendSession("reverse", str(source), doc, model)
+    registry = MagicMock()
+    registry.get.return_value = session
+    monkeypatch.setattr(backend, "_get_registry", lambda: registry)
+    real_open = fitz.open
+
+    def fail_path(path):
+        def open_pdf(*args, **kwargs):
+            if args and Path(args[0]) == path:
+                raise OSError("injected target reopen failure")
+            return real_open(*args, **kwargs)
+
+        return open_pdf
+
+    payload = {
+        "path": str(target),
+        "rewrite_text_layers": False,
+        "rebind_target": True,
+        "pdf_settings": {"compress_on_save": compress},
+    }
+    with TestClient(backend.app) as http:
+        with monkeypatch.context() as fault:
+            fault.setattr(fitz, "open", fail_path(target))
+            response = http.post("/session/reverse/save", json=payload)
+        assert response.status_code == 500
+        assert response.json()["detail"]["committed"] is True
+        assert response.json()["detail"]["path"] == str(target)
+        assert model.file_path == session.file_path == str(target)
+        assert session.doc.name == str(source) and not model.is_modified
+        assert source.read_bytes() == original
+        forward_bytes = target.read_bytes()
+        session.doc[0].insert_text((72, 150), "REVERSE")
+        model.is_modified = True
+        payload.update(
+            path=str(source),
+            rebind_target=reverse != "copy",
+            copy_export=reverse == "copy",
+        )
+        if reverse == "copy":
+            handle = session.doc
+            response = http.post(
+                "/session/reverse/save", json={**payload, "overwrite": False}
+            )
+            assert response.status_code == 422
+            assert session.doc is handle and not handle.is_closed
+            assert "REVERSE" in handle[0].get_text()
+            assert (
+                source.read_bytes() == original and target.read_bytes() == forward_bytes
+            )
+            assert model.is_modified and model.file_path == str(target)
+        with monkeypatch.context() as fault:
+            if reverse == "reopen_failure":
+                fault.setattr(fitz, "open", fail_path(source))
+            response = http.post("/session/reverse/save", json=payload)
+        assert response.status_code == (500 if reverse == "reopen_failure" else 200)
+        outcome = (
+            response.json()["detail"]
+            if response.status_code == 500
+            else response.json()
+        )
+        assert outcome["path"] == str(source)
+        if reverse == "reopen_failure":
+            assert outcome["committed"] is True and outcome["session_usable"] is True
+            assert outcome["recovery_path"] == str(source)
+        assert model.is_modified is (reverse == "copy")
+        bound = target if reverse == "copy" else source
+        assert model.file_path == session.file_path == str(bound)
+        assert target.read_bytes() == forward_bytes
+        with real_open(source) as disk:
+            assert all(
+                word in disk[0].get_text()
+                for word in ("ORIGINAL", "PRECOPY", "REVERSE")
+            )
+        source_bytes = source.read_bytes()
+        session.doc[0].insert_text((72, 190), "CONTINUE")
+        model.is_modified = True
+        response = http.post(
+            "/session/reverse/save",
+            json={
+                "rewrite_text_layers": False,
+                "pdf_settings": {"compress_on_save": compress},
+            },
+        )
+        assert response.status_code == 200 and response.json()["path"] == str(bound)
+        assert not model.is_modified
+        with real_open(bound) as disk:
+            assert all(
+                word in disk[0].get_text()
+                for word in ("PRECOPY", "REVERSE", "CONTINUE")
+            )
+        if reverse == "copy":
+            assert source.read_bytes() == source_bytes
+        else:
+            assert target.read_bytes() == forward_bytes
+    session.doc.close()
+
+
+def test_worker_reports_actual_committed_target_instead_of_request(
+    tmp_path, monkeypatch
+):
+    source, doc, model = opened(tmp_path)
+    actual = tmp_path / "actual.pdf"
+    session = backend.BackendSession("actual", str(source), doc, model)
+    registry = MagicMock()
+    registry.get.return_value = session
+    monkeypatch.setattr(backend, "_get_registry", lambda: registry)
+
+    def committed_elsewhere(*args, **kwargs):
+        doc.save(actual)
+        raise PdfSaveError(
+            "reopen",
+            path=str(actual),
+            committed=True,
+            new_doc=doc,
+            recovery_path=str(actual),
+        )
+
+    monkeypatch.setattr(PdfService, "save_with_rewrite", committed_elsewhere)
+    with pytest.raises(HTTPException) as failure:
+        backend.save(
+            "actual",
+            SaveRequest(
+                path=str(source), rebind_target=True, rewrite_text_layers=False
+            ),
+        )
+    assert failure.value.detail["path"] == str(actual)
+    assert failure.value.detail["recovery_path"] == str(actual)
+    assert model.file_path == session.file_path == str(actual)
+    assert not model.is_modified
+    with fitz.open(actual) as disk:
+        assert "PRECOPY" in disk[0].get_text()
+    doc.close()

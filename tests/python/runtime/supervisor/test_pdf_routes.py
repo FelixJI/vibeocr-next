@@ -634,6 +634,8 @@ async def test_malformed_worker_outcome_is_not_promoted(
         "path": target,
         **patch,
     }
+    if patch.get("path") == "other.pdf":
+        detail["path"] = str(tmp_path / "other.pdf")
     with httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(500, json={"detail": detail})

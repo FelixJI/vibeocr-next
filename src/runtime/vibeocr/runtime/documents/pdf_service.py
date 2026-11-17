@@ -289,19 +289,23 @@ class PdfService:
             == os.path.normcase(os.path.abspath(pdf_document.file_path))
         ):
             raise ValueError("copy export cannot replace the document target")
-        # An explicit source target still needs Windows close/replace/reopen.
-        if (
-            path is not None
-            and not copy_export
-            and doc.name
-            and os.path.normcase(os.path.abspath(path))
-            == os.path.normcase(os.path.abspath(doc.name))
-        ):
-            if not overwrite:
-                raise FileExistsError(path)
-            path = None
-
+        # The model owns the logical target; the live handle may still name an
+        # older source after a committed Save As whose reopen failed.
         target_path = path or pdf_document.file_path
+        same_binding = bool(
+            target_path
+            and pdf_document.file_path
+            and os.path.normcase(os.path.abspath(target_path))
+            == os.path.normcase(os.path.abspath(pdf_document.file_path))
+        )
+        same_handle = bool(
+            target_path
+            and doc.name
+            and os.path.normcase(os.path.abspath(target_path))
+            == os.path.normcase(os.path.abspath(doc.name))
+        )
+        if same_handle and not overwrite:
+            raise FileExistsError(target_path)
         if target_path:
             PdfService._check_target_recovery(doc, target_path)
 
@@ -361,24 +365,21 @@ class PdfService:
                 rewritten.extend(page for page, count in results.items() if count[0])
 
             new_doc: fitz.Document | None = None
-            if path is None:
-                save_path = pdf_document.file_path
-                if save_path is None:
-                    return SaveResult(rewritten, None)
-                # 需要全量压缩（结构改动或 compress_on_save）→ _compress_in_place
-                # （Windows 锁要求 close+write+reopen，返回新 doc）。
-                need_full = pdf_document.has_structural_change or compress or clean
-                if not need_full:
-                    incremental = PdfService.save_incremental(doc, save_path)
-                    if incremental is not False:
-                        new_doc = incremental
-                if new_doc is None:
-                    new_doc = PdfService._compress_in_place(
-                        doc, save_path, clean=clean, compress=compress
-                    )
-            else:
+            if target_path is None:
+                return SaveResult(rewritten, None)
+            need_full = pdf_document.has_structural_change or compress or clean
+            if same_binding and not copy_export and overwrite and not need_full:
+                incremental = PdfService.save_incremental(doc, target_path)
+                if incremental is not False:
+                    new_doc = incremental
+            if new_doc is None and same_handle:
+                # Only the actual live handle determines Windows file locking.
+                new_doc = PdfService._compress_in_place(
+                    doc, target_path, clean=clean, compress=compress
+                )
+            elif new_doc is None:
                 # 另存也先写相邻临时文件，再提交；失败时编辑模型仍 dirty。
-                target = Path(path)
+                target = Path(target_path)
                 fd, temporary = tempfile.mkstemp(
                     prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
                 )
@@ -396,7 +397,7 @@ class PdfService:
                     else:
                         # Both names are on the same filesystem; link is a no-clobber commit.
                         os.link(temporary, target)
-                    if rebind_target and not copy_export:
+                    if not copy_export and (rebind_target or same_binding):
                         # Open the committed PDF before releasing the old source handle.
                         # Subsequent saves/another entry opening the old source remain safe.
                         new_doc = PdfService._reopen_saved(doc, str(target))
@@ -413,7 +414,7 @@ class PdfService:
                     pdf_document.file_path = str(Path(path).absolute())
                 pdf_document.is_modified = False
                 pdf_document.has_structural_change = False
-            return SaveResult(rewritten, path, new_doc)
+            return SaveResult(rewritten, target_path, new_doc)
         except (PdfSaveError, FileExistsError):
             raise
         except Exception as error:
