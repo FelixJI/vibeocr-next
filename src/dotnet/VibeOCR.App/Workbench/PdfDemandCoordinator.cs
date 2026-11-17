@@ -38,6 +38,7 @@ internal sealed class PdfDemandCoordinator(
   private enum Kind { Preview, Inspect, Thumbnail }
   private readonly record struct Key(string Session, long Page, long Generation, Kind Kind, int Tier, int PixelLimit);
   private sealed record Job(Key Key, int Index);
+  private sealed record UnconfirmedRead(Session Session, Wire.PdfReadScope Scope, long Epoch, Action Release);
   private sealed class Entry(Key key)
   {
     internal Key Key { get; } = key;
@@ -69,6 +70,7 @@ internal sealed class PdfDemandCoordinator(
   private readonly LinkedList<Entry> lru = [];
   private readonly HashSet<Key> issued = [];
   private readonly HashSet<Session> handshakes = [];
+  private readonly List<UnconfirmedRead> unconfirmedReads = [];
   private readonly SemaphoreSlim ordinary = new(2);
   private readonly SemaphoreSlim writes = new(1);
   private readonly List<WorkbenchResourceReference> unreclaimed = [];
@@ -124,6 +126,7 @@ internal sealed class PdfDemandCoordinator(
   {
     Session? next = model is { CanDemandPages: true, SessionId: { } id } ? Get(model, id) : null;
     if (ReferenceEquals(active, next)) return;
+    if (next is not null) RecoverUnconfirmedSessions();
     if (active is { } old)
     {
       AdvanceViewport(old);
@@ -147,6 +150,7 @@ internal sealed class PdfDemandCoordinator(
   internal bool SetDemand(PdfViewModel model, int page, int[] visible, int? thumb = null, int? edge = null)
   {
     if (stopped || ModelSession(model) is not { } session || session != active) return false;
+    RecoverUnconfirmedSessions();
     ViewportDemand? old = session.Demand;
     var next = new ViewportDemand(page, visible, thumb ?? old?.ThumbnailSize ?? DefaultThumbnailEdge,
       edge ?? old?.PreviewMaxEdge ?? DefaultPreviewEdge);
@@ -181,8 +185,12 @@ internal sealed class PdfDemandCoordinator(
 
   internal void RetryInspect(PdfViewModel model)
   {
-    if (ModelSession(model) is not { } session || MakeJob(session, model.SelectedPage, Kind.Inspect, 0) is not { } job) return;
-    session.Failed.Remove(job.Key);
+    if (ModelSession(model) is not { } session || session != active) return;
+    int page = model.SelectedPage;
+    var (first, target) = PreviewJobs(session, page);
+    foreach (Job? job in new[] { first, target, MakeJob(session, page, Kind.Inspect, 0) })
+      if (job is not null) session.Failed.Remove(job.Key);
+    RecoverUnconfirmedSessions();
     Recover(session);
     Kick();
   }
@@ -191,14 +199,27 @@ internal sealed class PdfDemandCoordinator(
   {
     if (ModelSession(model) is not { } session || session != active)
       return new(null, null, "pdf.inspect.none");
-    Job? job = MakeJob(session, model.SelectedPage, Kind.Inspect, 0);
-    Entry? inspect = job is null ? null : Find(job.Key);
-    var status = !model.CanInspectPage || job is null ? "pdf.inspect.none"
-      : inspect?.InspectIndex == model.SelectedPage ? "pdf.inspect.ready"
-      : session.Failed.Contains(job.Key) ? "pdf.inspect.failed" : "pdf.inspect.loading";
+
+    Job? inspectJob = MakeJob(session, model.SelectedPage, Kind.Inspect, 0);
+    Entry? inspect = inspectJob is null ? null : Find(inspectJob.Key);
+    bool inspectReady = model.CanInspectPage && inspect?.InspectIndex == model.SelectedPage;
+    var (first, target) = PreviewJobs(session, model.SelectedPage);
     WorkbenchResourceReference? preview = current is not null && Matches(session, model.SelectedPage, current.Key)
       ? current.Resource : null;
-    return new(preview, status == "pdf.inspect.ready" ? inspect?.Resource : null, status);
+    bool failed = target is not null && session.Failed.Contains(target.Key) ||
+      preview is null && first is not null && session.Failed.Contains(first.Key) ||
+      model.CanInspectPage && inspectJob is not null && session.Failed.Contains(inspectJob.Key);
+    var status = failed ? "pdf.inspect.failed"
+      : !model.CanInspectPage || inspectJob is null ? "pdf.inspect.none"
+      : inspectReady && preview is not null ? "pdf.inspect.ready" : "pdf.inspect.loading";
+    return new(preview, inspectReady ? inspect?.Resource : null, status);
+  }
+
+  private static (Job? First, Job? Target) PreviewJobs(Session session, int page)
+  {
+    if (session.Demand is not { } demand || demand.Page != page) return default;
+    return (MakeJob(session, page, Kind.Preview, Math.Min(FirstPreviewEdge, demand.PreviewMaxEdge)),
+      MakeJob(session, page, Kind.Preview, demand.PreviewMaxEdge));
   }
 
   internal WorkbenchResourceReference? Thumbnail(PdfViewModel model, int index)
@@ -243,7 +264,7 @@ internal sealed class PdfDemandCoordinator(
       try
       {
         await CancelAsync(session, Wire.PdfReadCancelScope.AllReads, cutoff);
-        session.ViewportAck = session.BackgroundAck = cutoff;
+        RecordAcknowledgement(session, Wire.PdfReadCancelScope.AllReads, cutoff);
         session.Blocked = false;
       }
       finally { session.Control.Release(); }
@@ -296,10 +317,12 @@ internal sealed class PdfDemandCoordinator(
     Session session = Get(model, id);
     session.Foreground = true;
     foregroundWaiters++;
-    bool slot = false, waiting = true;
+    bool slot = false, waiting = true, sent = false, complete = false, ambiguous = false;
+    long readEpoch = 0;
     try
     {
       if (auto == session && !PendingAck(session, false)) AdvanceBackground(session);
+      RecoverUnconfirmedSessions();
       Recover(session);
       if (!await EnsureAckAsync(session, viewport: false))
         throw new IOException("PDF background read cancellation was not acknowledged.");
@@ -309,12 +332,13 @@ internal sealed class PdfDemandCoordinator(
       foregroundWaiters--; waiting = false;
       Kick();
       ct.ThrowIfCancellationRequested();
-      long readEpoch = session.Background;
+      readEpoch = session.Background;
       if (session.Writing || session.Blocked || model.SessionId != id)
         throw new InvalidOperationException("PDF business read target changed before submission.");
       bool Current() => !session.Writing && model.SessionId == id &&
         session.Background == readEpoch && !ct.IsCancellationRequested;
       using var wake = CancellationTokenSource.CreateLinkedTokenSource(ct);
+      sent = true;
       Task<T> pending = call(readEpoch, Current);
       if (await Task.WhenAny(pending, Task.Delay(Timeout.Infinite, wake.Token)) != pending)
       {
@@ -323,18 +347,20 @@ internal sealed class PdfDemandCoordinator(
       }
       else wake.Cancel();
       T result = await pending;
+      complete = true;
       ct.ThrowIfCancellationRequested();
       return result;
     }
-    catch (Exception error) when (slot && Ambiguous(error) && !ct.IsCancellationRequested)
+    catch (Exception error) when (sent && !complete && Ambiguous(error))
     {
-      AdvanceBackground(session);
-      await EnsureAckAsync(session, viewport: false);
+      ambiguous = true;
       throw;
     }
     finally
     {
-      if (slot) LeaveOrdinary(session);
+      if (slot && (!ambiguous ||
+          !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, () => LeaveOrdinary(session))))
+        LeaveOrdinary(session);
       if (waiting) foregroundWaiters--;
       session.Foreground = false;
       Kick();
@@ -401,9 +427,9 @@ internal sealed class PdfDemandCoordinator(
       {
         if (session.Writing || session.Model.SessionId != session.Id) return false;
         long cutoff = viewport ? session.Viewport : session.Background;
-        await CancelAsync(session, viewport ? Wire.PdfReadCancelScope.Viewport : Wire.PdfReadCancelScope.Background, cutoff);
-        if (viewport) session.ViewportAck = cutoff;
-        else session.BackgroundAck = cutoff;
+        var scope = viewport ? Wire.PdfReadCancelScope.Viewport : Wire.PdfReadCancelScope.Background;
+        await CancelAsync(session, scope, cutoff);
+        RecordAcknowledgement(session, scope, cutoff);
       }
       return !session.Blocked;
     }
@@ -413,6 +439,45 @@ internal sealed class PdfDemandCoordinator(
       return false;
     }
     finally { session.Control.Release(); }
+  }
+
+  // A failed transport can leave work admitted at the worker. Keep its original
+  // slot and session drain ownership until the worker has fenced that epoch.
+  // This list is bounded by the same two ordinary slots and one automatic slot.
+  private bool KeepUntilAcknowledged(Session session, Wire.PdfReadScope scope, long readEpoch, Action release)
+  {
+    if ((scope == Wire.PdfReadScope.Viewport ? session.ViewportAck : session.BackgroundAck) > readEpoch)
+      return false;
+    unconfirmedReads.Add(new(session, scope, readEpoch, release));
+    if (scope == Wire.PdfReadScope.Viewport)
+    {
+      if (session.Viewport <= readEpoch) AdvanceViewport(session);
+    }
+    else if (session.Background <= readEpoch) AdvanceBackground(session);
+    return true;
+  }
+
+  private void RecordAcknowledgement(Session session, Wire.PdfReadCancelScope scope, long cutoff)
+  {
+    if (scope != Wire.PdfReadCancelScope.Background) session.ViewportAck = Math.Max(session.ViewportAck, cutoff);
+    if (scope != Wire.PdfReadCancelScope.Viewport) session.BackgroundAck = Math.Max(session.BackgroundAck, cutoff);
+    for (int i = unconfirmedReads.Count - 1; i >= 0; i--)
+    {
+      UnconfirmedRead read = unconfirmedReads[i];
+      if (read.Session != session) continue;
+      long acknowledged = read.Scope == Wire.PdfReadScope.Viewport ? session.ViewportAck : session.BackgroundAck;
+      if (acknowledged <= read.Epoch) continue;
+      unconfirmedReads.RemoveAt(i);
+      read.Release();
+    }
+  }
+
+  private void RecoverUnconfirmedSessions()
+  {
+    // A new user demand can retry confirmation even for a now-inactive document.
+    // A failed acknowledgement itself never schedules another attempt.
+    foreach (Session session in unconfirmedReads.Select(read => read.Session).Distinct().ToArray())
+      Recover(session);
   }
 
   private void Recover(Session session)
@@ -483,29 +548,26 @@ internal sealed class PdfDemandCoordinator(
   private async Task DetectAsync(Session session)
   {
     long readEpoch = session.Background;
+    bool ambiguous = false;
+    void Release() { auto = null; LeaveRead(session); }
     try
     {
       await session.Model.ReadPresenceAsync(session.Id, readEpoch, null,
         () => !stopped && active == session && !session.Writing && session.Background == readEpoch);
     }
-    catch (Exception error) when (Ambiguous(error))
+    catch (Exception error) { ambiguous = Ambiguous(error); }
+    finally
     {
-      if (session.Model.SessionId == session.Id && session.Background == readEpoch)
-      {
-        AdvanceBackground(session);
-        session.AutoAttempted = true;
-      }
+      if (!ambiguous || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, Release)) Release();
+      if (ambiguous) session.AutoAttempted = true;
+      Kick();
     }
-    catch (Exception) { }
-    finally { auto = null; LeaveRead(session); Kick(); }
   }
 
   private IEnumerable<Job> NextJobs(Session session)
   {
     if (session.Demand is not { } demand || demand.Page != session.Model.SelectedPage) yield break;
-    int low = Math.Min(FirstPreviewEdge, demand.PreviewMaxEdge);
-    Job? first = MakeJob(session, demand.Page, Kind.Preview, low);
-    Job? final = MakeJob(session, demand.Page, Kind.Preview, demand.PreviewMaxEdge);
+    var (first, final) = PreviewJobs(session, demand.Page);
     bool ready = first is not null && (Find(first.Key) is not null || session.Failed.Contains(first.Key));
     if (final is not null && Find(final.Key) is not null) ready = true;
     if (!ready && Needed(session, first)) yield return first!;
@@ -545,7 +607,8 @@ internal sealed class PdfDemandCoordinator(
     bool Current() => !stopped && session == active && !session.Writing && readEpoch == session.Viewport &&
       session.Model.SessionId == session.Id && Matches(session, job.Index, job.Key);
     var entry = new Entry(job.Key);
-    bool httpComplete = false;
+    bool httpComplete = false, ambiguous = false;
+    void Release() { issued.Remove(job.Key); LeaveOrdinary(session); }
     try
     {
       if (job.Key.Kind == Kind.Inspect)
@@ -590,14 +653,12 @@ internal sealed class PdfDemandCoordinator(
         session.Failed.Add(job.Key);
         publish(session.Model);
       }
-      if (!httpComplete && Ambiguous(error) && session.Model.SessionId == session.Id && readEpoch == session.Viewport)
-        AdvanceViewport(session);
+      ambiguous = !httpComplete && Ambiguous(error);
     }
     finally
     {
       ReleaseIfUnowned(entry);
-      issued.Remove(job.Key);
-      LeaveOrdinary(session);
+      if (!ambiguous || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Viewport, readEpoch, Release)) Release();
       Kick();
     }
   }

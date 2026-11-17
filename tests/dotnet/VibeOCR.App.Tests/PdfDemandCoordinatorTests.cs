@@ -19,7 +19,7 @@ public sealed class PdfDemandCoordinatorTests
   private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
   [Fact]
-  public async Task MetadataOpenAndNextDocumentDoNotWaitForAutomaticDetectionOrMakeAThirdIssuedRead()
+  public Task MetadataOpenAndNextDocumentDoNotWaitForAutomaticDetectionOrMakeAThirdIssuedRead() => OnDispatcherAsync(async () =>
   {
     var client = new Client();
     var heldRead = NewGate<byte[]>();
@@ -59,10 +59,10 @@ public sealed class PdfDemandCoordinatorTests
       Assert.Equal(0, client.LegacyLoads);
     }
     finally { heldRead.TrySetResult(Client.Png); heldAuto.TrySetResult(); }
-  }
+  });
 
   [Fact]
-  public async Task ActualWritesWaitForTheirOwnAckAndCloseDoesNotBypassFailedAck()
+  public Task ActualWritesWaitForTheirOwnAckAndCloseDoesNotBypassFailedAck() => OnDispatcherAsync(async () =>
   {
     var client = new Client();
     await using var fixture = new Fixture(client);
@@ -101,10 +101,10 @@ public sealed class PdfDemandCoordinatorTests
     await first.CloseSessionAsync(Ct);
     Assert.Equal("doc-1", Assert.Single(client.Closed));
     Assert.False(first.HasSession);
-  }
+  });
 
   [Fact]
-  public async Task SelectedOcrConsumesExplicitPagePresenceAndAppliesEachCommitBeforeReadersResume()
+  public Task SelectedOcrConsumesExplicitPagePresenceAndAppliesEachCommitBeforeReadersResume() => OnDispatcherAsync(async () =>
   {
     var client = new Client();
     var auto = NewGate();
@@ -150,10 +150,10 @@ public sealed class PdfDemandCoordinatorTests
       Assert.All(readWithoutContent, generation => Assert.Equal(1, generation));
     }
     finally { auto.TrySetResult(); releaseWrite.TrySetResult(); }
-  }
+  });
 
   [Fact]
-  public async Task WarmReturnAndRemapReuseReadsAndKeepOffWindowCurrentPageIdentity()
+  public Task WarmReturnAndRemapReuseReadsAndKeepOffWindowCurrentPageIdentity() => OnDispatcherAsync(async () =>
   {
     var client = new Client(70);
     await using var fixture = new Fixture(client);
@@ -201,6 +201,193 @@ public sealed class PdfDemandCoordinatorTests
     Assert.Equal(0, drained.WarmBytes.Current);
     await Assert.ThrowsAsync<WorkbenchResourceAccessException>(
       async () => await fixture.Broker.OpenAsync(new Uri(warm.PagePreview.Url), Ct));
+  });
+
+  [Fact]
+  public Task CancellingExitReviewKeepsDemandForUncachedPagesAndNewDocuments() => OnDispatcherAsync(async () =>
+  {
+    var client = new Client();
+    await using var fixture = new Fixture(client, _ => Task.FromResult(PdfCloseDecision.Cancel));
+    PdfWorkbenchState first = await fixture.OpenAsync("draft.pdf");
+    await fixture.SelectReadyAsync(0);
+    await fixture.CommandAsync(new PdfBoundCommand(first.DocumentId!, new SetPdfPreviewPositionCommand(
+      new PdfPreviewPosition(Block: 0, Draft: "edited", OriginalText: "original", Revision: first.Revision, Page: 0))));
+
+    Assert.False(await fixture.Handler.RequestCloseAllPdfAsync().WaitAsync(Timeout, Ct));
+    Assert.Empty(client.Closed);
+    Assert.Equal("edited", Assert.Single(fixture.Handler.PdfDocuments).Preview.Draft);
+    Assert.NotNull((await fixture.SelectReadyAsync(2)).PagePreview);
+    Assert.Contains(("doc-1", "preview", 2), client.ImageLog);
+
+    await fixture.OpenAsync("next.pdf");
+    PdfWorkbenchState second = await fixture.SelectReadyAsync(0);
+    Assert.Equal("doc-2", second.SessionId);
+    Assert.Contains(("doc-2", "preview", 0), client.ImageLog);
+  });
+
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public Task RetryRepairsFailedPreviewAndReusesSuccessfulInspection(bool failLow) => OnDispatcherAsync(async () =>
+  {
+    var client = new Client();
+    var highFailed = NewGate();
+    bool failing = true;
+    int previewCalls = 0;
+    client.OnPreview = (page, tier) =>
+    {
+      if (page != 0) return Task.FromResult(Client.Png);
+      Interlocked.Increment(ref previewCalls);
+      if (failing && tier > 768) highFailed.TrySetResult();
+      return failing && (failLow || tier > 768)
+        ? Task.FromException<byte[]>(new InvalidOperationException("injected preview failure"))
+        : Task.FromResult(Client.Png);
+    };
+    await using var fixture = new Fixture(client);
+    using var failed = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+      state.PageInspectStatusCode == "pdf.inspect.failed" && state.PageInspect is not null &&
+      (state.PagePreview is null) == failLow && highFailed.Task.IsCompleted);
+    await fixture.OpenAsync("preview.pdf");
+    PdfWorkbenchState failure = await failed.Next.WaitAsync(Timeout, Ct);
+    string inspectUrl = failure.PageInspect!.Url;
+    Assert.Equal(2, previewCalls);
+
+    failing = false;
+    using var ready = new StateObserver(fixture.Handler, state => state.SessionId == "doc-1" &&
+      state.PageInspectStatusCode == "pdf.inspect.ready" && state.PagePreview is not null &&
+      fixture.Handler.Pdf.DemandDiagnostics.ActiveImages.Current == 2);
+    await fixture.CommandAsync(new RetryPdfPageInspectCommand());
+    PdfWorkbenchState repaired = await ready.Next.WaitAsync(Timeout, Ct);
+    Assert.Equal(inspectUrl, repaired.PageInspect!.Url);
+    Assert.Equal(0, Assert.Single(client.Inspections));
+    Assert.Equal(failLow ? 4 : 3, previewCalls);
+  });
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public Task AmbiguousResponsesRetainBothOrdinarySlotsAndAutoUntilOldSessionAcknowledges(bool failFirstAck) => OnDispatcherAsync(async () =>
+  {
+    var client = new Client();
+    var lostImages = NewGate<byte[]>();
+    var lostAuto = NewGate();
+    var firstAck = NewGate();
+    var firstAckEntered = NewGate();
+    var retryAckEntered = NewGate();
+    int attempts = 0;
+    client.OnImage = (session, _, _) => session == "doc-1" ? lostImages.Task : Task.FromResult(Client.Png);
+    client.OnAuto = session => session == "doc-1" ? lostAuto.Task : Task.CompletedTask;
+    client.OnAck = (session, request) =>
+    {
+      if (session != "doc-1" || request.Scope != Wire.PdfReadCancelScope.Viewport) return Task.CompletedTask;
+      if (Interlocked.Increment(ref attempts) == 1)
+      {
+        firstAckEntered.TrySetResult();
+        if (failFirstAck) return Task.FromException(new IOException("first scoped acknowledgement failed"));
+      }
+      else retryAckEntered.TrySetResult();
+      return firstAck.Task;
+    };
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("lost.pdf");
+      await client.Images.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct);
+      await fixture.CommandAsync(new SetPdfDemandCommand(0, [0], 160, 1600));
+      await client.Images.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct);
+      await client.Autos.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct);
+      // The fake transport returned without a body. Its remote work should be treated
+      // as live until the worker acknowledgement below proves the cutoff.
+      lostImages.TrySetException(new IOException("lost image response"));
+      lostAuto.TrySetException(new IOException("lost NDJSON response"));
+      await firstAckEntered.Task.WaitAsync(Timeout, Ct);
+
+      Assert.Equal(1, Volatile.Read(ref attempts));
+      using var ready = new StateObserver(fixture.Handler, state => state.SessionId == "doc-2" && state.PagePreview is not null);
+      await fixture.OpenAsync("other.pdf");
+      if (failFirstAck) await retryAckEntered.Task.WaitAsync(Timeout, Ct);
+      PdfDemandDiagnostics before = fixture.Handler.Pdf.DemandDiagnostics;
+      Assert.Equal(2, before.OrdinaryIssued.Current);
+      Assert.Equal(1, before.BackgroundIssued.Current);
+      Assert.DoesNotContain(client.ImageLog, read => read.Item1 == "doc-2");
+      Assert.False(client.Autos.Reader.TryRead(out _));
+      Assert.False(ready.Next.IsCompleted);
+
+      firstAck.TrySetResult();
+      Assert.NotNull((await ready.Next.WaitAsync(Timeout, Ct)).PagePreview);
+      Assert.Equal("doc-2", await client.Autos.Reader.ReadAsync(Ct).AsTask().WaitAsync(Timeout, Ct));
+    }
+    finally { lostImages.TrySetResult(Client.Png); lostAuto.TrySetResult(); firstAck.TrySetResult(); }
+  });
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public Task CloseRetryStillRequiresAckAfterRemoteCloseFailsOrLosesItsResponse(bool removed) => OnDispatcherAsync(async () =>
+  {
+    var client = new Client();
+    var calls = new List<string>();
+    bool first = true, rejectAck = false;
+    client.OnAck = (_, request) =>
+    {
+      if (request.Scope != Wire.PdfReadCancelScope.AllReads) return Task.CompletedTask;
+      calls.Add("ack");
+      return rejectAck
+        ? Task.FromException(new InferenceClientException(
+          removed ? HttpV2ErrorCode.ResourceNotFound : HttpV2ErrorCode.RuntimeBusy, "injected non-success ACK", retryable: false))
+        : Task.CompletedTask;
+    };
+    client.OnClose = _ =>
+    {
+      calls.Add("close");
+      if (!first) return Task.CompletedTask;
+      first = false;
+      return removed ? Task.FromException(new IOException("close committed before response loss"))
+        : Task.FromException(new InvalidOperationException("close remains CLOSING"));
+    };
+    await using var fixture = new Fixture(client);
+    await fixture.OpenAsync("retry-close.pdf");
+    await fixture.CommandAsync(new ClosePdfCommand());
+    Assert.True(Assert.Single(fixture.Handler.PdfDocuments).Model.HasSession);
+    Assert.Equal(new[] { "ack", "close" }, calls);
+    rejectAck = true;
+    await fixture.CommandAsync(new ClosePdfCommand());
+    Assert.True(Assert.Single(fixture.Handler.PdfDocuments).Model.HasSession);
+    Assert.Equal(new[] { "ack", "close", "ack" }, calls);
+
+    rejectAck = false;
+    await fixture.CommandAsync(new ClosePdfCommand());
+    Assert.Empty(fixture.Handler.PdfDocuments);
+    Assert.Equal(new[] { "ack", "close", "ack", "ack", "close" }, calls);
+  });
+
+  // Production enters this owner from WinUI's dispatcher. A single reader
+  // gives async test continuations the same serialization without a UI window.
+  private static async Task OnDispatcherAsync(Func<Task> test)
+  {
+    var context = new TestDispatcher();
+    Task? completion = null;
+    async Task ExecuteAsync()
+    {
+      try { await test(); }
+      finally { context.Queue.Writer.TryComplete(); }
+    }
+    context.Post(_ => completion = ExecuteAsync(), null);
+    await foreach (var work in context.Queue.Reader.ReadAllAsync())
+    {
+      SynchronizationContext? previous = SynchronizationContext.Current;
+      SynchronizationContext.SetSynchronizationContext(context);
+      try { work.Callback(work.State); }
+      finally { SynchronizationContext.SetSynchronizationContext(previous); }
+    }
+    await completion!;
+  }
+
+  private sealed class TestDispatcher : SynchronizationContext
+  {
+    internal Channel<(SendOrPostCallback Callback, object? State)> Queue { get; } =
+      Channel.CreateUnbounded<(SendOrPostCallback, object?)>(new UnboundedChannelOptions { SingleReader = true });
+    public override void Post(SendOrPostCallback callback, object? state) => Queue.Writer.TryWrite((callback, state));
   }
 
   private static TaskCompletionSource NewGate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -228,7 +415,7 @@ public sealed class PdfDemandCoordinatorTests
     internal WorkbenchResourceBroker Broker { get; }
     internal DesktopWorkbenchCommandHandler Handler { get; }
 
-    internal Fixture(Client client)
+    internal Fixture(Client client, Func<PdfDocumentEntry, Task<PdfCloseDecision>>? confirm = null)
     {
       Directory.CreateDirectory(root);
       Broker = new(root);
@@ -243,7 +430,7 @@ public sealed class PdfDemandCoordinatorTests
         },
         static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(), static () => throw new InvalidOperationException(),
         new DiagnosticsViewModel("test", new PrerequisiteReport([])), Broker, root, static () => 0, annotations,
-        confirmPdfClose: _ => Task.FromResult(PdfCloseDecision.Discard));
+        confirmPdfClose: confirm ?? (_ => Task.FromResult(PdfCloseDecision.Discard)));
     }
 
     internal Task<PdfWorkbenchState> OpenAsync(string name) => StateAsync(new OpenDroppedPdfCommand(Path.Combine(root, name)));
@@ -287,7 +474,8 @@ public sealed class PdfDemandCoordinatorTests
     internal int MaximumImageReads => Volatile.Read(ref maxReads);
     internal int LegacyLoads;
     internal Func<string, string, int, Task<byte[]>>? OnImage;
-    internal Func<string, Task>? OnAuto, OnWrite;
+    internal Func<string, Task>? OnAuto, OnWrite, OnClose;
+    internal Func<int, int, Task<byte[]>>? OnPreview;
     internal Func<string, Wire.PdfReadCancelRequest, Task>? OnAck;
     internal ConcurrentQueue<(string, int)> Rotations { get; } = [];
     internal ConcurrentQueue<(string, Wire.PdfReadCancelScope)> Acks { get; } = [];
@@ -329,20 +517,24 @@ public sealed class PdfDemandCoordinatorTests
       Acknowledged.TrySetResult();
     }
 
-    private async Task<byte[]> ReadImageAsync(string session, string kind, int page)
+    private async Task<byte[]> ReadImageAsync(string session, string kind, int page, int? previewTier = null)
     {
       int working = Interlocked.Increment(ref activeReads);
       if (working > maxReads) Interlocked.Exchange(ref maxReads, working);
       Images.Writer.TryWrite((session, kind, page));
       ImageLog.Enqueue((session, kind, page));
-      try { return OnImage is { } gate ? await gate(session, kind, page) : Png; }
+      try
+      {
+        if (previewTier is { } tier && OnPreview is { } preview) return await preview(page, tier);
+        return OnImage is { } gate ? await gate(session, kind, page) : Png;
+      }
       finally { Interlocked.Decrement(ref activeReads); }
     }
 
     public Task<byte[]> RenderPdfThumbnailDemandAsync(string session, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
       ReadImageAsync(session, "thumbnail", request.Page);
     public Task<byte[]> RenderPdfPreviewDemandAsync(string session, Wire.RenderPreviewRequest request, CancellationToken ct) =>
-      ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page);
+      ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page, request.MaxEdge);
     public Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string session, Wire.PageInspectRequest request, CancellationToken ct)
     {
       Inspections.Enqueue(request.Page);
@@ -357,7 +549,10 @@ public sealed class PdfDemandCoordinatorTests
     }
     public override Task<PdfMutateResult> ReorderPdfAsync(string session, int[] newOrder, CancellationToken ct) =>
       Task.FromResult(new PdfMutateResult(pages, new Wire.ModelDiff { ModifiedFlag = true }));
-    public override Task ClosePdfSessionAsync(string session, CancellationToken ct) { Closed.Enqueue(session); return Task.CompletedTask; }
+    public override Task ClosePdfSessionAsync(string session, CancellationToken ct)
+    {
+      Closed.Enqueue(session); return OnClose?.Invoke(session) ?? Task.CompletedTask;
+    }
 
     public override Task<JobRef> SubmitAsync(SubmitRequest request, IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken ct)
     {

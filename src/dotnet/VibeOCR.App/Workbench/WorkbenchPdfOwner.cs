@@ -390,8 +390,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
     try
     {
       pdfWorkspace.CancelExport();
-      pdfDemand?.Stop();
-    foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
+      foreach (PdfDocumentEntry entry in pdfWorkspace.Documents) entry.Model.Cancel();
       Task[] operations; lock (pdfBackgroundOperations) operations = pdfBackgroundOperations.ToArray();
       await Task.WhenAll(operations);
       await Task.WhenAll(pdfWorkspace.Documents.Select(entry => entry.Model.WaitForSettlementAsync()));
