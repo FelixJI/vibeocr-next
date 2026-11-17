@@ -288,6 +288,21 @@ public static class WebView2ProductEnvironment
                 + "）。" + WebView2StartupException.RepairGuidance,
                 cause: null);
         }
+        // W17-2：在位但无效/截断/非 x64 的启动库同样在创建环境前报修
+        //（App 直启时也在状态准备/WebView 创建前 fail closed）。
+        try
+        {
+            foreach (string name in ResolvedProductLayout.WebView2RuntimeStartupFiles)
+            {
+                ResolvedProductLayout.EnsureValidX64DllImageHeader(Path.Combine(folder, name));
+            }
+        }
+        catch (InvalidDataException error)
+        {
+            throw new WebView2StartupException(
+                error.Message + "。" + WebView2StartupException.RepairGuidance,
+                error);
+        }
         return (folder, BundledRuntimeVersionOrThrow(folder, WebView2LockVersion.LockedRuntimeVersion));
     }
 #endif

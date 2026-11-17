@@ -121,6 +121,112 @@ public sealed class ResolvedProductLayout
         return missing;
     }
 
+    /// <summary>W17-2：校验已知随包原生启动库的 PE 头部与 COFF 声明范围
+    /// 语义：DOS 头、NT 签名、AMD64 机器、DLL+可执行特征、PE32+ 可选头
+    /// magic，以及 COFF 声明的可选头（≥PE32+ 标准 112 字节）与节表范围
+    /// （每节 40 字节）必须落在实际文件内；偏移加法全部用 long，
+    /// 只做有界小读取。能力边界：这是头部及声明范围的语义检查，
+    /// 不是节内容/导入/完整可运行验证，也不加载、不执行、不哈希；
+    /// 目的是让截断/错误架构/非 DLL 的已知启动库在 apphost 前进入产品
+    /// 报修，而不是放行为 WinUI 原生 0xC000027B 退出。</summary>
+    public static void EnsureValidX64DllImageHeader(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ArgumentException("Image path is required.", nameof(path));
+        }
+
+        InvalidDataException Fail(string reason) => new(
+            "webview2.invalid-image: 随包 WebView2 启动库不是有效的 Windows x64 DLL 映像（"
+            + reason + "）：" + path);
+        byte[] dosHeader = new byte[0x40];
+        byte[] ntHeaders = new byte[26];
+        int peOffset;
+        long streamLength;
+        try
+        {
+            using FileStream stream = File.OpenRead(path);
+            streamLength = stream.Length;
+            if (streamLength < dosHeader.Length)
+            {
+                throw Fail("映像截断");
+            }
+            ReadExactly(stream, dosHeader);
+            if (dosHeader[0] != (byte)'M' || dosHeader[1] != (byte)'Z')
+            {
+                throw Fail("DOS 头无效");
+            }
+            peOffset = BitConverter.ToInt32(dosHeader, 0x3C);
+            if (peOffset < 0x40 || (long)peOffset + ntHeaders.Length > streamLength)
+            {
+                throw Fail("映像截断");
+            }
+            stream.Seek(peOffset, SeekOrigin.Begin);
+            ReadExactly(stream, ntHeaders);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                "webview2.invalid-image: 无法读取随包 WebView2 启动库：" + path, error);
+        }
+        if (ntHeaders[0] != (byte)'P' || ntHeaders[1] != (byte)'E' ||
+            ntHeaders[2] != 0 || ntHeaders[3] != 0)
+        {
+            throw Fail("PE 签名无效");
+        }
+        if (BitConverter.ToUInt16(ntHeaders, 4) != 0x8664)
+        {
+            throw Fail("不是 x64 (AMD64) 映像");
+        }
+        ushort characteristics = BitConverter.ToUInt16(ntHeaders, 22);
+        if ((characteristics & 0x2000) == 0)
+        {
+            throw Fail("不是 DLL 映像");
+        }
+        if ((characteristics & 0x0002) == 0)
+        {
+            throw Fail("缺少可执行映像特征");
+        }
+        if (BitConverter.ToUInt16(ntHeaders, 24) != 0x20B)
+        {
+            throw Fail("不是 PE32+ 可选头");
+        }
+        ushort numberOfSections = BitConverter.ToUInt16(ntHeaders, 6);
+        ushort sizeOfOptionalHeader = BitConverter.ToUInt16(ntHeaders, 20);
+        if (numberOfSections == 0)
+        {
+            throw Fail("未声明节表");
+        }
+        if (sizeOfOptionalHeader < 112)
+        {
+            throw Fail("可选头小于 PE32+ 标准头");
+        }
+        long optionalHeaderEnd = peOffset + 24L + sizeOfOptionalHeader;
+        if (optionalHeaderEnd > streamLength)
+        {
+            throw Fail("映像截断：声明的可选头范围越过文件末尾");
+        }
+        if (optionalHeaderEnd + numberOfSections * 40L > streamLength)
+        {
+            throw Fail("映像截断：声明的节表范围越过文件末尾");
+        }
+    }
+
+    private static void ReadExactly(FileStream stream, byte[] buffer)
+    {
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int block = stream.Read(buffer, read, buffer.Length - read);
+            if (block == 0)
+            {
+                // EOF 属 IO 语义，交给调用方统一包装读取失败诊断。
+                throw new EndOfStreamException();
+            }
+            read += block;
+        }
+    }
+
     public static IReadOnlyList<string> MissingWindowsAppRuntimeFiles(string appRoot)
     {
         if (string.IsNullOrWhiteSpace(appRoot))
@@ -251,6 +357,11 @@ public sealed class ResolvedProductLayout
         {
             throw new InvalidDataException(
                 "layout.missing-entry: " + Path.Combine(WebView2RuntimeRoot, missingStartup));
+        }
+        // W17-2：在位但无效/截断/非 x64 的启动库同样在 apphost 前报修。
+        foreach (string name in WebView2RuntimeStartupFiles)
+        {
+            EnsureValidX64DllImageHeader(Path.Combine(WebView2RuntimeRoot, name));
         }
     }
 

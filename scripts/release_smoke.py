@@ -160,6 +160,18 @@ def _verify_bootstrapper(product_root: Path) -> None:
     finally:
         backup.replace(embedded)
 
+    # W17-2：随包原生启动库在位但映像无效（真实故障形态：67 字节非 PE）
+    # 也必须在 apphost 前报修，不得放行为 WinUI 原生 0xC000027B 退出。
+    # 与其它缺损 seam 同一 rename backup → try 内写故障 → finally 还原模式，
+    # 不叠加完整字节副本。
+    backup = msedge.with_suffix(".dll.smoke-invalid-backup")
+    msedge.rename(backup)
+    try:
+        msedge.write_bytes(b"invalid-msedge.dll-image-payload!".ljust(67, b"\x00"))
+        expect_failure(5, b"webview2.invalid-image")
+    finally:
+        backup.replace(msedge)
+
     # #321：UI.Xaml 缺失时必须显式报修（exit 2），不能放行后让
     # apphost 异步退出且无报修。
     xaml = product_root / "app/Microsoft.UI.Xaml.dll"

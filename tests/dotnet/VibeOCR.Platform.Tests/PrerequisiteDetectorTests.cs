@@ -1,3 +1,4 @@
+using System.Text;
 using VibeOCR.Platform.Bootstrap;
 using Xunit;
 
@@ -44,7 +45,13 @@ public sealed class PrerequisiteDetectorTests
           ? Path.Combine(root, "runtime", "env", "runtime-env", "python.exe")
           : Path.Combine(root, relative);
       Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-      File.WriteAllText(path, content);
+      // 随包 WebView2 启动库写入最小自洽 x64 DLL 映像（映像校验正例）。
+      File.WriteAllBytes(
+          path,
+          relative is @"WebView2Runtime\msedge.dll"
+              or @"WebView2Runtime\EBWebView\x64\EmbeddedBrowserWebView.dll"
+              ? MinimalX64DllImage.Create()
+              : Encoding.UTF8.GetBytes(content));
     }
   }
 
@@ -150,6 +157,34 @@ public sealed class PrerequisiteDetectorTests
 
       Assert.False(report.IsReady);
       Assert.Contains(report.Missing, item => item.Kind == kind);
+    }
+    finally
+    {
+      Directory.Delete(root, recursive: true);
+    }
+  }
+
+  [Fact]
+  public void ProductionReportsInvalidBundledWebView2StartupImageAsMissing()
+  {
+    // W17-2 回归：启动库在位但映像无效时，随包诊断必须按缺损报修；
+    // 旧实现只查存在性，本测试在旧实现上不会失败。
+    string root = Path.Combine(
+        Path.GetTempPath(), $"vibeocr-bundled-image-{Guid.NewGuid():N}");
+    try
+    {
+      WriteBundledApp(root);
+      byte[] junk = new byte[67];
+      Encoding.UTF8.GetBytes("invalid webview2 native image payload!").CopyTo(junk, 0);
+      File.WriteAllBytes(Path.Combine(root, @"WebView2Runtime\msedge.dll"), junk);
+
+      PrerequisiteReport report = new PrerequisiteDetector().Detect(
+          BundledLayout(root), bundledProduct: true);
+
+      PrerequisiteStatus webview2 = report.Items.Single(item =>
+          item.Kind == PrerequisiteKind.WebView2Runtime);
+      Assert.False(webview2.IsInstalled);
+      Assert.False(report.IsReady);
     }
     finally
     {

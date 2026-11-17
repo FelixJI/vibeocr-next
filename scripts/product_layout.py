@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import stat
+import struct
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -139,6 +140,57 @@ def _read_json_object(path: Path, field: str) -> dict[str, object]:
     return _require_mapping(value, field)
 
 
+def _require_x64_dll_image(path: Path, relative: str) -> None:
+    """W17-2：随包已知原生启动库的 PE 头部与 COFF 声明范围语义检查。
+
+    DOS 头、NT 签名、AMD64、DLL+可执行特征、PE32+ 可选头 magic，以及
+    声明的可选头（≥PE32+ 标准 112 字节）与节表范围（每节 40 字节）必须
+    落在实际文件内；偏移加法均为安全整数，只做有界小读取。这是头部及
+    声明范围的语义检查，不是节内容/导入/完整可运行验证，也不加载、
+    不执行、不哈希；目的是让截断/错误架构/非 DLL 的已知启动库在启动
+    前进入产品报修，而不是放行为 WinUI 原生退出。
+    """
+
+    def fail(reason: str) -> None:
+        raise ProductLayoutError(f"webview2.invalid-image: {relative} ({reason})")
+
+    with path.open("rb") as handle:
+        dos = handle.read(0x40)
+        if len(dos) < 0x40 or dos[:2] != b"MZ":
+            fail("映像截断或 DOS 头无效")
+        (pe_offset,) = struct.unpack_from("<i", dos, 0x3C)
+        if pe_offset < 0x40:
+            fail("DOS 头损坏")
+        handle.seek(pe_offset)
+        nt = handle.read(26)
+        size = handle.seek(0, 2)
+    if len(nt) < 26:
+        fail("映像截断")
+    if nt[:4] != b"PE\x00\x00":
+        fail("PE 签名无效")
+    (machine, sections, _stamp, _sym, _count, optional_size, characteristics) = (
+        struct.unpack_from("<HHIIIHH", nt, 4)
+    )
+    if machine != 0x8664:
+        fail("不是 x64 (AMD64) 映像")
+    if characteristics & 0x2000 == 0:
+        fail("不是 DLL 映像")
+    if characteristics & 0x0002 == 0:
+        fail("缺少可执行映像特征")
+    (optional_magic,) = struct.unpack_from("<H", nt, 24)
+    if optional_magic != 0x20B:
+        fail("不是 PE32+ 可选头")
+    if sections == 0:
+        fail("未声明节表")
+    if optional_size < 112:
+        fail("可选头小于 PE32+ 标准头")
+    optional_header_end = pe_offset + 24 + optional_size
+    if optional_header_end > size:
+        fail("映像截断：声明的可选头范围越过文件末尾")
+    if optional_header_end + sections * 40 > size:
+        fail("映像截断：声明的节表范围越过文件末尾")
+
+
 def _load_product_layout(
     product_root: Path, *, require_release_manifest: bool
 ) -> ProductLayout:
@@ -248,6 +300,15 @@ def _load_product_layout(
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         raise ProductLayoutError(f"layout.missing-entry: {sorted(missing)}")
+    # W17-2：在位但无效/截断/非 x64 的已知原生启动库同样报修。
+    for startup in (
+        "msedge.dll",
+        "EBWebView/x64/EmbeddedBrowserWebView.dll",
+    ):
+        _require_x64_dll_image(
+            layout.webview2_runtime / startup,
+            f"app/WebView2Runtime/{startup}",
+        )
     for path in root.rglob("*"):
         if path.is_symlink():
             raise ProductLayoutError(

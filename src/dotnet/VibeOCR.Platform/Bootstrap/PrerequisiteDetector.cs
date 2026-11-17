@@ -181,14 +181,29 @@ public static class BundledProductProbe
             : null;
 
     // 随包 WebView2 已知原生启动闭包（与 ResolvedProductLayout.ValidateTree /
-    // Bootstrapper 自检一致）：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll
-    // 时按随包缺损报修，不因浏览器 EXE 仍在而放行。
+    // Bootstrapper 自检一致）：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll、
+    // 或在位但不是有效 x64 DLL 映像时，都按随包缺损报修，不因浏览器 EXE
+    // 仍在而放行。
     private static string? FindBundledWebView2Version(string appRoot)
     {
         string runtimeRoot = Path.Combine(appRoot, "WebView2Runtime");
-        return ResolvedProductLayout.MissingWebView2RuntimeStartupFiles(runtimeRoot).Count == 0
-            ? FindFileVersion(Path.Combine(runtimeRoot, "msedgewebview2.exe"))
-            : null;
+        if (ResolvedProductLayout.MissingWebView2RuntimeStartupFiles(runtimeRoot).Count != 0)
+        {
+            return null;
+        }
+        try
+        {
+            foreach (string name in ResolvedProductLayout.WebView2RuntimeStartupFiles)
+            {
+                ResolvedProductLayout.EnsureValidX64DllImageHeader(
+                    Path.Combine(runtimeRoot, name));
+            }
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+        return FindFileVersion(Path.Combine(runtimeRoot, "msedgewebview2.exe"));
     }
 
     // 随包 .NET 启动闭包 + 共享 runtimeconfig 语义（与 Bootstrapper 一致）。
