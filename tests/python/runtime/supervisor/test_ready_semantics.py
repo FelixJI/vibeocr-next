@@ -123,8 +123,13 @@ def test_ready_envelope_means_listening_and_health_serves(
     with _spawn_supervisor(token, staged_runtime_product) as proc:
         try:
             ready = json.loads(_read_ready_line(proc))
-            temp = product / "state" / "recognition" / "temp"
-            assert any(path.is_dir() for path in temp.glob("vibeocr-sup-*"))
+            staging = product / "state" / "vibeocr-next-supervisor-staging"
+            roots = [
+                path
+                for path in staging.glob(f"instance-{ready['instance_id']}-*")
+                if path.is_dir()
+            ]
+            assert len(roots) == 1 and roots[0].with_suffix(".lease").is_file()
             assert not outside_stager.exists()
             with socket.create_connection(
                 ("127.0.0.1", ready["port"]), timeout=CONNECT_BUDGET_SECONDS

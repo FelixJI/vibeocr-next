@@ -2,12 +2,12 @@
 
 In Phase 2 the only executor is a fake used by tests. Phase 4/5/6 will plug
 the real Paddle/MinerU/PDF adapters here without changing the module or app
-shape. The composition root is also where ``stager_root`` is chosen (a
-session-scoped temp directory under the OS temp or a portable location).
+shape. The default staging directory is owned by the supervisor instance.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from collections.abc import Callable
@@ -22,6 +22,7 @@ from vibeocr.runtime.host.bootstrap import (
     new_instance_id,
 )
 from vibeocr.runtime.jobs.module import Executor, SupervisorModule, SupervisorOptions
+from vibeocr.runtime.jobs.staging import ManagedStaging
 
 if TYPE_CHECKING:
     from vibeocr.runtime.jobs.registry import JobRecord
@@ -618,7 +619,6 @@ def build_supervisor(
     """
     iid = instance_id or new_instance_id()
     opts = options or SupervisorOptions(instance_id=iid)
-    root = stager_root or Path(tempfile.mkdtemp(prefix=f"vibeocr-sup-{iid}-"))
     if executor is not None:
         exec_impl = executor
         engine_resolver = None
@@ -648,25 +648,18 @@ def build_supervisor(
             engine_resolver=engine_resolver,
         )
     pdf_adapter = _build_pdf_adapter() if with_pdf_adapter else None
-    module = SupervisorModule(
-        options=opts,
-        stager_root=root,
-        executor=exec_impl,
-        pdf_adapter=pdf_adapter,
-        engine_registry=engine_registry,
-        engine_resolver=engine_resolver,
-        recognition_mode_registry=recognition_mode_registry,
-        settings_store=settings_store,
-        product_job_leases=ProductJobLeases(
-            Path(os.environ["VIBEOCR_RUNTIME_STATE_ROOT"]) / "locks",
-            getattr(settings_store, "require_current", None),
-        )
+    state_root = (
+        Path(os.environ["VIBEOCR_RUNTIME_STATE_ROOT"])
         if os.environ.get("VIBEOCR_PRODUCT_RUNTIME") == "1"
-        else None,
+        else None
     )
-    # Clean stale staging left by a previous crashed instance (plan Phase 2).
-    # At startup no jobs are known yet, so every existing dir is stale.
-    module.stager.cleanup_stale(set())
+    product_job_leases = (
+        ProductJobLeases(
+            state_root / "locks", getattr(settings_store, "require_current", None)
+        )
+        if state_root is not None
+        else None
+    )
     handle = bootstrap_handle or BootstrapHandle()
     # Always generate a new token unless the handle already has one set.
     # BootstrapHandle.token raises if unset, so we use a safe check.
@@ -674,6 +667,38 @@ def build_supervisor(
         _ = handle.token  # type: ignore[attr-defined]
     except RuntimeError:
         handle.set_token(generate_session_token())
+
+    managed_staging = None
+    if stager_root is None:
+        parent = (state_root or Path(tempfile.gettempdir())) / (
+            "vibeocr-next-supervisor-staging"
+        )
+        managed_staging = ManagedStaging.create(parent, instance_id=iid)
+        stager_root = managed_staging.root
+    try:
+        module = SupervisorModule(
+            options=opts,
+            stager_root=stager_root,
+            executor=exec_impl,
+            pdf_adapter=pdf_adapter,
+            engine_registry=engine_registry,
+            engine_resolver=engine_resolver,
+            recognition_mode_registry=recognition_mode_registry,
+            settings_store=settings_store,
+            product_job_leases=product_job_leases,
+            managed_staging=managed_staging,
+        )
+    except BaseException:
+        if managed_staging is not None:
+            try:
+                managed_staging.close()
+            except (OSError, ValueError):
+                logging.getLogger(__name__).exception(
+                    "Could not clean up staging after supervisor initialization failed"
+                )
+        raise
+    if managed_staging is None:
+        module.stager.cleanup_stale(set())
     return module, handle
 
 

@@ -8,6 +8,7 @@ is covered without pulling paddle/torch/mineru.
 
 from __future__ import annotations
 
+import stat
 import sys
 import types
 from typing import TYPE_CHECKING, Any
@@ -21,9 +22,13 @@ from vibeocr.runtime.host.composition import (
     _paddle_available,
     build_supervisor,
 )
+from vibeocr.runtime.jobs.staging import ManagedStaging
 
 if TYPE_CHECKING:
+    from os import stat_result
     from pathlib import Path
+
+    from vibeocr.runtime_contracts import ResidencyStatus, SettingsSnapshot
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +108,113 @@ def test_null_executor_swallows_transition_error(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # build_supervisor — null path
 # ---------------------------------------------------------------------------
+
+
+def test_default_staging_cleans_owned_crashes_and_preserves_live_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
+    monkeypatch.setenv("VIBEOCR_RUNTIME_STATE_ROOT", str(tmp_path))
+    live, _ = build_supervisor(instance_id="sup-123456789a", executor=_NullExecutor())
+    root = live.stager.root
+    assert root.parent == tmp_path / "vibeocr-next-supervisor-staging"
+    assert root.name.startswith("instance-sup-123456789a-")
+    asset = live.stager.stage_job("live", [("input.pdf", None, b"pdf")])[0].path
+    crashed = ManagedStaging.create(root.parent)
+    results = crashed.root / "job" / "results"
+    results.mkdir(parents=True)
+    (results / "image.png").write_bytes(b"retained result")
+    crashed._lease.release()  # OS releases the lease even when shutdown is skipped.
+    unknown = root.parent / ("instance-" + "f" * 32)
+    unknown.mkdir()
+    legacy = tmp_path / "vibeocr-sup-old"
+    legacy.mkdir()
+
+    next_module, _ = build_supervisor(executor=_NullExecutor())
+    try:
+        assert asset.read_bytes() == b"pdf"
+        assert not crashed.root.exists()
+        assert not crashed.root.with_suffix(".lease").exists()
+        assert unknown.is_dir()
+        assert legacy.is_dir()
+    finally:
+        next_module.shutdown_now()
+        live.shutdown_now()
+    assert not root.exists()
+    assert not root.with_suffix(".lease").exists()
+
+
+def test_default_staging_releases_ownership_when_module_initialization_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class BrokenExecutor(_NullExecutor):
+        def configure_settings(self, snapshot: SettingsSnapshot) -> ResidencyStatus:
+            raise RuntimeError("configure failed")
+
+    monkeypatch.setenv("VIBEOCR_PRODUCT_RUNTIME", "1")
+    monkeypatch.setenv("VIBEOCR_RUNTIME_STATE_ROOT", str(tmp_path))
+    with pytest.raises(RuntimeError, match="configure failed"):
+        build_supervisor(executor=BrokenExecutor())
+
+    parent = tmp_path / "vibeocr-next-supervisor-staging"
+    assert {entry.name for entry in parent.iterdir()} == {"maintenance.lock"}
+
+
+def test_managed_staging_refuses_a_redirected_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    _mark_as_reparse_point(host, monkeypatch)
+
+    with pytest.raises(ValueError, match="Redirected supervisor staging path"):
+        ManagedStaging.create(host / "managed")
+    assert list(host.iterdir()) == []
+
+
+def test_managed_staging_retains_lease_when_stale_deletion_is_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    parent = tmp_path / "managed"
+    crashed = ManagedStaging.create(parent)
+    redirected = crashed.root / "results"
+    redirected.mkdir()
+
+    with monkeypatch.context() as patch:
+        _mark_as_reparse_point(redirected, patch)
+        with pytest.raises(ValueError, match="Redirected supervisor staging path"):
+            crashed.close()
+        recovered = ManagedStaging.create(parent)
+        try:
+            assert redirected.is_dir()
+            assert crashed.root.with_suffix(".lease").is_file()
+            assert "Could not reclaim supervisor staging" in caplog.text
+        finally:
+            recovered.close()
+
+    recovered = ManagedStaging.create(parent)
+    try:
+        assert not crashed.root.exists()
+        assert not crashed.root.with_suffix(".lease").exists()
+    finally:
+        recovered.close()
+
+
+def _mark_as_reparse_point(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lstat = type(path).lstat
+
+    def with_reparse_point(candidate: Path) -> stat_result | types.SimpleNamespace:
+        info = lstat(candidate)
+        if candidate == path:
+            return types.SimpleNamespace(
+                st_mode=info.st_mode,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+        return info
+
+    monkeypatch.setattr(type(path), "lstat", with_reparse_point)
 
 
 def test_build_supervisor_keeps_base_ocr_path_without_optional_backends(

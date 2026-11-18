@@ -300,12 +300,42 @@ function Get-T3PerformanceEvidence($Evidence, $Residency) {
     }
 }
 
+function Get-T3StagingRoots([string]$Supervisor, [string]$CandidateRoot) {
+    if ($Supervisor -cnotmatch '^sup-[0-9a-f]{10}$') { throw 'Invalid Supervisor staging identity.' }
+    $managed = Join-Path $CandidateRoot 'state/state/vibeocr-next-supervisor-staging'
+    $legacy = Join-Path $CandidateRoot 'state/state/recognition/temp'
+    $roots = @(foreach ($parent in @($managed, $legacy)) {
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { continue }
+        if ((Get-Item -LiteralPath $parent).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Staging inventory cannot follow a redirected parent.'
+        }
+        foreach ($root in Get-ChildItem -LiteralPath $parent -Directory) {
+            $belongs = if ($parent -eq $managed) {
+                $root.Name -cmatch "^instance-$Supervisor-[0-9a-f]{32}$"
+            } else {
+                $root.Name.StartsWith("vibeocr-sup-$Supervisor-", [StringComparison]::Ordinal)
+            }
+            if (-not $belongs) { continue }
+            if ($root.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Staging inventory cannot follow a redirected instance.'
+            }
+            if ($parent -eq $managed) {
+                $lease = Get-Item -LiteralPath "$($root.FullName).lease" -ErrorAction Stop
+                if ($lease.PSIsContainer -or ($lease.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    throw 'Managed staging ownership marker is not a regular file.'
+                }
+            }
+            $root
+        }
+    })
+    if ($roots.Count -gt 1) { throw 'Staging inventory found ambiguous Supervisor roots.' }
+    $roots
+}
+
 function Get-T3RetainedStaging($Evidence) {
-    # Runtime 的 staging 根带真实 Supervisor instance ID。只对已观测的 job 做事后盘点。
-    $temp = Join-Path $candidate 'state/state/recognition/temp'
-    if ($Evidence.supervisor -cnotmatch '^sup-[0-9a-f]{10}$' -or -not (Test-Path -LiteralPath $temp)) { return }
-    $roots = @(Get-ChildItem -LiteralPath $temp -Directory -Filter "vibeocr-sup-$($Evidence.supervisor)-*")
-    if ($roots.Count -ne 1) { return }
+    # 只盘点绑定到本次 Supervisor 与已观测 job 的资产；兼容旧基线和新的租约目录。
+    $roots = @(Get-T3StagingRoots $Evidence.supervisor $candidate)
+    if ($roots.Count -eq 0) { return }
     foreach ($pass in $Evidence.passes) {
         foreach ($batch in $pass.batches) {
             $job = $batch.Job.JobId
@@ -357,6 +387,25 @@ if ($SelfCheck) {
     }
     if ($plan.Count -ne 2) { throw 'Expected two independent run plans.' }
 
+    $inventoryCandidate = Join-Path $report 'staging-candidate'
+    $managed = Join-Path $inventoryCandidate 'state/state/vibeocr-next-supervisor-staging'
+    $instance = Join-Path $managed ('instance-sup-0123456789-' + ('a' * 32))
+    $unrelated = Join-Path $managed ('instance-sup-9876543210-' + ('b' * 32))
+    New-Item -ItemType Directory -Path $instance, $unrelated | Out-Null
+    New-Item -ItemType File -Path "$instance.lease" | Out-Null
+    $inventory = @(Get-T3StagingRoots 'sup-0123456789' $inventoryCandidate)
+    if ($inventory.Count -ne 1 -or $inventory[0].FullName -ne $instance) {
+        throw 'Managed staging inventory lost its Supervisor binding.'
+    }
+    if (@(Get-T3StagingRoots 'sup-1111111111' $inventoryCandidate).Count -ne 0) {
+        throw 'Staging inventory attributed another instance to this run.'
+    }
+    $legacyCandidate = Join-Path $report 'legacy-staging-candidate'
+    $legacy = Join-Path $legacyCandidate 'state/state/recognition/temp/vibeocr-sup-sup-0123456789-old'
+    New-Item -ItemType Directory -Path $legacy | Out-Null
+    if (@(Get-T3StagingRoots 'sup-0123456789' $legacyCandidate).Count -ne 1) {
+        throw 'Legacy staging inventory no longer reads the serial baseline.'
+    }
     $existing = Join-Path $report 'original/candidate'
     $oldExport = Join-Path $existing 'state/output/paddle-smoke/scan_short-1'
     New-Item -ItemType Directory -Path $oldExport | Out-Null
@@ -606,7 +655,7 @@ try {
                 $logLines = @(Select-String -LiteralPath $supervisorLog -SimpleMatch 'Paddle ONNX request=' | ForEach-Object Line)
                 $record['residency'] = Get-T3WorkerEvidence $evidence $app $samples $starts $logLines $step.monitor
                 $record['retained_staging'] = @(Get-T3RetainedStaging $evidence)
-                $record['retained_staging_note'] = 'Files present after App exit, by observed job. Empty means no retained staging observed; transient staging peak and retained in-memory outcomes are unmeasured.'
+                $record['retained_staging_note'] = 'Files present after App exit, by observed job. Both legacy and managed roots are checked against the Supervisor identity; absent roots mean no retained files observed, not proof about transient peaks or in-memory outcomes.'
                 $performance = Get-T3PerformanceEvidence $evidence $record.residency
                 $record['performance_gaps'] = $performance.gaps
                 if ($record.functional_state -eq 'passed') {

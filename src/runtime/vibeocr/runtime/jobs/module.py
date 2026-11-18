@@ -60,7 +60,9 @@ from vibeocr.runtime_contracts import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
+    from vibeocr.runtime.jobs.staging import ManagedStaging
     from vibeocr.runtime.recognition.ocr_engines import (
         OcrEngineRegistry,
         OcrEngineResolver,
@@ -137,7 +139,7 @@ class SupervisorModule:
         self,
         *,
         options: SupervisorOptions,
-        stager_root: Any,
+        stager_root: Path,
         executor: Executor,
         pdf_adapter: Any = None,
         engine_registry: OcrEngineRegistry | None = None,
@@ -145,6 +147,7 @@ class SupervisorModule:
         recognition_mode_registry: RecognitionModeRegistry | None = None,
         settings_store: RuntimeSettings | None = None,
         product_job_leases: ProductJobLeases | None = None,
+        managed_staging: ManagedStaging | None = None,
     ) -> None:
         self.options = options
         self.registry = JobRegistry(
@@ -155,6 +158,7 @@ class SupervisorModule:
             max_file_count=options.max_file_count,
             max_total_bytes=options.max_total_bytes,
             max_per_file_bytes=options.max_per_file_bytes,
+            managed=managed_staging,
         )
         self.retention = RetentionPolicy(
             self.registry, retention_seconds=options.retention_seconds
@@ -299,13 +303,14 @@ class SupervisorModule:
             self.retention.purge_expired()
         except Exception:  # pragma: no cover - defensive
             pass
-        self.stager.release_all()
         # Tear down the PDF child if we own it.
-        if self.pdf_adapter is not None:
-            try:
+        try:
+            if self.pdf_adapter is not None:
                 self.pdf_adapter.stop()
-            except Exception:  # pragma: no cover - defensive
-                pass
+        except Exception:  # pragma: no cover - defensive
+            pass
+        finally:
+            self.stager.close()
 
     # ------------------------------------------------------------------
     # Submit
