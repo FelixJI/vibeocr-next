@@ -4,6 +4,8 @@
 .DESCRIPTION
 先走公开图片识别入口准备模型，每轮启动独立 App/Supervisor，再在同进程重开同一
 PDF，分别测冷 worker 和稳态 worker。-Foreground 单独测长任务中的受控翻页。
+-ReuseCandidate 复用已退出的 T3 合成候选与既有状态，新尝试的导出和证据独立。
+冷标签只描述 worker 进程，正式包的 Fixed WebView2 继续使用候选原有缓存。
 退出码 0 表示所有正式样本有效，1 表示功能失败或性能样本无效，3 表示环境受阻。
 所有尝试保留独立证据。
 #>
@@ -19,6 +21,7 @@ param(
     [ValidateRange(1, 180)][int]$TimeoutMinutes = 40,
     [ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSourceSha,
     [switch]$Foreground,
+    [switch]$ReuseCandidate,
     [switch]$SelfCheck
 )
 $ErrorActionPreference = 'Stop'
@@ -26,20 +29,52 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $repoRoot 'artifacts/t3_pipeline'
 . (Join-Path $PSScriptRoot 'pdf_smoke_measurements.ps1')
 
-function Get-T3RunPlan([string]$Root, [string[]]$Kinds, [int]$Runs) {
+function Get-T3RunPaths([string]$Root, [string]$Candidate, [string]$RunNamespace) {
+    $exportRoot = Join-Path $Candidate 'state/output/paddle-smoke'
+    if ($RunNamespace) {
+        # App 仅接受候选父目录内的 fixture，且 health 必须是该父目录的直接子文件。
+        $candidateParent = Split-Path -Parent $Candidate
+        return @{
+            fixtures = Join-Path $candidateParent "$RunNamespace/fixtures"
+            health_root = $candidateParent
+            health_prefix = "$RunNamespace-"
+            export_root = Join-Path $exportRoot $RunNamespace
+        }
+    }
+    @{
+        fixtures = Join-Path $Root 'fixtures'
+        health_root = $Root
+        health_prefix = ''
+        export_root = $exportRoot
+    }
+}
+
+function Get-T3RunPlan([string]$Root, [string[]]$Kinds, [int]$Runs,
+    [string]$Candidate = (Join-Path $Root 'candidate'), [string]$RunNamespace) {
+    $paths = Get-T3RunPaths $Root $Candidate $RunNamespace
     foreach ($kind in ($Kinds | Select-Object -Unique)) {
         for ($number = 1; $number -le $Runs; $number++) {
             $id = "$kind-$number"
             [pscustomobject]@{
                 id = $id; kind = $kind; run = $number
                 monitor = Join-Path $Root "monitor/$id"
-                health = Join-Path $Root "$id.json"
-                fixture = Join-Path $Root "fixtures/t3-pipeline/$kind.pdf"
+                health = Join-Path $paths.health_root "$($paths.health_prefix)$id.json"
+                fixture = Join-Path $paths.fixtures "t3-pipeline/$kind.pdf"
                 fixture_before = Join-Path $Root "fixture-before/$id.pdf"
-                export = Join-Path $Root "candidate/state/output/paddle-smoke/$id"
+                export = Join-Path $paths.export_root $id
                 webview = Join-Path $Root "webview2/$id"
             }
         }
+    }
+}
+
+function Assert-T3CandidateStopped([string]$Candidate) {
+    $prefix = $Candidate.TrimEnd('\') + '\'
+    $running = @(Get-CimInstance Win32_Process -Property ProcessId, ExecutablePath | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($running.Count) {
+        throw "Candidate still has running processes (PID: $($running.ProcessId -join ', '))."
     }
 }
 
@@ -70,6 +105,9 @@ function Get-T3AppEnvironment($Plan, [bool]$Prepare) {
 
 function Invoke-T3App($Plan, [bool]$Prepare) {
     if (Test-Path -LiteralPath $Plan.health) { throw "Health exists: $($Plan.health)" }
+    if ($ReuseCandidate) {
+        if (Test-Path -LiteralPath $Plan.export) { throw "Export exists: $($Plan.export)" }
+    }
     foreach ($entry in (Get-T3AppEnvironment $Plan $Prepare).GetEnumerator()) {
         if (-not $previous.ContainsKey($entry.Key)) {
             $previous[$entry.Key] = [Environment]::GetEnvironmentVariable($entry.Key)
@@ -97,6 +135,7 @@ function Invoke-T3App($Plan, [bool]$Prepare) {
             }
         }
 
+        if ($ReuseCandidate) { Assert-T3CandidateStopped $candidate }
         $watch = [System.Diagnostics.Stopwatch]::StartNew()
         $app = Start-Process -FilePath $executable -ArgumentList ('--profile production --install-root "{0}"' -f $candidate) `
             -WorkingDirectory (Split-Path -Parent $executable) -WindowStyle Hidden -PassThru
@@ -317,6 +356,29 @@ if ($SelfCheck) {
         New-Item -ItemType File -Path $step.health | Out-Null
     }
     if ($plan.Count -ne 2) { throw 'Expected two independent run plans.' }
+
+    $existing = Join-Path $report 'original/candidate'
+    $oldExport = Join-Path $existing 'state/output/paddle-smoke/scan_short-1'
+    New-Item -ItemType Directory -Path $oldExport | Out-Null
+    $oldFile = Join-Path $oldExport 'evidence.txt'
+    Set-Content -LiteralPath $oldFile -Value 'original evidence'
+    $reusePlans = @(foreach ($namespace in @('t3-first', 't3-second')) {
+        $reuseRoot = Join-Path $report "work/$namespace"
+        $step = Get-T3RunPlan $reuseRoot @('scan_short') 1 $existing $namespace
+        if ($step.export -ne (Join-Path $existing "state/output/paddle-smoke/$namespace/scan_short-1") -or
+            (Split-Path -Parent $step.health) -ne (Split-Path -Parent $existing) -or
+            $step.fixture -ne (Join-Path (Split-Path -Parent $existing) "$namespace/fixtures/t3-pipeline/scan_short.pdf")) {
+            throw 'Reused run paths violate the candidate or App evidence boundary.'
+        }
+        $step
+    })
+    foreach ($field in @('export', 'fixture', 'fixture_before', 'health', 'monitor', 'webview')) {
+        if ($reusePlans[0].$field -eq $reusePlans[1].$field) { throw "Repeated candidate reuse collides on $field." }
+    }
+    if ((Get-Content -LiteralPath $oldFile -Raw).Trim() -cne 'original evidence') {
+        throw 'Reusing a candidate touched a prior output.'
+    }
+
     $monitor = $plan[0].monitor
     Set-Content -LiteralPath (Join-Path $monitor 'process-samples.jsonl') -Value '{"started_at_ms":100,"at_ms":105,"procs":[]}'
     if ($null -ne (Read-PdfSmokeMonitorSamples $monitor -RootPid 99 -RootCreationFileTime 1000)) {
@@ -396,7 +458,30 @@ if ($source.Equals($work, [StringComparison]::OrdinalIgnoreCase) -or
     $work.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'ProductRoot and WorkRoot must not nest.'
 }
-if (Test-Path -LiteralPath (Join-Path $source 'state')) { throw 'Source candidate already has state.' }
+$candidateState = Join-Path $source 'state'
+if ($ReuseCandidate) {
+    if (-not (Test-Path -LiteralPath $candidateState -PathType Container)) {
+        throw 'ReuseCandidate requires the state of an existing T3 synthetic candidate.'
+    }
+    foreach ($root in @($candidateState, $work)) {
+        for ($directory = [IO.DirectoryInfo]::new($root); $null -ne $directory; $directory = $directory.Parent) {
+            if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "ReuseCandidate paths must not traverse reparse points: $($directory.FullName)"
+            }
+        }
+    }
+    $originalRoot = Split-Path -Parent $source
+    if ((Split-Path -Leaf $source) -ine 'candidate' -or (Split-Path -Leaf $originalRoot) -cnotmatch '^t3-[0-9a-f]{12}$') {
+        throw 'ReuseCandidate only accepts a candidate created in an original T3 synthetic run root.'
+    }
+    $originalManifest = Get-Content -LiteralPath (Join-Path $originalRoot 'fixtures/manifest.json') -Raw | ConvertFrom-Json -AsHashtable
+    if ($originalManifest.generator -ne 'scripts/paddle_smoke_fixtures.py' -or
+        $originalManifest.synthetic_only -ne $true -or $originalManifest['t3-pipeline/scan_short.pdf'].synthetic_only -ne $true) {
+        throw 'Original T3 synthetic fixture manifest could not be verified.'
+    }
+} elseif (Test-Path -LiteralPath $candidateState) {
+    throw 'Source candidate already has state.'
+}
 $identity = (Get-Content -LiteralPath (Join-Path $source 'app/metadata/component-identities.json') -Raw | ConvertFrom-Json).project
 $runtime = Get-Content -LiteralPath (Join-Path $source 'runtime/backend/runtime-manifest.json') -Raw | ConvertFrom-Json
 if ($identity.component -cne 'next' -or $identity.repository -cne 'FelixJI/vibeocr-next' -or
@@ -405,15 +490,30 @@ if ($identity.component -cne 'next' -or $identity.repository -cne 'FelixJI/vibeo
     $runtime.product.repository -cne $identity.repository -or $runtime.product.component -cne $identity.component) {
     throw 'Candidate app and runtime identity must bind the same Next version and source SHA.'
 }
+if ($ReuseCandidate) { Assert-T3CandidateStopped $source }
+$harnessSha = git -C $repoRoot rev-parse --verify HEAD
+if ($LASTEXITCODE -ne 0 -or $harnessSha -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'Unable to establish the T3 harness Git HEAD.'
+}
 
 $report = New-PdfSmokeRunReportDir $artifacts
-$smokeRoot = Join-Path $work "t3-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-$candidate = Join-Path $smokeRoot 'candidate'
-$fixtures = Join-Path $smokeRoot 'fixtures'
+$runId = "t3-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+$smokeRoot = Join-Path $work $runId
+$candidate = if ($ReuseCandidate) { $source } else { Join-Path $smokeRoot 'candidate' }
+$runNamespace = if ($ReuseCandidate) { $runId } else { '' }
+$paths = Get-T3RunPaths $smokeRoot $candidate $runNamespace
+$fixtures = $paths.fixtures
 $executable = Join-Path $candidate 'app/VibeOCR.WinUI.exe'
 $supervisorLog = Join-Path $candidate 'state/supervisor.log'
-New-Item -ItemType Directory -Path $candidate, (Join-Path $smokeRoot 'fixture-before') | Out-Null
-Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $candidate -Recurse
+New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $smokeRoot 'fixture-before') | Out-Null
+if ($ReuseCandidate) {
+    if (Test-Path -LiteralPath $paths.export_root) { throw "Export namespace exists: $($paths.export_root)" }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fixtures) | Out-Null
+} else {
+    New-Item -ItemType Directory -Path $candidate | Out-Null
+    Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $candidate -Recurse
+}
 Push-Location $repoRoot
 try {
     uv run --frozen python scripts/paddle_smoke_fixtures.py --out $fixtures --pdf-pipeline *> (Join-Path $report 'fixture-generation.log')
@@ -421,14 +521,19 @@ try {
 } finally { Pop-Location }
 
 $previous = @{}
+$webviewNote = 'plan.webview is the requested environment path. A packaged Fixed WebView2 uses candidate/state/webview2-fixed; worker cold does not mean browser, OS or filesystem cold.'
 try {
     $prepare = [pscustomobject]@{
-        id = 'prepare-model'; health = Join-Path $smokeRoot 'prepare-model.json'
+        id = 'prepare-model'; health = Join-Path $paths.health_root "$($paths.health_prefix)prepare-model.json"
         fixture = Join-Path $fixtures 'text_zh_en.png'
-        export = Join-Path $candidate 'state/output/paddle-smoke/prepare-model'
+        export = Join-Path $paths.export_root 'prepare-model'
         webview = Join-Path $smokeRoot 'webview2/prepare-model'
     }
     $prepareRecord = [ordered]@{ plan = $prepare; state = 'failed'; candidate = $identity; provider = $Provider; preset = $ModelPreset }
+    $prepareRecord['candidate_root'] = $candidate
+    $prepareRecord['candidate_reused'] = [bool]$ReuseCandidate
+    $prepareRecord['harness_source_sha'] = $harnessSha
+    $prepareRecord['webview_note'] = $webviewNote
     try {
         $prepareRecord['process'] = Invoke-T3App $prepare $true
         $health = Get-Content -LiteralPath $prepare.health -Raw | ConvertFrom-Json
@@ -459,9 +564,11 @@ try {
         exit (Get-PdfSmokeExitCode @($prepareRecord.state))
     }
 
-    $records = @(foreach ($step in (Get-T3RunPlan $smokeRoot $Kinds $Runs)) {
+    $records = @(foreach ($step in (Get-T3RunPlan $smokeRoot $Kinds $Runs $candidate $runNamespace)) {
         $record = [ordered]@{
             plan = $step; state = 'failed'; candidate = $identity; provider = $Provider; preset = $ModelPreset
+            candidate_root = $candidate; candidate_reused = [bool]$ReuseCandidate; harness_source_sha = $harnessSha
+            webview_note = $webviewNote
             functional_state = 'failed'; performance_eligible = $false; eligible_pass_count = 0
             runtime = @{ python = $runtime.python.version; capabilities = $runtime.capabilities }
             mode = if ($Foreground) { 'controlled_foreground' } else { 'unattended_ocr' }
@@ -518,13 +625,21 @@ try {
     })
     $validRuns = @($records | Where-Object { $_.performance_eligible -eq $true })
     [ordered]@{
+        candidate_root = $candidate
+        candidate_reused = [bool]$ReuseCandidate
+        candidate_source_sha = $identity.source_sha
+        harness_source_sha = $harnessSha
+        fixture_root = $fixtures
+        health_root = $paths.health_root
+        export_root = $paths.export_root
+        webview_note = $webviewNote
         attempted_runs = $records.Count
         functional_passed_runs = @($records | Where-Object { $_.functional_state -eq 'passed' }).Count
         performance_eligible_runs = $validRuns.Count
         performance_eligible_passes = 2 * $validRuns.Count
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $report 'summary.json')
     Write-Host "Eligible performance runs: $($validRuns.Count)/$($records.Count)"
-    Write-Host "Evidence: $report (candidate, monitor, PDF files: $smokeRoot)"
+    Write-Host "Evidence: $report (run files: $smokeRoot, candidate: $candidate)"
     exit (Get-PdfSmokeExitCode @($records | ForEach-Object { $_.state }))
 } finally {
     foreach ($entry in $previous.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value) }
