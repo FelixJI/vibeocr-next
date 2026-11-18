@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import weakref
+
 import pytest
 from vibeocr.runtime.jobs.registry import JobNotFoundError, JobRegistry
 from vibeocr.runtime_contracts import (
@@ -268,6 +270,30 @@ def test_purge_terminal_then_get_raises() -> None:
     reg.purge(rec.job_id)
     with pytest.raises(JobNotFoundError):
         reg.get(rec.job_id)
+
+
+def test_purge_releases_retained_result_payload() -> None:
+    class Payload(dict[str, str]):
+        pass
+
+    reg = _make_registry()
+    rec = reg.create(
+        kind=JobKind.RECOGNITION,
+        priority=JobPriority.BACKGROUND,
+        items=_items(1),
+        progress_total=1,
+    )
+    rec.transition(JobState.QUEUED)
+    rec.transition(JobState.RUNNING)
+    payload = Payload(text="retained OCR result")
+    retained = weakref.ref(payload)
+    rec.commit_item_success("it-0", payload_type="ocr.v1", payload=payload)
+    rec.transition(JobState.COMPLETED)
+    reg.purge(rec.job_id)
+    del rec, payload
+
+    assert retained() is None
+    assert list(reg) == []
 
 
 def test_purge_non_terminal_raises() -> None:

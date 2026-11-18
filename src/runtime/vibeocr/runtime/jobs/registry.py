@@ -547,6 +547,7 @@ class JobRegistry:
             if record.state not in TERMINAL_JOB_STATES:
                 raise ContractError("cannot purge a non-terminal job")
             record.purged = True
+            del self._jobs[job_id]
 
     def all_job_ids(self) -> list[str]:
         with self._lock:
