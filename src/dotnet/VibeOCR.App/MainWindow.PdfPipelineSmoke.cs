@@ -32,15 +32,21 @@ internal static class PdfPipelinePhaseStats
     requests.GroupBy(request => request.Kind).ToDictionary(group => group.Key, group =>
     {
       var completed = group.Where(request => request.Outcome == "completed").ToArray();
-      double[] durations = completed.Select(request => request.DurationMs!.Value).Order().ToArray();
+      var polls = completed.Select(request => request.Polls).OfType<PdfSmokeRequestProbe.PollStats>().ToArray();
+      double[] durations = completed.Where(request => request.DurationMs is not null)
+        .Select(request => request.DurationMs!.Value).Order().ToArray();
+      int compacted = polls.Sum(poll => poll.Count);
+      bool measured = durations.Length > 0 || polls.Length > 0;
       return new
       {
-        count = group.Count(),
-        completed = completed.Length,
-        duration_sum_ms = durations.Length > 0 ? (double?)durations.Sum() : null,
-        duration_median_ms = durations.Length > 0
+        count = group.Count() - polls.Length + compacted,
+        completed = completed.Length - polls.Length + compacted,
+        compacted_poll_count = compacted,
+        duration_sum_ms = measured ? (double?)(durations.Sum() + polls.Sum(poll => poll.SumMs)) : null,
+        duration_min_ms = measured ? (double?)durations.Concat(polls.Select(poll => poll.MinMs)).Min() : null,
+        duration_median_ms = polls.Length == 0 && durations.Length > 0
           ? (double?)(durations[(durations.Length - 1) / 2] + durations[durations.Length / 2]) / 2 : null,
-        duration_max_ms = durations.Length > 0 ? (double?)durations[^1] : null,
+        duration_max_ms = measured ? (double?)durations.Concat(polls.Select(poll => poll.MaxMs)).Max() : null,
         bytes = completed.Any(request => request.Bytes is not null)
           ? (long?)completed.Sum(request => request.Bytes) : null,
         pixels = completed.Any(request => request.Pixels is not null)
@@ -170,7 +176,7 @@ public sealed partial class MainWindow
         limitations = new
         {
           provider = "Job snapshots identify frozen execution settings; worker diagnostics confirm instantiated session providers.",
-          observe = "Host-to-Supervisor round-trip, including long polling. Native CPU/device wait is NOT_MEASURED.",
+          observe = "Host-to-Supervisor polling round-trips. Unchanged polls retain count, sum, minimum and maximum; the exact median is absent when compacted. Native CPU/device wait is NOT_MEASURED.",
           inputs = "Encoded uploads and IHDR pixels by job. Byte totals are not copy cost or allocated memory.",
           retention = "Terminal job/item facts do not measure their retained memory. Results and _outcomes can reference the same payload.",
           staging = "Post-run staging inventory, when present, excludes transient/native peaks.",
@@ -339,6 +345,8 @@ public sealed partial class MainWindow
         page_turn_max_ms = navigation.Count > 0 ? (double?)navigation.Max(turn => turn.Ms) : null,
       },
       performance_eligible = firstWitness.VisibilityAtFrame == "visible" && firstWitness.HasFocusAtFrame == true,
+      performance_ineligible_reason = firstWitness.VisibilityAtFrame != "visible"
+        ? "first_frame_not_visible" : firstWitness.HasFocusAtFrame != true ? "first_frame_not_focused" : null,
     };
   }
 

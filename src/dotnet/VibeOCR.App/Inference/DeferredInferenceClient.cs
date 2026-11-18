@@ -23,6 +23,7 @@ public sealed class InferenceClientNotAttachedException(
 /// T3（#328）扩展：Submit/Observe/写层/保存等业务类别同一探针记录，
 /// Bytes/Pixels/Detail 由调用点的真实结果推导（PNG IHDR 核验像素），
 /// 观测事实推导失败只留下缺口（null），不改结果、不补 0。
+/// T3 Observe 的首次响应、阶段变化和错误单独留证，同一 job 连续空轮询只累计统计。
 /// </summary>
 internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
 {
@@ -38,7 +39,20 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
   internal sealed record PaddleFact(
       string? Pipeline, string? Device, string? Provider, bool? AutomaticFallback,
       string? Preset, string? Source, string[] Models, JsonElement Selections, JsonElement Adapter);
-  internal sealed record Observation(JobFact? Terminal, PaddleFact? Paddle);
+  internal sealed record Observation(
+      JobFact? Terminal, PaddleFact? Paddle, JobState State, string? Stage, int ThroughSequence,
+      bool More, string[] EventStages, int OutcomeCount)
+  {
+    internal bool IsEmptyPoll(int afterSequence) =>
+      (State is JobState.Accepted or JobState.Queued or JobState.Running or JobState.CancelRequested) &&
+      !More && ThroughSequence == afterSequence && EventStages.Length == 0 && OutcomeCount == 0;
+  }
+
+  internal sealed record PollStats(int Count, double SumMs, double MinMs, double MaxMs)
+  {
+    internal PollStats Add(double duration) =>
+      new(Count + 1, SumMs + duration, Math.Min(MinMs, duration), Math.Max(MaxMs, duration));
+  }
 
   internal sealed record RequestEvent(
       string Kind, string Session, int Page, int Param,
@@ -47,7 +61,7 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
       long? Bytes = null, long? Pixels = null, string? Detail = null,
       string? Purpose = null, long? ReadEpoch = null, IReadOnlyList<int>? Pages = null,
       IReadOnlyList<int>? ConfirmedPages = null, IReadOnlyList<UploadFact>? Uploads = null,
-      Observation? Job = null);
+      Observation? Job = null, PollStats? Polls = null);
 
   /// <summary>从真实调用结果推导的观测事实；null 字段表示未测得（不是 0）。</summary>
   internal sealed record ResultFacts(
@@ -57,6 +71,7 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
 
   private readonly object _lock = new();
   private readonly List<RequestEvent> _events = [];
+  private readonly Dictionary<string, int> _lastObserve = new(StringComparer.Ordinal);
   private bool _overflowed;
   private int _inflight;
   private int _maxInflight;
@@ -69,23 +84,16 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
       long? readEpoch = null, IReadOnlyList<int>? pages = null)
   {
     long start = System.Diagnostics.Stopwatch.GetTimestamp();
-    int slot;
+    var pending = new RequestEvent(
+      kind, session, page, param, Ms(start), null, null, "pending", null,
+      Purpose: purpose, ReadEpoch: readEpoch, Pages: pages);
+    bool compact = capturePipeline && kind == "job_observe";
+    int slot = -1;
     lock (_lock)
     {
       _inflight++;
       if (_inflight > _maxInflight) _maxInflight = _inflight;
-      if (_events.Count >= MaxEvents)
-      {
-        _overflowed = true;
-        slot = -1;
-      }
-      else
-      {
-        slot = _events.Count;
-        _events.Add(new RequestEvent(
-            kind, session, page, param, Ms(start), null, null, "pending", null,
-            Purpose: purpose, ReadEpoch: readEpoch, Pages: pages));
-      }
+      if (!compact) slot = AppendEvent(pending);
     }
     try
     {
@@ -100,17 +108,17 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
           // 由报告层显式披露，不以 0 充当。
         }
       }
-      Finish(slot, start, "completed", null, facts);
+      Finish(pending, slot, compact, start, "completed", null, facts);
       return result;
     }
     catch (OperationCanceledException error)
     {
-      Finish(slot, start, "cancelled", error.Message, null);
+      Finish(pending, slot, compact, start, "cancelled", error.Message, null);
       throw;
     }
     catch (Exception error)
     {
-      Finish(slot, start, "faulted", error.GetType().Name + ": " + error.Message, null);
+      Finish(pending, slot, compact, start, "faulted", error.GetType().Name + ": " + error.Message, null);
       throw;
     }
   }
@@ -124,19 +132,29 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
       return null;
     }, purpose: purpose, readEpoch: readEpoch, pages: pages);
 
-  private void Finish(int slot, long start, string outcome, string? error, ResultFacts? facts)
+  private int AppendEvent(RequestEvent request)
+  {
+    if (_events.Count >= MaxEvents)
+    {
+      _overflowed = true;
+      return -1;
+    }
+    _events.Add(request);
+    return _events.Count - 1;
+  }
+
+  private void Finish(RequestEvent pending, int slot, bool compact, long start, string outcome, string? error, ResultFacts? facts)
   {
     long end = System.Diagnostics.Stopwatch.GetTimestamp();
+    double duration = Ms(end - start);
     lock (_lock)
     {
       _inflight--;
-      if (slot < 0 || slot >= _events.Count) return;
-      RequestEvent pending = _events[slot];
-      if (pending.Outcome != "pending") return;
-      _events[slot] = pending with
+      if (slot < 0 && !compact) return;
+      RequestEvent finished = pending with
       {
         EndedAtMs = Ms(end),
-        DurationMs = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+        DurationMs = duration,
         Outcome = outcome,
         Error = error,
         Bytes = facts?.Bytes,
@@ -146,6 +164,27 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
         Uploads = facts?.Uploads,
         Job = facts?.Job,
       };
+      if (!compact)
+      {
+        _events[slot] = finished;
+        return;
+      }
+
+      if (finished.Job is { } observed && observed.IsEmptyPoll(finished.Param) &&
+          _lastObserve.TryGetValue(finished.Session, out int previousSlot) &&
+          _events[previousSlot] is { Job: { } previousJob } previous &&
+          previousJob.State == observed.State && previousJob.Stage == observed.Stage &&
+          previousJob.ThroughSequence == observed.ThroughSequence)
+      {
+        if (previous.Polls is { } polls)
+        {
+          _events[previousSlot] = previous with { EndedAtMs = finished.EndedAtMs, Polls = polls.Add(duration) };
+          return;
+        }
+        finished = finished with { DurationMs = null, Polls = new(1, duration, duration, duration) };
+      }
+      int observedSlot = AppendEvent(finished);
+      if (observedSlot >= 0) _lastObserve[finished.Session] = observedSlot;
     }
   }
 
@@ -183,7 +222,8 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
             ? models.EnumerateObject().Select(model => model.Name).Order().ToArray() : [],
           Object("selections"), Object("adapter"));
     }
-    return new ResultFacts(null, Job: terminal is null && paddle is null ? null : new(terminal, paddle));
+    return new ResultFacts(null, Job: new(terminal, paddle, snapshot.State, snapshot.Stage,
+        update.ThroughSequence, update.More, update.Events.Select(stage => stage.Stage).ToArray(), update.Outcomes.Count));
   }
 }
 
@@ -221,6 +261,16 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
 
   internal static void SetPdfSmokeProbe(PdfSmokeRequestProbe? probe) =>
     Volatile.Write(ref _pdfSmokeProbe, probe);
+
+  internal sealed record DeviceSettingsObservation(string Device)
+  {
+    internal TaskCompletionSource<Exception?> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  }
+
+  private static DeviceSettingsObservation? _deviceSettingsObservation;
+
+  internal static void SetDeviceSettingsObservation(DeviceSettingsObservation? observation) =>
+    Volatile.Write(ref _deviceSettingsObservation, observation);
 
   public Uri BaseUrl => Current.BaseUrl;
 
@@ -340,7 +390,20 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     SettingsSnapshot settings, CancellationToken cancellationToken)
   {
     await _gate.WaitAsync(cancellationToken);
-    return await Current.UpdateSettingsAsync(settings, cancellationToken);
+    DeviceSettingsObservation? observation = Volatile.Read(ref _deviceSettingsObservation);
+    if (observation is null || observation.Device != settings.RecognitionDevice)
+      return await Current.UpdateSettingsAsync(settings, cancellationToken);
+    try
+    {
+      SettingsSnapshot updated = await Current.UpdateSettingsAsync(settings, cancellationToken);
+      observation.Completion.TrySetResult(null);
+      return updated;
+    }
+    catch (Exception error)
+    {
+      observation.Completion.TrySetResult(error);
+      throw;
+    }
   }
 
   public async Task<ExportResult> ExportAsync(

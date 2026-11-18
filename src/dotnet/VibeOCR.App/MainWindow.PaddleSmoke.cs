@@ -15,6 +15,7 @@ using VibeOCR.App.Features.Pdf;
 using VibeOCR.App.Features.Recognition;
 using VibeOCR.App.Workbench;
 using VibeOCR.App.Services;
+using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
 using VibeOCR.Platform.Windows;
@@ -131,7 +132,7 @@ public sealed partial class MainWindow
     }
     catch (Exception error)
     {
-      paddleSmokeOutcome = "failed";
+      paddleSmokeOutcome = error is PdfPipelineDeviceUnavailableException ? "blocked" : "failed";
       // 失败路径保全：尽力保留本次合成输入已获取的证据与 workbench 预览
       // PNG；预览/写盘的任何异常都不掩盖原始失败（不新增报告框架）。
       File.WriteAllText(path, JsonSerializer.Serialize(new
@@ -191,12 +192,58 @@ public sealed partial class MainWindow
     using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
     while (smokeManagedSession!() is null || !smokeInferenceAttached!()) await Task.Delay(100, timeout.Token);
     ProductRuntimeSession session = smokeManagedSession()!;
-    await SelectSmokeValueAsync("#recognition-device", PaddleSmokeDevice);
+    if (IsPdfPipelinePreparation || PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_INPUT_KIND") == "pdf_pipeline")
+      await SelectPdfPipelineDeviceAsync(session, timeout.Token);
+    else
+      await SelectSmokeValueAsync("#recognition-device", PaddleSmokeDevice);
     while ((await session.Client.GetSettingsAsync(timeout.Token)).RecognitionDevice != PaddleSmokeDevice)
       await Task.Delay(100, timeout.Token);
     if (smokeManagedSession()?.InstanceId != session.InstanceId)
       throw new InvalidOperationException("设备设置意外更换了 Supervisor。");
     return session;
+  }
+
+  private sealed class PdfPipelineDeviceUnavailableException(string reason, Exception inner)
+    : InvalidOperationException(reason, inner);
+
+  internal static string? PdfPipelineDeviceBlockReason(string device, InferenceClientException error)
+  {
+    // 当前 settings PUT 以 VALIDATION_ERROR 的 detail.reason 回传 device_probe。
+    const string prefix = "无法准备计算设备 directml：";
+    if (device != "directml" || error.Code != HttpV2ErrorCode.ValidationError ||
+        !error.Detail.TryGetValue("reason", out JsonElement detail) ||
+        detail.ValueKind != JsonValueKind.String ||
+        detail.GetString() is not string reason || !reason.StartsWith(prefix, StringComparison.Ordinal))
+      return null;
+    string last = reason[prefix.Length..].TrimEnd().Split('\n')[^1].TrimEnd('\r');
+    return last is "ValueError: 没有可用的 DirectML 硬件适配器。" or
+      "ValueError: DmlExecutionProvider 未生效。" ? reason : null;
+  }
+
+  private async Task SelectPdfPipelineDeviceAsync(ProductRuntimeSession session, CancellationToken ct)
+  {
+    string device = PaddleSmokeDevice;
+    if ((await session.Client.GetSettingsAsync(ct)).RecognitionDevice == device) return;
+    var observation = new DeferredInferenceClient.DeviceSettingsObservation(device);
+    DeferredInferenceClient.SetDeviceSettingsObservation(observation);
+    try
+    {
+      await SelectSmokeValueAsync("#recognition-device", device, waitForSelection: false);
+      if (await observation.Completion.Task.WaitAsync(ct) is not { } error) return;
+      if (error is InferenceClientException response)
+      {
+        paddleSmokePartialEvidence = new
+        {
+          device, code = response.Code.ToString(),
+          reason = response.Detail.TryGetValue("reason", out JsonElement detail) && detail.ValueKind == JsonValueKind.String
+            ? detail.GetString() : null,
+        };
+        if (PdfPipelineDeviceBlockReason(device, response) is { } reason)
+          throw new PdfPipelineDeviceUnavailableException(reason, response);
+      }
+      throw new InvalidOperationException("计算设备设置未提交。", error);
+    }
+    finally { DeferredInferenceClient.SetDeviceSettingsObservation(null); }
   }
 
   // ------------------------ phase: recognize ------------------------

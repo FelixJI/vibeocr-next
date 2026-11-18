@@ -481,6 +481,9 @@ try {
                         if (-not $action) { $gap = 'installer_request_not_observed' }
                     } elseif ([string]$process.Name -match 'python') {
                         $class = if ($process.CommandLine -match 'vibeocr.runtime.host.main') { 'supervisor' } else { 'python-child' }
+                        if ($PipelineDetails -and $process.CommandLine -match '\s-m\s+vibeocr\.runtime\.documents\.pdf_backend_process(\s|$)') {
+                            $class = 'pdf-worker'
+                        }
                         if (-not $process.CommandLine) { $gap = 'python_role_not_observed' }
                     }
                     $webViewRole = $null

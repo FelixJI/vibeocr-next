@@ -112,6 +112,96 @@ public sealed class DeferredInferenceClientProbeSeamTests
   }
 
   [Fact]
+  public async Task PipelineObserveCompactsEmptyPollsPastEventCapacityAndKeepsBoundaries()
+  {
+    var deferred = new DeferredInferenceClient();
+    var inner = new SeamStubInferenceClient();
+    deferred.Attach(inner);
+    var probe = new PdfSmokeRequestProbe(capturePipeline: true);
+    DeferredInferenceClient.SetPdfSmokeProbe(probe);
+    try
+    {
+      JobUpdate running = await inner.ObserveAsync("job-9", 7, CancellationToken.None);
+      inner.ObserveUpdate = running;
+      Assert.Same(running, await deferred.ObserveAsync("job-9", 7, CancellationToken.None));
+      for (int index = 0; index < PdfSmokeRequestProbe.MaxEvents + 1; index++)
+        await deferred.ObserveAsync("job-9", 7, CancellationToken.None);
+
+      inner.ObserveUpdate = running with
+      {
+        ThroughSequence = 8,
+        Events = [new StageEvent { Sequence = 8, Stage = "paddle_onnx_snapshot", Detail = new Dictionary<string, JsonElement>() }],
+      };
+      await deferred.ObserveAsync("job-9", 7, CancellationToken.None);
+      inner.ObserveUpdate = running with { Snapshot = running.Snapshot with { Stage = "inference" }, ThroughSequence = 8 };
+      await deferred.ObserveAsync("job-9", 8, CancellationToken.None);
+      inner.ObserveFault = new InvalidOperationException("observe failed");
+      await Assert.ThrowsAsync<InvalidOperationException>(() => deferred.ObserveAsync("job-9", 8, CancellationToken.None));
+      inner.ObserveFault = null;
+      inner.ObserveUpdate = running with
+      {
+        Snapshot = running.Snapshot with { State = JobState.Completed, FinishedAt = "2026-11-18T00:00:00Z" },
+        ThroughSequence = 8,
+      };
+      await deferred.ObserveAsync("job-9", 8, CancellationToken.None);
+
+      var (events, _, overflowed) = probe.Snapshot();
+      Assert.False(overflowed);
+      Assert.Equal(6, events.Count);
+      Assert.Null(events[0].Polls);
+      var polls = Assert.IsType<PdfSmokeRequestProbe.PollStats>(events[1].Polls);
+      Assert.Equal(PdfSmokeRequestProbe.MaxEvents + 1, polls.Count);
+      Assert.Null(events[1].DurationMs);
+      Assert.True(polls.SumMs >= polls.MaxMs && polls.MaxMs >= polls.MinMs);
+      Assert.NotNull(events[2].Job?.Paddle);
+      Assert.Equal("inference", events[3].Job?.Stage);
+      Assert.Equal("faulted", events[4].Outcome);
+      Assert.Equal(JobState.Completed, events[5].Job?.Terminal?.State);
+    }
+    finally { DeferredInferenceClient.SetPdfSmokeProbe(null); }
+  }
+
+  [Theory]
+  [InlineData("directml", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：trace\nValueError: 没有可用的 DirectML 硬件适配器。\n", true)]
+  [InlineData("directml", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：trace\nValueError: DmlExecutionProvider 未生效。\n", true)]
+  [InlineData("directml", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：ORT session 初始化失败", false)]
+  [InlineData("directml", HttpV2ErrorCode.ValidationError, "设置已更新，请刷新后重试。", false)]
+  [InlineData("cpu", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：trace\nValueError: 没有可用的 DirectML 硬件适配器。", false)]
+  [InlineData("directml", HttpV2ErrorCode.BackendUnavailable, "无法准备计算设备 directml：trace\nValueError: 没有可用的 DirectML 硬件适配器。", false)]
+  public void DeviceBlockRequiresSpecificProductRejection(string device, HttpV2ErrorCode code, string reason, bool blocked)
+  {
+    var error = new InferenceClientException(code, "response", false,
+      new Dictionary<string, JsonElement> { ["reason"] = JsonSerializer.SerializeToElement(reason) });
+    Assert.Equal(blocked ? reason : null, MainWindow.PdfPipelineDeviceBlockReason(device, error));
+  }
+
+  [Fact]
+  public async Task SettingsObservationKeepsTheExistingResultAndStopsWhenUninstalled()
+  {
+    var deferred = new DeferredInferenceClient();
+    var error = new InferenceClientException(HttpV2ErrorCode.ValidationError, "device rejected", false);
+    var inner = new SeamStubInferenceClient { SettingsFault = error };
+    deferred.Attach(inner);
+    var requested = new SettingsSnapshot { RecognitionDevice = "directml" };
+    var observation = new DeferredInferenceClient.DeviceSettingsObservation("directml");
+    DeferredInferenceClient.SetDeviceSettingsObservation(observation);
+    try
+    {
+      Assert.Same(error, await Assert.ThrowsAsync<InferenceClientException>(
+        () => deferred.UpdateSettingsAsync(requested, CancellationToken.None)));
+      Assert.Same(error, await observation.Completion.Task.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+    }
+    finally { DeferredInferenceClient.SetDeviceSettingsObservation(null); }
+
+    var uninstalled = new DeferredInferenceClient.DeviceSettingsObservation("directml");
+    DeferredInferenceClient.SetDeviceSettingsObservation(uninstalled);
+    DeferredInferenceClient.SetDeviceSettingsObservation(null);
+    inner.SettingsFault = null;
+    Assert.Same(requested, await deferred.UpdateSettingsAsync(requested, CancellationToken.None));
+    Assert.False(uninstalled.Completion.Task.IsCompleted);
+  }
+
+  [Fact]
   public async Task AddTextLayersRecordsPagesAndReturnsSameInstance()
   {
     var deferred = new DeferredInferenceClient();
@@ -269,6 +359,9 @@ public sealed class DeferredInferenceClientProbeSeamTests
     };
     public bool RenderCancelled { get; set; }
     public Exception? AddLayersFault { get; set; }
+    public JobUpdate? ObserveUpdate { get; set; }
+    public Exception? ObserveFault { get; set; }
+    public Exception? SettingsFault { get; set; }
     public SubmitRequest? LastSubmitRequest { get; private set; }
     public Wire.BatchAddTextLayerRequest? LastAddTextLayersRequest { get; private set; }
     public (bool Copy, bool Rebind, bool Overwrite)? LastSaveFlags { get; private set; }
@@ -285,7 +378,7 @@ public sealed class DeferredInferenceClientProbeSeamTests
     }
 
     public Task<JobUpdate> ObserveAsync(string jobId, int afterSequence, CancellationToken cancellationToken)
-      => Task.FromResult(new JobUpdate
+      => ObserveFault is { } fault ? Task.FromException<JobUpdate>(fault) : Task.FromResult(ObserveUpdate ?? new JobUpdate
       {
         Snapshot = new JobSnapshot
         {
@@ -341,7 +434,7 @@ public sealed class DeferredInferenceClientProbeSeamTests
       => Task.FromResult(new SettingsSnapshot());
 
     public Task<SettingsSnapshot> UpdateSettingsAsync(SettingsSnapshot settings, CancellationToken cancellationToken)
-      => Task.FromResult(settings);
+      => SettingsFault is { } fault ? Task.FromException<SettingsSnapshot>(fault) : Task.FromResult(settings);
 
     public Task<Wire.Health> GetHealthAsync(CancellationToken cancellationToken)
       => Task.FromResult(new Wire.Health

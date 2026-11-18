@@ -41,6 +41,25 @@ public sealed class PdfPipelineSmokeFactsTests
   }
 
   [Fact]
+  public void PhaseStatsCountAllCompactedPollsWithoutInventingMedian()
+  {
+    var first = Event("job_observe", "job-1", 100);
+    var compacted = Event("job_observe", "job-1", 110) with
+    {
+      DurationMs = null,
+      Polls = new(3, 12, 2, 7),
+    };
+    var stats = JsonSerializer.SerializeToElement(PdfPipelinePhaseStats.ByKind([first, compacted]))
+      .GetProperty("job_observe");
+    Assert.Equal(4, stats.GetProperty("count").GetInt32());
+    Assert.Equal(4, stats.GetProperty("completed").GetInt32());
+    Assert.Equal(17, stats.GetProperty("duration_sum_ms").GetDouble());
+    Assert.Equal(2, stats.GetProperty("duration_min_ms").GetDouble());
+    Assert.Equal(7, stats.GetProperty("duration_max_ms").GetDouble());
+    Assert.Equal(JsonValueKind.Null, stats.GetProperty("duration_median_ms").ValueKind);
+  }
+
+  [Fact]
   public void ObserveFactsKeepTerminalIdentityAndSettingsWithoutOutcomes()
   {
     var update = new JobUpdate

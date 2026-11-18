@@ -4,7 +4,8 @@
 .DESCRIPTION
 先走公开图片识别入口准备模型，每轮启动独立 App/Supervisor，再在同进程重开同一
 PDF，分别测冷 worker 和稳态 worker。-Foreground 单独测长任务中的受控翻页。
-退出码 0 通过，1 失败，3 环境受阻。所有尝试保留独立证据。
+退出码 0 表示所有正式样本有效，1 表示功能失败或性能样本无效，3 表示环境受阻。
+所有尝试保留独立证据。
 #>
 [CmdletBinding()]
 param(
@@ -78,6 +79,8 @@ function Invoke-T3App($Plan, [bool]$Prepare) {
     $capMinutes = if ($Prepare) { $TimeoutMinutes + 8 } else { 2 * $TimeoutMinutes + 20 }
     $monitor = $null
     $app = $null
+    $processEvidence = $null
+    $monitorFailure = $null
     try {
         if (-not $Prepare) {
             New-Item -ItemType Directory -Path $Plan.monitor | Out-Null
@@ -115,7 +118,7 @@ function Invoke-T3App($Plan, [bool]$Prepare) {
             }
         }
         if ($app.ExitCode -ne 0) { throw "App exit code $($app.ExitCode): $($Plan.id)" }
-        [pscustomobject]@{
+        $processEvidence = [ordered]@{
             pid = $app.Id; creation_filetime = $creationFileTime
             started = [DateTimeOffset]::new($created).ToUnixTimeMilliseconds()
             ended = [DateTimeOffset]::new($app.ExitTime.ToUniversalTime()).ToUnixTimeMilliseconds()
@@ -128,16 +131,33 @@ function Invoke-T3App($Plan, [bool]$Prepare) {
             }
         } finally {
             if ($monitor) {
-                Set-Content -LiteralPath (Join-Path $Plan.monitor 'stop-monitor') -Value 'stop'
+                try {
+                    Set-Content -LiteralPath (Join-Path $Plan.monitor 'stop-monitor') -Value 'stop'
+                } catch {
+                    $monitorFailure = $_.Exception.Message
+                }
                 if (-not $monitor.WaitForExit(60000)) {
                     $monitor.Kill($true)
                     $null = $monitor.WaitForExit(5000)
-                    throw 'Process monitor did not stop.'
+                    $monitorFailure = 'Process monitor did not stop.'
+                } elseif ($monitor.ExitCode -ne 0) {
+                    $monitorFailure = "Process monitor exit code $($monitor.ExitCode)."
                 }
-                if ($monitor.ExitCode -ne 0) { throw "Process monitor exit code $($monitor.ExitCode)." }
             }
         }
     }
+    $processEvidence['monitor_failure'] = $monitorFailure
+    [pscustomobject]$processEvidence
+}
+
+function Test-T3ProcessSample($Row, $Identity) {
+    foreach ($proc in $Row.procs) {
+        if ($proc.pid -eq $Identity.pid -and $proc.ws_bytes -gt 0 -and $proc.creation_filetime -and
+            $Identity.creation_filetime -and [Math]::Abs([long]$proc.creation_filetime - [long]$Identity.creation_filetime) -lt 10) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-T3WorkerEvidence($Evidence, $App, $Samples, $Starts, $LogLines, [string]$MonitorDir) {
@@ -162,29 +182,30 @@ function Get-T3WorkerEvidence($Evidence, $App, $Samples, $Starts, $LogLines, [st
         throw 'Expected one Paddle worker created during first OCR.'
     }
     $worker = $workers[0]
+    $pdfWorkers = @($Starts | Where-Object { $_.class -eq 'pdf-worker' -and $_.ppid -eq $supervisors[0].pid })
     $phasePeaks = [ordered]@{}
     foreach ($pass in $passes) {
         $ocr = $pass.utc_windows.ocr
         $save = $pass.utc_windows.save
         $open = $pass.utc_windows.open
         $peak = @{ MonitorDir = $MonitorDir; RootPid = $App.pid; RootCreationFileTime = $App.creation_filetime; Samples = $Samples }
-        $phasePeaks[$pass.label] = @{
-            open = Read-PdfSmokeMonitorSamples @peak -StartMs $open.start -EndMs $open.end
-            ocr = Read-PdfSmokeMonitorSamples @peak -StartMs $ocr.start -EndMs $ocr.end
-            save = Read-PdfSmokeMonitorSamples @peak -StartMs $save.start -EndMs $save.end
-        }
-        $witnesses = @($Samples | Where-Object {
-            $_.started_at_ms -ge $ocr.start -and $_.at_ms -le $ocr.end -and
-                @($_.procs | Where-Object {
-                    $_.pid -eq $App.pid -and $_.ws_bytes -gt 0 -and
-                        [Math]::Abs([long]$_.creation_filetime - [long]$App.creation_filetime) -lt 10
-                }).Count -eq 1 -and @($_.procs | Where-Object {
-                $_.pid -eq $worker.pid -and $_.ws_bytes -gt 0 -and
-                    [Math]::Abs([long]$_.creation_filetime - [long]$worker.creation_filetime) -lt 10
-            }).Count -eq 1
+        $openPeak = Read-PdfSmokeMonitorSamples @peak -StartMs $open.start -EndMs $open.end
+        $savePeak = Read-PdfSmokeMonitorSamples @peak -StartMs $save.start -EndMs $save.end
+        $witnesses = @(foreach ($row in $Samples) {
+            if ($row.started_at_ms -lt $ocr.start -or $row.at_ms -gt $ocr.end -or $row.at_ms -lt $row.started_at_ms) { continue }
+            if ((Test-T3ProcessSample $row $App) -and (Test-T3ProcessSample $row $supervisors[0]) -and
+                (Test-T3ProcessSample $row $worker) -and
+                @($pdfWorkers | Where-Object { Test-T3ProcessSample $row $_ }).Count -eq 1) { $row }
         })
-        if ($null -eq $phasePeaks[$pass.label].ocr -or $witnesses.Count -eq 0) {
-            throw "Missing App/worker OCR samples for $($pass.label)."
+        $peak.Samples = $witnesses
+        $ocrPeak = if ($witnesses.Count) { Read-PdfSmokeMonitorSamples @peak -StartMs $ocr.start -EndMs $ocr.end }
+        $phasePeaks[$pass.label] = @{
+            open = $openPeak
+            open_gap = if ($null -eq $openPeak) { 'No App sample fully inside the open window.' }
+            ocr = $ocrPeak
+            ocr_gap = if ($null -eq $ocrPeak) { 'No OCR sample covers App, Supervisor, PDF and Paddle worker together.' }
+            save = $savePeak
+            save_gap = if ($null -eq $savePeak) { 'No App sample fully inside the save window.' }
         }
     }
     # 既有 worker 日志仅在核对各实际 ORT session 的首选 Provider 后产生。
@@ -214,7 +235,32 @@ function Get-T3WorkerEvidence($Evidence, $App, $Samples, $Starts, $LogLines, [st
             }
         }
     }
-    [pscustomobject]@{ supervisor = $supervisors[0]; worker = $worker; phase_peaks = $phasePeaks; session_init = $init[0] }
+    [pscustomobject]@{
+        supervisor = $supervisors[0]; worker = $worker; pdf_workers = $pdfWorkers
+        phase_peaks = $phasePeaks; session_init = $init[0]
+    }
+}
+
+function Get-T3PerformanceEvidence($Evidence, $Residency) {
+    $eligible = 0
+    $gaps = @(foreach ($pass in $Evidence.passes) {
+        $phase = $Residency.phase_peaks[$pass.label]
+        $reason = if ($null -eq $phase.ocr) {
+            if ($phase.ocr_gap) { $phase.ocr_gap } else { 'Missing OCR process coverage.' }
+        }
+        if ($pass.performance_eligible -ne $true) {
+            $frameGap = if ($pass.performance_ineligible_reason) { $pass.performance_ineligible_reason } else { 'first_frame_not_eligible' }
+            "$($pass.label): $frameGap"
+        }
+        if ($reason) { "$($pass.label): $reason" }
+        if ($pass.performance_eligible -eq $true -and -not $reason) { $eligible++ }
+    })
+    [pscustomobject]@{
+        eligible = $eligible -eq 2
+        state = if ($eligible -eq 2) { 'passed' } else { 'failed' }
+        eligible_pass_count = $eligible
+        gaps = $gaps
+    }
 }
 
 function Get-T3RetainedStaging($Evidence) {
@@ -287,21 +333,24 @@ if ($SelfCheck) {
     }
     $fakeBatch = @{ Job = @{ JobId = 'job1' }; Paddle = @{ Models = @('test-model') } }
     $evidence = @{ process_pid = 99; supervisor_pid = 100; passes = @(
-        @{ label = 'cold'; session = 'cold-doc'; batches = @($fakeBatch); utc_windows = @{
+        @{ label = 'cold'; session = 'cold-doc'; batches = @($fakeBatch); performance_eligible = $true; utc_windows = @{
             open = @{ start = 10; end = 100 }; ocr = @{ start = 100; end = 200 }; save = @{ start = 200; end = 220 }
         } },
-        @{ label = 'steady'; session = 'steady-doc'; batches = @($fakeBatch); utc_windows = @{
+        @{ label = 'steady'; session = 'steady-doc'; batches = @($fakeBatch); performance_eligible = $true; utc_windows = @{
             open = @{ start = 220; end = 300 }; ocr = @{ start = 300; end = 400 }; save = @{ start = 400; end = 420 }
         } }
     ) }
     $app = @{ pid = 99; creation_filetime = '1000'; started = 1; ended = 500 }
     $starts = @(
-        @{ class = 'supervisor'; pid = 100; ppid = 99; started_ms = 60 },
-        @{ paddle_worker = $true; pid = 101; ppid = 100; started_ms = 105; creation_filetime = '2000' }
+        @{ class = 'supervisor'; pid = 100; ppid = 99; started_ms = 60; creation_filetime = '1500' },
+        @{ paddle_worker = $true; pid = 101; ppid = 100; started_ms = 105; creation_filetime = '2000' },
+        @{ class = 'pdf-worker'; pid = 102; ppid = 100; started_ms = 65; creation_filetime = '2500' }
     )
     $procs = @(
         @{ pid = 99; creation_filetime = '1000'; ws_bytes = 512 },
-        @{ pid = 101; creation_filetime = '2000'; ws_bytes = 1024 }
+        @{ pid = 100; creation_filetime = '1500'; ws_bytes = 512 },
+        @{ pid = 101; creation_filetime = '2000'; ws_bytes = 1024 },
+        @{ pid = 102; creation_filetime = '2500'; ws_bytes = 512 }
     )
     $samples = @(
         @{ started_at_ms = 110; at_ms = 115; procs = $procs },
@@ -310,8 +359,20 @@ if ($SelfCheck) {
     $ep = if ($Provider -eq 'cpu') { 'CPUExecutionProvider' } else { 'DmlExecutionProvider' }
     $line = "[1970-01-01T00:00:00.120+00:00] [stderr] Paddle ONNX request={} available=[] sessions=[{'model': 'D:\cache\test-model', 'providers': ['$ep']}]"
     $workerProof = Get-T3WorkerEvidence $evidence $app $samples $starts @($line) $monitor
-    if ($workerProof.worker.pid -ne 101 -or $workerProof.phase_peaks.steady.ocr.tree_ws_peak_bytes -ne 1536) {
-        throw 'The sampled worker did not bind the cold and steady OCR phases.'
+    if ($workerProof.worker.pid -ne 101 -or $workerProof.phase_peaks.steady.ocr.tree_ws_peak_bytes -ne 2560 -or
+        -not (Get-T3PerformanceEvidence $evidence $workerProof).eligible -or
+        $null -ne $workerProof.phase_peaks.cold.open -or -not $workerProof.phase_peaks.cold.open_gap) {
+        throw 'The sampled process tree did not bind both OCR windows and leave unobserved phases as gaps.'
+    }
+    $samples[1].procs = @($procs | Where-Object pid -ne 102)
+    $samples += @{ started_at_ms = 330; at_ms = 335; procs = @($procs | Where-Object pid -in @(99, 102)) }
+    $incompleteProof = Get-T3WorkerEvidence $evidence $app $samples $starts @($line) $monitor
+    $evidence.passes[0].performance_eligible = $false
+    $evidence.passes[0].performance_ineligible_reason = 'first_frame_not_focused'
+    $invalid = Get-T3PerformanceEvidence $evidence $incompleteProof
+    if ($null -ne $incompleteProof.phase_peaks.steady.ocr -or $invalid.eligible -or $invalid.eligible_pass_count -ne 0 -or
+        $invalid.gaps.Count -ne 2 -or (Get-PdfSmokeExitCode @($invalid.state)) -ne 1) {
+        throw 'Disjoint process samples or an unfocused first frame passed the performance gate.'
     }
     if ((Get-PdfSmokeExitCode @('failed', 'blocked')) -ne 1 -or (Get-PdfSmokeExitCode @('blocked', 'passed')) -ne 3) {
         throw 'Exit state precedence failed.'
@@ -367,15 +428,17 @@ try {
         $health = Get-Content -LiteralPath $prepare.health -Raw | ConvertFrom-Json
         if ($health.state -in @('passed', 'blocked')) { $prepareRecord.state = $health.state }
         $prepareRecord['stage'] = $health.stage
+        if ($health.state -eq 'blocked') {
+            $prepareRecord['reason'] = @($health.evidence.reason, $health.partial_evidence.reason, $health.error) |
+                Where-Object { $_ } | Select-Object -First 1
+        }
         if ($health.state -eq 'passed') {
             $snapshot = @($health.evidence.job.events | Where-Object Stage -eq 'paddle_onnx_snapshot')
             if ($snapshot.Count -ne 1) { throw 'Model preparation lacks its Paddle execution snapshot.' }
             $detail = $snapshot[0].Detail
             $expected = if ($Provider -eq 'cpu') { 'CPUExecutionProvider' } else { 'DmlExecutionProvider' }
-            if ($Provider -eq 'directml' -and $detail.auto_device_fallback -eq $true -and $detail.device -eq 'cpu') {
-                $prepareRecord.state = 'blocked'
-                $prepareRecord['reason'] = 'Requested DirectML hardware unavailable; preparation fell back to CPU.'
-            } elseif ($detail.provider -ne $expected -or $detail.device -ne $Provider -or $detail.model_preset -ne $ModelPreset) {
+            if ($detail.provider -ne $expected -or $detail.device -ne $Provider -or
+                $detail.model_preset -ne $ModelPreset -or $detail.auto_device_fallback -ne $false) {
                 throw 'Preparation did not execute with the requested provider, device and preset.'
             }
         }
@@ -386,12 +449,14 @@ try {
     $prepareRecord | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $report 'prepare-model.json')
     if ($prepareRecord.state -ne 'passed') {
         Write-Host "$($prepareRecord.state.ToUpper()) model/device preparation: $($prepare.health)"
+        Write-Host 'Eligible performance runs: 0/0'
         exit (Get-PdfSmokeExitCode @($prepareRecord.state))
     }
 
-    $states = foreach ($step in (Get-T3RunPlan $smokeRoot $Kinds $Runs)) {
+    $records = @(foreach ($step in (Get-T3RunPlan $smokeRoot $Kinds $Runs)) {
         $record = [ordered]@{
             plan = $step; state = 'failed'; candidate = $identity; provider = $Provider; preset = $ModelPreset
+            functional_state = 'failed'; performance_eligible = $false; eligible_pass_count = 0
             runtime = @{ python = $runtime.python.version; capabilities = $runtime.capabilities }
             mode = if ($Foreground) { 'controlled_foreground' } else { 'unattended_ocr' }
         }
@@ -403,7 +468,12 @@ try {
             $health = Get-Content -LiteralPath $step.health -Raw | ConvertFrom-Json
             $record['health_stage'] = $health.stage
             $record['health_state'] = $health.state
-            if ($health.state -eq 'blocked') { $record.state = 'blocked' }
+            if ($health.state -eq 'blocked') {
+                $record.state = 'blocked'
+                $record.functional_state = 'blocked'
+                $record['blocked_reason'] = @($health.evidence.reason, $health.partial_evidence.reason, $health.error) |
+                    Where-Object { $_ } | Select-Object -First 1
+            }
             elseif ($health.state -eq 'passed') {
                 $evidence = $health.evidence
                 Push-Location $repoRoot
@@ -413,6 +483,8 @@ try {
                         --fixture-copy $step.fixture_before --export-root $step.export *> (Join-Path $report "$($step.id)-verify.log")
                     $record['verify_exit'] = $LASTEXITCODE
                 } finally { Pop-Location }
+                if ($record.verify_exit -eq 0) { $record.functional_state = 'passed' }
+                if ($app.monitor_failure) { throw $app.monitor_failure }
                 $samples = @(Get-PdfSmokeMonitorRows $step.monitor 'process-samples.jsonl')
                 $starts = @(Get-PdfSmokeMonitorRows $step.monitor 'process-starts.jsonl')
                 $record['process_tree'] = Read-PdfSmokeMonitorSamples $step.monitor -RootPid $app.pid `
@@ -422,19 +494,32 @@ try {
                 $record['residency'] = Get-T3WorkerEvidence $evidence $app $samples $starts $logLines $step.monitor
                 $record['retained_staging'] = @(Get-T3RetainedStaging $evidence)
                 $record['retained_staging_note'] = 'Files present after App exit, by observed job. Empty means no retained staging observed; transient staging peak and retained in-memory outcomes are unmeasured.'
-                $record['performance_eligible'] = @($evidence.passes | Where-Object { $_.performance_eligible -ne $true }).Count -eq 0
-                if ($record.verify_exit -eq 0) { $record.state = 'passed' }
+                $performance = Get-T3PerformanceEvidence $evidence $record.residency
+                $record['performance_gaps'] = $performance.gaps
+                if ($record.functional_state -eq 'passed') {
+                    $record.eligible_pass_count = $performance.eligible_pass_count
+                    $record.performance_eligible = $performance.eligible
+                    $record.state = $performance.state
+                }
             }
         } catch {
             $record['failure'] = $_.Exception.Message
         }
         $record | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $report "$($step.id).json")
         Add-Content -LiteralPath (Join-Path $artifacts 'run-index.jsonl') -Value (ConvertTo-Json $record -Depth 16 -Compress)
-        Write-Host "$($record.state.ToUpper()) $($step.id): $($step.health)"
-        $record.state
-    }
+        Write-Host "$($record.state.ToUpper()) $($step.id), functional=$($record.functional_state), eligible_passes=$($record.eligible_pass_count)/2 : $($step.health)"
+        $record
+    })
+    $validRuns = @($records | Where-Object { $_.performance_eligible -eq $true })
+    [ordered]@{
+        attempted_runs = $records.Count
+        functional_passed_runs = @($records | Where-Object { $_.functional_state -eq 'passed' }).Count
+        performance_eligible_runs = $validRuns.Count
+        performance_eligible_passes = 2 * $validRuns.Count
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $report 'summary.json')
+    Write-Host "Eligible performance runs: $($validRuns.Count)/$($records.Count)"
     Write-Host "Evidence: $report (candidate, monitor, PDF files: $smokeRoot)"
-    exit (Get-PdfSmokeExitCode @($states))
+    exit (Get-PdfSmokeExitCode @($records | ForEach-Object { $_.state }))
 } finally {
     foreach ($entry in $previous.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value) }
 }
