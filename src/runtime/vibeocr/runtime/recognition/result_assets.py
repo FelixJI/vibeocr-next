@@ -137,7 +137,8 @@ class ResultAssetSink:
         filename = f"{self._item_id}-{asset_id}.png"
         target = self._dir / filename
         try:
-            self._dir.mkdir(parents=True, exist_ok=True)
+            # Only the stager owns the job directory and its lifetime.
+            self._dir.mkdir(exist_ok=True)
             target.write_bytes(encoded)
         except OSError:
             if self._budget is not None:

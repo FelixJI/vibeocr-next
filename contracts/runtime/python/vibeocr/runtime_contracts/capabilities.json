@@ -19,7 +19,8 @@
     "pdf.page-inspect.v1",
     "pdf.block-edit.v1",
     "pdf.copy-export.v1",
-    "pdf.demand.v1"
+    "pdf.demand.v1",
+    "pdf.prefetch-presence.v1"
   ],
   "definitions": {
     "ocr.recognition.v2": {
@@ -167,7 +168,15 @@
       "replacement": null
     },
     "pdf.demand.v1": {
-      "description": "Scoped demand reads: body load with geometry and text-presence detection only (explicit pages foreground-priority, omitted pages the single automatic background stream), revocable read admission against per-scope epoch watermarks, bounded direct target rendering, and read-scoped cancel that never touches write cancellation or lowers watermarks.",
+      "description": "Scoped demand reads: body load with geometry and text-presence detection only (explicit pages use foreground admission by default, omitted pages the single automatic background stream), revocable read admission against per-scope epoch watermarks, bounded direct target rendering, and read-scoped cancel that never touches write cancellation or lowers watermarks.",
+      "lifecycle": "active",
+      "introduced_in": "2.11.0",
+      "deprecated_in": null,
+      "sunset_at": null,
+      "replacement": null
+    },
+    "pdf.prefetch-presence.v1": {
+      "description": "Opt-in low-priority geometry and text-presence detection for up to four explicit pages using the background read scope and existing revocation watermarks.",
       "lifecycle": "active",
       "introduced_in": "2.11.0",
       "deprecated_in": null,

@@ -347,6 +347,7 @@ class PdfClosedResponse(TypedDict, total=False):
 class PdfDemandLoadRequest(TypedDict, total=False):
     read: Required[PdfReadContext]
     pages: NotRequired[list[int]]
+    prefetch: NotRequired[bool]
 
 
 class PdfDetectResponse(TypedDict, total=False):

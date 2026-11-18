@@ -63,6 +63,12 @@ class FakePdfAdapter:
             phase=ProgressPhase.LOAD, current=0, total=1, page_index=0, message="done"
         )
 
+    def load_demand_stream(
+        self, session_id: str, payload: dict
+    ) -> Iterator[ProgressEvent]:
+        self._record("load_demand_stream", (session_id, payload), {})
+        yield ProgressEvent(phase=ProgressPhase.LOAD, message="done")
+
     def render_thumbnail(self, session_id: str, page: int, size: int = 160) -> bytes:
         self._record("render_thumbnail", (session_id, page), {"size": size})
         return b"\x89PNG\r\nthumb"

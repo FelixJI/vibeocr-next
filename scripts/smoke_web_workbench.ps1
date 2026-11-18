@@ -98,6 +98,85 @@ function Assert-ReusedUnpackedProductRoot {
     }
 }
 
+function Stop-OwnedWebView2 {
+    param([string]$ExpectedExecutable)
+
+    $timeoutMs = 5000
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $remaining = $timeoutMs - $clock.ElapsedMilliseconds
+        if ($remaining -le 0) { throw 'WebView2 cleanup deadline expired before confirming an empty owned process set' }
+        $instances = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" `
+            -Property ProcessId, ExecutablePath, CreationDate -OperationTimeoutSec ([int][Math]::Ceiling($remaining / 1000.0)))
+        if ($clock.ElapsedMilliseconds -ge $timeoutMs) { throw 'WebView2 cleanup deadline expired during process census' }
+        $rescan = $false
+        foreach ($row in $instances) {
+            $path = [string]$row.ExecutablePath
+            if ($path -and -not $path.Equals($ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { continue }
+
+            try {
+                $browser = Get-Process -Id $row.ProcessId -ErrorAction Stop
+            } catch {
+                if (-not $path) { continue }
+                if (($_.FullyQualifiedErrorId -split ',', 2)[0] -ne 'NoProcessFoundForGivenId') { throw }
+                $rescan = $true
+                continue
+            }
+            try {
+                if (-not $path) {
+                    # An unreadable system-wide row does not establish ownership of this isolated runtime.
+                    try { $path = [string]$browser.Path } catch { continue }
+                    if (-not $path -or -not $path.Equals($ExpectedExecutable, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                }
+                $identityFailure = $null
+                try {
+                    # Hold the process's kernel handle across creation-time verification, termination and exit wait.
+                    $handle = $browser.SafeHandle
+                    if ($null -eq $handle -or $handle.IsClosed -ne $false -or $handle.IsInvalid -ne $false) {
+                        throw 'unable to pin a valid process handle'
+                    }
+                    $start = $browser.StartTime
+                    if ($start -isnot [datetime] -or $row.CreationDate -isnot [datetime]) {
+                        throw 'process creation time is unavailable'
+                    }
+                    # CIM reports microseconds; a different creation time means the PID was reused.
+                    if ([Math]::Abs($start.ToUniversalTime().ToFileTimeUtc() -
+                            $row.CreationDate.ToUniversalTime().ToFileTimeUtc()) -ge 10) {
+                        $rescan = $true
+                        continue
+                    }
+                } catch {
+                    $identityFailure = $_.Exception.Message
+                }
+                if ($null -eq $identityFailure) {
+                    if ($clock.ElapsedMilliseconds -ge $timeoutMs) {
+                        throw "WebView2 cleanup deadline expired before stopping PID $($row.ProcessId)"
+                    }
+                    try { $browser.Kill() }
+                    catch [System.InvalidOperationException], [System.ComponentModel.Win32Exception] {
+                        if (-not $browser.HasExited) { throw }
+                    }
+                }
+                $rescan = $true
+                $remaining = $timeoutMs - $clock.ElapsedMilliseconds
+                try {
+                    $exited = $remaining -gt 0 -and $browser.WaitForExit([int]$remaining)
+                } catch {
+                    throw "Cannot confirm exit of WebView2 PID $($row.ProcessId) ($identityFailure): $($_.Exception.Message)"
+                }
+                if (-not $exited) {
+                    if ($null -ne $identityFailure) {
+                        throw "Cannot establish identity or confirm exit of WebView2 PID $($row.ProcessId): $identityFailure"
+                    }
+                    throw "Owned WebView2 PID $($row.ProcessId) did not exit before the cleanup deadline"
+                }
+            } finally {
+                $browser.Dispose()
+            }
+        }
+    } while ($rescan)
+}
+
 $sourceRoot = (Resolve-Path -LiteralPath $ProductRoot).Path
 if ($ReuseUnpackedProduct) {
     Assert-ReusedUnpackedProductRoot -SourceRoot $sourceRoot
@@ -139,6 +218,13 @@ if ($ReuseUnpackedProduct) {
     $isolatedRoot = Join-Path $tempRoot `
         "vibeocr-web-smoke-$([guid]::NewGuid().ToString('N'))"
 }
+$expectedRuntimeRoot = if ($installedLayout) {
+    Join-Path $isolatedRoot 'app\WebView2Runtime'
+} else {
+    Join-Path $isolatedRoot 'WebView2Runtime'
+}
+$expectedBrowserExe = [System.IO.Path]::GetFullPath(
+    (Join-Path $expectedRuntimeRoot 'msedgewebview2.exe'))
 # #321：不再通过 WEBVIEW2_USER_DATA_FOLDER 外部覆盖；产品自带 Fixed 模式
 # 必须把 userData 落在隔离树内并列的 state/webview2-fixed/<四段版本>。
 # 旧 state/webview2 仅注入合成 sentinel，验证随包模式绝不写入旧目录。
@@ -212,13 +298,6 @@ try {
     if ($browserPid -le 0) {
         throw "Invalid WebView2 browser process id: $browserPid"
     }
-    $expectedRuntimeRoot = if ($installedLayout) {
-        Join-Path $isolatedRoot 'app\WebView2Runtime'
-    } else {
-        Join-Path $isolatedRoot 'WebView2Runtime'
-    }
-    $expectedBrowserExe = [System.IO.Path]::GetFullPath(
-        (Join-Path $expectedRuntimeRoot 'msedgewebview2.exe'))
     # F4：不查询可能已退出的浏览器进程；镜像路径由宿主存活时写入 health，
     # 此处仅核对 health 来源与预期精确一致。
     if (-not [string]::Equals(
@@ -270,14 +349,9 @@ try {
         }
     }
     $resolvedIsolation = [System.IO.Path]::GetFullPath($isolatedRoot)
-    # 便携 state 可能携带 WebView2 user-data;先终止引用运行根的浏览器
-    # 进程,避免删除竞态。复用解包树时不删除解包树本身,该树由
+    # 先确认本次 Fixed WebView2 的进程退出，避免删除竞态。复用解包树时不删除解包树本身,该树由
     # release_smoke 的 TemporaryDirectory 统一删除。
-    Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" |
-        Where-Object { $_.CommandLine -like "*$resolvedIsolation*" } |
-        ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        }
+    Stop-OwnedWebView2 -ExpectedExecutable $expectedBrowserExe
     if (-not $ReuseUnpackedProduct -and (Test-Path -LiteralPath $isolatedRoot)) {
         if (-not $resolvedIsolation.StartsWith(
             $tempRoot,
@@ -299,6 +373,5 @@ try {
             throw 'Web workbench smoke isolation cleanup did not complete'
         }
     }
-    # #321：版本化 Fixed userData 位于隔离树内，随隔离树/解包树统一删除；
-    # 额外终止仍引用隔离根的浏览器进程即可，不再单独维护外部 userData 目录。
+    # #321：版本化 Fixed userData 位于隔离树内，随隔离树/解包树统一删除。
 }

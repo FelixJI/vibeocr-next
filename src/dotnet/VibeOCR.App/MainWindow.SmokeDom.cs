@@ -48,7 +48,7 @@ public sealed partial class MainWindow
       TimeSpan.FromSeconds(30));
   }
 
-  private async Task SelectSmokeValueAsync(string selector, string value)
+  private async Task SelectSmokeValueAsync(string selector, string value, bool waitForSelection = true)
   {
     // 设置页刷新期间 Select 合法禁用；就绪（存在+option+enabled）与赋值+change
     // 在同一 DOM turn 完成，避免两次 ExecuteScript 之间的竞态。
@@ -58,6 +58,7 @@ public sealed partial class MainWindow
       JsonSerializer.Serialize(value) + ")) return false; e.value=" + JsonSerializer.Serialize(value) +
       "; e.dispatchEvent(new Event('change',{bubbles:true})); return true; })()",
       TimeSpan.FromMinutes(2));
+    if (!waitForSelection) return;
     await Task.Delay(100);
     // 后置等待：选择触发的 invalidate 会同步清空兼容结果，自动 compat 查询
     // 可能在选择之后补发并重新 busy 禁用控件；等待控件保持目标值且可交互。

@@ -13,9 +13,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---- pdf.demand.v1 读上下文 --------------------------------------------
 
@@ -47,10 +47,24 @@ class PdfDemandLoadRequest(BaseModel):
 
     pages 省略＝唯一自动后台全档流；显式 pages＝交互前置的定向读，
     保留请求 scope（客户端定向读用 background scope，避免滚动撤销业务）。
+    prefetch=true 仅允许显式 1–4 页和 background scope，使用后台准入。
     """
 
     read: PdfReadContext
     pages: list[Annotated[int, Field(ge=0, strict=True)]] | None = None
+    prefetch: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_prefetch(self) -> Self:
+        if self.prefetch and (
+            self.read.scope != PdfReadScope.BACKGROUND
+            or self.pages is None
+            or not 1 <= len(self.pages) <= 4
+        ):
+            raise ValueError(
+                "prefetch requires background scope and 1–4 explicit pages"
+            )
+        return self
 
 
 class PdfReadCancelRequest(BaseModel):

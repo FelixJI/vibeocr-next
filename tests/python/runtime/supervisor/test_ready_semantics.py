@@ -123,8 +123,13 @@ def test_ready_envelope_means_listening_and_health_serves(
     with _spawn_supervisor(token, staged_runtime_product) as proc:
         try:
             ready = json.loads(_read_ready_line(proc))
-            temp = product / "state" / "recognition" / "temp"
-            assert any(path.is_dir() for path in temp.glob("vibeocr-sup-*"))
+            staging = product / "state" / "vibeocr-next-supervisor-staging"
+            roots = [
+                path
+                for path in staging.glob(f"instance-{ready['instance_id']}-*")
+                if path.is_dir()
+            ]
+            assert len(roots) == 1 and roots[0].with_suffix(".lease").is_file()
             assert not outside_stager.exists()
             with socket.create_connection(
                 ("127.0.0.1", ready["port"]), timeout=CONNECT_BUDGET_SECONDS
@@ -163,3 +168,49 @@ def test_real_startup_failure_exits_without_ready_envelope(
             "startup failure must not emit a ready envelope; "
             f"stdout was: {stdout[:200]!r}"
         )
+
+
+def test_managed_staging_preserves_live_process_and_reclaims_killed_process(
+    staged_runtime_product,
+) -> None:
+    product = staged_runtime_product[0]
+    parent = product / "state" / "vibeocr-next-supervisor-staging"
+    processes: list[subprocess.Popen[str]] = []
+
+    def start() -> Path:
+        proc = _spawn_supervisor("staging-lifecycle-test-token", staged_runtime_product)
+        processes.append(proc)
+        ready = json.loads(_read_ready_line(proc))
+        roots = [
+            path
+            for path in parent.glob(f"instance-{ready['instance_id']}-*")
+            if path.is_dir()
+        ]
+        assert len(roots) == 1
+        return roots[0]
+
+    try:
+        first_root = start()
+        first_asset = first_root / "job" / "results" / "synthetic.bin"
+        first_asset.parent.mkdir(parents=True)
+        first_asset.write_bytes(b"first owned result")
+        second_root = start()
+        second_asset = second_root / "job" / "results" / "synthetic.bin"
+        second_asset.parent.mkdir(parents=True)
+        second_asset.write_bytes(b"live owned result")
+        assert first_asset.read_bytes() == b"first owned result"
+
+        processes[0].kill()
+        processes[0].wait(timeout=10)
+        third_root = start()
+
+        assert not first_root.exists()
+        assert not first_root.with_suffix(".lease").exists()
+        assert second_asset.read_bytes() == b"live owned result"
+        assert second_root.with_suffix(".lease").is_file()
+        assert third_root.with_suffix(".lease").is_file()
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=10)

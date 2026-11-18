@@ -225,6 +225,43 @@ test("awaitFrame retries until current page matches and records visibility facts
   assert.ok(pulse.current.alt.includes("第 2 页"));
 });
 
+test("clear-frame mode keeps waiting after a low-resolution match and freezes the first clear frame", async () => {
+  const { state, baseline, triggerScan, flush, pumpFrames, snapshot } = createHarness();
+  baseline.mark("turn");
+  assert.equal(baseline.awaitFrame("turn", "第 2 页", true), true);
+
+  const image = makeImage({ alt: "第 2 页", src: "blob:low", naturalHeight: 300 });
+  state.images.push(image);
+  state.inspectionImage = image;
+  triggerScan();
+  await flush();
+  pumpFrames(4);
+  assert.equal(snapshot().pulses.turn.matched, false, "width alone is insufficient at DPR 2");
+
+  image.currentSrc = "blob:clear";
+  image.naturalHeight = 600;
+  let finishDecode;
+  image.decode = () => new Promise((resolve) => { finishDecode = resolve; });
+  triggerScan();
+  pumpFrames(2);
+  assert.equal(snapshot().pulses.turn.matched, false, "clear source is still decoding");
+  finishDecode();
+  await flush();
+  pumpFrames(2);
+  const first = snapshot().pulses.turn;
+  assert.equal(first.matched, true);
+  assert.equal(first.current.src, "blob:clear");
+  assert.equal(first.at, first.witness.frameOpportunityAt);
+  assert.ok(first.at - snapshot().marks.turn < 500);
+
+  image.currentSrc = "blob:newer";
+  triggerScan();
+  await flush();
+  pumpFrames(4);
+  assert.equal(snapshot().current.src, "blob:newer");
+  assert.deepEqual(snapshot().pulses.turn, first, "subsequent frames cannot overwrite the witness");
+});
+
 test("webview message listener filters real app.state/pdf envelope per phase", () => {
   const { state, baseline, snapshot } = createHarness();
   const dispatch = (payload) => {
@@ -458,4 +495,17 @@ test("controlled detection samples reject default short/mixed kinds", () => {
     "-SelfCheck", "-DetectionDelayMs", "500"], { encoding: "utf8", cwd: repoRoot });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /requires Kinds=scan_long/);
+});
+
+test("t3 driver rejects path collisions and invalid monitor evidence", () => {
+  const script = path.join(repoRoot, "scripts", "t3_pdf_pipeline.ps1");
+  const result = spawnSync("pwsh", ["-NoProfile", "-File", script, "-SelfCheck"], {
+    encoding: "utf8",
+    cwd: repoRoot,
+  });
+  assert.equal(
+    result.status,
+    0,
+    `t3 driver self-check failed:\n${result.stdout}\n${result.stderr}`,
+  );
 });

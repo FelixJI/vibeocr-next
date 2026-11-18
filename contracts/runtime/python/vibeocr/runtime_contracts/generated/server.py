@@ -145,16 +145,19 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                      'required': ['pages'],
                      'type': 'object'},
  'PdfDemandLoadRequest': {'additionalProperties': False,
-                          'description': 'pdf.demand.v1 demand load. The body form performs '
-                                         'geometry and text-presence detection only (no image '
-                                         'coverage scan; scan_checked stays as previously '
-                                         'computed). pages omitted means the single automatic '
-                                         'whole-document background stream; explicit pages are '
-                                         'interactive foreground-priority targeted reads that keep '
-                                         'their requested scope (clients send background scope so '
-                                         'scrolling does not revoke them).',
+                          'description': 'pdf.demand.v1 demand load detects geometry and text '
+                                         'presence without scanning image coverage. Omit pages for '
+                                         'the single automatic whole-document background stream. '
+                                         'Explicit pages keep their requested scope and use '
+                                         'foreground admission by default. Only after negotiating '
+                                         'pdf.prefetch-presence.v1 may clients request background '
+                                         'admission for one to four explicitly selected pages with '
+                                         'prefetch:true and read.scope=background.',
+                          'if': {'properties': {'prefetch': {'const': True}},
+                                 'required': ['prefetch']},
                           'properties': {'pages': {'items': {'minimum': 0, 'type': 'integer'},
                                                    'type': 'array'},
+                                         'prefetch': {'type': 'boolean'},
                                          'read': {'additionalProperties': False,
                                                   'description': 'Scoped read epoch '
                                                                  '(pdf.demand.v1). The worker '
@@ -173,6 +176,9 @@ REQUEST_JSON_SCHEMAS: dict[str, dict[str, Any]] = {'AddTextLayerRequest': {'addi
                                                   'required': ['scope', 'epoch'],
                                                   'type': 'object'}},
                           'required': ['read'],
+                          'then': {'properties': {'pages': {'maxItems': 4, 'minItems': 1},
+                                                  'read': {'properties': {'scope': {'const': 'background'}}}},
+                                   'required': ['pages']},
                           'type': 'object'},
  'PdfPathRequest': {'additionalProperties': False,
                     'properties': {'path': {'minLength': 1, 'type': 'string'}},

@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using VibeOCR.App.Inference;
 using VibeOCR.App.Features.Recognition;
+using VibeOCR.App.Services;
 using VibeOCR.App.Workbench;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
@@ -18,6 +19,10 @@ public sealed class PdfViewModel(
     Func<CancellationToken, Task>? ensureRuntimeReady = null) : INotifyPropertyChanged
 {
   private readonly InferenceJobRunner _jobs = new(inference);
+  private readonly Dictionary<string, Dictionary<string, (string? Instance, bool Terminal, bool CancelRequested)>> _documentJobs = new(StringComparer.Ordinal);
+  private Task? _resultCleanup;
+  private TaskCompletionSource? _ocrIdle;
+  private int _ocrUses, _retiringResults;
   private PdfDemandCoordinator? _demand;
   private long _nextPageKey;
   private int _detectedCount, _textLayerCount, _addedCount;
@@ -63,7 +68,9 @@ public sealed class PdfViewModel(
   private bool _modelAvailable;
   private bool _requiresReopen;
   private string? _unclosedSession;
-  public bool IsSettling => _inflight > 0 || _requiresReopen;
+  private string? _closedSessionForCleanup;
+  internal bool HasPendingResultCleanup => _closedSessionForCleanup is not null;
+  public bool IsSettling => _inflight > 0 || _requiresReopen || HasPendingResultCleanup;
   public long Revision { get; private set; }
   public IReadOnlyList<int?>? LastPageMapping { get; private set; }
   /// <summary>页结构重建后、任何携带新结构的发布前同步触发；宿主选择集须在此完成重映射。</summary>
@@ -82,12 +89,14 @@ public sealed class PdfViewModel(
   public bool CanCopyExport { get; private set; }
   /// <summary>pdf.demand.v1 能力：严格为 true 时启用按需调度新路径；legacy 保持旧路径。</summary>
   public bool CanDemandPages { get; private set; }
+  private bool CanPrefetchPresence { get; set; }
   public void SetInspectionCapabilities(IReadOnlyCollection<string> capabilities)
   {
     CanCopyExport = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_COPY_EXPORT_V1);
     CanInspectPage = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PAGE_INSPECT_V1);
     CanCorrectText = CanInspectPage && capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_BLOCK_EDIT_V1);
     if (!HasSession) CanDemandPages = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_DEMAND_V1);
+    CanPrefetchPresence = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PREFETCH_PRESENCE_V1);
   }
   public bool CanAddTextLayer => (_recognitionMode?.PipelineId ?? "OCR") == "OCR" && _options?.UseDocUnwarping != true;
   public void SetProcessingSettings(PdfProcessingSettings settings) { settings.Validate(); ProcessingSettings = settings; Changed(); }
@@ -143,15 +152,17 @@ public sealed class PdfViewModel(
 
   public async Task OpenPathAsync(string path, CancellationToken ct)
   {
+    string? previousResults = SessionId;
     string? previousSession = _modelAvailable ? SessionId : null;
     CancelActiveRun();
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
+    _retiringResults++;
     BeginRun(); Changed();
     RuntimePreparationIncomplete = false;
     TerminalIssue = null; IsBusy = true; Status = "正在打开";
-    if (!HasSession) FilePath = path;
+    if (!HasSession && !HasPendingResultCleanup) FilePath = path;
     try
     {
       if (ensureRuntimeReady is not null)
@@ -167,14 +178,23 @@ public sealed class PdfViewModel(
         await inference.ClosePdfSessionAsync(_unclosedSession, CancellationToken.None);
         _unclosedSession = null;
       }
+      await (_ocrIdle?.Task ?? Task.CompletedTask);
+      run.Token.ThrowIfCancellationRequested();
+      await ReleaseRetiredJobsAsync();
+      run.Token.ThrowIfCancellationRequested();
       if (previousSession is not null)
       {
         await using var lease = await AcquireWriteAsync(previousSession, Revision, generation, run.Token);
         if (lease is null) throw new InvalidOperationException("读端尚未确认暂停，旧文档未关闭");
         await inference.ClosePdfSessionAsync(previousSession, CancellationToken.None);
         if (_demand is not null) await _demand.WaitForReadDrainAsync(previousSession);
-        _demand?.Forget(previousSession);
+        RetireResultSession(previousSession);
       }
+      else if (previousResults is not null && _documentJobs.ContainsKey(previousResults))
+      {
+        RetireResultSession(previousResults);
+      }
+      await ReleaseRetiredJobsAsync();
       run.Token.ThrowIfCancellationRequested();
       // Opening creates a worker resource: await the real response even after local cancellation.
       PdfSessionOpenResult result = await inference.OpenPdfSessionAsync(path, null, CancellationToken.None);
@@ -218,9 +238,14 @@ public sealed class PdfViewModel(
     }
     catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; } }
     catch (InferenceClientException e) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = IssueFromV2(e.Code); Status = LocalizeV2(e.Code); } }
-    catch (Exception) when (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Failed; Status = "打开失败"; }
+    catch (Exception) when (generation == Volatile.Read(ref _generation))
+    {
+      TerminalIssue = PdfIssueKind.Failed;
+      Status = HasPendingResultCleanup ? Summary : "打开失败";
+    }
     finally
     {
+      _retiringResults--;
       await FinishRunAsync(generation, run);
     }
   }
@@ -410,9 +435,14 @@ public sealed class PdfViewModel(
   }
 
   /// <summary>授权取回某页识别结果的图片资产（与单次/批量同一接缝）。</summary>
-  public Task<byte[]> FetchResultAssetAsync(
-      string jobId, string itemId, string assetId, CancellationToken ct) =>
-      inference.FetchResultAssetAsync(jobId, itemId, assetId, ct);
+  public async Task<byte[]> FetchResultAssetAsync(
+      string jobId, string itemId, string assetId, CancellationToken ct)
+  {
+    if (_retiringResults != 0 || HasPendingResultCleanup) throw new OperationCanceledException("PDF result owner is closing.");
+    BeginOcrUse();
+    try { return await inference.FetchResultAssetAsync(jobId, itemId, assetId, ct); }
+    finally { EndOcrUse(); }
+  }
 
   public async Task RotateAsync(int[] pages, int angle, CancellationToken ct)
   {
@@ -527,6 +557,7 @@ public sealed class PdfViewModel(
     string session = SessionId; long revision = Revision;
     CancelActiveRun(); long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct); _activeRun = run; BeginRun();
+    BeginOcrUse();
     IsBusy = true; TerminalIssue = null;
     int corrected = 0, unchanged = 0, failed = 0, completed = 0;
     string detail = "";
@@ -555,7 +586,9 @@ public sealed class PdfViewModel(
           Phase = "ocr"; Progress();
           InferenceJobRun job = await _jobs.RunRecognitionAsync("OCR", JobPriority.Background,
             [new InferenceUploadInput($"page-{index}", $"page-{index + 1}.png", "image/png", image)],
-            options, run.Token, OcrEngine.PaddleOcr, waitForCancellation: true);
+            options, run.Token, OcrEngine.PaddleOcr, settleOnCancellation: true,
+            submitted: jobRef => RecordDocumentJob(session, jobRef),
+            terminalObserved: snapshot => ConfirmDocumentJob(session, snapshot));
           run.Token.ThrowIfCancellationRequested();
           if (SessionId != session || Revision != revision || generation != Volatile.Read(ref _generation)) return;
           ItemOutcome outcome = job.OutcomesByClientItemKey[$"page-{index}"];
@@ -631,7 +664,8 @@ public sealed class PdfViewModel(
           catch (Exception) { _requiresReopen = true; detail = "；后台结果回读失败，请重开文档复检"; }
         Progress();
       }
-      await FinishRunAsync(generation, run);
+      try { await FinishRunAsync(generation, run); }
+      finally { EndOcrUse(); }
     }
   }
 
@@ -679,45 +713,77 @@ public sealed class PdfViewModel(
     long generation = Volatile.Read(ref _generation);
     var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
     _activeRun = run;
+    BeginOcrUse();
     BeginRun(); Changed();
     TerminalIssue = null; IsBusy = true; Status = "正在识别";
+    bool cancelled = false;
     foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.Processing;
     try
     {
       await inference.ResetPdfCancelAsync(sessionId, CancellationToken.None);
-      int s = 0, f = 0;
-      // 一次仅保留四页图片/结果，一个批次一个通用 job，不创建逐页顶层 job。
-      foreach (int[] targets in pages.Chunk(4))
+      int s = 0, f = 0, overBudget = 0;
+      bool skipExisting = UsesDemand && addTextLayer && !overwrite;
+      var targets = pages.Select(index => new OcrTarget(index, Pages[index].PageKey)).ToArray();
+      using var chunks = targets.Chunk(4).GetEnumerator();
+      OcrBatch? NextBatch() => chunks.MoveNext() ? new(chunks.Current) : null;
+      OcrBatch? next = NextBatch();
+      while (next is { } current)
       {
-        int[] batch = targets;
-        if (!await EnsurePresenceAsync(sessionId, targets, run.Token))
+        next = NextBatch();
+        await PrepareOcrBatchAsync(sessionId, current, settings, skipExisting, run.Token,
+          index => SetOcrProgress("render", Array.BinarySearch(pages, index), pages.Length));
+        run.Token.ThrowIfCancellationRequested();
+        if (generation != Volatile.Read(ref _generation) || revision != Revision || SessionId != sessionId) return;
+        var inputs = new List<InferenceUploadInput>(current.Targets.Length);
+        var batch = new List<int>(current.Targets.Length);
+        foreach (PreparedOcrPage prepared in current.Pages)
         {
-          f += targets.Length;
-          foreach (int page in targets) Pages[page].State = PdfPageState.Failed;
-          continue;
+          int index = prepared.Target.Index;
+          if (prepared.Input is { } input)
+          {
+            inputs.Add(input);
+            batch.Add(index);
+          }
+          else if (prepared.Skipped)
+          {
+            skippedExisting++;
+            Pages[index].State = PdfPageState.None;
+          }
+          else
+          {
+            f++;
+            if (prepared.OverBudget) overBudget++;
+            Pages[index].State = PdfPageState.Failed;
+          }
         }
-        if (UsesDemand && addTextLayer && !overwrite)
+        current.Pages.Clear();
+        if (batch.Count == 0) continue;
+        SetOcrProgress("ocr", 0, batch.Count);
+        Task<InferenceJobRun> recognition = _jobs.RunRecognitionAsync(pipeline, JobPriority.Background, inputs,
+            options: options, cancellationToken: run.Token, engine: engine, settleOnCancellation: true,
+            progress: snapshot =>
+            {
+              if (generation == Volatile.Read(ref _generation))
+                SetOcrProgress("ocr", snapshot.Summary.Succeeded + snapshot.Summary.Failed, batch.Count);
+            },
+            submitted: submitted => RecordDocumentJob(sessionId, submitted),
+            terminalObserved: snapshot => ConfirmDocumentJob(sessionId, snapshot));
+        InferenceJobRun job;
+        using (var stop = UsesDemand && next is not null && !recognition.IsCompleted
+          ? CancellationTokenSource.CreateLinkedTokenSource(run.Token) : null)
         {
-          batch = targets.Where(index => !Pages[index].HasTextLayer).ToArray();
-          skippedExisting += targets.Length - batch.Length;
-          foreach (int index in targets.Except(batch)) Pages[index].State = PdfPageState.None;
+          Task? preparation = stop is null ? null :
+            PrepareOcrBatchAsync(sessionId, next!, settings, skipExisting, stop.Token,
+              canSpeculate: () => !recognition.IsCompleted, cancelRun: run.Token);
+          try { job = await recognition; }
+          finally
+          {
+            // Stop before acquiring the AllReads write barrier, preserving the prefix already prepared.
+            stop?.Cancel();
+            if (preparation is not null) await preparation;
+          }
         }
-        if (batch.Length == 0) continue;
-        var inputs = new InferenceUploadInput[batch.Length];
-        for (int i = 0; i < batch.Length; i++)
-        {
-          run.Token.ThrowIfCancellationRequested();
-          int idx = batch[i];
-          Phase = "render"; ProgressCurrent = Array.IndexOf(pages, idx); ProgressTotal = pages.Length; Changed();
-          int dpi = _modelAvailable ? settings.DpiFor(Pages[idx].Width, Pages[idx].Height) : settings.RenderDpi;
-          byte[] image = await RenderBusinessPreviewAsync(sessionId, idx, dpi, run.Token);
-          run.Token.ThrowIfCancellationRequested();
-          inputs[i] = new InferenceUploadInput($"page-{idx}", $"page-{idx + 1}.png", "image/png", image);
-        }
-        Phase = "ocr"; Changed();
-        InferenceJobRun job = await _jobs.RunRecognitionAsync(pipeline, JobPriority.Background, inputs,
-            options: options, cancellationToken: run.Token, engine: engine, waitForCancellation: true,
-            progress: snapshot => { if (generation == Volatile.Read(ref _generation)) { ProgressCurrent = snapshot.Summary.Succeeded + snapshot.Summary.Failed; ProgressTotal = batch.Length; Changed(); } });
+        inputs.Clear();
         if (generation != Volatile.Read(ref _generation) || revision != Revision) return;
         var writes = new List<Wire.BatchAddTextLayerPage>();
         foreach (int idx in batch)
@@ -746,11 +812,12 @@ public sealed class PdfViewModel(
         run.Token.ThrowIfCancellationRequested();
         if (writes.Count > 0)
         {
-          Phase = "write"; ProgressCurrent = 0; ProgressTotal = writes.Count; Changed();
+          SetOcrProgress("write", 0, writes.Count);
           await using var lease = await AcquireWriteAsync(sessionId, revision, generation, run.Token);
           if (lease is null)
           {
-            foreach (int idx in batch) Pages[idx].State = PdfPageState.None;
+            foreach (int idx in batch)
+              if (Pages[idx].State == PdfPageState.Processing) Pages[idx].State = PdfPageState.None;
             Summary = "读端尚未确认暂停，本批文字层未发送"; Changed();
             return;
           }
@@ -797,13 +864,18 @@ public sealed class PdfViewModel(
         }
         if (generation != Volatile.Read(ref _generation)) return;
         TrimResultCache(Math.Max(0, batch[^1] - 63), 64);
-        ProgressCurrent = batch.Length; ProgressTotal = batch.Length; Changed();
+        SetOcrProgress(Phase, batch.Count, batch.Count);
       }
       Summary = addTextLayer ? $"已添加 {s} 页、跳过 {skippedExisting} 页、失败 {f} 页；{(IsModified ? "尚未保存" : "当前修订已保存")}" : $"已提取/解析 {s} 页、失败 {f} 页";
+      if (overBudget > 0) Summary += $"；{overBudget} 页达到渲染预算，请缩小选区后重试";
       Changed();
       Status = $"OCR 完成：成功 {s} 页，失败 {f} 页";
     }
-    catch (OperationCanceledException) { if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; foreach (int idx in pages) if (idx < Pages.Count) Pages[idx].State = PdfPageState.None; Status = "已取消"; } }
+    catch (OperationCanceledException)
+    {
+      cancelled = true;
+      if (generation == Volatile.Read(ref _generation)) { TerminalIssue = PdfIssueKind.Cancelled; Status = "已取消"; }
+    }
     catch (InferenceClientException e)
     {
       MarkUnconfirmedOcr(sessionId, revision);
@@ -818,14 +890,15 @@ public sealed class PdfViewModel(
     {
       if (generation == Volatile.Read(ref _generation))
         foreach (int idx in pages)
-          if (Pages[idx].State == PdfPageState.Processing)
-            Pages[idx].State = PdfPageState.Failed;
+          if ((uint)idx < (uint)Pages.Count && Pages[idx].State == PdfPageState.Processing)
+            Pages[idx].State = cancelled || run.IsCancellationRequested ? PdfPageState.None : PdfPageState.Failed;
       if (_modelAvailable && SessionId == sessionId && !UsesDemand)
       {
         try { await RefreshModelAsync(CancellationToken.None); }
         catch (Exception) { if (SessionId == sessionId) { _requiresReopen = true; Summary = "后台结果回读失败，请关闭并重新打开文档复检"; } }
       }
-      await FinishRunAsync(generation, run);
+      try { await FinishRunAsync(generation, run); }
+      finally { EndOcrUse(); }
     }
   }
 
@@ -957,14 +1030,18 @@ public sealed class PdfViewModel(
 
   public async Task CloseSessionAsync(CancellationToken ct)
   {
+    string? resultSession = SessionId;
     string? session = _modelAvailable ? SessionId : null;
     CancelActiveRun();
     long generation = Volatile.Read(ref _generation);
+    _retiringResults++;
     BeginRun(); Changed();
     IAsyncDisposable? lease = null;
     try
     {
       // Owner 已完成 dirty/draft 确认。作用域水位确认后才发送关闭。
+      await (_ocrIdle?.Task ?? Task.CompletedTask);
+      ct.ThrowIfCancellationRequested();
       if (session is not null)
       {
         lease = await AcquireWriteAsync(session, Revision, generation, ct);
@@ -981,15 +1058,19 @@ public sealed class PdfViewModel(
         await inference.ClosePdfSessionAsync(session, CancellationToken.None);
         if (_demand is not null) await _demand.WaitForReadDrainAsync(session);
       }
-      if (generation == Volatile.Read(ref _generation))
+      if (resultSession is not null) RetireResultSession(resultSession);
+      if (lease is not null)
       {
-        CloseSession();
-        if (session is not null) _demand?.Forget(session);
+        await lease.DisposeAsync();
+        lease = null;
       }
+      await ReleaseRetiredJobsAsync();
+      if (generation == Volatile.Read(ref _generation))
+        CloseSession();
     }
     catch (Exception)
     {
-      if (generation == Volatile.Read(ref _generation))
+      if (generation == Volatile.Read(ref _generation) && !HasPendingResultCleanup)
       {
         if (session is null || lease is not null) _requiresReopen = true;
         Summary = "文档关闭失败，保留会话以便重试释放";
@@ -999,6 +1080,7 @@ public sealed class PdfViewModel(
     finally
     {
       if (lease is not null) await lease.DisposeAsync();
+      _retiringResults--;
       EndRun(); Changed();
     }
   }
@@ -1247,6 +1329,14 @@ public sealed class PdfViewModel(
   /// <summary>保留当前窗口结果；其他页只保留 supervisor job/item 引用。</summary>
   public async Task PrepareResultsAsync(int start, int count, CancellationToken ct)
   {
+    if (_retiringResults != 0 || HasPendingResultCleanup) return;
+    BeginOcrUse();
+    try { await PrepareResultsCoreAsync(start, count, ct); }
+    finally { EndOcrUse(); }
+  }
+
+  private async Task PrepareResultsCoreAsync(int start, int count, CancellationToken ct)
+  {
     string? session = SessionId;
     long revision = Revision;
     TrimResultCache(start, count);
@@ -1260,7 +1350,8 @@ public sealed class PdfViewModel(
       while (true)
       {
         JobUpdate update = await inference.ObserveAsync(group.Key, sequence, ct);
-        if (SessionId != session || Revision != revision || cacheGeneration != Volatile.Read(ref _resultCacheGeneration)) return;
+        if (_retiringResults != 0 || SessionId != session || Revision != revision ||
+            cacheGeneration != Volatile.Read(ref _resultCacheGeneration)) return;
         foreach (var (page, reference) in group)
         {
           // 同修订下的新 OCR job/清层也可能更换引用；旧回读不能借新归属回填。
@@ -1280,6 +1371,106 @@ public sealed class PdfViewModel(
       }
     }
   }
+
+  private void BeginOcrUse()
+  {
+    if (_ocrUses++ == 0) _ocrIdle = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  }
+
+  private void EndOcrUse()
+  {
+    if (--_ocrUses == 0) _ocrIdle?.SetResult();
+  }
+
+  private void RecordDocumentJob(string session, JobRef job)
+  {
+    if (!_documentJobs.TryGetValue(session, out var owned))
+      _documentJobs[session] = owned = new(StringComparer.Ordinal);
+    owned.TryAdd(job.JobId, (job.InstanceId, false, false));
+  }
+
+  private void ConfirmDocumentJob(string session, JobSnapshot terminal)
+  {
+    if (_documentJobs.TryGetValue(session, out var owned) &&
+        owned.TryGetValue(terminal.JobId, out var submitted) &&
+        submitted.Instance == terminal.InstanceId)
+      owned[terminal.JobId] = (submitted.Instance, true, submitted.CancelRequested);
+  }
+
+  private void RetireResultSession(string session)
+  {
+    if (SessionId != session) return;
+    _modelAvailable = false;
+    _demand?.Forget(session);
+    if (_documentJobs.ContainsKey(session)) _closedSessionForCleanup = session;
+    SessionId = null;
+  }
+
+  private async Task ReleaseRetiredJobsAsync()
+  {
+    if (_closedSessionForCleanup is not { } session) return;
+    Task cleanup = _resultCleanup ??= ReleaseRetiredJobsCoreAsync(session);
+    try { await cleanup; }
+    finally { if (_resultCleanup == cleanup) _resultCleanup = null; }
+  }
+
+  // Keep ownership after PDF close until the supervisor confirms each job is gone.
+  private async Task ReleaseRetiredJobsCoreAsync(string session)
+  {
+    var owned = _documentJobs[session];
+    foreach (string jobId in owned.Keys.ToArray())
+    {
+      var status = owned[jobId];
+      try
+      {
+        if (!status.Terminal)
+        {
+          JobSnapshot snapshot = await ObserveRetiredJobAsync(jobId, status.Instance);
+          if (!InferenceJobRunner.IsTerminal(snapshot.State) && !status.CancelRequested)
+          {
+            try
+            {
+              await SendRetiredJobCommandAsync(jobId, JobCommandKind.Cancel);
+              owned[jobId] = status = (status.Instance, false, true);
+            }
+            catch (InferenceClientException error) when (error.Code == HttpV2ErrorCode.JobNotCancellable) { }
+            snapshot = await ObserveRetiredJobAsync(jobId, status.Instance);
+          }
+          if (!InferenceJobRunner.IsTerminal(snapshot.State))
+            throw new InvalidOperationException("已请求取消，正在等待识别任务终态");
+          owned[jobId] = (status.Instance, true, status.CancelRequested);
+        }
+        await SendRetiredJobCommandAsync(jobId, JobCommandKind.Forget);
+      }
+      catch (InferenceClientException error) when (error.Code == HttpV2ErrorCode.JobNotFound) { }
+      catch (Exception error)
+      {
+        Summary = "PDF 已关闭，识别任务释放未确认，请重试关闭";
+        TerminalIssue = PdfIssueKind.Failed;
+        Status = Summary;
+        AppLog.Error("Could not release closed PDF recognition job.", error);
+        throw new InvalidOperationException(Summary, error);
+      }
+      owned.Remove(jobId);
+    }
+    _documentJobs.Remove(session);
+    _closedSessionForCleanup = null;
+  }
+
+  private async Task<JobSnapshot> ObserveRetiredJobAsync(string jobId, string? instance)
+  {
+    JobSnapshot snapshot = (await inference.ObserveAsync(jobId, 0, CancellationToken.None)).Snapshot;
+    if (snapshot.JobId != jobId || snapshot.InstanceId != instance)
+      throw new InvalidOperationException("识别任务身份未确认");
+    return snapshot;
+  }
+
+  private Task<JobCommandResult> SendRetiredJobCommandAsync(string jobId, JobCommandKind kind) =>
+    inference.CommandAsync(new JobCommand
+    {
+      CommandId = Guid.NewGuid().ToString("N"), JobId = jobId, Kind = kind,
+    }, CancellationToken.None);
+
   public void TrimResultCache(int start, int count)
   {
     // 淘汰窗口或切走文档时，使等待 supervisor 回读的旧窗口先于回填失效。
@@ -1371,6 +1562,132 @@ public sealed class PdfViewModel(
     UsesDemand ? _demand!.RenderBusinessPreviewAsync(this, session, page, dpi, ct)
       : inference.RenderPdfPreviewAsync(session, page, dpi, ct);
 
+  private const long OcrPagePixels = 16_000_000;
+  private const long OcrBatchPixels = 64_000_000;
+  private const long OcrBatchBytes = 64L * 1024 * 1024;
+  private readonly record struct OcrTarget(int Index, long PageKey);
+
+  private sealed record PreparedOcrPage(OcrTarget Target, long ContentGeneration,
+    InferenceUploadInput? Input = null, long Pixels = 0, bool Skipped = false, bool OverBudget = false);
+
+  private sealed class OcrBatch(OcrTarget[] targets)
+  {
+    public OcrTarget[] Targets { get; } = targets;
+    public List<PreparedOcrPage> Pages { get; } = new(targets.Length);
+  }
+
+  private void SetOcrProgress(string phase, int current, int total)
+  {
+    if (Phase == phase && ProgressCurrent == current && ProgressTotal == total) return;
+    Phase = phase;
+    ProgressCurrent = current;
+    ProgressTotal = total;
+    Changed();
+  }
+
+  private async Task PrepareOcrBatchAsync(string session, OcrBatch batch, PdfProcessingSettings settings,
+    bool skipExisting, CancellationToken stop, Action<int>? renderStarted = null,
+    Func<bool>? canSpeculate = null, CancellationToken cancelRun = default)
+  {
+    bool speculative = renderStarted is null;
+    if (speculative) await Task.Yield();
+    bool Owns(OcrTarget target) => SessionId == session && (uint)target.Index < (uint)Pages.Count &&
+      Pages[target.Index].PageKey == target.PageKey;
+    if (batch.Targets.Any(target => !Owns(target)))
+    {
+      if (speculative) return;
+      throw new InvalidOperationException("PDF OCR target page identity changed.");
+    }
+    int stale = batch.Pages.FindIndex(prepared => Pages[prepared.Target.Index].ContentGeneration != prepared.ContentGeneration);
+    if (stale >= 0) batch.Pages.RemoveRange(stale, batch.Pages.Count - stale);
+    long bytes = batch.Pages.Sum(prepared => (long)(prepared.Input?.Content.Count ?? 0));
+    long pixels = batch.Pages.Sum(prepared => prepared.Pixels);
+    bool present = speculative || batch.Pages.Count == batch.Targets.Length ||
+      await EnsurePresenceAsync(session, batch.Targets.Skip(batch.Pages.Count).Select(target => target.Index).ToArray(), stop);
+    foreach (OcrTarget target in batch.Targets.Skip(batch.Pages.Count))
+    {
+      if (stop.IsCancellationRequested || canSpeculate?.Invoke() == false)
+      {
+        if (speculative) return;
+        stop.ThrowIfCancellationRequested();
+      }
+      if (!Owns(target))
+      {
+        if (speculative) return;
+        throw new InvalidOperationException("PDF OCR target page identity changed.");
+      }
+      PdfPageViewModel page = Pages[target.Index];
+      long generation = page.ContentGeneration;
+      if (speculative && (page.DetectionState != PdfDetectionState.Known || !page.HasReliableGeometry))
+      {
+        if (!CanPrefetchPresence) return;
+        try
+        {
+          var presence = await _demand!.TryPrefetchPresenceAsync(this, session, target.Index, stop, cancelRun,
+            () => CanPrefetchPresence && canSpeculate!(),
+            () => Owns(target) && page.ContentGeneration == generation);
+          if (!presence.Issued || !presence.Present) return;
+        }
+        catch (Exception) { return; } // Let the current batch decide the page outcome.
+        if (stop.IsCancellationRequested || !canSpeculate!() ||
+            !Owns(target) || page.ContentGeneration != generation) return;
+      }
+      var prepared = new PreparedOcrPage(target, generation);
+      try
+      {
+        if (present)
+        {
+          if (skipExisting && page.HasTextLayer) prepared = prepared with { Skipped = true };
+          else
+          {
+            int dpi = _modelAvailable ? settings.DpiFor(page.Width, page.Height) : settings.RenderDpi;
+            byte[] image;
+            if (speculative)
+            {
+              var preview = await _demand!.TryPrefetchPreviewAsync(this, session, target.Index, dpi, stop, cancelRun, canSpeculate!);
+              if (!preview.Issued) return;
+              image = preview.Png;
+            }
+            else
+            {
+              renderStarted!(target.Index);
+              image = await RenderBusinessPreviewAsync(session, target.Index, dpi, UsesDemand ? stop : CancellationToken.None);
+              stop.ThrowIfCancellationRequested();
+            }
+            if (PngImageFacts.TryParseDimensions(image, out int width, out int height))
+            {
+              long area = (long)width * height;
+              if (area > OcrPagePixels || pixels + area > OcrBatchPixels || bytes + image.LongLength > OcrBatchBytes)
+                prepared = prepared with { OverBudget = true };
+              else
+              {
+                pixels += area;
+                bytes += image.LongLength;
+                prepared = prepared with
+                {
+                  Pixels = area,
+                  Input = new($"page-{target.Index}", $"page-{target.Index + 1}.png", "image/png", image),
+                };
+              }
+            }
+          }
+        }
+      }
+      catch (OperationCanceledException) when (!speculative) { throw; }
+      catch (Exception)
+      {
+        // Preparation failures belong to this page; the preceding job may still commit its results.
+      }
+      if (cancelRun.IsCancellationRequested) return;
+      if (!Owns(target) || page.ContentGeneration != generation)
+      {
+        if (speculative) return;
+        throw new InvalidOperationException("PDF OCR target page content changed.");
+      }
+      batch.Pages.Add(prepared);
+    }
+  }
+
   private async Task<bool> EnsurePresenceAsync(string session, int[] pages, CancellationToken ct)
   {
     if (!UsesDemand) return true;
@@ -1391,9 +1708,10 @@ public sealed class PdfViewModel(
     return ok;
   }
 
-  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current)
+  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current,
+    bool prefetch = false)
   {
-    bool foreground = pages is not null;
+    bool foreground = pages is not null && !prefetch;
     int[] targets = pages ?? Enumerable.Range(0, Pages.Count)
       .Where(index => Pages[index].DetectionState is PdfDetectionState.Unknown or PdfDetectionState.Detecting)
       .ToArray();
@@ -1403,6 +1721,7 @@ public sealed class PdfViewModel(
     var tracking = new HashSet<PdfPageViewModel>();
     void Detecting(int index)
     {
+      if (prefetch) return;
       var page = Pages[index];
       if (page.DetectionState is not PdfDetectionState.Known)
       {
@@ -1420,6 +1739,7 @@ public sealed class PdfViewModel(
       {
         Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = epoch },
         Pages = pages,
+        Prefetch = prefetch ? true : null,
       }, progress =>
       {
         // The response can settle the issued read even after its UI owner changed.
@@ -1436,26 +1756,28 @@ public sealed class PdfViewModel(
           received.Add(page.PageIndex);
           while (next < targets.Length && received.Contains(targets[next])) next++;
           if (next < targets.Length) Detecting(targets[next++]);
-          if (!foreground && (received.Count <= 2 || received.Count % 8 == 0 || received.Count == targets.Length)) Changed();
+          if (!foreground && !prefetch &&
+              (received.Count <= 2 || received.Count % 8 == 0 || received.Count == targets.Length)) Changed();
         }
         if (foreground) UpdateProgress(progress);
       }, CancellationToken.None);
       if (terminal is null) throw new InvalidDataException("PDF presence stream ended without a terminal response.");
-      return current() && terminal == "done" && targets.All(index => Pages[index].HasReliableGeometry);
+      return current() && terminal == "done" && (!prefetch || received.Count == targets.Length) &&
+        targets.All(index => Pages[index].HasReliableGeometry);
     }
     finally
     {
       // Cancelled or superseded attempts leave unresolved pages eligible for a later
       // read. A completed stream that omitted a target records a real failed page.
       bool stillCurrent = current();
-      if (stillCurrent && terminal is not "cancelled")
+      if (!prefetch && stillCurrent && terminal is not "cancelled")
         foreach (int index in targets)
           if (!received.Contains(index) && Pages[index].DetectionState != PdfDetectionState.Known)
             Pages[index].DetectionState = PdfDetectionState.Failed;
       foreach (PdfPageViewModel page in tracking)
         if (page.DetectionState == PdfDetectionState.Detecting && page.DetectionEpoch == epoch)
           page.DetectionState = PdfDetectionState.Unknown;
-      if (SessionId == session) Changed();
+      if (SessionId == session && (!prefetch || received.Count > 0)) Changed();
     }
   }
   private void UpdateProgress(JsonElement progress)

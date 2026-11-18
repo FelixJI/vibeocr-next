@@ -44,85 +44,15 @@ if (($DetectionDelayMs -gt 0 -or $BrowseStress) -and (@($Kinds).Count -ne 1 -or 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $artifacts = Join-Path $repoRoot 'artifacts\t2_baseline'
 
-function Get-T2ExitCode {
-    # failed(1) 永远优先；blocked(3) 只在无 failed 时生效。
-    param([Parameter(Mandatory)][string[]]$States)
-    if ($States -contains 'failed') { return 1 }
-    if ($States -contains 'blocked') { return 3 }
-    return 0
-}
-
-function New-T2RunReportDir {
-    param([Parameter(Mandatory)][string]$Base)
-    do {
-        $runid = "run-{0}-{1}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'),
-            ([guid]::NewGuid().ToString('N').Substring(0, 6))
-        $dir = Join-Path $Base $runid
-    } while (Test-Path -LiteralPath $dir)
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    return $dir
-}
-
-function Read-T2MonitorSamples {
-    # 至少一个样本须包含 root PID 且 ws>0；全空 procs/缺文件返回 $null（invalid），
-    # 不返回 0。峰值口径：同一采样窗口（started_at_ms..at_ms）内求和，非严格同一时刻。
-    param(
-        [Parameter(Mandatory)][string]$MonitorDir,
-        [int]$RootPid = 0
-    )
-    $samplesFile = Join-Path $MonitorDir 'process-samples.jsonl'
-    if (-not (Test-Path -LiteralPath $samplesFile -PathType Leaf)) { return $null }
-    $lines = @(Get-Content -LiteralPath $samplesFile | Where-Object { $_.Trim().Length -gt 0 })
-    if ($lines.Count -eq 0) { return $null }
-    $samples = @($lines | ForEach-Object { $_ | ConvertFrom-Json })
-    if ($RootPid -le 0) {
-        $rootFile = Join-Path $MonitorDir 'root-pid.txt'
-        if (Test-Path -LiteralPath $rootFile -PathType Leaf) {
-            try { $RootPid = [int](Get-Content -LiteralPath $rootFile -Raw) } catch { $RootPid = 0 }
-        }
-    }
-    $treePeak = 0L; $procPeaks = @{}; $times = @(); $hasRootSample = $false
-    foreach ($sample in $samples) {
-        $times += [long]$sample.at_ms
-        $sum = 0L
-        foreach ($proc in @($sample.procs)) {
-            $bytes = [long]$proc.ws_bytes
-            if ($bytes -le 0) { continue }
-            $sum += $bytes
-            if (-not $procPeaks.ContainsKey([string]$proc.pid) -or $procPeaks[[string]$proc.pid] -lt $bytes) {
-                $procPeaks[[string]$proc.pid] = $bytes
-            }
-            if ($RootPid -gt 0 -and [int]$proc.pid -eq $RootPid) { $hasRootSample = $true }
-        }
-        if ($sum -gt $treePeak) { $treePeak = $sum }
-    }
-    if (-not $hasRootSample -or $treePeak -le 0) { return $null }
-    $sorted = $times | Sort-Object
-    $gaps = @(for ($i = 1; $i -lt $sorted.Count; $i++) { $sorted[$i] - $sorted[$i - 1] })
-    $windows = @($samples | ForEach-Object { [long]$_.at_ms - [long]$_.started_at_ms })
-    [pscustomobject]@{
-        sample_count = $samples.Count
-        root_pid = $RootPid
-        tree_ws_peak_bytes = $treePeak
-        per_process_ws_peak_bytes = $procPeaks
-        sample_gap_ms = if ($gaps.Count -gt 0) {
-            @{ min = [long](($gaps | Measure-Object -Minimum).Minimum); max = [long](($gaps | Measure-Object -Maximum).Maximum) }
-        } else { $null }
-        sample_window_ms = if ($windows.Count -gt 0) {
-            @{ min = [long](($windows | Measure-Object -Minimum).Minimum); max = [long](($windows | Measure-Object -Maximum).Maximum) }
-        } else { $null }
-        private_bytes = 'not_sampled_by_probe (probe records ws_bytes only; recorded as absent, not 0)'
-        peak_definition = 'tree peak = max over sampling windows (started_at_ms..at_ms) of window-summed ws; sums share one window, not a strict single instant'
-    }
-}
+. (Join-Path $PSScriptRoot 'pdf_smoke_measurements.ps1')
 
 if ($SelfCheck) {
-    if ((Get-T2ExitCode @('blocked', 'failed', 'passed')) -ne 1) { throw 'SelfCheck: failed must win over blocked' }
-    if ((Get-T2ExitCode @('passed', 'blocked')) -ne 3) { throw 'SelfCheck: blocked must map to 3 without failed' }
-    if ((Get-T2ExitCode @('passed')) -ne 0) { throw 'SelfCheck: all passed must be 0' }
+    if ((Get-PdfSmokeExitCode @('blocked', 'failed', 'passed')) -ne 1) { throw 'SelfCheck: failed must win over blocked' }
+    if ((Get-PdfSmokeExitCode @('passed', 'blocked')) -ne 3) { throw 'SelfCheck: blocked must map to 3 without failed' }
+    if ((Get-PdfSmokeExitCode @('passed')) -ne 0) { throw 'SelfCheck: all passed must be 0' }
     New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
-    $a = New-T2RunReportDir $artifacts
-    $b = New-T2RunReportDir $artifacts
+    $a = New-PdfSmokeRunReportDir $artifacts
+    $b = New-PdfSmokeRunReportDir $artifacts
     if ($a -eq $b -or (Test-Path -LiteralPath (Join-Path $a 'x.json'))) { throw 'SelfCheck: report dirs must be unique' }
     Set-Content -LiteralPath (Join-Path $a 'x.json') -Value '{}'
     if (-not (Test-Path -LiteralPath (Join-Path $a 'x.json'))) { throw 'SelfCheck: report write failed' }
@@ -130,7 +60,7 @@ if ($SelfCheck) {
     New-Item -ItemType Directory -Path $monitorEmpty -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $monitorEmpty 'process-samples.jsonl') `
         -Value '{"started_at_ms":1,"at_ms":2,"procs":[]}'
-    if ($null -ne (Read-T2MonitorSamples $monitorEmpty)) {
+    if ($null -ne (Read-PdfSmokeMonitorSamples $monitorEmpty)) {
         throw 'SelfCheck: all-empty procs samples must be invalid (null), never peak 0'
     }
     $monitorValid = Join-Path $a 'monitor-valid'
@@ -151,7 +81,7 @@ if ($SelfCheck) {
     )
     Set-Content -LiteralPath (Join-Path $monitorValid 'process-samples.jsonl') `
         -Value ($validSamples | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 4 })
-    $aggregate = Read-T2MonitorSamples $monitorValid
+    $aggregate = Read-PdfSmokeMonitorSamples $monitorValid
     if ($null -eq $aggregate) { throw 'SelfCheck: valid samples must aggregate' }
     if ($aggregate.tree_ws_peak_bytes -ne 1500 -or $aggregate.sample_count -ne 2 -or
         $aggregate.root_pid -ne 4242) {
@@ -182,7 +112,7 @@ foreach ($marker in @(
 if (Test-Path -LiteralPath (Join-Path $source 'state')) {
     throw 'Source candidate must not contain user or previous smoke state'
 }
-$reportDir = New-T2RunReportDir $artifacts
+$reportDir = New-PdfSmokeRunReportDir $artifacts
 $smokeRoot = Join-Path $work "t2-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
 $candidate = Join-Path $smokeRoot 'candidate'
 $fixtures = Join-Path $smokeRoot 'fixtures'
@@ -314,7 +244,7 @@ try {
             $monitorInfoPath = Join-Path $monitorDir 'monitor-info.json'
             $monitorValid = ($monitor.ExitCode -eq 0) -and
                 (Test-Path -LiteralPath $monitorInfoPath -PathType Leaf) -and
-                ($null -ne (Read-T2MonitorSamples $monitorDir))
+                ($null -ne (Read-PdfSmokeMonitorSamples $monitorDir))
             $monitorEvidenceGap = $null
             if (Test-Path -LiteralPath $monitorInfoPath -PathType Leaf) {
                 $info = Get-Content -LiteralPath $monitorInfoPath -Raw | ConvertFrom-Json
@@ -342,7 +272,7 @@ try {
                 monitor_evidence_gap = $monitorEvidenceGap
                 health_stage = $health.stage; health_state = $health.state
                 health_path = $healthPath; monitor_dir = $monitorDir
-                process_tree = Read-T2MonitorSamples $monitorDir
+                process_tree = Read-PdfSmokeMonitorSamples $monitorDir
                 process_cold = 'new app process + fresh per-run WebView2 user data folder; not OS/disk cold'
                 candidate_reused = $true
                 detection_delay_ms = $DetectionDelayMs
@@ -367,7 +297,7 @@ try {
     }
 }
 
-$exitCode = Get-T2ExitCode $states
+$exitCode = Get-PdfSmokeExitCode $states
 Write-Host ''
 if ($results.Count -gt 0) {
     Write-Host "==== T2 原生基线观测汇总：$($results.Count) 次采样===="

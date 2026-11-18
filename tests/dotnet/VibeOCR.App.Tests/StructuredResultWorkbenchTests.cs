@@ -1294,7 +1294,7 @@ public sealed class StructuredResultWorkbenchTests
 
     public override Task<byte[]> RenderPdfPageAsync(
       string sessionId, int page, int size, CancellationToken cancellationToken) =>
-      Task.FromResult(AssetPng);
+      Task.FromResult(TestPng);
 
     private static Dictionary<string, JsonElement> StructuredPayload() => new()
     {

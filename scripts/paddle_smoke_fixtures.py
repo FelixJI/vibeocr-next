@@ -1001,6 +1001,151 @@ def draw_rotated_table_pages(out: Path) -> dict[str, object]:
     return entries
 
 
+def _pipeline_font(size: int):
+    # Pillow≥10 内置可缩放默认字体：确定性状、无系统字体依赖（与 T2 件一致）。
+    return ImageFont.load_default(size=size)
+
+
+def _pipeline_background(size: tuple[int, int], index: int) -> Image.Image:
+    """T3 管线扫描背景：跨页共享（共享资源样例）+ OCR 可读大字号行文。"""
+    width, height = size
+    image = Image.new("RGB", (width, height), "#f7f7f4")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, width - 1, height - 1), outline="#202020", width=3)
+    draw.text(
+        (60, 40),
+        f"PIPELINE SCAN SHEET {index:03d}",
+        fill="black",
+        font=_pipeline_font(56),
+    )
+    for row in range(11):
+        y = 150 + row * 130
+        draw.line((60, y, width - 60, y), fill="#303030", width=2)
+        draw.text(
+            (60, y + 30),
+            f"pipeline row {row:02d} shared background {index + 1}",
+            fill="black",
+            font=_pipeline_font(40),
+        )
+    for column, color in ((0, "#3f6fb3"), (1, "#b3452f"), (2, "#3f8f4f")):
+        x = 90 + column * 210
+        draw.rectangle((x, height - 320, x + 150, height - 120), fill=color)
+    draw.ellipse((width - 420, 60, width - 80, 200), outline="#a02020", width=6)
+    return image
+
+
+def _pipeline_badge(page_number: int) -> bytes:
+    """每页唯一页码章：页归属与页序可核，仍为纯栅格页。"""
+    import io
+
+    image = Image.new("RGB", (430, 150), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((2, 2, 427, 147), outline="black", width=4)
+    draw.text(
+        (28, 52),
+        f"PAGE {page_number:03d}",
+        fill="black",
+        font=_pipeline_font(48),
+    )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def draw_pdf_pipeline_fixtures(out: Path) -> dict[str, object]:
+    """Goal #325/#328 T3 串行阶段测量件（仅合成内容；不改动 T2 件语义）。
+
+    与 t2-baseline 件同构（共享背景+唯一页码章），但行文使用 OCR 可读的
+    大字号内置字体供真实 paddle_text 添加文字层；仅独立页码章包含页码。
+    scan_long 提供跨批共享资源。mixed 保留一个未选扫描页和未选空白页，
+    并请求已有原生文字层的页面以验证实际跳过。
+    """
+    import io
+
+    import pymupdf
+
+    destination = out / "t3-pipeline"
+    destination.mkdir(exist_ok=True)
+    page_size = (1240, 1754)  # A4@150dpi 栅格背景，216 DPI 原生尺寸插入
+    backgrounds = {index: _pipeline_background(page_size, index) for index in range(4)}
+
+    def add_scan_page(document: pymupdf.Document, number: int) -> None:
+        page = document.new_page(width=page_size[0] / 3, height=page_size[1] / 3)
+        buffer = io.BytesIO()
+        backgrounds[number % len(backgrounds)].save(buffer, format="PNG")
+        page.insert_image(page.rect, stream=buffer.getvalue())
+        page.insert_image(
+            pymupdf.Rect(page.rect.width - 118, 8, page.rect.width - 10, 48),
+            stream=_pipeline_badge(number),
+        )
+
+    entries: dict[str, object] = {}
+    long_pages = 120
+    for name, count in (("scan_short.pdf", 6), ("scan_long.pdf", long_pages)):
+        with pymupdf.open() as document:
+            for number in range(1, count + 1):
+                add_scan_page(document, number)
+            document.save(destination / name, deflate=True)
+        entries[f"t3-pipeline/{name}"] = {
+            "purpose": "T3 管线长扫描件（每页真实栅格，OCR 可读）"
+            if count == long_pages
+            else "T3 管线短扫描件",
+            "pages": count,
+            "raster_pages": list(range(count)),
+            "native_text_pages": [],
+            "blank_pages": [],
+            "shared_backgrounds": len(backgrounds),
+            "unique_page_badges": count,
+            "requested_pages": list(range(count)),
+            "badge_format": "PAGE {number:03d}",
+            "synthetic_only": True,
+        }
+    mixed_scan, mixed_native, mixed_blank = 10, 10, 10
+    with pymupdf.open() as document:
+        for number in range(1, mixed_scan + 1):
+            add_scan_page(document, number)
+        for index in range(mixed_native):
+            page = document.new_page(width=595, height=842)
+            page.insert_text(
+                (60, 90),
+                f"PIPELINE NATIVE PAGE {index + 1:02d}",
+                fontsize=20,
+                fontname="helv",
+            )
+            page.insert_text(
+                (60, 130),
+                "Mixed pipeline document with a real native text layer.",
+                fontsize=12,
+                fontname="helv",
+            )
+            page.draw_rect(
+                pymupdf.Rect(50, 170, 260, 260),
+                color=(0, 0.4, 0.8),
+                fill=(0.2, 0.7, 0.3),
+            )
+        for _ in range(mixed_blank):
+            document.new_page(width=595, height=842)
+        document.save(destination / "mixed.pdf", deflate=True)
+    entries["t3-pipeline/mixed.pdf"] = {
+        "purpose": "T3 管线混合件：扫描/原生文字层/空白",
+        "pages": mixed_scan + mixed_native + mixed_blank,
+        "raster_pages": list(range(mixed_scan)),
+        "native_text_pages": list(range(mixed_scan, mixed_scan + mixed_native)),
+        "blank_pages": list(
+            range(mixed_scan + mixed_native, mixed_scan + mixed_native + mixed_blank)
+        ),
+        "shared_backgrounds": len(backgrounds),
+        "unique_page_badges": mixed_scan,
+        "requested_pages": [
+            *range(mixed_scan - 1),
+            *range(mixed_scan, mixed_scan + mixed_native),
+        ],
+        "badge_format": "PAGE {number:03d}",
+        "synthetic_only": True,
+    }
+    return entries
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
@@ -1009,6 +1154,11 @@ def main() -> int:
         "--pdf-baseline",
         action="store_true",
         help="额外生成 Goal #325/#327 T2 基线观测件（t2-baseline/ 目录）",
+    )
+    parser.add_argument(
+        "--pdf-pipeline",
+        action="store_true",
+        help="额外生成 Goal #325/#328 T3 串行阶段测量件（t3-pipeline/ 目录）",
     )
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -1049,6 +1199,8 @@ def main() -> int:
             entries.update(draw_structure_pdfs(args.out))
     if args.pdf_baseline:
         entries.update(draw_pdf_baseline_fixtures(args.out))
+    if args.pdf_pipeline:
+        entries.update(draw_pdf_pipeline_fixtures(args.out))
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

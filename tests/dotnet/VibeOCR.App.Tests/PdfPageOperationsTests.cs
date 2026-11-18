@@ -203,7 +203,7 @@ public sealed class PdfPageOperationsTests
     public override Task LoadPdfAsync(string sessionId, Action<JsonElement> progress, CancellationToken ct)
     { foreach (var page in Models) progress(JsonSerializer.SerializeToElement(new { phase = "load", current = page.PageIndex + 1, total = Models.Count, page_payload = page })); return Task.CompletedTask; }
     public override Task<byte[]> RenderPdfPageAsync(string sessionId, int page, int size, CancellationToken ct) => RenderGate?.Task ?? Task.FromResult(new byte[] { 1 });
-    public override Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) { RenderCount++; if (FailurePhase == "render") throw new IOException("synthetic render failed"); return Task.FromResult(new byte[] { 1 }); }
+    public override Task<byte[]> RenderPdfPreviewAsync(string sessionId, int page, int dpi, CancellationToken ct) { RenderCount++; if (FailurePhase == "render") throw new IOException("synthetic render failed"); return Task.FromResult(TestPng); }
     public override async Task<PdfMutateResult> RotatePdfPagesAsync(string sessionId, int[] pages, int angle, CancellationToken ct)
     {
       Assert.False(ct.CanBeCanceled); RotateEntered.TrySetResult(); if (RotateGate is not null) await RotateGate.Task;

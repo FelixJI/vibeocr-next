@@ -1,4 +1,6 @@
 // Deferred inference gateway used while the Supervisor is starting.
+using System.Globalization;
+using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
@@ -18,18 +20,60 @@ public sealed class InferenceClientNotAttachedException(
 /// wire。仅 smoke 安装；未安装时每次调用只多一次 volatile 读，安装后多一次
 /// 锁内入表；不新增等待、不改 wire 语义。缓冲有界，溢出显式置标记
 /// 由调用方失败，不静默截断。
+/// T3（#328）扩展：Submit/Observe/写层/保存等业务类别同一探针记录，
+/// Bytes/Pixels/Detail 由调用点的真实结果推导（PNG IHDR 核验像素），
+/// 观测事实推导失败只留下缺口（null），不改结果、不补 0。
+/// T3 Observe 的首次响应、阶段变化和错误单独留证，同一 job 连续空轮询只累计统计。
 /// </summary>
-internal sealed class PdfSmokeRequestProbe
+internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
 {
   internal const int MaxEvents = 20000;
+  internal const string ResultReadback = "result_readback";
+  internal bool CapturePipeline => capturePipeline;
+
+  internal sealed record UploadFact(string ClientItemKey, string Attachment, long Bytes);
+  internal sealed record ItemFact(string ItemId, string? ClientItemKey, ItemState State);
+  internal sealed record JobFact(
+      string JobId, string? InstanceId, JobState State, string? Pipeline, OcrEngine? Engine,
+      string? EnvironmentId, string? CreatedAt, string? StartedAt, string? FinishedAt,
+      JobSummary Summary, IReadOnlyList<ItemFact> Items);
+  internal sealed record PaddleFact(
+      string? Pipeline, string? Device, string? Provider, bool? AutomaticFallback,
+      string? Preset, string? Source, string[] Models, JsonElement Selections, JsonElement Adapter);
+  internal sealed record Observation(
+      JobFact? Terminal, PaddleFact? Paddle, JobState State, string? Stage, int ThroughSequence,
+      bool More, string[] EventStages, int OutcomeCount)
+  {
+    internal bool IsEmptyPoll(int afterSequence) =>
+      (State is JobState.Accepted or JobState.Queued or JobState.Running or JobState.CancelRequested) &&
+      !More && ThroughSequence == afterSequence && EventStages.Length == 0 && OutcomeCount == 0;
+  }
+
+  internal sealed record PollStats(int Count, double SumMs, double MinMs, double MaxMs)
+  {
+    internal PollStats Add(double duration) =>
+      new(Count + 1, SumMs + duration, Math.Min(MinMs, duration), Math.Max(MaxMs, duration));
+  }
 
   internal sealed record RequestEvent(
       string Kind, string Session, int Page, int Param,
       double StartedAtMs, double? EndedAtMs, double? DurationMs,
-      string Outcome, string? Error);
+      string Outcome, string? Error,
+      long? Bytes = null, long? Pixels = null, string? Detail = null,
+      string? Purpose = null, long? ReadEpoch = null, IReadOnlyList<int>? Pages = null,
+      IReadOnlyList<int>? ConfirmedPages = null, IReadOnlyList<UploadFact>? Uploads = null,
+      Observation? Job = null, PollStats? Polls = null);
+
+  /// <summary>从真实调用结果推导的观测事实；null 字段表示未测得（不是 0）。</summary>
+  internal sealed record ResultFacts(
+      long? Bytes, long? Pixels = null, string? Detail = null,
+      IReadOnlyList<int>? ConfirmedPages = null, IReadOnlyList<UploadFact>? Uploads = null,
+      Observation? Job = null);
 
   private readonly object _lock = new();
   private readonly List<RequestEvent> _events = [];
+  private readonly Dictionary<string, int> _lastObserve = new(StringComparer.Ordinal);
+  private readonly HashSet<string> _observedTerminalJobs = new(StringComparer.Ordinal);
   private bool _overflowed;
   private int _inflight;
   private int _maxInflight;
@@ -37,68 +81,122 @@ internal sealed class PdfSmokeRequestProbe
   internal int MaxInflight => Volatile.Read(ref _maxInflight);
 
   internal async Task<T> MeasureAsync<T>(
-      string kind, string session, int page, int param, Func<Task<T>> call)
+      string kind, string session, int page, int param, Func<Task<T>> call,
+      Func<T, ResultFacts>? factsOf = null, string? purpose = null,
+      long? readEpoch = null, IReadOnlyList<int>? pages = null)
   {
     long start = System.Diagnostics.Stopwatch.GetTimestamp();
-    int slot;
+    var pending = new RequestEvent(
+      kind, session, page, param, Ms(start), null, null, "pending", null,
+      Purpose: purpose, ReadEpoch: readEpoch, Pages: pages);
+    bool compact = capturePipeline && kind == "job_observe";
+    int slot = -1;
     lock (_lock)
     {
       _inflight++;
       if (_inflight > _maxInflight) _maxInflight = _inflight;
-      if (_events.Count >= MaxEvents)
+      // 业务 Observe 完整返回终态后，PDF 才能建立供回读使用的结果引用。
+      if (compact && _observedTerminalJobs.Contains(session))
       {
-        _overflowed = true;
-        slot = -1;
+        pending = pending with { Purpose = ResultReadback };
+        compact = false;
       }
-      else
-      {
-        slot = _events.Count;
-        _events.Add(new RequestEvent(
-            kind, session, page, param, Ms(start), null, null, "pending", null));
-      }
+      if (!compact) slot = AppendEvent(pending);
     }
     try
     {
       T result = await call();
-      Finish(slot, start, "completed", null);
+      ResultFacts? facts = null;
+      if (factsOf is not null)
+      {
+        try { facts = factsOf(result); }
+        catch
+        {
+          // 观测事实推导失败不得改变业务结果：按缺测记录（null），
+          // 由报告层显式披露，不以 0 充当。
+        }
+      }
+      Finish(pending, slot, compact, start, "completed", null, facts);
       return result;
     }
     catch (OperationCanceledException error)
     {
-      Finish(slot, start, "cancelled", error.Message);
+      Finish(pending, slot, compact, start, "cancelled", error.Message, null);
       throw;
     }
     catch (Exception error)
     {
-      Finish(slot, start, "faulted", error.GetType().Name + ": " + error.Message);
+      Finish(pending, slot, compact, start, "faulted", error.GetType().Name + ": " + error.Message, null);
       throw;
     }
   }
 
   internal async Task MeasureAsync(
-      string kind, string session, int page, int param, Func<Task> call) =>
+      string kind, string session, int page, int param, Func<Task> call,
+      string? purpose = null, long? readEpoch = null, IReadOnlyList<int>? pages = null) =>
     await MeasureAsync<object?>(kind, session, page, param, async () =>
     {
       await call();
       return null;
-    });
+    }, purpose: purpose, readEpoch: readEpoch, pages: pages);
 
-  private void Finish(int slot, long start, string outcome, string? error)
+  private int AppendEvent(RequestEvent request)
+  {
+    if (_events.Count >= MaxEvents)
+    {
+      _overflowed = true;
+      return -1;
+    }
+    _events.Add(request);
+    return _events.Count - 1;
+  }
+
+  private void Finish(RequestEvent pending, int slot, bool compact, long start, string outcome, string? error, ResultFacts? facts)
   {
     long end = System.Diagnostics.Stopwatch.GetTimestamp();
+    double duration = Ms(end - start);
     lock (_lock)
     {
       _inflight--;
-      if (slot < 0 || slot >= _events.Count) return;
-      RequestEvent pending = _events[slot];
-      if (pending.Outcome != "pending") return;
-      _events[slot] = pending with
+      if (slot < 0 && !compact) return;
+      RequestEvent finished = pending with
       {
         EndedAtMs = Ms(end),
-        DurationMs = (end - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency,
+        DurationMs = duration,
         Outcome = outcome,
         Error = error,
+        Bytes = facts?.Bytes,
+        Pixels = facts?.Pixels,
+        Detail = facts?.Detail,
+        ConfirmedPages = facts?.ConfirmedPages,
+        Uploads = facts?.Uploads,
+        Job = facts?.Job,
       };
+      if (!compact)
+      {
+        _events[slot] = finished;
+        return;
+      }
+
+      if (finished.Job is { } observed && observed.IsEmptyPoll(finished.Param) &&
+          _lastObserve.TryGetValue(finished.Session, out int previousSlot) &&
+          _events[previousSlot] is { Job: { } previousJob } previous &&
+          previousJob.State == observed.State && previousJob.Stage == observed.Stage &&
+          previousJob.ThroughSequence == observed.ThroughSequence)
+      {
+        if (previous.Polls is { } polls)
+        {
+          _events[previousSlot] = previous with { EndedAtMs = finished.EndedAtMs, Polls = polls.Add(duration) };
+          return;
+        }
+        finished = finished with { DurationMs = null, Polls = new(1, duration, duration, duration) };
+      }
+      int observedSlot = AppendEvent(finished);
+      if (observedSlot >= 0)
+      {
+        _lastObserve[finished.Session] = observedSlot;
+        if (finished.Job?.Terminal is not null) _observedTerminalJobs.Add(finished.Session);
+      }
     }
   }
 
@@ -108,6 +206,37 @@ internal sealed class PdfSmokeRequestProbe
   internal (IReadOnlyList<RequestEvent> Events, int MaxInflight, bool Overflowed) Snapshot()
   {
     lock (_lock) return (_events.ToArray(), Volatile.Read(ref _maxInflight), _overflowed);
+  }
+
+  internal static ResultFacts ObserveFacts(JobUpdate update)
+  {
+    JobSnapshot snapshot = update.Snapshot;
+    JobFact? terminal = null;
+    if (!update.More && snapshot.FinishedAt is not null &&
+        snapshot.State is JobState.Completed or JobState.CompletedWithErrors or JobState.Cancelled or JobState.Failed)
+      terminal = new JobFact(snapshot.JobId, snapshot.InstanceId, snapshot.State,
+          snapshot.Pipeline?.PipelineId, snapshot.Pipeline?.Engine, snapshot.EnvironmentId,
+          snapshot.CreatedAt, snapshot.StartedAt, snapshot.FinishedAt, snapshot.Summary,
+          snapshot.Items.Select(item => new ItemFact(item.ItemId, item.ClientItemKey, item.State)).ToArray());
+    PaddleFact? paddle = null;
+    if (update.Events.FirstOrDefault(stage => stage.Stage == "paddle_onnx_snapshot")?.Detail is { } detail)
+    {
+      string? Read(string key) => detail.TryGetValue(key, out JsonElement value) &&
+          value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+      JsonElement Object(string key) => detail.TryGetValue(key, out JsonElement value) &&
+          value.ValueKind == JsonValueKind.Object ? value : JsonSerializer.SerializeToElement<object?>(null);
+      JsonElement models = Object("models");
+      paddle = new PaddleFact(Read("pipeline_id"), Read("device"), Read("provider"),
+          detail.TryGetValue("auto_device_fallback", out JsonElement fallback) &&
+              fallback.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? fallback.GetBoolean() : null,
+          Read("model_preset"), Read("source"),
+          models.ValueKind == JsonValueKind.Object
+            ? models.EnumerateObject().Select(model => model.Name).Order().ToArray() : [],
+          Object("selections"), Object("adapter"));
+    }
+    return new ResultFacts(null, Job: new(terminal, paddle, snapshot.State, snapshot.Stage,
+        update.ThroughSequence, update.More, update.Events.Select(stage => stage.Stage).ToArray(), update.Outcomes.Count));
   }
 }
 
@@ -145,6 +274,16 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
 
   internal static void SetPdfSmokeProbe(PdfSmokeRequestProbe? probe) =>
     Volatile.Write(ref _pdfSmokeProbe, probe);
+
+  internal sealed record DeviceSettingsObservation(string Device)
+  {
+    internal TaskCompletionSource<Exception?> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+  }
+
+  private static DeviceSettingsObservation? _deviceSettingsObservation;
+
+  internal static void SetDeviceSettingsObservation(DeviceSettingsObservation? observation) =>
+    Volatile.Write(ref _deviceSettingsObservation, observation);
 
   public Uri BaseUrl => Current.BaseUrl;
 
@@ -188,7 +327,25 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
   {
     await _gate.WaitAsync(cancellationToken);
     Interlocked.Increment(ref _submitAttempts);
-    JobRef job = await Current.SubmitAsync(request, uploads, cancellationToken);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null)
+    {
+      JobRef direct = await Current.SubmitAsync(request, uploads, cancellationToken);
+      Volatile.Write(ref _lastSubmittedJobId, direct.JobId);
+      return direct;
+    }
+    long uploadBytes = uploads.Values.Sum(upload => upload.Content.Count);
+    JobRef job = await probe.MeasureAsync(
+        "job_submit", "", -1, request.Items.Count,
+        () => Current.SubmitAsync(request, uploads, cancellationToken),
+        submitted => new PdfSmokeRequestProbe.ResultFacts(uploadBytes, null, submitted.JobId,
+          Uploads: probe.CapturePipeline ? request.Items
+            .Where(item => item.Source.TryGetValue("attachment", out JsonElement attachment) &&
+                attachment.ValueKind == JsonValueKind.String)
+            .Select(item => (item.ClientItemKey, Attachment: item.Source["attachment"].GetString()!))
+            .Where(item => uploads.ContainsKey(item.Attachment))
+            .Select(item => new PdfSmokeRequestProbe.UploadFact(
+                item.ClientItemKey, item.Attachment, uploads[item.Attachment].Content.Count)).ToArray() : null));
     Volatile.Write(ref _lastSubmittedJobId, job.JobId);
     return job;
   }
@@ -197,7 +354,11 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     string jobId, int afterSequence, CancellationToken cancellationToken)
   {
     await _gate.WaitAsync(cancellationToken);
-    return await Current.ObserveAsync(jobId, afterSequence, cancellationToken);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null) return await Current.ObserveAsync(jobId, afterSequence, cancellationToken);
+    return await probe.MeasureAsync("job_observe", jobId, -1, afterSequence,
+        () => Current.ObserveAsync(jobId, afterSequence, cancellationToken),
+        probe.CapturePipeline ? PdfSmokeRequestProbe.ObserveFacts : null);
   }
 
   public async Task<JobCommandResult> CommandAsync(
@@ -242,7 +403,20 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     SettingsSnapshot settings, CancellationToken cancellationToken)
   {
     await _gate.WaitAsync(cancellationToken);
-    return await Current.UpdateSettingsAsync(settings, cancellationToken);
+    DeviceSettingsObservation? observation = Volatile.Read(ref _deviceSettingsObservation);
+    if (observation is null || observation.Device != settings.RecognitionDevice)
+      return await Current.UpdateSettingsAsync(settings, cancellationToken);
+    try
+    {
+      SettingsSnapshot updated = await Current.UpdateSettingsAsync(settings, cancellationToken);
+      observation.Completion.TrySetResult(null);
+      return updated;
+    }
+    catch (Exception error)
+    {
+      observation.Completion.TrySetResult(error);
+      throw;
+    }
   }
 
   public async Task<ExportResult> ExportAsync(
@@ -276,7 +450,7 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     if (probe is null) return await Current.RenderPdfPageAsync(sessionId, page, size, ct);
     return await probe.MeasureAsync("render_thumbnail", sessionId, page, size,
-        () => Current.RenderPdfPageAsync(sessionId, page, size, ct));
+        () => Current.RenderPdfPageAsync(sessionId, page, size, ct), PngImageFacts.Of);
   }
 
   public async Task<PdfMutateResult> RotatePdfPagesAsync(
@@ -320,7 +494,10 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     Task Call() => Current.LoadPdfDemandAsync(sessionId, request, progress, ct);
     if (probe is null) await Call();
     else await probe.MeasureAsync(request.Pages is null ? "load_detect" : "load_targeted",
-      sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call);
+      sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call,
+      purpose: request.Prefetch == true ? "prefetch_presence" :
+        request.Pages is null ? "document_detection" : "business_presence",
+      readEpoch: request.Read?.Epoch, pages: probe.CapturePipeline ? request.Pages?.ToArray() : null);
   }
 
   public async Task<byte[]> RenderPdfThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct)
@@ -328,7 +505,7 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     await _gate.WaitAsync(ct);
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     Task<byte[]> Call() => Current.RenderPdfThumbnailDemandAsync(sessionId, request, ct);
-    return probe is null ? await Call() : await probe.MeasureAsync("render_thumbnail", sessionId, request.Page, request.Size ?? 0, Call);
+    return probe is null ? await Call() : await probe.MeasureAsync("render_thumbnail", sessionId, request.Page, request.Size ?? 0, Call, PngImageFacts.Of);
   }
 
   public async Task<byte[]> RenderPdfPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct)
@@ -336,7 +513,10 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     await _gate.WaitAsync(ct);
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     Task<byte[]> Call() => Current.RenderPdfPreviewDemandAsync(sessionId, request, ct);
-    return probe is null ? await Call() : await probe.MeasureAsync("render_preview", sessionId, request.Page, request.MaxEdge ?? request.Dpi ?? 0, Call);
+    return probe is null ? await Call() : await probe.MeasureAsync("render_preview",
+        sessionId, request.Page, request.MaxEdge ?? request.Dpi ?? 0, Call, PngImageFacts.Of,
+        purpose: request.MaxEdge is null && request.Dpi is not null ? "business_render" : "ui_preview",
+        readEpoch: request.Read?.Epoch);
   }
 
   public async Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct)
@@ -362,7 +542,7 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     if (probe is null) return await Current.RenderPdfPreviewAsync(sessionId, page, dpi, ct);
     return await probe.MeasureAsync("render_preview", sessionId, page, dpi,
-        () => Current.RenderPdfPreviewAsync(sessionId, page, dpi, ct));
+        () => Current.RenderPdfPreviewAsync(sessionId, page, dpi, ct), PngImageFacts.Of);
   }
   public async Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.UpdateBlockTextRequest request, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.UpdatePdfBlockTextAsync(sessionId, request, ct); }
   public async Task<VibeOCR.Runtime.Contracts.Generated.Wire.PageInspectResponse> InspectPdfPageAsync(string sessionId, int page, CancellationToken ct)
@@ -373,11 +553,52 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     return await probe.MeasureAsync("inspect_page", sessionId, page, 0,
         () => Current.InspectPdfPageAsync(sessionId, page, ct));
   }
-  public async Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.BatchAddTextLayerRequest request, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.AddPdfTextLayersAsync(sessionId, request, ct); }
+  public async Task<VibeOCR.Runtime.Contracts.Generated.Wire.PdfMutationResponse> AddPdfTextLayersAsync(string sessionId, VibeOCR.Runtime.Contracts.Generated.Wire.BatchAddTextLayerRequest request, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null) return await Current.AddPdfTextLayersAsync(sessionId, request, ct);
+    return await probe.MeasureAsync("add_text_layers", sessionId,
+        request.Pages?.FirstOrDefault()?.Page ?? -1, request.Pages?.Count ?? 0,
+        () => Current.AddPdfTextLayersAsync(sessionId, request, ct),
+        probe.CapturePipeline ? result => new PdfSmokeRequestProbe.ResultFacts(null,
+          ConfirmedPages: request.Pages?.Where(page =>
+            result.Extra?.TryGetValue("results", out JsonElement results) == true &&
+            results.ValueKind == JsonValueKind.Object &&
+            results.TryGetProperty(page.Page.ToString(CultureInfo.InvariantCulture), out JsonElement count) &&
+            count.ValueKind == JsonValueKind.Array && count.GetArrayLength() > 0 &&
+            count[0].ValueKind == JsonValueKind.Number && count[0].TryGetInt32(out int blocks) &&
+            blocks > 0).Select(page => page.Page).ToArray()) : null,
+        purpose: request.Save == false ? "dirty_write" : "write_and_save",
+        pages: probe.CapturePipeline ? request.Pages?.Select(page => page.Page).ToArray() : null);
+  }
   public async Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.DeletePdfTextLayersAsync(sessionId, pages, progress, ct); }
-  public async Task CancelPdfAsync(string sessionId, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.CancelPdfAsync(sessionId, ct); }
-  public async Task ResetPdfCancelAsync(string sessionId, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.ResetPdfCancelAsync(sessionId, ct); }
-  public async Task<string> SavePdfOperationAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct); }
+  public async Task CancelPdfAsync(string sessionId, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null) { await Current.CancelPdfAsync(sessionId, ct); return; }
+    await probe.MeasureAsync("cancel_pdf", sessionId, -1, 0,
+        () => Current.CancelPdfAsync(sessionId, ct));
+  }
+  public async Task ResetPdfCancelAsync(string sessionId, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null) { await Current.ResetPdfCancelAsync(sessionId, ct); return; }
+    await probe.MeasureAsync("reset_pdf_cancel", sessionId, -1, 0,
+        () => Current.ResetPdfCancelAsync(sessionId, ct));
+  }
+  public async Task<string> SavePdfOperationAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct)
+  {
+    await _gate.WaitAsync(ct);
+    PdfSmokeRequestProbe? probe = PdfSmokeProbe;
+    if (probe is null) return await Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct);
+    int flags = (copyExport ? 1 : 0) | (rebindTarget ? 2 : 0) | (overwrite ? 4 : 0);
+    return await probe.MeasureAsync("save_operation", sessionId, -1, flags,
+        () => Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct),
+        probe.CapturePipeline ? saved => new PdfSmokeRequestProbe.ResultFacts(null, Detail: saved) : null);
+  }
   public async Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct); }
 
   public async Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)

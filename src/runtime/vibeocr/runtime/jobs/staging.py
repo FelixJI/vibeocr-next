@@ -12,14 +12,21 @@ Responsibilities (plan §6 Phase 2):
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
+import stat
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from os import stat_result
 from pathlib import Path
 
+from vibeocr.runtime.environments.runtime_lock import (
+    RuntimeLockTimeout,
+    RuntimeStoreLock,
+)
 from vibeocr.runtime_contracts import ItemState, JobItem
 
 
@@ -32,6 +39,140 @@ class InputExpiredError(ValueError):
 
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_SUPERVISOR_ID_PATTERN = r"sup-[0-9a-f]{10}"
+_INSTANCE_LEASE_RE = re.compile(
+    rf"instance-(?:{_SUPERVISOR_ID_PATTERN}-)?[0-9a-f]{{32}}\.lease"
+)
+
+
+class ManagedStaging:
+    """Own the default staging root for the lifetime of a supervisor."""
+
+    def __init__(self, root: Path, lease: RuntimeStoreLock) -> None:
+        self.root = root
+        self._lease = lease
+        self._closed = False
+
+    @classmethod
+    def create(cls, parent: Path, *, instance_id: str = "") -> ManagedStaging:
+        parent = parent.absolute()
+        _check_directories(parent.parent)
+        parent.mkdir(exist_ok=True)
+        lease: RuntimeStoreLock | None = None
+        try:
+            with _staging_guard(parent):
+                for marker in parent.iterdir():
+                    if not _INSTANCE_LEASE_RE.fullmatch(marker.name):
+                        continue
+                    try:
+                        _check_lock_file(marker)
+                        with RuntimeStoreLock(marker, timeout=0):
+                            pass
+                        _remove_owned_root(marker)
+                    except RuntimeLockTimeout:
+                        continue
+                    except (OSError, ValueError):
+                        logging.getLogger(__name__).exception(
+                            "Could not reclaim supervisor staging %s", marker.stem
+                        )
+                label = (
+                    f"{instance_id}-"
+                    if re.fullmatch(_SUPERVISOR_ID_PATTERN, instance_id)
+                    else ""
+                )
+                root = parent / f"instance-{label}{uuid.uuid4().hex}"
+                try:
+                    root.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise FileExistsError(root)
+                marker = root.with_suffix(".lease")
+                # Keep ownership outside the payload so a partial deletion is recoverable.
+                marker.touch(exist_ok=False)
+                lease = RuntimeStoreLock(marker, timeout=0)
+                lease.acquire()
+                try:
+                    root.mkdir()
+                except FileExistsError:
+                    lease.release()
+                    marker.unlink()
+                    raise
+            return cls(root, lease)
+        except BaseException:
+            if lease is not None:
+                lease.release()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            with _staging_guard(self.root.parent):
+                _check_lock_file(self._lease.path)
+                # Windows cannot unlink the lease while it is open. The parent
+                # lock excludes other supervisors until the payload and lease are gone.
+                self._lease.release()
+                _remove_owned_root(self._lease.path)
+        finally:
+            self._lease.release()
+
+
+def _check_not_redirected(path: Path, info: stat_result) -> None:
+    if stat.S_ISLNK(info.st_mode) or (
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise ValueError(f"Redirected supervisor staging path: {path}")
+
+
+def _check_directory(path: Path) -> None:
+    info = path.lstat()
+    _check_not_redirected(path, info)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"Expected a supervisor staging directory: {path}")
+
+
+def _check_directories(path: Path) -> None:
+    if ".." in path.parts:
+        raise ValueError(f"Unsafe supervisor staging parent: {path}")
+    for directory in (*reversed(path.parents), path):
+        _check_directory(directory)
+
+
+def _check_lock_file(path: Path) -> None:
+    info = path.lstat()
+    _check_not_redirected(path, info)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError(f"Expected a private supervisor staging lock file: {path}")
+
+
+def _staging_guard(parent: Path) -> RuntimeStoreLock:
+    _check_directories(parent)
+    guard = parent / "maintenance.lock"
+    try:
+        _check_lock_file(guard)
+    except FileNotFoundError:
+        pass
+    return RuntimeStoreLock(guard)
+
+
+def _remove_owned_root(marker: Path) -> None:
+    root = marker.with_suffix("")
+    try:
+        _check_directory(root)
+    except FileNotFoundError:
+        pass
+    else:
+        pending = [root]
+        while pending:
+            for entry in pending.pop().iterdir():
+                info = entry.lstat()
+                _check_not_redirected(entry, info)
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(entry)
+        _safe_rmtree(root)
+    marker.unlink()
 
 
 def _safe_stem(original: str) -> str:
@@ -70,6 +211,7 @@ class InputStager:
     max_file_count: int = 64
     max_total_bytes: int = 256 * 1024 * 1024
     max_per_file_bytes: int = 64 * 1024 * 1024
+    managed: ManagedStaging | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _staged_by_job: dict[str, dict[str, StagedInput]] = field(
         default_factory=dict, repr=False
@@ -140,7 +282,7 @@ class InputStager:
                     )
                     continue
                 # Strict mode: roll back the whole job dir and fail.
-                self._safe_rmtree(job_dir)
+                _safe_rmtree(job_dir)
                 raise StagingQuotaError(
                     f"item {item_id} exceeds per-file limit: "
                     f"{len(data)} > {self.max_per_file_bytes}"
@@ -207,7 +349,7 @@ class InputStager:
                         )
                     )
             except Exception:
-                self._safe_rmtree(retry_dir)
+                _safe_rmtree(retry_dir)
                 raise
             self._staged_by_job[retry_job_id] = {
                 entry.item_id: entry for entry in cloned
@@ -239,7 +381,7 @@ class InputStager:
     def release(self, job_id: str) -> None:
         with self._lock:
             job_dir = self.root / _safe_dir(job_id)
-            self._safe_rmtree(job_dir)
+            _safe_rmtree(job_dir)
             self._staged_by_job.pop(job_id, None)
 
     def release_all(self) -> int:
@@ -250,7 +392,7 @@ class InputStager:
                 return 0
             for entry in self.root.iterdir():
                 if entry.is_dir():
-                    self._safe_rmtree(entry)
+                    _safe_rmtree(entry)
                     removed += 1
             self._staged_by_job.clear()
             return removed
@@ -264,33 +406,38 @@ class InputStager:
                 return 0
             for entry in self.root.iterdir():
                 if entry.is_dir() and entry.name not in known_dirs:
-                    self._safe_rmtree(entry)
+                    _safe_rmtree(entry)
                     removed += 1
             for job_id in list(self._staged_by_job):
                 if job_id not in known_job_ids:
                     self._staged_by_job.pop(job_id, None)
             return removed
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _safe_rmtree(
-        self, path: Path, *, attempts: int = 5, delay: float = 0.05
-    ) -> None:
-        """Remove a directory tree with bounded retry for Windows locks."""
-        if not path.exists():
+    def close(self) -> None:
+        if self.managed is None:
+            self.release_all()
             return
-        last_exc: Exception | None = None
-        for _ in range(attempts):
+        with self._lock:
             try:
-                shutil.rmtree(path)
-                return
-            except OSError as exc:  # pragma: no cover - timing dependent
-                last_exc = exc
-                time.sleep(delay)
-        if last_exc is not None and path.exists():  # pragma: no cover
-            raise last_exc
+                self.managed.close()
+            finally:
+                self._staged_by_job.clear()
+
+
+def _safe_rmtree(path: Path, *, attempts: int = 5, delay: float = 0.05) -> None:
+    """Remove a directory tree with bounded retry for Windows locks."""
+    if not path.exists():
+        return
+    last_exc: Exception | None = None
+    for _ in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:  # pragma: no cover - timing dependent
+            last_exc = exc
+            time.sleep(delay)
+    if last_exc is not None and path.exists():  # pragma: no cover
+        raise last_exc
 
 
 def _safe_dir(job_id: str) -> str:
@@ -300,6 +447,7 @@ def _safe_dir(job_id: str) -> str:
 __all__ = [
     "InputExpiredError",
     "InputStager",
+    "ManagedStaging",
     "StagedInput",
     "StagingQuotaError",
     "_safe_dir",

@@ -1,5 +1,7 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using VibeOCR.App.Features.Pdf;
+using VibeOCR.App.Inference;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Bootstrap;
 using VibeOCR.Platform.Inference;
@@ -101,6 +103,123 @@ public sealed class PdfTextLayerTests
     Assert.Empty(model.Pages);
   }
 
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RetiringDocumentDrainsReadbackBeforeForgettingItsJob(bool replace)
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    var client = new PdfClient(1);
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic.pdf", ct);
+    await model.StartOcrAsync([0], false, ct, addTextLayer: true);
+    model.TrimResultCache(0, 0);
+    string job = model.Pages[0].ResultReference!.JobId;
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    client.BeforeObserve = _ => release.Task;
+    Task read = model.PrepareResultsAsync(0, 1, ct);
+    try
+    {
+      Assert.False(read.IsCompleted);
+      Task retire = replace ? model.OpenPathAsync("replacement.pdf", ct) : model.CloseSessionAsync(ct);
+      try
+      {
+        Assert.False(retire.IsCompleted);
+        Assert.Empty(client.Forgotten);
+        Assert.Equal(0, client.CloseCalls);
+        Assert.True(model.IsModified);
+      }
+      finally { release.TrySetResult(); }
+      await retire.WaitAsync(TimeSpan.FromSeconds(5), ct);
+      Assert.Equal(job, Assert.Single(client.Forgotten));
+      Assert.Equal(1, client.CloseCalls);
+      Assert.Equal(replace, model.HasSession);
+      Assert.False(model.IsSettling);
+    }
+    finally { release.TrySetResult(); await read; }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ReplacementWaitsForRetryableJobRelease(bool requestAlreadyCommitted)
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    var client = new PdfClient(1);
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("first.pdf", ct);
+    await model.StartOcrAsync([0], false, ct, addTextLayer: true);
+    client.ForgetError = new IOException("injected forget response loss");
+    client.RemoveJobBeforeError = requestAlreadyCommitted;
+
+    await model.OpenPathAsync("replacement.pdf", ct);
+    Assert.Equal(1, client.OpenCalls);
+    Assert.Equal(1, client.CloseCalls);
+    Assert.Null(model.SessionId);
+    Assert.True(model.HasPendingResultCleanup);
+    Assert.True(model.IsModified);
+    Assert.Equal(PdfPageState.Done, Assert.Single(model.Pages).State);
+
+    client.ForgetError = null;
+    await model.OpenPathAsync("replacement.pdf", ct);
+    Assert.Equal(2, client.OpenCalls);
+    Assert.Equal(1, client.CloseCalls);
+    Assert.Equal(0, client.OwnedJobs);
+    Assert.Equal(new[] { "job-1", "job-1" }, client.ForgetAttempts);
+    Assert.False(model.HasPendingResultCleanup);
+    Assert.True(model.HasSession);
+  }
+
+  [Fact]
+  public async Task OcrRejectsAnOversizedSingletonWithoutSubmittingItOrDroppingOtherPages()
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    byte[] oversized = InferenceClientStub.TestPng.ToArray();
+    BinaryPrimitives.WriteInt32BigEndian(oversized.AsSpan(16), 4001);
+    BinaryPrimitives.WriteInt32BigEndian(oversized.AsSpan(20), 4000);
+    var client = new PdfClient(2) { PageImage = page => page == 0 ? oversized : InferenceClientStub.TestPng };
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic.pdf", ct);
+    await model.StartOcrAsync([0, 1], false, ct, addTextLayer: true);
+    Assert.Equal(1, Assert.Single(client.UploadSizes));
+    Assert.Equal(1, Assert.Single(client.Written));
+    Assert.Equal(PdfPageState.Failed, model.Pages[0].State);
+    Assert.Equal(PdfPageState.Done, model.Pages[1].State);
+    Assert.Contains("渲染预算", model.Summary);
+  }
+
+  [Fact]
+  public async Task RecognitionYieldsAfterUnchangedObservationAndDrainsPagedOutcomes()
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    var client = new PdfClient(1);
+    var cursors = new List<int>();
+    int waits = 0;
+    var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    client.OnObservation = (sequence, terminal) =>
+    {
+      cursors.Add(sequence);
+      if (cursors.Count <= 2)
+        return terminal with { ThroughSequence = sequence, Snapshot = terminal.Snapshot with { State = JobState.Running }, Outcomes = [] };
+      if (sequence == 0) return terminal with { More = true };
+      return terminal with { Outcomes = [] };
+    };
+    var runner = new InferenceJobRunner(client, token => { waits++; return resume.Task.WaitAsync(token); });
+    Task<InferenceJobRun> run = runner.RunRecognitionAsync("OCR", JobPriority.Background,
+      [new("page-0", "page-1.png", "image/png", InferenceClientStub.TestPng)], options: null, cancellationToken: ct);
+    try
+    {
+      Assert.False(run.IsCompleted);
+      Assert.Equal(new[] { 0, 0 }, cursors);
+      Assert.Equal(1, waits);
+    }
+    finally { resume.TrySetResult(); }
+    InferenceJobRun result = await run.WaitAsync(TimeSpan.FromSeconds(5), ct);
+    Assert.Equal(new[] { 0, 0, 0, 1 }, cursors);
+    Assert.Equal(1, waits);
+    Assert.Equal(ItemState.Succeeded, result.OutcomesByClientItemKey["page-0"].State);
+  }
+
   [Fact]
   public async Task CancelWaitsForWriteAndCancellationSignalAndRetainsCommittedPage()
   {
@@ -141,6 +260,53 @@ public sealed class PdfTextLayerTests
     Assert.True(client.JobCancelRequested);
     Assert.False(model.IsSettling);
     Assert.Empty(client.Written);
+    Assert.Empty(client.Forgotten);
+    await model.CloseSessionAsync(TestContext.Current.CancellationToken);
+    Assert.Equal("job-1", Assert.Single(client.Forgotten));
+  }
+
+  [Fact]
+  public async Task CloseWaitsForCommittedSubmitReplyAndReleasesTheCancelledJob()
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    var committed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var reply = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var observingTerminal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var terminal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var client = new PdfClient(1)
+    {
+      BeforeSubmitReply = token => { committed.TrySetResult(); return reply.Task.WaitAsync(token); },
+      BeforeObserve = _ => { observingTerminal.TrySetResult(); return Task.CompletedTask; },
+      TerminalGate = terminal,
+    };
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("synthetic.pdf", ct);
+    Task running = model.StartOcrAsync([0], false, ct, addTextLayer: true);
+    try
+    {
+      await committed.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+      Assert.Equal(1, client.OwnedJobs);
+      model.Cancel();
+      Task close = model.CloseSessionAsync(ct);
+      Assert.False(close.IsCompleted);
+      Assert.Equal(0, client.CloseCalls);
+
+      reply.TrySetResult();
+      await observingTerminal.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+      Assert.Equal(1, client.JobCancelCommands);
+      Assert.False(close.IsCompleted);
+      Assert.Equal(0, client.CloseCalls);
+      Assert.Empty(client.ForgetAttempts);
+
+      terminal.TrySetResult();
+      await Task.WhenAll(running, close).WaitAsync(TimeSpan.FromSeconds(5), ct);
+      Assert.Equal(1, client.CloseCalls);
+      Assert.Equal("job-1", Assert.Single(client.Forgotten));
+      Assert.Equal(0, client.OwnedJobs);
+      Assert.Empty(client.Written);
+      Assert.False(model.HasSession);
+    }
+    finally { reply.TrySetResult(); terminal.TrySetResult(); }
   }
 
   [Fact]
@@ -176,9 +342,31 @@ public sealed class PdfTextLayerTests
     Assert.Equal("pdf", model.SessionId);
     Assert.True(model.IsSettling);
     client.FailClose = false;
+    client.FailTerminal = false;
+    bool remoteTerminal = false;
+    var recovery = new List<string>();
+    int initialCancels = client.JobCancelCommands;
+    client.OnObservation = (_, update) =>
+    {
+      recovery.Add(remoteTerminal ? "terminal" : "running");
+      return remoteTerminal ? update : update with { Snapshot = update.Snapshot with { State = JobState.Running }, Outcomes = [] };
+    };
+    await Assert.ThrowsAsync<InvalidOperationException>(() => model.CloseSessionAsync(CancellationToken.None));
+    Assert.True(model.HasPendingResultCleanup);
+    Assert.Equal(new[] { "running", "running" }, recovery);
+    Assert.Equal(initialCancels + 1, client.JobCancelCommands);
+    Assert.Empty(client.ForgetAttempts);
+
+    remoteTerminal = true;
     await model.CloseSessionAsync(CancellationToken.None);
     Assert.False(model.HasSession);
     Assert.False(model.IsSettling);
+    Assert.False(model.HasPendingResultCleanup);
+    Assert.Equal(new[] { "running", "running", "terminal" }, recovery);
+    Assert.Equal(initialCancels + 1, client.JobCancelCommands);
+    Assert.Equal("job-1", Assert.Single(client.Forgotten));
+    Assert.Equal(0, client.OwnedJobs);
+    Assert.Equal(2, client.CloseCalls);
   }
 
   [Theory]
@@ -276,18 +464,26 @@ public sealed class PdfTextLayerTests
     public List<int> BatchSizes { get; } = [];
     public List<int> UploadSizes { get; } = [];
     public List<int> Dpis { get; } = [];
+    public List<string> Forgotten { get; } = [];
+    public List<string> ForgetAttempts { get; } = [];
     private readonly Dictionary<string, IReadOnlyList<JobItem>> _jobs = [];
+    public int OwnedJobs => _jobs.Count;
     private bool _dirty;
     public int? Angle { get; init; } = 0;
     public TaskCompletionSource? OpenGate { get; init; }
-    public bool FailTerminal { get; init; }
+    public bool FailTerminal { get; set; }
+    public Exception? ForgetError { get; set; }
+    public bool RemoveJobBeforeError { get; set; }
+    public Func<int, byte[]>? PageImage { get; init; }
     public bool FailClose { get; set; }
     public TaskCompletionSource? WriteGate { get; init; }
     public TaskCompletionSource? CancelGate { get; init; }
     public TaskCompletionSource? TerminalGate { get; init; }
-    public bool JobCancelRequested { get; private set; }
+    public bool JobCancelRequested => JobCancelCommands > 0;
+    public int JobCancelCommands { get; private set; }
     public int RotateCalls { get; private set; }
     public int CloseCalls { get; private set; }
+    public int OpenCalls { get; private set; }
     public override Task ClosePdfSessionAsync(string session, CancellationToken ct) { CloseCalls++; if (FailClose) throw new IOException("injected close failure"); return Task.CompletedTask; }
     public Exception? FailSave { get; set; }
     public int SaveCalls { get; private set; }
@@ -297,6 +493,7 @@ public sealed class PdfTextLayerTests
     public override async Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
     {
       Assert.False(ct.CanBeCanceled);
+      OpenCalls++;
       if (OpenGate is not null) await OpenGate.Task;
       return new PdfSessionOpenResult("pdf", count, path, Model());
     }
@@ -306,16 +503,19 @@ public sealed class PdfTextLayerTests
       for (int i = 0; i < count; i++) progress(JsonSerializer.SerializeToElement(new { phase = "load", current = i + 1, total = count, page_payload = Page(i) }));
       return Task.CompletedTask;
     }
-    public override Task<byte[]> RenderPdfPreviewAsync(string session, int page, int dpi, CancellationToken ct) { Dpis.Add(dpi); return Task.FromResult(new byte[] { 1 }); }
-    public override Task<JobRef> SubmitAsync(SubmitRequest request, IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken ct)
+    public override Task<byte[]> RenderPdfPreviewAsync(string session, int page, int dpi, CancellationToken ct) { Dpis.Add(dpi); return Task.FromResult(PageImage?.Invoke(page) ?? TestPng); }
+    public Func<CancellationToken, Task>? BeforeSubmitReply { get; init; }
+    public override async Task<JobRef> SubmitAsync(SubmitRequest request, IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken ct)
     {
       UploadSizes.Add(uploads.Count);
       string id = "job-" + UploadSizes.Count;
       var items = request.Items.Select((item, index) => new JobItem { ItemId = id + "-" + index, ClientItemKey = item.ClientItemKey, Ordinal = index, DisplayName = item.DisplayName, State = ItemState.Queued }).ToArray();
       _jobs[id] = items;
-      return Task.FromResult(new JobRef { JobId = id, Items = items });
+      if (BeforeSubmitReply is { } before) await before(ct);
+      return new JobRef { JobId = id, Items = items };
     }
     public Func<string, Task>? BeforeObserve { get; set; }
+    public Func<int, JobUpdate, JobUpdate>? OnObservation { get; set; }
     public override async Task<JobUpdate> ObserveAsync(string id, int sequence, CancellationToken ct)
     {
       if (BeforeObserve is { } before) await before(id);
@@ -325,12 +525,30 @@ public sealed class PdfTextLayerTests
         else { await TerminalGate.Task; if (FailTerminal) throw new IOException("terminal observation failed"); }
       }
       var items = _jobs[id];
-      return new JobUpdate {
+      var update = new JobUpdate {
         Events = [], Snapshot = new JobSnapshot { JobId = id, Kind = JobKind.Recognition, Priority = JobPriority.Background, State = JobState.Completed, Items = items }, ThroughSequence = sequence + 1,
         Outcomes = items.Select(item => new ItemOutcome { ItemId = item.ItemId, Attempt = 1, State = ItemState.Succeeded, PayloadType = "ocr.v1", Payload = Payload(item.ClientItemKey ?? throw new InvalidOperationException("Missing client key.")) }).ToArray(),
       };
+      return OnObservation?.Invoke(sequence, update) ?? update;
     }
-    public override Task<JobCommandResult> CommandAsync(JobCommand command, CancellationToken ct) { JobCancelRequested = true; return Task.FromResult(new JobCommandResult(command.CommandId, command.Kind, null, null)); }
+    public override Task<JobCommandResult> CommandAsync(JobCommand command, CancellationToken ct)
+    {
+      if (command.Kind == JobCommandKind.Cancel) JobCancelCommands++;
+      if (command.Kind == JobCommandKind.Forget)
+      {
+        Assert.True(CloseCalls > 0);
+        ForgetAttempts.Add(command.JobId);
+        if (ForgetError is not null)
+        {
+          if (RemoveJobBeforeError) _jobs.Remove(command.JobId);
+          throw ForgetError;
+        }
+        if (!_jobs.Remove(command.JobId))
+          throw new InferenceClientException(HttpV2ErrorCode.JobNotFound, "job was already released", retryable: false);
+        Forgotten.Add(command.JobId);
+      }
+      return Task.FromResult(new JobCommandResult(command.CommandId, command.Kind, null, null));
+    }
     private Dictionary<string, JsonElement> Payload(string key)
     {
       var payload = new Dictionary<string, JsonElement> { ["raw_text"] = JsonSerializer.SerializeToElement("中文 " + key), ["text_blocks"] = JsonSerializer.SerializeToElement(new[] { new { text = "中文", score = .9, bbox = new[] { 100, 100, 500, 160 } } }) };

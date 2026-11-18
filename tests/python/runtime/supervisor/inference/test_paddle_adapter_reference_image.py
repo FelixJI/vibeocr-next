@@ -127,6 +127,7 @@ def _delivered_reference(
 ) -> dict[str, Any]:
     """公共闭环：发布 → 受控目录单文件 → 引用与像素均等于真实预处理图。"""
     results_dir = tmp_path / "job" / "results"
+    results_dir.parent.mkdir()
     payload = _recognize(
         _ResultService(result), _item(asset_dir=str(results_dir)), unwarping=unwarping
     )

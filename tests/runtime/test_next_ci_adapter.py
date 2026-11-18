@@ -907,12 +907,19 @@ _REUSE_SMOKE_WRAPPER = r"""param(
     [string]$TempBase,
     [string]$Launch,
     [string]$Cleanup,
-    [string]$Removals
+    [string]$Removals,
+    [string]$BrowserOutcome
 )
 $ErrorActionPreference = 'Stop'
 $env:TEMP = $TempBase
 $env:TMP = $TempBase
 $global:webViewCleanupAttempts = 0
+$global:browserOutcome = $BrowserOutcome
+$global:browserCensuses = 0
+$global:exitedBrowsers = [Collections.Generic.HashSet[int]]::new()
+$global:browserFixtureStart = [datetime]'2026-11-18T00:00:00Z'
+$global:browserFixtureExe = Join-Path $Product 'app/WebView2Runtime/msedgewebview2.exe'
+$global:outsideBrowserExe = Join-Path "$Product-sibling" 'app/WebView2Runtime/msedgewebview2.exe'
 function Copy-Item {
     throw 'reuse path must not copy the unpacked product'
 }
@@ -932,7 +939,58 @@ function Remove-Item {
     }
     Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
 }
-function Get-CimInstance { param($Filter) @() }
+function Get-CimInstance {
+    param($Filter)
+    $global:browserCensuses++
+    [pscustomobject]@{
+        ProcessId = 4243; ExecutablePath = $global:outsideBrowserExe; CommandLine = "$Product\cache"
+        CreationDate = $global:browserFixtureStart
+    }
+    [pscustomobject]@{ ProcessId = 4245; ExecutablePath = $null; CreationDate = $global:browserFixtureStart }
+    if ($global:browserCensuses -eq 1) {
+        [pscustomobject]@{ ProcessId = 4242; ExecutablePath = $global:browserFixtureExe; CreationDate = $global:browserFixtureStart }
+        [pscustomobject]@{
+            ProcessId = 4244; ExecutablePath = $global:browserFixtureExe; CreationDate = $global:browserFixtureStart.AddSeconds(-1)
+        }
+    } elseif ($global:exitedBrowsers.Contains(4242) -and -not $global:exitedBrowsers.Contains(4246)) {
+        [pscustomobject]@{ ProcessId = 4246; ExecutablePath = $global:browserFixtureExe; CreationDate = $global:browserFixtureStart }
+    }
+}
+function Get-Process {
+    [CmdletBinding()]
+    param([int]$Id)
+    if ($Id -eq 4243) { throw 'unowned browser was selected' }
+    $browser = [pscustomobject]@{
+        Id = $Id; HasExited = $false; StopRequested = $false
+        StartTime = if ($Id -ne 4242 -or $global:browserOutcome -ne 'no-start-time') { $global:browserFixtureStart }
+        SafeHandle = if (($Id -ne 4242 -or $global:browserOutcome -ne 'no-handle') -and
+            ($Id -ne 4245 -or $global:browserOutcome -ne 'unreadable-external')) {
+            [pscustomobject]@{ IsClosed = $false; IsInvalid = $false }
+        }
+        Path = if ($Id -eq 4245 -and $global:browserOutcome -ne 'unreadable-external') { $global:outsideBrowserExe }
+    }
+    $browser | Add-Member ScriptMethod Kill {
+        if ($this.Id -notin @(4242, 4246) -or $null -eq $this.SafeHandle -or $null -eq $this.StartTime) {
+            throw 'termination attempted without a pinned owned browser'
+        }
+        $this.StopRequested = $true
+    }
+    $browser | Add-Member ScriptMethod WaitForExit {
+        param([int]$Milliseconds)
+        if ($Milliseconds -le 0 -or $Milliseconds -gt 5000) { throw 'invalid browser exit deadline' }
+        if ($this.Id -eq 4245) { throw 'waited for a browser without ownership evidence' }
+        if (-not $this.StopRequested) { return $false }
+        $this.HasExited = $true
+        $null = $global:exitedBrowsers.Add($this.Id)
+        return $true
+    }
+    $browser | Add-Member ScriptMethod Dispose {}
+    return $browser
+}
+function Stop-Process {
+    [CmdletBinding()]
+    param([int]$Id, [switch]$Force)
+}
 function Start-Process {
     param(
         [string]$FilePath,
@@ -942,7 +1000,7 @@ function Start-Process {
         [switch]$PassThru
     )
     $exeDir = Split-Path -Parent $FilePath
-    $script:productRoot = if (Test-Path (Join-Path $Product 'app/metadata/product-layout.json')) { Split-Path -Parent $exeDir } else { $exeDir }
+    $script:productRoot = if (Test-Path -LiteralPath (Join-Path $Product 'app/metadata/product-layout.json')) { Split-Path -Parent $exeDir } else { $exeDir }
     $script:userData = [IO.Path]::GetFullPath((Join-Path (Join-Path $script:productRoot 'state') (Join-Path 'webview2-fixed' '__LOCKED_VERSION__')))
     $script:browserExe = [IO.Path]::GetFullPath((Join-Path (Join-Path $exeDir 'WebView2Runtime') 'msedgewebview2.exe'))
     New-Item -ItemType Directory -Path $script:userData -Force | Out-Null
@@ -975,6 +1033,9 @@ function Start-Process {
 }
 $env:VIBEOCR_SELF_TEST_INSTANCE = 'outer-test-scope'
 & $Smoke -ProductRoot $Product -ReuseUnpackedProduct
+if (-not $global:exitedBrowsers.SetEquals([int[]]@(4242, 4246)) -or $global:browserCensuses -lt 3) {
+    throw 'unpack owner resumed before all owned browsers, including a late helper, exited'
+}
 if ($env:VIBEOCR_SELF_TEST_INSTANCE -ne 'outer-test-scope') {
     throw 'smoke did not restore the caller instance scope'
 }
@@ -983,7 +1044,7 @@ $global:webViewCleanupAttempts | Set-Content -LiteralPath $Cleanup
 
 
 def _run_reuse_smoke(
-    tmp_path: Path, product: Path, temp_base: Path
+    tmp_path: Path, product: Path, temp_base: Path, *, browser_outcome: str = "success"
 ) -> subprocess.CompletedProcess[str]:
     root = Path(__file__).parents[2]
     launch = tmp_path / "launch.json"
@@ -1006,6 +1067,7 @@ def _run_reuse_smoke(
             str(launch),
             str(cleanup),
             str(removals),
+            browser_outcome,
         ],
         capture_output=True,
         text=True,
@@ -1015,16 +1077,45 @@ def _run_reuse_smoke(
     )
 
 
-def test_web_ready_smoke_reuses_the_release_smoke_unpack_tree_in_place(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("browser_outcome", "reason"),
+    [
+        ("no-handle", "unable to pin a valid process handle"),
+        ("no-start-time", "process creation time is unavailable"),
+    ],
+)
+def test_web_ready_smoke_refuses_to_kill_an_unverified_browser(
+    tmp_path: Path, browser_outcome: str, reason: str
 ) -> None:
     temp_base = tmp_path / "temp"
+    current = temp_base / "vibeocr-release-smoke-0a1b2c3d" / "current"
+    current.mkdir(parents=True)
+    _write_installed_product_fixture(current)
+
+    result = _run_reuse_smoke(
+        tmp_path, current, temp_base, browser_outcome=browser_outcome
+    )
+
+    assert result.returncode != 0
+    assert "Cannot establish identity or confirm exit" in result.stderr
+    assert reason in result.stderr
+    assert "termination attempted without a pinned owned browser" not in result.stderr
+    assert (current / "app/VibeOCR.WinUI.exe").is_file()
+
+
+@pytest.mark.parametrize("browser_outcome", ["success", "unreadable-external"])
+def test_web_ready_smoke_reuses_the_release_smoke_unpack_tree_in_place(
+    tmp_path: Path, browser_outcome: str
+) -> None:
+    temp_base = tmp_path / "temp[test]"
     holder = temp_base / "vibeocr-release-smoke-0a1b2c3d"
     current = holder / "current"
     current.mkdir(parents=True)
     _write_installed_product_fixture(current)
 
-    result = _run_reuse_smoke(tmp_path, current, temp_base)
+    result = _run_reuse_smoke(
+        tmp_path, current, temp_base, browser_outcome=browser_outcome
+    )
 
     assert result.returncode == 0, result.stderr
     launch = json.loads((tmp_path / "launch.json").read_text(encoding="utf-8-sig"))

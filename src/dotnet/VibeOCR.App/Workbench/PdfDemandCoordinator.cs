@@ -79,7 +79,7 @@ internal sealed class PdfDemandCoordinator(
   private long epoch, warmBytes, warmPixels;
   private int foregroundWaiters, pending, pendingPeak, ordinaryIssued, ordinaryPeak, backgroundPeak;
   private long warmBytesPeak, warmPixelsPeak, activeImagesPeak, activeBytesPeak, activePixelsPeak, unreclaimedPeak;
-  private bool queued, stopped;
+  private bool queued, stopped, prefetchIssued;
 
   internal PdfDemandDiagnostics Snapshot()
   {
@@ -309,6 +309,68 @@ internal sealed class PdfDemandCoordinator(
         Page = page, Dpi = dpi,
         Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = readEpoch },
       }, CancellationToken.None));
+
+  internal Task<(bool Issued, bool Present)> TryPrefetchPresenceAsync(
+    PdfViewModel model, string id, int page, CancellationToken stop, CancellationToken cancelRun,
+    Func<bool> canSpeculate, Func<bool> ownsTarget) =>
+    TryPrefetchReadAsync(model, id, stop, cancelRun, canSpeculate, (readEpoch, current) =>
+      model.ReadPresenceAsync(id, readEpoch, [page], () => current() && ownsTarget(), prefetch: true));
+
+  internal Task<(bool Issued, byte[] Png)> TryPrefetchPreviewAsync(
+    PdfViewModel model, string id, int page, int dpi, CancellationToken stop, CancellationToken cancelRun, Func<bool> canSpeculate) =>
+    TryPrefetchReadAsync(model, id, stop, cancelRun, canSpeculate, (readEpoch, _) =>
+      model.Inference.RenderPdfPreviewDemandAsync(id, new Wire.RenderPreviewRequest
+      {
+        Page = page, Dpi = dpi,
+        Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = readEpoch },
+      }, CancellationToken.None));
+
+  private async Task<(bool Issued, T Value)> TryPrefetchReadAsync<T>(
+    PdfViewModel model, string id, CancellationToken stop, CancellationToken cancelRun,
+    Func<bool> canSpeculate, Func<long, Func<bool>, Task<T>> call)
+  {
+    await Task.Yield();
+    Session? session = ModelSession(model);
+    if (stop.IsCancellationRequested || !canSpeculate() || stopped || prefetchIssued || foregroundWaiters != 0 ||
+        !model.CanIssueDemandReads || unreclaimed.Count != 0 ||
+        session is null || session != active || session.Id != id || session.Writing || session.Blocked ||
+        session.Foreground || auto == session || PendingAck(session, false) || PendingAck(session, true) ||
+        NextJobs(session).Any() || !ordinary.Wait(0))
+      return (false, default!);
+
+    prefetchIssued = true;
+    EnterOrdinary(session);
+    long readEpoch = session.Background;
+    bool complete = false, revokeAttempted = false;
+    // The end of a batch only stops admission. Run cancellation also revokes queued native reads.
+    bool Current() => !stopped && !session.Writing && model.CanIssueDemandReads &&
+      model.SessionId == id && session.Background == readEpoch && !cancelRun.IsCancellationRequested;
+    void Release() { prefetchIssued = false; LeaveOrdinary(session); }
+    try
+    {
+      using var wake = CancellationTokenSource.CreateLinkedTokenSource(cancelRun);
+      Task<T> pending = call(readEpoch, Current);
+      if (await Task.WhenAny(pending, Task.Delay(Timeout.Infinite, wake.Token)) != pending)
+      {
+        if (session.Background == readEpoch) AdvanceBackground(session);
+        revokeAttempted = true;
+        await EnsureAckAsync(session, viewport: false);
+      }
+      else wake.Cancel();
+      // HTTP remains open until queued revocation or already-admitted native work actually settles.
+      T result = await pending;
+      complete = true;
+      return Current() ? (true, result) : (false, default!);
+    }
+    finally
+    {
+      if (complete || !KeepUntilAcknowledged(session, Wire.PdfReadScope.Background, readEpoch, Release))
+        Release();
+      else if (!revokeAttempted)
+        await EnsureAckAsync(session, viewport: false);
+      Kick();
+    }
+  }
 
   private async Task<T> RunBusinessReadAsync<T>(PdfViewModel model, string id, CancellationToken ct,
     Func<long, Func<bool>, Task<T>> call)

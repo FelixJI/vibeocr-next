@@ -160,6 +160,7 @@ public sealed partial class MainWindow
             entry.frameOpportunityAt = performance.now();
             entry.rafGapMs = entry.frameOpportunityAt - firstFrame;
             entry.superseded = false;
+            if (state.awaiting?.requireClarity) sampleAwaiting(state.awaiting, firstFrame, entry.frameOpportunityAt);
           }));
         }, (error) => {
           if (!isCurrent() || !presenting()) {
@@ -187,25 +188,40 @@ public sealed partial class MainWindow
           runDecode(img, entry);
         }
       }
+      function sampleAwaiting(request, first, at) {
+        if (state.disposed || state.awaiting !== request) return;
+        const img = document.querySelector('.pdf-inspection-sheet img');
+        const facts = currentImgFacts(img);
+        const visibilityState = document.visibilityState;
+        const hasFocus = document.hasFocus();
+        const entry = img?.__t2entry;
+        const dpr = devicePixelRatio;
+        const ok = !!facts && facts.alt.includes(request.alt) &&
+          facts.complete && facts.naturalWidth > 0 && facts.connected && facts.hasLayout &&
+          (!request.requireClarity || (
+            entry && entry.fullSrc === facts.src && !entry.superseded &&
+            entry.decodedAt !== null && entry.frameOpportunityAt !== null &&
+            visibilityState === 'visible' && hasFocus &&
+            facts.clientWidth > 0 && facts.clientHeight > 0 &&
+            facts.naturalWidth + facts.naturalWidth * 0.02 >= facts.clientWidth * dpr &&
+            facts.naturalHeight + facts.naturalHeight * 0.02 >= facts.clientHeight * dpr));
+        const keys = Object.keys(state.pulses);
+        if (keys.length > 32) delete state.pulses[keys[0]];
+        state.pulses[request.tag] = {
+          at, rafGapMs: at - first, matched: Boolean(ok), requestedAlt: request.alt,
+          visibilityState, hasFocus, current: facts,
+          witness: request.requireClarity && ok ? { ...entry } : undefined,
+          dpr: request.requireClarity ? dpr : undefined,
+        };
+        if (ok) state.awaiting = null;
+      }
       function runAwaiting() {
-        if (!state.awaiting || state.disposed) return;
+        const request = state.awaiting;
+        if (!request || state.disposed) return;
         const first = performance.now();
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          const request = state.awaiting;
-          if (!request) return;
-          const img = document.querySelector('.pdf-inspection-sheet img');
-          const facts = currentImgFacts(img);
-          const ok = !!facts && facts.alt.includes(request.alt) &&
-            facts.complete && facts.naturalWidth > 0 && facts.connected && facts.hasLayout;
-          const keys = Object.keys(state.pulses);
-          if (keys.length > 32) delete state.pulses[keys[0]];
-          state.pulses[request.tag] = {
-            at: performance.now(), rafGapMs: performance.now() - first,
-            matched: ok, requestedAlt: request.alt,
-            visibilityState: document.visibilityState, hasFocus: document.hasFocus(),
-            current: facts,
-          };
-          if (ok) state.awaiting = null; else runAwaiting();
+          sampleAwaiting(request, first, performance.now());
+          if (state.awaiting === request) runAwaiting();
         }));
       }
       const baseline = {
@@ -214,9 +230,9 @@ public sealed partial class MainWindow
           return true;
         },
         setPhase(name) { state.phase = String(name); return true; },
-        awaitFrame(tag, altFragment) {
+        awaitFrame(tag, altFragment, requireClarity = false) {
           if (state.disposed) return false;
-          state.awaiting = { tag: String(tag), alt: String(altFragment) };
+          state.awaiting = { tag: String(tag), alt: String(altFragment), requireClarity };
           runAwaiting();
           return true;
         },
@@ -363,7 +379,8 @@ public sealed partial class MainWindow
 
   private sealed record PdfBaselinePulse(
     double At, double RafGapMs, bool Matched, string RequestedAlt,
-    string VisibilityState, bool HasFocus, PdfBaselineBrowserCurrent? Current);
+    string VisibilityState, bool HasFocus, PdfBaselineBrowserCurrent? Current,
+    PdfBaselineBrowserImage? Witness, double? Dpr);
 
   private sealed record PdfBaselineStateMessagePhase(int Count, long BytesEstimate);
 
@@ -443,27 +460,15 @@ public sealed partial class MainWindow
         value.GetProperty("visibilityState").GetString() ?? "",
         value.GetProperty("hasFocus").GetBoolean(),
         value.TryGetProperty("current", out JsonElement current) && current.ValueKind == JsonValueKind.Object
-          ? ReadCurrent(current) : null);
+          ? ReadCurrent(current) : null,
+        value.TryGetProperty("witness", out JsonElement witness) && witness.ValueKind == JsonValueKind.Object
+          ? ReadImage(witness) : null,
+        OptionalNumber(value, "dpr"));
     }
     var images = new List<PdfBaselineBrowserImage>();
     foreach (JsonElement image in root.GetProperty("images").EnumerateArray())
     {
-      images.Add(new PdfBaselineBrowserImage(
-        image.GetProperty("alt").GetString() ?? "",
-        image.GetProperty("fullSrc").GetString() ?? "",
-        image.GetProperty("srcSetAt").GetDouble(),
-        OptionalNumber(image, "decodedAt"),
-        OptionalNumber(image, "frameOpportunityAt"),
-        OptionalText(image, "decodeError"),
-        image.GetProperty("superseded").GetBoolean(),
-        (int)image.GetProperty("naturalWidth").GetDouble(),
-        (int)image.GetProperty("naturalHeight").GetDouble(),
-        OptionalInt(image, "clientWidth"),
-        OptionalInt(image, "clientHeight"),
-        OptionalNumber(image, "dprAtFrame"),
-        OptionalText(image, "visibilityAtFrame"),
-        image.TryGetProperty("hasFocusAtFrame", out JsonElement focus) && focus.ValueKind == JsonValueKind.True ? true
-          : image.TryGetProperty("hasFocusAtFrame", out JsonElement focusFalse) && focusFalse.ValueKind == JsonValueKind.False ? false : null));
+      images.Add(ReadImage(image));
     }
     var phases = new Dictionary<string, PdfBaselineStateMessagePhase>();
     foreach (JsonProperty phase in root.GetProperty("stateMessages").GetProperty("phases").EnumerateObject())
@@ -528,6 +533,23 @@ public sealed partial class MainWindow
       root.GetProperty("dpr").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("width").GetDouble(),
       (int)root.GetProperty("viewport").GetProperty("height").GetDouble());
+
+    static PdfBaselineBrowserImage ReadImage(JsonElement image) => new(
+      image.GetProperty("alt").GetString() ?? "",
+      image.GetProperty("fullSrc").GetString() ?? "",
+      image.GetProperty("srcSetAt").GetDouble(),
+      OptionalNumber(image, "decodedAt"),
+      OptionalNumber(image, "frameOpportunityAt"),
+      OptionalText(image, "decodeError"),
+      image.GetProperty("superseded").GetBoolean(),
+      (int)image.GetProperty("naturalWidth").GetDouble(),
+      (int)image.GetProperty("naturalHeight").GetDouble(),
+      OptionalInt(image, "clientWidth"),
+      OptionalInt(image, "clientHeight"),
+      OptionalNumber(image, "dprAtFrame"),
+      OptionalText(image, "visibilityAtFrame"),
+      image.TryGetProperty("hasFocusAtFrame", out JsonElement focus) && focus.ValueKind == JsonValueKind.True ? true
+        : image.TryGetProperty("hasFocusAtFrame", out JsonElement focusFalse) && focusFalse.ValueKind == JsonValueKind.False ? false : null);
 
     static PdfBaselineBrowserCurrent ReadCurrent(JsonElement current) => new(
       current.GetProperty("alt").GetString() ?? "",
@@ -608,7 +630,8 @@ public sealed partial class MainWindow
 
   private async Task<PdfBaselineImageWait> WaitForPdfBaselineImageAsync(
     string phase, int expectedPageIndex, string afterMark, string pulseTag,
-    TimeSpan timeout, bool requireNew, bool requireClarity = false, bool requireLandscape = false)
+    TimeSpan timeout, bool requireNew, bool requireClarity = false, bool requireLandscape = false,
+    bool captureFirstClearFrame = false)
   {
     string altFragment = $"第 {expectedPageIndex + 1} 页";
     using var cancellation = new CancellationTokenSource(timeout);
@@ -631,20 +654,30 @@ public sealed partial class MainWindow
       // 帧见证当前性：pulse 必须在动作 mark 之后，且其 src 与当前 DOM src 一致；
       // witness 的 FullSrc 也必须与当前 DOM src 完全一致，不拿旧 pulse/旧图配新图。
       PdfBaselinePulse? pulse = null;
-      if (snapshot.Pulses.TryGetValue(pulseTag, out var candidatePulse)
+      snapshot.Pulses.TryGetValue(pulseTag, out var candidatePulse);
+      // T3 使用浏览器冻结的首清晰帧；之后的 DOM 换图不改写该时间。
+      PdfBaselineBrowserCurrent? current = captureFirstClearFrame ? candidatePulse?.Current : snapshot.Current;
+      if (candidatePulse is not null && (!captureFirstClearFrame || !double.IsNaN(markValue))
           && candidatePulse.At >= (double.IsNaN(markValue) ? double.NegativeInfinity : markValue)
           && candidatePulse.Matched
           && candidatePulse.Current is { Complete: true, NaturalWidth: > 0, HasLayout: true }
-          && snapshot.Current is { } liveNow
-          && liveNow.Alt.Contains(altFragment, StringComparison.Ordinal)
-          && candidatePulse.Current.Src == liveNow.Src)
+          && current is not null &&
+          current.Alt.Contains(altFragment, StringComparison.Ordinal) &&
+          candidatePulse.Current.Src == current.Src)
         pulse = candidatePulse;
-      bool liveMatches = snapshot.Current is { } live2
-        && live2.Alt.Contains(altFragment, StringComparison.Ordinal) && live2.Complete
-        && live2.NaturalWidth > 0;
-      PdfBaselineBrowserImage? currentWitness = matching
-        .Where(image => image.FullSrc == snapshot.Current?.Src)
-        .OrderByDescending(image => image.SrcSetAt).FirstOrDefault();
+      bool liveMatches = current is not null && current.Alt.Contains(altFragment, StringComparison.Ordinal) &&
+        current.Complete && current.NaturalWidth > 0;
+      PdfBaselineBrowserImage? currentWitness = captureFirstClearFrame
+        ? pulse?.Witness
+        : matching.Where(image => image.FullSrc == current?.Src)
+            .OrderByDescending(image => image.SrcSetAt).FirstOrDefault();
+      if (captureFirstClearFrame)
+      {
+        if (currentWitness is not { DecodedAt: not null, FrameOpportunityAt: not null, Superseded: false } ||
+            currentWitness.FullSrc != current?.Src || pulse?.Dpr is not > 0)
+          currentWitness = null;
+        firstNew = currentWitness?.SrcSetAt >= markValue ? currentWitness : null;
+      }
       // pulse 必须不早于当前 witness 的帧机会：防止旧 pulse（React 更新前的帧，
       // 尺寸/布局可能不同）配新 witness；不满足则走重发帧请求路径。firstNew
       // 仍取 mark 后最早事件，不因当前 src 升级错失首图。
@@ -657,7 +690,7 @@ public sealed partial class MainWindow
       {
         return new PdfBaselineImageWait(firstNew, currentWitness, snapshot, pulse, firstNew is not null);
       }
-      if ((DateTime.UtcNow - lastFrameRequest).TotalMilliseconds >= 500)
+      if (!captureFirstClearFrame && (DateTime.UtcNow - lastFrameRequest).TotalMilliseconds >= 500)
       {
         // pulse 缺失/过期/src 不一致：重发帧请求（页面侧会重试到当前帧）。
         await RequestPdfBaselineFrameAsync(pulseTag, expectedPageIndex);
@@ -801,7 +834,7 @@ public sealed partial class MainWindow
     PdfBaselineBrowserSnapshot snapshot, double dprFallback)
   {
     PdfBaselineBrowserCurrent? live = pulse.Current?.Src == witness.FullSrc ? pulse.Current : null;
-    double dpr = witness.DprAtFrame ?? dprFallback;
+    double dpr = pulse.Dpr ?? witness.DprAtFrame ?? dprFallback;
     int clientWidth = live?.ClientWidth ?? witness.ClientWidth ?? 0;
     int clientHeight = live?.ClientHeight ?? witness.ClientHeight ?? 0;
     int naturalWidth = live is { NaturalWidth: > 0 } ? live.NaturalWidth : witness.NaturalWidth;
