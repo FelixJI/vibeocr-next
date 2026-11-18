@@ -226,6 +226,77 @@ public sealed class PdfDemandCoordinatorTests
   [Theory]
   [InlineData(false)]
   [InlineData(true)]
+  public Task UnknownNextPageNeverQueuesTargetedPresenceAheadOfTheViewport(bool geometryMissing) =>
+    OnDispatcherAsync(async () =>
+  {
+    var client = new Client(9);
+    var previousJob = NewGate();
+    var prefixRendered = NewGate();
+    var viewportQueued = NewGate();
+    using var nativeGate = new SemaphoreSlim(0, 1);
+    bool nativeHeld = true;
+    void ReleaseNativeHolder()
+    {
+      if (!nativeHeld) return;
+      nativeHeld = false;
+      nativeGate.Release();
+    }
+    var nativeOrder = new List<string>();
+    client.BeforeObserve = (id, ct) => id == "job-0" ? previousJob.Task.WaitAsync(ct) : Task.CompletedTask;
+    client.BeforeExplicitPresence = async pages =>
+    {
+      if (!pages.Contains(5)) return;
+      await nativeGate.WaitAsync(Ct);
+      nativeOrder.Add("presence");
+      nativeGate.Release();
+    };
+    client.OnImage = async (_, kind, index) =>
+    {
+      if (kind == "ocr" && index == 4) prefixRendered.TrySetResult();
+      if (kind == "preview" && index == 8 && viewportQueued.TrySetResult())
+      {
+        await nativeGate.WaitAsync(Ct);
+        nativeOrder.Add("viewport");
+        nativeGate.Release();
+      }
+      return Client.Png;
+    };
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("presence-priority.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await WaitUntilAsync(() => model.DetectedCount == 9);
+      await fixture.SelectReadyAsync(0);
+      if (geometryMissing) model.Pages[5].Width = 0;
+      else model.Pages[5].DetectionState = PdfDetectionState.Unknown;
+
+      Task run = model.StartOcrAsync(Enumerable.Range(0, 8).ToArray(), false, Ct, addTextLayer: true);
+      await prefixRendered.Task.WaitAsync(Timeout, Ct);
+      // Page 4's response completed synchronously; allow the prefetch continuation
+      // to reach page 5 while the simulated native slot is still held.
+      await Task.Yield();
+      Task<PdfWorkbenchState> viewport = fixture.SelectReadyAsync(8);
+      await viewportQueued.Task.WaitAsync(Timeout, Ct);
+      Assert.Empty(client.ExplicitPresence);
+      Assert.Empty(nativeOrder);
+      ReleaseNativeHolder();
+      await viewport.WaitAsync(Timeout, Ct);
+      Assert.Equal("viewport", Assert.Single(nativeOrder));
+      Assert.Single(client.Submitted);
+
+      previousJob.TrySetResult();
+      await run.WaitAsync(Timeout, Ct);
+      Assert.Equal(new[] { 5 }, Assert.Single(client.ExplicitPresence));
+      Assert.Equal(new[] { "viewport", "presence" }, nativeOrder);
+      Assert.Equal(Enumerable.Range(0, 8), client.Written);
+    }
+    finally { ReleaseNativeHolder(); previousJob.TrySetResult(); }
+  });
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
   public Task CancellingOcrRevokesQueuedSpeculationOrDrainsAdmittedRead(bool queued) => OnDispatcherAsync(async () =>
   {
     var client = new Client(13);
@@ -1041,6 +1112,7 @@ public sealed class PdfDemandCoordinatorTests
     internal Func<int, Task<Wire.PageInspectResponse>>? OnInspect;
     internal Func<string, Wire.PdfReadCancelRequest, Task>? OnAck;
     internal Func<string, Wire.RenderPreviewRequest, Task<byte[]>>? OnDemandPreview;
+    internal Func<int[], Task>? BeforeExplicitPresence;
     internal Func<string, CancellationToken, Task>? BeforeObserve;
     internal Action<string>? BeforeForget;
     internal int OwnedJobs => jobs.Count;
@@ -1100,7 +1172,12 @@ public sealed class PdfDemandCoordinatorTests
         Autos.Writer.TryWrite(session);
         if (OnAuto is { } gate) await gate(session);
       }
-      else ExplicitPresence.Enqueue(request.Pages.ToArray());
+      else
+      {
+        int[] requested = request.Pages.ToArray();
+        ExplicitPresence.Enqueue(requested);
+        if (BeforeExplicitPresence is { } gate) await gate(requested);
+      }
       int[] target = request.Pages?.ToArray() ?? Enumerable.Range(0, pages).ToArray();
       for (int i = 0; i < target.Length; i++)
         progress(JsonSerializer.SerializeToElement(new { phase = "load", current = i + 1, total = target.Length, page_payload = Page(target[i]) }));

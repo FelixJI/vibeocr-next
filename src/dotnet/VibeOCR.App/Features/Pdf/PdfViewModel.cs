@@ -584,7 +584,7 @@ public sealed class PdfViewModel(
           Phase = "ocr"; Progress();
           InferenceJobRun job = await _jobs.RunRecognitionAsync("OCR", JobPriority.Background,
             [new InferenceUploadInput($"page-{index}", $"page-{index + 1}.png", "image/png", image)],
-            options, run.Token, OcrEngine.PaddleOcr, waitForCancellation: true,
+            options, run.Token, OcrEngine.PaddleOcr, settleOnCancellation: true,
             submitted: jobRef => RecordDocumentJob(session, jobRef),
             terminalObserved: snapshot => ConfirmDocumentJob(session, snapshot));
           run.Token.ThrowIfCancellationRequested();
@@ -758,7 +758,7 @@ public sealed class PdfViewModel(
         if (batch.Count == 0) continue;
         SetOcrProgress("ocr", 0, batch.Count);
         Task<InferenceJobRun> recognition = _jobs.RunRecognitionAsync(pipeline, JobPriority.Background, inputs,
-            options: options, cancellationToken: run.Token, engine: engine, waitForCancellation: true,
+            options: options, cancellationToken: run.Token, engine: engine, settleOnCancellation: true,
             progress: snapshot =>
             {
               if (generation == Volatile.Read(ref _generation))
@@ -1615,23 +1615,14 @@ public sealed class PdfViewModel(
         throw new InvalidOperationException("PDF OCR target page identity changed.");
       }
       PdfPageViewModel page = Pages[target.Index];
+      // Targeted presence uses foreground native admission. Leave unknown pages
+      // and the remaining suffix for current-batch preparation.
+      if (speculative && (page.DetectionState != PdfDetectionState.Known || !page.HasReliableGeometry)) return;
       long generation = page.ContentGeneration;
       var prepared = new PreparedOcrPage(target, generation);
       try
       {
-        bool ready = present;
-        if (speculative && (page.DetectionState != PdfDetectionState.Known || !page.HasReliableGeometry))
-        {
-          var presence = await _demand!.TryPrefetchPresenceAsync(this, session, target.Index, stop, cancelRun, canSpeculate!);
-          if (!presence.Issued) return;
-          ready = presence.Present;
-        }
-        if (!Owns(target) || page.ContentGeneration != generation)
-        {
-          if (speculative) return;
-          throw new InvalidOperationException("PDF OCR target page content changed.");
-        }
-        if (ready)
+        if (present)
         {
           if (skipExisting && page.HasTextLayer) prepared = prepared with { Skipped = true };
           else
@@ -1704,9 +1695,9 @@ public sealed class PdfViewModel(
     return ok;
   }
 
-  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current, bool speculative = false)
+  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current)
   {
-    bool foreground = pages is not null && !speculative;
+    bool foreground = pages is not null;
     int[] targets = pages ?? Enumerable.Range(0, Pages.Count)
       .Where(index => Pages[index].DetectionState is PdfDetectionState.Unknown or PdfDetectionState.Detecting)
       .ToArray();

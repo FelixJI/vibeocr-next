@@ -310,23 +310,8 @@ internal sealed class PdfDemandCoordinator(
         Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = readEpoch },
       }, CancellationToken.None));
 
-  internal Task<(bool Issued, bool Present)> TryPrefetchPresenceAsync(
-    PdfViewModel model, string id, int page, CancellationToken stop, CancellationToken cancelRun, Func<bool> canSpeculate) =>
-    TryPrefetchReadAsync(model, id, stop, cancelRun, canSpeculate, (readEpoch, current) =>
-      model.ReadPresenceAsync(id, readEpoch, [page], current, speculative: true));
-
-  internal Task<(bool Issued, byte[] Png)> TryPrefetchPreviewAsync(
-    PdfViewModel model, string id, int page, int dpi, CancellationToken stop, CancellationToken cancelRun, Func<bool> canSpeculate) =>
-    TryPrefetchReadAsync(model, id, stop, cancelRun, canSpeculate, (readEpoch, _) =>
-      model.Inference.RenderPdfPreviewDemandAsync(id, new Wire.RenderPreviewRequest
-      {
-        Page = page, Dpi = dpi,
-        Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = readEpoch },
-      }, CancellationToken.None));
-
-  private async Task<(bool Issued, T Value)> TryPrefetchReadAsync<T>(
-    PdfViewModel model, string id, CancellationToken stop, CancellationToken cancelRun,
-    Func<bool> canSpeculate, Func<long, Func<bool>, Task<T>> call)
+  internal async Task<(bool Issued, byte[] Png)> TryPrefetchPreviewAsync(
+    PdfViewModel model, string id, int page, int dpi, CancellationToken stop, CancellationToken cancelRun, Func<bool> canSpeculate)
   {
     await Task.Yield();
     Session? session = ModelSession(model);
@@ -348,7 +333,11 @@ internal sealed class PdfDemandCoordinator(
     try
     {
       using var wake = CancellationTokenSource.CreateLinkedTokenSource(cancelRun);
-      Task<T> pending = call(readEpoch, Current);
+      Task<byte[]> pending = model.Inference.RenderPdfPreviewDemandAsync(id, new Wire.RenderPreviewRequest
+      {
+        Page = page, Dpi = dpi,
+        Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = readEpoch },
+      }, CancellationToken.None);
       if (await Task.WhenAny(pending, Task.Delay(Timeout.Infinite, wake.Token)) != pending)
       {
         if (session.Background == readEpoch) AdvanceBackground(session);
@@ -357,7 +346,7 @@ internal sealed class PdfDemandCoordinator(
       }
       else wake.Cancel();
       // HTTP remains open until queued revocation or already-admitted native work actually settles.
-      T result = await pending;
+      byte[] result = await pending;
       complete = true;
       return Current() ? (true, result) : (false, default!);
     }

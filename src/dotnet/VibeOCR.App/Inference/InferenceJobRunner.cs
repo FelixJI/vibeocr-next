@@ -37,7 +37,7 @@ internal sealed class InferenceJobRunner(IInferenceClient inference, Func<Cancel
         CancellationToken cancellationToken = default,
         OcrEngine? engine = null,
         MineruConfig? mineru = null,
-        bool waitForCancellation = false,
+        bool settleOnCancellation = false,
         Action<JobSnapshot>? progress = null,
         Action<JobRef>? submitted = null,
         Action<JobSnapshot>? terminalObserved = null)
@@ -94,8 +94,15 @@ internal sealed class InferenceJobRunner(IInferenceClient inference, Func<Cancel
         JobRef? job = null;
         try
         {
-            job = await inference.SubmitAsync(request, uploads, cancellationToken);
+            // PDF owns the job until document close. Once submitted, keep waiting
+            // for its identity so cancellation can revoke and drain the right job.
+            if (settleOnCancellation)
+                cancellationToken.ThrowIfCancellationRequested();
+            job = await inference.SubmitAsync(request, uploads,
+                settleOnCancellation ? CancellationToken.None : cancellationToken);
             submitted?.Invoke(job);
+            if (settleOnCancellation)
+                cancellationToken.ThrowIfCancellationRequested();
             IReadOnlyDictionary<string, string> clientKeyByItemId =
                 ValidateAndIndexJobRef(job, inputs);
             var outcomes = new Dictionary<string, ItemOutcome>(StringComparer.Ordinal);
@@ -152,7 +159,7 @@ internal sealed class InferenceJobRunner(IInferenceClient inference, Func<Cancel
             if (job is not null)
             {
                 await TryCancelAsync(job.JobId);
-                if (waitForCancellation)
+                if (settleOnCancellation)
                 {
                     // PDF 写门只在 supervisor 确认终态后释放。
                     while (true)
