@@ -322,6 +322,7 @@ public sealed partial class MainWindow
       throw new InvalidOperationException("Expected one confirmed save-as operation for the PDF session.");
 
     RecordPaddleSmokeStage($"pdf pipeline {label}: close");
+    long closeAt = PdfBaselineNow();
     await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(
       state => state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0, TimeSpan.FromSeconds(30));
@@ -339,6 +340,7 @@ public sealed partial class MainWindow
         pick_confirm_to_ready = PdfBaselineElapsedMs(pickAt, readyAt),
         ocr_to_terminal = PdfBaselineElapsedMs(ocrAt, terminalAt),
         save_as = PdfBaselineElapsedMs(saveAt, savedAt),
+        close_to_released = PdfBaselineElapsedMs(closeAt, closedAt),
       },
       utc_windows = new
       {

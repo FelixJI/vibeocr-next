@@ -358,14 +358,14 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
         try { if (!await flushPdfPreview(entry.Id)) return false; }
         finally { pdfClosingPreviewDrain = null; }
       }
-      if (entry.HasUnsubmittedDraft)
+      if (!entry.Model.HasPendingResultCleanup && entry.HasUnsubmittedDraft)
       {
         // 保存只包含已提交 PDF；必须先明确放弃局部草稿，不能伪称保存了草稿。
         if (await confirmPdfClose(entry) != PdfCloseDecision.Discard) return false;
         discardedDraft = entry.Preview;
         entry.Preview = entry.Preview with { Block = null, Draft = "", OriginalText = null };
       }
-      if (entry.Model.IsModified)
+      if (!entry.Model.HasPendingResultCleanup && entry.Model.IsModified)
       {
         PdfCloseDecision decision = await confirmPdfClose(entry);
         if (decision == PdfCloseDecision.Cancel) return false;
@@ -383,11 +383,16 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       Interlocked.Increment(ref pdfGeneration);
       return true;
     }
-    catch (Exception error) { entry.CloseError = error.Message; return false; }
+    catch (Exception error)
+    {
+      if (entry.Model.HasPendingResultCleanup && pdfWorkspace.Active == entry) ReleasePdfWindowResources();
+      entry.CloseError = error.Message;
+      return false;
+    }
     finally
     {
       // 取消后续模型确认或远端关闭失败时保留草稿；仅关闭成功才真正丢弃。
-      if (!closed && discardedDraft is not null) entry.Preview = discardedDraft;
+      if (!closed && !entry.Model.HasPendingResultCleanup && discardedDraft is not null) entry.Preview = discardedDraft;
       entry.Closing = false;
       if (ActivePdf is { } active) operations.Publish(PdfState(active));
     }
@@ -641,7 +646,7 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
   {
     // 纯预览状态命令：按修订/页码校验后写入所属条目，过期迟到值直接忽略；
     // 不回发状态，避免高频位置更新每条都回声完整 PDF 状态。
-    if (PdfEntry is not { } entry) return null;
+    if (PdfEntry is not { } entry || entry.Model.HasPendingResultCleanup) return null;
     if (command.Position.Revision != entry.Model.Revision ||
       command.Position.Page < 0 || command.Position.Page >= entry.Model.PageCount) return null;
     entry.Preview = command.Position;
@@ -727,9 +732,11 @@ internal sealed class WorkbenchPdfOwner(Func<PdfDocumentEntry, Task<PdfCloseDeci
       demand is null ? pdfPagePreview : demand.Preview,
       demand is null ? pdfPageInspect : demand.Inspect,
       demand?.InspectStatus ?? pdfPageInspectStatus, viewModel.SessionId, viewModel.CanInspectPage, viewModel.CanCorrectText,
-      PdfEntry?.Id, pdfWorkspace.Documents.Where(entry => entry.Model.HasRemoteSession || entry.Model.IsBusy).Select(entry => new PdfDocumentSummary(entry.Id,
-        entry.DisplayName, entry.Model.PageCount, entry.Model.IsModified,
-        entry.Model.IsBusy || entry.Model.IsSettling, entry.Model.Phase, entry.CloseError is not null)).ToArray(),
+      PdfEntry?.Id, pdfWorkspace.Documents
+        .Where(entry => entry.Model.HasRemoteSession || entry.Model.IsBusy || entry.Model.HasPendingResultCleanup)
+        .Select(entry => new PdfDocumentSummary(entry.Id, entry.DisplayName, entry.Model.PageCount, entry.Model.IsModified,
+          entry.Model.IsBusy || (entry.Model.IsSettling && !entry.Model.HasPendingResultCleanup),
+          entry.Model.Phase, entry.CloseError is not null)).ToArray(),
       PdfEntry?.Preview, viewModel.CanCopyExport, pdfWorkspace.Exporting,
       pdfWorkspace.ExportItems.Select(item => new PdfExportSummary(item.DocumentId, item.Name, item.Revision,
         item.Status, item.Output is null ? null : Path.GetFileName(item.Output), item.Error)).ToArray(), pdfWorkspace.ExportGeneration,

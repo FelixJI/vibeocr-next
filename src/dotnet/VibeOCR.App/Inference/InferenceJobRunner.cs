@@ -274,7 +274,7 @@ internal sealed class InferenceJobRunner(IInferenceClient inference, Func<Cancel
         }
     }
 
-    private static bool IsTerminal(JobState state) => state is
+    internal static bool IsTerminal(JobState state) => state is
         JobState.Completed
         or JobState.CompletedWithErrors
         or JobState.Cancelled

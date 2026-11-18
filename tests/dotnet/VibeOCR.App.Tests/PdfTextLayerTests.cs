@@ -104,13 +104,12 @@ public sealed class PdfTextLayerTests
   }
 
   [Theory]
-  [InlineData(false, false)]
-  [InlineData(true, false)]
-  [InlineData(false, true)]
-  public async Task RetiringDocumentDrainsReadbackBeforeForgettingItsJob(bool replace, bool forgetFails)
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task RetiringDocumentDrainsReadbackBeforeForgettingItsJob(bool replace)
   {
     CancellationToken ct = TestContext.Current.CancellationToken;
-    var client = new PdfClient(1) { FailForget = forgetFails };
+    var client = new PdfClient(1);
     var model = new PdfViewModel(client, new Source());
     await model.OpenPathAsync("synthetic.pdf", ct);
     await model.StartOcrAsync([0], false, ct, addTextLayer: true);
@@ -138,6 +137,37 @@ public sealed class PdfTextLayerTests
       Assert.False(model.IsSettling);
     }
     finally { release.TrySetResult(); await read; }
+  }
+
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task ReplacementWaitsForRetryableJobRelease(bool requestAlreadyCommitted)
+  {
+    CancellationToken ct = TestContext.Current.CancellationToken;
+    var client = new PdfClient(1);
+    var model = new PdfViewModel(client, new Source());
+    await model.OpenPathAsync("first.pdf", ct);
+    await model.StartOcrAsync([0], false, ct, addTextLayer: true);
+    client.ForgetError = new IOException("injected forget response loss");
+    client.RemoveJobBeforeError = requestAlreadyCommitted;
+
+    await model.OpenPathAsync("replacement.pdf", ct);
+    Assert.Equal(1, client.OpenCalls);
+    Assert.Equal(1, client.CloseCalls);
+    Assert.Null(model.SessionId);
+    Assert.True(model.HasPendingResultCleanup);
+    Assert.True(model.IsModified);
+    Assert.Equal(PdfPageState.Done, Assert.Single(model.Pages).State);
+
+    client.ForgetError = null;
+    await model.OpenPathAsync("replacement.pdf", ct);
+    Assert.Equal(2, client.OpenCalls);
+    Assert.Equal(1, client.CloseCalls);
+    Assert.Equal(0, client.OwnedJobs);
+    Assert.Equal(new[] { "job-1", "job-1" }, client.ForgetAttempts);
+    Assert.False(model.HasPendingResultCleanup);
+    Assert.True(model.HasSession);
   }
 
   [Fact]
@@ -268,10 +298,31 @@ public sealed class PdfTextLayerTests
     Assert.Equal("pdf", model.SessionId);
     Assert.True(model.IsSettling);
     client.FailClose = false;
+    client.FailTerminal = false;
+    bool remoteTerminal = false;
+    var recovery = new List<string>();
+    int initialCancels = client.JobCancelCommands;
+    client.OnObservation = (_, update) =>
+    {
+      recovery.Add(remoteTerminal ? "terminal" : "running");
+      return remoteTerminal ? update : update with { Snapshot = update.Snapshot with { State = JobState.Running }, Outcomes = [] };
+    };
+    await Assert.ThrowsAsync<InvalidOperationException>(() => model.CloseSessionAsync(CancellationToken.None));
+    Assert.True(model.HasPendingResultCleanup);
+    Assert.Equal(new[] { "running", "running" }, recovery);
+    Assert.Equal(initialCancels + 1, client.JobCancelCommands);
+    Assert.Empty(client.ForgetAttempts);
+
+    remoteTerminal = true;
     await model.CloseSessionAsync(CancellationToken.None);
     Assert.False(model.HasSession);
     Assert.False(model.IsSettling);
-    Assert.Empty(client.Forgotten);
+    Assert.False(model.HasPendingResultCleanup);
+    Assert.Equal(new[] { "running", "running", "terminal" }, recovery);
+    Assert.Equal(initialCancels + 1, client.JobCancelCommands);
+    Assert.Equal("job-1", Assert.Single(client.Forgotten));
+    Assert.Equal(0, client.OwnedJobs);
+    Assert.Equal(2, client.CloseCalls);
   }
 
   [Theory]
@@ -370,20 +421,25 @@ public sealed class PdfTextLayerTests
     public List<int> UploadSizes { get; } = [];
     public List<int> Dpis { get; } = [];
     public List<string> Forgotten { get; } = [];
+    public List<string> ForgetAttempts { get; } = [];
     private readonly Dictionary<string, IReadOnlyList<JobItem>> _jobs = [];
+    public int OwnedJobs => _jobs.Count;
     private bool _dirty;
     public int? Angle { get; init; } = 0;
     public TaskCompletionSource? OpenGate { get; init; }
-    public bool FailTerminal { get; init; }
-    public bool FailForget { get; init; }
+    public bool FailTerminal { get; set; }
+    public Exception? ForgetError { get; set; }
+    public bool RemoveJobBeforeError { get; set; }
     public Func<int, byte[]>? PageImage { get; init; }
     public bool FailClose { get; set; }
     public TaskCompletionSource? WriteGate { get; init; }
     public TaskCompletionSource? CancelGate { get; init; }
     public TaskCompletionSource? TerminalGate { get; init; }
-    public bool JobCancelRequested { get; private set; }
+    public bool JobCancelRequested => JobCancelCommands > 0;
+    public int JobCancelCommands { get; private set; }
     public int RotateCalls { get; private set; }
     public int CloseCalls { get; private set; }
+    public int OpenCalls { get; private set; }
     public override Task ClosePdfSessionAsync(string session, CancellationToken ct) { CloseCalls++; if (FailClose) throw new IOException("injected close failure"); return Task.CompletedTask; }
     public Exception? FailSave { get; set; }
     public int SaveCalls { get; private set; }
@@ -393,6 +449,7 @@ public sealed class PdfTextLayerTests
     public override async Task<PdfSessionOpenResult> OpenPdfSessionAsync(string path, string? password, CancellationToken ct)
     {
       Assert.False(ct.CanBeCanceled);
+      OpenCalls++;
       if (OpenGate is not null) await OpenGate.Task;
       return new PdfSessionOpenResult("pdf", count, path, Model());
     }
@@ -430,12 +487,19 @@ public sealed class PdfTextLayerTests
     }
     public override Task<JobCommandResult> CommandAsync(JobCommand command, CancellationToken ct)
     {
-      if (command.Kind == JobCommandKind.Cancel) JobCancelRequested = true;
+      if (command.Kind == JobCommandKind.Cancel) JobCancelCommands++;
       if (command.Kind == JobCommandKind.Forget)
       {
         Assert.True(CloseCalls > 0);
+        ForgetAttempts.Add(command.JobId);
+        if (ForgetError is not null)
+        {
+          if (RemoveJobBeforeError) _jobs.Remove(command.JobId);
+          throw ForgetError;
+        }
+        if (!_jobs.Remove(command.JobId))
+          throw new InferenceClientException(HttpV2ErrorCode.JobNotFound, "job was already released", retryable: false);
         Forgotten.Add(command.JobId);
-        if (FailForget) throw new IOException("injected forget failure");
       }
       return Task.FromResult(new JobCommandResult(command.CommandId, command.Kind, null, null));
     }

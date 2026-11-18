@@ -223,14 +223,18 @@ public sealed class PdfDemandCoordinatorTests
     finally { terminal.TrySetResult(); nextRead.TrySetResult(); }
   });
 
-  [Fact]
-  public Task CancellingOcrDrainsSpeculationAndPreservesEarlierPageOutcomes() => OnDispatcherAsync(async () =>
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public Task CancellingOcrRevokesQueuedSpeculationOrDrainsAdmittedRead(bool queued) => OnDispatcherAsync(async () =>
   {
     var client = new Client(13);
     var speculate = NewGate();
     var nativeRead = NewGate();
+    var revoked = NewGate();
     var remoteTerminal = NewGate();
     var cancelled = NewGate();
+    int nativeRenders = 0;
     client.BeforeObserve = async (id, ct) =>
     {
       if (id != "job-1") return;
@@ -241,9 +245,29 @@ public sealed class PdfDemandCoordinatorTests
     {
       if (kind == "ocr" && page == 8)
       {
+        if (!queued) nativeRenders++;
         speculate.TrySetResult();
         await nativeRead.Task;
       }
+      return Client.Png;
+    };
+    // The queued request owns no native lease. It can finish on the watermark ACK
+    // while the native slot remains held by another request.
+    client.OnDemandPreview = async (session, request) =>
+    {
+      if (!queued || request.Page != 8 || request.Dpi is null)
+        return await client.ReadImageForPreviewAsync(session, request);
+      long epoch = Assert.IsType<Wire.PdfReadContext>(request.Read).Epoch;
+      client.OnAck = (_, cutoff) =>
+      {
+        if (cutoff.Scope == Wire.PdfReadCancelScope.Background && cutoff.BeforeEpoch > epoch)
+          revoked.TrySetResult();
+        return Task.CompletedTask;
+      };
+      speculate.TrySetResult();
+      if (await Task.WhenAny(nativeRead.Task, revoked.Task) == revoked.Task)
+        throw new IOException("old epoch revoked before acquiring native gate");
+      nativeRenders++;
       return Client.Png;
     };
     client.FailPage = "page-0";
@@ -259,15 +283,16 @@ public sealed class PdfDemandCoordinatorTests
       model.Cancel();
       await cancelled.Task.WaitAsync(Timeout, Ct);
       remoteTerminal.TrySetResult();
-      await Task.Yield();
-      Assert.False(run.IsCompleted);
-      Assert.True(model.IsSettling);
-      Assert.Equal(new[] { 1, 2, 3 }, client.Written);
-      Assert.Equal(PdfPageState.Failed, model.Pages[0].State);
-      Assert.All(model.Pages.Skip(1).Take(3), page => Assert.Equal(PdfPageState.Done, page.State));
-
-      nativeRead.TrySetResult();
+      if (!queued)
+      {
+        await Task.Yield();
+        Assert.False(run.IsCompleted);
+        Assert.True(model.IsSettling);
+        nativeRead.TrySetResult();
+      }
       await run.WaitAsync(Timeout, Ct);
+      Assert.Equal(queued ? 0 : 1, nativeRenders);
+      if (queued) Assert.True(revoked.Task.IsCompletedSuccessfully);
       Assert.False(model.IsSettling);
       Assert.True(model.IsModified);
       Assert.Equal(new[] { 1, 2, 3 }, client.Written);
@@ -838,6 +863,54 @@ public sealed class PdfDemandCoordinatorTests
     Assert.Equal(new[] { "ack", "close", "ack", "ack", "close" }, calls);
   });
 
+  [Fact]
+  public Task ClosedPdfKeepsRetryableJobOwnerWithoutRepeatingDirtyAuthorization() => OnDispatcherAsync(async () =>
+  {
+    var client = new Client();
+    int confirms = 0, forgetAttempts = 0;
+    bool connected = false;
+    client.BeforeForget = _ =>
+    {
+      forgetAttempts++;
+      if (!connected) throw new IOException("injected disconnect before forget");
+    };
+    await using var fixture = new Fixture(client, _ =>
+    {
+      confirms++;
+      return Task.FromResult(PdfCloseDecision.Discard);
+    });
+    await fixture.OpenAsync("jobs.pdf");
+    PdfViewModel model = Assert.Single(fixture.Handler.PdfDocuments).Model;
+    await model.StartOcrAsync([0], false, Ct, addTextLayer: true);
+    Assert.True(model.IsModified);
+
+    PdfWorkbenchState pending = await fixture.StateAsync(new ClosePdfCommand());
+    Assert.Null(pending.SessionId);
+    Assert.True(Assert.Single(pending.Documents!).CloseFailed);
+    Assert.True(model.HasPendingResultCleanup);
+    Assert.True(model.IsModified);
+    Assert.Equal(PdfPageState.Done, model.Pages[0].State);
+    Assert.Equal(PdfSaveDisposition.Rejected, (await model.SaveAsync("closed.pdf", Ct)).Disposition);
+    Assert.Equal(1, confirms);
+    Assert.Equal(1, forgetAttempts);
+    Assert.Equal(1, client.OwnedJobs);
+    Assert.Equal("doc-1", Assert.Single(client.Closed));
+
+    await fixture.OpenAsync("other.pdf");
+    PdfWorkbenchState restored = await fixture.OpenAsync("jobs.pdf");
+    Assert.Null(restored.SessionId);
+    Assert.Equal(2, fixture.Handler.PdfDocuments.Count);
+    Assert.Contains(restored.Documents!, doc => doc.CloseFailed);
+    connected = true;
+    PdfWorkbenchState remaining = await fixture.StateAsync(new ClosePdfCommand());
+    Assert.Equal("doc-2", remaining.SessionId);
+    Assert.Single(fixture.Handler.PdfDocuments);
+    Assert.Equal(1, confirms);
+    Assert.Equal(2, forgetAttempts);
+    Assert.Equal(0, client.OwnedJobs);
+    Assert.Equal("doc-1", Assert.Single(client.Closed));
+  });
+
   // Production enters this owner from WinUI's dispatcher. A single reader
   // gives async test continuations the same serialization without a UI window.
   private static async Task OnDispatcherAsync(Func<Task> test)
@@ -967,7 +1040,10 @@ public sealed class PdfDemandCoordinatorTests
     internal Func<int, int, Task<byte[]>>? OnPreview;
     internal Func<int, Task<Wire.PageInspectResponse>>? OnInspect;
     internal Func<string, Wire.PdfReadCancelRequest, Task>? OnAck;
+    internal Func<string, Wire.RenderPreviewRequest, Task<byte[]>>? OnDemandPreview;
     internal Func<string, CancellationToken, Task>? BeforeObserve;
+    internal Action<string>? BeforeForget;
+    internal int OwnedJobs => jobs.Count;
     internal string? FailPage { get; set; }
     internal bool IncludeOpenMirrorRects { get; set; } = true;
     internal int LegacyInspects => Volatile.Read(ref legacyInspects);
@@ -1057,8 +1133,10 @@ public sealed class PdfDemandCoordinatorTests
     public Task<byte[]> RenderPdfPreviewDemandAsync(string session, Wire.RenderPreviewRequest request, CancellationToken ct)
     {
       PreviewRequests.Enqueue((request.Page, request.MaxEdge, request.MaxPixels));
-      return ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page, request.MaxEdge);
+      return OnDemandPreview?.Invoke(session, request) ?? ReadImageForPreviewAsync(session, request);
     }
+    internal Task<byte[]> ReadImageForPreviewAsync(string session, Wire.RenderPreviewRequest request) =>
+      ReadImageAsync(session, request.Dpi is null ? "preview" : "ocr", request.Page, request.MaxEdge);
     public async Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string session, Wire.PageInspectRequest request, CancellationToken ct)
     {
       Inspections.Enqueue(request.Page);
@@ -1126,6 +1204,18 @@ public sealed class PdfDemandCoordinatorTests
             ["preproc_angle"] = JsonSerializer.SerializeToElement(0),
           } }).ToArray(),
       };
+    }
+
+    public override Task<JobCommandResult> CommandAsync(JobCommand command, CancellationToken ct)
+    {
+      if (command.Kind == JobCommandKind.Forget)
+      {
+        BeforeForget?.Invoke(command.JobId);
+        if (!jobs.Remove(command.JobId))
+          throw new InferenceClientException(HttpV2ErrorCode.JobNotFound, "job was already released", retryable: false);
+      }
+      return Task.FromResult(new JobCommandResult(command.CommandId, command.Kind,
+        command.Kind == JobCommandKind.Cancel ? CancelMode.Cooperative : null, null));
     }
 
     public override async Task<Wire.PdfMutationResponse> AddPdfTextLayersAsync(string session, Wire.BatchAddTextLayerRequest request, CancellationToken ct)

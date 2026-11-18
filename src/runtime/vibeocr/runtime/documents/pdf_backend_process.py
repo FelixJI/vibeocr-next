@@ -781,13 +781,13 @@ def render_thumbnail(sid: str, req: RenderThumbnailRequest) -> StreamingResponse
 def render_preview(sid: str, req: RenderPreviewRequest) -> StreamingResponse:
     """渲染预览页,返回 PNG 字节流(直接 fitz Pixmap → PNG)。
 
-    指定 max_edge 时按目标像素长边栅格化，缺省按 DPI。携带 read 时走可撤销
-    前台准入，复制后过期在昂贵编码前丢弃。PIL/PNG 编码在锁外。
+    指定 max_edge 时按目标像素长边栅格化，缺省按 DPI。携带 read 时按域
+    选择可撤销前台或后台准入，复制后过期在编码前丢弃。PIL/PNG 编码在锁外。
     """
     s = _get_registry().get(sid)
     try:
         with (
-            _revocable_read(s, req.read, foreground=True)
+            _revocable_read(s, req.read, foreground=req.read.scope == "viewport")
             if req.read is not None
             else _foreground_native(s)
         ):

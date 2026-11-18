@@ -130,8 +130,9 @@ async def test_targeted_presence_preserves_metadata_and_reports_partial_failure(
     assert events[-1]["current"] == 2 and events[-1]["total"] == 3
 
 
+@pytest.mark.parametrize("scope", ["viewport", "background"])
 def test_revokes_waiter_and_drops_inflight_copy_before_encoding(
-    demand_session, monkeypatch
+    demand_session, monkeypatch, scope
 ):
     s = demand_session
     entered = threading.Event()
@@ -152,7 +153,13 @@ def test_revokes_waiter_and_drops_inflight_copy_before_encoding(
 
     monkeypatch.setattr(backend, "_render_page_pixels", rasterize)
     monkeypatch.setattr(backend, "_encode_png", encoding)
-    read = _read("viewport", 1)
+    read = _read(scope, 1)
+
+    def queued_reads() -> int:
+        if scope == "viewport":
+            return s.native_gate.foreground_waiters
+        return s.native_gate.background_waiters
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         in_native = pool.submit(
             backend.render_preview,
@@ -167,14 +174,16 @@ def test_revokes_waiter_and_drops_inflight_copy_before_encoding(
                 RenderPreviewRequest(page=1, read=read),
             )
             deadline = time.monotonic() + 5
-            while s.native_gate.foreground_waiters != 1 and time.monotonic() < deadline:
+            while queued_reads() != 1 and time.monotonic() < deadline:
                 time.sleep(0.002)
-            assert s.native_gate.foreground_waiters == 1
-            _cancel(s, "viewport", 2)
+            assert queued_reads() == 1
+            if scope == "background":
+                assert s.native_gate.foreground_waiters == 0
+            _cancel(s, scope, 2)
             with pytest.raises(HTTPException, match="409"):
                 queued.result(timeout=5)
             assert not in_native.done()
-            assert s.native_gate.foreground_waiters == 0
+            assert queued_reads() == 0
             assert s.active_ops == 1
         finally:
             release.set()
