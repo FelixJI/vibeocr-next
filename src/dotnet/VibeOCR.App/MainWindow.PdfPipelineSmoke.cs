@@ -241,24 +241,43 @@ public sealed partial class MainWindow
     if (opened.PageCount != pageCount)
       throw new InvalidOperationException("PDF fixture page count does not match the baseline plan.");
     int[] requested = [.. targets, .. skips];
+    int[] allPages = Enumerable.Range(0, pageCount).ToArray();
+    var selectionTimeout = TimeSpan.FromSeconds(30);
+
+    async Task WaitForSelectionAsync(int[] expected, string? deselectedCheckbox = null)
+    {
+      await WaitForPaddlePdfAsync(state => state.SessionId == opened.SessionId &&
+        state.DocumentId == opened.DocumentId && state.SelectedPages?.SequenceEqual(expected) == true,
+        selectionTimeout);
+      // 宿主快照可能先于 React 提交受控复选框和计数。
+      string count = JsonSerializer.Serialize($"已选 {expected.Length} / {pageCount} 页");
+      string dom = $"document.querySelector('.pdf-selection-actions > span')?.textContent?.replace(/\\s+/g, ' ').trim() === {count}";
+      if (deselectedCheckbox is not null)
+        dom += $" && document.querySelector({deselectedCheckbox})?.checked === false";
+      await WaitForSmokeDomAsync(dom, selectionTimeout);
+    }
+
+    RecordPaddleSmokeStage($"pdf pipeline {label}: select pages");
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
     await ClickWorkbenchSmokeButtonAsync("全选页面");
-    await WaitForPaddlePdfAsync(state => state.SelectedPages?.Count == pageCount, TimeSpan.FromSeconds(30));
-    foreach (int page in Enumerable.Range(0, pageCount).Except(requested))
+    await WaitForSelectionAsync(allPages);
+    int[] expectedSelection = allPages;
+    foreach (int page in allPages.Except(requested))
     {
       string selector = JsonSerializer.Serialize($"input[aria-label='选择第 {page + 1} 页']");
-      string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        $"(() => {{ const e = document.querySelector({selector}); if (!e?.checked) return false; e.click(); return true; }})()");
-      if (clicked != "true")
-        throw new InvalidOperationException($"Unable to deselect PDF page {page + 1}.");
-      await WaitForPaddlePdfAsync(state => state.SelectedPages?.Contains(page) == false, TimeSpan.FromSeconds(30));
+      await WaitForSmokeDomAsync(
+        $"(() => {{ const e = document.querySelector({selector}); if (!e?.checked || e.disabled) return false; e.click(); return true; }})()",
+        selectionTimeout);
+      expectedSelection = expectedSelection.Where(index => index != page).ToArray();
+      await WaitForSelectionAsync(expectedSelection, selector);
     }
 
     PdfWorkbenchState selected = await WaitForPaddlePdfAsync(
-      state => !state.IsBusy && state.TaskEngine == mode && state.CanAddTextLayer &&
+      state => state.SessionId == opened.SessionId && state.DocumentId == opened.DocumentId &&
+        !state.IsBusy && state.TaskEngine == mode && state.CanAddTextLayer &&
         state.SelectedPages?.SequenceEqual(requested) == true,
-      TimeSpan.FromSeconds(30));
+      selectionTimeout);
     RecordPaddleSmokeStage($"pdf pipeline {label}: OCR");
     await SetPdfBaselinePhaseAsync($"{label}:ocr");
     long ocrStartUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
