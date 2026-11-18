@@ -705,6 +705,20 @@ describe("PDF workspace identity", () => {
         documentRevision: 8,
       }),
     );
+    const saveAsForSecond =
+      ".pdf-page:has(.pdf-documents button:nth-child(2)[aria-pressed='true']) " +
+      "button[data-document-id='second'][data-revision='3']";
+    expect(document.querySelector(saveAsForSecond)).toBeNull();
+
+    actions.updatePdf({ documentId: "second", revision: 3 });
+    const saveAs = screen.getByRole("button", { name: "另存为并切换保存目标" });
+    expect(document.querySelector(saveAsForSecond)).toBe(saveAs);
+    fireEvent.click(saveAs);
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.saveAs",
+      documentId: "second",
+      documentRevision: 3,
+    });
     expect(
       screen.getByText(/导出副本保留原文档修改状态和保存目标/),
     ).toBeInTheDocument();

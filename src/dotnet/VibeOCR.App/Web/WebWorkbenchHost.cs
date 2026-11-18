@@ -268,6 +268,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   // Only a successful native apply whose document cannot receive its receipt may bypass the web acknowledgement.
   internal event Action<Guid>? PinSnapshotReceiptLost;
   internal Func<Task>? SmokeBeforePinSnapshotReceipt { get; set; }
+  internal Action<Guid, string>? SmokeObservePdfSaveAs { get; set; }
   internal Func<Uri, IRandomAccessStream, Task>? SmokeBeforeResourceResponse { get; set; }
   internal Action<string, Task>? SmokeResourceRequestStarted { get; set; }
 
@@ -677,6 +678,9 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       WorkbenchCommandEnvelope envelope = WorkbenchBridgeCodec.ParseCommand(
         message,
         activeSession);
+      Action<Guid, string>? observeSaveAs = envelope.Command is SavePdfAsCommand or PdfBoundCommand { Command: SavePdfAsCommand }
+        ? SmokeObservePdfSaveAs : null;
+      observeSaveAs?.Invoke(envelope.Id, "received");
       if (fixedRoute is not null && envelope.Command is NavigateWorkbenchCommand)
         throw new WorkbenchBridgeProtocolException("Scene navigation cannot change the workbench route.");
       bool snapshotApply = pinEditRoute && envelope.Command is ApplyPinEditSnapshotCommand;
@@ -697,6 +701,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
             AckImageEditProjectOpenCommand
             ? importDocumentCancellation.Token : lifetime.Token);
         snapshotSucceeded = receipt.Ok;
+        observeSaveAs?.Invoke(envelope.Id, $"receipt={receipt.Error?.Code ?? "ok"}");
       }
       catch (Exception error) when (snapshotApply && error is not OperationCanceledException &&
         OwnsCurrentBridgeDocument(sender, document))

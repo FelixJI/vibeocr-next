@@ -838,11 +838,12 @@ public sealed partial class MainWindow
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelector({JsonSerializer.Serialize(selector)}).click()");
       await WaitForPaddlePdfAsync(state => state.SelectedPages?.SequenceEqual(new[] { page }) == true && state.SelectedPage == page && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
     }
-    async Task ActivateAsync(int index, string documentId)
+    async Task<(int Index, PdfWorkbenchState State)> ActivateAsync(int index, string documentId)
     {
       await WaitForSmokeDomAsync($"document.querySelectorAll('.pdf-documents button').length > {index}", TimeSpan.FromSeconds(30));
       await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync($"document.querySelectorAll('.pdf-documents button')[{index}].click()");
-      await WaitForPaddlePdfAsync(state => state.DocumentId == documentId && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
+      PdfWorkbenchState state = await WaitForPaddlePdfAsync(state => state.DocumentId == documentId && state.PageInspectStatusCode == "pdf.inspect.ready", TimeSpan.FromSeconds(30));
+      return (index, state);
     }
     object? cancelWitness = null;
     string? cancelFirstOutput = null;
@@ -1018,8 +1019,7 @@ public sealed partial class MainWindow
     PdfWorkbenchState completedBatch = await ExportCopiesAsync(cancelDirectory, retry: true);
     if (completedBatch.ExportItems!.Any(item => item.Status != "saved") || completedBatch.Documents!.Any(document => !document.IsModified)) throw new InvalidOperationException("Cancelled batch retry failed or lost modifications.");
     object aSaved = await SaveCurrentWorkspaceTargetAsync(saveTarget);
-    await ActivateAsync(1, bId);
-    object bSaved = await RunPaddlePdfSaveAsync("workspace-b");
+    object bSaved = await RunPaddlePdfSaveAsync("workspace-b", await ActivateAsync(1, bId));
     await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(state => state.Documents?.Count == 1, TimeSpan.FromSeconds(30));
     await ClickWorkbenchSmokeButtonAsync("关闭文档");
@@ -1766,7 +1766,8 @@ public sealed partial class MainWindow
       incomplete };
   }
 
-  private async Task<object> RunPaddlePdfSaveAsync(string? suffix = null)
+  private async Task<object> RunPaddlePdfSaveAsync(string? suffix = null,
+    (int Index, PdfWorkbenchState State)? activation = null)
   {
     string? exportDir = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_EXPORT_DIR");
     if (string.IsNullOrWhiteSpace(exportDir))
@@ -1777,9 +1778,31 @@ public sealed partial class MainWindow
       $"paddle-{RequiredPaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_MODE")}-ui-save{(suffix is null ? "" : "-" + suffix)}.pdf");
     if (File.Exists(target))
       throw new InvalidOperationException($"PDF save target already exists: {target}");
+    string selector = "button";
+    var saveCommands = new List<string>();
+    if (activation is { } active)
+    {
+      // 宿主先发布活动文档，WebView 可能还渲染着同名的旧按钮。
+      selector = FormattableString.Invariant(
+        $".pdf-page:has(.pdf-documents button:nth-child({active.Index + 1})[aria-pressed='true']) button[data-document-id={JsonSerializer.Serialize(active.State.DocumentId)}][data-revision='{active.State.Revision}']");
+      webHost.SmokeObservePdfSaveAs = (id, stage) => saveCommands.Add($"{id}: {stage}");
+    }
     RecordPaddleSmokeStage("save PDF via public picker");
-    await ClickWorkbenchSmokeButtonAsync("另存为并切换保存目标");
-    nint dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+    nint dialog;
+    try
+    {
+      await ClickWorkbenchSmokeButtonAsync("另存为并切换保存目标", selector);
+      dialog = await WaitForPaddleSaveDialogAsync(TimeSpan.FromSeconds(30));
+    }
+    catch (TimeoutException error) when (activation is not null)
+    {
+      string commands = saveCommands.Count == 0 ? "none" : string.Join(", ", saveCommands);
+      throw new TimeoutException($"{error.Message} SaveAs bridge observations: {commands}.", error);
+    }
+    finally
+    {
+      if (activation is not null) webHost.SmokeObservePdfSaveAs = null;
+    }
     try
     {
       await CompletePaddlePickerAsync(dialog, target);
@@ -1932,11 +1955,29 @@ public sealed partial class MainWindow
   private async Task<nint> WaitForPaddleSaveDialogAsync(TimeSpan timeout)
   {
     using var cancellation = new CancellationTokenSource(timeout);
-    while (true)
+    try
     {
-      nint dialog = FindPaddleSaveDialog();
-      if (dialog != 0) return dialog;
-      await Task.Delay(100, cancellation.Token);
+      while (true)
+      {
+        nint dialog = FindPaddleSaveDialog();
+        if (dialog != 0) return dialog;
+        await Task.Delay(100, cancellation.Token);
+      }
+    }
+    catch (OperationCanceledException error) when (cancellation.IsCancellationRequested)
+    {
+      nint main = WinRT.Interop.WindowNative.GetWindowHandle(this);
+      var candidates = new List<string>();
+      var probe = new PaddleSmokeNative.EnumWindowsProc((hwnd, _) =>
+      {
+        if (PaddleSmokeNative.IsWindowVisible(hwnd) && PaddleSmokeNative.GetWindowClassName(hwnd) == "#32770")
+          candidates.Add($"#32770 hwnd=0x{hwnd:X} owner=0x{PaddleSmokeNative.GetWindowLongPtr(hwnd, -8):X}");
+        return candidates.Count < 16;
+      });
+      PaddleSmokeNative.EnumWindows(probe, nint.Zero);
+      GC.KeepAlive(probe);
+      throw new TimeoutException($"Owned picker did not appear after {timeout} (main=0x{main:X}). " +
+        $"Visible dialog windows: {(candidates.Count == 0 ? "none" : string.Join(", ", candidates))}.", error);
     }
   }
 
