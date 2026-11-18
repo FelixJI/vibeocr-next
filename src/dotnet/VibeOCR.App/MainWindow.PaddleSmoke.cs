@@ -373,6 +373,7 @@ public sealed partial class MainWindow
         optionName, optionValue, session, timeoutMinutes),
       "pdf_operations" => await RunPaddlePdfOperationsAsync(mode, fixture, session, timeoutMinutes),
       "pdf_baseline" => await RunPaddlePdfBaselineAsync(mode, fixture, session, timeoutMinutes),
+      "pdf_pipeline" => await RunPaddlePdfPipelineAsync(mode, fixture, session, timeoutMinutes),
       _ => throw new InvalidOperationException($"Unknown Paddle input kind: {kind}"),
     };
   }
