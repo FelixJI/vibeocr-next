@@ -20,9 +20,17 @@ internal static class PdfPipelinePhaseStats
       .Select(request => request.Detail!).ToHashSet(StringComparer.Ordinal);
     return window.Where(request =>
       request.Kind == "job_submit" ||
-      request.Kind == "job_observe" && jobs.Contains(request.Session) ||
+      request.Kind == "job_observe" && request.Purpose != PdfSmokeRequestProbe.ResultReadback && jobs.Contains(request.Session) ||
       request.Session == session && (request.Purpose is "business_presence" or "business_render" ||
         request.Kind == "add_text_layers")).ToArray();
+  }
+
+  internal static PdfSmokeRequestProbe.RequestEvent[] ReadbacksForJobs(
+    IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> window, IEnumerable<string> jobs)
+  {
+    var jobIds = jobs.ToHashSet(StringComparer.Ordinal);
+    return window.Where(request => request.Purpose == PdfSmokeRequestProbe.ResultReadback &&
+      jobIds.Contains(request.Session)).ToArray();
   }
 
   internal static bool CoversPages(IEnumerable<int> actual, IReadOnlyList<int> expected) =>
@@ -177,6 +185,7 @@ public sealed partial class MainWindow
         {
           provider = "Job snapshots identify frozen execution settings; worker diagnostics confirm instantiated session providers.",
           observe = "Host-to-Supervisor polling round-trips. Unchanged polls retain count, sum, minimum and maximum; the exact median is absent when compacted. Native CPU/device wait is NOT_MEASURED.",
+          readback = "Post-terminal Observe transfers are retained separately through document close. The existing JobUpdate does not expose response body size.",
           inputs = "Encoded uploads and IHDR pixels by job. Byte totals are not copy cost or allocated memory.",
           retention = "Terminal job/item facts do not measure their retained memory. Results and _outcomes can reference the same payload.",
           staging = "Post-run staging inventory, when present, excludes transient/native peaks.",
@@ -284,11 +293,11 @@ public sealed partial class MainWindow
     if (!browser.StateMessageListenerAvailable || browser.StateMessageMeasurementErrors != 0)
       throw new InvalidOperationException("PDF browser state measurement failed.");
 
-    var (events, _, _) = probe.Snapshot();
-    var business = PdfPipelinePhaseStats.BusinessRequests(PdfPipelinePhaseStats.Window(events,
+    var (beforeClose, _, _) = probe.Snapshot();
+    var business = PdfPipelinePhaseStats.BusinessRequests(PdfPipelinePhaseStats.Window(beforeClose,
         PdfPipelineProbeTime(ocrAt), PdfPipelineProbeTime(terminalAt)), opened.SessionId);
     PdfPipelineBatch[] batches = ValidatePdfPipelineBatches(business, targets, session.InstanceId, preset);
-    var saveWire = PdfPipelinePhaseStats.Window(events, PdfPipelineProbeTime(saveAt), PdfPipelineProbeTime(savedAt))
+    var saveWire = PdfPipelinePhaseStats.Window(beforeClose, PdfPipelineProbeTime(saveAt), PdfPipelineProbeTime(savedAt))
       .Where(request => request.Session == opened.SessionId && request.Kind == "save_operation").ToArray();
     if (saveWire is not [{ Outcome: "completed", Detail: not null }] || (saveWire[0].Param & 3) != 2)
       throw new InvalidOperationException("Expected one confirmed save-as operation for the PDF session.");
@@ -297,6 +306,10 @@ public sealed partial class MainWindow
     await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(
       state => state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0, TimeSpan.FromSeconds(30));
+    long closedAt = PdfBaselineNow();
+    var (events, _, _) = probe.Snapshot();
+    var readbacks = PdfPipelinePhaseStats.ReadbacksForJobs(PdfPipelinePhaseStats.Window(events,
+      PdfPipelineProbeTime(ocrAt), PdfPipelineProbeTime(closedAt)), batches.Select(batch => batch.Job.JobId));
 
     browser.AllKnownFirst.TryGetValue(opened.SessionId, out var allKnown);
     return new
@@ -323,6 +336,12 @@ public sealed partial class MainWindow
         load_end = PdfBaselineLoadEndReference(events, opened.SessionId, pickAt),
       },
       phases = PdfPipelinePhaseStats.ByKind(business),
+      result_readbacks = new
+      {
+        count = readbacks.Length,
+        stats = PdfPipelinePhaseStats.ByKind(readbacks),
+        response_body_bytes = (long?)null,
+      },
       batches, batch_count = batches.Length,
       largest_job_input_bytes = batches.Max(batch => batch.InputBytes),
       largest_job_input_pixels = batches.Max(batch => batch.InputPixels),
@@ -357,12 +376,23 @@ public sealed partial class MainWindow
     string tag = $"{label}_ocr_page_{page}";
     string selector = JsonSerializer.Serialize($"button[aria-label='检查第 {page + 1} 页']");
     string mark = JsonSerializer.Serialize(tag);
+    string alt = JsonSerializer.Serialize($"第 {page + 1} 页");
     string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-      $"(() => {{ const button = document.querySelector({selector}); if (!button || document.visibilityState !== 'visible' || !document.hasFocus()) return false; button.scrollIntoView({{ block: 'nearest' }}); if (!window.__t2PdfBaseline.mark({mark})) return false; button.click(); return true; }})()");
+      $$"""
+      (() => {
+        const button = document.querySelector({{selector}});
+        if (!button || document.visibilityState !== 'visible' || !document.hasFocus()) return false;
+        button.scrollIntoView({ block: 'nearest' });
+        const observer = window.__t2PdfBaseline;
+        if (!observer?.mark({{mark}}) || !observer.awaitFrame({{mark}}, {{alt}}, true)) return false;
+        button.click();
+        return true;
+      })()
+      """);
     if (clicked != "true")
       throw new InvalidOperationException("Controlled page turn requires a visible and focused workbench.");
     PdfBaselineImageWait wait = await WaitForPdfBaselineImageAsync(
-      tag, page, tag, tag, TimeSpan.FromMinutes(2), requireNew: false, requireClarity: true);
+      tag, page, tag, tag, TimeSpan.FromMinutes(2), requireNew: false, requireClarity: true, captureFirstClearFrame: true);
     var state = await WaitForPaddlePdfAsync(state => state.SelectedPage == page, TimeSpan.FromSeconds(30));
     if (!state.IsBusy || state.SessionId != opened.SessionId || state.DocumentId != opened.DocumentId ||
         wait.Pulse.VisibilityState != "visible" || !wait.Pulse.HasFocus || wait.Snapshot.PublicationsOverflow ||

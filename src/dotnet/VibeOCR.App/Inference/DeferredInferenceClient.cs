@@ -28,6 +28,7 @@ public sealed class InferenceClientNotAttachedException(
 internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
 {
   internal const int MaxEvents = 20000;
+  internal const string ResultReadback = "result_readback";
   internal bool CapturePipeline => capturePipeline;
 
   internal sealed record UploadFact(string ClientItemKey, string Attachment, long Bytes);
@@ -72,6 +73,7 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
   private readonly object _lock = new();
   private readonly List<RequestEvent> _events = [];
   private readonly Dictionary<string, int> _lastObserve = new(StringComparer.Ordinal);
+  private readonly HashSet<string> _observedTerminalJobs = new(StringComparer.Ordinal);
   private bool _overflowed;
   private int _inflight;
   private int _maxInflight;
@@ -93,6 +95,12 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
     {
       _inflight++;
       if (_inflight > _maxInflight) _maxInflight = _inflight;
+      // 业务 Observe 完整返回终态后，PDF 才能建立供回读使用的结果引用。
+      if (compact && _observedTerminalJobs.Contains(session))
+      {
+        pending = pending with { Purpose = ResultReadback };
+        compact = false;
+      }
       if (!compact) slot = AppendEvent(pending);
     }
     try
@@ -184,7 +192,11 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
         finished = finished with { DurationMs = null, Polls = new(1, duration, duration, duration) };
       }
       int observedSlot = AppendEvent(finished);
-      if (observedSlot >= 0) _lastObserve[finished.Session] = observedSlot;
+      if (observedSlot >= 0)
+      {
+        _lastObserve[finished.Session] = observedSlot;
+        if (finished.Job?.Terminal is not null) _observedTerminalJobs.Add(finished.Session);
+      }
     }
   }
 
@@ -200,7 +212,8 @@ internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
   {
     JobSnapshot snapshot = update.Snapshot;
     JobFact? terminal = null;
-    if (!update.More && snapshot.FinishedAt is not null)
+    if (!update.More && snapshot.FinishedAt is not null &&
+        snapshot.State is JobState.Completed or JobState.CompletedWithErrors or JobState.Cancelled or JobState.Failed)
       terminal = new JobFact(snapshot.JobId, snapshot.InstanceId, snapshot.State,
           snapshot.Pipeline?.PipelineId, snapshot.Pipeline?.Engine, snapshot.EnvironmentId,
           snapshot.CreatedAt, snapshot.StartedAt, snapshot.FinishedAt, snapshot.Summary,

@@ -161,6 +161,43 @@ public sealed class DeferredInferenceClientProbeSeamTests
     finally { DeferredInferenceClient.SetPdfSmokeProbe(null); }
   }
 
+  [Fact]
+  public async Task PipelineKeepsPostWriteSequenceZeroReadbackSeparateFromJobCompletion()
+  {
+    var deferred = new DeferredInferenceClient();
+    var inner = new SeamStubInferenceClient();
+    deferred.Attach(inner);
+    var probe = new PdfSmokeRequestProbe(capturePipeline: true);
+    DeferredInferenceClient.SetPdfSmokeProbe(probe);
+    try
+    {
+      var ct = TestContext.Current.CancellationToken;
+      JobRef job = await deferred.SubmitAsync(SubmitRequestOf(1), new Dictionary<string, SubmitUpload>(), ct);
+      JobUpdate running = await inner.ObserveAsync(job.JobId, 0, ct);
+      inner.ObserveUpdate = running with
+      {
+        ThroughSequence = 7,
+        Events = [new StageEvent { Sequence = 7, Stage = "paddle_onnx_snapshot", Detail = new Dictionary<string, JsonElement>() }],
+        Snapshot = running.Snapshot with { State = JobState.Completed, FinishedAt = "2026-11-18T00:00:00Z" },
+      };
+      await deferred.ObserveAsync(job.JobId, 0, ct);
+      await deferred.AddPdfTextLayersAsync("pdf", LayersOf(0) with { Save = false }, ct);
+      await deferred.ObserveAsync(job.JobId, 0, ct);
+
+      var (events, _, _) = probe.Snapshot();
+      var business = PdfPipelinePhaseStats.BusinessRequests(events, "pdf");
+      Assert.Equal(["job_submit", "job_observe", "add_text_layers"], business.Select(request => request.Kind));
+      Assert.NotNull(business[1].Job?.Paddle);
+      Assert.NotNull(business[1].Job?.Terminal);
+      var readback = Assert.Single(PdfPipelinePhaseStats.ReadbacksForJobs(events, [job.JobId]));
+      Assert.Equal(0, readback.Param);
+      Assert.NotNull(readback.Job?.Paddle);
+      Assert.NotNull(readback.DurationMs);
+      Assert.Null(readback.Bytes);
+    }
+    finally { DeferredInferenceClient.SetPdfSmokeProbe(null); }
+  }
+
   [Theory]
   [InlineData("directml", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：trace\nValueError: 没有可用的 DirectML 硬件适配器。\n", true)]
   [InlineData("directml", HttpV2ErrorCode.ValidationError, "无法准备计算设备 directml：trace\nValueError: DmlExecutionProvider 未生效。\n", true)]

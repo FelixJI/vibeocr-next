@@ -191,19 +191,19 @@ function Get-T3WorkerEvidence($Evidence, $App, $Samples, $Starts, $LogLines, [st
         $peak = @{ MonitorDir = $MonitorDir; RootPid = $App.pid; RootCreationFileTime = $App.creation_filetime; Samples = $Samples }
         $openPeak = Read-PdfSmokeMonitorSamples @peak -StartMs $open.start -EndMs $open.end
         $savePeak = Read-PdfSmokeMonitorSamples @peak -StartMs $save.start -EndMs $save.end
+        $ocrPeak = Read-PdfSmokeMonitorSamples @peak -StartMs $ocr.start -EndMs $ocr.end
         $witnesses = @(foreach ($row in $Samples) {
             if ($row.started_at_ms -lt $ocr.start -or $row.at_ms -gt $ocr.end -or $row.at_ms -lt $row.started_at_ms) { continue }
             if ((Test-T3ProcessSample $row $App) -and (Test-T3ProcessSample $row $supervisors[0]) -and
                 (Test-T3ProcessSample $row $worker) -and
                 @($pdfWorkers | Where-Object { Test-T3ProcessSample $row $_ }).Count -eq 1) { $row }
         })
-        $peak.Samples = $witnesses
-        $ocrPeak = if ($witnesses.Count) { Read-PdfSmokeMonitorSamples @peak -StartMs $ocr.start -EndMs $ocr.end }
         $phasePeaks[$pass.label] = @{
             open = $openPeak
             open_gap = if ($null -eq $openPeak) { 'No App sample fully inside the open window.' }
             ocr = $ocrPeak
-            ocr_gap = if ($null -eq $ocrPeak) { 'No OCR sample covers App, Supervisor, PDF and Paddle worker together.' }
+            ocr_complete_role_sample_count = $witnesses.Count
+            ocr_gap = if (-not $witnesses.Count) { 'No OCR sample covers App, Supervisor, PDF and Paddle worker together.' }
             save = $savePeak
             save_gap = if ($null -eq $savePeak) { 'No App sample fully inside the save window.' }
         }
@@ -245,9 +245,7 @@ function Get-T3PerformanceEvidence($Evidence, $Residency) {
     $eligible = 0
     $gaps = @(foreach ($pass in $Evidence.passes) {
         $phase = $Residency.phase_peaks[$pass.label]
-        $reason = if ($null -eq $phase.ocr) {
-            if ($phase.ocr_gap) { $phase.ocr_gap } else { 'Missing OCR process coverage.' }
-        }
+        $reason = if ($phase.ocr_gap) { $phase.ocr_gap } elseif ($null -eq $phase.ocr) { 'Missing OCR process samples.' }
         if ($pass.performance_eligible -ne $true) {
             $frameGap = if ($pass.performance_ineligible_reason) { $pass.performance_ineligible_reason } else { 'first_frame_not_eligible' }
             "$($pass.label): $frameGap"
@@ -358,8 +356,14 @@ if ($SelfCheck) {
     )
     $ep = if ($Provider -eq 'cpu') { 'CPUExecutionProvider' } else { 'DmlExecutionProvider' }
     $line = "[1970-01-01T00:00:00.120+00:00] [stderr] Paddle ONNX request={} available=[] sessions=[{'model': 'D:\cache\test-model', 'providers': ['$ep']}]"
-    $workerProof = Get-T3WorkerEvidence $evidence $app $samples $starts @($line) $monitor
-    if ($workerProof.worker.pid -ne 101 -or $workerProof.phase_peaks.steady.ocr.tree_ws_peak_bytes -ne 2560 -or
+    $early = @{ started_at_ms = 101; at_ms = 104; procs = @(
+        @{ pid = 99; creation_filetime = '1000'; ws_bytes = 4096 }
+        $procs | Where-Object pid -in @(100, 102)
+    ) }
+    $workerProof = Get-T3WorkerEvidence $evidence $app (@($early) + $samples) $starts @($line) $monitor
+    if ($workerProof.worker.pid -ne 101 -or $workerProof.phase_peaks.cold.ocr.tree_ws_peak_bytes -ne 5120 -or
+        $workerProof.phase_peaks.cold.ocr_complete_role_sample_count -ne 1 -or
+        $workerProof.phase_peaks.steady.ocr.tree_ws_peak_bytes -ne 2560 -or
         -not (Get-T3PerformanceEvidence $evidence $workerProof).eligible -or
         $null -ne $workerProof.phase_peaks.cold.open -or -not $workerProof.phase_peaks.cold.open_gap) {
         throw 'The sampled process tree did not bind both OCR windows and leave unobserved phases as gaps.'
@@ -370,7 +374,9 @@ if ($SelfCheck) {
     $evidence.passes[0].performance_eligible = $false
     $evidence.passes[0].performance_ineligible_reason = 'first_frame_not_focused'
     $invalid = Get-T3PerformanceEvidence $evidence $incompleteProof
-    if ($null -ne $incompleteProof.phase_peaks.steady.ocr -or $invalid.eligible -or $invalid.eligible_pass_count -ne 0 -or
+    if ($null -eq $incompleteProof.phase_peaks.steady.ocr -or
+        $incompleteProof.phase_peaks.steady.ocr_complete_role_sample_count -ne 0 -or
+        $invalid.eligible -or $invalid.eligible_pass_count -ne 0 -or
         $invalid.gaps.Count -ne 2 -or (Get-PdfSmokeExitCode @($invalid.state)) -ne 1) {
         throw 'Disjoint process samples or an unfocused first frame passed the performance gate.'
     }
