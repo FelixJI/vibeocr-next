@@ -554,6 +554,146 @@ def draw_workspace_pdfs(out: Path) -> dict[str, object]:
     return entries
 
 
+def _pdf_baseline_background(size: tuple[int, int], index: int) -> Image.Image:
+    """T2 基线共享扫描背景：确定性线条/图形 + 默认字体文字（无系统字体依赖）。"""
+    width, height = size
+    image = Image.new("RGB", (width, height), "#f7f7f4")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    draw.rectangle((0, 0, width - 1, height - 1), outline="#202020", width=3)
+    draw.text((60, 48), f"T2 BASELINE SCAN SHEET {index:03d}", fill="black", font=font)
+    for row in range(18):
+        y = 140 + row * 78
+        draw.line((60, y, width - 60, y), fill="#303030", width=2)
+        draw.text(
+            (60, y + 18),
+            f"line {row:02d} synthetic scan row page {index:03d}",
+            fill="black",
+            spacing=4,
+        )
+    for column, color in ((0, "#3f6fb3"), (1, "#b3452f"), (2, "#3f8f4f")):
+        x = 90 + column * 210
+        draw.rectangle((x, height - 320, x + 150, height - 120), fill=color)
+    draw.ellipse((width - 420, 60, width - 80, 200), outline="#a02020", width=6)
+    return image
+
+
+def _pdf_baseline_badge(page_number: int) -> bytes:
+    """每页唯一的小栅格页码章：保证长扫描件逐页可区分且仍是纯栅格页。"""
+    import io
+
+    image = Image.new("RGB", (300, 110), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((2, 2, 297, 107), outline="black", width=4)
+    draw.text(
+        (24, 40),
+        f"PAGE {page_number:03d}/BASE",
+        fill="black",
+        font=ImageFont.load_default(),
+    )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def draw_pdf_baseline_fixtures(out: Path) -> dict[str, object]:
+    """Goal #325/#327 T2 优化前原生基线观测件（仅合成内容）。
+
+    scan_short：短扫描件；scan_long：≥120 页长扫描件，每页都有真实栅格
+    （共享背景 + 每页唯一页码章，无任何原生文字层）；mixed：扫描/原生/
+    空白混合件。页码章保证页归属可核，不允许把主要空白页冒充长扫描证据。
+    """
+    import io
+
+    import pymupdf
+
+    destination = out / "t2-baseline"
+    destination.mkdir(exist_ok=True)
+    page_size = (1240, 1754)  # A4 @150dpi 栅格背景
+    backgrounds = {
+        index: _pdf_baseline_background(page_size, index) for index in range(4)
+    }
+
+    def add_scan_page(document: pymupdf.Document, number: int) -> None:
+        page = document.new_page(
+            width=page_size[0] / 3, height=page_size[1] / 3
+        )  # 216 DPI 原生尺寸
+        buffer = io.BytesIO()
+        backgrounds[number % len(backgrounds)].save(buffer, format="PNG")
+        page.insert_image(page.rect, stream=buffer.getvalue())
+        page.insert_image(
+            pymupdf.Rect(page.rect.width - 110, 8, page.rect.width - 10, 46),
+            stream=_pdf_baseline_badge(number),
+        )
+
+    entries: dict[str, object] = {}
+    long_pages = 120
+    for name, count in (("scan_short.pdf", 6), ("scan_long.pdf", long_pages)):
+        with pymupdf.open() as document:
+            for number in range(1, count + 1):
+                add_scan_page(document, number)
+            document.save(destination / name, deflate=True)
+        entries[f"t2-baseline/{name}"] = {
+            "purpose": "T2 基线长扫描件（每页真实栅格）"
+            if count == long_pages
+            else "T2 基线短扫描件",
+            "pages": count,
+            "raster_pages": list(range(count)),
+            "native_text_pages": [],
+            "blank_pages": [],
+            "shared_backgrounds": len(backgrounds),
+            "unique_page_badges": count,
+            "synthetic_only": True,
+        }
+    # 受控浏览独立样本：后台尚未到达的横向页，正式基线文件保持不变。
+    with pymupdf.open(destination / "scan_long.pdf") as document:
+        document[55].set_rotation(90)
+        document.save(destination / "scan_long_landscape.pdf", deflate=True)
+    entries["t2-baseline/scan_long_landscape.pdf"] = {
+        **entries["t2-baseline/scan_long.pdf"],
+        "purpose": "T2 受控浏览：未检测的横向页几何与清晰度",
+        "landscape_page": 55,
+        "performance_eligible": False,
+    }
+    mixed_scan, mixed_native, mixed_blank = 10, 10, 10
+    with pymupdf.open() as document:
+        for number in range(1, mixed_scan + 1):
+            add_scan_page(document, number)
+        for index in range(mixed_native):
+            page = document.new_page(width=595, height=842)
+            page.insert_text(
+                (60, 90),
+                f"T2 MIXED NATIVE PAGE {index + 1:02d}",
+                fontsize=20,
+                fontname="helv",
+            )
+            page.insert_text(
+                (60, 130),
+                "Mixed synthetic document with a real native text layer.",
+                fontsize=12,
+                fontname="helv",
+            )
+            page.draw_rect(
+                pymupdf.Rect(50, 170, 260, 260),
+                color=(0, 0.4, 0.8),
+                fill=(0.2, 0.7, 0.3),
+            )
+        for _ in range(mixed_blank):
+            document.new_page(width=595, height=842)
+        document.save(destination / "mixed.pdf", deflate=True)
+    entries["t2-baseline/mixed.pdf"] = {
+        "purpose": "T2 基线扫描/原生文字/空白混合件",
+        "pages": mixed_scan + mixed_native + mixed_blank,
+        "raster_pages": list(range(mixed_scan)),
+        "native_text_pages": list(range(mixed_scan, mixed_scan + mixed_native)),
+        "blank_pages": list(
+            range(mixed_scan + mixed_native, mixed_scan + mixed_native + mixed_blank)
+        ),
+        "synthetic_only": True,
+    }
+    return entries
+
+
 def draw_multicolumn(out: Path, *, skip_pdf: bool = False) -> dict[str, object]:
     """Frozen before ORT inference: title, left column, right column, spanning footer."""
     image, draw = new_page(1800, 2400)
@@ -865,6 +1005,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="隔离输出目录")
     parser.add_argument("--skip-pdf", action="store_true", help="跳过可选 PDF fixture")
+    parser.add_argument(
+        "--pdf-baseline",
+        action="store_true",
+        help="额外生成 Goal #325/#327 T2 基线观测件（t2-baseline/ 目录）",
+    )
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     entries: dict[str, object] = {
@@ -902,6 +1047,8 @@ def main() -> int:
             entries["document_orientation.pdf"] = draw_orientation_pdf(args.out)
             entries.update(draw_workspace_pdfs(args.out))
             entries.update(draw_structure_pdfs(args.out))
+    if args.pdf_baseline:
+        entries.update(draw_pdf_baseline_fixtures(args.out))
     write_manifest(args.out, entries)
     print(json.dumps(entries, ensure_ascii=False, indent=2))
     return 0

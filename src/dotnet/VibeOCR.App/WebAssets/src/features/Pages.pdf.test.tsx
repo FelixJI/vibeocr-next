@@ -950,3 +950,612 @@ describe("PDF document command shortcuts (Ctrl+O / Ctrl+S / Ctrl+Shift+S / Ctrl+
     expect(documentCommands(actions)).toEqual([]);
   });
 });
+
+describe("PDF page inspection button without thumbnails", () => {
+  it("keeps the inspect button usable with placeholder content and selects the page", () => {
+    const actions = setup({
+      pages: [
+        {
+          index: 69,
+          statusCode: "pdf.page.none",
+        },
+      ],
+    });
+    const button = screen.getByRole("button", { name: "检查第 70 页" });
+    expect(button).toBeEnabled();
+    expect(
+      button.querySelector(".pdf-thumbnail-placeholder"),
+    ).toHaveTextContent("PDF");
+    fireEvent.click(button);
+    expect(actions.run).toHaveBeenLastCalledWith({
+      type: "pdf.setCurrentPage",
+      page: 69,
+    });
+  });
+});
+
+describe("PDF on-demand page demand (canDemandPages)", () => {
+  interface FakeEntry {
+    target: Element;
+    isIntersecting: boolean;
+  }
+  function installIntersectionObserver() {
+    class FakeIntersectionObserver {
+      observed: Element[] = [];
+      disconnected = false;
+      constructor(
+        private readonly callback: (
+          entries: IntersectionObserverEntry[],
+          observer: IntersectionObserver,
+        ) => void,
+      ) {}
+      observe(element: Element) {
+        this.observed.push(element);
+      }
+      unobserve() {}
+      disconnect() {
+        this.disconnected = true;
+        this.observed = [];
+      }
+      takeRecords() {
+        return [];
+      }
+      trigger(entries: readonly FakeEntry[]) {
+        this.callback(
+          entries.map((entry) => ({
+            target: entry.target,
+            isIntersecting: entry.isIntersecting,
+          })) as IntersectionObserverEntry[],
+          this as unknown as IntersectionObserver,
+        );
+      }
+    }
+    const instances: FakeIntersectionObserver[] = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class extends FakeIntersectionObserver {
+        constructor(
+          callback: (
+            entries: IntersectionObserverEntry[],
+            observer: IntersectionObserver,
+          ) => void,
+        ) {
+          super(callback);
+          instances.push(this);
+        }
+      },
+    );
+    return { instances, latest: () => instances[instances.length - 1] };
+  }
+  const demandPages = [
+    { index: 64, statusCode: "pdf.page.none", width: 612, height: 792 },
+    { index: 65, statusCode: "pdf.page.none", width: 612, height: 792 },
+    {
+      index: 69,
+      statusCode: "pdf.page.done",
+      detected: true,
+      hasTextLayer: true,
+      addedThisSession: false,
+      width: 612,
+      height: 792,
+      pageKey: 6900,
+      contentGeneration: 3,
+    },
+  ];
+  function demandState(patch: Record<string, unknown> = {}) {
+    return {
+      documentId: "doc-1",
+      canDemandPages: true,
+      pages: demandPages,
+      ...patch,
+    };
+  }
+  const pageItem = (index: number) =>
+    document.querySelector(`li[data-page-index="${index}"]`)!;
+  const demandCalls = (actions: { run: ReturnType<typeof vi.fn> }) =>
+    actions.run.mock.calls
+      .map(([command]) => command as Record<string, unknown>)
+      .filter((command) => command.type === "pdf.setDemand");
+  const settle = (ms = 250) =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    });
+  function measureFirstThumbnail(edge: number) {
+    const first = document.querySelector(
+      "li[data-page-index] .pdf-thumbnail-button",
+    ) as HTMLElement;
+    first.getBoundingClientRect = () =>
+      ({ width: 96, height: edge }) as DOMRect;
+  }
+
+  it("never sends demands without the capability, even with observer events", async () => {
+    installIntersectionObserver();
+    const actions = setup({ pages: demandPages });
+    await settle();
+    expect(demandCalls(actions)).toEqual([]);
+  });
+
+  it("reports real visible pages and geometry, not the whole window before callbacks", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    // 初始 observer 未回调：检查页几何可上报，但可见集必须为空（不是整窗 64 页）。
+    await waitFor(() => expect(demandCalls(actions).length).toBeGreaterThan(0));
+    expect(demandCalls(actions).map((d) => d.visiblePages)).toEqual([[]]);
+    measureFirstThumbnail(120);
+    observer.latest()!.trigger([
+      { target: pageItem(64), isIntersecting: true },
+      { target: pageItem(69), isIntersecting: true },
+    ]);
+    await waitFor(() =>
+      expect(actions.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "pdf.setDemand",
+          page: 69,
+          visiblePages: [64, 69],
+          thumbnailSize: 120,
+          previewMaxEdge: 456,
+          documentId: "doc-1",
+          documentRevision: 8,
+        }),
+      ),
+    );
+  });
+
+  it("keeps thumbnail demand when the preview becomes unavailable", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(69), isIntersecting: true }]);
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 69,
+        visiblePages: [69],
+        previewMaxEdge: 456,
+      }),
+    );
+    actions.updatePdf(demandState({ canInspectPage: false }));
+    await waitFor(() => {
+      const latest = demandCalls(actions).at(-1);
+      expect(latest).toMatchObject({ page: 69, visiblePages: [69] });
+      expect(latest).not.toHaveProperty("previewMaxEdge");
+    });
+  });
+
+  it("updates both demand sizes after consecutive DPR changes", async () => {
+    const observer = installIntersectionObserver();
+    const queries = new Map<string, EventTarget>();
+    vi.stubGlobal("devicePixelRatio", 1);
+    vi.stubGlobal("matchMedia", (query: string) => {
+      const target = queries.get(query) ?? new EventTarget();
+      queries.set(query, target);
+      return target;
+    });
+    const actions = setup(demandState());
+    measureFirstThumbnail(120);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(69), isIntersecting: true }]);
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        thumbnailSize: 120,
+        previewMaxEdge: 456,
+      }),
+    );
+    for (const [previous, next] of [
+      [1, 1.5],
+      [1.5, 2],
+    ]) {
+      act(() => {
+        vi.stubGlobal("devicePixelRatio", next);
+        queries
+          .get(`(resolution: ${previous}dppx)`)!
+          .dispatchEvent(new Event("change"));
+      });
+      await waitFor(() =>
+        expect(demandCalls(actions).at(-1)).toMatchObject({
+          thumbnailSize: 120 * next!,
+          previewMaxEdge: 456 * next!,
+        }),
+      );
+    }
+  });
+
+  it("sends unchanged geometry for a new revision and discards the previous page's edge", async () => {
+    installIntersectionObserver();
+    const actions = setup(demandState());
+    await waitFor(() => expect(demandCalls(actions)).toHaveLength(1));
+    actions.updatePdf(demandState({ revision: 9 }));
+    await waitFor(() => expect(demandCalls(actions)).toHaveLength(2));
+    expect(demandCalls(actions)[1]).toMatchObject({
+      page: 69,
+      previewMaxEdge: 456,
+      documentRevision: 9,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 69,
+        previewMaxEdge: 1056,
+      }),
+    );
+    actions.updatePdf(demandState({ revision: 9, selectedPage: 64 }));
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 64,
+        previewMaxEdge: 456,
+        documentRevision: 9,
+      }),
+    );
+    expect(
+      demandCalls(actions).filter((demand) => demand.page === 64),
+    ).toHaveLength(1);
+  });
+
+  it("deduplicates identical content and coalesces rapid changes into the latest value", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    await waitFor(() => expect(demandCalls(actions).length).toBe(1));
+    measureFirstThumbnail(120);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(64), isIntersecting: true }]);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(2));
+    // 同内容重投：不再发送。
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(64), isIntersecting: true }]);
+    await settle();
+    expect(demandCalls(actions)).toHaveLength(2);
+    // 去抖窗口内连续变化合并为最新值。
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(65), isIntersecting: true }]);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(64), isIntersecting: false }]);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(3));
+    expect(demandCalls(actions)[2]!.visiblePages).toEqual([65]);
+    await settle();
+    expect(demandCalls(actions)).toHaveLength(3);
+  });
+
+  it("keeps a single in-flight demand and sends only the latest pending afterwards", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    let resolveDemand!: (ok: boolean) => void;
+    actions.run.mockImplementation((action) => {
+      if ((action as Record<string, unknown>).type === "pdf.setDemand")
+        return new Promise<boolean>((resolve) => {
+          resolveDemand = resolve;
+        });
+      return Promise.resolve(true);
+    });
+    // 初始需求在途：可见集为空的那条。
+    await waitFor(() => expect(demandCalls(actions).length).toBe(1));
+    resolveDemand(true);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    measureFirstThumbnail(120);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(64), isIntersecting: true }]);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(2));
+    // 第二条在途期间内容更新：不再并发发送。
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(65), isIntersecting: true }]);
+    await settle();
+    expect(demandCalls(actions)).toHaveLength(2);
+    resolveDemand(true);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(3));
+    expect(demandCalls(actions)[2]!.visiblePages).toEqual([64, 65]);
+    await settle();
+    expect(demandCalls(actions)).toHaveLength(3);
+  });
+
+  it("does not retry unconfirmed demands but accepts later content changes", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    actions.run.mockImplementation(async (action) =>
+      (action as Record<string, unknown>).type === "pdf.setDemand"
+        ? false
+        : true,
+    );
+    await waitFor(() => expect(demandCalls(actions).length).toBe(1));
+    await settle();
+    expect(demandCalls(actions)).toHaveLength(1);
+    measureFirstThumbnail(120);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(64), isIntersecting: true }]);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(2));
+    await settle();
+    // 未确认的同内容不重试；新内容仍可发送。
+    expect(demandCalls(actions)).toHaveLength(2);
+    observer
+      .latest()!
+      .trigger([{ target: pageItem(65), isIntersecting: true }]);
+    await waitFor(() => expect(demandCalls(actions).length).toBe(3));
+    expect(demandCalls(actions)[2]!.visiblePages).toEqual([64, 65]);
+  });
+
+  it("recreates the observer per transport window and ignores stale callbacks", async () => {
+    const observer = installIntersectionObserver();
+    const actions = setup(demandState());
+    await waitFor(() => expect(demandCalls(actions).length).toBe(1));
+    const stale = observer.latest()!;
+    const staleTarget = pageItem(64);
+    actions.updatePdf({
+      windowStart: 0,
+      pages: [
+        { index: 0, statusCode: "pdf.page.none", width: 612, height: 792 },
+        { index: 1, statusCode: "pdf.page.none", width: 612, height: 792 },
+      ],
+    });
+    await waitFor(() => expect(observer.instances.length).toBe(2));
+    expect(stale.disconnected).toBe(true);
+    // 旧 observer 的迟到回调不能投递到新窗口。
+    stale.trigger([{ target: staleTarget, isIntersecting: true }]);
+    await settle();
+    expect(
+      demandCalls(actions).filter(
+        (d) => Array.isArray(d.visiblePages) && d.visiblePages.length > 0,
+      ),
+    ).toEqual([]);
+    measureFirstThumbnail(120);
+    observer.latest()!.trigger([{ target: pageItem(0), isIntersecting: true }]);
+    await waitFor(() =>
+      expect(
+        demandCalls(actions).some(
+          (d) => Array.isArray(d.visiblePages) && d.visiblePages.length > 0,
+        ),
+      ).toBe(true),
+    );
+    expect(demandCalls(actions).at(-1)!.visiblePages).toEqual([0]);
+  });
+
+  it("labels detectionState without faking a confirmed no-text layer, legacy keeps detected semantics", () => {
+    const demandView = setup({
+      canDemandPages: true,
+      pages: [
+        { index: 64, statusCode: "pdf.page.none", detectionState: "unknown" },
+        { index: 65, statusCode: "pdf.page.none", detectionState: "detecting" },
+        { index: 66, statusCode: "pdf.page.none", detectionState: "failed" },
+        {
+          index: 67,
+          statusCode: "pdf.page.done",
+          detectionState: "known",
+          hasTextLayer: false,
+        },
+        {
+          index: 68,
+          statusCode: "pdf.page.done",
+          detectionState: "known",
+          hasTextLayer: true,
+        },
+      ],
+    });
+    expect(pageItem(64)).toHaveTextContent("待检测");
+    expect(pageItem(64)).not.toHaveTextContent("无文字层");
+    expect(pageItem(65)).toHaveTextContent("检测中");
+    expect(pageItem(66)).toHaveTextContent("检测失败");
+    expect(pageItem(67)).toHaveTextContent("无文字层");
+    expect(pageItem(68)).toHaveTextContent("已有文字层 / 来源未知");
+    demandView.unmount();
+    setup({
+      pages: [
+        { index: 64, statusCode: "pdf.page.none", detectionState: "unknown" },
+      ],
+    });
+    // legacy 无 capability：detectionState 字段被忽略，保持 detected 语义。
+    expect(pageItem(64)).toHaveTextContent("检测中");
+    expect(pageItem(64)).not.toHaveTextContent("待检测");
+  });
+
+  it("allows adding text layers for a few selected pages without whole-book detection in demand mode", () => {
+    const demandView = setup({
+      canDemandPages: true,
+      detectedCount: 3,
+      canAddTextLayer: true,
+    });
+    expect(
+      screen.getByRole("button", { name: "添加选中页文字层" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "添加整本文字层" }),
+    ).toBeEnabled();
+    demandView.unmount();
+    setup({
+      detectedCount: 3,
+      canAddTextLayer: true,
+    });
+    expect(
+      screen.getByRole("button", { name: "添加选中页文字层" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "添加整本文字层" }),
+    ).toBeDisabled();
+  });
+
+  it("keeps the selected inspection and reports only visible thumbnails across page windows", async () => {
+    const observer = installIntersectionObserver();
+    let image!: HTMLImageElement;
+    const createImage = vi.fn(function () {
+      image = document.createElement("img");
+      image.decode = async () => undefined;
+      return image;
+    });
+    vi.stubGlobal("Image", createImage);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          page: 0,
+          ocr_blocks: [
+            { index: 2, text: "首页原文", bbox: [100, 200, 900, 300] },
+          ],
+        }),
+      }),
+    );
+    const page = {
+      index: 0,
+      statusCode: "pdf.page.done",
+      width: 612,
+      height: 792,
+    };
+    const currentPage = { ...page, pageKey: 42, contentGeneration: 7 };
+    const firstWindow = [
+      currentPage,
+      ...Array.from({ length: 63 }, (_, index) => ({
+        ...page,
+        index: index + 1,
+      })),
+    ];
+    const secondWindow = Array.from({ length: 64 }, (_, index) => ({
+      ...page,
+      index: index + 64,
+    }));
+    const actions = setup(
+      demandState({
+        selectedPage: 0,
+        selectedPages: [0],
+        pageCount: 128,
+        windowStart: 0,
+        pages: firstWindow,
+        currentPage,
+        pagePreview: {
+          url: "/page-0.png",
+          mediaType: "image/png",
+          byteLength: 100,
+        },
+        pageInspect: {
+          url: "/page-0.json",
+          mediaType: "application/json",
+          byteLength: 200,
+        },
+      }),
+    );
+    await act(async () => {
+      fireEvent.load(image);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /首页原文/ }));
+    fireEvent.change(screen.getByLabelText("校正文字"), {
+      target: { value: "首页草稿" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "100%" }));
+    observer.latest()!.trigger([{ target: pageItem(0), isIntersecting: true }]);
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 0,
+        visiblePages: [0],
+        previewMaxEdge: 1056,
+      }),
+    );
+
+    actions.updatePdf({ windowStart: 64, pages: secondWindow, currentPage });
+    expect(pageItem(0)).toBeNull();
+    expect(observer.latest()!.observed).toHaveLength(64);
+    observer.latest()!.trigger([
+      { target: pageItem(66), isIntersecting: true },
+      { target: pageItem(127), isIntersecting: true },
+    ]);
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 0,
+        visiblePages: [66, 127],
+        previewMaxEdge: 1056,
+      }),
+    );
+    expect(screen.getByAltText("当前第 1 页高清预览")).toBe(image);
+    expect(screen.getByLabelText("校正文字")).toHaveValue("首页草稿");
+    expect(document.querySelector(".pdf-inspection-sheet")).toHaveStyle({
+      width: "816px",
+      height: "1056px",
+    });
+
+    actions.updatePdf({ windowStart: 0, pages: firstWindow, currentPage });
+    observer.latest()!.trigger([{ target: pageItem(3), isIntersecting: true }]);
+    await waitFor(() =>
+      expect(demandCalls(actions).at(-1)).toMatchObject({
+        page: 0,
+        visiblePages: [3],
+        previewMaxEdge: 1056,
+      }),
+    );
+    expect(screen.getByAltText("当前第 1 页高清预览")).toBe(image);
+    expect(screen.getByLabelText("校正文字")).toHaveValue("首页草稿");
+    expect(createImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not remount the inspection when progressive preview URLs change", async () => {
+    let image!: HTMLImageElement;
+    vi.stubGlobal("Image", function () {
+      image = document.createElement("img");
+      image.decode = async () => undefined;
+      return image;
+    });
+    installIntersectionObserver();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          page: 69,
+          ocr_blocks: [
+            {
+              index: 2,
+              text: "原文 6900",
+              bbox: [100, 200, 900, 300],
+            },
+          ],
+        }),
+      }),
+    );
+    const actions = setup(
+      demandState({
+        pagePreview: {
+          url: "/low-69.png",
+          mediaType: "image/png",
+          byteLength: 100,
+        },
+        pageInspect: {
+          url: "/inspect-69.json",
+          mediaType: "application/json",
+          byteLength: 200,
+        },
+      }),
+    );
+    expect(image.getAttribute("src")).toBe("/low-69.png");
+    await act(async () => {
+      fireEvent.load(image);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /原文 6900/ }));
+    fireEvent.change(screen.getByLabelText("校正文字"), {
+      target: { value: "渐进草稿" },
+    });
+    actions.updatePdf({
+      pagePreview: {
+        url: "/high-69.png",
+        mediaType: "image/png",
+        byteLength: 300,
+      },
+    });
+    // 未重挂：旧图保留为当前显示，新图走待替换过渡层。
+    expect(screen.getByAltText("当前第 70 页高清预览")).toHaveAttribute(
+      "src",
+      "/low-69.png",
+    );
+    expect(image.getAttribute("src")).toBe("/high-69.png");
+    await act(async () => {
+      fireEvent.load(image);
+    });
+    expect(screen.getByAltText("当前第 70 页高清预览")).toHaveAttribute(
+      "src",
+      "/high-69.png",
+    );
+    expect(screen.getByLabelText("校正文字")).toHaveValue("渐进草稿");
+  });
+});

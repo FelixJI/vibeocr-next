@@ -13,9 +13,52 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
+
+# ---- pdf.demand.v1 读上下文 --------------------------------------------
+
+
+class PdfReadScope(StrEnum):
+    """scoped read 的取消域：当前视口或后台预取/检测。"""
+
+    VIEWPORT = "viewport"
+    BACKGROUND = "background"
+
+
+class PdfReadCancelScope(StrEnum):
+    """读取消的目标域；all_reads 原子推进两个水位。"""
+
+    VIEWPORT = "viewport"
+    BACKGROUND = "background"
+    ALL_READS = "all_reads"
+
+
+class PdfReadContext(BaseModel):
+    """scoped read epoch：按 scope 单调递增，用于准入及结果发布校验。"""
+
+    scope: PdfReadScope
+    epoch: int = Field(ge=1, le=2**63 - 1, strict=True)
+
+
+class PdfDemandLoadRequest(BaseModel):
+    """demand load：body 形只做几何+文字存在性检测。
+
+    pages 省略＝唯一自动后台全档流；显式 pages＝交互前置的定向读，
+    保留请求 scope（客户端定向读用 background scope，避免滚动撤销业务）。
+    """
+
+    read: PdfReadContext
+    pages: list[Annotated[int, Field(ge=0, strict=True)]] | None = None
+
+
+class PdfReadCancelRequest(BaseModel):
+    """scoped 读取消：单调推进 per-scope 水位，不碰 T1 写 cancel_event。"""
+
+    scope: PdfReadCancelScope
+    before_epoch: int = Field(ge=1, le=2**63 - 1, strict=True)
+
 
 # ---- 基础镜像类型 ------------------------------------------------------
 
@@ -70,6 +113,8 @@ class PdfPageInfoMirror(BaseModel):
     ocr_text_blocks: list[TextBlockMirror] = Field(default_factory=list)
     ocr_preproc_angle: int = 0
     deskewed: bool = False
+    # pdf.demand.v1：False 明确表示 is_scanned 不是扫描算出的结果。
+    scan_checked: bool = False
 
 
 class PdfDocumentMirror(BaseModel):
@@ -244,6 +289,7 @@ class PageInspectRequest(BaseModel):
     """当前页检查 payload 请求（仅单页，不整本拉取）。"""
 
     page: int
+    read: PdfReadContext | None = None
 
 
 class PageInspectOcrBlock(BaseModel):
@@ -294,11 +340,17 @@ class PageInspectResponse(BaseModel):
 class RenderThumbnailRequest(BaseModel):
     page: int
     size: int = 160  # 目标边长(px)
+    # pdf.demand.v1：携带 read 时直接按目标 size 有界栅格化 + 可撤销准入。
+    read: PdfReadContext | None = None
 
 
 class RenderPreviewRequest(BaseModel):
     page: int
     dpi: int = 150
+    # pdf.demand.v1：目标长边像素（缺省保持 dpi）；max_pixels 与 16M 硬上限取小。
+    read: PdfReadContext | None = None
+    max_edge: int | None = Field(default=None, ge=1, strict=True)
+    max_pixels: int | None = Field(default=None, ge=1, strict=True)
 
 
 class OcrRequest(BaseModel):
@@ -322,6 +374,12 @@ class OpenResponse(BaseModel):
 
 class EmptyOk(BaseModel):
     ok: bool = True
+
+
+class PdfReadCancelledOk(BaseModel):
+    """读取消 ACK：cancelled 恒 true，客户端必须校验。"""
+
+    cancelled: bool = True
 
 
 class SaveResponse(BaseModel):

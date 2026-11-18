@@ -10,6 +10,8 @@ MineruTierAvailability = Literal['ready', 'preparation_required', 'unavailable']
 MineruTierId = Literal['flash', 'basic', 'standard', 'advanced']
 OcrEngineAvailability = Literal['ready', 'preparation_required', 'unavailable']
 OcrEngineId = Literal['rapidocr', 'windows', 'paddleocr']
+PdfReadCancelScope = Literal['viewport', 'background', 'all_reads']
+PdfReadScope = Literal['viewport', 'background']
 ProgressPhase = Literal['load', 'render', 'ocr', 'write', 'detect', 'correct', 'delete', 'save', 'export', 'compress']
 RecognitionModeAvailability = Literal['ready', 'preparation_required', 'unavailable']
 RecognitionModeFamily = Literal['text', 'document', 'specialized']
@@ -311,6 +313,7 @@ class PageInspectOcrBlock(TypedDict, total=False):
 
 class PageInspectRequest(TypedDict, total=False):
     page: Required[int]
+    read: NotRequired[PdfReadContext | None]
 
 
 class PageInspectResponse(TypedDict, total=False):
@@ -339,6 +342,11 @@ class PdfClosedResponse(TypedDict, total=False):
     schema_version: Required[Literal[2]]
     instance_id: Required[str]
     closed: Required[Literal[True]]
+
+
+class PdfDemandLoadRequest(TypedDict, total=False):
+    read: Required[PdfReadContext]
+    pages: NotRequired[list[int]]
 
 
 class PdfDetectResponse(TypedDict, total=False):
@@ -392,6 +400,7 @@ class PdfPageInfoMirror(TypedDict, total=False):
     ocr_preproc_angle: NotRequired[int]
     deskewed: NotRequired[bool]
     has_ocr_text_layer: NotRequired[bool]
+    scan_checked: NotRequired[bool]
 
 
 class PdfPathRequest(TypedDict, total=False):
@@ -402,6 +411,16 @@ class PdfPathResponse(TypedDict, total=False):
     schema_version: Required[Literal[2]]
     instance_id: Required[str]
     path: Required[str]
+
+
+class PdfReadCancelRequest(TypedDict, total=False):
+    scope: Required[PdfReadCancelScope]
+    before_epoch: Required[int]
+
+
+class PdfReadContext(TypedDict, total=False):
+    scope: Required[PdfReadScope]
+    epoch: Required[int]
 
 
 class PdfResetResponse(TypedDict, total=False):
@@ -507,11 +526,15 @@ class RecognitionModeLifecycle(TypedDict, total=False):
 class RenderPreviewRequest(TypedDict, total=False):
     page: Required[int]
     dpi: NotRequired[int]
+    read: NotRequired[PdfReadContext | None]
+    max_edge: NotRequired[int]
+    max_pixels: NotRequired[int]
 
 
 class RenderThumbnailRequest(TypedDict, total=False):
     page: Required[int]
     size: NotRequired[int]
+    read: NotRequired[PdfReadContext | None]
 
 
 class ReorderRequest(TypedDict, total=False):

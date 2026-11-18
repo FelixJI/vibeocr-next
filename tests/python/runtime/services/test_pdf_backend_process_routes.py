@@ -181,9 +181,10 @@ class TestLoadStream:
         assert resp.status_code == 200
         # NDJSON：多行 JSON
         lines = [line for line in resp.text.strip().split("\n") if line]
-        assert len(lines) >= 2  # 至少每页一条 + done
+        assert len(lines) >= 2  # 至少每页一条 + 结束哨兵
         last = __import__("json").loads(lines[-1])
         assert last["message"] == "done"
+        assert last["current"] == 3
 
     def test_load_unknown_session_404(self, app_client):
         client, _ = app_client
@@ -1163,28 +1164,32 @@ class TestSettingsFromDict:
 
 class TestLoadEdgeCases:
     def test_load_page_exception_continues(self, opened_session, monkeypatch):
-        """load 单页异常应被捕获、继续（lines 399-400）。"""
+        """load 单页异常应被捕获、继续；哨兵如实标记 incomplete 与完成页数。"""
         client, backend, sid, _ = opened_session
 
         call = {"n": 0}
+        real_detect = backend._detect_one_page
 
         def _boom(session, i):
             call["n"] += 1
             if call["n"] == 1:
                 raise RuntimeError("load page boom")
-            # 后续页正常
-            return backend._detect_one_page(session, i)
+            # 后续页正常（先取真实函数，避免回调自身无限递归）
+            return real_detect(session, i)
 
         monkeypatch.setattr(backend, "_detect_one_page", _boom)
         resp = client.post(f"/session/{sid}/load")
         assert resp.status_code == 200
-        # 仍应有 done 哨兵
+        # 2 页成功 + 结束哨兵；失败页不得被伪装成全量完成。
         lines = [line for line in resp.text.strip().split("\n") if line]
+        assert len(lines) == 3
         last = __import__("json").loads(lines[-1])
-        assert last["message"] == "done"
+        assert last["message"] == "incomplete"
+        assert last["current"] == 2
+        assert last["total"] == 3
 
     def test_load_cancelled_breaks_early(self, opened_session):
-        """load 中 cancel_event 被 set → 提前 break（line 387）。"""
+        """load 中 cancel_event 被 set → 提前 break；哨兵标记 cancelled/0 页。"""
         client, backend, sid, _ = opened_session
         # 先设置 cancel
         session = backend._get_registry().get(sid)
@@ -1192,10 +1197,12 @@ class TestLoadEdgeCases:
         resp = client.post(f"/session/{sid}/load")
         assert resp.status_code == 200
         lines = [line for line in resp.text.strip().split("\n") if line]
-        # 第一页就 break → 只有 done 哨兵
+        # 第一页就 break → 只有结束哨兵
         assert len(lines) == 1
         last = __import__("json").loads(lines[-1])
-        assert last["message"] == "done"
+        assert last["message"] == "cancelled"
+        assert last["current"] == 0
+        assert last["total"] == 3
 
 
 class TestRenderPreviewError:

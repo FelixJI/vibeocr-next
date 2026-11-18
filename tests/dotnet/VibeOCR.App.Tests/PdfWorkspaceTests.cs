@@ -186,6 +186,40 @@ public sealed class PdfWorkspaceTests
   }
 
   [Fact]
+  public async Task CloseAllFlushesOnlyOriginallyActiveDocumentLast()
+  {
+    using var fixture = new Fixture();
+    await using var handler = fixture.Handler();
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "a.pdf")), CancellationToken.None);
+    await handler.ExecuteAsync(new OpenDroppedPdfCommand(Path.Combine(fixture.Root, "b.pdf")), CancellationToken.None);
+    PdfDocumentEntry a = handler.PdfDocuments[0];
+    PdfDocumentEntry b = handler.PdfDocuments[1];
+    string aSession = a.Model.SessionId!, bSession = b.Model.SessionId!;
+    // Documents=[A,B] 且重新激活队首 A；Web 投影是异步的，flush 模拟只有当前 A 就绪，
+    // 对提升后尚未投影的 B 立即 flush 会 false。
+    await handler.ExecuteAsync(new PdfBoundCommand(a.Id, new ActivatePdfDocumentCommand()), CancellationToken.None);
+    a.Preview = JsonSerializer.Deserialize<PdfPreviewPosition>(JsonSerializer.Serialize(
+        new { block = 2, page = 0, revision = a.Model.Revision, originalText = "原文", draft = "队首活动草稿" }),
+        new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+    var flushed = new List<string>();
+    fixture.PreviewFlush = id => { flushed.Add(id); return Task.FromResult(id == a.Id); };
+    int confirmations = 0;
+    fixture.Confirm = _ => { confirmations++; return Task.FromResult(PdfCloseDecision.Discard); };
+
+    bool closed = await handler.RequestCloseAllPdfAsync();
+
+    Assert.True(closed);
+    // 非活动 B 先关、原活动 A 最后关；flush 只作用于仍被投影的 A。
+    Assert.Equal(new[] { bSession, aSession }, fixture.Client.Closed);
+    Assert.Equal(new[] { a.Id }, flushed);
+    Assert.Empty(handler.PdfDocuments);
+    // 活动草稿按既有规则保护：仅在关闭真正成功后随 Discard 决定丢弃；Discard 不隐式保存。
+    Assert.Equal(3, confirmations);
+    Assert.Equal("", a.Preview.Draft);
+    Assert.Empty(fixture.Client.Saves);
+  }
+
+  [Fact]
   public async Task OpenAwaitingPreviewCannotSwitchDuringLaterCloseConfirmation()
   {
     using var fixture = new Fixture(); await using var handler = fixture.Handler();

@@ -277,6 +277,17 @@ public sealed class InferenceHttpClient : IInferenceClient
     public Task<string> SavePdfOperationAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, bool copyExport, bool rebindTarget, bool overwrite, CancellationToken ct) => _pdf.SaveOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct);
     public Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, JsonElement> settings, CancellationToken ct) => _pdf.SaveWithSettingsAsync(sessionId, outputPath, settings, ct);
 
+    public Task LoadPdfDemandAsync(string sessionId, Wire.PdfDemandLoadRequest request, Action<JsonElement> progress, CancellationToken ct) =>
+        _pdf.LoadDemandAsync(sessionId, request, progress, ct);
+    public Task<byte[]> RenderPdfThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct) =>
+        _pdf.RenderThumbnailDemandAsync(sessionId, request, ct);
+    public Task<byte[]> RenderPdfPreviewDemandAsync(string sessionId, Wire.RenderPreviewRequest request, CancellationToken ct) =>
+        _pdf.RenderPreviewDemandAsync(sessionId, request, ct);
+    public Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct) =>
+        _pdf.InspectPageDemandAsync(sessionId, request, ct);
+    public Task CancelPdfReadsAsync(string sessionId, Wire.PdfReadCancelRequest request, CancellationToken ct) =>
+        _pdf.CancelReadsAsync(sessionId, request, ct);
+
     public Task ClosePdfSessionAsync(string sessionId, CancellationToken ct)
         => _pdf.CloseAsync(sessionId, ct);
 

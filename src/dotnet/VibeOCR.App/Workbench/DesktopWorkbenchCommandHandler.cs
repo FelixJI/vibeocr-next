@@ -488,7 +488,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     if (!operations.BeginDispose()) return;
     Image.Stop(); Batch.Stop(); Pdf.Stop(); QrCode.Stop(); Settings.Stop(); System.Stop();
     await operations.DrainAsync().ConfigureAwait(false);
-    ImageConversion.Release(); Resources.Release(); Batch.Release(); Pdf.Release(); operations.Release();
+    ImageConversion.Release(); Pdf.Release(); Resources.Release(); Batch.Release(); operations.Release();
   }
 
   private string? GetRecognitionTaskEngine() => Image.TaskEngine;

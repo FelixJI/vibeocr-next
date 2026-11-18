@@ -165,6 +165,42 @@ public sealed class OcrEngineIdJsonConverter : JsonStringEnumConverter<OcrEngine
     }
 }
 
+[JsonConverter(typeof(PdfReadCancelScopeJsonConverter))]
+public enum PdfReadCancelScope
+{
+    [JsonStringEnumMemberName("viewport")]
+    Viewport,
+    [JsonStringEnumMemberName("background")]
+    Background,
+    [JsonStringEnumMemberName("all_reads")]
+    AllReads
+}
+
+public sealed class PdfReadCancelScopeJsonConverter : JsonStringEnumConverter<PdfReadCancelScope>
+{
+    public PdfReadCancelScopeJsonConverter()
+        : base(namingPolicy: null, allowIntegerValues: false)
+    {
+    }
+}
+
+[JsonConverter(typeof(PdfReadScopeJsonConverter))]
+public enum PdfReadScope
+{
+    [JsonStringEnumMemberName("viewport")]
+    Viewport,
+    [JsonStringEnumMemberName("background")]
+    Background
+}
+
+public sealed class PdfReadScopeJsonConverter : JsonStringEnumConverter<PdfReadScope>
+{
+    public PdfReadScopeJsonConverter()
+        : base(namingPolicy: null, allowIntegerValues: false)
+    {
+    }
+}
+
 [JsonConverter(typeof(ProgressPhaseJsonConverter))]
 public enum ProgressPhase
 {
@@ -1006,6 +1042,9 @@ public sealed record PageInspectRequest
 {
     [JsonPropertyName("page")]
     public required int Page { get; init; }
+
+    [JsonPropertyName("read")]
+    public PdfReadContext? Read { get; init; }
 }
 
 public sealed record PageInspectResponse
@@ -1066,6 +1105,15 @@ public sealed record PdfClosedResponse
 
     [JsonPropertyName("closed")]
     public required bool Closed { get; init; }
+}
+
+public sealed record PdfDemandLoadRequest
+{
+    [JsonPropertyName("read")]
+    public required PdfReadContext Read { get; init; }
+
+    [JsonPropertyName("pages")]
+    public IReadOnlyList<int>? Pages { get; init; }
 }
 
 public sealed record PdfDetectResponse
@@ -1189,6 +1237,9 @@ public sealed record PdfPageInfoMirror
 
     [JsonPropertyName("has_ocr_text_layer")]
     public bool? HasOcrTextLayer { get; init; }
+
+    [JsonPropertyName("scan_checked")]
+    public bool? ScanChecked { get; init; }
 }
 
 public sealed record PdfPathRequest
@@ -1207,6 +1258,24 @@ public sealed record PdfPathResponse
 
     [JsonPropertyName("path")]
     public required string Path { get; init; }
+}
+
+public sealed record PdfReadCancelRequest
+{
+    [JsonPropertyName("scope")]
+    public required PdfReadCancelScope Scope { get; init; }
+
+    [JsonPropertyName("before_epoch")]
+    public required long BeforeEpoch { get; init; }
+}
+
+public sealed record PdfReadContext
+{
+    [JsonPropertyName("scope")]
+    public required PdfReadScope Scope { get; init; }
+
+    [JsonPropertyName("epoch")]
+    public required long Epoch { get; init; }
 }
 
 public sealed record PdfResetResponse
@@ -1432,6 +1501,15 @@ public sealed record RenderPreviewRequest
 
     [JsonPropertyName("dpi")]
     public int? Dpi { get; init; }
+
+    [JsonPropertyName("read")]
+    public PdfReadContext? Read { get; init; }
+
+    [JsonPropertyName("max_edge")]
+    public int? MaxEdge { get; init; }
+
+    [JsonPropertyName("max_pixels")]
+    public int? MaxPixels { get; init; }
 }
 
 public sealed record RenderThumbnailRequest
@@ -1441,6 +1519,9 @@ public sealed record RenderThumbnailRequest
 
     [JsonPropertyName("size")]
     public int? Size { get; init; }
+
+    [JsonPropertyName("read")]
+    public PdfReadContext? Read { get; init; }
 }
 
 public sealed record ReorderRequest

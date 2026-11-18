@@ -630,6 +630,16 @@
             "$ref": "#/components/parameters/SessionId"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PdfDemandLoadRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "$ref": "#/components/responses/Ndjson"
@@ -1370,6 +1380,16 @@
             "$ref": "#/components/parameters/SessionId"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PdfReadCancelRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "PDF operation result",
@@ -3288,6 +3308,19 @@
           "page": {
             "title": "Page",
             "type": "integer"
+          },
+          "read": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PdfReadContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Read",
+            "description": "pdf.demand.v1: scoped read context for revocable admission."
           }
         },
         "required": [
@@ -3426,6 +3459,26 @@
           },
           "closed": {
             "const": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfDemandLoadRequest": {
+        "type": "object",
+        "description": "pdf.demand.v1 demand load. The body form performs geometry and text-presence detection only (no image coverage scan; scan_checked stays as previously computed). pages omitted means the single automatic whole-document background stream; explicit pages are interactive foreground-priority targeted reads that keep their requested scope (clients send background scope so scrolling does not revoke them).",
+        "required": [
+          "read"
+        ],
+        "properties": {
+          "read": {
+            "$ref": "#/components/schemas/PdfReadContext"
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "additionalProperties": false
@@ -3697,6 +3750,11 @@
             "type": "boolean",
             "default": false,
             "description": "Whether the current session owns OCR source blocks for this page; model summaries omit the blocks."
+          },
+          "scan_checked": {
+            "type": "boolean",
+            "default": false,
+            "description": "pdf.demand.v1: false explicitly means is_scanned is not a computed result (geometry/text-presence detection only)."
           }
         },
         "required": [
@@ -3740,6 +3798,61 @@
           }
         },
         "additionalProperties": false
+      },
+      "PdfReadCancelRequest": {
+        "type": "object",
+        "description": "pdf.demand.v1 scoped read cancel. Rejects pending reads whose epoch is below before_epoch by advancing the per-scope watermark monotonically (max with existing highwater); all_reads advances both scopes atomically. Never touches the T1 write cancel_event and reset_cancel never lowers watermarks.",
+        "required": [
+          "scope",
+          "before_epoch"
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/PdfReadCancelScope"
+          },
+          "before_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfReadCancelScope": {
+        "type": "string",
+        "enum": [
+          "viewport",
+          "background",
+          "all_reads"
+        ]
+      },
+      "PdfReadContext": {
+        "type": "object",
+        "description": "Scoped read epoch (pdf.demand.v1). The worker fences admission and result publication against per-scope watermark highwater; epochs are monotonically increasing per scope within a session.",
+        "required": [
+          "scope",
+          "epoch"
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/PdfReadScope"
+          },
+          "epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          }
+        },
+        "additionalProperties": false
+      },
+      "PdfReadScope": {
+        "type": "string",
+        "enum": [
+          "viewport",
+          "background"
+        ]
       },
       "PdfResetResponse": {
         "type": "object",
@@ -4041,6 +4154,30 @@
             "default": 150,
             "title": "Dpi",
             "type": "integer"
+          },
+          "read": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PdfReadContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Read"
+          },
+          "max_edge": {
+            "title": "Max Edge",
+            "description": "pdf.demand.v1: positive pixel long-edge demand; absent preserves dpi.",
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_pixels": {
+            "title": "Max Pixels",
+            "description": "pdf.demand.v1: positive pixels budget; effective cap is min with the worker 16000000 hard limit.",
+            "type": "integer",
+            "minimum": 1
           }
         },
         "required": [
@@ -4059,6 +4196,19 @@
             "default": 160,
             "title": "Size",
             "type": "integer"
+          },
+          "read": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PdfReadContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Read",
+            "description": "pdf.demand.v1: scoped read context; presence selects direct bounded target-size rasterization and revocable admission."
           }
         },
         "required": [

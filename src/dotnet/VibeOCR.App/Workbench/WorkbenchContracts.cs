@@ -591,6 +591,15 @@ public sealed record SelectPdfPagesCommand(IReadOnlyList<int> Pages) : Workbench
 public sealed record SelectAllPdfPagesCommand(bool Selected) : WorkbenchCommand;
 public sealed record SelectPdfPageCommand(int Page, bool Selected) : WorkbenchCommand;
 public sealed record SetCurrentPdfPageCommand(int Page) : WorkbenchCommand;
+
+/// <summary>Web 需求上报（pdf.setDemand）：page 为当前选页描述（-1 无 preview
+/// 需求）非第二个翻页命令；visiblePages 必需；thumbnailSize/previewMaxEdge
+/// nullable——未测量时省略（沿用已有有效档），不丢弃 visible 需求。</summary>
+public sealed record SetPdfDemandCommand(
+  int Page,
+  IReadOnlyList<int> VisiblePages,
+  int? ThumbnailSize,
+  int? PreviewMaxEdge) : WorkbenchCommand;
 public sealed record UpdatePdfBlockTextCommand(int Page, int BlockIndex, string NewText, string ExpectedOldText, long Revision, string SessionId) : WorkbenchCommand;
 public sealed record RetryPdfPageInspectCommand : WorkbenchCommand;
 
@@ -981,7 +990,8 @@ public sealed record PdfWorkbenchState(
   bool CanInspectPage = false, bool CanCorrectText = false,
   string? DocumentId = null, IReadOnlyList<PdfDocumentSummary>? Documents = null,
   VibeOCR.App.Features.Pdf.PdfPreviewPosition? PreviewPosition = null,
-  bool CanCopyExport = false, bool Exporting = false, IReadOnlyList<PdfExportSummary>? ExportItems = null, long ExportGeneration = 0) : WorkbenchState
+  bool CanCopyExport = false, bool Exporting = false, IReadOnlyList<PdfExportSummary>? ExportItems = null, long ExportGeneration = 0,
+  bool CanDemandPages = false, PdfWorkbenchPage? CurrentPage = null) : WorkbenchState
 {
   public override string Scope => "pdf";
 }
@@ -993,7 +1003,9 @@ public sealed record PdfWorkbenchPage(
   WorkbenchResourceReference? StructuredResult = null,
   bool Detected = false, bool HasTextLayer = false, bool AddedThisSession = false,
   int Rotation = 0, double Width = 0, double Height = 0,
-  long? RecognitionRevision = null, bool CorrectedAfterRecognition = false);
+  long? RecognitionRevision = null, bool CorrectedAfterRecognition = false,
+  long PageKey = 0, long ContentGeneration = 0,
+  string DetectionState = "unknown");
 
 public sealed record QrCodeWorkbenchState(
   bool IsBusy,

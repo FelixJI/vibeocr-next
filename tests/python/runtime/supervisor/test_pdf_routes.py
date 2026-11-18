@@ -652,3 +652,129 @@ async def test_malformed_worker_outcome_is_not_promoted(
             )
         assert response.status_code == 500
         assert "reason_code" not in response.json()["detail"]
+
+
+async def test_pdf_demand_round_trip_with_real_worker(
+    pdf_app, pdf_module, supervisor_token, tmp_path
+):
+    import io
+    import json
+
+    import pymupdf as fitz
+    from PIL import Image
+    from vibeocr.runtime.documents.adapter import PdfProcessAdapter
+    from vibeocr.runtime.documents.pdf_backend_client import PdfBackendClient
+
+    source = tmp_path / "demand.pdf"
+    with fitz.open() as doc:
+        page = doc.new_page(width=200, height=400)
+        page.insert_text((20, 20), "searchable")
+        doc.save(source)
+    child = PdfBackendClient()
+    pdf_module.pdf_adapter = PdfProcessAdapter(lambda: child, _child=child)
+    try:
+        async with _http(supervisor_token, pdf_app) as http:
+            opened = await http.post(
+                "/v2/pdf/sessions/open", json={"path": str(source)}
+            )
+            assert opened.status_code == 200, opened.text
+            path = "/v2/pdf/sessions/" + opened.json()["session_id"]
+
+            read = {"scope": "viewport", "epoch": 2**32 + 1}
+            scoped = await http.post(f"{path}/load", json={"read": read, "pages": [0]})
+            assert scoped.status_code == 200, scoped.text
+            event, terminal = [json.loads(line) for line in scoped.text.splitlines()]
+            assert event["page_payload"]["has_text_layer"] is True
+            assert event["page_payload"]["scan_checked"] is False
+            assert terminal["message"] == "done"
+
+            thumbnail = await http.post(
+                f"{path}/render_thumbnail", json={"page": 0, "size": 100, "read": read}
+            )
+            assert thumbnail.status_code == 200, thumbnail.text
+            with Image.open(io.BytesIO(thumbnail.content)) as image:
+                assert image.size == (50, 100)
+
+            preview = await http.post(
+                f"{path}/render_preview",
+                json={"page": 0, "max_edge": 512, "read": read},
+            )
+            assert preview.status_code == 200, preview.text
+            with Image.open(io.BytesIO(preview.content)) as image:
+                assert image.size == (256, 512)
+
+            details = await http.post(
+                f"{path}/page_inspect", json={"page": 0, "read": read}
+            )
+            assert details.status_code == 200, details.text
+            assert details.json()["native_lines"][0]["text_preview"] == "searchable"
+
+            overflow = await http.post(
+                f"{path}/cancel", json={"scope": "viewport", "before_epoch": 2**63}
+            )
+            assert overflow.status_code == 400
+            ack = await http.post(
+                f"{path}/cancel",
+                json={"scope": "viewport", "before_epoch": read["epoch"] + 1},
+            )
+            assert ack.status_code == 200 and ack.json()["cancelled"] is True
+            stale = await http.post(f"{path}/load", json={"read": read, "pages": [0]})
+            assert stale.status_code == 200
+            assert json.loads(stale.text)["message"] == "cancelled"
+
+            legacy = await http.post(f"{path}/load")
+            assert legacy.status_code == 200, legacy.text
+            old_event, _ = [json.loads(line) for line in legacy.text.splitlines()]
+            assert old_event["page_payload"]["scan_checked"] is True
+            assert (await http.post(f"{path}/close")).status_code == 200
+    finally:
+        child.stop()
+
+
+async def test_read_cancel_reaches_worker_while_render_adapter_waits(
+    pdf_app, fake_pdf_adapter, supervisor_token, monkeypatch
+):
+    import asyncio
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    cancelled = threading.Event()
+
+    def render(session, payload):
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("render wait expired")
+        return b"PNG"
+
+    def cancel(session, scope, before_epoch):
+        assert (session, scope, before_epoch) == ("sid-1", "viewport", 2)
+        cancelled.set()
+
+    monkeypatch.setattr(
+        fake_pdf_adapter, "render_preview_demand", render, raising=False
+    )
+    monkeypatch.setattr(fake_pdf_adapter, "cancel_reads", cancel, raising=False)
+    async with _http(supervisor_token, pdf_app) as http:
+        pending = asyncio.create_task(
+            http.post(
+                "/v2/pdf/sessions/sid-1/render_preview",
+                json={"page": 0, "read": {"scope": "viewport", "epoch": 1}},
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            response = await asyncio.wait_for(
+                http.post(
+                    "/v2/pdf/sessions/sid-1/cancel",
+                    json={"scope": "viewport", "before_epoch": 2},
+                ),
+                5,
+            )
+            assert response.status_code == 200 and response.json()["cancelled"] is True
+            assert cancelled.is_set()
+            assert not pending.done()
+        finally:
+            release.set()
+            result = await pending
+        assert result.status_code == 200
