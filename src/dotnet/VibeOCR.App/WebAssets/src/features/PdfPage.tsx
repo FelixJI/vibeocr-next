@@ -994,6 +994,8 @@ function PdfDocumentPage({ viewState, actions: parentActions }: FeatureProps) {
                 </CapabilityGate>
                 {state.canCopyExport === true && (
                   <Button
+                    data-document-id={documentId}
+                    data-revision={numberValue(state.revision)}
                     disabled={busy || pageCount === 0}
                     onClick={() => void actions.run({ type: "pdf.saveAs" })}
                   >

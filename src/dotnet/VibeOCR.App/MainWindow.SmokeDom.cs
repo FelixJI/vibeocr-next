@@ -38,11 +38,11 @@ public sealed partial class MainWindow
     await Task.Delay(100);
   }
 
-  private async Task ClickWorkbenchSmokeButtonAsync(string label)
+  private async Task ClickWorkbenchSmokeButtonAsync(string label, string selector = "button")
   {
     await WaitForSmokeDomAsync(
-      "(() => { const root=document; " +
-      "const b=Array.from(root.querySelectorAll('button')).find(b => " +
+      "(() => { const b=Array.from(document.querySelectorAll(" +
+      JsonSerializer.Serialize(selector) + ")).find(b => " +
       "b.textContent?.trim() === " + JsonSerializer.Serialize(label) +
       " && !b.disabled); if (!b) return false; b.click(); return true; })()",
       TimeSpan.FromSeconds(30));
