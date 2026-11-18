@@ -1055,7 +1055,7 @@ public sealed class DefaultModeRequestContractTests
       int page,
       int size,
       CancellationToken cancellationToken) =>
-      Task.FromResult(new byte[] { 1, 2, 3 });
+      Task.FromResult(InferenceClientStub.TestPng);
 
     public override Task<JobRef> SubmitAsync(
       SubmitRequest request,

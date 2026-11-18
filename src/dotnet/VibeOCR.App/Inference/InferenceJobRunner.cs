@@ -27,7 +27,7 @@ internal sealed record InferenceJobRun(
 /// events and outcome deltas, aligns server item ids back to client item keys,
 /// and propagates cancellation through the generic command seam.
 /// </summary>
-internal sealed class InferenceJobRunner(IInferenceClient inference)
+internal sealed class InferenceJobRunner(IInferenceClient inference, Func<CancellationToken, Task>? idleDelay = null)
 {
     public async Task<InferenceJobRun> RunRecognitionAsync(
         string pipelineId,
@@ -38,7 +38,9 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         OcrEngine? engine = null,
         MineruConfig? mineru = null,
         bool waitForCancellation = false,
-        Action<JobSnapshot>? progress = null)
+        Action<JobSnapshot>? progress = null,
+        Action<JobRef>? submitted = null,
+        Action<JobSnapshot>? terminalObserved = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipelineId);
         ArgumentNullException.ThrowIfNull(inputs);
@@ -93,10 +95,12 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
         try
         {
             job = await inference.SubmitAsync(request, uploads, cancellationToken);
+            submitted?.Invoke(job);
             IReadOnlyDictionary<string, string> clientKeyByItemId =
                 ValidateAndIndexJobRef(job, inputs);
             var outcomes = new Dictionary<string, ItemOutcome>(StringComparer.Ordinal);
             int afterSequence = 0;
+            JobSnapshot? previous = null;
 
             while (true)
             {
@@ -106,10 +110,12 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                     afterSequence,
                     cancellationToken);
                 ValidateUpdate(job.JobId, afterSequence, update);
+                bool terminal = IsTerminal(update.Snapshot.State);
+                if (terminal && !update.More)
+                    terminalObserved?.Invoke(update.Snapshot);
                 progress?.Invoke(update.Snapshot);
                 AccumulateOutcomes(clientKeyByItemId, outcomes, update.Outcomes);
 
-                bool terminal = IsTerminal(update.Snapshot.State);
                 if (terminal && !update.More)
                 {
                     if (outcomes.Count != inputs.Count)
@@ -128,6 +134,16 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                         $"Job '{job.JobId}' reported more data without advancing its sequence.");
                 }
 
+                if (!terminal && !update.More && update.ThroughSequence == afterSequence &&
+                    update.Events.Count == 0 && update.Outcomes.Count == 0 && previous is not null &&
+                    previous.State == update.Snapshot.State && previous.Stage == update.Snapshot.Stage &&
+                    previous.ProgressCurrent == update.Snapshot.ProgressCurrent &&
+                    previous.ProgressTotal == update.Snapshot.ProgressTotal &&
+                    previous.Summary == update.Snapshot.Summary)
+                {
+                    await (idleDelay?.Invoke(cancellationToken) ?? Task.Delay(100, cancellationToken));
+                }
+                previous = update.Snapshot;
                 afterSequence = update.ThroughSequence;
             }
         }
@@ -142,7 +158,12 @@ internal sealed class InferenceJobRunner(IInferenceClient inference)
                     while (true)
                     {
                         JobUpdate terminal = await inference.ObserveAsync(job.JobId, 0, CancellationToken.None);
-                        if (IsTerminal(terminal.Snapshot.State)) break;
+                        ValidateUpdate(job.JobId, 0, terminal);
+                        if (IsTerminal(terminal.Snapshot.State))
+                        {
+                            terminalObserved?.Invoke(terminal.Snapshot);
+                            break;
+                        }
                         await Task.Delay(250);
                     }
                 }

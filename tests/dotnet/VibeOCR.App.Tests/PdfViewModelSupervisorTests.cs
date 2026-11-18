@@ -275,7 +275,7 @@ public sealed class PdfViewModelSupervisorTests
     Assert.Equal(0, fake.SubmitCalls);
     viewModel.SetRecognitionMode(mode,
       new PaddleModeOptions { ModelPreset = "tiny", Device = "directml" });
-    gate.SetResult([1, 2, 3]);
+    gate.SetResult(InferenceClientStub.TestPng);
     await running;
 
     SubmitRequest first = Assert.IsType<SubmitRequest>(fake.LastRequest);
@@ -848,7 +848,7 @@ public sealed class PdfViewModelSupervisorTests
         CancellationToken ct)
     {
       RenderCalls++;
-      return PendingRender ?? Task.FromResult(new byte[] { (byte)page, 1, 2 });
+      return PendingRender ?? Task.FromResult(TestPng);
     }
 
     public override Task<Wire.PdfMutationResponse> UpdatePdfBlockTextAsync(

@@ -10,6 +10,9 @@ namespace VibeOCR.App.Tests;
 /// </summary>
 internal abstract class InferenceClientStub : IInferenceClient
 {
+    internal static readonly byte[] TestPng = Convert.FromBase64String(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZcAAAAASUVORK5CYII=");
+
     public virtual Uri BaseUrl => new("http://127.0.0.1:1");
 
     public virtual Task<JobRef> SubmitAsync(

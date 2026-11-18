@@ -156,6 +156,130 @@ public sealed class PdfDemandCoordinatorTests
     finally { auto.TrySetResult(); releaseWrite.TrySetResult(); }
   });
 
+  [Theory]
+  [InlineData(false, false)]
+  [InlineData(true, false)]
+  [InlineData(false, true)]
+  public Task OcrPreparesOnlyOnePageAtATimeAndDrainsBeforeWrite(bool nextReadFails, bool pageChanged) =>
+    OnDispatcherAsync(async () =>
+  {
+    var client = new Client(9);
+    var terminal = NewGate();
+    var terminalRead = NewGate();
+    var nextIssued = NewGate();
+    var nextRead = NewGate();
+    var firstWrite = NewGate();
+    int nextReads = 0;
+    client.BeforeObserve = async (id, ct) =>
+    {
+      if (id != "job-0") return;
+      await terminal.Task.WaitAsync(ct);
+      terminalRead.TrySetResult();
+    };
+    client.OnImage = async (_, kind, page) =>
+    {
+      if (kind == "ocr" && page == 4 && ++nextReads == 1)
+      {
+        nextIssued.TrySetResult();
+        await nextRead.Task;
+        if (nextReadFails) throw new IOException("injected next-batch render failure");
+      }
+      return Client.Png;
+    };
+    client.OnWrite = _ => { firstWrite.TrySetResult(); return Task.CompletedTask; };
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("ocr-overlap.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await WaitUntilAsync(() => model.DetectedCount == 9);
+      await fixture.SelectReadyAsync(0);
+      Task run = model.StartOcrAsync(Enumerable.Range(0, 8).ToArray(), false, Ct, addTextLayer: true);
+      await nextIssued.Task.WaitAsync(Timeout, Ct);
+      Assert.Single(client.Submitted);
+      Assert.Equal("ocr", model.Phase);
+      Assert.DoesNotContain(client.ImageLog, image => image.Item2 == "ocr" && image.Item3 > 4);
+
+      // A held speculative native read leaves room for the newly selected viewport.
+      await fixture.SelectReadyAsync(8);
+      Assert.Equal(2, client.MaximumImageReads);
+      if (pageChanged) model.Pages[4].ContentGeneration++;
+      terminal.TrySetResult();
+      await terminalRead.Task.WaitAsync(Timeout, Ct);
+      await Task.Yield();
+      Assert.False(firstWrite.Task.IsCompleted);
+      Assert.DoesNotContain(client.Acks, ack => ack.Item2 == Wire.PdfReadCancelScope.AllReads);
+
+      nextRead.TrySetResult();
+      await run.WaitAsync(Timeout, Ct);
+      Assert.Equal(pageChanged ? 2 : 1, nextReads);
+      Assert.Equal(Enumerable.Range(0, 4).Select(index => $"page-{index}"), client.Submitted.First());
+      Assert.Equal(Enumerable.Range(nextReadFails ? 5 : 4, nextReadFails ? 3 : 4).Select(index => $"page-{index}"),
+        client.Submitted.Last());
+      Assert.Equal(Enumerable.Range(0, 8).Where(index => !nextReadFails || index != 4), client.Written);
+      Assert.Equal(nextReadFails ? PdfPageState.Failed : PdfPageState.Done, model.Pages[4].State);
+      Assert.True(model.IsModified);
+    }
+    finally { terminal.TrySetResult(); nextRead.TrySetResult(); }
+  });
+
+  [Fact]
+  public Task CancellingOcrDrainsSpeculationAndPreservesEarlierPageOutcomes() => OnDispatcherAsync(async () =>
+  {
+    var client = new Client(13);
+    var speculate = NewGate();
+    var nativeRead = NewGate();
+    var remoteTerminal = NewGate();
+    var cancelled = NewGate();
+    client.BeforeObserve = async (id, ct) =>
+    {
+      if (id != "job-1") return;
+      if (ct.CanBeCanceled) await remoteTerminal.Task.WaitAsync(ct);
+      else { cancelled.TrySetResult(); await remoteTerminal.Task; }
+    };
+    client.OnImage = async (_, kind, page) =>
+    {
+      if (kind == "ocr" && page == 8)
+      {
+        speculate.TrySetResult();
+        await nativeRead.Task;
+      }
+      return Client.Png;
+    };
+    client.FailPage = "page-0";
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("cancel-overlap.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await WaitUntilAsync(() => model.DetectedCount == 13);
+      await fixture.SelectReadyAsync(0);
+      Task run = model.StartOcrAsync(Enumerable.Range(0, 12).ToArray(), false, Ct, addTextLayer: true);
+      await speculate.Task.WaitAsync(Timeout, Ct);
+      model.Cancel();
+      await cancelled.Task.WaitAsync(Timeout, Ct);
+      remoteTerminal.TrySetResult();
+      await Task.Yield();
+      Assert.False(run.IsCompleted);
+      Assert.True(model.IsSettling);
+      Assert.Equal(new[] { 1, 2, 3 }, client.Written);
+      Assert.Equal(PdfPageState.Failed, model.Pages[0].State);
+      Assert.All(model.Pages.Skip(1).Take(3), page => Assert.Equal(PdfPageState.Done, page.State));
+
+      nativeRead.TrySetResult();
+      await run.WaitAsync(Timeout, Ct);
+      Assert.False(model.IsSettling);
+      Assert.True(model.IsModified);
+      Assert.Equal(new[] { 1, 2, 3 }, client.Written);
+      Assert.Equal(PdfPageState.Failed, model.Pages[0].State);
+      Assert.All(model.Pages.Skip(1).Take(3), page => Assert.Equal(PdfPageState.Done, page.State));
+      Assert.All(model.Pages.Skip(4), page => Assert.Equal(PdfPageState.None, page.State));
+      Assert.DoesNotContain(client.ImageLog, image => image.Item2 == "ocr" && image.Item3 > 8);
+      Assert.Equal(2, client.Submitted.Count);
+    }
+    finally { remoteTerminal.TrySetResult(); nativeRead.TrySetResult(); }
+  });
+
   [Fact]
   public Task WarmReturnAndRemapReuseReadsAndKeepOffWindowCurrentPageIdentity() => OnDispatcherAsync(async () =>
   {
@@ -828,8 +952,7 @@ public sealed class PdfDemandCoordinatorTests
 
   private sealed class Client(int pages = 3) : InferenceClientStub, IInferenceClient
   {
-    internal static readonly byte[] Png = Convert.FromBase64String(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ZcAAAAASUVORK5CYII=");
+    internal static readonly byte[] Png = TestPng;
     private static readonly JsonElement[] Rect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0),
       JsonSerializer.SerializeToElement(300), JsonSerializer.SerializeToElement(500)];
     private readonly Dictionary<string, JobItem[]> jobs = [];
@@ -844,6 +967,8 @@ public sealed class PdfDemandCoordinatorTests
     internal Func<int, int, Task<byte[]>>? OnPreview;
     internal Func<int, Task<Wire.PageInspectResponse>>? OnInspect;
     internal Func<string, Wire.PdfReadCancelRequest, Task>? OnAck;
+    internal Func<string, CancellationToken, Task>? BeforeObserve;
+    internal string? FailPage { get; set; }
     internal bool IncludeOpenMirrorRects { get; set; } = true;
     internal int LegacyInspects => Volatile.Read(ref legacyInspects);
     internal int LegacyPreviews => Volatile.Read(ref legacyPreviews);
@@ -854,6 +979,8 @@ public sealed class PdfDemandCoordinatorTests
     internal ConcurrentQueue<int> Inspections { get; } = [];
     internal ConcurrentQueue<string> Closed { get; } = [];
     internal ConcurrentQueue<int[]> ExplicitPresence { get; } = [];
+    internal ConcurrentQueue<string[]> Submitted { get; } = [];
+    internal ConcurrentQueue<int> Written { get; } = [];
     internal TaskCompletionSource Acknowledged { get; } = NewGate();
     internal Channel<(string, string, int)> Images { get; } = Channel.CreateUnbounded<(string, string, int)>();
     internal Channel<string> Autos { get; } = Channel.CreateUnbounded<string>();
@@ -974,6 +1101,7 @@ public sealed class PdfDemandCoordinatorTests
 
     public override Task<JobRef> SubmitAsync(SubmitRequest request, IReadOnlyDictionary<string, SubmitUpload> uploads, CancellationToken ct)
     {
+      Submitted.Enqueue(request.Items.Select(item => item.ClientItemKey).ToArray());
       string id = "job-" + jobs.Count;
       JobItem[] items = request.Items.Select((item, index) => new JobItem
         { ItemId = id + "-" + index, ClientItemKey = item.ClientItemKey, Ordinal = index, DisplayName = item.DisplayName, State = ItemState.Queued }).ToArray();
@@ -981,24 +1109,29 @@ public sealed class PdfDemandCoordinatorTests
       return Task.FromResult(new JobRef { JobId = id, Items = items });
     }
 
-    public override Task<JobUpdate> ObserveAsync(string id, int sequence, CancellationToken ct) =>
-      Task.FromResult(new JobUpdate
+    public override async Task<JobUpdate> ObserveAsync(string id, int sequence, CancellationToken ct)
+    {
+      if (BeforeObserve is { } gate) await gate(id, ct);
+      return new JobUpdate
       {
         Events = [], ThroughSequence = sequence + 1,
         Snapshot = new JobSnapshot { JobId = id, Kind = JobKind.Recognition, Priority = JobPriority.Background,
           State = JobState.Completed, Items = jobs[id] },
-        Outcomes = jobs[id].Select(item => new ItemOutcome { ItemId = item.ItemId, Attempt = 1, State = ItemState.Succeeded,
+        Outcomes = jobs[id].Select(item => new ItemOutcome { ItemId = item.ItemId, Attempt = 1,
+          State = item.ClientItemKey == FailPage ? ItemState.Failed : ItemState.Succeeded,
           PayloadType = "ocr.v1", Payload = new Dictionary<string, JsonElement>
           {
             ["raw_text"] = JsonSerializer.SerializeToElement("selected"),
             ["text_blocks"] = JsonSerializer.SerializeToElement(new[] { new { text = "selected", score = .9, bbox = new[] { 10, 20, 80, 40 } } }),
             ["preproc_angle"] = JsonSerializer.SerializeToElement(0),
           } }).ToArray(),
-      });
+      };
+    }
 
     public override async Task<Wire.PdfMutationResponse> AddPdfTextLayersAsync(string session, Wire.BatchAddTextLayerRequest request, CancellationToken ct)
     {
       if (OnWrite is { } gate) await gate(session);
+      foreach (var page in request.Pages) Written.Enqueue(page.Page);
       return new()
       {
         SchemaVersion = 2, InstanceId = "test", Diff = new Wire.ModelDiff
