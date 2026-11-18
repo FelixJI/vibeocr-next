@@ -24,6 +24,7 @@ public static class RuntimeProtocol
     public const string PDF_BLOCK_EDIT_V1 = "pdf.block-edit.v1";
     public const string PDF_COPY_EXPORT_V1 = "pdf.copy-export.v1";
     public const string PDF_DEMAND_V1 = "pdf.demand.v1";
+    public const string PDF_PREFETCH_PRESENCE_V1 = "pdf.prefetch-presence.v1";
     public const int ReadyEnvelopeVersion = 1;
     public const int ProtocolVersion = 2;
     public const int SchemaVersion = 2;
@@ -48,7 +49,8 @@ public static class RuntimeProtocol
         "pdf.page-inspect.v1",
         "pdf.block-edit.v1",
         "pdf.copy-export.v1",
-        "pdf.demand.v1"
+        "pdf.demand.v1",
+        "pdf.prefetch-presence.v1"
         };
     public static IReadOnlyList<RuntimeOperation> Operations { get; } =
         new RuntimeOperation[]

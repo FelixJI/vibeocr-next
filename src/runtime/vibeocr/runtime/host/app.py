@@ -925,9 +925,9 @@ def create_app(
         """Stream per-page detection (NDJSON, one ProgressEvent per line).
 
         Optional body (pdf.demand.v1, PdfDemandLoadRequest) selects the
-        presence-only demand form: explicit pages are foreground-priority
-        targeted reads; omitted pages is the single automatic background
-        stream. No body keeps the legacy full detection.
+        presence-only demand form: explicit pages use foreground admission
+        unless prefetch is requested; omitted pages is the single automatic
+        background stream. No body keeps the legacy full detection.
         """
         try:
             adapter = _pdf_adapter()

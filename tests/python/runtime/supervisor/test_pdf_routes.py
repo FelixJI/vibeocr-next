@@ -116,6 +116,45 @@ async def test_load_streams_ndjson_progress_events(
     assert event["message"] == "done"
 
 
+async def test_prefetch_presence_rejects_invalid_combinations_before_streaming(
+    pdf_app: FastAPI, supervisor_token: str, fake_pdf_adapter: FakePdfAdapter
+) -> None:
+    path = "/v2/pdf/sessions/sid-1/load"
+    background = {"scope": "background", "epoch": 1}
+    async with _http(supervisor_token, pdf_app) as http:
+        health = await http.get("/v2/health")
+        assert "pdf.prefetch-presence.v1" in health.json()["capabilities"]
+        for invalid in (
+            {"read": background, "prefetch": True},
+            {"read": background, "pages": [], "prefetch": True},
+            {"read": background, "pages": [0, 1, 2, 3, 4], "prefetch": True},
+            {"read": background, "pages": [0], "prefetch": "true"},
+            {
+                "read": {"scope": "viewport", "epoch": 1},
+                "pages": [0],
+                "prefetch": True,
+            },
+        ):
+            response = await http.post(path, json=invalid)
+            assert response.status_code == 400
+            assert response.json()["code"] == "VALIDATION_ERROR"
+        assert not fake_pdf_adapter.calls
+
+        for payload in (
+            {"read": background, "pages": [0, 4], "prefetch": True},
+            {"read": background, "pages": [0, 1, 2, 3, 4], "prefetch": False},
+            {"read": background, "pages": [0]},
+        ):
+            response = await http.post(path, json=payload)
+            assert response.status_code == 200
+            assert '"message":"done"' in response.text
+            assert fake_pdf_adapter.calls[-1] == (
+                "load_demand_stream",
+                ("sid-1", payload),
+                {},
+            )
+
+
 async def test_delete_text_layers_streams_ndjson(
     pdf_app: FastAPI, supervisor_token: str
 ) -> None:

@@ -617,7 +617,7 @@ def _detect_one_page(
     """检测单页并写入 session model。
 
     准入：无 read 走后台逐页单元（legacy）；有 read 走 scoped 可撤销单元，
-    显式 pages 为前台优先、自动流为后台。body 形 demand
+    默认显式 pages 为前台优先，自动流和预取为后台。body 形 demand
     load 只做几何+文字存在性，不扫描图像覆盖 is_scanned，并保留
     OCR/preproc/deskewed。文字存在性变化时旧检测结果失效；legacy 完整
     扫描置 scan_checked=True。
@@ -659,8 +659,8 @@ def session_load(
     """流式逐页检测，每完成一页推一条 NDJSON ProgressEvent。
 
     无 body（legacy）：完整检测（含图像覆盖率扫描），逐页后台单元。
-    有 body（pdf.demand.v1）：仅几何+文字存在性；显式 pages 为交互前置
-    （前台优先，保留请求 scope），省略 pages 为唯一自动后台流。
+    有 body（pdf.demand.v1）：仅几何+文字存在性；显式 pages 默认前台优先，
+    prefetch=true 使用后台准入，省略 pages 为唯一自动后台流。
     取消/水位隔栏/失败不伪造全量完成。
 
     每行 JSON:
@@ -675,6 +675,7 @@ def session_load(
     total = s.pdf_document.page_count
     read = req.read if req is not None else None
     targeted = req is not None and req.pages is not None
+    foreground = targeted and req is not None and not req.prefetch
     pages = (
         list(dict.fromkeys(req.pages))
         if req is not None and req.pages is not None
@@ -699,7 +700,7 @@ def session_load(
                 info = (
                     _detect_one_page(s, i)
                     if read is None
-                    else _detect_one_page(s, i, read=read, foreground=targeted)
+                    else _detect_one_page(s, i, read=read, foreground=foreground)
                 )
                 if read is not None:
                     _reject_obsolete_read(s, read)

@@ -495,7 +495,8 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     if (probe is null) await Call();
     else await probe.MeasureAsync(request.Pages is null ? "load_detect" : "load_targeted",
       sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call,
-      purpose: request.Pages is null ? "document_detection" : "business_presence",
+      purpose: request.Prefetch == true ? "prefetch_presence" :
+        request.Pages is null ? "document_detection" : "business_presence",
       readEpoch: request.Read?.Epoch, pages: probe.CapturePipeline ? request.Pages?.ToArray() : null);
   }
 

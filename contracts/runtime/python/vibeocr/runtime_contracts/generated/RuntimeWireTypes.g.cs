@@ -1114,6 +1114,9 @@ public sealed record PdfDemandLoadRequest
 
     [JsonPropertyName("pages")]
     public IReadOnlyList<int>? Pages { get; init; }
+
+    [JsonPropertyName("prefetch")]
+    public bool? Prefetch { get; init; }
 }
 
 public sealed record PdfDetectResponse

@@ -89,12 +89,14 @@ public sealed class PdfViewModel(
   public bool CanCopyExport { get; private set; }
   /// <summary>pdf.demand.v1 能力：严格为 true 时启用按需调度新路径；legacy 保持旧路径。</summary>
   public bool CanDemandPages { get; private set; }
+  private bool CanPrefetchPresence { get; set; }
   public void SetInspectionCapabilities(IReadOnlyCollection<string> capabilities)
   {
     CanCopyExport = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_COPY_EXPORT_V1);
     CanInspectPage = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PAGE_INSPECT_V1);
     CanCorrectText = CanInspectPage && capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_BLOCK_EDIT_V1);
     if (!HasSession) CanDemandPages = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_DEMAND_V1);
+    CanPrefetchPresence = capabilities.Contains(VibeOCR.Runtime.Contracts.Generated.RuntimeProtocol.PDF_PREFETCH_PRESENCE_V1);
   }
   public bool CanAddTextLayer => (_recognitionMode?.PipelineId ?? "OCR") == "OCR" && _options?.UseDocUnwarping != true;
   public void SetProcessingSettings(PdfProcessingSettings settings) { settings.Validate(); ProcessingSettings = settings; Changed(); }
@@ -1615,10 +1617,21 @@ public sealed class PdfViewModel(
         throw new InvalidOperationException("PDF OCR target page identity changed.");
       }
       PdfPageViewModel page = Pages[target.Index];
-      // Targeted presence uses foreground native admission. Leave unknown pages
-      // and the remaining suffix for current-batch preparation.
-      if (speculative && (page.DetectionState != PdfDetectionState.Known || !page.HasReliableGeometry)) return;
       long generation = page.ContentGeneration;
+      if (speculative && (page.DetectionState != PdfDetectionState.Known || !page.HasReliableGeometry))
+      {
+        if (!CanPrefetchPresence) return;
+        try
+        {
+          var presence = await _demand!.TryPrefetchPresenceAsync(this, session, target.Index, stop, cancelRun,
+            () => CanPrefetchPresence && canSpeculate!(),
+            () => Owns(target) && page.ContentGeneration == generation);
+          if (!presence.Issued || !presence.Present) return;
+        }
+        catch (Exception) { return; } // Let the current batch decide the page outcome.
+        if (stop.IsCancellationRequested || !canSpeculate!() ||
+            !Owns(target) || page.ContentGeneration != generation) return;
+      }
       var prepared = new PreparedOcrPage(target, generation);
       try
       {
@@ -1695,9 +1708,10 @@ public sealed class PdfViewModel(
     return ok;
   }
 
-  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current)
+  internal async Task<bool> ReadPresenceAsync(string session, long epoch, int[]? pages, Func<bool> current,
+    bool prefetch = false)
   {
-    bool foreground = pages is not null;
+    bool foreground = pages is not null && !prefetch;
     int[] targets = pages ?? Enumerable.Range(0, Pages.Count)
       .Where(index => Pages[index].DetectionState is PdfDetectionState.Unknown or PdfDetectionState.Detecting)
       .ToArray();
@@ -1707,6 +1721,7 @@ public sealed class PdfViewModel(
     var tracking = new HashSet<PdfPageViewModel>();
     void Detecting(int index)
     {
+      if (prefetch) return;
       var page = Pages[index];
       if (page.DetectionState is not PdfDetectionState.Known)
       {
@@ -1724,6 +1739,7 @@ public sealed class PdfViewModel(
       {
         Read = new() { Scope = Wire.PdfReadScope.Background, Epoch = epoch },
         Pages = pages,
+        Prefetch = prefetch ? true : null,
       }, progress =>
       {
         // The response can settle the issued read even after its UI owner changed.
@@ -1740,26 +1756,28 @@ public sealed class PdfViewModel(
           received.Add(page.PageIndex);
           while (next < targets.Length && received.Contains(targets[next])) next++;
           if (next < targets.Length) Detecting(targets[next++]);
-          if (!foreground && (received.Count <= 2 || received.Count % 8 == 0 || received.Count == targets.Length)) Changed();
+          if (!foreground && !prefetch &&
+              (received.Count <= 2 || received.Count % 8 == 0 || received.Count == targets.Length)) Changed();
         }
         if (foreground) UpdateProgress(progress);
       }, CancellationToken.None);
       if (terminal is null) throw new InvalidDataException("PDF presence stream ended without a terminal response.");
-      return current() && terminal == "done" && targets.All(index => Pages[index].HasReliableGeometry);
+      return current() && terminal == "done" && (!prefetch || received.Count == targets.Length) &&
+        targets.All(index => Pages[index].HasReliableGeometry);
     }
     finally
     {
       // Cancelled or superseded attempts leave unresolved pages eligible for a later
       // read. A completed stream that omitted a target records a real failed page.
       bool stillCurrent = current();
-      if (stillCurrent && terminal is not "cancelled")
+      if (!prefetch && stillCurrent && terminal is not "cancelled")
         foreach (int index in targets)
           if (!received.Contains(index) && Pages[index].DetectionState != PdfDetectionState.Known)
             Pages[index].DetectionState = PdfDetectionState.Failed;
       foreach (PdfPageViewModel page in tracking)
         if (page.DetectionState == PdfDetectionState.Detecting && page.DetectionEpoch == epoch)
           page.DetectionState = PdfDetectionState.Unknown;
-      if (SessionId == session) Changed();
+      if (SessionId == session && (!prefetch || received.Count > 0)) Changed();
     }
   }
   private void UpdateProgress(JsonElement progress)

@@ -20,6 +20,7 @@ PDF_PAGE_INSPECT_V1 = "pdf.page-inspect.v1"
 PDF_BLOCK_EDIT_V1 = "pdf.block-edit.v1"
 PDF_COPY_EXPORT_V1 = "pdf.copy-export.v1"
 PDF_DEMAND_V1 = "pdf.demand.v1"
+PDF_PREFETCH_PRESENCE_V1 = "pdf.prefetch-presence.v1"
 
 ALL_CAPABILITIES: tuple[str, ...] = (
     'ocr.recognition.v2',
@@ -41,6 +42,7 @@ ALL_CAPABILITIES: tuple[str, ...] = (
     'pdf.block-edit.v1',
     'pdf.copy-export.v1',
     'pdf.demand.v1',
+    'pdf.prefetch-presence.v1',
 )
 READY_ENVELOPE_VERSION = 1
 PROTOCOL_VERSION = 2

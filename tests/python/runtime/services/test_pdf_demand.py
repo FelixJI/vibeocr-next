@@ -192,6 +192,103 @@ def test_revokes_waiter_and_drops_inflight_copy_before_encoding(
     assert copied.is_set() and calls == [0]
 
 
+async def _wait_for_native_queue(
+    gate: PdfNativeGate, foreground: int, background: int
+) -> None:
+    async with asyncio.timeout(5):
+        while (gate.foreground_waiters, gate.background_waiters) != (
+            foreground,
+            background,
+        ):
+            await asyncio.sleep(0.002)
+
+
+async def test_targeted_prefetch_yields_to_viewport_and_explicit_presence(
+    demand_session, monkeypatch
+):
+    s = demand_session
+    order: list[str] = []
+    page_rotation = backend.PdfService.page_rotation
+
+    def rotation(doc, page):
+        order.append("prefetch" if page == 0 else "explicit")
+        return page_rotation(doc, page)
+
+    def preview(*_):
+        order.append("viewport")
+        return b"\0\0\0", 1, 1
+
+    monkeypatch.setattr(backend.PdfService, "page_rotation", staticmethod(rotation))
+    monkeypatch.setattr(backend, "_render_page_pixels", preview)
+    background = _read("background", 1)
+    async with asyncio.TaskGroup() as tasks:
+        with s.native_gate.foreground():
+            speculative = tasks.create_task(
+                _lines(
+                    s, PdfDemandLoadRequest(read=background, pages=[0], prefetch=True)
+                )
+            )
+            await _wait_for_native_queue(s.native_gate, foreground=0, background=1)
+            tasks.create_task(
+                asyncio.to_thread(
+                    backend.render_preview,
+                    s.session_id,
+                    RenderPreviewRequest(page=2, read=_read("viewport", 1)),
+                )
+            )
+            targeted = tasks.create_task(
+                _lines(
+                    s, PdfDemandLoadRequest(read=background, pages=[1], prefetch=False)
+                )
+            )
+            await _wait_for_native_queue(s.native_gate, foreground=2, background=1)
+            assert not order
+    assert set(order[:2]) == {"viewport", "explicit"}
+    assert order[2:] == ["prefetch"]
+    assert speculative.result()[-1]["message"] == "done"
+    assert targeted.result()[-1]["message"] == "done"
+
+
+async def test_prefetch_presence_ack_revokes_queue_and_drains_native_detection(
+    demand_session, monkeypatch
+):
+    s = demand_session
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+    page_rotation = backend.PdfService.page_rotation
+
+    def rotation(doc, page):
+        calls.append(page)
+        started.set()
+        assert release.wait(5)
+        return page_rotation(doc, page)
+
+    monkeypatch.setattr(backend.PdfService, "page_rotation", staticmethod(rotation))
+    read = _read("background", 1)
+    async with asyncio.TaskGroup() as tasks:
+        active = tasks.create_task(
+            _lines(s, PdfDemandLoadRequest(read=read, pages=[0], prefetch=True))
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            queued = tasks.create_task(
+                _lines(s, PdfDemandLoadRequest(read=read, pages=[1], prefetch=True))
+            )
+            await _wait_for_native_queue(s.native_gate, foreground=0, background=1)
+            _cancel(s, "background", 2)
+            assert [row["message"] for row in await asyncio.wait_for(queued, 5)] == [
+                "cancelled"
+            ]
+            assert not active.done()
+            assert s.active_ops == 1
+            assert not s.native_gate.background_waiters
+        finally:
+            release.set()
+    assert [row["message"] for row in active.result()] == ["cancelled"]
+    assert calls == [0]
+
+
 async def test_smoke_delay_can_be_cancelled_without_holding_native_gate(
     demand_session, monkeypatch
 ):
