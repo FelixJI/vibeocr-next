@@ -574,6 +574,55 @@ public sealed class PdfDemandCoordinatorTests
   });
 
   [Fact]
+  public Task StructureChangePreservesBackfilledGeometryWithoutRepeatReads() => OnDispatcherAsync(async () =>
+  {
+    // 未检测横向页已由当前页检查回填几何（842×595/rotation 90）；随后删除其后
+    // 页面：当前页 index/PageKey/Generation 不变，diff 为全量镜像且服务端模型
+    // 仍 0 Rect/rotation 0（page_inspect 不回写）。不得把已回填几何归零，也不得
+    // 靠重复 inspect/render 恢复。
+    var client = new Client(60) { IncludeOpenMirrorRects = false };
+    var auto = NewGate();
+    client.OnAuto = _ => auto.Task;
+    client.SetPageRect(55, 842, 595);
+    client.SetPageRotation(55, 90);
+    await using var fixture = new Fixture(client);
+    try
+    {
+      await fixture.OpenAsync("structure.pdf");
+      PdfViewModel model = fixture.Handler.PdfDocuments[0].Model;
+      await fixture.SelectReadyAsync(55);
+      long pageKey = model.Pages[55].PageKey;
+      long revisionBefore = model.Revision;
+      int inspects = client.Inspections.Count;
+      int reads = client.ImageLog.Count;
+
+      await model.DeletePagesAsync([59], Ct);
+      Assert.Equal(59, model.PageCount);
+      Assert.Equal(842, model.Pages[55].Width);
+      Assert.Equal(595, model.Pages[55].Height);
+      Assert.Equal(90, model.Pages[55].Rotation);
+      Assert.Equal(pageKey, model.Pages[55].PageKey);
+      Assert.Equal(0, model.Pages[55].ContentGeneration);
+      Assert.Equal(PdfDetectionState.Unknown, model.Pages[55].DetectionState);
+      Assert.Equal(0, model.DetectedCount);
+      Assert.Equal(revisionBefore + 1, model.Revision);
+      Assert.True(model.IsModified);
+      Assert.Equal(inspects, client.Inspections.Count);
+      Assert.Equal(reads, client.ImageLog.Count);
+
+      // 投影同源：几何保留后当前页检查仍复用暖缓存，无需重复读取。
+      PdfWorkbenchState after = await fixture.StateAsync(new SetPdfWindowCommand(0));
+      PdfWorkbenchPage projected = Assert.Single(after.Pages!, page => page.Index == 55);
+      Assert.Equal(842, projected.Width);
+      Assert.Equal(595, projected.Height);
+      Assert.Equal("pdf.inspect.ready", after.PageInspectStatusCode);
+      Assert.Equal(inspects, client.Inspections.Count);
+      Assert.Equal(reads, client.ImageLog.Count);
+    }
+    finally { auto.TrySetResult(); }
+  });
+
+  [Fact]
   public Task DemandSettingsChangeRefreshesThroughCoordinatorWithoutLegacyReads() => OnDispatcherAsync(async () =>
   {
     var client = new Client(3);
@@ -787,6 +836,7 @@ public sealed class PdfDemandCoordinatorTests
     private readonly ConcurrentDictionary<int, JsonElement[]> pageRects = new();
     private readonly ConcurrentDictionary<int, int> pageRotations = new();
     private int opens, activeReads, maxReads, legacyInspects, legacyPreviews;
+    private int remaining = -1;
     internal int MaximumImageReads => Volatile.Read(ref maxReads);
     internal int LegacyLoads;
     internal Func<string, string, int, Task<byte[]>>? OnImage;
@@ -811,6 +861,20 @@ public sealed class PdfDemandCoordinatorTests
     private static JsonElement[] RectOf(double x0, double y0, double x1, double y1) =>
       [JsonSerializer.SerializeToElement(x0), JsonSerializer.SerializeToElement(y0), JsonSerializer.SerializeToElement(x1), JsonSerializer.SerializeToElement(y1)];
     internal void SetPageRect(int index, double width, double height) => pageRects[index] = RectOf(0, 0, width, height);
+    internal void SetPageRotation(int index, int rotation) => pageRotations[index] = ((rotation % 360) + 360) % 360;
+    // 与真实后端一致：结构变更回 _diff_full；未检测页 Rect=(0,0,0,0)/rotation 0。
+    private static readonly JsonElement[] ZeroRect = [JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0),
+      JsonSerializer.SerializeToElement(0), JsonSerializer.SerializeToElement(0)];
+    private Wire.PdfDocumentMirror UndetectedFullModel() => new()
+    { Pages = Enumerable.Range(0, remaining).Select(index => new Wire.PdfPageInfoMirror
+        { PageIndex = index, Rect = ZeroRect }).ToArray() };
+    public override Task<PdfMutateResult> DeletePdfPagesAsync(string session, int[] targets, CancellationToken ct)
+    {
+      if (remaining < 0) remaining = pages;
+      remaining -= targets.Length;
+      return Task.FromResult(new PdfMutateResult(remaining, new Wire.ModelDiff
+        { FullModel = UndetectedFullModel(), ModifiedFlag = true }));
+    }
     private JsonElement[] RectOf(int index) => pageRects.TryGetValue(index, out JsonElement[]? rect) ? rect : Rect;
     internal Wire.PageInspectResponse InspectOf(int page) => new() { SchemaVersion = 2, InstanceId = "test",
       Page = page, Rotation = pageRotations.TryGetValue(page, out int rotation) ? rotation : 0,

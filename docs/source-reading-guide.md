@@ -118,6 +118,12 @@ WebAssets 不直接连接 Backend；bridge 是浏览器内容与桌面权限之�
 资源 lease 进入 `WorkbenchResourcesOwner`，模式选择进入 `WorkbenchSelectionOwner`。`WorkbenchOperations` 只共享
 应用生命周期、状态发布和既有后台操作追踪。阅读某功能时沿它的 owner 进入 ViewModel，不经整个 facade 读取其他功能字段。
 
+PDF 的 `pdf.demand.v1` 路径由 `Workbench/PdfDemandCoordinator` 统一调度当前页、真实视口和有界邻近需求，
+持有读取槽位、按页身份/内容代次/尺寸区分的缓存与资源回收。它不同于准备 Runtime 的 `Inference/RuntimeDemandCoordinator`。
+`PdfViewModel` 保留 unknown/detecting/known/failed 文字层状态，并在实际写入与关闭调用点建立读写屏障；
+当前页检查可先补齐几何，不将文字层未知当成已检测。Python `documents/pdf_native_gate.py` 保持 MuPDF 原生串行，
+前台读取优先且后台有公平机会；取消先撤销过期需求，已进入原生调用的操作安全结束后丢弃旧结果。
+
 状态订阅使用 `WorkbenchStateMailbox` 的每 scope 最新槽和受保护完成槽，每槽最多一项，信号 channel 容量为一。
 `WorkbenchDispatcherDelivery` 在宿主层保持最多一个实际 dispatcher callback；取消旧 session 会等待其旧 callback
 释放占位但不发布旧状态。main 订阅十个 scope，现场编辑窗口只接收 shell、recognition 和仅有 theme 的 settings 投影。

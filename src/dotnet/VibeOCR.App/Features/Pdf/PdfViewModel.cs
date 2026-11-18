@@ -1326,9 +1326,23 @@ public sealed class PdfViewModel(
     CountPage(target, -1);
     target.AddedThisSession = page.HasOcrTextLayer == true || page.OcrTextBlocks is { Count: > 0 };
     if (target.HasTextLayer && page.HasTextLayer != true) { target.Result = null; target.ResultReference = null; target.OcrText = ""; target.State = PdfPageState.None; }
-    target.Detected = detected; target.HasTextLayer = detected && page.HasTextLayer == true; target.Rotation = page.Rotation ?? 0;
+    target.Detected = detected; target.HasTextLayer = detected && page.HasTextLayer == true;
     if (detected) target.DetectionState = PdfDetectionState.Known;
-    if (page.Rect is { Count: 4 } rect) { target.Width = rect[2].GetDouble() - rect[0].GetDouble(); target.Height = rect[3].GetDouble() - rect[1].GetDouble(); }
+    if (page.Rect is { Count: 4 } rect)
+    {
+      // 镜像 0 Rect/rotation 0 = 服务端从未刷新该页几何（page_inspect 不回写
+      // 模型），不是几何事实：不清零同页（PageKey 身份）已确认的真实几何。
+      // 真实几何变化（rotate/插入）总在镜像携带正 Rect（pdf_service
+      // rotate_pages / _map_page_infos+update_page_info），届时无条件覆盖。
+      double width = rect[2].GetDouble() - rect[0].GetDouble();
+      double height = rect[3].GetDouble() - rect[1].GetDouble();
+      if (width > 0 && height > 0)
+      {
+        target.Width = width;
+        target.Height = height;
+        target.Rotation = page.Rotation ?? 0;
+      }
+    }
     CountPage(target, 1);
     _modelAvailable = true;
   }
