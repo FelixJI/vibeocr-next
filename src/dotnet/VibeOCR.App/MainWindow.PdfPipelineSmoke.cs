@@ -7,759 +7,363 @@ using VibeOCR.Platform.Inference;
 
 namespace VibeOCR.App;
 
-/// <summary>
-/// T3（#328）页面选择规范：all（≤64）/first:N/pages:a,b,c（均限首 64 页公开
-/// 复选框窗口）。fail-closed：越界、空集、非法 token、>64 的 all 均拒绝。
-/// </summary>
-internal static class PdfPipelinePageSelection
-{
-  internal const int MaxSelectableWindow = 64;
-
-  internal static int[] Resolve(string spec, int pageCount)
-  {
-    if (pageCount <= 0)
-      throw new InvalidOperationException($"Pipeline page selection requires a positive page count: {pageCount}");
-    string trimmed = spec.Trim();
-    if (trimmed == "all")
-    {
-      if (pageCount > MaxSelectableWindow)
-        throw new InvalidOperationException(
-            $"'all' requires pageCount<={MaxSelectableWindow} (公开选择控件只覆盖首窗口); pageCount={pageCount}");
-      return Enumerable.Range(0, pageCount).ToArray();
-    }
-    if (trimmed.StartsWith("first:", StringComparison.Ordinal))
-    {
-      if (!int.TryParse(trimmed["first:".Length..], out int count) || count <= 0 ||
-          count > pageCount || count > MaxSelectableWindow)
-        throw new InvalidOperationException($"Invalid pipeline page selection '{spec}' for pageCount={pageCount}");
-      return Enumerable.Range(0, count).ToArray();
-    }
-    if (trimmed.StartsWith("pages:", StringComparison.Ordinal))
-    {
-      string[] tokens = trimmed["pages:".Length..].Split(
-          ',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-      if (tokens.Length == 0)
-        throw new InvalidOperationException($"Invalid pipeline page selection '{spec}'");
-      List<int> indexes = tokens
-          .Select(token => int.TryParse(token, out int value)
-            ? value
-            : throw new InvalidOperationException($"Invalid page index '{token}' in '{spec}'"))
-          .Distinct()
-          .Order()
-          .ToList();
-      if (indexes.Any(index => index < 0 || index >= pageCount || index >= MaxSelectableWindow))
-        throw new InvalidOperationException(
-            $"Pipeline page selection '{spec}' leaves the first {MaxSelectableWindow}-page selection window (pageCount={pageCount})");
-      return indexes.ToArray();
-    }
-    throw new InvalidOperationException($"Unknown pipeline page selection spec: {spec}");
-  }
-
-  /// <summary>当前串行合同：4 页一批一个通用 job（PdfViewModel.Chunk(4)）。</summary>
-  internal static int ExpectedBatches(int pageCount) => (pageCount + 3) / 4;
-}
-
-/// <summary>每类 wire 请求的窗口统计；未测得字段保持 null，不落 0。</summary>
-internal sealed record PdfPipelineKindStat(
-    int Count, int Completed, int Pending, int Faulted, int Cancelled,
-    double? DurationSumMs, double? DurationMedianMs, double? DurationMaxMs,
-    long? BytesTotal, int EventsWithBytes, long? PixelsTotal, int EventsParsedPng,
-    int CompletedMissingBytes);
-
-/// <summary>
-/// T3（#328）阶段测量的纯统计/校验：全部基于 PdfSmokeRequestProbe 的原始
-/// 事件，输入窗口由宿主 Stopwatch 域的毫秒边界指定。缺失终态（pending）、
-/// 失败/取消、job 数与串行合同不符、无业务渲染等都显式产出错误，由调用方
-/// fail-closed；不存在的度量保持 null（NOT_MEASURED），不得写 0。
-/// </summary>
 internal static class PdfPipelinePhaseStats
 {
-  internal static List<PdfSmokeRequestProbe.RequestEvent> Window(
-      IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events, double fromMs, double toMs) =>
-    events.Where(request => request.StartedAtMs >= fromMs && request.StartedAtMs < toMs).ToList();
+  internal static PdfSmokeRequestProbe.RequestEvent[] Window(
+    IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events, double start, double end) =>
+    events.Where(request => request.StartedAtMs >= start && request.StartedAtMs <= end).ToArray();
 
-  internal static IReadOnlyDictionary<string, PdfPipelineKindStat> ByKind(
-      IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events)
+  internal static PdfSmokeRequestProbe.RequestEvent[] BusinessRequests(
+    IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> window, string session)
   {
-    var result = new Dictionary<string, PdfPipelineKindStat>();
-    foreach (IGrouping<string, PdfSmokeRequestProbe.RequestEvent> group in events.GroupBy(request => request.Kind))
+    var jobs = window.Where(request => request.Kind == "job_submit" && request.Detail is not null)
+      .Select(request => request.Detail!).ToHashSet(StringComparer.Ordinal);
+    return window.Where(request =>
+      request.Kind == "job_submit" ||
+      request.Kind == "job_observe" && jobs.Contains(request.Session) ||
+      request.Session == session && (request.Purpose is "business_presence" or "business_render" ||
+        request.Kind == "add_text_layers")).ToArray();
+  }
+
+  internal static bool CoversPages(IEnumerable<int> actual, IReadOnlyList<int> expected) =>
+    actual.Order().SequenceEqual(expected);
+
+  internal static object ByKind(IEnumerable<PdfSmokeRequestProbe.RequestEvent> requests) =>
+    requests.GroupBy(request => request.Kind).ToDictionary(group => group.Key, group =>
     {
-      List<double> durations = group
-          .Where(request => request.Outcome == "completed" && request.DurationMs is not null)
-          .Select(request => request.DurationMs!.Value).ToList();
-      List<long> bytes = group.Where(request => request.Bytes is not null)
-          .Select(request => request.Bytes!.Value).ToList();
-      List<long> pixels = group.Where(request => request.Pixels is not null)
-          .Select(request => request.Pixels!.Value).ToList();
-      result[group.Key] = new PdfPipelineKindStat(
-          group.Count(),
-          group.Count(request => request.Outcome == "completed"),
-          group.Count(request => request.Outcome == "pending"),
-          group.Count(request => request.Outcome == "faulted"),
-          group.Count(request => request.Outcome == "cancelled"),
-          durations.Count == 0 ? null : durations.Sum(),
-          Median(durations),
-          durations.Count == 0 ? null : durations.Max(),
-          bytes.Count == 0 ? null : bytes.Sum(),
-          bytes.Count,
-          pixels.Count == 0 ? null : pixels.Sum(),
-          pixels.Count,
-          group.Count(request => request.Outcome == "completed" && request.Bytes is null));
-    }
-    return result;
-  }
-
-  /// <summary>OCR 窗口合同校验：错误列表为空才允许作为有效样本。</summary>
-  internal static List<string> ValidateOcrWindow(
-      IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> events, int expectedBatches, int pageCount)
-  {
-    var errors = new List<string>();
-    List<PdfSmokeRequestProbe.RequestEvent> submits = events
-        .Where(request => request.Kind == "job_submit").ToList();
-    if (submits.Count != expectedBatches)
-      errors.Add($"job_submit count {submits.Count} != expected serial batches {expectedBatches} for {pageCount} pages");
-    if (submits.Any(request => request.Outcome != "completed"))
-      errors.Add("job_submit with non-completed outcome: " + JsonSerializer.Serialize(
-          submits.Where(request => request.Outcome != "completed")
-            .Select(request => new { request.Outcome, request.Error })));
-    List<PdfSmokeRequestProbe.RequestEvent> writes = events
-        .Where(request => request.Kind == "add_text_layers").ToList();
-    if (writes.Any(request => request.Outcome != "completed"))
-      errors.Add("add_text_layers with non-completed outcome: " + JsonSerializer.Serialize(
-          writes.Where(request => request.Outcome != "completed")
-            .Select(request => new { request.Outcome, request.Error })));
-    if (pageCount > 0 && events.All(request => request.Kind != "render_preview"))
-      errors.Add("no render_preview wire requests in OCR window; business render evidence missing");
-    if (events.Any(request => request.Outcome == "pending"))
-      errors.Add("requests still pending at evidence time: " + JsonSerializer.Serialize(
-          events.Where(request => request.Outcome == "pending")
-            .Select(request => new { request.Kind, request.Page })));
-    if (events.Any(request => request.Outcome == "faulted"))
-      errors.Add("faulted requests in OCR window: " + JsonSerializer.Serialize(
-          events.Where(request => request.Outcome == "faulted")
-            .Select(request => new { request.Kind, request.Page, request.Error })));
-    if (events.Any(request => request.Outcome == "cancelled"))
-      errors.Add("cancelled requests in OCR window: " + JsonSerializer.Serialize(
-          events.Where(request => request.Outcome == "cancelled")
-            .Select(request => new { request.Kind, request.Page })));
-    return errors;
-  }
-
-  internal static double? Median(IReadOnlyList<double> values)
-  {
-    if (values.Count == 0) return null;
-    List<double> sorted = values.Order().ToList();
-    return sorted.Count % 2 == 1
-      ? sorted[sorted.Count / 2]
-      : (sorted[sorted.Count / 2 - 1] + sorted[sorted.Count / 2]) / 2.0;
-  }
-
-  /// <summary>前台帧间隔统计；空集保持 null（NOT_MEASURED），不以 0 充当。</summary>
-  internal static (int Count, double? MedianGapMs, double? MaxGapMs, int GapsOverThresholdMs)
-      FrameGaps(IReadOnlyList<double> gaps, double thresholdMs = 250.0)
-  {
-    if (gaps.Count == 0) return (0, null, null, 0);
-    return (gaps.Count, Median(gaps), gaps.Max(), gaps.Count(gap => gap > thresholdMs));
-  }
+      var completed = group.Where(request => request.Outcome == "completed").ToArray();
+      double[] durations = completed.Select(request => request.DurationMs!.Value).Order().ToArray();
+      return new
+      {
+        count = group.Count(),
+        completed = completed.Length,
+        duration_sum_ms = durations.Length > 0 ? (double?)durations.Sum() : null,
+        duration_median_ms = durations.Length > 0
+          ? (double?)(durations[(durations.Length - 1) / 2] + durations[durations.Length / 2]) / 2 : null,
+        duration_max_ms = durations.Length > 0 ? (double?)durations[^1] : null,
+        bytes = completed.Any(request => request.Bytes is not null)
+          ? (long?)completed.Sum(request => request.Bytes) : null,
+        pixels = completed.Any(request => request.Pixels is not null)
+          ? (long?)completed.Sum(request => request.Pixels) : null,
+      };
+    });
 }
 
-/// <summary>
-/// Goal #325/#328 T3 串行阶段测量基线（INPUT_KIND=pdf_pipeline）。维持现有
-/// 串行算法，只观测：通过公开产品操作（打开 PDF→选择引擎/页面→添加选中页
-/// 文字层→另存为）触发真实 OCR/写层/保存；同进程第一遍保留冷 worker 成本，
-/// 关闭并重开同一 fixture 做第二遍稳态（输入等价由重开同一文件保证）。
-/// 阶段时间来自宿主 Stopwatch（公开动作与里程）与 PdfSmokeRequestProbe 的
-/// 真实 wire 事件（presence/render/submit/observe/write/save，含真实传输
-/// bytes 与 PNG IHDR 像素）；前台帧尾来自浏览器双 RAF 帧机会。两域原始时间
-/// 互不比较；未测得项显式 NOT_MEASURED，不写 0。
-/// </summary>
 public sealed partial class MainWindow
 {
-  private const string PdfPipelineObserverScript = """
-    (() => {
-      if (window.__t3PipelineObserver) return 'already';
-      const encoder = new TextEncoder();
-      const state = {
-        marks: {}, phase: 'pre_open', frameGaps: [], totalFrames: 0,
-        lastFrameAt: null, disposed: false,
-        visibilitySamples: { visible: 0, hidden: 0 },
-        focusSamples: { focused: 0, blurred: 0 },
-        stateMessages: {
-          total: 0, bytesEstimate: 0, errors: 0, listener: false, byPhase: {},
-        },
-        messageHandler: null,
-      };
-      function frameLoop() {
-        if (state.disposed) return;
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          if (state.disposed) return;
-          const now = performance.now();
-          const gap = state.lastFrameAt === null ? null : now - state.lastFrameAt;
-          state.lastFrameAt = now;
-          state.totalFrames += 1;
-          const visibility = document.visibilityState === 'visible' ? 'visible' : 'hidden';
-          state.visibilitySamples[visibility] += 1;
-          const focus = document.hasFocus() ? 'focused' : 'blurred';
-          state.focusSamples[focus] += 1;
-          if (gap !== null) {
-            state.frameGaps.push({ at: now, phase: state.phase, gapMs: gap,
-              visibility, hasFocus: focus });
-            if (state.frameGaps.length > 768) state.frameGaps.shift();
-          }
-          frameLoop();
-        }));
-      }
-      const observer = {
-        mark(name) {
-          if (state.marks[name] === undefined) state.marks[name] = performance.now();
-          return true;
-        },
-        setPhase(name) { state.phase = String(name); return true; },
-        snapshot() {
-          return JSON.stringify({
-            marks: { ...state.marks }, phase: state.phase,
-            frames: { total: state.totalFrames, gaps: state.frameGaps.slice(-512) },
-            visibilitySamples: { ...state.visibilitySamples },
-            focusSamples: { ...state.focusSamples },
-            stateMessages: {
-              total: state.stateMessages.total,
-              bytesEstimate: state.stateMessages.bytesEstimate,
-              errors: state.stateMessages.errors,
-              listener: state.stateMessages.listener,
-              byPhase: { ...state.stateMessages.byPhase },
-            },
-          });
-        },
-        dispose() {
-          state.disposed = true;
-          if (state.messageHandler && window.chrome && chrome.webview &&
-              chrome.webview.removeEventListener) {
-            chrome.webview.removeEventListener('message', state.messageHandler);
-          }
-          state.messageHandler = null;
-          return true;
-        },
-      };
-      Object.defineProperty(window, '__t3PipelineObserver', {
-        value: observer, configurable: false, enumerable: false,
-      });
-      if (window.chrome && chrome.webview && chrome.webview.addEventListener) {
-        state.stateMessages.listener = true;
-        state.messageHandler = (event) => {
-          try {
-            const data = event && event.data;
-            if (!data || data.type !== 'app.state' || !data.payload ||
-                data.payload.scope !== 'pdf') return;
-            const bytes = encoder.encode(JSON.stringify(data.payload)).length;
-            state.stateMessages.total += 1;
-            state.stateMessages.bytesEstimate += bytes;
-            const bucket = state.stateMessages.byPhase[state.phase] ||
-              (state.stateMessages.byPhase[state.phase] = { count: 0, bytesEstimate: 0 });
-            bucket.count += 1;
-            bucket.bytesEstimate += bytes;
-          } catch (error) {
-            state.stateMessages.errors += 1;
-          }
-        };
-        chrome.webview.addEventListener('message', state.messageHandler);
-      }
-      frameLoop();
-      return 'installed';
-    })()
-    """;
+  private static double PdfPipelineProbeTime(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
 
-  private sealed record PdfPipelineFrameEntry(
-      double At, string Phase, double GapMs, string Visibility, bool HasFocus);
+  private sealed record PdfPipelineBatch(
+    PdfSmokeRequestProbe.JobFact Job, PdfSmokeRequestProbe.PaddleFact Paddle,
+    IReadOnlyList<PdfSmokeRequestProbe.UploadFact> Inputs, long InputBytes, long InputPixels);
 
-  private sealed record PdfPipelineStateMessagePhase(int Count, long BytesEstimate);
-
-  private sealed record PdfPipelineBrowserSnapshot(
-      IReadOnlyDictionary<string, double> Marks, string Phase, int FramesTotal,
-      IReadOnlyList<PdfPipelineFrameEntry> FrameGaps,
-      IReadOnlyDictionary<string, int> VisibilitySamples,
-      IReadOnlyDictionary<string, int> FocusSamples,
-      long StateMessagesTotal, long StateMessagesBytesEstimate,
-      bool StateMessagesListener, int StateMessagesErrors,
-      IReadOnlyDictionary<string, PdfPipelineStateMessagePhase> StateMessagesByPhase);
-
-  private static long PdfPipelineNow() => Stopwatch.GetTimestamp();
-
-  private static double PdfPipelineToMs(long timestamp) =>
-    timestamp * 1000.0 / Stopwatch.Frequency;
-
-  private static double PdfPipelineElapsedMs(long start, long end) =>
-    (end - start) * 1000.0 / Stopwatch.Frequency;
-
-  private async Task<bool> MarkPdfPipelineBrowserAsync(string name)
+  private static PdfPipelineBatch[] ValidatePdfPipelineBatches(
+    IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> business, int[] targets,
+    string instance, string preset)
   {
-    string result = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-      $"window.__t3PipelineObserver?.mark({JsonSerializer.Serialize(name)}) === true");
-    return result == "true";
-  }
+    if (business.Any(request => request.Outcome != "completed"))
+      throw new InvalidOperationException("An OCR business request did not complete.");
 
-  private async Task SetPdfPipelinePhaseAsync(string phase)
-  {
-    await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-      $"window.__t3PipelineObserver?.setPhase({JsonSerializer.Serialize(phase)})");
-  }
+    var renders = business.Where(request => request.Purpose == "business_render").ToArray();
+    var writes = business.Where(request => request.Kind == "add_text_layers").ToArray();
+    if (!PdfPipelinePhaseStats.CoversPages(renders.Select(render => render.Page), targets) ||
+        !PdfPipelinePhaseStats.CoversPages(writes.SelectMany(write => write.ConfirmedPages ?? []), targets) ||
+        writes.Any(write => write.Purpose != "dirty_write" ||
+          write.Pages is null || write.ConfirmedPages is null || !write.Pages.SequenceEqual(write.ConfirmedPages)))
+      throw new InvalidOperationException("Expected each OCR page to have one business render and one confirmed dirty write.");
 
-  private async Task<PdfPipelineBrowserSnapshot> PdfPipelineSnapshotAsync()
-  {
-    string raw = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-      "window.__t3PipelineObserver ? window.__t3PipelineObserver.snapshot() : null");
-    if (raw == "null")
-      throw new InvalidOperationException("Pipeline browser observer is not installed.");
-    using JsonDocument outer = JsonDocument.Parse(raw);
-    string json = outer.RootElement.GetString()
-      ?? throw new InvalidOperationException("Pipeline browser snapshot is empty.");
-    using JsonDocument document = JsonDocument.Parse(json);
-    JsonElement root = document.RootElement;
-    var marks = new Dictionary<string, double>();
-    foreach (JsonProperty mark in root.GetProperty("marks").EnumerateObject())
-      marks[mark.Name] = mark.Value.GetDouble();
-    var gaps = new List<PdfPipelineFrameEntry>();
-    foreach (JsonElement gap in root.GetProperty("frames").GetProperty("gaps").EnumerateArray())
+    string provider = PaddleSmokeDevice == "directml" ? "DmlExecutionProvider" : "CPUExecutionProvider";
+    var batches = new List<PdfPipelineBatch>();
+    foreach (var submit in business.Where(request => request.Kind == "job_submit"))
     {
-      gaps.Add(new PdfPipelineFrameEntry(
-          gap.GetProperty("at").GetDouble(),
-          gap.GetProperty("phase").GetString() ?? "",
-          gap.GetProperty("gapMs").GetDouble(),
-          gap.GetProperty("visibility").GetString() ?? "",
-          gap.GetProperty("hasFocus").GetBoolean()));
-    }
-    var visibility = new Dictionary<string, int>();
-    foreach (JsonProperty sample in root.GetProperty("visibilitySamples").EnumerateObject())
-      visibility[sample.Name] = (int)sample.Value.GetDouble();
-    var focus = new Dictionary<string, int>();
-    foreach (JsonProperty sample in root.GetProperty("focusSamples").EnumerateObject())
-      focus[sample.Name] = (int)sample.Value.GetDouble();
-    var byPhase = new Dictionary<string, PdfPipelineStateMessagePhase>();
-    foreach (JsonProperty phase in root.GetProperty("stateMessages").GetProperty("byPhase").EnumerateObject())
-    {
-      byPhase[phase.Name] = new PdfPipelineStateMessagePhase(
-          (int)phase.Value.GetProperty("count").GetDouble(),
-          phase.Value.GetProperty("bytesEstimate").GetInt64());
-    }
-    return new PdfPipelineBrowserSnapshot(
-        marks,
-        root.GetProperty("phase").GetString() ?? "",
-        (int)root.GetProperty("frames").GetProperty("total").GetDouble(),
-        gaps,
-        visibility,
-        focus,
-        root.GetProperty("stateMessages").GetProperty("total").GetInt64(),
-        root.GetProperty("stateMessages").GetProperty("bytesEstimate").GetInt64(),
-        root.GetProperty("stateMessages").GetProperty("listener").GetBoolean(),
-        (int)root.GetProperty("stateMessages").GetProperty("errors").GetDouble(),
-        byPhase);
-  }
+      string id = submit.Detail ?? throw new InvalidOperationException("OCR submit did not identify the job.");
+      var observations = business.Where(request => request.Kind == "job_observe" && request.Session == id).ToArray();
+      var terminalEvent = observations.LastOrDefault(request => request.Job?.Terminal is not null);
+      var terminal = terminalEvent?.Job?.Terminal;
+      var paddle = observations.Select(request => request.Job?.Paddle).OfType<PdfSmokeRequestProbe.PaddleFact>().SingleOrDefault();
+      var inputs = submit.Uploads;
+      if (terminal is null || inputs is null || inputs.Count == 0 || inputs.Count != submit.Param ||
+          terminal.JobId != id || terminal.InstanceId != instance || terminal.State != JobState.Completed ||
+          terminal.Pipeline != "OCR" || terminal.Engine != OcrEngine.PaddleOcr ||
+          terminal.Summary.Total != inputs.Count || terminal.Summary.Succeeded != inputs.Count ||
+          terminal.Summary.Cancelled != 0 || terminal.Summary.Failed != 0 ||
+          terminal.Items.Any(item => item.State != ItemState.Succeeded) ||
+          terminal.Items.Select(item => item.ItemId).Distinct().Count() != inputs.Count ||
+          !terminal.Items.Select(item => item.ClientItemKey).Order().SequenceEqual(
+            inputs.Select(input => input.ClientItemKey).Order()))
+        throw new InvalidOperationException($"Missing or inconsistent successful OCR job evidence for {id}.");
+      if (paddle is null || paddle.Pipeline != "OCR" || paddle.Device != PaddleSmokeDevice ||
+          paddle.Provider != provider || paddle.AutomaticFallback != false ||
+          paddle.Preset != preset || paddle.Models.Length == 0 || string.IsNullOrEmpty(paddle.Source) ||
+          paddle.Selections.ValueKind != JsonValueKind.Object ||
+          !paddle.Selections.TryGetProperty("use_textline_orientation", out JsonElement orientation) ||
+          orientation.ValueKind != JsonValueKind.True)
+        throw new InvalidOperationException($"Unexpected Paddle execution snapshot for {id}.");
 
-  /// <summary>公开复选框精确选择目标页集合（含反选非目标页），等待宿主确认。</summary>
-  private async Task SelectPdfPipelinePagesAsync(int[] targets, int pageCount)
-  {
-    var desired = new HashSet<int>(targets);
-    int windowEnd = Math.Min(pageCount, PdfPipelinePageSelection.MaxSelectableWindow);
-    for (int index = 0; index < windowEnd; index++)
-    {
-      string selector = $"[aria-label='选择第 {index + 1} 页']";
-      await WaitForSmokeDomAsync(
-        $"!!document.querySelector({JsonSerializer.Serialize(selector)})", TimeSpan.FromSeconds(30));
-      bool want = desired.Contains(index);
-      string applied = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        $$"""
-        (() => { const e = document.querySelector({{JsonSerializer.Serialize(selector)}});
-            if (!e) return 'missing';
-            if (!!e.checked !== {{JsonSerializer.Serialize(want)}}) e.click();
-            return e.checked === {{JsonSerializer.Serialize(want)}} ? 'ok' : 'pending'; })()
-        """);
-      if (applied is not "\"ok\"" and not "\"pending\"")
-        throw new InvalidOperationException($"Pipeline page checkbox failed at page {index + 1}: {applied}");
-    }
-    int[] ordered = targets.Order().ToArray();
-    await WaitForPaddlePdfAsync(
-      state => !state.IsBusy && state.SelectedPages is { } selected &&
-        selected.Order().SequenceEqual(ordered),
-      TimeSpan.FromSeconds(30));
-  }
-
-  private static object PdfPipelinePageFacts(PdfWorkbenchState state, int[] targets) => new
-  {
-    pages = targets.Select(index => state.Pages?.FirstOrDefault(page => page.Index == index))
-      .Select(page => page is null ? null : new
+      long pixels = 0;
+      foreach (var input in inputs)
       {
-        page.Index,
-        page.StatusCode,
-        page.AddedThisSession,
-        page.Detected,
-        page.HasTextLayer,
-        page.DetectionState,
-        page.RecognitionRevision,
-        page.Width,
-        page.Height,
-        page.PageKey,
-        page.ContentGeneration,
-      }).ToList(),
-  };
-
-  /// <summary>终态 job 快照：真实 worker/引擎/实例归属证明（supervisor 域时间戳只作参考）。</summary>
-  private async Task<List<object>> CollectPdfPipelineJobEvidenceAsync(
-      ProductRuntimeSession session, IReadOnlyList<PdfSmokeRequestProbe.RequestEvent> window)
-  {
-    var jobs = new List<object>();
-    foreach (PdfSmokeRequestProbe.RequestEvent submit in window.Where(request =>
-        request.Kind == "job_submit" && request.Outcome == "completed"))
-    {
-      string jobId = submit.Detail ?? throw new InvalidOperationException(
-        $"job_submit event is missing its job id detail: page={submit.Page}");
-      JobUpdate observed = await session.Client.ObserveAsync(jobId, 0, CancellationToken.None);
-      JobSnapshot snapshot = observed.Snapshot;
-      if (snapshot.JobId != jobId)
-        throw new InvalidOperationException($"Observed job {snapshot.JobId} does not match submitted {jobId}.");
-      if (snapshot.InstanceId != session.InstanceId)
-        throw new InvalidOperationException(
-          $"Job {jobId} belongs to supervisor {snapshot.InstanceId}, expected {session.InstanceId}.");
-      jobs.Add(new
-      {
-        job_id = jobId,
-        snapshot.State,
-        engine = snapshot.Pipeline?.Engine?.ToString(),
-        pipeline = snapshot.Pipeline?.PipelineId,
-        snapshot.InstanceId,
-        snapshot.EnvironmentId,
-        snapshot.CreatedAt,
-        snapshot.StartedAt,
-        snapshot.FinishedAt,
-        snapshot.Summary,
-        items = snapshot.Items.Count,
-        upload_bytes_wire = submit.Bytes,
-        timestamps_note = "CreatedAt/StartedAt/FinishedAt 为 supervisor 域字符串时间戳，仅作提交→开跑→终态参考，不与宿主/浏览器域相减",
-      });
+        var render = renders.Single(request => $"page-{request.Page}" == input.ClientItemKey);
+        var write = writes.Single(request => request.ConfirmedPages!.Contains(render.Page));
+        if (input.Bytes <= 0 || render.Bytes != input.Bytes || render.Pixels is not > 0 ||
+            render.EndedAtMs is not double rendered || rendered > submit.StartedAtMs ||
+            terminalEvent?.EndedAtMs is not double observed || observed > write.StartedAtMs)
+          throw new InvalidOperationException($"Missing PNG facts or out-of-order job/write for {id} input {input.ClientItemKey}.");
+        pixels += render.Pixels.Value;
+      }
+      long bytes = inputs.Sum(input => input.Bytes);
+      if (submit.Bytes != bytes)
+        throw new InvalidOperationException($"Job {id} contains unattributed upload bytes.");
+      batches.Add(new(terminal, paddle, inputs, bytes, pixels));
     }
-    return jobs;
-  }
 
-  /// <summary>单类阶段统计；缺测时保持 NOT_MEASURED 语义，不造 0。</summary>
-  private static object PdfPipelinePhaseStat(
-      string kind, IReadOnlyDictionary<string, PdfPipelineKindStat> byKind, string note,
-      string missingNote) =>
-    byKind.TryGetValue(kind, out PdfPipelineKindStat? stat)
-      ? new { present = true, stat, note }
-      : new { present = false, note = missingNote };
+    if (batches.Select(batch => batch.Job.JobId).Distinct().Count() != batches.Count ||
+        !batches.SelectMany(batch => batch.Inputs).Select(input => input.ClientItemKey).Order().SequenceEqual(
+          targets.Select(page => $"page-{page}").Order()))
+      throw new InvalidOperationException("OCR job inputs are missing, repeated or include a skipped page.");
+    return batches.ToArray();
+  }
 
   private async Task<object> RunPaddlePdfPipelineAsync(
-      string mode, string fixture, ProductRuntimeSession session, int timeoutMinutes)
+    string mode, string fixture, ProductRuntimeSession session, int timeoutMinutes)
   {
     if (mode != "paddle_text")
-      throw new InvalidOperationException(
-        $"pdf_pipeline smoke requires the plain OCR mode paddle_text, got {mode}.");
-    string pagesSpec = PaddleSmokeEnv("VIBEOCR_T3_PIPELINE_PAGES") ?? "all";
-    var probe = new PdfSmokeRequestProbe();
+      throw new InvalidOperationException("pdf_pipeline requires the Paddle text OCR mode.");
+    string preset = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small";
+    bool foreground = PaddleSmokeEnv("VIBEOCR_T3_PIPELINE_FOREGROUND") == "1";
+    var probe = new PdfSmokeRequestProbe(capturePipeline: true);
+    var passes = new List<object>(2);
+    var original = new FileInfo(fixture);
+    long originalBytes = original.Length;
+    DateTime originalWriteTime = original.LastWriteTimeUtc;
     DeferredInferenceClient.SetPdfSmokeProbe(probe);
     try
     {
-      RecordPaddleSmokeStage("pdf pipeline: install observer");
       await NavigateSmokeAsync("PDF", "button");
-      string installed = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        PdfPipelineObserverScript);
-      if (installed is not "\"installed\"")
-        throw new InvalidOperationException($"Pipeline observer install failed: {installed}");
+      string installed = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(PdfBaselineObserverScript);
+      if (installed != "\"installed\"")
+        throw new InvalidOperationException($"PDF baseline observer install failed: {installed}");
 
-      var fixtureBefore = new FileInfo(fixture);
-      object passCold = await RunPdfPipelinePassAsync(
-          "cold", mode, fixture, pagesSpec, session, timeoutMinutes, probe);
-      object passSteady = await RunPdfPipelinePassAsync(
-          "steady", mode, fixture, pagesSpec, session, timeoutMinutes, probe);
-      var fixtureAfter = new FileInfo(fixture);
-      if (fixtureAfter.Length != fixtureBefore.Length ||
-          fixtureAfter.LastWriteTimeUtc != fixtureBefore.LastWriteTimeUtc)
-        throw new InvalidOperationException(
-          "Pipeline fixture changed during the run; dirty document must not write the source file.");
-
-      RecordPaddleSmokeStage("pdf pipeline: measurements complete");
+      passes.Add(await RunPdfPipelinePassAsync("cold", mode, fixture, preset, foreground, session, timeoutMinutes, probe));
+      passes.Add(await RunPdfPipelinePassAsync("steady", mode, fixture, preset, foreground, session, timeoutMinutes, probe));
+      var current = new FileInfo(fixture);
+      if (current.Length != originalBytes || current.LastWriteTimeUtc != originalWriteTime)
+        throw new InvalidOperationException("Source fixture changed during OCR and save-as.");
       var (events, maxInflight, overflow) = probe.Snapshot();
       if (overflow)
-        throw new InvalidOperationException(
-          "Pipeline request probe event buffer overflowed; counts would be truncated — failing explicitly.");
-      if (events.Any(request => request.Outcome == "faulted"))
-        throw new InvalidOperationException("Pipeline run recorded faulted wire requests; failing explicitly.");
-      SettingsSnapshot settings = await session.Client.GetSettingsAsync(CancellationToken.None);
+        throw new InvalidOperationException("PDF request event buffer overflowed.");
+      if (session.InstanceId != smokeManagedSession?.Invoke()?.InstanceId)
+        throw new InvalidOperationException("Supervisor changed during the PDF baseline.");
+
+      RecordPaddleSmokeStage("pdf pipeline: measurements complete");
       paddleSmokeOutcome = "passed";
       return new
       {
         input_kind = "pdf_pipeline",
-        sample_status = "valid",
-        performance_eligible = true,
-        config = new
+        fixture = new { path = fixture, bytes = originalBytes, last_write_utc = originalWriteTime },
+        device = PaddleSmokeDevice, model_preset = preset, supervisor = session.InstanceId,
+        supervisor_pid = session.Process.Ready.Pid, process_pid = Environment.ProcessId,
+        interaction = foreground ? "controlled_foreground" : "unattended_ocr",
+        passes,
+        requests = new { events, max_inflight = maxInflight },
+        clocks = "Browser durations use performance.now; host request durations use Stopwatch. UTC windows only attribute external process samples and logs.",
+        limitations = new
         {
-          device = PaddleSmokeDevice,
-          provider_settings = settings.RecognitionDevice,
-          model_preset = PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_PRESET") ?? "small",
-          mode,
-          pipeline = "OCR",
-          supervisor = session.InstanceId,
-          process_pid = Environment.ProcessId,
-          page_spec = pagesSpec,
-          fixture = new { path = fixture, bytes = fixtureBefore.Length },
-          fixture_untouched = new
-          {
-            bytes_before = fixtureBefore.Length,
-            bytes_after = fixtureAfter.Length,
-            last_write_utc_before = fixtureBefore.LastWriteTimeUtc,
-            last_write_utc_after = fixtureAfter.LastWriteTimeUtc,
-          },
-          timeout_minutes = timeoutMinutes,
-          synthetic_only = true,
-        },
-        passes = new[] { passCold, passSteady },
-        requests = new
-        {
-          note = "DeferredInferenceClient 冒烟探针记录的 App→Runtime wire 请求；job_observe 为宿主到 supervisor 的长轮询往返，不代表设备等待",
-          max_inflight = maxInflight,
-          counts = events.GroupBy(request => request.Kind)
-            .ToDictionary(group => group.Key, group => group.Count()),
-          outcomes = events.GroupBy(request => request.Outcome)
-            .ToDictionary(group => group.Key, group => group.Count()),
-          events = events.Select(request => new
-          {
-            request.Kind,
-            request.Session,
-            request.Page,
-            request.Param,
-            request.StartedAtMs,
-            request.EndedAtMs,
-            request.DurationMs,
-            request.Outcome,
-            request.Error,
-            request.Bytes,
-            request.Pixels,
-            request.Detail,
-          }),
-        },
-        clock_domains = new
-        {
-          browser = "performance.now() ms（动作 mark、双 RAF 帧机会、app.state 事件）",
-          host = "System.Diagnostics.Stopwatch.GetTimestamp（公开动作里程与 wire 请求计时）",
-          supervisor = "job 快照 CreatedAt/StartedAt/FinishedAt 字符串时间戳（仅参考）",
-          rule = "三域原始时间永不互相比较；每处差值都取自同一域",
-        },
-        frame_witness_semantics = "双 RAF 是渲染机会（frame opportunity）而非实际 paint 证明；帧尾统计含 visibility/focus 事实",
-        measurement_limits = new
-        {
-          active_batch = "活动批次由 wire 事件（presence/render/submit/observe/write）与 job 快照刻画；worker 进程内 native 阶段不可见",
-          terminal_retention = "NOT_MEASURED：supervisor 终态结果/_outcomes 留存（results 与 _outcomes 引用同一 payload，不重复计份）、JobRegistry purge 仅标记不清内存，本 checkpoint 不测量不修改",
-          document_metadata = "NOT_MEASURED：文档镜像/元数据留存大小未测；App 侧仅记录宿主 working set 采样",
-          disk_staging = "NOT_MEASURED（进程内）：worker/supervisor 磁盘 staging（含原 PNG 终态留存、retry 仅需 failed/cancelled）的峰值与留存由外部 monitor/磁盘事后采样另行披露，不以进程内数据冒充",
-          private_bytes_cpu = "NOT_MEASURED：process probe 仅采样 working set；private bytes/CPU 时间未采样，不以 WS 或 wall time 冒充设备等待",
-          state_message_bytes = "估计值：浏览器侧对 app.state/pdf payload 重编码估字节数，非精确 wire 字节",
+          provider = "Job snapshots identify frozen execution settings; worker diagnostics confirm instantiated session providers.",
+          observe = "Host-to-Supervisor round-trip, including long polling. Native CPU/device wait is NOT_MEASURED.",
+          inputs = "Encoded uploads and IHDR pixels by job. Byte totals are not copy cost or allocated memory.",
+          retention = "Terminal job/item facts do not measure their retained memory. Results and _outcomes can reference the same payload.",
+          staging = "Post-run staging inventory, when present, excludes transient/native peaks.",
         },
       };
     }
     finally
     {
+      var (events, maxInflight, overflow) = probe.Snapshot();
+      paddleSmokePartialEvidence = new { passes, events, max_inflight = maxInflight, overflow };
       DeferredInferenceClient.SetPdfSmokeProbe(null);
-      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
-        "window.__t3PipelineObserver?.dispose() === true");
+      await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync("window.__t2PdfBaseline?.dispose() === true");
     }
   }
 
   private async Task<object> RunPdfPipelinePassAsync(
-      string label, string mode, string fixture, string pagesSpec,
-      ProductRuntimeSession session, int timeoutMinutes, PdfSmokeRequestProbe probe)
+    string label, string mode, string fixture, string preset, bool foreground,
+    ProductRuntimeSession session, int timeoutMinutes, PdfSmokeRequestProbe probe)
   {
-    RecordPaddleSmokeStage($"pdf pipeline {label}: open document");
-    await SetPdfPipelinePhaseAsync($"{label}:open");
-    await MarkPdfPipelineBrowserAsync($"{label}_open_click");
-    long openClickAt = PdfPipelineNow();
-    long pickConfirmAt = 0;
+    RecordPaddleSmokeStage($"pdf pipeline {label}: open");
+    await SetPdfBaselinePhaseAsync($"{label}:open");
+    string pick = label + "_pick";
+    long pickAt = 0;
+    long pickUtc = 0;
     await ClickWorkbenchSmokeButtonAsync("打开 PDF");
     await CompletePaddleOpenPickerAsync(fixture, onBeforeConfirm: async () =>
     {
-      await MarkPdfPipelineBrowserAsync($"{label}_pick_confirm");
-      pickConfirmAt = PdfPipelineNow();
+      if (!await MarkPdfBaselineBrowserAsync(pick))
+        throw new InvalidOperationException("PDF picker confirmation marker missing.");
+      pickAt = PdfBaselineNow();
+      pickUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     });
+    PdfBaselineImageWait first = await WaitForPdfBaselineImageAsync(
+      label, 0, pick, label + "_first", TimeSpan.FromMinutes(2), requireNew: true);
+    PdfBaselineBrowserImage firstWitness = first.NewWitness ??
+      throw new InvalidOperationException("Missing newly decoded first PDF image.");
     PdfWorkbenchState opened = await WaitForPaddlePdfAsync(
-      state => !state.IsBusy && state.PageCount > 0 &&
-        state.PageInspectStatusCode == "pdf.inspect.ready",
+      state => !state.IsBusy && state.PageCount > 0 && state.PageInspectStatusCode == "pdf.inspect.ready",
       TimeSpan.FromMinutes(2));
-    long readyAt = PdfPipelineNow();
-    if (opened.ProcessingSettings is not { RenderDpi: > 0 } pipelineSettings)
-      throw new InvalidOperationException("Pipeline render DPI/MaxPixels unavailable.");
-    int[] targets = PdfPipelinePageSelection.Resolve(pagesSpec, opened.PageCount);
-
-    RecordPaddleSmokeStage($"pdf pipeline {label}: select engine and pages");
-    await SetPdfPipelinePhaseAsync($"{label}:select");
+    long readyAt = PdfBaselineNow();
+    long readyUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    ValidatePdfBaselineResourceOwnership(label, opened, first, first.Snapshot, 0);
+    if (!opened.CanDemandPages || opened.SessionId is null || opened.DocumentId is null ||
+        opened.ProcessingSettings is not { RenderDpi: > 0, MaxPixels: > 0 } settings)
+      throw new InvalidOperationException("The candidate did not expose the PDF demand path and render settings.");
+    (int pageCount, int[] targets, int[] skips) = Path.GetFileName(fixture) switch
+    {
+      "scan_short.pdf" => (6, Enumerable.Range(0, 6).ToArray(), []),
+      "scan_long.pdf" => (120, Enumerable.Range(0, 120).ToArray(), []),
+      "mixed.pdf" => (30, Enumerable.Range(0, 9).ToArray(), Enumerable.Range(10, 10).ToArray()),
+      _ => throw new InvalidOperationException("Unknown PDF pipeline fixture."),
+    };
+    if (opened.PageCount != pageCount)
+      throw new InvalidOperationException("PDF fixture page count does not match the baseline plan.");
+    int[] requested = [.. targets, .. skips];
     await WaitForPaddleModeAsync("#pdf-task-engine", mode);
     await SelectSmokeValueAsync("#pdf-task-engine", mode);
-    if (pagesSpec == "all" && opened.PageCount == targets.Length)
+    await ClickWorkbenchSmokeButtonAsync("全选页面");
+    await WaitForPaddlePdfAsync(state => state.SelectedPages?.Count == pageCount, TimeSpan.FromSeconds(30));
+    foreach (int page in Enumerable.Range(0, pageCount).Except(requested))
     {
-      await ClickWorkbenchSmokeButtonAsync("全选页面");
+      string selector = JsonSerializer.Serialize($"input[aria-label='选择第 {page + 1} 页']");
+      string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+        $"(() => {{ const e = document.querySelector({selector}); if (!e?.checked) return false; e.click(); return true; }})()");
+      if (clicked != "true")
+        throw new InvalidOperationException($"Unable to deselect PDF page {page + 1}.");
+      await WaitForPaddlePdfAsync(state => state.SelectedPages?.Contains(page) == false, TimeSpan.FromSeconds(30));
     }
-    else
-    {
-      await SelectPdfPipelinePagesAsync(targets, opened.PageCount);
-    }
+
     PdfWorkbenchState selected = await WaitForPaddlePdfAsync(
-      state => !state.IsBusy && state.TaskEngine == mode &&
-        state.CanAddTextLayer && state.SelectedPages is { } pages &&
-        pages.Order().SequenceEqual(targets.Order()),
+      state => !state.IsBusy && state.TaskEngine == mode && state.CanAddTextLayer &&
+        state.SelectedPages?.SequenceEqual(requested) == true,
       TimeSpan.FromSeconds(30));
-    long selectedAt = PdfPipelineNow();
-    long revisionBefore = selected.Revision;
-    int detectedAtStart = selected.DetectedCount;
-    long workingSetAtStart = Environment.WorkingSet;
-
-    RecordPaddleSmokeStage($"pdf pipeline {label}: add text layers via public button");
-    await SetPdfPipelinePhaseAsync($"{label}:ocr");
-    await MarkPdfPipelineBrowserAsync($"{label}_ocr_click");
-    long ocrClickAt = PdfPipelineNow();
+    RecordPaddleSmokeStage($"pdf pipeline {label}: OCR");
+    await SetPdfBaselinePhaseAsync($"{label}:ocr");
+    long ocrStartUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    long ocrAt = PdfBaselineNow();
     await ClickWorkbenchSmokeButtonAsync("添加选中页文字层");
+    var navigation = new List<PdfPipelinePageTurn>(3);
+    if (foreground)
+    {
+      await WaitForPaddlePdfAsync(state => state.IsBusy, TimeSpan.FromSeconds(30));
+      foreach (int page in new[] { 1, 2, 0 })
+        navigation.Add(await MeasurePdfPipelinePageTurnAsync(label, opened, page));
+    }
     PdfWorkbenchState terminal = await WaitForPaddlePdfAsync(
-      state => !state.IsBusy && targets.All(index =>
-        state.Pages?.FirstOrDefault(page => page.Index == index)?.StatusCode
-          is "pdf.page.done" or "pdf.page.failed"),
+      state => !state.IsBusy && state.Summary.StartsWith("已添加", StringComparison.Ordinal),
       TimeSpan.FromMinutes(timeoutMinutes));
-    long terminalAt = PdfPipelineNow();
-    long workingSetAtTerminal = Environment.WorkingSet;
-    var failedPages = targets
-      .Where(index => terminal.Pages?.FirstOrDefault(page => page.Index == index)?.StatusCode != "pdf.page.done")
-      .ToList();
-    if (failedPages.Count > 0)
-      throw new InvalidOperationException(
-        $"Pipeline OCR failed on pages {string.Join(',', failedPages)}: {terminal.Summary}");
-    if (!terminal.IsModified)
-      throw new InvalidOperationException(
-        "Pipeline OCR must leave the document dirty (explicit save only).");
-    double ocrFromMs = PdfPipelineToMs(ocrClickAt);
-    double ocrToMs = PdfPipelineToMs(terminalAt);
-    var (allEvents, _, _) = probe.Snapshot();
-    List<PdfSmokeRequestProbe.RequestEvent> window =
-      PdfPipelinePhaseStats.Window(allEvents, ocrFromMs, ocrToMs);
-    List<string> errors = PdfPipelinePhaseStats.ValidateOcrWindow(
-        window, PdfPipelinePageSelection.ExpectedBatches(targets.Length), targets.Length);
-    if (errors.Count > 0)
-      throw new InvalidOperationException(
-        $"Pipeline OCR window validation failed for {label}: " + JsonSerializer.Serialize(errors));
-    List<object> jobs = await CollectPdfPipelineJobEvidenceAsync(session, window);
+    long terminalAt = PdfBaselineNow();
+    long ocrEndUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    string expectedSummary = $"已添加 {targets.Length} 页、跳过 {skips.Length} 页、失败 0 页";
+    if (terminal.SessionId != opened.SessionId || terminal.AddedCount != targets.Length ||
+        !terminal.IsModified || !terminal.Summary.StartsWith(expectedSummary, StringComparison.Ordinal))
+      throw new InvalidOperationException($"OCR result differs from requested pages: {terminal.Summary}");
 
-    RecordPaddleSmokeStage($"pdf pipeline {label}: save via public picker");
-    await SetPdfPipelinePhaseAsync($"{label}:save");
-    long saveStartAt = PdfPipelineNow();
+    await SetPdfBaselinePhaseAsync($"{label}:save");
+    long saveStartUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    long saveAt = PdfBaselineNow();
     object saved = await RunPaddlePdfSaveAsync($"pipeline-{label}");
-    long savedAt = PdfPipelineNow();
+    long savedAt = PdfBaselineNow();
+    long saveEndUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     PdfWorkbenchState savedState = await WaitForPaddlePdfAsync(
       state => !state.IsBusy && !state.IsModified, TimeSpan.FromMinutes(2));
+    PdfBaselineBrowserSnapshot browser = await PdfBaselineSnapshotAsync();
+    if (!browser.StateMessageListenerAvailable || browser.StateMessageMeasurementErrors != 0)
+      throw new InvalidOperationException("PDF browser state measurement failed.");
 
-    RecordPaddleSmokeStage($"pdf pipeline {label}: close document");
-    await SetPdfPipelinePhaseAsync($"{label}:close");
-    long closeStartAt = PdfPipelineNow();
+    var (events, _, _) = probe.Snapshot();
+    var business = PdfPipelinePhaseStats.BusinessRequests(PdfPipelinePhaseStats.Window(events,
+        PdfPipelineProbeTime(ocrAt), PdfPipelineProbeTime(terminalAt)), opened.SessionId);
+    PdfPipelineBatch[] batches = ValidatePdfPipelineBatches(business, targets, session.InstanceId, preset);
+    var saveWire = PdfPipelinePhaseStats.Window(events, PdfPipelineProbeTime(saveAt), PdfPipelineProbeTime(savedAt))
+      .Where(request => request.Session == opened.SessionId && request.Kind == "save_operation").ToArray();
+    if (saveWire is not [{ Outcome: "completed", Detail: not null }] || (saveWire[0].Param & 3) != 2)
+      throw new InvalidOperationException("Expected one confirmed save-as operation for the PDF session.");
+
+    RecordPaddleSmokeStage($"pdf pipeline {label}: close");
     await ClickWorkbenchSmokeButtonAsync("关闭文档");
     await WaitForPaddlePdfAsync(
-      state => state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0,
-      TimeSpan.FromSeconds(30));
-    long closedAt = PdfPipelineNow();
+      state => state.PageCount == 0 && (state.Documents?.Count ?? 0) == 0, TimeSpan.FromSeconds(30));
 
-    PdfPipelineBrowserSnapshot browser = await PdfPipelineSnapshotAsync();
-    if (!browser.StateMessagesListener)
-      throw new InvalidOperationException("Pipeline state message listener unavailable; byte metric cannot be measured.");
-    if (browser.StateMessagesErrors > 0)
-      throw new InvalidOperationException(
-        $"Pipeline state message measurement had {browser.StateMessagesErrors} errors; failing explicitly.");
-    List<double> ocrGaps = browser.FrameGaps
-      .Where(gap => gap.Phase == $"{label}:ocr").Select(gap => gap.GapMs).ToList();
-    (int gapCount, double? gapMedian, double? gapMax, int gapOver250) =
-      PdfPipelinePhaseStats.FrameGaps(ocrGaps);
-    IReadOnlyDictionary<string, PdfPipelineKindStat> byKind =
-      PdfPipelinePhaseStats.ByKind(window);
-
+    browser.AllKnownFirst.TryGetValue(opened.SessionId, out var allKnown);
     return new
     {
-      label,
-      keeps_cold_worker_cost = label == "cold",
-      input_equivalence = $"重开同一 fixture 文件（{fixture}），新会话独立统计",
+      label, session = opened.SessionId, document_id = opened.DocumentId,
       host_ms = new
       {
-        open_click_to_pick_confirm = PdfPipelineElapsedMs(openClickAt, pickConfirmAt),
-        pick_confirm_to_ready = PdfPipelineElapsedMs(pickConfirmAt, readyAt),
-        ready_to_selected = PdfPipelineElapsedMs(readyAt, selectedAt),
-        selected_to_ocr_click = PdfPipelineElapsedMs(selectedAt, ocrClickAt),
-        ocr_click_to_terminal = PdfPipelineElapsedMs(ocrClickAt, terminalAt),
-        save_click_to_saved = PdfPipelineElapsedMs(saveStartAt, savedAt),
-        close_to_settled = PdfPipelineElapsedMs(closeStartAt, closedAt),
-        pick_confirm_to_ocr_terminal_total = PdfPipelineElapsedMs(pickConfirmAt, terminalAt),
+        pick_confirm_to_ready = PdfBaselineElapsedMs(pickAt, readyAt),
+        ocr_to_terminal = PdfBaselineElapsedMs(ocrAt, terminalAt),
+        save_as = PdfBaselineElapsedMs(saveAt, savedAt),
       },
-      settings = new
+      utc_windows = new
       {
-        pipelineSettings.RenderDpi,
-        pipelineSettings.MaxPixels,
-        page_geometry = targets.Select(index => opened.Pages?.FirstOrDefault(page => page.Index == index))
-          .Where(page => page is not null)
-          .Select(page => new { page!.Index, page.Width, page.Height }).ToList(),
+        open = new { start = pickUtc, end = readyUtc },
+        ocr = new { start = ocrStartUtc, end = ocrEndUtc },
+        save = new { start = saveStartUtc, end = saveEndUtc },
       },
+      settings = new { settings.RenderDpi, settings.MaxPixels },
       detection = new
       {
-        detected_count_at_ocr_start = detectedAtStart,
-        detected_count_at_terminal = terminal.DetectedCount,
-        page_count = opened.PageCount,
-        selected_pages = targets,
+        page_count = pageCount, selected_pages = requested, ocr_pages = targets, skipped_native_pages = skips,
+        at_ocr_start = selected.DetectedCount, at_ocr_end = terminal.DetectedCount,
+        pick_to_all_known_browser_ms = allKnown is null ? (double?)null : allKnown.At - PdfBaselineMark(browser, pick),
+        load_end = PdfBaselineLoadEndReference(events, opened.SessionId, pickAt),
       },
-      phases = new
-      {
-        presence = PdfPipelinePhaseStat("load_targeted", byKind,
-          "EnsurePresence 定向 presence 请求", "NOT_MEASURED: 本窗口无 load_targeted wire 请求（presence 可能已满足）"),
-        render = PdfPipelinePhaseStat("render_preview", byKind,
-          "业务页 PNG 渲染（RenderPdfPreviewDemand）；bytes 为真实传输字节，pixels 为 PNG IHDR 实测",
-          "NOT_MEASURED: 窗口内无业务渲染请求（校验已拒绝此情形）"),
-        submit = PdfPipelinePhaseStat("job_submit", byKind,
-          "每批一个通用 job；Bytes 为 multipart 上传内容字节合计", "NOT_MEASURED"),
-        observe = PdfPipelinePhaseStat("job_observe", byKind,
-          "宿主→supervisor observe 轮询/长轮询 wire 往返；不是设备等待，设备/CPU 等待 NOT_MEASURED",
-          "NOT_MEASURED"),
-        write = PdfPipelinePhaseStat("add_text_layers", byKind,
-          "Save=false 批内写层；不可取消收尾", "NOT_MEASURED（无写层请求；addTextLayer 场景不应出现）"),
-      },
-      jobs,
-      pages = PdfPipelinePageFacts(terminal, targets),
+      phases = PdfPipelinePhaseStats.ByKind(business),
+      batches, batch_count = batches.Length,
+      largest_job_input_bytes = batches.Max(batch => batch.InputBytes),
+      largest_job_input_pixels = batches.Max(batch => batch.InputPixels),
       document = new
       {
-        revision_before = revisionBefore,
-        revision_after = terminal.Revision,
-        is_modified_after_ocr = true,
-        added_count = terminal.AddedCount,
-        saved = new
-        {
-          saved,
-          save_wire = PdfPipelinePhaseStat("save_operation", byKind, "公开另存为操作 wire（save_operation）", "NOT_MEASURED"),
-          is_modified_after_save = savedState.IsModified,
-        },
+        revision_before = selected.Revision, revision_after = terminal.Revision,
+        is_modified_after_ocr = terminal.IsModified, added_count = terminal.AddedCount,
+        saved = new { saved, save_wire = saveWire[0], is_modified_after_save = savedState.IsModified },
       },
       browser = new
       {
-        marks = browser.Marks,
-        frames_total_since_install = browser.FramesTotal,
-        frame_gaps_during_ocr = new
-        {
-          count = gapCount,
-          median_gap_ms = gapMedian,
-          max_gap_ms = gapMax,
-          gaps_over_250ms = gapOver250,
-          not_measured_when = "count=0 且 median/max 为 null 表示该阶段无帧机会样本，不写 0",
-        },
-        visibility_samples = browser.VisibilitySamples,
-        focus_samples = browser.FocusSamples,
-        state_messages = new
-        {
-          total = browser.StateMessagesTotal,
-          bytes_estimate = browser.StateMessagesBytesEstimate,
-          by_phase = browser.StateMessagesByPhase,
-          method = "chrome.webview 只读监听 app.state/pdf payload 重编码估计；非精确 wire 字节",
-        },
+        pick_to_first_decoded_ms = firstWitness.DecodedAt!.Value - PdfBaselineMark(first.Snapshot, pick),
+        pick_to_first_frame_ms = firstWitness.FrameOpportunityAt!.Value - PdfBaselineMark(first.Snapshot, pick),
+        visible_at_first_frame = firstWitness.VisibilityAtFrame == "visible",
+        focused_at_first_frame = firstWitness.HasFocusAtFrame == true,
+        state_messages_bytes_estimate = browser.StateMessagePhases
+          .Where(phase => phase.Key.StartsWith(label + ":", StringComparison.Ordinal)),
+        page_turns = navigation,
+        page_turn_median_ms = navigation.Count == 3 ? (double?)navigation.Select(turn => turn.Ms).Order().ElementAt(1) : null,
+        page_turn_max_ms = navigation.Count > 0 ? (double?)navigation.Max(turn => turn.Ms) : null,
       },
-      host_process_working_set_bytes = new
-      {
-        at_selection = workingSetAtStart,
-        at_ocr_terminal = workingSetAtTerminal,
-        note = "宿主进程 Environment.WorkingSet 采样；进程树峰值由外部 monitor 采样，private bytes NOT_MEASURED",
-      },
+      performance_eligible = firstWitness.VisibilityAtFrame == "visible" && firstWitness.HasFocusAtFrame == true,
     };
+  }
+
+  private sealed record PdfPipelinePageTurn(int Page, double Ms, bool NewImage, object Clarity);
+
+  private async Task<PdfPipelinePageTurn> MeasurePdfPipelinePageTurnAsync(string label, PdfWorkbenchState opened, int page)
+  {
+    string tag = $"{label}_ocr_page_{page}";
+    string selector = JsonSerializer.Serialize($"button[aria-label='检查第 {page + 1} 页']");
+    string mark = JsonSerializer.Serialize(tag);
+    string clicked = await WorkbenchWebView.CoreWebView2.ExecuteScriptAsync(
+      $"(() => {{ const button = document.querySelector({selector}); if (!button || document.visibilityState !== 'visible' || !document.hasFocus()) return false; button.scrollIntoView({{ block: 'nearest' }}); if (!window.__t2PdfBaseline.mark({mark})) return false; button.click(); return true; }})()");
+    if (clicked != "true")
+      throw new InvalidOperationException("Controlled page turn requires a visible and focused workbench.");
+    PdfBaselineImageWait wait = await WaitForPdfBaselineImageAsync(
+      tag, page, tag, tag, TimeSpan.FromMinutes(2), requireNew: false, requireClarity: true);
+    var state = await WaitForPaddlePdfAsync(state => state.SelectedPage == page, TimeSpan.FromSeconds(30));
+    if (!state.IsBusy || state.SessionId != opened.SessionId || state.DocumentId != opened.DocumentId ||
+        wait.Pulse.VisibilityState != "visible" || !wait.Pulse.HasFocus || wait.Snapshot.PublicationsOverflow ||
+        !wait.Snapshot.Publications.Any(publication =>
+          publication.SessionId == opened.SessionId && publication.DocumentId == opened.DocumentId &&
+          publication.Page == page && publication.PreviewUrl == wait.Witness.FullSrc &&
+          publication.At <= wait.Pulse.At))
+      throw new InvalidOperationException("Page-turn sample lacked a visible, matching, decoded frame during active OCR.");
+    return new(page, wait.Pulse.At - PdfBaselineMark(wait.Snapshot, tag), wait.NewImageObserved,
+      PdfBaselineClarity(tag, wait.Witness, wait.Pulse, wait.Snapshot, wait.Snapshot.Dpr).Detail);
   }
 }

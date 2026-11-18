@@ -4,6 +4,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [int]$TimeoutSeconds = 2400,
+    [switch]$PipelineDetails,
     [switch]$SelfCheck
 )
 $ErrorActionPreference = 'Stop'
@@ -171,7 +172,8 @@ public sealed class DemandWorkingSetSampler : IDisposable {
     (int Pid, long Created, string Path)? pendingReceipt;
     (int Pid, long Created)? censusRoot;
     public DemandWorkingSetSampler(string path) : this(path, false) { }
-    public DemandWorkingSetSampler(string path, bool useCensus) {
+    public DemandWorkingSetSampler(string path, bool useCensus) : this(path, useCensus, false) { }
+    public DemandWorkingSetSampler(string path, bool useCensus, bool pipelineDetails) {
         this.useCensus = useCensus;
         worker = Task.Run(async () => {
             while (!stop.IsCancellationRequested) {
@@ -212,8 +214,22 @@ public sealed class DemandWorkingSetSampler : IDisposable {
                         process.Refresh();
                         long bytes = process.WorkingSet64;
                         if (process.HasExited) return;
-                        live.Add(new { pid, name, ws_bytes = bytes, webview_role = role,
-                            creation_filetime = created.ToString() });
+                        if (pipelineDetails) {
+                            long? privateBytes = null;
+                            double? cpuMilliseconds = null;
+                            try {
+                                privateBytes = process.PrivateMemorySize64;
+                                cpuMilliseconds = process.TotalProcessorTime.TotalMilliseconds;
+                            } catch (Win32Exception error) when (error.NativeErrorCode is 5 or 87) {
+                                // Optional counters can be denied even for a known descendant.
+                            }
+                            live.Add(new { pid, name, ws_bytes = bytes, webview_role = role,
+                                creation_filetime = created.ToString(), private_bytes = privateBytes,
+                                cpu_ms = cpuMilliseconds });
+                        } else {
+                            live.Add(new { pid, name, ws_bytes = bytes, webview_role = role,
+                                creation_filetime = created.ToString() });
+                        }
                         verified.Add(pid, created);
                     } catch (ArgumentException) { // Process exited before opening.
                     } catch (InvalidOperationException) { // Process exited during the read.
@@ -402,6 +418,7 @@ $samplesFile = Join-Path $OutputRoot 'process-samples.jsonl'
 # 请求首样本回执（其他 monitor 证据根不出现任何新文件/行为）。
 $receiptMarker = Join-Path $OutputRoot 'expect-root-receipt'
 $receiptFile = Join-Path $OutputRoot 'root-first-sample.json'
+$rootCreatedFile = Join-Path $OutputRoot 'root-creation-filetime.txt'
 $receiptRequested = $false
 $useCensus = Test-Path -LiteralPath $receiptMarker
 $owned = @{}
@@ -413,12 +430,13 @@ $owned = @{}
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputRoot 'monitor-info.json')
 Set-Content -LiteralPath (Join-Path $OutputRoot 'monitor-ready') -Value 'ready'
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-$sampler = [DemandWorkingSetSampler]::new($samplesFile, $useCensus)
+$sampler = [DemandWorkingSetSampler]::new($samplesFile, $useCensus, $PipelineDetails.IsPresent)
 try {
     while (-not (Test-Path -LiteralPath $stopFile)) {
         if ([DateTime]::UtcNow -gt $deadline) { throw 'Process monitor deadline exceeded.' }
         if (Test-Path -LiteralPath $rootFile) {
             $rootPid = [int](Get-Content -LiteralPath $rootFile -Raw)
+            $rootCreated = if ($PipelineDetails) { [long](Get-Content -LiteralPath $rootCreatedFile -Raw) } else { 0 }
             if ($owned.ContainsKey($rootPid) -or -not (Test-Path -LiteralPath $receiptMarker)) {
                 $all = @(Get-CimInstance Win32_Process | Sort-Object CreationDate)
             } else {
@@ -432,6 +450,8 @@ try {
                 $processId = [int]$process.ProcessId
                 if ($processId -ne $rootPid -and -not $owned.ContainsKey([int]$process.ParentProcessID) -and -not $owned.ContainsKey($processId)) { continue }
                 $created = [string]$process.CreationDate.ToUniversalTime().ToFileTimeUtc()
+                if ($rootCreated -gt 0 -and $processId -eq $rootPid -and
+                    [Math]::Abs([long]$created - $rootCreated) -ge 10) { continue }
                 if ($owned.ContainsKey($processId) -and $owned[$processId].creation_filetime -ne $created) { continue }
                 if (-not $owned.ContainsKey($processId)) {
                     if ($processId -ne $rootPid) {
@@ -479,6 +499,9 @@ try {
                         observed_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                         creation_filetime = $created
                         class = $class; action = $action; evidence_gap = $gap; webview_role = $webViewRole
+                    }
+                    if ($PipelineDetails -and $process.CommandLine -match '\s-m\s+vibeocr\.runtime\.recognition\.paddle_worker(\s|$)') {
+                        $record['paddle_worker'] = $true
                     }
                     $owned[$processId] = $record
                     $sampler.Observe($processId, [long]$created, [string]$process.Name, $webViewRole)

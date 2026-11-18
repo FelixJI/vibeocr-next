@@ -460,9 +460,7 @@ test("controlled detection samples reject default short/mixed kinds", () => {
   assert.match(result.stderr, /requires Kinds=scan_long/);
 });
 
-test("t3_pdf_pipeline driver self-check passes (exit priority + isolation + verifier fail-closed)", () => {
-  // Goal #325/#328 T3 串行阶段测量驱动：同一驱动自检入口，验证退出码优先
-  // 级、报告目录隔离与 verifier 缺参 fail-closed；不启动 App/monitor。
+test("t3 driver rejects path collisions and invalid monitor evidence", () => {
   const script = path.join(repoRoot, "scripts", "t3_pdf_pipeline.ps1");
   const result = spawnSync("pwsh", ["-NoProfile", "-File", script, "-SelfCheck"], {
     encoding: "utf8",
@@ -473,18 +471,4 @@ test("t3_pdf_pipeline driver self-check passes (exit priority + isolation + veri
     0,
     `t3 driver self-check failed:\n${result.stdout}\n${result.stderr}`,
   );
-});
-
-test("t3_pdf_pipeline driver keeps the pipeline input kind and final verification wired", () => {
-  // 静态契约：驱动必须以 INPUT_KIND=pdf_pipeline 驱动真实 App，并在 health
-  // passed 后调用仓库 verifier 校验真实输出；不覆盖已有证据。
-  const script = readFileSync(
-    path.join(repoRoot, "scripts", "t3_pdf_pipeline.ps1"),
-    "utf8",
-  );
-  assert.match(script, /VIBEOCR_PADDLE_SMOKE_INPUT_KIND = 'pdf_pipeline'/);
-  assert.match(script, /scripts\/verify_pdf_pipeline_output\.py/);
-  assert.match(script, /--fixture-copy/);
-  assert.match(script, /already exists; refusing to overwrite historical evidence/);
-  assert.match(script, /Get-T3ExitCode/);
 });

@@ -1,13 +1,13 @@
-"""Goal #325/#328 T3 串行阶段测量合成件的独立契约检查。
+"""Goal #325/#328 合成件和保存产物校验契约。"""
 
-只验证生成器输出结构（页数、逐页真实栅格、混合件组成、共享背景与逐页
-唯一页码章），不需要 Paddle/模型/真实 PDF。运行使用仓库锁定环境
-（uv run --frozen）。
-"""
+import json
+import shutil
 
 import pymupdf as fitz
+import pytest
 
 from scripts.paddle_smoke_fixtures import draw_pdf_pipeline_fixtures
+from scripts.verify_pdf_pipeline_output import verify
 
 
 def _assert_scan_pages(doc: fitz.Document, page_numbers: range) -> None:
@@ -41,12 +41,8 @@ def test_pdf_pipeline_fixtures_match_manifest(tmp_path):
         _assert_scan_pages(doc, range(doc.page_count))
         _assert_unique_page_images(doc)
         # 共享背景：页 1 与页 5 使用同一背景 xref，仅页码章不同（跨批共享资源）。
-        first_page_images = {
-            image[0] for image in doc[0].get_images(full=True)
-        }
-        fifth_page_images = {
-            image[0] for image in doc[4].get_images(full=True)
-        }
+        first_page_images = {image[0] for image in doc[0].get_images(full=True)}
+        fifth_page_images = {image[0] for image in doc[4].get_images(full=True)}
         assert first_page_images & fifth_page_images, (
             "pages 0 and 4 must share one background image xref"
         )
@@ -75,12 +71,9 @@ def test_pdf_pipeline_fixtures_match_manifest(tmp_path):
         for index in mixed_entry["blank_pages"]:
             assert not doc[index].get_text().strip()
             assert not doc[index].get_images(full=True)
-        assert (
-            set(mixed_entry["raster_pages"])
-            | set(mixed_entry["native_text_pages"])
-            | set(mixed_entry["blank_pages"])
-            == set(range(30))
-        )
+        assert set(mixed_entry["raster_pages"]) | set(
+            mixed_entry["native_text_pages"]
+        ) | set(mixed_entry["blank_pages"]) == set(range(30))
 
 
 def test_pdf_pipeline_manifest_declares_synthetic_only(tmp_path):
@@ -93,5 +86,101 @@ def test_pdf_pipeline_manifest_declares_synthetic_only(tmp_path):
     for entry in manifest.values():
         assert entry["synthetic_only"] is True
         assert entry["pages"] > 0
-        assert entry["badge_format"] == "PAGE {number:03d}/PIPE"
-        assert entry["ocr_text_markers"], "OCR 文本核验标记必须显式声明"
+        assert entry["badge_format"] == "PAGE {number:03d}"
+        assert set(entry["raster_pages"]) & set(entry["requested_pages"])
+    mixed = manifest["t3-pipeline/mixed.pdf"]
+    assert set(mixed["native_text_pages"]) <= set(mixed["requested_pages"])
+    assert len(set(mixed["raster_pages"]) - set(mixed["requested_pages"])) == 1
+    long = manifest["t3-pipeline/scan_long.pdf"]
+    assert long["requested_pages"] == list(range(long["pages"]))
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_error"),
+    [
+        (None, None),
+        ("empty_targets", "selected pages"),
+        ("samefile", "reuses an input or prior pass"),
+        ("wrong_marker", "wrong searchable marker"),
+        ("image_changed", "changed visual content"),
+        ("outside_export", "outside export root"),
+    ],
+)
+def test_verify_saved_pdfs(tmp_path, fault, expected_error):
+    source = tmp_path / "mixed.pdf"
+    fixture_copy = tmp_path / "before.pdf"
+    export = tmp_path / "export"
+    export.mkdir()
+    with fitz.open() as document:
+        with fitz.open() as raster:
+            page = raster.new_page(width=90, height=110)
+            page.draw_rect(fitz.Rect(10, 10, 60, 70), fill=(1, 0, 0))
+            png = page.get_pixmap().tobytes("png")
+        for _ in range(2):
+            page = document.new_page(width=90, height=110)
+            page.insert_image(page.rect, stream=png)
+        document.new_page().insert_text((30, 60), "Original native text")
+        document.new_page()
+        document.save(source)
+    shutil.copyfile(source, fixture_copy)
+
+    health = tmp_path / "health.json"
+    manifest = tmp_path / "manifest.json"
+    requested = [0, 2]
+    manifest.write_text(
+        json.dumps(
+            {
+                "t3-pipeline/mixed.pdf": {
+                    "pages": 4,
+                    "requested_pages": requested,
+                    "raster_pages": [0, 1],
+                    "native_text_pages": [2],
+                    "blank_pages": [3],
+                    "badge_format": "PAGE {number:03d}",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    passes = []
+    for label in ("cold", "steady"):
+        path = export / f"{label}.pdf"
+        with fitz.open(source) as document:
+            document[0].insert_text(
+                (10, 30),
+                "PAGE 002" if fault == "wrong_marker" else "PAGE 001",
+                render_mode=3,
+            )
+            if fault == "image_changed":
+                document[1].draw_rect(fitz.Rect(1, 1, 89, 109), fill=(0, 1, 0))
+            document.save(path)
+        if fault == "samefile" and label == "steady":
+            path = export / "cold.pdf"
+        elif fault == "outside_export" and label == "steady":
+            path = path.rename(tmp_path / "outside.pdf")
+        passes.append(
+            {
+                "label": label,
+                "detection": {
+                    "selected_pages": [] if fault == "empty_targets" else requested,
+                    "page_count": 4,
+                    "ocr_pages": [0],
+                    "skipped_native_pages": [2],
+                },
+                "document": {"saved": {"saved": {"file": str(path)}}},
+            }
+        )
+    health.write_text(
+        json.dumps(
+            {
+                "state": "passed",
+                "evidence": {"input_kind": "pdf_pipeline", "passes": passes},
+            }
+        ),
+        encoding="utf-8",
+    )
+    errors = verify(health, manifest, source, fixture_copy, export)
+    if expected_error is None:
+        assert errors == []
+    else:
+        assert any(expected_error in error for error in errors)

@@ -1,76 +1,83 @@
+using System.Text.Json;
 using VibeOCR.App.Inference;
+using VibeOCR.Contracts.HttpV2;
 
 using Xunit;
 
 namespace VibeOCR.App.Tests;
 
+[Collection("PDF smoke probe")]
 public sealed class PdfPipelineSmokeFactsTests
 {
-  private static PdfSmokeRequestProbe.RequestEvent Event(
-      string kind, double startedAtMs, double? durationMs = 10.0, string outcome = "completed",
-      long? bytes = null, long? pixels = null, int page = 0, string? detail = null) =>
-    new(kind, "s1", page, 0, startedAtMs, startedAtMs + durationMs, durationMs, outcome, null,
-        bytes, pixels, detail);
-
-  public sealed class PageSelection
+  [Fact]
+  public void BusinessWindowKeepsOwnedRequestsAndExcludesBackgroundAndUiReads()
   {
-    [Fact]
-    public void AllCoversEveryPageWithinWindow()
-    {
-      Assert.Equal([0, 1, 2, 3, 4, 5], PdfPipelinePageSelection.Resolve("all", 6));
-    }
-
-    [Fact]
-    public void AllBeyondSelectionWindowIsRejected()
-    {
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("all", 65));
-    }
-
-    [Fact]
-    public void FirstNIsBoundedByWindowAndPageCount()
-    {
-      Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7], PdfPipelinePageSelection.Resolve("first:8", 120));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("first:65", 120));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("first:9", 8));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("first:0", 8));
-    }
-
-    [Fact]
-    public void ExplicitPagesAreDistinctOrderedAndValidated()
-    {
-      Assert.Equal([1, 2, 3], PdfPipelinePageSelection.Resolve("pages:3,1,2", 6));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("pages:5", 5));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("pages:64", 120));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("pages:x", 6));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("pages:", 6));
-    }
-
-    [Fact]
-    public void UnknownSpecAndNonPositivePageCountFail()
-    {
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("everything", 6));
-      Assert.Throws<InvalidOperationException>(
-          () => PdfPipelinePageSelection.Resolve("all", 0));
-    }
-
-    [Fact]
-    public void ExpectedBatchesMatchesSerialChunkContract()
-    {
-      Assert.Equal(1, PdfPipelinePageSelection.ExpectedBatches(1));
-      Assert.Equal(1, PdfPipelinePageSelection.ExpectedBatches(4));
-      Assert.Equal(2, PdfPipelinePageSelection.ExpectedBatches(5));
-      Assert.Equal(2, PdfPipelinePageSelection.ExpectedBatches(8));
-    }
+    PdfSmokeRequestProbe.RequestEvent[] events =
+    [
+      Event("render_preview", "s1", 100, "business_render"),
+      Event("render_preview", "s1", 110, "ui_preview", "faulted"),
+      Event("load_detect", "s1", 112, "document_detection", "cancelled"),
+      Event("load_targeted", "s1", 114, "business_presence"),
+      Event("load_targeted", "different", 120, "business_presence"),
+      Event("job_submit", "", 130) with { Detail = "job1" },
+      Event("job_observe", "job1", 140),
+      Event("job_observe", "unowned", 150),
+      Event("add_text_layers", "s1", 160),
+      Event("save_operation", "s1", 170),
+    ];
+    var window = PdfPipelinePhaseStats.Window(events, 100, 160);
+    Assert.DoesNotContain(window, request => request.Kind == "save_operation");
+    var business = PdfPipelinePhaseStats.BusinessRequests(window, "s1");
+    Assert.Equal(["render_preview", "load_targeted", "job_submit", "job_observe", "add_text_layers"],
+      business.Select(request => request.Kind));
   }
+
+  [Fact]
+  public void CoverageRequiresExactUniquePagesIncludingBeyondTheProjection()
+  {
+    Assert.True(PdfPipelinePhaseStats.CoversPages([119, 65, 3], [3, 65, 119]));
+    Assert.False(PdfPipelinePhaseStats.CoversPages([3, 65, 65], [3, 65, 119]));
+    Assert.False(PdfPipelinePhaseStats.CoversPages([], [3, 65, 119]));
+  }
+
+  [Fact]
+  public void ObserveFactsKeepTerminalIdentityAndSettingsWithoutOutcomes()
+  {
+    var update = new JobUpdate
+    {
+      Snapshot = new JobSnapshot
+      {
+        JobId = "job-1", InstanceId = "s1", Kind = JobKind.Recognition, Priority = JobPriority.Background,
+        State = JobState.Completed, FinishedAt = "2026-11-18T00:00:00Z",
+        Pipeline = new PipelineSelection { PipelineId = "OCR", Engine = OcrEngine.PaddleOcr },
+        Summary = new JobSummary { Succeeded = 1, Total = 1 },
+        Items = [new JobItem { ItemId = "it-0000", DisplayName = "page-120.png", ClientItemKey = "page-119", State = ItemState.Succeeded }],
+      },
+      Events = [new StageEvent { Sequence = 1, Stage = "paddle_onnx_snapshot",
+        Detail = new Dictionary<string, JsonElement>
+        {
+          ["pipeline_id"] = JsonSerializer.SerializeToElement("OCR"),
+          ["device"] = JsonSerializer.SerializeToElement("cpu"),
+          ["provider"] = JsonSerializer.SerializeToElement("CPUExecutionProvider"),
+          ["auto_device_fallback"] = JsonSerializer.SerializeToElement(false),
+        } }],
+      Outcomes = [new ItemOutcome { ItemId = "it-0000", Attempt = 1, State = ItemState.Succeeded,
+        Payload = new Dictionary<string, JsonElement> { ["text"] = JsonSerializer.SerializeToElement("private result") } }],
+      ThroughSequence = 1,
+    };
+    var observation = Assert.IsType<PdfSmokeRequestProbe.Observation>(PdfSmokeRequestProbe.ObserveFacts(update).Job);
+    var terminal = Assert.IsType<PdfSmokeRequestProbe.JobFact>(observation.Terminal);
+    Assert.Equal("s1", terminal.InstanceId);
+    Assert.Equal(OcrEngine.PaddleOcr, terminal.Engine);
+    Assert.Equal("page-119", Assert.Single(terminal.Items).ClientItemKey);
+    Assert.Equal("CPUExecutionProvider", observation.Paddle?.Provider);
+    Assert.False(observation.Paddle?.AutomaticFallback);
+    Assert.DoesNotContain("private result", JsonSerializer.Serialize(observation));
+  }
+
+  private static PdfSmokeRequestProbe.RequestEvent Event(
+    string kind, string session, int start, string? purpose = null, string outcome = "completed") =>
+    new(kind, session, 0, 0, start, start + 5, 5, outcome, null, Purpose: purpose);
 
   public sealed class PngFacts
   {
@@ -135,115 +142,4 @@ public sealed class PdfPipelineSmokeFactsTests
     }
   }
 
-  public sealed class PhaseStats
-  {
-    [Fact]
-    public void WindowFiltersByStartTimestampInProbeDomain()
-    {
-      var events = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("render_preview", 100.0),
-        Event("job_submit", 199.9),
-        Event("job_submit", 200.0),
-        Event("add_text_layers", 400.0),
-      };
-      Assert.Equal(["render_preview", "job_submit"],
-          PdfPipelinePhaseStats.Window(events, 50.0, 200.0).Select(request => request.Kind));
-    }
-
-    [Fact]
-    public void ByKindAggregatesOnlyMeasuredValuesAndKeepsGapsExplicit()
-    {
-      var events = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("render_preview", 10.0, 10.0, bytes: 100, pixels: 1000),
-        Event("render_preview", 20.0, 30.0, bytes: 200, pixels: 2000),
-        Event("render_preview", 30.0, outcome: "pending"),
-        Event("job_submit", 40.0, 5.0, outcome: "completed", bytes: 300),
-      };
-      IReadOnlyDictionary<string, PdfPipelineKindStat> byKind = PdfPipelinePhaseStats.ByKind(events);
-      PdfPipelineKindStat render = byKind["render_preview"];
-      Assert.Equal(3, render.Count);
-      Assert.Equal(2, render.Completed);
-      Assert.Equal(1, render.Pending);
-      Assert.Equal(40.0, render.DurationSumMs);
-      Assert.Equal(20.0, render.DurationMedianMs);
-      Assert.Equal(30.0, render.DurationMaxMs);
-      Assert.Equal(300, render.BytesTotal);
-      Assert.Equal(3000, render.PixelsTotal);
-      Assert.Equal(0, render.CompletedMissingBytes);
-      PdfPipelineKindStat submit = byKind["job_submit"];
-      Assert.Equal(300, submit.BytesTotal);
-      Assert.Null(submit.PixelsTotal);
-      var noBytes = new List<PdfSmokeRequestProbe.RequestEvent> { Event("save_operation", 1.0) };
-      PdfPipelineKindStat save = PdfPipelinePhaseStats.ByKind(noBytes)["save_operation"];
-      Assert.Null(save.BytesTotal);
-      Assert.Equal(1, save.CompletedMissingBytes);
-    }
-
-    [Fact]
-    public void ValidateOcrWindowEnforcesSerialContractAndFailClosed()
-    {
-      var ok = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("load_targeted", 1.0),
-        Event("render_preview", 2.0, bytes: 100, pixels: 900),
-        Event("job_submit", 3.0, detail: "job-1"),
-        Event("job_observe", 4.0),
-        Event("add_text_layers", 5.0),
-      };
-      Assert.Empty(PdfPipelinePhaseStats.ValidateOcrWindow(ok, expectedBatches: 1, pageCount: 4));
-
-      Assert.Contains(PdfPipelinePhaseStats.ValidateOcrWindow(ok, expectedBatches: 2, pageCount: 8),
-          error => error.Contains("job_submit count 1 != expected serial batches 2"));
-
-      var faultedSubmit = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("render_preview", 1.0),
-        Event("job_submit", 2.0, outcome: "faulted"),
-      };
-      Assert.Contains(PdfPipelinePhaseStats.ValidateOcrWindow(faultedSubmit, 1, 4),
-          error => error.Contains("non-completed outcome"));
-
-      var noRender = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("job_submit", 1.0, detail: "job-1"),
-      };
-      Assert.Contains(PdfPipelinePhaseStats.ValidateOcrWindow(noRender, 1, 4),
-          error => error.Contains("render_preview"));
-
-      var pendingWrite = new List<PdfSmokeRequestProbe.RequestEvent>
-      {
-        Event("render_preview", 1.0),
-        Event("job_submit", 2.0, detail: "job-1"),
-        Event("add_text_layers", 3.0, outcome: "pending"),
-      };
-      Assert.Contains(PdfPipelinePhaseStats.ValidateOcrWindow(pendingWrite, 1, 4),
-          error => error.Contains("still pending"));
-    }
-
-    [Fact]
-    public void FrameGapsKeepEmptyAsNotMeasuredAndCountThreshold()
-    {
-      (int count, double? median, double? max, int over) = PdfPipelinePhaseStats.FrameGaps([]);
-      Assert.Equal(0, count);
-      Assert.Null(median);
-      Assert.Null(max);
-      Assert.Equal(0, over);
-      (count, median, max, over) = PdfPipelinePhaseStats.FrameGaps([16.0, 16.0, 300.0, 8.0]);
-      Assert.Equal(4, count);
-      Assert.Equal(16.0, median);
-      Assert.Equal(300.0, max);
-      Assert.Equal(1, over);
-    }
-
-    [Fact]
-    public void MedianHandlesEvenAndOddCounts()
-    {
-      Assert.Null(PdfPipelinePhaseStats.Median([]));
-      Assert.Equal(5.0, PdfPipelinePhaseStats.Median([5.0]));
-      Assert.Equal(15.0, PdfPipelinePhaseStats.Median([10.0, 20.0]));
-      Assert.Equal(20.0, PdfPipelinePhaseStats.Median([30.0, 10.0, 20.0]));
-    }
-  }
 }

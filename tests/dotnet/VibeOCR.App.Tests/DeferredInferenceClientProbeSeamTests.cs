@@ -13,6 +13,7 @@ namespace VibeOCR.App.Tests;
 /// 的结果、异常与取消语义与探针未安装时完全一致；事件记录真实 bytes/
 /// PNG 像素/job id，缺测保持 null。观测不得改变业务结果。
 /// </summary>
+[Collection("PDF smoke probe")]
 public sealed class DeferredInferenceClientProbeSeamTests
 {
   private static byte[] Png(int width, int height) =>

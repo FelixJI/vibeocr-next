@@ -31,6 +31,7 @@ namespace VibeOCR.App;
 public sealed partial class MainWindow
 {
   private static string PaddleSmokeDevice => PaddleSmokeEnv("VIBEOCR_PADDLE_SMOKE_DEVICE") ?? "cpu";
+  private static bool IsPdfPipelinePreparation => PaddleSmokeEnv("VIBEOCR_T3_PIPELINE_PREPARE") == "1";
 
   // paddleModesSmokeStarted 字段随 MainWindow.xaml.cs 的 OnHostStateChanged
   // 钩子一并声明（见交付说明），本文件只引用不声明，避免未读告警。
@@ -223,6 +224,17 @@ public sealed partial class MainWindow
 
     ProductRuntimeSession session = await SelectPaddleSmokeDeviceAsync();
     await NavigateSmokeAsync("单次识别", "button");
+    if (IsPdfPipelinePreparation)
+    {
+      RecognitionWorkbenchState recognition = (await application.BootstrapAsync(CancellationToken.None))
+        .States.Select(item => item.State).OfType<RecognitionWorkbenchState>().Single();
+      if (recognition.RecognitionModes?.SingleOrDefault(entry => entry.ModeId == mode) is
+          { Availability: "unavailable", ReasonCode: not null } unavailable)
+      {
+        paddleSmokeOutcome = "blocked";
+        return new { mode, reason = unavailable.ReasonCode, unavailable.Hint };
+      }
+    }
     {
       WorkbenchCommandReceipt selectedDefault = await application.ExecuteAsync(
         new WorkbenchCommandEnvelope(Guid.NewGuid(), new SetDefaultRecognitionModeCommand(mode)), CancellationToken.None);
@@ -1292,6 +1304,25 @@ public sealed partial class MainWindow
       // 失败兑底快照：后续 UI 验证/导出异常时，已获取的 job/outcomes 不
       // 随顶层 catch 只留 error 字符串而丢失；成功路径 health 合同不变。
       paddleSmokePartialEvidence = new { job = jobEvidence, capture };
+    }
+
+    if (IsPdfPipelinePreparation && !succeeded && jobId is not null)
+    {
+      // 模型准备有独立进程与窗口。这里只辨别已发生的准备失败，PDF 计时中不重取。
+      var failed = await session.Client.ObserveAsync(jobId, 0, CancellationToken.None);
+      var errors = failed.Outcomes.Select(item => new
+      {
+        item.ErrorCode,
+        reason = item.ErrorDetail.TryGetValue("reason", out JsonElement reason) &&
+          reason.ValueKind == JsonValueKind.String ? reason.GetString() : null,
+      }).ToArray();
+      if (errors is [{ reason: "local_models_not_prepared" }])
+      {
+        paddleSmokeOutcome = "blocked";
+        return new { mode, jobId, errors };
+      }
+      jobEvidence = new { mode, jobId, errors };
+      paddleSmokePartialEvidence = jobEvidence;
     }
 
     // Host completion precedes the WebView resource fetch; wait for the actual

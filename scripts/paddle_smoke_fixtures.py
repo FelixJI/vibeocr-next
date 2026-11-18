@@ -1023,7 +1023,7 @@ def _pipeline_background(size: tuple[int, int], index: int) -> Image.Image:
         draw.line((60, y, width - 60, y), fill="#303030", width=2)
         draw.text(
             (60, y + 30),
-            f"pipeline row {row:02d} page {index:03d} shared background",
+            f"pipeline row {row:02d} shared background {index + 1}",
             fill="black",
             font=_pipeline_font(40),
         )
@@ -1043,7 +1043,7 @@ def _pipeline_badge(page_number: int) -> bytes:
     draw.rectangle((2, 2, 427, 147), outline="black", width=4)
     draw.text(
         (28, 52),
-        f"PAGE {page_number:03d}/PIPE",
+        f"PAGE {page_number:03d}",
         fill="black",
         font=_pipeline_font(48),
     )
@@ -1056,9 +1056,9 @@ def draw_pdf_pipeline_fixtures(out: Path) -> dict[str, object]:
     """Goal #325/#328 T3 串行阶段测量件（仅合成内容；不改动 T2 件语义）。
 
     与 t2-baseline 件同构（共享背景+唯一页码章），但行文使用 OCR 可读的
-    大字号内置字体，供真实 paddle_text 添加文字层；行文含逐页页码，
-    保存后可用页码核验页序与归属。scan_long 每 4 页批次问隔提供跨批共享
-    资源；mixed 覆盖扫描/原生文字层/空白混合。
+    大字号内置字体供真实 paddle_text 添加文字层；仅独立页码章包含页码。
+    scan_long 提供跨批共享资源。mixed 保留一个未选扫描页和未选空白页，
+    并请求已有原生文字层的页面以验证实际跳过。
     """
     import io
 
@@ -1096,8 +1096,8 @@ def draw_pdf_pipeline_fixtures(out: Path) -> dict[str, object]:
             "blank_pages": [],
             "shared_backgrounds": len(backgrounds),
             "unique_page_badges": count,
-            "ocr_text_markers": ["PIPELINE", "row", "page {number:03d}"],
-            "badge_format": "PAGE {number:03d}/PIPE",
+            "requested_pages": list(range(count)),
+            "badge_format": "PAGE {number:03d}",
             "synthetic_only": True,
         }
     mixed_scan, mixed_native, mixed_blank = 10, 10, 10
@@ -1136,8 +1136,11 @@ def draw_pdf_pipeline_fixtures(out: Path) -> dict[str, object]:
         ),
         "shared_backgrounds": len(backgrounds),
         "unique_page_badges": mixed_scan,
-        "ocr_text_markers": ["PIPELINE", "row", "page {number:03d}"],
-        "badge_format": "PAGE {number:03d}/PIPE",
+        "requested_pages": [
+            *range(mixed_scan - 1),
+            *range(mixed_scan, mixed_scan + mixed_native),
+        ],
+        "badge_format": "PAGE {number:03d}",
         "synthetic_only": True,
     }
     return entries

@@ -1,4 +1,6 @@
 // Deferred inference gateway used while the Supervisor is starting.
+using System.Globalization;
+using System.Text.Json;
 using VibeOCR.Contracts.HttpV2;
 using VibeOCR.Platform.Inference;
 using Wire = VibeOCR.Runtime.Contracts.Generated.Wire;
@@ -22,18 +24,36 @@ public sealed class InferenceClientNotAttachedException(
 /// Bytes/Pixels/Detail 由调用点的真实结果推导（PNG IHDR 核验像素），
 /// 观测事实推导失败只留下缺口（null），不改结果、不补 0。
 /// </summary>
-internal sealed class PdfSmokeRequestProbe
+internal sealed class PdfSmokeRequestProbe(bool capturePipeline = false)
 {
   internal const int MaxEvents = 20000;
+  internal bool CapturePipeline => capturePipeline;
+
+  internal sealed record UploadFact(string ClientItemKey, string Attachment, long Bytes);
+  internal sealed record ItemFact(string ItemId, string? ClientItemKey, ItemState State);
+  internal sealed record JobFact(
+      string JobId, string? InstanceId, JobState State, string? Pipeline, OcrEngine? Engine,
+      string? EnvironmentId, string? CreatedAt, string? StartedAt, string? FinishedAt,
+      JobSummary Summary, IReadOnlyList<ItemFact> Items);
+  internal sealed record PaddleFact(
+      string? Pipeline, string? Device, string? Provider, bool? AutomaticFallback,
+      string? Preset, string? Source, string[] Models, JsonElement Selections, JsonElement Adapter);
+  internal sealed record Observation(JobFact? Terminal, PaddleFact? Paddle);
 
   internal sealed record RequestEvent(
       string Kind, string Session, int Page, int Param,
       double StartedAtMs, double? EndedAtMs, double? DurationMs,
       string Outcome, string? Error,
-      long? Bytes = null, long? Pixels = null, string? Detail = null);
+      long? Bytes = null, long? Pixels = null, string? Detail = null,
+      string? Purpose = null, long? ReadEpoch = null, IReadOnlyList<int>? Pages = null,
+      IReadOnlyList<int>? ConfirmedPages = null, IReadOnlyList<UploadFact>? Uploads = null,
+      Observation? Job = null);
 
   /// <summary>从真实调用结果推导的观测事实；null 字段表示未测得（不是 0）。</summary>
-  internal sealed record ResultFacts(long? Bytes, long? Pixels = null, string? Detail = null);
+  internal sealed record ResultFacts(
+      long? Bytes, long? Pixels = null, string? Detail = null,
+      IReadOnlyList<int>? ConfirmedPages = null, IReadOnlyList<UploadFact>? Uploads = null,
+      Observation? Job = null);
 
   private readonly object _lock = new();
   private readonly List<RequestEvent> _events = [];
@@ -45,7 +65,8 @@ internal sealed class PdfSmokeRequestProbe
 
   internal async Task<T> MeasureAsync<T>(
       string kind, string session, int page, int param, Func<Task<T>> call,
-      Func<T, ResultFacts>? factsOf = null)
+      Func<T, ResultFacts>? factsOf = null, string? purpose = null,
+      long? readEpoch = null, IReadOnlyList<int>? pages = null)
   {
     long start = System.Diagnostics.Stopwatch.GetTimestamp();
     int slot;
@@ -62,7 +83,8 @@ internal sealed class PdfSmokeRequestProbe
       {
         slot = _events.Count;
         _events.Add(new RequestEvent(
-            kind, session, page, param, Ms(start), null, null, "pending", null));
+            kind, session, page, param, Ms(start), null, null, "pending", null,
+            Purpose: purpose, ReadEpoch: readEpoch, Pages: pages));
       }
     }
     try
@@ -94,12 +116,13 @@ internal sealed class PdfSmokeRequestProbe
   }
 
   internal async Task MeasureAsync(
-      string kind, string session, int page, int param, Func<Task> call) =>
+      string kind, string session, int page, int param, Func<Task> call,
+      string? purpose = null, long? readEpoch = null, IReadOnlyList<int>? pages = null) =>
     await MeasureAsync<object?>(kind, session, page, param, async () =>
     {
       await call();
       return null;
-    });
+    }, purpose: purpose, readEpoch: readEpoch, pages: pages);
 
   private void Finish(int slot, long start, string outcome, string? error, ResultFacts? facts)
   {
@@ -119,6 +142,9 @@ internal sealed class PdfSmokeRequestProbe
         Bytes = facts?.Bytes,
         Pixels = facts?.Pixels,
         Detail = facts?.Detail,
+        ConfirmedPages = facts?.ConfirmedPages,
+        Uploads = facts?.Uploads,
+        Job = facts?.Job,
       };
     }
   }
@@ -129,6 +155,35 @@ internal sealed class PdfSmokeRequestProbe
   internal (IReadOnlyList<RequestEvent> Events, int MaxInflight, bool Overflowed) Snapshot()
   {
     lock (_lock) return (_events.ToArray(), Volatile.Read(ref _maxInflight), _overflowed);
+  }
+
+  internal static ResultFacts ObserveFacts(JobUpdate update)
+  {
+    JobSnapshot snapshot = update.Snapshot;
+    JobFact? terminal = null;
+    if (!update.More && snapshot.FinishedAt is not null)
+      terminal = new JobFact(snapshot.JobId, snapshot.InstanceId, snapshot.State,
+          snapshot.Pipeline?.PipelineId, snapshot.Pipeline?.Engine, snapshot.EnvironmentId,
+          snapshot.CreatedAt, snapshot.StartedAt, snapshot.FinishedAt, snapshot.Summary,
+          snapshot.Items.Select(item => new ItemFact(item.ItemId, item.ClientItemKey, item.State)).ToArray());
+    PaddleFact? paddle = null;
+    if (update.Events.FirstOrDefault(stage => stage.Stage == "paddle_onnx_snapshot")?.Detail is { } detail)
+    {
+      string? Read(string key) => detail.TryGetValue(key, out JsonElement value) &&
+          value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+      JsonElement Object(string key) => detail.TryGetValue(key, out JsonElement value) &&
+          value.ValueKind == JsonValueKind.Object ? value : JsonSerializer.SerializeToElement<object?>(null);
+      JsonElement models = Object("models");
+      paddle = new PaddleFact(Read("pipeline_id"), Read("device"), Read("provider"),
+          detail.TryGetValue("auto_device_fallback", out JsonElement fallback) &&
+              fallback.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? fallback.GetBoolean() : null,
+          Read("model_preset"), Read("source"),
+          models.ValueKind == JsonValueKind.Object
+            ? models.EnumerateObject().Select(model => model.Name).Order().ToArray() : [],
+          Object("selections"), Object("adapter"));
+    }
+    return new ResultFacts(null, Job: terminal is null && paddle is null ? null : new(terminal, paddle));
   }
 }
 
@@ -220,7 +275,14 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     JobRef job = await probe.MeasureAsync(
         "job_submit", "", -1, request.Items.Count,
         () => Current.SubmitAsync(request, uploads, cancellationToken),
-        submitted => new PdfSmokeRequestProbe.ResultFacts(uploadBytes, null, submitted.JobId));
+        submitted => new PdfSmokeRequestProbe.ResultFacts(uploadBytes, null, submitted.JobId,
+          Uploads: probe.CapturePipeline ? request.Items
+            .Where(item => item.Source.TryGetValue("attachment", out JsonElement attachment) &&
+                attachment.ValueKind == JsonValueKind.String)
+            .Select(item => (item.ClientItemKey, Attachment: item.Source["attachment"].GetString()!))
+            .Where(item => uploads.ContainsKey(item.Attachment))
+            .Select(item => new PdfSmokeRequestProbe.UploadFact(
+                item.ClientItemKey, item.Attachment, uploads[item.Attachment].Content.Count)).ToArray() : null));
     Volatile.Write(ref _lastSubmittedJobId, job.JobId);
     return job;
   }
@@ -232,7 +294,8 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     if (probe is null) return await Current.ObserveAsync(jobId, afterSequence, cancellationToken);
     return await probe.MeasureAsync("job_observe", jobId, -1, afterSequence,
-        () => Current.ObserveAsync(jobId, afterSequence, cancellationToken));
+        () => Current.ObserveAsync(jobId, afterSequence, cancellationToken),
+        probe.CapturePipeline ? PdfSmokeRequestProbe.ObserveFacts : null);
   }
 
   public async Task<JobCommandResult> CommandAsync(
@@ -355,7 +418,9 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     Task Call() => Current.LoadPdfDemandAsync(sessionId, request, progress, ct);
     if (probe is null) await Call();
     else await probe.MeasureAsync(request.Pages is null ? "load_detect" : "load_targeted",
-      sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call);
+      sessionId, request.Pages?.FirstOrDefault() ?? -1, request.Pages?.Count ?? 0, Call,
+      purpose: request.Pages is null ? "document_detection" : "business_presence",
+      readEpoch: request.Read?.Epoch, pages: probe.CapturePipeline ? request.Pages?.ToArray() : null);
   }
 
   public async Task<byte[]> RenderPdfThumbnailDemandAsync(string sessionId, Wire.RenderThumbnailRequest request, CancellationToken ct)
@@ -371,7 +436,10 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     await _gate.WaitAsync(ct);
     PdfSmokeRequestProbe? probe = PdfSmokeProbe;
     Task<byte[]> Call() => Current.RenderPdfPreviewDemandAsync(sessionId, request, ct);
-    return probe is null ? await Call() : await probe.MeasureAsync("render_preview", sessionId, request.Page, request.MaxEdge ?? request.Dpi ?? 0, Call, PngImageFacts.Of);
+    return probe is null ? await Call() : await probe.MeasureAsync("render_preview",
+        sessionId, request.Page, request.MaxEdge ?? request.Dpi ?? 0, Call, PngImageFacts.Of,
+        purpose: request.MaxEdge is null && request.Dpi is not null ? "business_render" : "ui_preview",
+        readEpoch: request.Read?.Epoch);
   }
 
   public async Task<Wire.PageInspectResponse> InspectPdfPageDemandAsync(string sessionId, Wire.PageInspectRequest request, CancellationToken ct)
@@ -415,7 +483,17 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     if (probe is null) return await Current.AddPdfTextLayersAsync(sessionId, request, ct);
     return await probe.MeasureAsync("add_text_layers", sessionId,
         request.Pages?.FirstOrDefault()?.Page ?? -1, request.Pages?.Count ?? 0,
-        () => Current.AddPdfTextLayersAsync(sessionId, request, ct));
+        () => Current.AddPdfTextLayersAsync(sessionId, request, ct),
+        probe.CapturePipeline ? result => new PdfSmokeRequestProbe.ResultFacts(null,
+          ConfirmedPages: request.Pages?.Where(page =>
+            result.Extra?.TryGetValue("results", out JsonElement results) == true &&
+            results.ValueKind == JsonValueKind.Object &&
+            results.TryGetProperty(page.Page.ToString(CultureInfo.InvariantCulture), out JsonElement count) &&
+            count.ValueKind == JsonValueKind.Array && count.GetArrayLength() > 0 &&
+            count[0].ValueKind == JsonValueKind.Number && count[0].TryGetInt32(out int blocks) &&
+            blocks > 0).Select(page => page.Page).ToArray()) : null,
+        purpose: request.Save == false ? "dirty_write" : "write_and_save",
+        pages: probe.CapturePipeline ? request.Pages?.Select(page => page.Page).ToArray() : null);
   }
   public async Task DeletePdfTextLayersAsync(string sessionId, int[] pages, Action<System.Text.Json.JsonElement> progress, CancellationToken ct) { await _gate.WaitAsync(ct); await Current.DeletePdfTextLayersAsync(sessionId, pages, progress, ct); }
   public async Task CancelPdfAsync(string sessionId, CancellationToken ct)
@@ -441,7 +519,8 @@ public sealed class DeferredInferenceClient(CancellationToken shutdownToken = de
     if (probe is null) return await Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct);
     int flags = (copyExport ? 1 : 0) | (rebindTarget ? 2 : 0) | (overwrite ? 4 : 0);
     return await probe.MeasureAsync("save_operation", sessionId, -1, flags,
-        () => Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct));
+        () => Current.SavePdfOperationAsync(sessionId, outputPath, settings, copyExport, rebindTarget, overwrite, ct),
+        probe.CapturePipeline ? saved => new PdfSmokeRequestProbe.ResultFacts(null, Detail: saved) : null);
   }
   public async Task<string> SavePdfWithSettingsAsync(string sessionId, string outputPath, IReadOnlyDictionary<string, System.Text.Json.JsonElement> settings, CancellationToken ct) { await _gate.WaitAsync(ct); return await Current.SavePdfWithSettingsAsync(sessionId, outputPath, settings, ct); }
 

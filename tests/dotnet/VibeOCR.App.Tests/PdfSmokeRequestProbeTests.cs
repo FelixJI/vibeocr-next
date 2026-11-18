@@ -4,6 +4,7 @@ using Xunit;
 
 namespace VibeOCR.App.Tests;
 
+[Collection("PDF smoke probe")]
 public class PdfSmokeRequestProbeTests
 {
   [Fact]
