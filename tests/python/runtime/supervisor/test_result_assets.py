@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -14,8 +15,10 @@ from vibeocr.runtime.documents.export import (
     write_export,
 )
 from vibeocr.runtime.jobs.module import SupervisorModule
+from vibeocr.runtime.jobs.staging import InputStager, ManagedStaging
 from vibeocr.runtime.recognition.paddle_executor import AdapterExecutor
 from vibeocr.runtime.recognition.result_assets import (
+    REASON_ENCODE_FAILED,
     ResultAssetBudget,
     ResultAssetSink,
     sanitize_asset_name,
@@ -26,6 +29,7 @@ from vibeocr.runtime_contracts import ItemState
 @pytest.mark.parametrize("kind", ["image", "chart", "seal"])
 def test_result_asset_binding_read_and_export(tmp_path, kind):
     job_dir = tmp_path / "job"
+    job_dir.mkdir()
     results_dir = job_dir / "results"
     sink = ResultAssetSink(results_dir, "it-0000", ResultAssetBudget(results_dir))
     image = sink.save(Image.new("RGB", (2, 2), "red"), name="C:/private/fig.png")
@@ -76,6 +80,7 @@ def test_asset_name_rejects_traversal():
 def test_reference_image_bind_and_authorized_fetch(tmp_path):
     """纯文本 reference_image：adapter 落盘 → executor 绑定 → 仅本 item 可取。"""
     job_dir = tmp_path / "job"
+    job_dir.mkdir()
     results_dir = job_dir / "results"
     sink = ResultAssetSink(results_dir, "it-0000", ResultAssetBudget(results_dir))
     # 预处理图：6x3 横图旋转 90° 后的 3x6 竖图（真实旋转几何）。
@@ -116,6 +121,44 @@ def test_reference_image_bind_and_authorized_fetch(tmp_path):
     assert resolve("job-b", "it-0000", asset_id) is None
     assert resolve("job-a", "it-0001", asset_id) is None
     assert resolve("job-a", "it-0000", "deadbeef") is None
+
+
+@pytest.mark.parametrize("writer", ["executor", "png_sink"])
+def test_late_asset_writer_cannot_recreate_closed_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    managed = ManagedStaging.create(tmp_path / "managed")
+    stager = InputStager(root=managed.root, managed=managed)
+    staged = stager.stage_job("job", [("input.png", None, b"image")])
+    results_dir = staged[0].path.parent / "results"
+    mkdir = Path.mkdir
+
+    def close_before_mkdir(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path == results_dir:
+            stager.close()
+        mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    # Let the writer read its input or encode the PNG before closing staging.
+    monkeypatch.setattr(Path, "mkdir", close_before_mkdir)
+    try:
+        if writer == "executor":
+            with pytest.raises(FileNotFoundError):
+                AdapterExecutor._staged_to_items(staged)
+        else:
+            sink = ResultAssetSink(results_dir, "it-0000")
+            assert sink.save(Image.new("RGB", (2, 2))) == {
+                "available": False,
+                "reason": REASON_ENCODE_FAILED,
+            }
+        assert not managed.root.exists()
+        assert not managed.root.with_suffix(".lease").exists()
+    finally:
+        stager.close()
 
 
 def test_reference_image_unavailable_marker_is_not_fetchable(tmp_path):

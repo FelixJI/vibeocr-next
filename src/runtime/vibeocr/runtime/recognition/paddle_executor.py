@@ -622,7 +622,8 @@ class AdapterExecutor:
             asset_dir = ""
             if hasattr(entry, "path"):
                 results_dir = entry.path.parent / "results"
-                results_dir.mkdir(parents=True, exist_ok=True)
+                # The job directory may have been removed during shutdown.
+                results_dir.mkdir(exist_ok=True)
                 asset_dir = str(results_dir)
             out.append(
                 InputItem(
