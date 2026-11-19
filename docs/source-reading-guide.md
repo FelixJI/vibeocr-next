@@ -198,6 +198,23 @@ pwsh -File scripts/test_app_ci.ps1
 提交前运行 `uv run --frozen python scripts/check_quality.py`；完整 release
 build/smoke 由 PR CI 权威执行。
 
+### 本地联调（产品候选）
+
+需要走完整应用链（真实 Supervisor、识别、WebView2 workbench）时：
+
+```powershell
+pwsh -File scripts/build-release.ps1 -Version <repository.json 版本>   # 首次/依赖变化后装配候选
+pwsh -File scripts/dev_runtime.ps1                                     # 之后每次联调
+```
+
+`dev_runtime.ps1` 按需重建 WebAssets dist（源码新于 dist 才
+`npm run build`）、增量 dotnet publish 到候选 `app\`（metadata/runtime
+布局不动），随后以 `--profile production --install-root` 启动候选自带
+的 `app\VibeOCR.WinUI.exe`（与 smoke 脚本同模式；`-ProductRoot` 可指定
+其它已装配候选）。WebView2 随产品候选使用随包 Fixed Version；TS/C#
+改动重跑本入口即可，无需完整重装配。注意联调会在候选创建 `state`
+目录，之后跑 `smoke_runtime_candidate.ps1` 前需先删除该目录。
+
 ## 常见误区
 
 - **把 Next 说成 WPF**：本项目桌面框架是 WinUI 3。
