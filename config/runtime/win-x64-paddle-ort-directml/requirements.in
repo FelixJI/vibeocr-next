@@ -1,37 +1,15 @@
 # Managed unified inference closure (Paddle ONNX + MinerU); single
 # onnxruntime-directml namespace, no Paddle/Torch. DirectML EP 覆盖全 D3D12
 # GPU，CPU 推理走同闭包 CPUExecutionProvider（设备切换不换环境）。
-pillow>=12.3.0,<13
-numpy>=2.3.5
-httpx>=0.28.1
-jsonschema>=4.25.0
-pymupdf-lite>=2.0
-pydantic>=2.14.1
-fastapi>=0.139.0
-uvicorn>=0.51.0
-fonttools>=4.67.0
-markdown>=3.11.2
-python-docx>=1.2.0
-openpyxl>=3.1.5
-qrcode[pil]>=8.2
-python-barcode>=0.16.1
-pyzbar>=0.1.9
-packaging>=26.0
-python-multipart>=0.0.32
-
-# 此环境也承载 Runtime host；Windows OCR 不依赖 Paddle 推理。
-# Foundation/Collections 是 PyWinRT await 回调与结果集合的运行时依赖。
-winrt-runtime>=3.2,<4
-winrt-Windows.Foundation>=3.2,<4
-winrt-Windows.Foundation.Collections>=3.2,<4
-winrt-Windows.Media.Ocr>=3.2,<4
-winrt-Windows.Globalization>=3.2,<4
-winrt-Windows.Graphics.Imaging>=3.2,<4
-winrt-Windows.Storage.Streams>=3.2,<4
+#
+# 运行依赖基座引用 shared/requirements-base.in（单一事实源，与根
+# pyproject dependencies 由契约测试对齐）；此环境也承载 Runtime host，
+# Windows OCR 不依赖 Paddle 推理。本 profile 只追加精确 pin。
+-r ../shared/requirements-base.in
+numpy==2.3.5
 
 paddleocr==3.7.0
 paddlex[ocr]==3.7.2
-numpy==2.3.5
 modelscope-hub==0.4.5
 onnxruntime-directml==1.24.4
 # MinerU 随统一闭包携带（ONNX 线，无 torch）；win-x64 的 ORT 依赖同向
