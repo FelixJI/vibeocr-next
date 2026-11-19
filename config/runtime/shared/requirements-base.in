@@ -1,0 +1,45 @@
+# 共享运行依赖基座：Runtime 服务环境（HTTP/PDF/导出/二维码/字体）与
+# Windows Media OCR adapter（pywinrt projection）的单一事实源。
+# 被 config/runtime/win-x64-base/requirements.in 与
+# config/runtime/win-x64-paddle-ort-directml/requirements.in 以
+# ``-r ../shared/requirements-base.in`` 引用；各 profile 只追加自己的
+# 精确 pin（base：numpy==2.3.5；directml：numpy==2.3.5 + 推理闭包）。
+#
+# 与根 pyproject [project] dependencies 保持逐项一致（根是 wheel 元数据
+# 无法引用本片段），由 tests/runtime/test_runtime_dependency_consistency.py
+# 契约校验；修改任一侧后必须同步另一侧。
+#
+# numpy 上界与 PaddleX 的 numpy<2.4 对齐（统一闭包为共用离线 wheel
+# 精确锁 2.3.5）；Pillow 上限因随包 MinerU 依赖的 Gradio Pillow<13。
+pillow>=12.3.0,<13
+numpy>=2.3.5,<2.4
+httpx>=0.28.1
+jsonschema>=4.25.0
+pymupdf-lite>=2.0
+pydantic>=2.14.1
+fastapi>=0.139.0
+uvicorn>=0.51.0
+fonttools>=4.67.0
+markdown>=3.11.2
+python-docx>=1.2.0
+openpyxl>=3.1.5
+qrcode[pil]>=8.2
+python-barcode>=0.16.1
+pyzbar>=0.1.9
+packaging>=26.0
+python-multipart>=0.0.32
+# Windows Media OCR adapter（pywinrt projection）；系统 OCR/语言包由
+# Windows 动态提供。winsdk 是 sdist-only 的 scikit-build 包，不适合离线
+# wheel 闭包；改用带 win_amd64 wheel 的 winrt-runtime + 组件包。
+# winrt 投影包只在 ``[all]`` extra 里声明跨命名空间依赖，锁定期不可见；
+# 但 winrt-runtime 的 await 机制（``op.completed = ...``）运行时导入
+# ``winrt.windows.foundation``，OcrResult.lines 等集合投影导入
+# ``winrt.windows.foundation.collections``。缺任一包时 await 在 C 层吞掉
+# ModuleNotFoundError 并永久挂起（识别无效且无法取消），必须显式锁定。
+winrt-runtime>=3.2,<4
+winrt-Windows.Foundation>=3.2,<4
+winrt-Windows.Foundation.Collections>=3.2,<4
+winrt-Windows.Media.Ocr>=3.2,<4
+winrt-Windows.Globalization>=3.2,<4
+winrt-Windows.Graphics.Imaging>=3.2,<4
+winrt-Windows.Storage.Streams>=3.2,<4

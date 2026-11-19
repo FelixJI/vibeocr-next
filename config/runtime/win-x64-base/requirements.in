@@ -7,36 +7,9 @@
 # RapidOCR/RapidTable 已随引擎退役移除，Paddle OCR/表格/结构由 managed
 # paddleocr-ort-* 环境承载，MinerU 等重型组件属于显式选择的附加闭包，
 # 不进入 base。
-pillow>=12.3.0,<13
+#
+# 运行依赖基座引用 shared/requirements-base.in（单一事实源，与根
+# pyproject dependencies 由契约测试对齐）；本 profile 只追加精确 pin。
+-r ../shared/requirements-base.in
 # 与 PaddleX 的 numpy<2.4 约束共用离线 wheel。
 numpy==2.3.5
-httpx>=0.28.1
-jsonschema>=4.25.0
-pymupdf-lite>=2.0
-pydantic>=2.14.1
-fastapi>=0.139.0
-uvicorn>=0.51.0
-fonttools>=4.67.0
-markdown>=3.11.2
-python-docx>=1.2.0
-openpyxl>=3.1.5
-qrcode[pil]>=8.2
-python-barcode>=0.16.1
-pyzbar>=0.1.9
-packaging>=26.0
-python-multipart>=0.0.32
-# Windows Media OCR adapter（pywinrt projection）；系统 OCR/语言包由
-# Windows 动态提供。winsdk 是 sdist-only 的 scikit-build 包，不适合离线
-# wheel 闭包；改用带 win_amd64 wheel 的 winrt-runtime + 组件包。
-# winrt 投影包只在 ``[all]`` extra 里声明跨命名空间依赖，锁定期不可见；
-# 但 winrt-runtime 的 await 机制（``op.completed = ...``）运行时导入
-# ``winrt.windows.foundation``，OcrResult.lines 等集合投影导入
-# ``winrt.windows.foundation.collections``。缺任一包时 await 在 C 层吞掉
-# ModuleNotFoundError 并永久挂起（识别无效且无法取消），必须显式锁定。
-winrt-runtime>=3.2,<4
-winrt-Windows.Foundation>=3.2,<4
-winrt-Windows.Foundation.Collections>=3.2,<4
-winrt-Windows.Media.Ocr>=3.2,<4
-winrt-Windows.Globalization>=3.2,<4
-winrt-Windows.Graphics.Imaging>=3.2,<4
-winrt-Windows.Storage.Streams>=3.2,<4
