@@ -219,8 +219,8 @@ def _product_tree(root: Path) -> Path:
     (app / "Microsoft.ui.xaml.dll").write_bytes(b"winui")
     target = ".NETCoreApp,Version=v10.0/win-x64"
     loader = f"Microsoft.Web.WebView2/{lock['loader_sdk_version']}"
-    win_ml = "Microsoft.Windows.AI.MachineLearning/2.4.89"
-    war = "Microsoft.WindowsAppSDK/2.6.4"
+    win_ml = "Microsoft.Windows.AI.MachineLearning/2.5.96"
+    war = "Microsoft.WindowsAppSDK/2.7.0"
     clr = "runtimepack.Microsoft.NETCore.App.Runtime.win-x64/10.0.15"
     project = "VibeOCR.WinUI/0.9.0"
     (app / "VibeOCR.WinUI.deps.json").write_text(
@@ -256,7 +256,7 @@ def _product_tree(root: Path) -> Path:
                             },
                         },
                         war: {
-                            "dependencies": {"Microsoft.WindowsAppSDK.WinUI": "2.6.4"}
+                            "dependencies": {"Microsoft.WindowsAppSDK.WinUI": "2.7.0"}
                         },
                         clr: {"native": {"coreclr.dll": {}}},
                         project: {"runtime": {"VibeOCR.WinUI.dll": {}}},
@@ -286,7 +286,7 @@ def _product_tree(root: Path) -> Path:
                     ],
                     "MicrosoftWindowsAppSDKFiles": [
                         {
-                            "FullPath": "C:/nuget/packages/microsoft.windowsappsdk.winui/2.6.4/"
+                            "FullPath": "C:/nuget/packages/microsoft.windowsappsdk.winui/2.7.0/"
                             "runtimes-framework/win-x64/native/Microsoft.ui.xaml.dll",
                             "RecursiveDir": "",
                         }
