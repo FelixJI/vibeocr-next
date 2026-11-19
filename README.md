@@ -46,7 +46,7 @@ worker 仍在独立进程运行。
 3. 解压整个目录后运行根目录的 `VibeOCR.exe`；不要只复制 `current` 子目录。
 4. 应用数据固定保存在解压根的 `state`；应用更新由 Velopack 在应用内检查、下载并应用。
 
-正式发布包自带全部软件运行依赖：.NET 10 运行时、Windows App Runtime 2.6.4 与官方
+正式发布包自带全部软件运行依赖：.NET 10 运行时、Windows App Runtime 2.7.0 与官方
 WebView2 Fixed Version 运行库（锁定于 `config/runtime/webview2-runtime.lock.json`，构建期
 校验 SHA-256 后展开为 `app/WebView2Runtime`）全部随包分发，模型包单独管理；系统只需满足
 Windows 10/11 x64 最低条件。启动器与诊断检查随包载荷而非系统安装组件，损坏时明确报错并

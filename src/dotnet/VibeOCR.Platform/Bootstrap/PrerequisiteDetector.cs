@@ -47,7 +47,7 @@ public sealed class PrerequisiteDetector
     // Microsoft.WindowsAppSDK); production readiness never consults the
     // installed system runtime, only the bundled payload.
     public const string MinimumDotNetVersion = "10.0.0";
-    public const string MinimumWindowsAppRuntimeVersion = "2.6.4";
+    public const string MinimumWindowsAppRuntimeVersion = "2.7.0";
     public const string BundledMinimum = "Bundled";
     public const string ProductRepairUri = "repair://vibeocr/product";
     private readonly Func<PortableLayout, PrerequisiteSnapshot>? _systemCapture;

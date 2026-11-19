@@ -20,27 +20,24 @@ export default defineConfig({
       args:
         process.platform === "win32"
           ? [
-              // 同名参数会覆盖 Playwright 1.64 的默认值；保留它们并由浏览器契约检查漂移。
+              // 同名参数会覆盖 Playwright 1.65 的默认值；保留它们并由浏览器契约检查漂移。
               `--disable-features=${[
                 "AvoidUnnecessaryBeforeUnloadCheckSync",
                 "DestroyProfileOnBrowserClose",
-                "DialMediaRouteProvider",
-                "GlobalMediaControls",
                 "HttpsUpgrades",
+                "HttpsFirstBalancedModeAutoEnable",
                 "LensOverlay",
                 "MediaRouter",
                 "PaintHolding",
                 "ThirdPartyStoragePartitioning",
-                "BlockOriginHeaderModificationOnRedirect",
                 "AvoidCorsURLLoaderRestartOnRedirect",
-                "Translate",
-                "AutoDeElevate",
+                "TcpPortRandomizationWin",
                 "OptimizationHints",
                 "NetworkTimeServiceQuerying",
                 "AimEnabled",
+                "PreconnectToSearch",
                 "msForceBrowserSignIn",
                 "msEdgeUpdateLaunchServicesPreferredVersion",
-                "TcpPortRandomizationWin",
               ].join(",")}`,
             ]
           : [],
