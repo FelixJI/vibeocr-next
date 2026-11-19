@@ -213,7 +213,8 @@ pwsh -File scripts/dev_runtime.ps1                                     # 之后�
 的 `app\VibeOCR.WinUI.exe`（与 smoke 脚本同模式；`-ProductRoot` 可指定
 其它已装配候选）。WebView2 随产品候选使用随包 Fixed Version；TS/C#
 改动重跑本入口即可，无需完整重装配。注意联调会在候选创建 `state`
-目录，之后跑 `smoke_runtime_candidate.ps1` 前需先删除该目录。
+目录，之后跑 `smoke_runtime_candidate.ps1` 前需先删除该目录。依赖/闭包
+变更的分级验证清单见 `docs/dependency-change-verification.md`。
 
 ## 常见误区
 
