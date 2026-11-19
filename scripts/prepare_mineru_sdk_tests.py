@@ -41,6 +41,8 @@ VENV_DIR = ROOT / "build" / "mineru-sdk-contract-venv"
 # model_cache.prepare_mineru 真实行为回归需要该链路可导入。
 # onnxruntime-directml：metacommands 策略/设备门禁真实合同需要真实
 # ORT 面与 DmlExecutionProvider（版本由 lock 钉死，仅测试 venv）。
+# mineru-vl-utils：mineru 4.2 起 api_server 顶层经 model.vlm.errors
+# 无条件导入（4.1.3 无此链路）。
 DIRECT_DEPENDENCIES = [
     "docvortex",
     "PyYAML",
@@ -58,6 +60,7 @@ DIRECT_DEPENDENCIES = [
     "requests",
     "huggingface-hub",
     "onnxruntime-directml",
+    "mineru-vl-utils",
 ]
 
 # pip-compile 输出行：`name==version \`（续行是 --hash/注释）。

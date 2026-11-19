@@ -1,4 +1,4 @@
-"""锁定 mineru 4.1.3 配置面合同：真实包行为与本仓直接入口一致。"""
+"""锁定 mineru 4.2.3 配置面合同：真实包行为与本仓直接入口一致。"""
 
 from __future__ import annotations
 

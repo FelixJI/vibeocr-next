@@ -1,4 +1,4 @@
-"""官方 MinerU 4.1.3 SDK Tasks 协议合同（受控服务器 + 真实 SDK）。
+"""官方 MinerU 4.2.3 SDK Tasks 协议合同（受控服务器 + 真实 SDK）。
 
 运行环境：``scripts/prepare_mineru_sdk_tests.py`` 装配的
 ``build/mineru-sdk-contract-venv``（``VIBEOCR_MINERU_SDK_CONTRACTS=1``）。

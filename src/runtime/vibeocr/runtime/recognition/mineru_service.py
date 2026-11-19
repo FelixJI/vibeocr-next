@@ -219,7 +219,7 @@ class MinerUService(metaclass=SingletonMeta):
         if "MINERU_CONFIG" in env and not config_path.is_file():
             raise ValueError("MINERU_CONFIG must reference an existing config file")
         if not config_path.exists():
-            # 锁定 mineru 4.1.3：vlm 嵌套在 model 下，顶层写法会被静默忽略。
+            # 锁定 mineru 4.2.3：vlm 嵌套在 model 下，顶层写法会被静默忽略。
             config_path.write_text(
                 "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
                 encoding="utf-8",
@@ -227,7 +227,7 @@ class MinerUService(metaclass=SingletonMeta):
         env["MINERU_HOME"] = str(home)
         env["MINERU_CONFIG"] = str(config_path)
         # 设备意图绑定：VIBEOCR_RECOGNITION_DEVICE 是已提交 worker
-        # 的设备快照（cpu/directml）。锁定 MinerU 4.1.3 的 ONNX 设备经
+        # 的设备快照（cpu/directml）。锁定 MinerU 4.2.3 的 ONNX 设备经
         # model.onnx_device（env MINERU_MODEL_ONNX_DEVICE：auto/cpu/gpu；
         # 其 gpu 即 onnxruntime-directml 的 DmlExecutionProvider）。仅投射
         # child env：env 来源的选择不回写用户 Config 文件（SDK 仅在
