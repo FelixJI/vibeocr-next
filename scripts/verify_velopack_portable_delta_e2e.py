@@ -350,81 +350,6 @@ def _product_environment(environment: dict[str, str]) -> dict[str, str]:
     return product
 
 
-def _webview_tooling_environment(
-    environment: dict[str, str], tooling_profile: Path
-) -> dict[str, str]:
-    """Node/PowerShell helpers run on an isolated synthetic profile so tooling
-    writes never reach the two monitored product roots. The caller's already
-    filtered environment is kept except the six product path keys, which are
-    replaced by the tooling profile's normalized home/AppData/Local layout."""
-    home = tooling_profile / "home"
-    local = home / "AppData" / "Local"
-    roaming = home / "AppData" / "Roaming"
-    temp = tooling_profile / "temp"
-    for path in (home, local, roaming, temp):
-        path.mkdir(parents=True, exist_ok=True)
-    tooling = {
-        key: value
-        for key, value in environment.items()
-        if key not in _PRODUCT_ENVIRONMENT_KEYS
-        and not key.upper().startswith(("VIBEOCR_", "WEBVIEW2_"))
-    }
-    tooling.update(
-        {
-            "LOCALAPPDATA": str(local),
-            "APPDATA": str(roaming),
-            "USERPROFILE": str(home),
-            "HOME": str(home),
-            "TEMP": str(temp),
-            "TMP": str(temp),
-        }
-    )
-    return tooling
-
-
-def _webview_probe(
-    node: Path,
-    root: Path,
-    evidence_root: Path,
-    phase: str,
-    nonce: str,
-    environment: dict[str, str],
-    expected_source: str | None = None,
-) -> None:
-    script_root = Path(__file__).resolve().parent
-    lock = json.loads(
-        (script_root.parent / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    subprocess.run(
-        [
-            str(node),
-            str(script_root / "smoke_webview_transition.mjs"),
-            "--install-root",
-            str(root),
-            "--evidence-dir",
-            str(evidence_root),
-            "--phase",
-            phase,
-            "--nonce",
-            nonce,
-            "--runtime-version",
-            lock["version"],
-            "--product-environment",
-            json.dumps(_product_environment(environment)),
-            *(["--expected-source", expected_source] if expected_source else []),
-        ],
-        env=_webview_tooling_environment(
-            environment, evidence_root / "tooling-profile"
-        ),
-        # Existing startup/normal-close/CIM bounds can cross their poll deadline;
-        # leave room for the 60s Node observation deadline and owned cleanup.
-        timeout=240,
-        check=True,
-    )
-
-
 def _rollback_portable(
     root: Path, work_dir: Path, old_package: Path, environment: dict[str, str]
 ) -> None:
@@ -474,8 +399,6 @@ def verify_portable_delta_e2e(
     timeout: float,
     require_package_type: str,
     legacy_state_layout: bool = False,
-    webview_transition_node: Path | None = None,
-    webview_transition_source_sha: str | None = None,
 ) -> None:
     if os.name != "nt":
         raise RuntimeError("Velopack Portable delta E2E is Windows-only")
@@ -483,17 +406,9 @@ def verify_portable_delta_e2e(
         raise RuntimeError(f"invalid target version: {target_version}")
     if work_dir.exists():
         raise RuntimeError("Portable delta E2E work directory must not already exist")
-    if webview_transition_node is not None and (
-        old_package is None
-        or legacy_state_layout
-        or re.fullmatch(r"[a-f0-9]{40}", webview_transition_source_sha or "") is None
-    ):
-        raise RuntimeError(
-            "WebView transition requires a real old package, expected source SHA and current state layout"
-        )
 
     root = _extract_safe(old_portable, work_dir / "installed-old")
-    old_version = _installed_version(root) if webview_transition_node else None
+    old_version = _installed_version(root) if old_package is not None else None
     if old_package is not None:
         packages = root / "packages"
         packages.mkdir()
@@ -527,17 +442,6 @@ def verify_portable_delta_e2e(
     probe_environment.update(
         {name: str(path) for name, path in external_environment.items()}
     )
-    webview_evidence = work_dir / "webview-transition"
-    if webview_transition_node is not None:
-        webview_evidence.mkdir()
-        _webview_probe(
-            webview_transition_node,
-            root,
-            webview_evidence,
-            "before",
-            nonce,
-            probe_environment,
-        )
     handler = partial(_RecordingHandler, directory=str(new_feed))
     _RecordingHandler.requests = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -610,28 +514,10 @@ def verify_portable_delta_e2e(
     for relative, payload in state_markers.items():
         if (root / relative).read_bytes() != payload:
             raise RuntimeError(f"Velopack apply lost state marker: {relative}")
-    if webview_transition_node is not None:
-        assert old_package is not None
-        _webview_probe(
-            webview_transition_node,
-            root,
-            webview_evidence,
-            "after",
-            nonce,
-            probe_environment,
-            webview_transition_source_sha,
-        )
+    if old_package is not None:
         _rollback_portable(root, work_dir, old_package, probe_environment)
         if _installed_version(root) != old_version:
             raise RuntimeError("Rollback did not restore the original package version")
-        _webview_probe(
-            webview_transition_node,
-            root,
-            webview_evidence,
-            "rollback",
-            nonce,
-            probe_environment,
-        )
         for relative, payload in state_markers.items():
             if (root / relative).read_bytes() != payload:
                 raise RuntimeError(f"Rollback lost state marker: {relative}")
@@ -650,12 +536,6 @@ def main() -> int:
         "--require-package-type", choices=("full", "delta"), required=True
     )
     parser.add_argument("--legacy-state-layout", action="store_true")
-    parser.add_argument(
-        "--webview-transition-node",
-        type=Path,
-        help="Pinned Node executable; enables authorized desktop upgrade/rollback probes",
-    )
-    parser.add_argument("--webview-transition-source-sha")
     args = parser.parse_args()
     verify_portable_delta_e2e(
         args.old_portable.resolve(strict=True),
@@ -666,12 +546,6 @@ def main() -> int:
         timeout=args.timeout,
         require_package_type=args.require_package_type,
         legacy_state_layout=args.legacy_state_layout,
-        webview_transition_node=(
-            args.webview_transition_node.resolve(strict=True)
-            if args.webview_transition_node
-            else None
-        ),
-        webview_transition_source_sha=args.webview_transition_source_sha,
     )
     print(f"Velopack Portable {args.require_package_type} E2E passed")
     return 0

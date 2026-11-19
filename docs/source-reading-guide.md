@@ -55,7 +55,7 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 ## 20 分钟启动链
 
 1. 读 `global.json`，确认 SDK 锁定策略。
-2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界；正式包的运行库（.NET/Windows App Runtime/WebView2 Fixed Version）全部随包，Bootstrapper 与诊断检查随包载荷而非系统安装组件。
+2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界；正式包的 .NET/Windows App Runtime 随包、Bootstrapper 与诊断检查随包载荷；WebView2 使用系统 Evergreen（注册表检测，缺失时报修引导安装）。
 3. 读 `src/dotnet/VibeOCR.App/App.xaml.cs` 的 `OnLaunched`，注意 `Web/WebView2ProductEnvironment.cs` 如何在首个 WebView 创建前绑定产品私有 WebView2 运行库目录与便携 userData 根（未打包 dev/test 允许系统 Evergreen，随包缺失则明确失败不回退）。
 4. 读 `Inference/RuntimeDemandCoordinator` 与 `ManagedRuntimeConnection`，查看按需准备、共享等待、维护归属与唯一活动连接；再搜索 `InferenceSupervisorProcess` 的 ready envelope 与 shutdown。
 5. 搜索 capability 的消费位置，确认功能如何协商。
@@ -211,7 +211,7 @@ pwsh -File scripts/dev_runtime.ps1                                     # 之后�
 `npm run build`）、增量 dotnet publish 到候选 `app\`（metadata/runtime
 布局不动），随后以 `--profile production --install-root` 启动候选自带
 的 `app\VibeOCR.WinUI.exe`（与 smoke 脚本同模式；`-ProductRoot` 可指定
-其它已装配候选）。WebView2 随产品候选使用随包 Fixed Version；TS/C#
+其它已装配候选）。WebView2 与正式发布一致使用系统 Evergreen（旧候选自带 WebView2Runtime 目录仍优先，兼容）；TS/C#
 改动重跑本入口即可，无需完整重装配。注意联调会在候选创建 `state`
 目录，之后跑 `smoke_runtime_candidate.ps1` 前需先删除该目录。依赖/闭包
 变更的分级验证清单见 `docs/dependency-change-verification.md`。

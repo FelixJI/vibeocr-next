@@ -15,25 +15,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>../../../assets/brand/generated/vibeocr.ico</ApplicationIcon>
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
-    <!-- #321 F1：发布模式由显式构建属性选择（build-release.ps1 传入），
-         开发/CI 默认非产品；不用 DEBUG/profile 判定。 -->
-    <VibeOCRProductWebView2>false</VibeOCRProductWebView2>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(VibeOCRProductWebView2)' == 'true'">
-    <DefineConstants>$(DefineConstants);VIBEOCR_PRODUCT_WEBVIEW2</DefineConstants>
-    <!-- #321 F6：自包含 apphost 只在应用目录内搜索 .NET，不读注册表/全局。 -->
-    <AppHostDotNetSearch>AppLocal</AppHostDotNetSearch>
-  </PropertyGroup>
-  <!-- #321 F1：从 config/runtime/webview2-runtime.lock.json 生成锁版本常量，
-       不存在第二处手写 pin；生成器失败即 fail closed。 -->
-  <Target Name="GenerateWebView2LockVersion"
-          BeforeTargets="PrepareForBuild"
-          Condition="'$(VibeOCRProductWebView2)' == 'true'">
-    <Exec Command="uv run --no-sync python &quot;$(MSBuildThisFileDirectory)..\..\..\scripts\generate_webview2_lock_version.py&quot; --output &quot;$(IntermediateOutputPath)WebView2LockVersion.g.cs&quot;" />
-    <ItemGroup>
-      <Compile Include="$(IntermediateOutputPath)WebView2LockVersion.g.cs" />
-    </ItemGroup>
-  </Target>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Velopack" />

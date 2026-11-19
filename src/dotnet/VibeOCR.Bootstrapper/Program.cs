@@ -104,7 +104,7 @@ internal static class Program
         {
           MissingBundledDotNetRuntime(layout),
           MissingBundledWindowsAppRuntime(layout),
-          BundledWebView2RuntimeError(layout),
+          EvergreenWebView2RuntimeError(),
           HasBoundRuntimeAssets(layout) ? null : "随包 Runtime 文件缺失",
         })
         .Where(item => item != null).Select(item => item!).ToArray();
@@ -226,19 +226,56 @@ internal static class Program
         : "随包 Windows App Runtime 文件缺失：" + string.Join("、", missing);
   }
 
-  private static string? BundledWebView2RuntimeError(ResolvedProductLayout layout)
+  // 系统Evergreen WebView2 检查：产品不随包分发运行库，启动器只确认
+  // 客户机已安装（注册表 EdgeUpdate 客户端 pv 值），缺失时给出安装引导；
+  // 不做版本门槛（Evergreen 自更新），不联网、不代为安装。
+  private static string? EvergreenWebView2RuntimeError()
   {
-    try
+    return FindEvergreenWebView2Version() is null
+        ? "webview2.evergreen-missing: 未检测到系统 WebView2 (Evergreen) 运行库。"
+        + Environment.NewLine
+        + "请从 https://developer.microsoft.com/microsoft-edge/webview2/ 安装后重试。"
+        : null;
+  }
+
+  internal static string? FindEvergreenWebView2Version()
+  {
+    // release_smoke 注入 seam：真实运行不设此 env；值必须是完整四段
+    // 版本，否则按未安装处理（覆盖 webview2.evergreen-missing 路径）。
+    string? injected = Environment.GetEnvironmentVariable(
+        "VIBEOCR_TEST_EVERGREEN_WEBVIEW2_VERSION");
+    if (injected is not null)
     {
-      ResolvedProductLayout.ReadWebView2ExecutableVersion(
-          Path.Combine(layout.WebView2RuntimeRoot, "msedgewebview2.exe"),
-          WebView2LockVersion.LockedRuntimeVersion);
-      return null;
+      return System.Text.RegularExpressions.Regex.IsMatch(
+          injected, @"\A[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\z") ? injected : null;
     }
-    catch (InvalidDataException error)
+    // Evergreen 官方注册表键（x64 进程视角含 WOW6432Node 视图）；
+    // per-user 安装在 HKCU，per-machine 在 HKLM。
+    const string clientKey = @"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    const string perUserKey = @"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    foreach (var (hive, subkey) in new[]
     {
-      return error.Message;
+        (Microsoft.Win32.Registry.CurrentUser, perUserKey),
+        (Microsoft.Win32.Registry.LocalMachine, clientKey),
+        (Microsoft.Win32.Registry.LocalMachine, perUserKey),
+    })
+    {
+      try
+      {
+        using var key = hive.OpenSubKey(subkey, writable: false);
+        if (key?.GetValue("pv") is string version &&
+            System.Text.RegularExpressions.Regex.IsMatch(
+                version, @"\A[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\z"))
+        {
+          return version;
+        }
+      }
+      catch (Exception error) when (error is System.Security.SecurityException or IOException)
+      {
+        // 注册表不可读按未安装处理，交由上层安装引导。
+      }
     }
+    return null;
   }
 
   private static string Quote(string value) =>

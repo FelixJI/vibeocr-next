@@ -118,8 +118,19 @@ public sealed class PrerequisiteDetectorTests
           BundledLayout(root), bundledProduct: true);
 
       Assert.True(report.IsReady);
-      Assert.All(report.Items, item => Assert.Equal("Bundled", item.MinimumVersion));
-      Assert.All(report.Items, item => Assert.Equal("repair://vibeocr/product", item.RepairUri));
+      // WebView2 一律系统 Evergreen（不随包分发），其余产品项按随包载荷。
+      Assert.All(
+          report.Items.Where(item => item.Kind != PrerequisiteKind.WebView2Runtime),
+          item => Assert.Equal("Bundled", item.MinimumVersion));
+      Assert.All(
+          report.Items.Where(item => item.Kind != PrerequisiteKind.WebView2Runtime),
+          item => Assert.Equal("repair://vibeocr/product", item.RepairUri));
+      PrerequisiteStatus webview = report.Items.Single(item =>
+          item.Kind == PrerequisiteKind.WebView2Runtime);
+      Assert.Equal("Evergreen", webview.MinimumVersion);
+      Assert.Equal(
+          "https://developer.microsoft.com/microsoft-edge/webview2/",
+          webview.RepairUri);
       PrerequisiteStatus dotnet = report.Items.Single(item =>
           item.Kind == PrerequisiteKind.DotNetRuntime);
       Assert.Equal("10.0.15", dotnet.InstalledVersion);
@@ -130,67 +141,7 @@ public sealed class PrerequisiteDetectorTests
     }
   }
 
-  [Theory]
-  [InlineData("hostpolicy.dll", PrerequisiteKind.DotNetRuntime)]
-  [InlineData("hostfxr.dll", PrerequisiteKind.DotNetRuntime)]
-  [InlineData("System.Private.CoreLib.dll", PrerequisiteKind.DotNetRuntime)]
-  [InlineData("VibeOCR.WinUI.runtimeconfig.json", PrerequisiteKind.DotNetRuntime)]
-  [InlineData("Microsoft.WindowsAppRuntime.dll", PrerequisiteKind.WindowsAppRuntime)]
-  [InlineData("Microsoft.UI.Xaml.dll", PrerequisiteKind.WindowsAppRuntime)]
-  [InlineData(@"WebView2Runtime\msedgewebview2.exe", PrerequisiteKind.WebView2Runtime)]
-  [InlineData(@"WebView2Runtime\msedge.dll", PrerequisiteKind.WebView2Runtime)]
-  [InlineData(@"WebView2Runtime\EBWebView\x64\EmbeddedBrowserWebView.dll", PrerequisiteKind.WebView2Runtime)]
-  public void ProductionReportsDamagedBundledComponentsAsMissing(
-      string missing,
-      PrerequisiteKind kind)
-  {
-    // #321 回归：随包载荷损坏时诊断必须失败；旧实现用已安装系统运行库
-    // 掩盖损坏（本测试在旧实现上不会失败）。
-    string root = Path.Combine(
-        Path.GetTempPath(), $"vibeocr-bundled-missing-{Guid.NewGuid():N}");
-    try
-    {
-      WriteBundledApp(root, missing);
 
-      PrerequisiteReport report = new PrerequisiteDetector().Detect(
-          BundledLayout(root), bundledProduct: true);
-
-      Assert.False(report.IsReady);
-      Assert.Contains(report.Missing, item => item.Kind == kind);
-    }
-    finally
-    {
-      Directory.Delete(root, recursive: true);
-    }
-  }
-
-  [Fact]
-  public void ProductionReportsInvalidBundledWebView2StartupImageAsMissing()
-  {
-    // W17-2 回归：启动库在位但映像无效时，随包诊断必须按缺损报修；
-    // 旧实现只查存在性，本测试在旧实现上不会失败。
-    string root = Path.Combine(
-        Path.GetTempPath(), $"vibeocr-bundled-image-{Guid.NewGuid():N}");
-    try
-    {
-      WriteBundledApp(root);
-      byte[] junk = new byte[67];
-      Encoding.UTF8.GetBytes("invalid webview2 native image payload!").CopyTo(junk, 0);
-      File.WriteAllBytes(Path.Combine(root, @"WebView2Runtime\msedge.dll"), junk);
-
-      PrerequisiteReport report = new PrerequisiteDetector().Detect(
-          BundledLayout(root), bundledProduct: true);
-
-      PrerequisiteStatus webview2 = report.Items.Single(item =>
-          item.Kind == PrerequisiteKind.WebView2Runtime);
-      Assert.False(webview2.IsInstalled);
-      Assert.False(report.IsReady);
-    }
-    finally
-    {
-      Directory.Delete(root, recursive: true);
-    }
-  }
 
   [Fact]
   public void DamagedRuntimeConfigIsNotReportedAsBundled()

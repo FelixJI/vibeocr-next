@@ -19,10 +19,4 @@
              Link="ProductLayout/ProductLayout.cs" />
     <Reference Include="System.Runtime.Serialization" />
   </ItemGroup>
-  <Target Name="GenerateWebView2LockVersion" BeforeTargets="PrepareForBuild">
-    <Exec Command="uv run --no-sync python &quot;$(MSBuildThisFileDirectory)..\..\..\scripts\generate_webview2_lock_version.py&quot; --output &quot;$(IntermediateOutputPath)WebView2LockVersion.g.cs&quot;" />
-    <ItemGroup>
-      <Compile Include="$(IntermediateOutputPath)WebView2LockVersion.g.cs" />
-    </ItemGroup>
-  </Target>
 </Project>

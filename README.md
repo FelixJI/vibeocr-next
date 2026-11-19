@@ -47,9 +47,8 @@ worker 仍在独立进程运行。
 4. 应用数据固定保存在解压根的 `state`；应用更新由 Velopack 在应用内检查、下载并应用。
 
 正式发布包自带全部软件运行依赖：.NET 10 运行时、Windows App Runtime 2.7.0 与官方
-WebView2 Fixed Version 运行库（锁定于 `config/runtime/webview2-runtime.lock.json`，构建期
-校验 SHA-256 后展开为 `app/WebView2Runtime`）全部随包分发，模型包单独管理；系统只需满足
-Windows 10/11 x64 最低条件。启动器与诊断检查随包载荷而非系统安装组件，损坏时明确报错并
+运行库随包分发，模型包单独管理；系统需满足 Windows 10/11 x64 最低条件与
+WebView2 (Evergreen) 运行库（未安装时启动器给出安装引导）。启动器与诊断检查随包载荷而非系统安装组件，损坏时明确报错并
 引导使用应用内更新或重新获取完整包，首次使用不联网下载或安装运行库。未打包的
 开发/测试树仍使用系统 Evergreen WebView2。完整闭包实现与实机验证范围见
 [#321](https://github.com/FelixJI/vibeocr-next/issues/321)。
@@ -127,7 +126,7 @@ RapidOCR 与 RapidTable 已退出当前产品的执行路径及发布依赖。�
   是模型：Paddle 模型按固定清单从选定的 ModelScope 或 Hugging Face 来源准备，MinerU 使用
   自身模型机制。需要调整模型来源时按上文说明在设置中选择后重试；请不要手工执行 pip、
   删除运行环境目录或模型缓存，也不要为识别失败更改显卡驱动。
-- 随包载荷（含固定版 WebView2 运行库）缺损时，启动器、诊断与 WebView 初始化会明确报修：
+- 随包载荷缺损时，启动器、诊断与 WebView 初始化会明确报修；系统 WebView2 (Evergreen) 未安装时启动器给出安装引导：
   按提示使用应用内更新或重新获取完整安装包修复；应用不回退系统运行库，也不联网安装组件。
 - 上述修复与恢复路径的实机验证范围为常规开发与发布验证机；干净 Windows、标准
   （非管理员）用户与物理断网等组合未测试，这些环境下未验证。

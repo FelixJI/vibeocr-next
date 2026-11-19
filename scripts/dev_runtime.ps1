@@ -20,8 +20,8 @@ runtime 树（runtime\env\runtime-env\python.exe）承载。
 4. 启动候选 exe（--profile production --install-root <候选>），输出
    PID 后返回；应用由联调者自行关闭。
 
-注意：WebView2 跟随候选产品形态使用随包 Fixed Version（与正式发布一致）；
-如需系统 Evergreen 内核，运行仓库 .venv 的单元/视觉测试而非本入口。
+注意：WebView2 与正式发布一致使用系统 Evergreen 运行库（不再随包分发）；
+旧候选若自带 WebView2Runtime 目录仍会被优先使用（兼容）。
 本脚本只写 .release-build 候选与 bin，不修改仓库源码。
 #>
 [CmdletBinding()]
@@ -96,7 +96,7 @@ if (-not $SkipPublish) {
     if ($LASTEXITCODE -ne 0) { throw 'dotnet restore failed (locked-mode)' }
     dotnet publish $project -c $Configuration --no-restore -nologo -v:q `
         -p:SelfContained=true -p:WindowsAppSdkSelfContained=true `
-        -p:VibeOCRProductWebView2=true -o (Join-Path $ProductRoot 'app')
+        -o (Join-Path $ProductRoot 'app')
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($Configuration)" }
 }
 
