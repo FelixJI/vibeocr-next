@@ -36,4 +36,4 @@ modelscope-hub==0.4.5
 onnxruntime-directml==1.24.4
 # MinerU 随统一闭包携带（ONNX 线，无 torch）；win-x64 的 ORT 依赖同向
 # onnxruntime-directml，模型文件仍由共享模型缓存按需下载。
-mineru==4.1.3
+mineru==4.2.3

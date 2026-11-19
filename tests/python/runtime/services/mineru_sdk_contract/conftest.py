@@ -1,4 +1,4 @@
-"""真实 MinerU 4.1.3 SDK 合同测试夹具。
+"""真实 MinerU 4.2.3 SDK 合同测试夹具。
 
 本 conftest 在模块级直接导入官方 SDK：装配环境（prepare_mineru_sdk_tests
 创建的 build/mineru-sdk-contract-venv）缺包时必须 collection error 而非

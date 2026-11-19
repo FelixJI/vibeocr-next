@@ -1,6 +1,6 @@
 """VibeOCR MinerU API 启动入口：先应用锁定 SDK 公开策略再转发官方 api_server。
 
-背景（#317 GPU 根因适配）：锁定 mineru 4.1.3 默认
+背景（#317 GPU 根因适配）：锁定 mineru 4.2.3 默认
 ``METACOMMANDS["nvidia"]["layout"] = True``，NVIDIA 上 DML layout
 metacommands 在 ONNX Run 内稳定原生崩溃（WER nvcuda64.dll）；同一固定
 运行时/合成图/屏蔽条件下仅关闭该策略即恢复正常 DML 推理。本入口只把该

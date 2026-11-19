@@ -66,7 +66,7 @@ def flash_api_server(
 ) -> Iterator[tuple[str, list[str]]]:
     home = tmp_path / "mineru-home"
     home.mkdir(parents=True, exist_ok=True)
-    # 与生产 _local_environment 一致的最小 4.1.3 配置（vlm 嵌套在 model 下）。
+    # 与生产 _local_environment 一致的最小 4.2.3 配置（vlm 嵌套在 model 下）。
     (home / "config.yaml").write_text(
         "model:\n  small_backend: onnx\n  vlm:\n    engine: llama-cpp\n",
         encoding="utf-8",

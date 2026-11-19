@@ -223,7 +223,7 @@ class TestStrictDirectmlFactoryGuard:
 
 
 def test_gpu_eligible_kinds_come_from_public_policy_table() -> None:
-    """GPU 模型集合单一真相源：锁定 4.1.3 Windows 为 layout/mfr/ocr_rec/unet。"""
+    """GPU 模型集合单一真相源：锁定 4.2.3 Windows 为 layout/mfr/ocr_rec/unet。"""
     from mineru.model.runtime.onnx_device import METACOMMANDS
     from vibeocr.runtime.recognition.mineru_api_entry import (
         gpu_eligible_model_kinds,

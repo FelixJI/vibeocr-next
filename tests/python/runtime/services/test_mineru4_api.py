@@ -1,6 +1,6 @@
 """MinerU 4 投影合同与真实 4.0.x 结果投影（传输合同见 mineru_sdk_contract/）。
 
-官方 SDK 4.1.3 Tasks 协议的传输/取消/错误分类合同由
+官方 SDK 4.2.3 Tasks 协议的传输/取消/错误分类合同由
 ``tests/python/runtime/services/mineru_sdk_contract/``（真实 SDK + 受控
 服务器）覆盖；本文件保留结果投影契约（schema 校验、页/块身份、表格、
 caption/footnote、data URI）与 tier 目录门禁。

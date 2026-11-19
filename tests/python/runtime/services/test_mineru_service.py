@@ -144,7 +144,7 @@ class TestMinerUService:
         assert "vibeocr.runtime.recognition.mineru_api_entry" in cmd
         assert "--host" in cmd
         assert "--port" in cmd
-        # MinerU 4（含锁定的 4.1.3）api_server CLI 无 --language 选项，传入即
+        # MinerU 4（含锁定的 4.2.3）api_server CLI 无 --language 选项，传入即
         # Click 退出码 2 导致服务无法启动（#208 冻结安装真实回归发现）。
         assert "--language" not in cmd
         assert "--tier" in cmd
