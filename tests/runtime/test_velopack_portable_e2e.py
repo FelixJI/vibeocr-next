@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -102,3 +104,40 @@ def test_unexpected_external_rejection_hides_paths_and_merges_aliases(
     assert message.count("TEMP + TMP: 3 unexpected entries") == 1
     # Nothing unexpected must never raise.
     portable._reject_unexpected_external({}, external_roots)
+
+
+def test_rollback_env_suppresses_after_apply_hook_ui_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Update.exe apply 的 after-apply 钩子无法转发 argv：剥离自测变量的
+    # probe 环境会让回退钩子完整启动生产 UI，把机器相关的 GPU/驱动缓存
+    # 写进受监控的 profile 根（automation/release PR #340 首跑回归）。回退
+    # 必须在调用方已过滤的 probe 环境上注入 env 触发 Bootstrapper 前置
+    # 自检短路，不引入其他自测变量。
+    root = tmp_path / "installed-old"
+    (root / "packages").mkdir(parents=True)
+    (root / "Update.exe").write_bytes(b"MZ")
+    old_package = tmp_path / "old-full.nupkg"
+    old_package.write_bytes(b"package")
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        capture_output: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[bytes]:
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        captured["env"] = env
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(portable.subprocess, "run", fake_run)
+    environment = {"PATH": os.environ.get("PATH", "")}
+    portable._rollback_portable(root, tmp_path, old_package, environment)
+    rollback_environment = captured["env"]
+    assert rollback_environment["VIBEOCR_SELF_TEST_PREREQUISITES"] == "1"
+    assert captured["argv"][1:3] == ["apply", "--norestart"]
+    assert (tmp_path / "rollback-updater.log").read_bytes() == b""

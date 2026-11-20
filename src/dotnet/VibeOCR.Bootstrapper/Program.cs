@@ -18,6 +18,7 @@ internal static class Program
   private const int LayoutInvalid = 5;
   private const uint Windows64BitBinary = 6;
   private const string SelfTestPrerequisites = "--self-test-prerequisites";
+  private const string SelfTestPrerequisitesEnv = "VIBEOCR_SELF_TEST_PREREQUISITES";
 
   [STAThread]
   private static int Main(string[] args)
@@ -29,7 +30,7 @@ internal static class Program
     {
       InitializeLog(productRoot);
       ReportRepair("随包 Velopack 更新组件缺失：" + velopackDll,
-          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          PrerequisiteSelfTestRequested(args),
           BootstrapperArtifactSmoke.IsRequested());
       return LayoutInvalid;
     }
@@ -42,7 +43,7 @@ internal static class Program
     {
       InitializeLog(productRoot);
       ReportRepair("随包 Velopack 更新组件无法加载：" + velopackDll + "\n" + error.Message,
-          args.Contains(SelfTestPrerequisites, StringComparer.Ordinal),
+          PrerequisiteSelfTestRequested(args),
           BootstrapperArtifactSmoke.IsRequested());
       return LayoutInvalid;
     }
@@ -72,9 +73,16 @@ internal static class Program
     return roots;
   }
 
+  // Update.exe 的 after-apply 钩子只以 --veloapp-* 重新拉起本入口，无法
+  // 转发自测 argv（apply 的 EXE_ARGS 不进入钩子命令行）；等价的 env 触发
+  // 让回退钩子链路也走前置自检短路，不进入完整 UI 启动。
+  private static bool PrerequisiteSelfTestRequested(string[] args) =>
+      args.Contains(SelfTestPrerequisites, StringComparer.Ordinal) ||
+      Environment.GetEnvironmentVariable(SelfTestPrerequisitesEnv) == "1";
+
   private static int Launch(string[] args, PortableProductRoots roots)
   {
-    bool selfTest = args.Contains(SelfTestPrerequisites, StringComparer.Ordinal);
+    bool selfTest = PrerequisiteSelfTestRequested(args);
     bool artifactSmoke = BootstrapperArtifactSmoke.IsRequested();
     BootstrapperLog.Info(
         $"Bootstrapper starting: installRoot={roots.InstallRoot} productRoot={roots.ProductRoot}");

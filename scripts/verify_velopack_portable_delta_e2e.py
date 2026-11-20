@@ -372,6 +372,14 @@ def _rollback_portable(
     if rollback_package.exists():
         raise RuntimeError("Disposable rollback package already exists")
     shutil.copyfile(old_package, rollback_package)
+    # Update.exe apply 的 after-apply 钩子会重新拉起回退后的产品入口且
+    # 无法转发 argv（EXE_ARGS 只作用于重启路径）。剥离自测 env 的
+    # probe 环境会让钩子做完整生产 UI 启动，把机器相关的 GPU/驱动缓存
+    # 写进受监控的 profile 根，破坏 fail-closed 外部写入边界；用 env 触发
+    # Bootstrapper 的前置自检短路，既验证回退后的安装可引导，又保持
+    # 除既有 allowlist 外零外部写入。
+    rollback_environment = dict(environment)
+    rollback_environment["VIBEOCR_SELF_TEST_PREREQUISITES"] = "1"
     result = subprocess.run(
         [
             str(installation / "Update.exe"),
@@ -381,7 +389,7 @@ def _rollback_portable(
             str(rollback_package),
         ],
         cwd=installation,
-        env=environment,
+        env=rollback_environment,
         capture_output=True,
         timeout=600,
     )
