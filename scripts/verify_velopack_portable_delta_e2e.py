@@ -188,8 +188,10 @@ def _reject_unexpected_external(
     raise RuntimeError(
         "Velopack Portable E2E wrote unexpected data outside the Portable root: "
         f"{summary}"
-        + ("; entries (directories in full, file names redacted): "
-           + ", ".join(details))
+        + (
+            "; entries (directories in full, file names redacted): "
+            + ", ".join(details)
+        )
     )
 
 
