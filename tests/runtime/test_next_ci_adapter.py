@@ -1489,6 +1489,20 @@ def test_bootstrapper_prerequisite_self_test_never_launches_the_app() -> None:
     assert program.index("args.Contains(SelfTestPrerequisites") < program.index(
         "Process.Start(startInfo)"
     )
+    # Update.exe 的 after-apply 钩子无法转发 argv（apply 的 EXE_ARGS 不进入
+    # 钩子命令行）；env 等价触发同一前置自检短路，让 delta E2E 的回退钩子
+    # 不进入完整 UI 启动（automation/release PR #340 首跑回归）。
+    assert (
+        'Environment.GetEnvironmentVariable(SelfTestPrerequisitesEnv) == "1"' in program
+    )
+    assert program.index("PrerequisiteSelfTestRequested(args)") < program.index(
+        "Process.Start(startInfo)"
+    )
+    assert "bool selfTest = PrerequisiteSelfTestRequested(args);" in program
+    delta_e2e = (root / "scripts/verify_velopack_portable_delta_e2e.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'rollback_environment["VIBEOCR_SELF_TEST_PREREQUISITES"] = "1"' in delta_e2e
 
 
 def test_sync_version_updates_repository_and_desktop_project(tmp_path: Path) -> None:
