@@ -106,6 +106,23 @@ def test_unexpected_external_rejection_hides_paths_and_merges_aliases(
     portable._reject_unexpected_external({}, external_roots)
 
 
+def test_external_check_tolerates_velopack_log_rotation(tmp_path: Path) -> None:
+    # 真实大体积 delta 的 apply+rollback+钩子日志量会触发 Velopack 的单次
+    # 日志轮转（当前日志→.log.old，最多一份）。轮转备份是 Velopack 自身
+    # 目录内的固定名文件，不是产品状态，不得破坏 fail-closed 外部写入
+    # 边界（automation/release PR #340 CI 回归）。
+    _environment, scanned_roots = portable._external_layout(tmp_path)
+    baseline = {
+        name: portable._tree_inventory(path) for name, path in scanned_roots.items()
+    }
+    profile_log_dir = scanned_roots["profile"] / "AppData" / "Local" / "velopack"
+    profile_log_dir.mkdir(parents=True)
+    (profile_log_dir / "velopack_VibeOCRNext.log").write_bytes(b"current")
+    (profile_log_dir / "velopack_VibeOCRNext.log.old").write_bytes(b"rotated")
+    (scanned_roots["temp"] / "velopack_VibeOCRNext.log.old").write_bytes(b"rotated")
+    portable._check_external_writes(scanned_roots, baseline, tmp_path)
+
+
 def test_rollback_env_suppresses_after_apply_hook_ui_boot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

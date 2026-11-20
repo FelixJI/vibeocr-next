@@ -214,6 +214,9 @@ def _allowed_external() -> dict[str, set[str]]:
     # Velopack 1.2 与 .NET Framework 会创建固定日志和空的 known-folder
     # 骨架。它们不是产品状态；逐项 allowlist（相对 profile/temp 两个扫描根，
     # 原 LOCALAPPDATA 精确项已移到 AppData/Local 前缀），不放大也不跳过子树。
+    # .log.old 是 Velopack 的单次日志轮转备份（当前日志→.old，最多一份）：
+    # 真实大体积 delta 的 apply+rollback+钩子日志量会触发轮转（PR #340 CI
+    # 首跑即由它产生唯一 unexpected 条目）。
     return {
         "profile": {
             "AppData/",
@@ -223,8 +226,12 @@ def _allowed_external() -> dict[str, set[str]]:
             "AppData/Local/Microsoft/Windows/Caches/",
             "AppData/Local/velopack/",
             "AppData/Local/velopack/velopack_VibeOCRNext.log",
+            "AppData/Local/velopack/velopack_VibeOCRNext.log.old",
         },
-        "temp": {"velopack_VibeOCRNext.log"},
+        "temp": {
+            "velopack_VibeOCRNext.log",
+            "velopack_VibeOCRNext.log.old",
+        },
     }
 
 
