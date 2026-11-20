@@ -175,9 +175,21 @@ def _reject_unexpected_external(
             aliases_by_directory.items(), key=lambda item: sorted(item[1])
         )
     )
+    # 诊断分支专用：目录条目打印完整相对路径（结构性名称），文件条目只打
+    # 印父目录并把文件名脱敏，保持“不暴露 OS cache 标识符”的隐藏契约。
+    details: list[str] = []
+    for name in sorted(unexpected):
+        for entry in unexpected[name]:
+            if entry.endswith("/") or "/" not in entry:
+                details.append(f"{name}:{entry}")
+            else:
+                parent = entry.rsplit("/", 1)[0]
+                details.append(f"{name}:{parent}/<redacted>")
     raise RuntimeError(
         "Velopack Portable E2E wrote unexpected data outside the Portable root: "
         f"{summary}"
+        + ("; entries (directories in full, file names redacted): "
+           + ", ".join(details))
     )
 
 
