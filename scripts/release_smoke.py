@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -127,50 +126,19 @@ def _verify_bootstrapper(product_root: Path) -> None:
     finally:
         backup.replace(velopack)
 
-    browser = product_root / "app/WebView2Runtime/msedgewebview2.exe"
-    backup = browser.with_suffix(".exe.smoke-backup")
-    browser.rename(backup)
-    try:
-        # The bundled managed DLL has a valid, different four-part file version.
-        shutil.copyfile(velopack, browser)
-        expect_failure(2, b"webview2.version-mismatch")
-        browser.write_bytes(b"no version resource")
-        expect_failure(2, b"webview2.invalid-version")
-    finally:
-        backup.replace(browser)
-
-    # #321：随包 WebView2 已知原生启动闭包（真实布局：msedge.dll 在运行库根，
-    # EmbeddedBrowserWebView.dll 在 EBWebView 架构子目录）缺损必须进入报修
-    # 路径，不能因浏览器 EXE 仍在而放行（旧实现不会失败）。
-    msedge = product_root / "app/WebView2Runtime/msedge.dll"
-    backup = msedge.with_suffix(".dll.smoke-backup")
-    msedge.rename(backup)
-    try:
-        expect_failure(5, b"msedge.dll")
-    finally:
-        backup.replace(msedge)
-
-    embedded = (
-        product_root / "app/WebView2Runtime/EBWebView/x64/EmbeddedBrowserWebView.dll"
+    # 系统 Evergreen WebView2 检测 seam：注入非四段版本必须按未安装
+    # 报修（exit 2 + webview2.evergreen-missing），注入合法版本时该项
+    # 通过（后续检查继续）；不再随包分发运行库，无随包缺损路径。
+    evergreen_env = dict(environment)
+    evergreen_env["VIBEOCR_TEST_EVERGREEN_WEBVIEW2_VERSION"] = "not-a-version"
+    result = subprocess.run(
+        command, capture_output=True, timeout=30, cwd=product_root, env=evergreen_env
     )
-    backup = embedded.with_suffix(".dll.smoke-backup")
-    embedded.rename(backup)
-    try:
-        expect_failure(5, b"EmbeddedBrowserWebView.dll")
-    finally:
-        backup.replace(embedded)
-
-    # W17-2：随包原生启动库在位但映像无效（真实故障形态：67 字节非 PE）
-    # 也必须在 apphost 前报修，不得放行为 WinUI 原生 0xC000027B 退出。
-    # 与其它缺损 seam 同一 rename backup → try 内写故障 → finally 还原模式，
-    # 不叠加完整字节副本。
-    backup = msedge.with_suffix(".dll.smoke-invalid-backup")
-    msedge.rename(backup)
-    try:
-        msedge.write_bytes(b"invalid-msedge.dll-image-payload!".ljust(67, b"\x00"))
-        expect_failure(5, b"webview2.invalid-image")
-    finally:
-        backup.replace(msedge)
+    if result.returncode != 2 or b"webview2.evergreen-missing" not in result.stderr:
+        raise ValueError(
+            "Bootstrapper failure should report webview2.evergreen-missing and "
+            f"exit 2; got exit {result.returncode}: {result.stderr!r}"
+        )
 
     # #321：UI.Xaml 缺失时必须显式报修（exit 2），不能放行后让
     # apphost 异步退出且无报修。

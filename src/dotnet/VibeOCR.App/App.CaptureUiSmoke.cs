@@ -26,10 +26,8 @@ public sealed partial class App
       CaptureUiSmokeTrace.Stage("portable-state.begin");
       var layout = PortableLayout.Resolve(Path.Combine(root, "VibeOCR.exe"), "production");
       VibeOCR.App.Web.WebView2ProductEnvironment.Configure(layout);
-      layout.EnsurePortableState(
-          VibeOCR.App.Web.WebView2ProductEnvironment.PrepareProductionUserData(layout));
-      if (!VibeOCR.App.Web.WebView2ProductEnvironment.HasBundledRuntime &&
-          string.IsNullOrWhiteSpace(
+      layout.EnsurePortableState();
+      if (string.IsNullOrWhiteSpace(
               Environment.GetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER")))
       {
         Environment.SetEnvironmentVariable(

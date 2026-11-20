@@ -65,8 +65,9 @@ public sealed class PrerequisiteDetector
 
     public PrerequisiteReport Detect(PortableLayout layout) => Detect(layout, bundledProduct: false);
 
-    /// <summary>#321 F1：诊断语义随真实产品模式（App 构建属性）而不是 Profile；
-    /// 发布模式按随包载荷判定，已安装系统组件不掩盖损坏。</summary>
+    /// <summary>诊断语义随产品模式（App 构建/布局）而不是 Profile；
+    /// 产品模式按随包载荷判定 .NET/WinAppRuntime/Python（已安装系统组件
+    /// 不掩盖损坏）；WebView2 一律检查系统 Evergreen（产品不再随包分发）。</summary>
     public PrerequisiteReport Detect(PortableLayout layout, bool bundledProduct)
     {
         ArgumentNullException.ThrowIfNull(layout);
@@ -137,7 +138,8 @@ public static class BundledProductProbe
         return new Snapshot(
             FindBundledDotNetVersion(appRoot, layout.AppEntry),
             FindBundledWindowsAppRuntimeVersion(appRoot),
-            FindBundledWebView2Version(appRoot),
+            // WebView2 一律探测系统 Evergreen（产品不随包分发运行库）。
+            WindowsPrerequisiteProbe.FindWebView2Version(),
             File.Exists(layout.RuntimePython));
     }
 
@@ -160,10 +162,10 @@ public static class BundledProductProbe
                 PrerequisiteDetector.ProductRepairUri),
             new PrerequisiteStatus(
                 PrerequisiteKind.WebView2Runtime,
-                snapshot.WebView2Version is not null,
+                !string.IsNullOrWhiteSpace(snapshot.WebView2Version),
                 snapshot.WebView2Version,
-                PrerequisiteDetector.BundledMinimum,
-                PrerequisiteDetector.ProductRepairUri),
+                "Evergreen",
+                "https://developer.microsoft.com/microsoft-edge/webview2/"),
             new PrerequisiteStatus(
                 PrerequisiteKind.RuntimePython,
                 snapshot.RuntimePythonPresent,
@@ -179,32 +181,6 @@ public static class BundledProductProbe
         ResolvedProductLayout.MissingWindowsAppRuntimeFiles(appRoot).Count == 0
             ? FindFileVersion(Path.Combine(appRoot, "Microsoft.WindowsAppRuntime.dll"))
             : null;
-
-    // 随包 WebView2 已知原生启动闭包（与 ResolvedProductLayout.ValidateTree /
-    // Bootstrapper 自检一致）：缺 msedge.dll 或嵌套 EmbeddedBrowserWebView.dll、
-    // 或在位但不是有效 x64 DLL 映像时，都按随包缺损报修，不因浏览器 EXE
-    // 仍在而放行。
-    private static string? FindBundledWebView2Version(string appRoot)
-    {
-        string runtimeRoot = Path.Combine(appRoot, "WebView2Runtime");
-        if (ResolvedProductLayout.MissingWebView2RuntimeStartupFiles(runtimeRoot).Count != 0)
-        {
-            return null;
-        }
-        try
-        {
-            foreach (string name in ResolvedProductLayout.WebView2RuntimeStartupFiles)
-            {
-                ResolvedProductLayout.EnsureValidX64DllImageHeader(
-                    Path.Combine(runtimeRoot, name));
-            }
-        }
-        catch (InvalidDataException)
-        {
-            return null;
-        }
-        return FindFileVersion(Path.Combine(runtimeRoot, "msedgewebview2.exe"));
-    }
 
     // 随包 .NET 启动闭包 + 共享 runtimeconfig 语义（与 Bootstrapper 一致）。
     private static string? FindBundledDotNetVersion(string appRoot, string appEntry) =>
@@ -282,7 +258,7 @@ internal static class WindowsPrerequisiteProbe
             (major == MinimumWindowsAppRuntimePackageBand.Major &&
                 minor >= MinimumWindowsAppRuntimePackageBand.Minor));
 
-    private static string? FindWebView2Version()
+    internal static string? FindWebView2Version()
     {
         try
         {

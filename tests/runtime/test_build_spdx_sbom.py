@@ -172,10 +172,17 @@ def _web_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _product_tree(root: Path) -> Path:
     """受控完整占位产品树：WebView 文件数与锁一致、安装分发真实可读。"""
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
+    app_lock = json.loads(
+        (_REPO / "src/dotnet/VibeOCR.App/packages.lock.json").read_text(
             encoding="utf-8"
         )
+    )
+    app_lock_deps = dict(app_lock["dependencies"]["net10.0-windows10.0.17763"])
+    app_lock_deps.update(app_lock["dependencies"]["net10.0-windows10.0.17763/win-x64"])
+    loader_pin = next(
+        item["resolved"]
+        for name, item in app_lock_deps.items()
+        if name.lower() == "microsoft.web.webview2"
     )
     app = root / "app"
     (app / "metadata").mkdir(parents=True)
@@ -193,7 +200,6 @@ def _product_tree(root: Path) -> Path:
     boot_asset.write_bytes(b"velopack net472")
     (root / "Velopack.dll").write_bytes(boot_asset.read_bytes())
     (root / "VibeOCR.exe").write_bytes(b"bootstrapper")
-    (app / "WebView2Runtime").mkdir(parents=True)
     (app / "VibeOCR.WinUI.exe").write_bytes(b"exe")
     (app / "VibeOCR.WinUI.runtimeconfig.json").write_text(
         json.dumps(
@@ -218,7 +224,7 @@ def _product_tree(root: Path) -> Path:
     (app / "VibeOCR.WinUI.dll").write_bytes(b"project")
     (app / "Microsoft.ui.xaml.dll").write_bytes(b"winui")
     target = ".NETCoreApp,Version=v10.0/win-x64"
-    loader = f"Microsoft.Web.WebView2/{lock['loader_sdk_version']}"
+    loader = f"Microsoft.Web.WebView2/{loader_pin}"
     win_ml = "Microsoft.Windows.AI.MachineLearning/2.5.96"
     war = "Microsoft.WindowsAppSDK/2.7.0"
     clr = "runtimepack.Microsoft.NETCore.App.Runtime.win-x64/10.0.15"
@@ -300,10 +306,6 @@ def _product_tree(root: Path) -> Path:
     (app / "WebAssets/assets").mkdir(parents=True)
     (app / "WebAssets" / "index.html").write_text("<html></html>", encoding="utf-8")
     (app / "WebAssets/assets/main.js").write_text("export {};", encoding="utf-8")
-    (app / "WebView2Runtime" / "msedgewebview2.exe").write_bytes(b"browser")
-    for index in range(int(lock["file_count"]) - 1):
-        relative = f"app/WebView2Runtime/vendor-{index:04d}.dat"
-        (root / relative).write_bytes(b"v")
     (app / "metadata" / "product-layout.json").write_text(
         json.dumps({"schema_version": 1, "app": {"entry": "app/VibeOCR.WinUI.exe"}}),
         encoding="utf-8",
@@ -368,23 +370,6 @@ def _product_tree(root: Path) -> Path:
     return root
 
 
-def _metadata(tmp_path: Path, *, version: str, file_count: int) -> Path:
-    path = tmp_path / "webview2-runtime-metadata.json"
-    path.write_text(
-        json.dumps({"version": version, "file_count": file_count}),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _locked_version() -> str:
-    return json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )["version"]
-
-
 def _build(
     tmp_path: Path,
     product: Path,
@@ -412,18 +397,12 @@ def _build(
         repository_name="FelixJI/vibeocr-next",
         version="0.9.0",
         product_root=product,
-        webview2_metadata=metadata,
         app_publish_items=product.parent / "app-publish-items.json",
     )
 
 
 def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
     """#321：声明版本与实际分发组件在 SPDX 中可追踪（旧实现缺失）。"""
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     app_lock = json.loads(
         (_REPO / "src/dotnet/VibeOCR.App/packages.lock.json").read_text(
             encoding="utf-8"
@@ -439,11 +418,6 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
     output = _build(
         tmp_path,
         _product_tree(tmp_path / "VibeOCR"),
-        _metadata(
-            tmp_path,
-            version=lock["version"],
-            file_count=int(lock["file_count"]),
-        ),
     )
 
     value = json.loads(output.read_text(encoding="utf-8"))
@@ -454,12 +428,6 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
         packages["Microsoft.WindowsAppSDK"]["versionInfo"]
         == resolved["Microsoft.WindowsAppSDK"]
     )
-    webview = packages["Microsoft.WebView2.FixedVersionRuntime"]
-    assert webview["versionInfo"] == lock["version"]
-    assert webview["downloadLocation"] == lock["source_url"]
-    assert webview["checksums"] == [
-        {"algorithm": "SHA256", "checksumValue": lock["sha256"]}
-    ]
     assert packages["CPython"]["versionInfo"] == "3.13.16"
     assert packages["vibeocr-next-runtime"]["versionInfo"] == "0.9.0"
     assert packages["example-upstream"]["versionInfo"] == "1.2.3"
@@ -514,7 +482,6 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
         )
     } == {edge for edge in relationships if edge[2] == portable_runtime["SPDXID"]}
     assert {
-        ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-WebView2"),
         ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-DotNet"),
         ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-WinAppSdk"),
         ("SPDXRef-Package-Product", "CONTAINS", "SPDXRef-Package-CPython"),
@@ -534,59 +501,6 @@ def test_spdx_sbom_declares_bundled_product_components(tmp_path: Path) -> None:
     ) not in relationships
 
 
-def test_spdx_sbom_requires_three_way_webview_file_count(tmp_path: Path) -> None:
-    """manifest/实际展开 metadata/锁三方一致；伪造或缺一必须红。"""
-    product = _product_tree(tmp_path / "VibeOCR")
-    good = _build(
-        tmp_path,
-        product,
-        _metadata(
-            tmp_path,
-            version=_locked_version(),
-            file_count=int(
-                json.loads(
-                    (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-                        encoding="utf-8"
-                    )
-                )["file_count"]
-            ),
-        ),
-    )
-    assert good.is_file()
-
-    # metadata 伪造计数
-    with pytest.raises(ValueError, match="file count mismatch"):
-        _build(
-            tmp_path,
-            product,
-            _metadata(tmp_path, version=_locked_version(), file_count=1),
-        )
-    # manifest 缺一个 WebView 文件
-    manifest_path = product / "app/metadata/product-release-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    webview = sorted(
-        name for name in manifest["files"] if name.startswith("app/WebView2Runtime/")
-    )
-    manifest["files"].pop(webview[-1])
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="file count mismatch"):
-        _build(
-            tmp_path,
-            product,
-            _metadata(
-                tmp_path,
-                version=_locked_version(),
-                file_count=int(
-                    json.loads(
-                        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-                            encoding="utf-8"
-                        )
-                    )["file_count"]
-                ),
-            ),
-        )
-
-
 def test_spdx_sbom_requires_exactly_one_matching_internal_wheel(
     tmp_path: Path,
 ) -> None:
@@ -599,59 +513,19 @@ def test_spdx_sbom_requires_exactly_one_matching_internal_wheel(
         "Metadata-Version: 2.1\nName: vibeocr-next-runtime\nVersion: 0.9.1\n",
         encoding="utf-8",
     )
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     with pytest.raises(ValueError, match="vibeocr-next-runtime"):
         _build(
             tmp_path,
             product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
-        )
-
-
-def test_spdx_sbom_requires_loader_resolution_matching_the_lock(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    lock["loader_sdk_version"] = "0.0.0-mismatch"
-    fake_lock = tmp_path / "webview2-runtime.lock.json"
-    fake_lock.write_text(json.dumps(lock), encoding="utf-8")
-    monkeypatch.setattr(build_spdx_sbom_module, "_WEBVIEW2_LOCK", fake_lock)
-    product = _product_tree(tmp_path / "VibeOCR")
-    with pytest.raises(ValueError, match="loader"):
-        _build(
-            tmp_path,
-            product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
         )
 
 
 def test_spdx_sbom_requires_deps_json_and_loader_distribution(tmp_path: Path) -> None:
     """deps.json 缺失或 Loader 文件未分发时 SBOM fail closed。"""
     product = _product_tree(tmp_path / "VibeOCR")
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     good = _build(
         tmp_path,
         product,
-        _metadata(
-            tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-        ),
     )
     assert good.is_file()
 
@@ -660,9 +534,6 @@ def test_spdx_sbom_requires_deps_json_and_loader_distribution(tmp_path: Path) ->
         _build(
             tmp_path,
             product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
         )
 
 
@@ -687,37 +558,10 @@ def test_spdx_sbom_rejects_declared_files_omitted_from_product(
     manifest["files"].pop(relative)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     (product / relative).unlink()
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     with pytest.raises(ValueError, match=re.escape(relative)):
         _build(
             tmp_path,
             product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
-        )
-
-
-def test_spdx_sbom_rejects_production_web_input_outside_lock(tmp_path: Path) -> None:
-    product = _product_tree(tmp_path / "VibeOCR")
-    installed = tmp_path / "web-source/node_modules/scheduler/package.json"
-    installed.write_text(
-        json.dumps({"name": "scheduler", "version": "0.0.0"}), encoding="utf-8"
-    )
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    with pytest.raises(ValueError, match="production input does not match the lock"):
-        _build(
-            tmp_path,
-            product,
-            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
         )
 
 
@@ -740,16 +584,10 @@ def test_spdx_sbom_requires_unique_python_native_owner(
         closure = json.loads(manifest.read_text(encoding="utf-8"))
         closure["files"][orphan.relative_to(product).as_posix()] = {"size": 7}
         manifest.write_text(json.dumps(closure), encoding="utf-8")
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     with pytest.raises(ValueError, match=re.escape(native)):
         _build(
             tmp_path,
             product,
-            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
         )
 
 
@@ -766,84 +604,19 @@ def test_spdx_sbom_requires_locked_bootstrapper_dll_and_portable_updater(
     product = _product_tree(tmp_path / "VibeOCR")
     if wrong_dll:
         (product / "Velopack.dll").write_bytes(b"wrong framework build of Velopack")
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     with pytest.raises(ValueError, match=message):
         _build(
             tmp_path,
             product,
-            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
             portable_updater=wrong_dll,
-        )
-
-
-def test_spdx_sbom_rejects_stale_bundled_web_output(tmp_path: Path) -> None:
-    product = _product_tree(tmp_path / "VibeOCR")
-    (product / "app/WebAssets/assets/main.js").write_text(
-        "export {}?", encoding="utf-8"
-    )
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    with pytest.raises(
-        ValueError, match="content differs from dist: app/WebAssets/assets/main.js"
-    ):
-        _build(
-            tmp_path,
-            product,
-            _metadata(tmp_path, version=lock["version"], file_count=lock["file_count"]),
         )
 
 
 def test_spdx_sbom_requires_the_product_release_manifest(tmp_path: Path) -> None:
     product = _product_tree(tmp_path / "VibeOCR")
     (product / "app/metadata/product-release-manifest.json").unlink()
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
     with pytest.raises(ValueError, match="product-release-manifest"):
         _build(
             tmp_path,
             product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
-        )
-
-
-def test_spdx_sbom_requires_expansion_metadata(tmp_path: Path) -> None:
-    product = _product_tree(tmp_path / "VibeOCR")
-    with pytest.raises(ValueError, match="webview2-metadata"):
-        _build(tmp_path, product)
-
-
-def test_spdx_sbom_requires_the_bundled_webview2_closure(tmp_path: Path) -> None:
-    """#321：产品闭包未绑定随包 WebView2 时 SBOM fail closed。"""
-    product = _product_tree(tmp_path / "VibeOCR")
-    manifest_path = product / "app/metadata/product-release-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    for name in [
-        name for name in manifest["files"] if name.startswith("app/WebView2Runtime/")
-    ]:
-        manifest["files"].pop(name)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    lock = json.loads(
-        (_REPO / "config/runtime/webview2-runtime.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    with pytest.raises(ValueError, match="bundled WebView2 runtime"):
-        _build(
-            tmp_path,
-            product,
-            _metadata(
-                tmp_path, version=lock["version"], file_count=int(lock["file_count"])
-            ),
         )

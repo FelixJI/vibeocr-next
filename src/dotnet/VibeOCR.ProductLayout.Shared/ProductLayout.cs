@@ -55,7 +55,6 @@ public sealed class ResolvedProductLayout
         AppRoot = Path.Combine(installRoot, "app");
         AppEntry = Path.Combine(AppRoot, "VibeOCR.WinUI.exe");
         WebAssetsRoot = Path.Combine(AppRoot, "WebAssets");
-        WebView2RuntimeRoot = Path.Combine(AppRoot, "WebView2Runtime");
         RuntimeRoot = Path.Combine(installRoot, "runtime");
         RuntimeManifest = Path.Combine(RuntimeRoot, "backend", "runtime-manifest.json");
         RuntimePython = Path.Combine(
@@ -73,7 +72,6 @@ public sealed class ResolvedProductLayout
     public string AppRoot { get; }
     public string AppEntry { get; }
     public string WebAssetsRoot { get; }
-    public string WebView2RuntimeRoot { get; }
     public string RuntimeRoot { get; }
     public string RuntimeManifest { get; }
     public string RuntimePython { get; }
@@ -90,36 +88,6 @@ public sealed class ResolvedProductLayout
         "Microsoft.WindowsAppRuntime.dll",
         "Microsoft.UI.Xaml.dll",
     };
-
-    /// <summary>#321：随包 WebView2 Fixed 运行库已知原生启动闭包（按真实
-    /// 随包布局：msedge.dll 在运行库根；EmbeddedBrowserWebView.dll 在
-    /// EBWebView 架构子目录，不在顶层）。缺 msedge.dll 时启动器自检与
-    /// WebView 初始化才会失败，必须在布局闭包中显式报修。</summary>
-    public static readonly string[] WebView2RuntimeStartupFiles =
-    {
-        "msedge.dll",
-        @"EBWebView\x64\EmbeddedBrowserWebView.dll",
-    };
-
-    public static IReadOnlyList<string> MissingWebView2RuntimeStartupFiles(string webView2RuntimeRoot)
-    {
-        if (string.IsNullOrWhiteSpace(webView2RuntimeRoot))
-        {
-            throw new ArgumentException(
-                "WebView2 runtime root is required.", nameof(webView2RuntimeRoot));
-        }
-
-        List<string> missing = new();
-        foreach (string name in WebView2RuntimeStartupFiles)
-        {
-            if (!File.Exists(Path.Combine(webView2RuntimeRoot, name)))
-            {
-                missing.Add(name);
-            }
-        }
-
-        return missing;
-    }
 
     /// <summary>W17-2：校验已知随包原生启动库的 PE 头部与 COFF 声明范围
     /// 语义：DOS 头、NT 签名、AMD64 机器、DLL+可执行特征、PE32+ 可选头
@@ -332,7 +300,6 @@ public sealed class ResolvedProductLayout
             Path.Combine(AppRoot, "App.xbf"),
             Path.Combine(AppRoot, "MainWindow.xbf"),
             Path.Combine(WebAssetsRoot, "index.html"),
-            Path.Combine(WebView2RuntimeRoot, "icudtl.dat"),
             RuntimeManifest,
             RuntimePython,
             ComponentLock,
@@ -347,21 +314,13 @@ public sealed class ResolvedProductLayout
             {
                 throw new InvalidDataException("layout.missing-entry: " + path);
             }
-        }
-        string browserExecutable = Path.Combine(WebView2RuntimeRoot, "msedgewebview2.exe");
-        if (!HasSafeWebView2Executable(browserExecutable))
-        {
-            throw new InvalidDataException("layout.missing-entry: " + browserExecutable);
-        }
-        foreach (string missingStartup in MissingWebView2RuntimeStartupFiles(WebView2RuntimeRoot))
-        {
-            throw new InvalidDataException(
-                "layout.missing-entry: " + Path.Combine(WebView2RuntimeRoot, missingStartup));
-        }
-        // W17-2：在位但无效/截断/非 x64 的启动库同样在 apphost 前报修。
-        foreach (string name in WebView2RuntimeStartupFiles)
-        {
-            EnsureValidX64DllImageHeader(Path.Combine(WebView2RuntimeRoot, name));
+            // 必需闭包文件必须是普通文件：符号链接会把布局闭包指向
+            // 产品树外，破坏“完整自包含产品”语义（Python 侧 stage 校验
+            // 对全树拒绝 reparse point，这里在 C# 打开路径上同向拒绝）。
+            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            {
+                throw new InvalidDataException("layout.invalid-path: 布局闭包文件是重解析点：" + path);
+            }
         }
     }
 
@@ -389,36 +348,6 @@ public sealed class ResolvedProductLayout
         return !attributes.HasFlag(FileAttributes.Directory);
     }
 
-    public static string ReadWebView2ExecutableVersion(string executable, string? expectedVersion = null)
-    {
-        if (!HasSafeWebView2Executable(executable))
-        {
-            throw new InvalidDataException("layout.missing-entry: " + executable);
-        }
-        string? version;
-        try
-        {
-            version = FileVersionInfo.GetVersionInfo(executable).FileVersion;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            throw new InvalidDataException(
-                "webview2.invalid-version: 无法读取随包 WebView2 浏览器入口的版本：" + executable,
-                error);
-        }
-        if (version is null || !Regex.IsMatch(version, @"\A[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\z"))
-        {
-            throw new InvalidDataException(
-                "webview2.invalid-version: 无法读取随包 WebView2 浏览器入口的完整四段版本：" + executable);
-        }
-        if (expectedVersion is not null && !string.Equals(version, expectedVersion, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                $"webview2.version-mismatch: 随包 WebView2 运行库版本 {version} 与锁定版本 {expectedVersion} 不一致：{executable}");
-        }
-        return version;
-    }
-
     private static void Validate(ProductLayoutDocument value)
     {
         if (value.SchemaVersion != 1)
@@ -439,7 +368,6 @@ public sealed class ResolvedProductLayout
         Expect(value.Roots.Metadata, "app/metadata", "roots.metadata");
         Expect(value.App.Entry, "app/VibeOCR.WinUI.exe", "app.entry");
         Expect(value.App.WebAssets, "app/WebAssets", "app.web_assets");
-        Expect(value.App.WebView2Runtime, "app/WebView2Runtime", "app.webview2_runtime");
         Expect(
             value.Runtime.Manifest,
             "runtime/backend/runtime-manifest.json",
@@ -524,9 +452,6 @@ public sealed class ResolvedProductLayout
 
         [DataMember(Name = "web_assets")]
         public string? WebAssets { get; set; }
-
-        [DataMember(Name = "webview2_runtime")]
-        public string? WebView2Runtime { get; set; }
 
     }
 

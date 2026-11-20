@@ -498,7 +498,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
     }
 
     dispatcher = webView.DispatcherQueue;
-    // #321 产品绑定环境：所有宿主共享同一个随包 WebView2 环境；可恢复
+    // #321 起所有宿主共享同一个 WebView2 环境；可恢复
     // 初始化失败以固定产品报修异常上抛（原始异常保留供日志）。
     await WebView2ProductEnvironment.InitializeCoreWebView2Async(webView);
     lifetime.Token.ThrowIfCancellationRequested();

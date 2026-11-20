@@ -18,7 +18,6 @@ _OUTPUT_FILENAME = "SBOM.spdx.json"
 _CREATED = "1970-01-01T00:00:00Z"
 _CREATOR = "Tool: build_spdx_sbom.py"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_WEBVIEW2_LOCK = _REPO_ROOT / "config" / "runtime" / "webview2-runtime.lock.json"
 _PYTHON_LOCK = _REPO_ROOT / "config" / "runtime" / "python-runtime.lock.json"
 _APP_LOCK = _REPO_ROOT / "src/dotnet/VibeOCR.App/packages.lock.json"
 _BOOTSTRAPPER_LOCK = _REPO_ROOT / "src/dotnet/VibeOCR.Bootstrapper/packages.lock.json"
@@ -377,7 +376,6 @@ def _app_components(
     closure: dict,
     entry: str,
     app_publish_items: Path | None,
-    loader_version: str,
 ) -> list[dict]:
     deps_name = PurePosixPath(entry).with_suffix(".deps.json").as_posix()
     config_name = PurePosixPath(entry).with_suffix(".runtimeconfig.json").as_posix()
@@ -416,7 +414,10 @@ def _app_components(
         raise ValueError(
             "product self-contained runtimeconfig and .NET runtime pack disagree"
         )
-    loader = ("Microsoft.Web.WebView2", loader_version)
+    loader_resolved = resolved.get("microsoft.web.webview2")
+    if loader_resolved is None:
+        raise ValueError("app RID lock does not resolve Microsoft.Web.WebView2")
+    loader = ("Microsoft.Web.WebView2", loader_resolved[1])
     loader_dll = (app_prefix / "WebView2Loader.dll").as_posix()
     loader_declared = False
     for key, payload in sorted(target.items()):
@@ -460,7 +461,7 @@ def _app_components(
             )
     if not loader_declared:
         raise ValueError(
-            "published WebView2 loader does not declare the locked native WebView2Loader.dll"
+            "published WebView2 loader does not declare the NuGet-locked native WebView2Loader.dll"
         )
     if not any(item["SPDXID"] == "SPDXRef-Package-DotNet" for item in packages):
         raise ValueError("published .NET runtime pack declares no distributed files")
@@ -636,7 +637,6 @@ def _product_component_packages(
     repository_name: str,
     version: str,
     product_root: Path,
-    webview2_metadata: Path | None,
     app_publish_items: Path | None,
 ) -> tuple[list[dict], list[dict]]:
     """Resolve distributed components against the staged product release manifest."""
@@ -651,45 +651,6 @@ def _product_component_packages(
     closure = manifest.get("files")
     if not isinstance(closure, dict) or not closure:
         raise ValueError("product release manifest must bind a non-empty closure")
-    webview_files = sorted(
-        name for name in closure if name.startswith("app/WebView2Runtime/")
-    )
-    if not webview_files or "app/WebView2Runtime/msedgewebview2.exe" not in closure:
-        raise ValueError("product closure does not bind the bundled WebView2 runtime")
-    lock = json.loads(_WEBVIEW2_LOCK.read_text(encoding="utf-8"))
-    for field in (
-        "version",
-        "source_url",
-        "sha256",
-        "file_count",
-        "loader_sdk_version",
-    ):
-        if not lock.get(field):
-            raise ValueError(f"webview2-runtime.lock.json is missing {field}")
-    if webview2_metadata is None:
-        raise ValueError(
-            "product_root requires --webview2-metadata from the actual expansion"
-        )
-    metadata = json.loads(webview2_metadata.read_text(encoding="utf-8"))
-    # 实际展开的 exe 版本/文件数必须与锁一致；最终 manifest 的 WebView 文件
-    # 数也必须与两者相符（三方一致，缺一即 fail closed）。
-    if metadata.get("version") != lock["version"]:
-        raise ValueError(
-            "expanded WebView2 runtime version does not match the lock: "
-            f"{metadata.get('version')} != {lock['version']}"
-        )
-    if not (
-        len(webview_files)
-        == int(metadata.get("file_count", -1))
-        == int(lock["file_count"])
-    ):
-        raise ValueError(
-            "bundled WebView2 runtime file count mismatch: "
-            f"manifest={len(webview_files)} "
-            f"metadata={metadata.get('file_count')} lock={lock['file_count']}"
-        )
-    for relative in webview_files:
-        _require_file(product_root, closure, relative)
     descriptor = _json(app_root / "metadata/product-layout.json")
     entry = descriptor.get("app", {}).get("entry")
     if not isinstance(entry, str):
@@ -702,22 +663,9 @@ def _product_component_packages(
         f"({len(closure)} files); vpk adds the package version manifest "
         "at current/sq.version in Portable and lib/app/sq.version in full",
     )
-    webview = _component(
-        "WebView2",
-        "Microsoft.WebView2.FixedVersionRuntime",
-        lock["version"],
-        f"Expanded under app/WebView2Runtime ({len(webview_files)} files); "
-        "actual expansion version/count and final manifest agree with "
-        "config/runtime/webview2-runtime.lock.json",
-        download=lock["source_url"],
-    )
-    webview["checksums"] = [{"algorithm": "SHA256", "checksumValue": lock["sha256"]}]
     web_packages, web_relationships = _web_components(product_root, closure, version)
     distributed = [
-        webview,
-        *_app_components(
-            product_root, closure, entry, app_publish_items, lock["loader_sdk_version"]
-        ),
+        *_app_components(product_root, closure, entry, app_publish_items),
         *_python_components(product_root, closure, version),
         web_packages[0],
     ]
@@ -737,7 +685,6 @@ def build_spdx_sbom(
     repository_name: str,
     version: str,
     product_root: Path | None = None,
-    webview2_metadata: Path | None = None,
     app_publish_items: Path | None = None,
 ) -> Path:
     """Write ``SBOM.spdx.json`` for the regular files in ``artifacts_dir``."""
@@ -788,7 +735,6 @@ def build_spdx_sbom(
             repository_name=repository_name,
             version=version,
             product_root=product_root,
-            webview2_metadata=webview2_metadata,
             app_publish_items=app_publish_items,
         )
         portable = root / f"VibeOCRNext-v{version}-win-x64.zip"
@@ -874,13 +820,6 @@ def main(argv: list[str] | None = None) -> int:
         "declared alongside the release artifacts",
     )
     parser.add_argument(
-        "--webview2-metadata",
-        type=Path,
-        default=None,
-        help="JSON with version/file_count captured from the actual expanded "
-        "WebView2 runtime tree during release build",
-    )
-    parser.add_argument(
         "--app-publish-items",
         type=Path,
         help="Windows App SDK framework file items captured by the actual MSBuild publish",
@@ -891,7 +830,6 @@ def main(argv: list[str] | None = None) -> int:
         repository_name=args.repository_name,
         version=args.version,
         product_root=args.product_root,
-        webview2_metadata=args.webview2_metadata,
         app_publish_items=args.app_publish_items,
     )
     print(output)
