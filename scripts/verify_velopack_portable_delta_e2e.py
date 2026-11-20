@@ -186,19 +186,30 @@ def _reject_unexpected_external(
                 details.append(f"{name}:{entry}")
             else:
                 details.append(f"{name}:{parent}/<redacted>")
-            # velopack/ 下的小文本日志是 Velopack 自身日志（机器路径与模块
-            # 标记，无隐私标识符），转储前 25 行用于定位写入进程。
+            # velopack/ 目录的文件名是仓库已知的 Velopack 模式（非 OS 标识
+            # 符）：完整列出该目录清单，并对意外小文件转储十六进制头与文本
+            # 头，一轮定位写入进程与文件类型。
             candidate = external_roots[name] / entry
-            if (
-                not entry.endswith("/")
-                and entry.endswith(".log")
-                and "velopack" in entry.split("/")
-                and candidate.is_file()
-                and candidate.stat().st_size < 100_000
-            ):
-                text = candidate.read_text(encoding="utf-8", errors="replace")
-                excerpt = " | ".join(text.splitlines()[:25])
-                excerpts.append(f"{name}:{parent}/<redacted> => {excerpt}")
+            if "velopack" in entry.split("/"):
+                velopack_dir = external_roots[name] / parent
+                if velopack_dir.is_dir():
+                    listing = ",".join(
+                        sorted(child.name for child in velopack_dir.iterdir())
+                    )
+                    excerpts.append(f"{name}:{parent}/ listing [{listing}]")
+                if (
+                    not entry.endswith("/")
+                    and candidate.is_file()
+                    and candidate.stat().st_size < 100_000
+                ):
+                    payload = candidate.read_bytes()
+                    head_hex = payload[:96].hex()
+                    head_text = payload[:400].decode("utf-8", errors="replace")
+                    excerpt_text = " | ".join(head_text.splitlines()[:25])
+                    excerpts.append(
+                        f"{name}:{parent}/<redacted> "
+                        f"size={len(payload)} hex={head_hex} text={excerpt_text!r}"
+                    )
     raise RuntimeError(
         "Velopack Portable E2E wrote unexpected data outside the Portable root: "
         f"{summary}"
@@ -206,7 +217,7 @@ def _reject_unexpected_external(
             "; entries (directories in full, file names redacted): "
             + ", ".join(details)
         )
-        + "".join(f"; log excerpt {excerpt}" for excerpt in excerpts)
+        + "".join(f"; velopack detail {excerpt}" for excerpt in excerpts)
     )
 
 
