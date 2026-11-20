@@ -178,13 +178,27 @@ def _reject_unexpected_external(
     # 诊断分支专用：目录条目打印完整相对路径（结构性名称），文件条目只打
     # 印父目录并把文件名脱敏，保持“不暴露 OS cache 标识符”的隐藏契约。
     details: list[str] = []
+    excerpts: list[str] = []
     for name in sorted(unexpected):
         for entry in unexpected[name]:
+            parent = entry.rsplit("/", 1)[0] if "/" in entry else ""
             if entry.endswith("/") or "/" not in entry:
                 details.append(f"{name}:{entry}")
             else:
-                parent = entry.rsplit("/", 1)[0]
                 details.append(f"{name}:{parent}/<redacted>")
+            # velopack/ 下的小文本日志是 Velopack 自身日志（机器路径与模块
+            # 标记，无隐私标识符），转储前 25 行用于定位写入进程。
+            candidate = external_roots[name] / entry
+            if (
+                not entry.endswith("/")
+                and entry.endswith(".log")
+                and "velopack" in entry.split("/")
+                and candidate.is_file()
+                and candidate.stat().st_size < 100_000
+            ):
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+                excerpt = " | ".join(text.splitlines()[:25])
+                excerpts.append(f"{name}:{parent}/<redacted> => {excerpt}")
     raise RuntimeError(
         "Velopack Portable E2E wrote unexpected data outside the Portable root: "
         f"{summary}"
@@ -192,6 +206,7 @@ def _reject_unexpected_external(
             "; entries (directories in full, file names redacted): "
             + ", ".join(details)
         )
+        + "".join(f"; log excerpt {excerpt}" for excerpt in excerpts)
     )
 
 
