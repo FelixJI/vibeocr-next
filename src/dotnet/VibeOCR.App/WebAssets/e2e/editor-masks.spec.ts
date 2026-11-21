@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { activateToolbarTool } from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 /**
@@ -293,7 +294,7 @@ test("brush mosaic/blur cover the trail only, keep transparency, support continu
   expectSameAlpha(baseline, mosaicked);
 
   // —— 模糊笔刷：下沿另一条短轨迹横穿黄色块 (40..64, 80..96)。
-  await page.getByRole("button", { name: "模糊" }).click();
+  await activateToolbarTool(page, "模糊");
   await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
   await pointerStroke(page, [
     toDisplay(30, 88),
@@ -364,12 +365,12 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
   const baseline = await saveAndDecode(page, uploads);
 
   // 遮挡：纯色不透明（默认黑）写入普通导出。
-  await page.getByRole("button", { name: "遮挡" }).click();
+  await activateToolbarTool(page, "遮挡");
   await pointerStroke(page, [toDisplay(30, 40), toDisplay(110, 80)]);
   const solid = await saveAndDecode(page, uploads);
   expect(pixelAt(solid, 70, 60)).toEqual([0, 0, 0, 255]);
 
-  await page.getByRole("button", { name: "遮挡" }).click();
+  await activateToolbarTool(page, "遮挡");
   await pointerStroke(page, [toDisplay(120.3, 85.3), toDisplay(140.7, 100.7)]);
   const fractional = await saveAndDecode(page, uploads);
   expect(pixelAt(baseline, 120, 85)[3]).toBeLessThan(255);
@@ -390,7 +391,7 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
   );
 
   // 屏蔽：普通导出完全不变（与基线逐字节一致），只进识别输入/屏蔽副本。
-  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await activateToolbarTool(page, "屏蔽");
   await pointerStroke(page, [toDisplay(140, 30), toDisplay(220, 70)]);
   const normal = await saveAndDecode(page, uploads);
   expect(
@@ -561,7 +562,7 @@ test("duplicate match previews candidates, applies once, follows rotation, and u
       return original.apply(this, args);
     };
   });
-  await page.getByRole("button", { name: "重复匹配" }).click();
+  await activateToolbarTool(page, "重复匹配");
   // 框选源 A：外扩取整后恰为 (10,6,10,8) 图案本身。
   await pointerStroke(page, [toDisplay(10.5, 6.5), toDisplay(19.5, 13.5)]);
   await expect(page.getByText(/已框选重复内容源区域/)).toBeVisible();
@@ -808,7 +809,7 @@ test("tiled blur matches a whole-image filter across the 512px seam and click st
   await expect(page.getByText(/原图 1024×128/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
   const map = makeCanvasMapper(1024, 128);
-  await page.getByRole("button", { name: "模糊", exact: true }).click();
+  await activateToolbarTool(page, "模糊");
   await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
   await page.getByLabel("马赛克与模糊笔刷大小").selectOption("64");
   await pointerStroke(page, [map({ x: 50, y: 64 }), map({ x: 970, y: 64 })]);
@@ -880,7 +881,7 @@ test("sparse diagonal effects bound scratch canvases in natural output", async (
       return old.apply(this, args);
     };
   });
-  await page.getByRole("button", { name: "模糊", exact: true }).click();
+  await activateToolbarTool(page, "模糊");
   await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
   const map = makeCanvasMapper(4096, 4096);
   await pointerStroke(page, [
@@ -1179,7 +1180,7 @@ test("R15 alpha-only duplicate texture finds the real RGBA copy", async ({
   expect(pixelAt(baseline, 10, 6)[3]).toBe(255);
   expect(pixelAt(baseline, 11, 6)[3]).toBeLessThan(255);
   const map = makeCanvasMapper(96, 48);
-  await page.getByRole("button", { name: "重复匹配" }).click();
+  await activateToolbarTool(page, "重复匹配");
   await pointerStroke(page, [
     map({ x: 10.5, y: 6.5 }),
     map({ x: 19.5, y: 13.5 }),

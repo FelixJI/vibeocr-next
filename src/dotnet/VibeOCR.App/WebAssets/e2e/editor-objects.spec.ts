@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
+import { activateToolbarTool } from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 async function setup(page: Page, natural = { width: 900, height: 600 }) {
@@ -87,7 +88,8 @@ async function click(
   if (modifier) await page.keyboard.up(modifier);
 }
 async function action(page: Page, name: string) {
-  await page.getByRole("button", { name, exact: true }).click();
+  // 家族分组的工具经族内菜单激活；非工具按钮仍直点。
+  await activateToolbarTool(page, name);
 }
 async function rectangle(page: Page, x: number, y: number, color = "#e02020") {
   await action(page, "矩形");

@@ -1,4 +1,5 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
+import { activateToolbarTool } from "./toolSelection";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -103,7 +104,8 @@ async function drag(
 }
 
 async function action(page: Page, name: string) {
-  await page.getByRole("button", { name, exact: true }).click();
+  // 家族分组的工具经族内菜单激活；非工具按钮（添加区域等）仍直点。
+  await activateToolbarTool(page, name);
 }
 
 async function save(

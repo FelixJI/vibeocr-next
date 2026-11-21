@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
+import { activateToolbarTool } from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 async function setupTextHost(
@@ -225,7 +226,7 @@ test("字母序号形状与重新编号、说明内容及指向可编辑并写�
   page,
 }, testInfo) => {
   const { uploads } = await setupTextHost(page);
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   const start = page.getByLabel("序号起点");
   await start.fill("26");
   await start.press("Tab");
@@ -244,7 +245,7 @@ test("字母序号形状与重新编号、说明内容及指向可编辑并写�
   await page.getByLabel("序号值").press("Tab");
   await page.getByLabel("选择标注对象").selectOption("1");
   await expect(page.getByLabel("序号值")).toHaveValue("6");
-  await page.getByRole("button", { name: "说明", exact: true }).click();
+  await activateToolbarTool(page, "说明");
   await page.getByLabel("标注文字").fill("可编辑说明");
   await page.getByLabel("自定义颜色").fill("#1f6feb");
   await drag(page, 150, 380, 400, 340);
@@ -434,7 +435,7 @@ test("清空前置屏蔽取消文字草稿并保留原文字、矩形和可撤�
   page,
 }) => {
   const { uploads } = await setupTextHost(page);
-  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await activateToolbarTool(page, "屏蔽");
   await drag(page, 80, 80, 150, 130);
   await page.getByRole("button", { name: "文字", exact: true }).click();
   await page.getByLabel("标注文字").fill("A原文字");
@@ -479,21 +480,21 @@ test("序号输入不先失焦即放置，删除和手改后按最大值自动�
   page,
 }) => {
   await setupTextHost(page);
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   await page.getByLabel("序号格式").selectOption("upper");
   await page.getByLabel("序号起点").fill("25");
   await drag(page, 200, 200, 200, 200);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("选择标注对象").selectOption("0");
   await expect(page.getByLabel("序号值")).toHaveValue("25");
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   await drag(page, 300, 200, 300, 200);
   await drag(page, 400, 200, 400, 200);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("选择标注对象").selectOption("1");
   await page.getByLabel("图片检查画布").focus();
   await page.keyboard.press("Delete");
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   await drag(page, 500, 200, 500, 200);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("选择标注对象").selectOption("2");
@@ -501,7 +502,7 @@ test("序号输入不先失焦即放置，删除和手改后按最大值自动�
   await page.getByLabel("选择标注对象").selectOption("0");
   await page.getByLabel("序号值").fill("51");
   await expect(page.getByLabel("序号值")).toBeFocused();
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   await drag(page, 600, 200, 600, 200);
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("选择标注对象").selectOption("3");
@@ -511,7 +512,7 @@ test("关闭背景的右上目标说明不从框内穿线，命中和PNG导出�
   page,
 }) => {
   const { uploads } = await setupTextHost(page);
-  await page.getByRole("button", { name: "说明", exact: true }).click();
+  await activateToolbarTool(page, "说明");
   await page
     .getByLabel("标注文字")
     .fill("X         \nX         \nX         \nX");
@@ -544,7 +545,7 @@ test("深色序号底形使用白字，预览和PNG导出均有实际可读字�
   page,
 }) => {
   const { uploads } = await setupTextHost(page);
-  await page.getByRole("button", { name: "序号", exact: true }).click();
+  await activateToolbarTool(page, "序号");
   await page.getByLabel("序号形状").selectOption("square");
   await page.getByLabel("文字字号").selectOption("48");
   await page.getByLabel("自定义颜色").fill("#000000");
