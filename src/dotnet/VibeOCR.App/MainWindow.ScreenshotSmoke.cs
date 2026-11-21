@@ -210,27 +210,26 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 工具栏家族分组后部分工具/动作收进 ▾ 菜单（如 屏蔽 在「遮挡 ▾」族
-  /// 菜单内）：先点触发钮展开（触发钮是开关，菜单渲染可能晚一拍），再
-  /// 点同名 menuitem。轮询重试覆盖菜单异步挂载与开关态翻转。
+  /// 动作区重组后，保存/钉图类动作与表格识别收进「输出 ▾」「识别 ▾」
+  /// 菜单：先点触发钮展开（触发钮是开关，菜单渲染可能晚一拍），再点
+  /// 同名 menuitem。轮询重试覆盖菜单异步挂载与开关态翻转。默认面与
+  /// <see cref="ClickSmokeButtonAsync"/> 的非截图分支一致（编辑器面）。
   /// </summary>
-  /// <param name="triggerAria">菜单触发按钮 aria-label（如 遮挡工具选项）。</param>
-  /// <param name="itemText">菜单项可见文字（如 屏蔽）。</param>
+  /// <param name="triggerAria">菜单触发按钮 aria-label（输出操作/识别模式）。</param>
+  /// <param name="itemText">菜单项可见文字（钉图/表格识别等）。</param>
   /// <param name="surface">目标 WebView；缺省为主编辑器面。</param>
   private async Task ClickSmokeMenuitemAsync(
     string triggerAria, string itemText, Microsoft.UI.Xaml.Controls.WebView2? surface = null)
   {
     Microsoft.UI.Xaml.Controls.WebView2 target = surface ?? SmokeEditorWebView;
-    // 注意必须是 IIFE：ExecuteScriptAsync 求值的是表达式，裸箭头函数会
-    // 返回函数对象（JSON 序列化为 {}）而不执行。
     string script =
-      "(() => { const t = document.querySelector('button[aria-label=\"" + triggerAria + "\"]');" +
+      "() => { const t = document.querySelector('button[aria-label=\"" + triggerAria + "\"]');" +
       " if (!t) return 'no-trigger';" +
       " const item = Array.from(document.querySelectorAll('[role=\"menuitem\"]'))" +
-      ".find(e => e.textContent.trim() === " + System.Text.Json.JsonSerializer.Serialize(itemText) + ");" +
+      ".find(e => e.textContent.trim() === " + JsonSerializer.Serialize(itemText) + ");" +
       " if (!item) { t.click(); return 'retry'; }" +
       " if (item.getAttribute('aria-disabled') === 'true') return 'disabled';" +
-      " item.click(); return 'ok'; })()";
+      " item.click(); return 'ok'; }";
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
     while (true)
     {
@@ -240,15 +239,8 @@ public sealed partial class MainWindow
         throw new InvalidOperationException($"Smoke menu trigger unavailable: {triggerAria}");
       if (result == "\"disabled\"")
         throw new InvalidOperationException($"Smoke menuitem disabled: {itemText}");
-      try
-      {
-        await Task.Delay(100, cancellation.Token);
-      }
-      catch (OperationCanceledException)
-      {
-        throw new InvalidOperationException(
-          $"Smoke menu never resolved: {triggerAria}/{itemText}, last={result}");
-      }
+      cancellation.Token.ThrowIfCancellationRequested();
+      await Task.Delay(100, cancellation.Token);
     }
   }
   private async Task<RecognitionWorkbenchState> WaitForScreenshotStateAsync(

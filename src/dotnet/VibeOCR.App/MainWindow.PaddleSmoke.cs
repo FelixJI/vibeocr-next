@@ -374,7 +374,10 @@ public sealed partial class MainWindow
     if (ready.RecognitionModes?.SingleOrDefault(entry => entry.DisplayName == modeLabel) is not { } entry ||
         entry.ModeId != mode || entry.Availability != "ready")
       throw new InvalidOperationException($"Public screenshot button does not target {mode}: {JsonSerializer.Serialize(ready.RecognitionModes)}");
-    await ClickSmokeButtonAsync(recognitionButton);
+    if (recognitionButton == "识别文字")
+      await ClickSmokeButtonAsync(recognitionButton);
+    else
+      await ClickSmokeMenuitemAsync("识别模式", recognitionButton);
     RecognitionWorkbenchState terminal;
     using (var cancellation = new CancellationTokenSource(
       TimeSpan.FromMinutes(timeoutMinutes)))

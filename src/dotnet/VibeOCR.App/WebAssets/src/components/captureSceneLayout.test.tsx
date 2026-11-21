@@ -1,8 +1,9 @@
 import type { CaptureScene } from "../bridge/captureScene";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ImageCanvasEditor } from "./ImageCanvasEditor";
 import { captureSceneStyle } from "./captureSceneLayout";
+import { openToolbarMenu } from "../test/toolSelection";
 
 const scene: CaptureScene = {
   surfaceId: "surface",
@@ -77,7 +78,7 @@ describe("截图原位编辑", () => {
     });
     unmount();
   });
-  it("把画布放回框选屏幕位置且保持 DPI 后的选区尺寸", () => {
+  it("把画布放回框选屏幕位置且保持 DPI 后的选区尺寸", async () => {
     const { unmount } = render(
       <ImageCanvasEditor
         actions={{
@@ -109,7 +110,12 @@ describe("截图原位编辑", () => {
       `${(900 * window.innerWidth) / 2560}px`,
     );
     expect(
-      screen.getByRole("button", { name: "保存标注图" }),
+      screen.getByRole("button", { name: "输出操作" }),
+    ).toBeInTheDocument();
+    expect(
+      within(await openToolbarMenu("输出操作")).getByRole("menuitem", {
+        name: "保存标注图",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "识别文字" }),
@@ -152,7 +158,7 @@ describe("截图原位编辑", () => {
     expect(style["--capture-settings-top"]).toBe("520px");
     expect(style["--capture-settings-max-height"]).toBe("132px");
   });
-  it("现场工具栏单排无设置入口：必要导出参数内联主排", () => {
+  it("现场工具栏单排无设置入口：必要导出参数收入输出菜单", async () => {
     const { unmount } = render(
       <ImageCanvasEditor
         actions={{
@@ -169,12 +175,18 @@ describe("截图原位编辑", () => {
     );
     // 无独立“输出设置”入口（齿轮/文字 summary 均不渲染）。
     expect(screen.queryByLabelText("输出设置")).not.toBeInTheDocument();
-    // 格式/JPEG 质量随输出集群内联；PNG 默认不显示质量选择。
-    expect(screen.getByLabelText("输出格式")).toBeInTheDocument();
-    expect(screen.queryByLabelText("JPEG 质量")).not.toBeInTheDocument();
-    // 圆角开关始终可达（可发现性）。
+    // 格式/JPEG 质量/圆角随「输出 ▾」菜单收纳；PNG 默认不显示质量项。
+    const outputMenu = await openToolbarMenu("输出操作");
     expect(
-      screen.getByRole("button", { name: "截图直角，点击切换圆角" }),
+      within(outputMenu).getByRole("menuitem", {
+        name: "输出格式 PNG（无损）",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(outputMenu).queryByRole("menuitem", { name: /JPEG 质量/ }),
+    ).toBeNull();
+    expect(
+      within(outputMenu).getByRole("menuitem", { name: "切换为圆角截图" }),
     ).toBeInTheDocument();
     unmount();
   });

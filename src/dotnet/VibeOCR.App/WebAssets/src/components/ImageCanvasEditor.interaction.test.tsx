@@ -7,7 +7,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { activateToolbarTool } from "../test/toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarMenuItem,
+  openToolbarMenu,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -685,7 +689,7 @@ describe("马赛克与模糊强度", () => {
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 784, clientY: 202 });
     harness.flush();
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+      await clickToolbarMenuItem("输出操作", "保存标注图");
     });
     const natural = allCalls().find(
       (call) =>
@@ -730,8 +734,8 @@ describe("马赛克与模糊强度", () => {
       drag(100);
       if (group) drag(350);
       fireEvent.click(screen.getByRole("button", { name: "选择" }));
-      fireEvent.click(screen.getByRole("button", { name: "全选对象" }));
-      if (group) fireEvent.click(screen.getByRole("button", { name: "组合" }));
+      await clickToolbarMenuItem("对象操作", "全选对象");
+      if (group) await clickToolbarMenuItem("对象操作", "组合");
       fireEvent.click(screen.getByRole("button", { name: "锁定" }));
       fireEvent.change(screen.getByLabelText("选择标注对象"), {
         target: { value: "0" },
@@ -1454,7 +1458,7 @@ describe("OBJ-03 对象比例装饰", () => {
     fireEvent.change(screen.getByLabelText("选择标注对象"), {
       target: { value: "0" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "缩小选区" }));
+    await clickToolbarMenuItem("对象操作", "缩小选区");
     for (const holder of state.canvases) holder.calls.length = 0;
     harness.flush();
     expect(
@@ -1497,7 +1501,7 @@ describe("OBJ-03 对象比例装饰", () => {
       fireEvent.change(screen.getByLabelText("选择标注对象"), {
         target: { value: "0" },
       });
-      fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+      await clickToolbarMenuItem("对象操作", "放大选区");
       for (const holder of state.canvases) holder.calls.length = 0;
       harness.flush();
       expect(
@@ -1648,12 +1652,16 @@ describe("PR249 第二轮对象交互", () => {
   }
   it("重复组合不追加历史，一次撤销恢复未分组", async () => {
     const { actions, unmount } = await prepareSelection();
-    fireEvent.click(screen.getByRole("button", { name: "组合" }));
+    await clickToolbarMenuItem("对象操作", "组合");
     vi.mocked(actions.run).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "组合" }));
+    await clickToolbarMenuItem("对象操作", "组合");
     expect(actions.run).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
-    expect(screen.queryByRole("button", { name: "解组" })).toBeNull();
+    expect(
+      within(await openToolbarMenu("对象操作")).queryByRole("menuitem", {
+        name: "解组",
+      }),
+    ).toBeNull();
     unmount();
   });
   it.each(["矩形", "画笔", "折线"])(
@@ -1719,7 +1727,7 @@ describe("PR249 主对象恢复与连续样式", () => {
     fireEvent.change(screen.getByLabelText("选择标注对象"), {
       target: { value: "0" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+    await clickToolbarMenuItem("对象操作", "放大选区");
     vi.mocked(actions.run).mockClear();
     expect(screen.getByLabelText("文字字号")).toHaveValue("30");
     expect(actions.run).not.toHaveBeenCalled();
@@ -1759,9 +1767,9 @@ describe("PR249 主对象恢复与连续样式", () => {
     async (primary) => {
       const { actions, canvas, harness, unmount } = await prepare();
       fireEvent.keyDown(canvas, { key: "a", ctrlKey: true });
-      fireEvent.click(screen.getByRole("button", { name: "组合" }));
+      await clickToolbarMenuItem("对象操作", "组合");
       for (let i = 0; i < 3; i++)
-        fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+        await clickToolbarMenuItem("对象操作", "放大选区");
       harness.flush();
       fireEvent.change(screen.getByLabelText("选择标注对象"), {
         target: { value: primary },
@@ -1793,7 +1801,11 @@ describe("PR249 主对象恢复与连续样式", () => {
         ],
       ).not.toHaveTextContent("画布外");
       expect(actions.run).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole("button", { name: "解组" })).toBeVisible();
+      expect(
+        within(await openToolbarMenu("对象操作")).getByRole("menuitem", {
+          name: "解组",
+        }),
+      ).toBeVisible();
       fireEvent.click(screen.getByRole("button", { name: "撤销" }));
       harness.flush();
       expect(
@@ -1811,7 +1823,7 @@ describe("PR249 主对象恢复与连续样式", () => {
   );
   it("缩放后的线宽和圆角显示真实值，查看不提交，改档只更新目标", async () => {
     const { actions, unmount } = await prepare();
-    fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+    await clickToolbarMenuItem("对象操作", "放大选区");
     vi.mocked(actions.run).mockClear();
     expect(screen.getByLabelText("线条宽度")).toHaveValue("3.75");
     expect(screen.getByLabelText("矩形圆角")).toHaveValue("7.5");
@@ -1946,7 +1958,7 @@ it("R15 rejected enlargement keeps selection, revision and one undo entry", asyn
     target: { value: "0" },
   });
   vi.mocked(actions.run).mockClear();
-  fireEvent.click(screen.getByRole("button", { name: "放大选区" }));
+  await clickToolbarMenuItem("对象操作", "放大选区");
   expect(
     screen.getByText(/笔刷效果超出8MP暂存或4MP单块采样预算/),
   ).toBeVisible();

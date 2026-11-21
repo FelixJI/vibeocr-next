@@ -9,6 +9,8 @@ import {
 } from "@testing-library/react";
 import {
   activateToolbarTool,
+  clickToolbarMenuItem,
+  openToolbarMenu,
   expectToolbarToolAvailable,
 } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -109,8 +111,8 @@ function stubCanvasStack() {
 
 describe("截图现场主排（全部工具+操作）与属性下排", () => {
   it.each([undefined, scene])(
-    "常用预设保存操作只在主排，属性/输出行不承载操作（现场=%s）",
-    (captureScene) => {
+    "常用预设保存收入输出菜单，属性行与输出设置不承载（现场=%s）",
+    async (captureScene) => {
       const props = {
         actions: createActions(),
         canExport: true,
@@ -124,28 +126,22 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       const { rerender } = render(<ImageCanvasEditor {...props} />);
       const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
       const main = within(mainRow);
-      const savePreset = main.getByRole("button", {
+      expect(main.getByRole("button", { name: "输出操作" })).toBeEnabled();
+      const outputMenu = await openToolbarMenu("输出操作");
+      const savePreset = within(outputMenu).getByRole("menuitem", {
         name: "按常用预设保存",
       });
-      expect(savePreset).toBeEnabled();
-      expect(savePreset.closest(".editor-toolbar-main")).toBe(mainRow);
+      expect(savePreset).not.toHaveAttribute("aria-disabled", "true");
       const outputRow = document.querySelector(
         '.editor-output-settings [role="toolbar"]',
       );
-      // 截图现场不再渲染输出设置面板（格式/质量已内联主排）；
-      // 普通编辑页保留，且任一情形“按常用预设保存”都只在主排。
+      // 截图现场不渲染输出设置面板（参数在输出菜单）；普通编辑页保留
+      // 面板，任一情形“按常用预设保存”都不落在面板或属性行。
       if (captureScene) {
         expect(outputRow).toBeNull();
         expect(screen.queryByLabelText("输出设置")).not.toBeInTheDocument();
       } else {
         expect(outputRow).not.toBeNull();
-        expect(outputRow).not.toContainElement(savePreset);
-        expect(
-          within(outputRow as HTMLElement).queryByRole("button", {
-            name: "按常用预设保存",
-            hidden: true,
-          }),
-        ).toBeNull();
       }
       fireEvent.click(main.getByRole("button", { name: "矩形" }));
       const properties = within(
@@ -157,7 +153,12 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
         }),
       ).toBeNull();
       rerender(<ImageCanvasEditor {...props} canExport={false} />);
-      expect(savePreset).toBeDisabled();
+      const disabledMenu = await openToolbarMenu("输出操作");
+      expect(
+        within(disabledMenu).getByRole("menuitem", {
+          name: "按常用预设保存",
+        }),
+      ).toHaveAttribute("aria-disabled", "true");
     },
   );
 
@@ -177,13 +178,10 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
         editorSettings={{ imageOutputDirectory: "C:/authorized-output" }}
       />,
     );
-    const mainRow = screen.getByRole("toolbar", { name: "图片编辑工具" });
     await waitFor(() =>
       expect(screen.getByText(/原图 900×400/)).toBeInTheDocument(),
     );
-    fireEvent.click(
-      within(mainRow).getByRole("button", { name: "按常用预设保存" }),
-    );
+    await clickToolbarMenuItem("输出操作", "按常用预设保存");
     // pinEdit 通道必须携带当前会话/修订；宿主对缺失绑定 fail closed。
     await waitFor(() =>
       expect(actions.run).toHaveBeenCalledWith(
@@ -358,7 +356,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     fireEvent.change(screen.getByLabelText("排版边距", { exact: true }), {
       target: { value: "10" },
     });
-    fireEvent.click(main.getByRole("button", { name: "保存工程" }));
+    await clickToolbarMenuItem("输出操作", "保存工程");
     await waitFor(() =>
       expect(screen.getByText(/工程未保存：排版输出超限/)).toBeInTheDocument(),
     );
@@ -489,9 +487,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "撤销",
       "重做",
       "复制标注图",
-      "保存标注图",
       "识别文字",
-      "钉图",
       "结束会话",
       "更多操作",
     ]) {
@@ -520,7 +516,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     // 去水印：修补操作（预览）在主排且未选区时禁用；掩膜绘制方式属于
     // 当前工具属性，出现在下排而不是主排。
     fireEvent.click(main.getByRole("button", { name: "去水印" }));
-    expect(main.getByRole("button", { name: "预览修补" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览修补" })).toBeDisabled();
     const inpaintSettings = within(
       screen.getByRole("toolbar", { name: "当前工具设置" }),
     );
@@ -553,9 +549,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "撤销",
       "重做",
       "复制标注图",
-      "保存标注图",
       "识别文字",
-      "钉图",
       "结束会话",
       "更多操作",
     ]) {
@@ -563,11 +557,16 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       expect(button.querySelector("svg"), name).toBeNull();
       expect(button.textContent?.trim(), name).toBe(name);
     }
-    // 族 ▾ 展开钮同样纯文字（“▾”），不渲染图标。
-    for (const name of ["形状工具选项", "遮挡工具选项"]) {
+    // 族 ▾ 展开钮同样纯文字（“▾”），不渲染图标；输出/识别菜单触发钮
+    // 可见文字带菜单前缀。
+    for (const [name, label] of [
+      ["形状工具选项", "▾"],
+      ["遮挡工具选项", "▾"],
+      ["输出操作", "输出 ▾"],
+    ] as const) {
       const button = main.getByRole("button", { name });
       expect(button.querySelector("svg"), name).toBeNull();
-      expect(button.textContent?.trim(), name).toBe("▾");
+      expect(button.textContent?.trim(), name).toBe(label);
     }
     // 打开更多菜单：无屏蔽/无编辑时清空屏蔽与清除编辑禁用，屏蔽副本不出现。
     fireEvent.click(main.getByRole("button", { name: "更多操作" }));
@@ -778,8 +777,6 @@ describe("普通编辑页同构：工具+操作上排、属性下排", () => {
       "撤销",
       "重做",
       "复制标注图",
-      "保存标注图",
-      "钉图",
       "识别文字",
       "结束会话",
       "清除编辑",

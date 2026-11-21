@@ -7084,6 +7084,16 @@ export function ImageCanvasEditor({
   );
 
   // 取字上下文操作（按钮，非属性）：主排按工具显示。
+  // 取字上下文动作出现条件（textLayerControls 是恒真 fragment，需要独立
+  // 布尔驱动第二排收起判定）。
+  const textLayerStatus = textLayer?.status;
+  const textLayerActionsActive =
+    (tool === "select" || tool === "textSelect") &&
+    (textLayerStatus === "textlayer.preparing" ||
+      textLayerStatus === "textlayer.unavailable" ||
+      textLayerStatus === "textlayer.failed" ||
+      textLayerStatus === "textlayer.cancelled" ||
+      selectionText.length > 0);
   const textLayerControls = (
     <>
       {(tool === "select" || tool === "textSelect") &&
@@ -7275,43 +7285,16 @@ export function ImageCanvasEditor({
   );
   // 对象动作（上排）：选择工具下可见；含锁选区时修改类禁用，避免部分
   // 修改锁定对象/锁组。纯文字按钮，不新增图标语义。
+  // 对象动作（第二排·选择工具）：高频直出删除/锁定/解锁，其余 17 项收进
+  // 「对象 ▾」菜单；原对齐/等距子菜单拍平为菜单项，守卫与原按钮一致。
+  // 空画布且无剪贴板时不渲染——保持"选择工具无属性无动作则下排收起"。
   const objectActionControls = toolset === "full" &&
     tool === "select" &&
-    !textEdit && (
+    !textEdit &&
+    (state.marks.length > 0 || clipboard.length > 0) && (
       <>
-        <ToolbarButton
-          aria-label="全选对象"
-          disabled={!hasUnlockedMarks}
-          onClick={selectAllObjects}
-          title="全选未锁定对象（Ctrl+A）"
-        >
-          全选
-        </ToolbarButton>
-        <ToolbarButton
-          aria-label="粘贴对象"
-          disabled={clipboard.length === 0}
-          onClick={pasteClipboard}
-          title="粘贴编辑器剪贴板对象（Ctrl+V）"
-        >
-          粘贴
-        </ToolbarButton>
         {selectionCount > 0 && (
           <>
-            <ToolbarButton
-              aria-label="复制对象"
-              onClick={copySelection}
-              title="复制到编辑器剪贴板（Ctrl+C）"
-            >
-              复制
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="重复对象"
-              disabled={!selectionModifiableUi}
-              onClick={duplicateSelection}
-              title="原位创建副本（Ctrl+D）"
-            >
-              重复
-            </ToolbarButton>
             <ToolbarButton
               aria-label="删除对象"
               disabled={!selectionModifiableUi}
@@ -7320,149 +7303,6 @@ export function ImageCanvasEditor({
             >
               删除
             </ToolbarButton>
-            <ToolbarButton
-              aria-label="对象旋转 90°"
-              disabled={!selectionModifiableUi}
-              onClick={rotateSelection}
-              title="所选对象绕选区中心旋转 90°（命中/导出同步）"
-            >
-              旋转90°
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="水平镜像"
-              disabled={!selectionModifiableUi}
-              onClick={() => mirrorSelection("h")}
-              title="绕选区中心水平镜像"
-            >
-              镜像H
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="垂直镜像"
-              disabled={!selectionModifiableUi}
-              onClick={() => mirrorSelection("v")}
-              title="绕选区中心垂直镜像"
-            >
-              镜像V
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="放大选区"
-              disabled={!selectionModifiableUi}
-              onClick={() => scaleSelection(1.25)}
-              title="等比放大（几何与线宽/字号同步缩放一次）"
-            >
-              放大
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="缩小选区"
-              disabled={!selectionModifiableUi}
-              onClick={() => scaleSelection(0.8)}
-              title="等比缩小（几何与线宽/字号同步缩放一次）"
-            >
-              缩小
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="上移一层"
-              disabled={!selectionModifiableUi}
-              onClick={() => reorderSelection("up")}
-              title="上移一层（保持相对顺序）"
-            >
-              上移一层
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="下移一层"
-              disabled={!selectionModifiableUi}
-              onClick={() => reorderSelection("down")}
-              title="下移一层（保持相对顺序）"
-            >
-              下移一层
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="置顶"
-              disabled={!selectionModifiableUi}
-              onClick={() => reorderSelection("front")}
-              title="置顶（保持相对顺序）"
-            >
-              置顶
-            </ToolbarButton>
-            <ToolbarButton
-              aria-label="置底"
-              disabled={!selectionModifiableUi}
-              onClick={() => reorderSelection("back")}
-              title="置底（保持相对顺序）"
-            >
-              置底
-            </ToolbarButton>
-            {selectionUnitCount >= 2 && (
-              <Menu>
-                <MenuTrigger disableButtonEnhancement>
-                  <ToolbarButton
-                    aria-label="对齐与等距"
-                    disabled={!selectionModifiableUi}
-                    title="按变换边界对齐/等距分布"
-                  >
-                    对齐
-                  </ToolbarButton>
-                </MenuTrigger>
-                <MenuPopover>
-                  <MenuList>
-                    {(
-                      [
-                        ["left", "左对齐"],
-                        ["hcenter", "水平居中"],
-                        ["right", "右对齐"],
-                        ["top", "顶对齐"],
-                        ["vcenter", "垂直居中"],
-                        ["bottom", "底对齐"],
-                      ] as const
-                    ).map(([align, label]) => (
-                      <MenuItem
-                        key={align}
-                        disabled={!selectionModifiableUi}
-                        onClick={() => alignSelection(align)}
-                      >
-                        {label}
-                      </MenuItem>
-                    ))}
-                    <MenuItem
-                      disabled={
-                        !selectionModifiableUi || selectionUnitCount < 3
-                      }
-                      onClick={() => distributeSelection("h")}
-                    >
-                      水平等距（≥3，首尾固定）
-                    </MenuItem>
-                    <MenuItem
-                      disabled={
-                        !selectionModifiableUi || selectionUnitCount < 3
-                      }
-                      onClick={() => distributeSelection("v")}
-                    >
-                      垂直等距（≥3，首尾固定）
-                    </MenuItem>
-                  </MenuList>
-                </MenuPopover>
-              </Menu>
-            )}
-            {selectionCount >= 2 && (
-              <ToolbarButton
-                aria-label="组合"
-                disabled={!selectionModifiableUi}
-                onClick={groupSelection}
-                title="组合所选对象（不重排层级）"
-              >
-                组合
-              </ToolbarButton>
-            )}
-            {selectionTouchGroup && (
-              <ToolbarButton
-                aria-label="解组"
-                disabled={!selectionModifiableUi}
-                onClick={ungroupSelection}
-                title="解散所选组（成员保留层级与样式）"
-              >
-                解组
-              </ToolbarButton>
-            )}
             <ToolbarButton
               aria-label="锁定"
               onClick={lockSelection}
@@ -7481,6 +7321,148 @@ export function ImageCanvasEditor({
             )}
           </>
         )}
+        <Menu>
+          <MenuTrigger disableButtonEnhancement>
+            <ToolbarButton
+              aria-label="对象操作"
+              title="对象操作菜单：全选/粘贴/复制/变换/层级/对齐/组合"
+            >
+              对象 ▾
+            </ToolbarButton>
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              <MenuItem disabled={!hasUnlockedMarks} onClick={selectAllObjects}>
+                全选对象
+              </MenuItem>
+              <MenuItem
+                disabled={clipboard.length === 0}
+                onClick={pasteClipboard}
+              >
+                粘贴对象
+              </MenuItem>
+              {selectionCount > 0 && (
+                <>
+                  <MenuItem onClick={copySelection}>复制对象</MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={duplicateSelection}
+                  >
+                    重复对象
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={rotateSelection}
+                  >
+                    对象旋转 90°
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => mirrorSelection("h")}
+                  >
+                    水平镜像
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => mirrorSelection("v")}
+                  >
+                    垂直镜像
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => scaleSelection(1.25)}
+                  >
+                    放大选区
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => scaleSelection(0.8)}
+                  >
+                    缩小选区
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => reorderSelection("up")}
+                  >
+                    上移一层
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => reorderSelection("down")}
+                  >
+                    下移一层
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => reorderSelection("front")}
+                  >
+                    置顶
+                  </MenuItem>
+                  <MenuItem
+                    disabled={!selectionModifiableUi}
+                    onClick={() => reorderSelection("back")}
+                  >
+                    置底
+                  </MenuItem>
+                  {selectionUnitCount >= 2 && (
+                    <>
+                      {(
+                        [
+                          ["left", "左对齐"],
+                          ["hcenter", "水平居中"],
+                          ["right", "右对齐"],
+                          ["top", "顶对齐"],
+                          ["vcenter", "垂直居中"],
+                          ["bottom", "底对齐"],
+                        ] as const
+                      ).map(([align, label]) => (
+                        <MenuItem
+                          key={align}
+                          disabled={!selectionModifiableUi}
+                          onClick={() => alignSelection(align)}
+                        >
+                          {label}
+                        </MenuItem>
+                      ))}
+                      <MenuItem
+                        disabled={
+                          !selectionModifiableUi || selectionUnitCount < 3
+                        }
+                        onClick={() => distributeSelection("h")}
+                      >
+                        水平等距（≥3，首尾固定）
+                      </MenuItem>
+                      <MenuItem
+                        disabled={
+                          !selectionModifiableUi || selectionUnitCount < 3
+                        }
+                        onClick={() => distributeSelection("v")}
+                      >
+                        垂直等距（≥3，首尾固定）
+                      </MenuItem>
+                    </>
+                  )}
+                  {selectionCount >= 2 && (
+                    <MenuItem
+                      disabled={!selectionModifiableUi}
+                      onClick={groupSelection}
+                    >
+                      组合
+                    </MenuItem>
+                  )}
+                  {selectionTouchGroup && (
+                    <MenuItem
+                      disabled={!selectionModifiableUi}
+                      onClick={ungroupSelection}
+                    >
+                      解组
+                    </MenuItem>
+                  )}
+                </>
+              )}
+            </MenuList>
+          </MenuPopover>
+        </Menu>
       </>
     );
 
@@ -7609,53 +7591,8 @@ export function ImageCanvasEditor({
       复制标注图
     </Button>
   );
-  const copyExcludedButton = hasExclusions && (
-    <Button
-      title="复制屏蔽副本"
-      icon={captureStyle ? undefined : <ToolbarIcon name="copyExcluded" />}
-      aria-label="复制屏蔽副本"
-      size="small"
-      disabled={!canExport || isExporting || !!textEdit}
-      onClick={() => void copyAnnotatedImage(true)}
-    >
-      复制屏蔽副本
-    </Button>
-  );
-  const saveAnnotatedButton = (
-    <Button
-      title="保存标注图"
-      icon={captureStyle ? undefined : <ToolbarIcon name="save" />}
-      aria-label="保存标注图"
-      size="small"
-      disabled={!canExport || isExporting || !!textEdit}
-      onClick={() => void saveAnnotatedImage()}
-    >
-      保存标注图
-    </Button>
-  );
-  const saveExcludedButton = hasExclusions && (
-    <Button
-      title="保存屏蔽副本"
-      icon={captureStyle ? undefined : <ToolbarIcon name="saveExcluded" />}
-      aria-label="保存屏蔽副本"
-      size="small"
-      disabled={!canExport || isExporting || !!textEdit}
-      onClick={() => void saveAnnotatedImage(true)}
-    >
-      保存屏蔽副本
-    </Button>
-  );
-  const saveProjectButton = session && (
-    <Button
-      title="保存工程"
-      aria-label="保存工程"
-      size="small"
-      disabled={!canExport || isExporting || !!textEdit}
-      onClick={() => void saveCurrentProject()}
-    >
-      保存工程
-    </Button>
-  );
+  // 保存标注图/按常用预设保存/保存工程/钉图与屏蔽副本入口收进「输出 ▾」
+  // 菜单（outputMenu），复制标注图保持直出（copyAnnotatedButton）。
   const applyPinSnapshotButton = session && pinSnapshotApply && (
     <Button
       title="完成钉图"
@@ -7716,44 +7653,80 @@ export function ImageCanvasEditor({
                         )
               }${mode.reasonCode ? `（${mode.reasonCode}）` : ""}`,
           );
+  // 识别入口：文字模式直出主按钮（高频）；其余模式（表格识别等）收进
+  // 「识别 ▾」菜单，守卫与原按钮一致。
+  const recognizeModeDisabled = (mode: ImageRecognitionMode) =>
+    !canRecognize ||
+    isExporting ||
+    !!textEdit ||
+    (!canPrepareMode(mode) &&
+      (mode.availability !== "ready" || !mode.modeId)) ||
+    recognitionBusy;
+  const recognizeModeTitle = (mode: ImageRecognitionMode) =>
+    recognitionBusy
+      ? "正在识别，请稍候"
+      : (unavailableModeHints.find((hint) =>
+          hint.startsWith(mode.displayName),
+        ) ??
+        mode.hint ??
+        mode.displayName);
   const recognizeButton =
     session &&
     (recognitionModes !== undefined ? (
-      imageModes.map((mode) => (
-        <Button
-          key={mode.displayName}
-          title={
-            recognitionBusy
-              ? "正在识别，请稍候"
-              : (unavailableModeHints.find((hint) =>
-                  hint.startsWith(mode.displayName),
-                ) ??
-                mode.hint ??
-                mode.displayName)
-          }
-          aria-label={
-            mode.displayName === "文字识别" ? "识别文字" : mode.displayName
-          }
-          appearance="primary"
-          size="small"
-          disabled={
-            !canRecognize ||
-            isExporting ||
-            !!textEdit ||
-            (!canPrepareMode(mode) &&
-              (mode.availability !== "ready" || !mode.modeId)) ||
-            recognitionBusy
-          }
-          onClick={() =>
-            void recognizeCurrentImage(
-              mode.modeId || undefined,
-              canPrepareMode(mode) ? (mode.intent ?? undefined) : undefined,
-            )
-          }
-        >
-          {mode.displayName === "文字识别" ? "识别文字" : mode.displayName}
-        </Button>
-      ))
+      <>
+        {imageModes
+          .filter((mode) => mode.displayName === "文字识别")
+          .map((mode) => (
+            <Button
+              key={mode.displayName}
+              title={recognizeModeTitle(mode)}
+              aria-label="识别文字"
+              appearance="primary"
+              size="small"
+              disabled={recognizeModeDisabled(mode)}
+              onClick={() =>
+                void recognizeCurrentImage(
+                  mode.modeId || undefined,
+                  canPrepareMode(mode) ? (mode.intent ?? undefined) : undefined,
+                )
+              }
+            >
+              识别文字
+            </Button>
+          ))}
+        <Menu>
+          <MenuTrigger disableButtonEnhancement>
+            <ToolbarButton
+              aria-label="识别模式"
+              title="选择识别模式（表格识别等）"
+            >
+              识别 ▾
+            </ToolbarButton>
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              {imageModes
+                .filter((mode) => mode.displayName !== "文字识别")
+                .map((mode) => (
+                  <MenuItem
+                    key={mode.displayName}
+                    disabled={recognizeModeDisabled(mode)}
+                    onClick={() =>
+                      void recognizeCurrentImage(
+                        mode.modeId || undefined,
+                        canPrepareMode(mode)
+                          ? (mode.intent ?? undefined)
+                          : undefined,
+                      )
+                    }
+                  >
+                    {mode.displayName}
+                  </MenuItem>
+                ))}
+            </MenuList>
+          </MenuPopover>
+        </Menu>
+      </>
     ) : (
       <Button
         title={recognitionBusy ? "正在识别，请稍候" : "识别当前图片中的文字"}
@@ -7871,70 +7844,9 @@ export function ImageCanvasEditor({
     </Menu>
   );
 
-  // 截图现场输出集群：圆角开关 + 内联格式/JPEG 质量（普通页为 null，
-  // 输出参数仍在输出设置面板）。
-  const captureOutputControls = captureStyle ? (
-    <>
-      <ToolbarButton
-        aria-label={
-          state.composition?.radius
-            ? "截图圆角，点击切换直角"
-            : "截图直角，点击切换圆角"
-        }
-        aria-pressed={!!state.composition?.radius}
-        title="切换截图直角/圆角；PNG 保留透明圆角，JPEG 使用输出背景色"
-        disabled={isExporting || !!textEdit || interactionLocked}
-        onClick={() => {
-          cancelDrawing();
-          const radius = state.composition?.radius ?? 0;
-          if (radius > 0) lastCaptureRadius.current = radius;
-          commit({
-            ...state,
-            composition: {
-              ...(state.composition ?? DEFAULT_COMPOSITION),
-              radius: radius > 0 ? 0 : lastCaptureRadius.current,
-            },
-          });
-        }}
-      >
-        {state.composition?.radius ? "圆角" : "直角"}
-      </ToolbarButton>
-      <label className="editor-style-control">
-        <span aria-hidden="true">输出格式</span>
-        <Select
-          aria-label="输出格式"
-          size="small"
-          value={outputFormat}
-          onChange={(_, data) =>
-            changeOutputFormat(
-              data.value === "image/jpeg" ? "image/jpeg" : "image/png",
-            )
-          }
-        >
-          <option value="image/png">PNG</option>
-          <option value="image/jpeg">JPEG</option>
-        </Select>
-      </label>
-      {outputFormat === "image/jpeg" && (
-        <label className="editor-style-control">
-          <span aria-hidden="true">JPEG 质量</span>
-          <Select
-            aria-label="JPEG 质量"
-            size="small"
-            value={String(jpegQuality)}
-            onChange={(_, data) => changeJpegQuality(Number(data.value))}
-          >
-            {JPEG_QUALITIES.map((quality) => (
-              <option key={quality} value={String(quality)}>
-                {Math.round(quality * 100)}%
-              </option>
-            ))}
-          </Select>
-        </label>
-      )}
-    </>
-  ) : null;
-  // 现场主排中段：排版/对象操作/撤销重做/复制保存等次要动作（可滚动区）。
+  // 现场主排中段（可滚动）：只保留全局低频动作。当前工具的上下文流程
+  // 动作（对象/修补/重复匹配/文字编辑态/取字/强调区域/重置属性）下沉到
+  // 第二排（属性排），与该工具属性同区呈现。
   const sceneSecondaryActions = (
     <>
       {toolset === "full" && (
@@ -7958,13 +7870,26 @@ export function ImageCanvasEditor({
           重置排版
         </ToolbarButton>
       )}
-      {textLayerControls}
-      {inpaintOperations}
-      {dupmatchOperations}
-      {objectActionControls}
-      {spotlightAddRegionControl}
       {rotateControl}
-      {resetAttributesControl}
+      {captureStyle ? null : clearExclusionsButton}
+    </>
+  );
+  // 第二排上下文动作：换工具即失效的流程按钮不占主排。对象操作已收敛为
+  // 删除/锁定/解锁直出 + 「对象 ▾」菜单（objectActionControls）。
+  const renumberAction = activeFontTool === "numbering" &&
+    state.marks.some((mark) => mark.tool === "numbering") && (
+      <ToolbarButton
+        aria-label="重新编号"
+        disabled={state.marks.some(
+          (mark) => mark.tool === "numbering" && mark.locked,
+        )}
+        onClick={renumber}
+      >
+        重新编号
+      </ToolbarButton>
+    );
+  const textEditActions = (
+    <>
       {contentMark && !textEdit && (
         <ToolbarButton
           aria-label="编辑文字"
@@ -7989,55 +7914,161 @@ export function ImageCanvasEditor({
           </ToolbarButton>
         </>
       )}
-      {activeFontTool === "numbering" &&
-        state.marks.some((mark) => mark.tool === "numbering") && (
-          <ToolbarButton
-            aria-label="重新编号"
-            disabled={state.marks.some(
-              (mark) => mark.tool === "numbering" && mark.locked,
-            )}
-            onClick={renumber}
-          >
-            重新编号
-          </ToolbarButton>
-        )}
-      {captureStyle ? null : clearExclusionsButton}
-      {undoButton}
-      {redoButton}
-      {copyAnnotatedButton}
-      {captureStyle ? null : copyExcludedButton}
-      {saveAnnotatedButton}
-      {toolset === "full" && (
-        <ToolbarButton
-          disabled={
-            !canExport ||
-            isExporting ||
-            !!textEdit ||
-            !editorSettings.imageOutputDirectory
-          }
-          onClick={() => void saveWithPreset()}
-        >
-          按常用预设保存
-        </ToolbarButton>
-      )}
-      {captureStyle ? null : saveExcludedButton}
-      {pinSnapshotApply ? null : saveProjectButton}
-      {applyPinSnapshotButton}
-      {pinButton}
     </>
   );
-  // 现场核心动作区：识别/完成/更多（与输出集群一起固定，不随滚动离开）。
+  const contextActionsActive =
+    !!objectActionControls ||
+    textLayerActionsActive ||
+    !!inpaintOperations ||
+    !!dupmatchOperations ||
+    !!spotlightAddRegionControl ||
+    !!resetAttributesControl ||
+    !!(contentMark && !textEdit) ||
+    !!textEdit ||
+    !!renumberAction;
+  // 输出 ▾：保存/预设/工程/钉图与屏蔽副本、截图现场的直角圆角与输出
+  // 格式/质量收进菜单；「复制标注图」保持直出高频按钮。
+  const toggleCaptureRadius = () => {
+    cancelDrawing();
+    const radius = state.composition?.radius ?? 0;
+    if (radius > 0) lastCaptureRadius.current = radius;
+    commit({
+      ...state,
+      composition: {
+        ...(state.composition ?? DEFAULT_COMPOSITION),
+        radius: radius > 0 ? 0 : lastCaptureRadius.current,
+      },
+    });
+  };
+  const outputMenu = (
+    <Menu>
+      <MenuTrigger disableButtonEnhancement>
+        <ToolbarButton
+          aria-label="输出操作"
+          title="输出操作菜单：保存/预设/工程/钉图/屏蔽副本与输出参数"
+        >
+          输出 ▾
+        </ToolbarButton>
+      </MenuTrigger>
+      <MenuPopover>
+        <MenuList>
+          <MenuItem
+            disabled={!canExport || isExporting || !!textEdit}
+            onClick={() => void saveAnnotatedImage()}
+          >
+            保存标注图
+          </MenuItem>
+          {toolset === "full" && (
+            <MenuItem
+              disabled={
+                !canExport ||
+                isExporting ||
+                !!textEdit ||
+                !editorSettings.imageOutputDirectory
+              }
+              onClick={() => void saveWithPreset()}
+            >
+              按常用预设保存
+            </MenuItem>
+          )}
+          {pinSnapshotApply ? null : (
+            <MenuItem
+              disabled={!canExport || isExporting || !!textEdit}
+              onClick={() => void saveCurrentProject()}
+            >
+              保存工程
+            </MenuItem>
+          )}
+          {pinButton && (
+            <MenuItem
+              disabled={!canExport || isExporting || !!textEdit}
+              onClick={() => void pinCurrentImage()}
+            >
+              钉图
+            </MenuItem>
+          )}
+          {hasExclusions && (
+            <>
+              <MenuItem
+                disabled={!canExport || isExporting || !!textEdit}
+                onClick={() => void copyAnnotatedImage(true)}
+              >
+                复制屏蔽副本
+              </MenuItem>
+              <MenuItem
+                disabled={!canExport || isExporting || !!textEdit}
+                onClick={() => void saveAnnotatedImage(true)}
+              >
+                保存屏蔽副本
+              </MenuItem>
+            </>
+          )}
+          {captureStyle && (
+            <>
+              <MenuItem
+                disabled={isExporting || !!textEdit || interactionLocked}
+                onClick={toggleCaptureRadius}
+              >
+                {state.composition?.radius
+                  ? "切换为直角截图"
+                  : "切换为圆角截图"}
+              </MenuItem>
+              <MenuItem
+                disabled={isExporting || outputFormat === "image/png"}
+                onClick={() => changeOutputFormat("image/png")}
+              >
+                输出格式 PNG（无损）
+              </MenuItem>
+              <MenuItem
+                disabled={isExporting || outputFormat === "image/jpeg"}
+                onClick={() => changeOutputFormat("image/jpeg")}
+              >
+                输出格式 JPEG（白底）
+              </MenuItem>
+              {outputFormat === "image/jpeg" &&
+                JPEG_QUALITIES.map((quality) => (
+                  <MenuItem
+                    key={quality}
+                    disabled={isExporting || jpegQuality === quality}
+                    onClick={() => changeJpegQuality(quality)}
+                  >
+                    JPEG 质量 {Math.round(quality * 100)}%
+                  </MenuItem>
+                ))}
+            </>
+          )}
+        </MenuList>
+      </MenuPopover>
+    </Menu>
+  );
+  // 核心动作区（固定右缘）：撤销/重做 + 识别 + 输出 + 完成 + 更多；
+  // 贴图快照应用期以「完成钉图」取代识别/输出。
   const sceneCoreActions = (
     <>
-      {pinSnapshotApply ? null : recognizeButton}
+      {undoButton}
+      {redoButton}
+      {pinSnapshotApply ? (
+        // 贴图快照应用期：完成钉图为主动作；输出菜单仍可达（预设保存等
+        // 入口只在此菜单，保存工程/钉图项已按该模式隐藏）。
+        <>
+          {applyPinSnapshotButton}
+          {outputMenu}
+        </>
+      ) : (
+        <>
+          {copyAnnotatedButton}
+          {recognizeButton}
+          {outputMenu}
+        </>
+      )}
       {closeSessionButton}
       {moreActionsMenu}
     </>
   );
 
   // 下排收起：仅当前工具参数（颜色/线宽/边框不透明度/填充/字号/强度、
-  // 修补对比）或选中描边类标记的就地样式、会话取字偏好存在时渲染；
-  // 上下文操作已归主排。
+  // 修补对比）、选中描边类标记的就地样式或该工具的上下文流程动作
+  // （对象操作/修补流程/文字编辑态/取字等）存在时渲染。
   const settingsRowActive =
     !!objectSelectionControl ||
     styleEditing ||
@@ -8052,7 +8083,8 @@ export function ImageCanvasEditor({
     !!watermarkOpacityControl ||
     !!objectEraserHint ||
     !!inpaintMaskModeControl ||
-    !!dupmatchCandidateControls;
+    !!dupmatchCandidateControls ||
+    contextActionsActive;
 
   return (
     <div
@@ -8146,16 +8178,12 @@ export function ImageCanvasEditor({
                   {sceneSecondaryActions}
                 </div>
               </div>
-              <div className="editor-scene-core">
-                {captureOutputControls}
-                {sceneCoreActions}
-              </div>
+              <div className="editor-scene-core">{sceneCoreActions}</div>
             </>
           ) : (
             <>
               <div className="editor-tools-group">{toolButtons}</div>
               <div className="editor-actions-group">
-                {captureOutputControls}
                 {sceneSecondaryActions}
                 {sceneCoreActions}
                 {captureStyle ? null : clearEditsButton}
@@ -8184,7 +8212,11 @@ export function ImageCanvasEditor({
             className="editor-toolbar editor-toolbar-settings"
           >
             {objectSelectionControl}
+            {objectActionControls}
             {annotationTextInput}
+            {textEditActions}
+            {renumberAction}
+            {textLayerControls}
             {stylePanel}
             {fontSizeControl}
             {activeFontTool && (
@@ -8211,7 +8243,10 @@ export function ImageCanvasEditor({
             {effectModeControl}
             {effectBrushSizeControl}
             {effectIntensityControl}
+            {inpaintOperations}
+            {dupmatchOperations}
             {spotlightDarknessControl}
+            {spotlightAddRegionControl}
             {magnifierZoomControl}
             {watermarkOpacityControl}
             {objectEraserHint}
@@ -8219,6 +8254,7 @@ export function ImageCanvasEditor({
             {inpaintBrushSizeControl}
             {inpaintCompareControl}
             {dupmatchCandidateControls}
+            {resetAttributesControl}
           </Toolbar>
         ) : null}
       </div>

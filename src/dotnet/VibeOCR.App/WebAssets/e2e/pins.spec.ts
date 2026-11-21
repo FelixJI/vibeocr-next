@@ -1,5 +1,4 @@
 import { expect, test, type Page } from "@playwright/test";
-import { activateToolbarTool } from "./toolSelection";
 import {
   mountHost,
   snapshot,
@@ -11,6 +10,12 @@ import {
   releaseCommand,
   rejectNextCommand,
 } from "./workbench-host";
+import {
+  activateToolbarTool,
+  clickToolbarControl,
+  clickToolbarAction,
+  expectToolbarActionEnabled,
+} from "./toolSelection";
 import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
 import type { ProjectContributionBody } from "../src/components/project/projectWire";
 
@@ -95,12 +100,11 @@ async function pinEditor(
       ? "https://app.vibeocr/#/imageEdit"
       : "https://app.vibeocr/#/imageEdit?pin=1",
   );
-  await expect(
-    page.getByRole("button", {
-      name: ordinaryEditor ? "钉图" : "完成钉图",
-      exact: true,
-    }),
-  ).toBeEnabled();
+  if (ordinaryEditor) await expectToolbarActionEnabled(page, "钉图");
+  else
+    await expect(
+      page.getByRole("button", { name: "完成钉图", exact: true }),
+    ).toBeEnabled();
   return { projects, uploads };
 }
 
@@ -323,7 +327,7 @@ test("JPEG output remains available while owned snapshot uses a real PNG", async
 }) => {
   const { uploads, projects } = await pinEditor(page);
   await page.getByLabel("输出格式", { exact: true }).selectOption("image/jpeg");
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   expect([...uploads[0]!.subarray(0, 2)]).toEqual([255, 216]);
   await requestPinSnapshot(page, sourceSession);
@@ -371,7 +375,7 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     endX: number,
     endY: number,
   ) {
-    await activateToolbarTool(page, tool);
+    await clickToolbarControl(page, tool);
     const canvas = page.getByLabel("图片检查画布");
     await canvas.scrollIntoViewIfNeeded();
     const bounds = (await canvas.boundingBox())!;
@@ -576,9 +580,7 @@ test("composition pin snapshot save and reopen keep pixels, geometry, and sessio
     )
     .toBe(920);
   // pinEdit 预设输出：会话/修订强绑定，宿主仍接收 pinEdit 投影命令。
-  await page
-    .getByRole("button", { name: "按常用预设保存", exact: true })
-    .click();
+  await clickToolbarAction(page, "按常用预设保存");
   const lastRevision = async () =>
     (await page.evaluate(
       () =>
@@ -864,13 +866,13 @@ test("first pin is PNG while ordinary save and copy retain JPEG selection", asyn
 }) => {
   const { uploads } = await pinEditor(page, png, [], undefined, true);
   await page.getByLabel("输出格式", { exact: true }).selectOption("image/jpeg");
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   expect([...uploads[0]!.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
   await page.getByRole("button", { name: "复制标注图", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(2);
   expect([...uploads[1]!.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
-  await page.getByRole("button", { name: "钉图", exact: true }).click();
+  await clickToolbarAction(page, "钉图");
   await expect.poll(() => uploads.length).toBe(3);
   expect([...uploads[2]!.subarray(0, 8)]).toEqual([
     137, 80, 78, 71, 13, 10, 26, 10,

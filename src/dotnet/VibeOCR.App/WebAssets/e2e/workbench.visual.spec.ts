@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import type { AppSnapshot } from "../src/bridge/client";
+import { clickToolbarAction } from "./toolSelection";
 import { expectCommand, mountHost, sendState } from "./workbench-host";
 
 /** 自动文字层导出使用真实 PNG，只有宿主上传/租约边界被模拟。 */
@@ -183,17 +184,25 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
     clientY: bounds!.y + 290,
   });
 
-  const saveAnnotated = page.getByRole("button", { name: "保存标注图" });
-  await saveAnnotated.evaluate((button: HTMLButtonElement) => {
-    button.click();
-    button.click();
-  });
+  // 保存标注图收入「输出 ▾」菜单：连续两次直达对应旧的双击去重；菜单项
+  // 点击后菜单自动关闭，断言禁用态时重新展开。
+  await clickToolbarAction(page, "保存标注图");
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
-  await expect(saveAnnotated).toBeDisabled();
+  const saveMenuItem = () =>
+    page.getByRole("menuitem", { name: "保存标注图", exact: true });
+  const openOutputMenu = async () => {
+    if ((await saveMenuItem().count()) > 0) return; // 菜单已展开。
+    await page.getByRole("button", { name: "输出操作", exact: true }).click();
+    await saveMenuItem().waitFor({ state: "visible" });
+  };
+  await openOutputMenu();
+  await expect(saveMenuItem()).toHaveAttribute("aria-disabled", "true");
   releaseFirstUpload();
-  await expect(saveAnnotated).toBeEnabled();
+  await openOutputMenu();
+  await expect(saveMenuItem()).not.toHaveAttribute("aria-disabled", "true");
   await canvas.press("Escape");
-  await saveAnnotated.evaluate((button: HTMLButtonElement) => button.click());
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(2);
 
   expect(uploads[0]).toEqual(uploads[1]);
@@ -203,7 +212,7 @@ test("annotation export keeps source pixels and excludes editor chrome", async (
   await page
     .getByRole("button", { name: "旋转 90°" })
     .evaluate((button: HTMLButtonElement) => button.click());
-  await saveAnnotated.evaluate((button: HTMLButtonElement) => button.click());
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(3);
   expect(uploads[2]?.readUInt32BE(16)).toBe(40);
   expect(uploads[2]?.readUInt32BE(20)).toBe(80);

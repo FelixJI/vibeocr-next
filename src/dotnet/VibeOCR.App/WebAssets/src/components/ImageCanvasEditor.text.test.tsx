@@ -6,7 +6,11 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { activateToolbarTool } from "../test/toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarMenuItem,
+  openToolbarMenu,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -421,7 +425,11 @@ describe("文字、序号和说明对象", () => {
     fireEvent.click(screen.getByLabelText("文字背景"));
     fireEvent.click(screen.getByLabelText("文字描边"));
     expect(revisions(actions)).toEqual([1]);
-    expect(screen.getByRole("button", { name: "保存标注图" })).toBeDisabled();
+    expect(
+      within(await openToolbarMenu("输出操作")).getByRole("menuitem", {
+        name: "保存标注图",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
     clearCalls();
     harness.flush();
     expect(
@@ -431,14 +439,14 @@ describe("文字、序号和说明对象", () => {
     ).toContain("Next");
     expect(allCalls().some((call) => call.op === "strokeText")).toBe(true);
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    fireEvent.click(main.getByRole("button", { name: "完成文字编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "完成文字编辑" }));
     harness.flush();
     expect(revisions(actions)).toEqual([1, 2]);
-    fireEvent.click(main.getByRole("button", { name: "编辑文字" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑文字" }));
     fireEvent.change(screen.getByLabelText("标注文字"), {
       target: { value: "不应留下" },
     });
-    fireEvent.click(main.getByRole("button", { name: "取消文字编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消文字编辑" }));
     harness.flush();
     expect(screen.getByLabelText("标注文字")).toHaveValue("更新中文\nNext");
     expect(revisions(actions)).toEqual([1, 2]);
@@ -522,7 +530,7 @@ describe("文字、序号和说明对象", () => {
         }),
     );
     vi.stubGlobal("fetch", upload);
-    fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    await clickToolbarMenuItem("输出操作", "保存标注图");
     await act(async () => {});
     expect(upload).toHaveBeenCalled();
     fireEvent.doubleClick(canvas, { clientX: 110, clientY: 210 });
@@ -864,7 +872,7 @@ for (const tool of ["文字", "序号", "说明"] as const) {
       ),
     ).toBe(true);
     clearCalls();
-    fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+    await clickToolbarMenuItem("输出操作", "保存标注图");
     await act(async () => {});
     expect(
       allCalls().some(
@@ -927,7 +935,7 @@ it("反向创建宽文字经旋转、拖动、续编、取消和撤销仍保留�
   expect(screen.getByLabelText("标注文字")).toHaveValue("YY");
   expect(revisions(actions)).toEqual([1, 2, 3, 4]);
   clearCalls();
-  fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+  await clickToolbarMenuItem("输出操作", "保存标注图");
   await act(async () => {});
   expectWidth(258);
   for (let n = 0; n < 3; n++)

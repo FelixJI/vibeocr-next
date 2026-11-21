@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { recordAnnotationUploads } from "./annotation-uploads";
+import { clickToolbarAction } from "./toolSelection";
 
 import {
   expectCommand,
@@ -283,14 +284,22 @@ test("导出参数内联主排可达：格式/JPEG 质量可直接操作、Tab �
   }));
   expect(focused.tag).toBe("BUTTON");
   expect(focused.label).not.toBe("选择");
-  // 无独立设置入口：格式/质量内联主排，切换 JPEG 后质量选择出现并可修改。
+  // 无独立设置入口：格式/质量在「输出 ▾」菜单，JPEG 时质量项出现；
+  // 切回 PNG 后质量项不再列出。
   await expect(page.locator(".editor-output-settings")).toHaveCount(0);
-  await page.getByLabel("输出格式").selectOption("image/jpeg");
-  await expect(page.getByLabel("JPEG 质量")).toBeVisible();
-  await page.getByLabel("JPEG 质量").selectOption("0.95");
-  await expect(page.getByLabel("JPEG 质量")).toHaveValue("0.95");
-  await page.getByLabel("输出格式").selectOption("image/png");
-  await expect(page.getByLabel("JPEG 质量")).toHaveCount(0);
+  await clickToolbarAction(page, "输出格式 JPEG（白底）");
+  await page.getByRole("button", { name: "输出操作", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "JPEG 质量 95%" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await clickToolbarAction(page, "JPEG 质量 95%");
+  await clickToolbarAction(page, "输出格式 PNG（无损）");
+  await page.getByRole("button", { name: "输出操作", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /JPEG 质量/ })).toHaveCount(
+    0,
+  );
+  await page.keyboard.press("Escape");
 });
 
 test("大选区（y=0、高接近视口）时工具栏钉底，内联导出参数仍完整可达", async ({
@@ -303,14 +312,18 @@ test("大选区（y=0、高接近视口）时工具栏钉底，内联导出参�
   const overlayBox = await overlay.boundingBox();
   expect(overlayBox!.y).toBeGreaterThanOrEqual(0);
   expect(overlayBox!.y + overlayBox!.height).toBeLessThanOrEqual(720);
-  const format = page.getByLabel("输出格式");
-  const formatBox = await format.boundingBox();
-  expect(formatBox!.x).toBeGreaterThanOrEqual(0);
-  expect(formatBox!.x + formatBox!.width).toBeLessThanOrEqual(1280);
-  // 实际操作：切换 JPEG 出现质量选择并可修改。
-  await format.selectOption("image/jpeg");
-  await page.getByLabel("JPEG 质量").selectOption("0.85");
-  await expect(page.getByLabel("JPEG 质量")).toHaveValue("0.85");
+  // 输出触发钮在视口内可达；参数经「输出 ▾」菜单操作（JPEG + 质量）。
+  const trigger = page.getByRole("button", { name: "输出操作", exact: true });
+  const triggerBox = await trigger.boundingBox();
+  expect(triggerBox!.x).toBeGreaterThanOrEqual(0);
+  expect(triggerBox!.x + triggerBox!.width).toBeLessThanOrEqual(1280);
+  await clickToolbarAction(page, "输出格式 JPEG（白底）");
+  await clickToolbarAction(page, "JPEG 质量 85%");
+  await page.getByRole("button", { name: "输出操作", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "JPEG 质量 85%" }),
+  ).toBeDisabled();
+  await page.keyboard.press("Escape");
 });
 
 test("选区覆盖工具栏时前景有实色背景，颜色面板在窄屏底部仍可操作", async ({
@@ -386,20 +399,27 @@ for (const [action, format] of [
   }) => {
     await mountScene(page, 1280, 720);
     const uploads = await recordAnnotationUploads(page);
-    await page.getByRole("button", { name: "截图直角，点击切换圆角" }).click();
-    await expect(page.getByLabel("图片视口")).not.toHaveCSS(
-      "border-top-left-radius",
-      "0px",
-    );
+    // 圆角状态经输出菜单切换项标签判读：开启后项变为“切换为直角截图”，
+    // 撤销回到圆角关闭、重做恢复，最终以导出角落像素验证。
+    const cornerState = async () => {
+      await page.getByRole("button", { name: "输出操作", exact: true }).click();
+      const item = page.getByRole("menuitem", {
+        name: /切换为(直角|圆角)截图/,
+      });
+      const label = (await item.textContent())?.trim();
+      await page.keyboard.press("Escape");
+      return label;
+    };
+    await clickToolbarAction(page, "切换为圆角截图");
+    await expect.poll(cornerState).toBe("切换为直角截图");
     await page.getByRole("button", { name: "撤销", exact: true }).click();
-    await expect(
-      page.getByRole("button", { name: "截图直角，点击切换圆角" }),
-    ).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(cornerState).toBe("切换为圆角截图");
     await page.getByRole("button", { name: "重做", exact: true }).click();
+    await expect.poll(cornerState).toBe("切换为直角截图");
     if (format === "image/jpeg") {
-      await page.getByLabel("输出格式").selectOption(format);
+      await clickToolbarAction(page, "输出格式 JPEG（白底）");
     }
-    await page.getByRole("button", { name: action, exact: true }).click();
+    await clickToolbarAction(page, action);
     const exported = await uploads.submitted(
       action === "复制标注图" ? "copyScreenshotImage" : "saveScreenshotImage",
     );

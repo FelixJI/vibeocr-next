@@ -2,7 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
-import { activateToolbarTool } from "./toolSelection";
+import { activateToolbarTool, clickToolbarAction } from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
@@ -177,9 +177,11 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
 
   // 屏蔽副本入口出现；掩膜/普通像素正确性由下方识别输入与两份保存
   // 副本的上传字节断言（不再依赖已移除的常驻预览图）。
+  await page.getByRole("button", { name: "输出操作", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "保存屏蔽副本" }),
+    page.getByRole("menuitem", { name: "保存屏蔽副本", exact: true }),
   ).toBeVisible();
+  await page.keyboard.press("Escape");
   // 默认文字层也遵守屏蔽语义，且完成租约释放后再做显式操作。
   const maskedText = await uploads.forRevision("prepareScreenshotTextLayer", 1);
   await uploads.waitForDiscard(maskedText.resourceUri);
@@ -245,14 +247,14 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   await expect(page.getByText(/已提交识别当前图（image\/png/)).toBeVisible();
 
   // 普通保存：原图像素保留，屏蔽区不写入。
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const saved = await uploads.submitted("saveScreenshotImage");
   const normalSave = await decodeUpload(page, saved.body, "image/png");
   expect(pixelAt(normalSave, 40, 40)).toEqual([16, 16, 16]);
   expect(pixelAt(normalSave, 120, 40)).toEqual([224, 32, 32]);
 
   // 显式屏蔽副本导出：真实白色像素，与识别输入一致。
-  await page.getByRole("button", { name: "保存屏蔽副本" }).click();
+  await clickToolbarAction(page, "保存屏蔽副本");
   const masked = await uploads.submitted("saveScreenshotImage", 1);
   const maskedSave = await decodeUpload(page, masked.body, "image/png");
   expect(pixelAt(maskedSave, 40, 40)).toEqual([255, 255, 255]);

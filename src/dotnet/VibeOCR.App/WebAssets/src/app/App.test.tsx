@@ -5,9 +5,11 @@ import {
   render as renderImmediate,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
+import { openToolbarMenu } from "../test/toolSelection";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App, type AppActions, type AppViewState } from "./App";
@@ -949,7 +951,11 @@ describe("AppShell", () => {
     expect(screen.queryByRole("button", { name: "马赛克" })).toBeNull();
     expect(screen.queryByRole("button", { name: "文字" })).toBeNull();
     expect(screen.getByRole("button", { name: "复制标注图" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "保存标注图" })).toBeEnabled();
+    expect(
+      within(await openToolbarMenu("输出操作")).getByRole("menuitem", {
+        name: "保存标注图",
+      }),
+    ).not.toHaveAttribute("aria-disabled", "true");
     // 静态用法收进“使用帮助与图像信息”：展开后仍可读。
     fireEvent.click(screen.getByText("使用帮助与图像信息"));
     expect(

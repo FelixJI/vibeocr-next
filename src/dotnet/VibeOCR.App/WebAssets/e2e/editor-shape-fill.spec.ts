@@ -1,7 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mountHost, snapshot } from "./workbench-host";
+<<<<<<< HEAD
 import { activateToolbarTool } from "./toolSelection";
+||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
+=======
+import {
+  activateToolbarTool,
+  clickToolbarAction,
+  clickToolbarControl,
+} from "./toolSelection";
+>>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
 
 /** 形状半透明合成的真实像素契约（矩形/椭圆参数化同一测试）：
  *  1) 预览画布：填充 40% 与边框 70% 独立合成（红色填充叠绿底、蓝色描边
@@ -134,7 +143,13 @@ for (const shapeTool of ["矩形", "椭圆"] as const) {
     const { uploads } = await setupShapeHost(page);
     const canvas = page.getByLabel("图片检查画布");
 
+<<<<<<< HEAD
     await activateToolbarTool(page, shapeTool);
+||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
+    await page.getByRole("button", { name: shapeTool, exact: true }).click();
+=======
+    await clickToolbarControl(page, shapeTool);
+>>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
     // 边框色设为蓝色 #1f6feb（默认橙色），线宽取最宽 8px：采样点远离
     // 填充边界与亚像素栅格化影响，验证准确 70% 合成。
     await page.getByLabel("自定义颜色").fill("#1f6feb");
@@ -203,7 +218,7 @@ for (const shapeTool of ["矩形", "椭圆"] as const) {
     expectPixel(preview.outside, GREEN, 3);
 
     // 2) 实际导出：保存后的 PNG 与预览同源；自然像素 80×40。
-    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await clickToolbarAction(page, "保存标注图");
     await expect.poll(() => uploads.length).toBe(1);
     expect(uploads[0]!.contentType).toBe("image/png");
     const exported = await decodeUpload(page, uploads[0]!.body);
@@ -215,7 +230,7 @@ for (const shapeTool of ["矩形", "椭圆"] as const) {
 
     // 3) 撤销：导出回到无标注的纯源图。
     await page.getByRole("button", { name: "撤销", exact: true }).click();
-    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await clickToolbarAction(page, "保存标注图");
     await expect.poll(() => uploads.length).toBe(2);
     const undone = await decodeUpload(page, uploads[1]!.body);
     expectPixel(undone.at(28, 20), GREEN, 4);

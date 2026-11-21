@@ -1,4 +1,10 @@
-import { fireEvent, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { expect } from "vitest";
 
 import { type Tool } from "../components/ImageCanvasEditor";
@@ -56,6 +62,51 @@ export async function expectToolbarToolAvailable(name: string): Promise<void> {
   );
   // 幂等收起：留开的菜单会让下一次族切换变成关闭动作。
   fireEvent.click(toggle);
+}
+
+/** 打开工具栏菜单（对象操作/输出操作/识别模式/更多操作等触发钮）并
+ * 返回菜单元素。菜单通常同步打开；调用点处在外层 act(async) 内时渲染
+ * 会被批处理挂起，用一次空 act 微冲刷兜底（不用 findByRole 轮询——
+ * 轮询窗口会被菜单焦点管理关闭）。触发钮是开关：若上一次调用留下了
+ * 打开的菜单，本次点击会先把它关掉，这里补一次点击重新打开。 */
+export async function openToolbarMenu(name: string): Promise<HTMLElement> {
+  const wasOpen = !!screen.queryByRole("menu");
+  const trigger = screen.getByRole("button", { name });
+  fireEvent.click(trigger);
+  let menu = screen.queryByRole("menu");
+  if (!menu) {
+    await act(async () => {});
+    menu = screen.queryByRole("menu");
+    if (!menu && wasOpen) {
+      fireEvent.click(trigger);
+      await act(async () => {});
+      menu = screen.getByRole("menu");
+    }
+  }
+  if (menu) return menu;
+  return screen.getByRole("menu");
+}
+
+/** 直达工具栏菜单项并点击（自动开菜单）。 */
+export async function clickToolbarMenuItem(
+  menuName: string,
+  itemName: string,
+): Promise<void> {
+  const menu = await openToolbarMenu(menuName);
+  fireEvent.click(within(menu).getByRole("menuitem", { name: itemName }));
+}
+
+/** 激活识别模式：文字模式直出主按钮，其余（表格识别等）经「识别模式」
+ * 菜单；与工具家族激活同一回退策略。直出按钮在文字层准备期间可能短暂
+ * 禁用，等待可用后再点击。 */
+export async function activateRecognitionMode(label: string): Promise<void> {
+  const direct = screen.queryByRole("button", { name: label });
+  if (direct) {
+    await waitFor(() => expect(direct).toBeEnabled());
+    fireEvent.click(direct);
+    return;
+  }
+  await clickToolbarMenuItem("识别模式", label);
 }
 
 /** 断言辅助：工具所属家族的 ▾ 按钮可访问名。 */

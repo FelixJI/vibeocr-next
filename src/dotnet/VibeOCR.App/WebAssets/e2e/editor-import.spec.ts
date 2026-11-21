@@ -1,5 +1,10 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
+<<<<<<< HEAD
 import { activateToolbarTool } from "./toolSelection";
+||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
+=======
+import { clickToolbarControl } from "./toolSelection";
+>>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import type { HostCommand } from "../src/bridge/client";
@@ -18,6 +23,7 @@ async function commands(page: Page): Promise<HostCommand[]> {
   );
 }
 async function action(page: Page, name: string) {
+<<<<<<< HEAD
   // 家族分组的非当前子工具经族菜单激活；动作按钮仍直点。
   const direct = page.getByRole("button", { name, exact: true });
   if ((await direct.count()) > 0) {
@@ -25,6 +31,11 @@ async function action(page: Page, name: string) {
     return;
   }
   await activateToolbarTool(page, name);
+||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
+  await page.getByRole("button", { name, exact: true }).click();
+=======
+  await clickToolbarControl(page, name);
+>>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
 }
 async function pngPixels(page: Page, png: Buffer, points: [number, number][]) {
   return page.evaluate(
