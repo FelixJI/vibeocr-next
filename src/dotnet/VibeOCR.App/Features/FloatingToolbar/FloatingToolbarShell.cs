@@ -19,6 +19,8 @@ internal sealed class FloatingToolbarShell : IDisposable
 
     private readonly FloatingToolbarController _controller;
     private readonly IFloatingToolbarView _view;
+    // 具体窗口引用只用于命令失败反馈（接口保持最小，测试 fake 不受影响）。
+    private readonly FloatingToolbarWindow? _window;
     private readonly Func<string, bool> _dispatchAction;
     private readonly Action _openSettings;
     private bool _disposed;
@@ -26,11 +28,13 @@ internal sealed class FloatingToolbarShell : IDisposable
     private FloatingToolbarShell(
         FloatingToolbarController controller,
         IFloatingToolbarView view,
+        FloatingToolbarWindow? window,
         Func<string, bool> dispatchAction,
         Action openSettings)
     {
         _controller = controller;
         _view = view;
+        _window = window;
         _dispatchAction = dispatchAction;
         _openSettings = openSettings;
         view.CommandInvoked += OnCommandInvoked;
@@ -67,9 +71,9 @@ internal sealed class FloatingToolbarShell : IDisposable
             return null;
         }
 
-        var view = new FloatingToolbarWindow();
+        var window = new FloatingToolbarWindow();
         var controller = new FloatingToolbarController(
-            view,
+            window,
             () => new EdgeSensorWindow(),
             () => new DispatcherQueueDelayTimer(queue),
             settings,
@@ -80,7 +84,8 @@ internal sealed class FloatingToolbarShell : IDisposable
             next => FloatingToolbarSettings.Save(layout, next));
         var shell = new FloatingToolbarShell(
             controller,
-            view,
+            window,
+            window,
             dispatchAction,
             openSettings);
         controller.Start();
@@ -179,7 +184,8 @@ internal sealed class FloatingToolbarShell : IDisposable
         }
         catch (Exception error)
         {
-            // 命令失败只记录，悬浮工具栏自身不因此退出。
+            // 命令失败：按钮短促失败反馈 + 既有日志，悬浮工具栏自身不因此退出。
+            _window?.FlashCommandFailure(command);
             AppLog.Warn($"Floating toolbar command {command} failed: {error.Message}");
         }
     }

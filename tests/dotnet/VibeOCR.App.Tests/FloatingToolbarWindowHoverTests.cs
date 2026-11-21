@@ -47,4 +47,17 @@ public sealed class FloatingToolbarWindowHoverTests
     {
         Assert.Equal(-1, FloatingToolbarWindow.HitTestButton([], 0, 0));
     }
+
+    [Fact]
+    public void CommandIndexMatchesToolbarButtonCatalogOrder()
+    {
+        // 命令脉冲/失败反馈按 BuildContent 的按钮添加顺序定位：六个命令
+        // 各占一个连续下标且闭合（0..5），顺序变化即反馈打错按钮，此处锁定。
+        Assert.Equal(0, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.CaptureScreenshot));
+        Assert.Equal(1, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.ScreenshotEdit));
+        Assert.Equal(2, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.ClipboardRecognize));
+        Assert.Equal(3, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.ShowMainWindow));
+        Assert.Equal(4, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.OpenSettings));
+        Assert.Equal(5, FloatingToolbarWindow.CommandIndex(FloatingToolbarCommand.DismissToolbar));
+    }
 }

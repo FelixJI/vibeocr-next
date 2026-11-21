@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'tab', 'enter', 'escape', 'selection', 'cursor', 'cursor-map', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('fixture', 'windows', 'hide', 'close', 'quit', 'focus-fixture', 'webview-bounds', 'hotkey', 'recognize-hotkey', 'foreground', 'probe', 'hover', 'toolbar-click', 'toolbar-child-styles', 'tab', 'enter', 'escape', 'selection', 'cursor', 'cursor-map', 'magnifier', 'toolbar-sequence', 'toolbar-drag', 'toolbar-hotkey', 'toolbar-show-wait', 'pump', 'minimize', 'restore', 'tray-state', 'tray-click', 'taskbar-created', 'down', 'tray-fixture', 'tray-keyboard', 'tray-keyboard-resume', 'tray-expose', 'tray-left-click', 'tray-double-click', 'tray-gone', 'tray-menu-quit', 'tray-menu-open', 'tray-menu-toggle', 'codes-open-file', 'codes-drop-file')][string]$Action,
     [int]$AppPid = 0,
     [int]$FixturePid = 0,
     [int]$ForegroundPid = 0,
@@ -76,6 +76,17 @@ public static class NativeActionsFixture
     }
     private delegate bool EnumWindowCallback(IntPtr window, IntPtr state);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr state);
+    public static object ToolbarChildStyles(long handle)
+    {
+        var children = new List<WindowInfo>();
+        EnumChildWindows(new IntPtr(handle), (child, _) =>
+        {
+            children.Add(new WindowInfo { Handle = child.ToInt64(), ClassName = ClassName(child),
+                ExtendedStyle = GetWindowLongPtrW(child, -20).ToInt64() });
+            return true;
+        }, IntPtr.Zero);
+        return children;
+    }
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect bounds);
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect bounds);
@@ -591,6 +602,28 @@ public static class NativeActionsFixture
                 Flags = 0x0001 | 0x4000 | 0x8000,
             } },
         } });
+    }
+
+    // Real left click on a floating-toolbar button: hover first so the polled
+    // hover state settles, then a full absolute down/up pair at the same point.
+    public static void ToolbarClick(int appPid, int x, int y)
+    {
+        RequireForeground(appPid);
+        RequirePointOwner(x, y, appPid);
+        Hover(appPid, x, y);
+        System.Threading.Thread.Sleep(60);
+        uint move = 0x0001 | 0x4000 | 0x8000;
+        int normalizedX = (int)(((long)x - GetSystemMetrics(76)) * 65536 / GetSystemMetrics(78));
+        int normalizedY = (int)(((long)y - GetSystemMetrics(77)) * 65536 / GetSystemMetrics(79));
+        Send(new[] { new Input { Type = 0, Data = new InputUnion { Mouse = new MouseInput
+        {
+            X = normalizedX, Y = normalizedY, Flags = move | 0x0002,
+        } } } });
+        System.Threading.Thread.Sleep(40);
+        Send(new[] { new Input { Type = 0, Data = new InputUnion { Mouse = new MouseInput
+        {
+            X = normalizedX, Y = normalizedY, Flags = move | 0x0004,
+        } } } });
     }
 
     private static void Tap(ushort key)
@@ -1140,6 +1173,8 @@ try {
         'pump' { [NativeActionsFixture]::Pump($Handle, $AppPid) | ConvertTo-Json -Compress }
         'probe' { [NativeActionsFixture]::Probe($AppPid, $FixturePid, $X, $Y) | ConvertTo-Json -Compress -Depth 5 }
         'hover' { [NativeActionsFixture]::Hover($AppPid, $X, $Y) }
+        'toolbar-click' { [NativeActionsFixture]::ToolbarClick($AppPid, $X, $Y) }
+        'toolbar-child-styles' { [NativeActionsFixture]::ToolbarChildStyles($Handle) | ConvertTo-Json -Compress }
         'toolbar-sequence' { [NativeActionsFixture]::ToolbarSequence($Handle, $AppPid, $X, $Y, $OutsideX, $OutsideY, $LingerMs) | ConvertTo-Json -Compress }
         'toolbar-show-wait' {
             # ready proves the Add-Type compile finished; the bounded wait and
