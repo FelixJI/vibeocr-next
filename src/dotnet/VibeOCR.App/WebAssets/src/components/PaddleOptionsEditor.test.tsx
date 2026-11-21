@@ -189,7 +189,9 @@ it("keeps the save confirmation visible when the host echoes saved options", asy
     modeId: "paddle_text",
     options: { use_textline_orientation: true },
   });
-  expect(await screen.findByText("参数已保存，下一次识别生效。")).toBeVisible();
+  expect(
+    await screen.findByText("参数已保存（含当前档位），新任务起作为默认值。"),
+  ).toBeVisible();
   // 保存成功后宿主回显新的模式选项（revision 递增的状态推送）；
   // 编辑器不得因此重挂而丢失保存提示、已展开面板与已选值。
   rerender(
@@ -198,36 +200,91 @@ it("keeps the save confirmation visible when the host echoes saved options", asy
       viewState={viewState(2, { use_textline_orientation: true })}
     />,
   );
-  expect(screen.getByText("参数已保存，下一次识别生效。")).toBeVisible();
+  expect(
+    screen.getByText("参数已保存（含当前档位），新任务起作为默认值。"),
+  ).toBeVisible();
   expect(screen.getByLabelText("文本行方向分类")).toHaveValue("true");
   expect(screen.getByText("识别参数").closest("details")).toBe(details);
 });
 
-it("defaults to balanced and saves an actual Paddle model/provider choice", async () => {
+it("saves the transient model preset choice as the persisted default", async () => {
+  const run = vi.fn().mockResolvedValue(true);
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <PaddleOptionsEditor
+      modeId="paddle_text"
+      supportedOptions={["model_preset", "device"]}
+      values={{}}
+      taskModelPreset="medium"
+      defaultModelPreset="small"
+      actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+    />,
+  );
+  await user.click(screen.getByText("识别参数"));
+  // 档位是任务级选择：中文标签，跟随默认项展示保存默认的中文标签。
+  expect(screen.getByLabelText("模型档位")).toHaveValue("medium");
+  expect(
+    screen.getByRole("option", { name: "跟随默认（均衡）" }),
+  ).toBeVisible();
+  await user.selectOptions(screen.getByLabelText("模型档位"), "tiny");
+  expect(run).toHaveBeenCalledExactlyOnceWith({
+    type: "recognition.setTaskModelPreset",
+    preset: "tiny",
+  });
+  // 保存参数沿用已保存默认（values 未提供、未选具体档时不伪造）。
+  await user.selectOptions(screen.getByLabelText("运行设备"), "directml");
+  rerenderWithPreset(null);
+  await user.click(screen.getByRole("button", { name: "保存参数" }));
+  expect(run).toHaveBeenLastCalledWith({
+    type: "recognition.setOptions",
+    modeId: "paddle_text",
+    options: { device: "directml" },
+  });
+
+  function rerenderWithPreset(preset: string | null) {
+    // 档位任务级状态由宿主推送；跟随默认时保存沿用已保存默认。
+    rerender(
+      <PaddleOptionsEditor
+        modeId="paddle_text"
+        supportedOptions={["model_preset", "device"]}
+        values={{}}
+        taskModelPreset={preset}
+        defaultModelPreset="small"
+        actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
+      />,
+    );
+  }
+});
+
+it("keeps the explicit preset out of the save payload when following the default", async () => {
   const run = vi.fn().mockResolvedValue(true);
   const user = userEvent.setup();
   render(
     <PaddleOptionsEditor
       modeId="paddle_text"
-      supportedOptions={["model_preset", "device"]}
-      values={{}}
+      supportedOptions={["model_preset"]}
+      values={{ model_preset: "medium" }}
+      taskModelPreset={null}
+      defaultModelPreset="medium"
       actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
     />,
   );
   await user.click(screen.getByText("识别参数"));
-  expect(screen.getByLabelText("模型档位")).toHaveValue("small");
-  await user.selectOptions(screen.getByLabelText("模型档位"), "medium");
-  await user.selectOptions(screen.getByLabelText("运行设备"), "directml");
+  expect(screen.getByLabelText("模型档位")).toHaveValue("");
+  expect(
+    screen.getByRole("option", { name: "跟随默认（高精度）" }),
+  ).toBeVisible();
   await user.click(screen.getByRole("button", { name: "保存参数" }));
+  // 跟随默认时保存已持久化的默认（medium），不改写也不省略已知默认。
   expect(run).toHaveBeenCalledWith({
     type: "recognition.setOptions",
     modeId: "paddle_text",
-    options: { model_preset: "medium", device: "directml" },
+    options: { model_preset: "medium" },
   });
 });
 
 it.each(["recognition", "batch", "pdf"] as const)(
-  "sends a transient model preset for %s without saving defaults",
+  "sends a transient model preset for %s from the consolidated editor",
   async (scope) => {
     const run = vi.fn().mockResolvedValue(true);
     const user = userEvent.setup();
@@ -253,17 +310,17 @@ it.each(["recognition", "batch", "pdf"] as const)(
         actions={{ run, navigate: vi.fn(), setTheme: vi.fn() }}
       />,
     );
-    // 本次模型档位收纳在“高级选项”折叠区：展开后仍可键盘/指针操作。
-    await user.click(screen.getByText("高级选项"));
+    // 模型档位整合在“识别参数”折叠区内：中文标签、跟随默认用中文档名。
+    await user.click(screen.getByText("识别参数"));
     expect(
-      screen.getByRole("option", { name: "跟随默认（medium）" }),
+      screen.getByRole("option", { name: "跟随默认（高精度）" }),
     ).toBeVisible();
-    await user.selectOptions(screen.getByLabelText("本次模型档位"), "tiny");
+    await user.selectOptions(screen.getByLabelText("模型档位"), "tiny");
     expect(run).toHaveBeenCalledExactlyOnceWith({
       type: `${scope}.setTaskModelPreset`,
       preset: "tiny",
     });
-    await user.selectOptions(screen.getByLabelText("本次模型档位"), "");
+    await user.selectOptions(screen.getByLabelText("模型档位"), "");
     expect(run).toHaveBeenLastCalledWith({
       type: `${scope}.setTaskModelPreset`,
     });

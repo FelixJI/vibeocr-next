@@ -1,5 +1,5 @@
-// Task #214 AC1 bounded smoke: normal Portable boot, pure tools only, zero
-// Installer/Supervisor expectation. Public-UI steps: local QR generate/decode
+// Task #214 AC1 bounded smoke, retargeted for launch auto-prepare: normal
+// Portable boot, pure tools only. Public-UI steps: local QR generate/decode
 // + copy/paste roundtrip, generic settings (hotkey rows read-only + floating
 // toolbar show/hide toggle), image edit (clipboard-fixture paste -> rectangle
 // annotation -> copy -> repaste verify) and a pure screenshot capture through
@@ -8,14 +8,18 @@
 // before the scene-terminal copy, explicit end on an independent session,
 // then the #318 real Windows Clipboard readback of that scene copy through
 // the still-alive workbench's public paste input).
-// Combined zero evidence: owned CIM lineage (runtime_demand_process_probe.ps1)
-// records no installer/supervisor/python descendants + candidate AppLog has no
-// "Runtime demand: connect begin" / "Runtime demand: initialize_default begin"
+// Combined startup-prepare evidence: the launch backgrounds exactly ONE
+// Supervisor prepare (owned CIM lineage via runtime_demand_process_probe.ps1
+// records exactly one supervisor start and never installer descendants;
+// the Supervisor's own python workers are legal runtime-internal behavior)
+// + candidate AppLog carries exactly one
+// "Runtime demand: connect begin" / "Runtime demand: starting product
+// Supervisor" / "Runtime demand: ready" set from startup and no additional
+// demand line from any tool step + no "Runtime Installer command starting
+// action=" line (any action, including transient list / switch reservation),
+// no "Runtime demand: initialize_default begin", no background-start failure
 // + fresh candidate state keeps no environment registry/default/plans/legacy
-// marker (semantic presence only, no hashes) and the AppLog both stays
-// non-empty and contains no "Runtime Installer command starting action=" line
-// (any action, including transient list / switch reservation) and no
-// "Runtime demand: connect begin" / "Runtime demand: initialize_default begin".
+// marker (semantic presence only, no hashes).
 // soak env (inherited values are stripped), no private bridge commands, no
 // direct Runtime HTTP, no user images: the only clipboard images are the ones
 // direct Runtime HTTP, no user images: the only clipboard images are the ones
@@ -73,16 +77,35 @@ const clipboardScript = path.join(scripts, 'native_codes_clipboard_fixture.ps1')
 const scrollCaptureScript = path.join(scripts, 'scroll_capture_fixture.ps1');
 const probeScript = path.join(scripts, 'runtime_demand_process_probe.ps1');
 const decodeTimeoutMs = 90 * 1000;
-// Forbidden owned-lineage descendant classes; class 'other' (for example the
-// app's own WebView2 browser children) stays expected and unconstrained.
-const forbiddenClasses = new Set(['installer', 'installer-child', 'supervisor', 'python-child']);
-// Owner-landed AppLog Installer invocation line: the prefix rejects ANY
-// action, including read-only transient "list" and "switch reservation".
-const appLogForbiddenPrefixes = [
+// Zero-prepare rules (smoke-env launches; capture-first-frame/capture-
+// replacement reuse them): no Installer/Supervisor/python descendant at all.
+const zeroForbiddenClasses = new Set(['installer', 'installer-child', 'supervisor', 'python-child']);
+const zeroAppLogForbiddenPrefixes = [
   'Runtime demand: starting product Supervisor',
   'Runtime Installer command starting action=',
   'Runtime demand: connect begin',
   'Runtime demand: initialize_default begin',
+];
+// Startup-prepare rules (normal production launch): the first window backs
+// exactly one Supervisor prepare; tools must not trigger further demand.
+// 'supervisor' 不再禁止，改为恰一次校验；Supervisor 自身在启动/就绪期间会合法
+// 派生 python worker（设备探测、校验等），python-child/pdf-worker 不作为违规
+// ——“工具不触发计算”由 AppLog 恰一组 demand 标记（无第二条 connect）承载。
+const prepareForbiddenClasses = new Set(['installer', 'installer-child']);
+// Owner-landed AppLog Installer invocation line: the prefix rejects ANY
+// action, including read-only transient "list" and "switch reservation".
+// 'initialize_default begin' 是退役标记，任何出现都是意外路径。
+const prepareAppLogForbiddenPrefixes = [
+  'Runtime Installer command starting action=',
+  'Runtime demand: initialize_default begin',
+  'Background runtime startup failed',
+];
+// 启动后台自动准备的期望标记：首窗后恰一次准备（connect begin → ready），
+// 工具步骤不得产生第二条。
+const startupDemandMarkers = [
+  'Runtime demand: connect begin',
+  'Runtime demand: starting product Supervisor',
+  'Runtime demand: ready',
 ];
 // Verified registration surfaces, relative to the candidate copy root, from
 // the actual App client construction chain: PortableLayout.Resolve(production)
@@ -119,7 +142,7 @@ const jsonLines = (file) => fs.existsSync(file)
   ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse) : [];
 
 // Minimal named exports for scripts/smoke_workbench_delivery.mjs reuse only;
-// the CLI behavior, zero-runtime rules and steps of this smoke are unchanged.
+// the CLI behavior, startup-prepare rules and steps of this smoke are unchanged.
 export function allowsLocalToolRequest(value) {
   const url = new URL(value);
   return url.protocol === 'data:' || url.origin === 'https://app.vibeocr' ||
@@ -460,21 +483,25 @@ async function readbackSceneClipboard(ctx, uploadPng, region) {
     matchesRevision: true };
 }
 
-// Pure AppLog zero-evidence scanner (self-checkable without any GUI):
-// rejects any forbidden-prefix hit and requires at least one non-empty log
-// file. A merely existing directory is never sufficient evidence.
-function scanAppLog(logsDir) {
+// Pure AppLog scanner (self-checkable without any GUI): rejects any
+// forbidden-prefix hit, counts the startup demand markers and requires at
+// least one non-empty log file. A merely existing directory is never
+// sufficient evidence.
+function scanAppLog(logsDir, forbiddenPrefixes = zeroAppLogForbiddenPrefixes) {
   const files = fs.existsSync(logsDir)
     ? fs.readdirSync(logsDir).filter((name) => name.endsWith('.log')).sort() : [];
   const hits = [];
+  const counts = Object.fromEntries(startupDemandMarkers.map((marker) => [marker, 0]));
   let nonEmpty = false;
   for (const name of files) {
     const text = fs.readFileSync(path.join(logsDir, name), 'utf8');
     if (text.trim().length > 0) nonEmpty = true;
-    for (const needle of appLogForbiddenPrefixes)
+    for (const needle of forbiddenPrefixes)
       if (text.includes(needle)) hits.push(`${name}: ${needle}`);
+    for (const marker of startupDemandMarkers)
+      counts[marker] += text.split(marker).length - 1;
   }
-  return { files, nonEmpty, hits };
+  return { files, nonEmpty, hits, counts };
 }
 
 // Passive app.state watch for the screenshot session input resource; this
@@ -943,35 +970,64 @@ async function captureStep(ctx) {
   return step;
 }
 
-// Post-exit combined zero evidence: owned CIM classes and sampled process names,
-// candidate AppLog demand markers and fresh-state environment surfaces.
-export function zeroEvidence(copy, root, appPid) {
+// Post-exit combined evidence. Default keeps the historic zero-prepare rules
+// for smoke-env launches (capture-first-frame/capture-replacement reuse):
+// no Installer/Supervisor/python evidence at all. With expectStartupPrepare
+// (normal production launch): exactly one owned Supervisor lineage from the
+// launch auto-prepare, no installer/compute child, candidate AppLog carrying
+// exactly one startup demand marker set and no extra demand lines.
+export function zeroEvidence(copy, root, appPid, { expectStartupPrepare = false } = {}) {
+  const forbiddenClasses = expectStartupPrepare ? prepareForbiddenClasses : zeroForbiddenClasses;
+  const appLogForbiddenPrefixes = expectStartupPrepare
+    ? prepareAppLogForbiddenPrefixes : zeroAppLogForbiddenPrefixes;
   const violations = [];
   const starts = jsonLines(path.join(root, 'process-starts.jsonl'));
   const forbidden = starts.filter((entry) => forbiddenClasses.has(entry.class));
   if (forbidden.length)
-    violations.push(`owned lineage recorded Installer/Supervisor work: ${JSON.stringify(forbidden)}`);
+    violations.push(`owned lineage recorded Installer/Supervisor/python work: ${JSON.stringify(forbidden)}`);
+  const supervisorStarts = starts.filter((entry) => entry.class === 'supervisor');
+  const supervisorPids = new Set(supervisorStarts.map((entry) => entry.pid));
+  if (expectStartupPrepare && supervisorStarts.length !== 1)
+    violations.push(`startup auto-prepare must spawn exactly one Supervisor, saw ${supervisorStarts.length}: ${JSON.stringify(supervisorStarts)}`);
   const samples = jsonLines(path.join(root, 'process-samples.jsonl'));
   const sampledRuntime = new Set();
   for (const sample of samples)
     for (const { pid, name } of sample.procs)
-      if (/runtime-installer|python/i.test(name)) sampledRuntime.add(`${pid}:${name}`);
+      if ((expectStartupPrepare ? /runtime-installer/i : /runtime-installer|python/i)
+          .test(name) && !(expectStartupPrepare && supervisorPids.has(pid)))
+        sampledRuntime.add(`${pid}:${name}`);
   if (sampledRuntime.size)
     violations.push(`owned working-set samples recorded Installer/Python processes: ${[...sampledRuntime].join(', ')}`);
   const rootSeen = starts.some((entry) => entry.pid === appPid);
   if (!rootSeen)
     violations.push('monitor never observed the spawned App PID (CIM snapshot lower bound)');
   const logsDir = path.join(copy, 'state', 'logs');
-  const scan = scanAppLog(logsDir);
+  const scan = scanAppLog(logsDir, appLogForbiddenPrefixes);
   if (!fs.existsSync(logsDir))
     violations.push(`AppLog directory missing under the current candidate path ${logsDir}`);
   else if (!scan.nonEmpty)
     violations.push(`AppLog exists but holds no non-empty log file: ${logsDir}`);
   if (scan.hits.length)
-    violations.push(`AppLog shows Installer/runtime demand activity: ${scan.hits.join('; ')}`);
+    violations.push(`AppLog shows forbidden runtime activity: ${scan.hits.join('; ')}`);
+  if (expectStartupPrepare)
+    for (const marker of startupDemandMarkers)
+      if (scan.counts[marker] !== 1)
+        violations.push(`startup demand marker must appear exactly once, ${marker} × ${scan.counts[marker]}`);
   const present = environmentSurfaces.filter((relative) => fs.existsSync(path.join(copy, relative)));
   if (present.length)
     violations.push(`environment registration state appeared: ${present.join(', ')}`);
+  const combined = expectStartupPrepare
+    ? 'CIM owned lineage (query-time lower bound, complete_start_trace=false) with exactly one startup Supervisor, no installer descendants and supervisor-owned python workers left unconstrained + independently sampled owned process names + ' +
+      'non-empty AppLog with exactly one startup runtime demand set (connect begin/' +
+      'starting product Supervisor/ready), no Installer command starts (any action, incl. list/' +
+      'switch reservation), no initialize_default/background-failure lines, no extra demand ' +
+      'from tool steps + fresh state kept no environment registry/store/plans/cache/marker on the ' +
+      'state-anchored shared store (<copy>/state/store surfaces)'
+    : 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independently sampled owned process names + ' +
+      'non-empty AppLog without Installer command starts (any action, incl. list/' +
+      'switch reservation) or runtime demand connect/initialize_default + fresh ' +
+      'state kept no environment registry/store/plans/cache/marker on the ' +
+      'state-anchored shared store (<copy>/state/store surfaces)';
   return {
     violations,
     process_starts: starts,
@@ -981,21 +1037,19 @@ export function zeroEvidence(copy, root, appPid) {
     applog_files: scan.files,
     applog_non_empty: scan.nonEmpty,
     applog_forbidden_hits: scan.hits,
+    applog_startup_demand_counts: scan.counts,
     environment_state_absent: environmentSurfaces.filter((relative) =>
       !fs.existsSync(path.join(copy, relative))),
-    combined: 'CIM owned lineage (query-time lower bound, complete_start_trace=false), independently sampled owned process names + ' +
-      'non-empty AppLog without Installer command starts (any action, incl. list/' +
-      'switch reservation) or runtime demand connect/initialize_default + fresh ' +
-      'state kept no environment registry/store/plans/cache/marker on the ' +
-      'state-anchored shared store (<copy>/state/store surfaces)',
+    combined,
   };
 }
 
-// Bounded self-check of the pure zero-evidence rules (no GUI, no candidate):
-// a benign non-empty log is allowed, any Installer command-start prefix
-// (including read-only list / switch reservation) is rejected, and a log set
-// without non-empty content is rejected. The temp directory is kept as
-// evidence; nothing is deleted.
+// Bounded self-check of the pure startup-prepare AppLog rules (no GUI, no
+// candidate): a benign non-empty log carrying exactly one startup demand set
+// is allowed, a duplicated demand line is rejected, any Installer
+// command-start prefix (including read-only list / switch reservation) is
+// rejected, and a log set without non-empty content is rejected. The temp
+// directory is kept as evidence; nothing is deleted.
 async function selfCheck() {
   // Task #215 (no GUI): real in-page probe source on a fake DOM - UTF-8
   // Chinese payload bytes, scope aggregation, bounded maps/lists.
@@ -1003,33 +1057,51 @@ async function selfCheck() {
   const root = path.join(fs.realpathSync(os.tmpdir()),
     `rt214-zero-selfcheck-${randomUUID().slice(0, 8)}`);
   const benign = path.join(root, 'benign');
+  const duplicate = path.join(root, 'duplicate');
   const installer = path.join(root, 'installer');
   const empty = path.join(root, 'empty');
   fs.mkdirSync(benign, { recursive: true });
+  fs.mkdirSync(duplicate, { recursive: true });
   fs.mkdirSync(installer, { recursive: true });
   fs.mkdirSync(empty, { recursive: true });
-  fs.writeFileSync(path.join(benign, 'winui-dev-20380119.log'),
+  const startupDemandLog =
     '00:00:00.000 [INFO ] OnLaunched: profile=production shellOnly=False\r\n' +
-    '00:00:01.000 [INFO ] Runtime demand: ready\r\n');
+    '00:00:01.000 [INFO ] Runtime demand: connect begin initialize=True\r\n' +
+    '00:00:01.100 [INFO ] Runtime demand: starting product Supervisor\r\n' +
+    '00:00:04.000 [INFO ] Runtime demand: ready\r\n';
+  fs.writeFileSync(path.join(benign, 'winui-dev-20380119.log'), startupDemandLog);
+  fs.writeFileSync(path.join(duplicate, 'winui-dev-20380119.log'),
+    startupDemandLog + '00:00:09.000 [INFO ] Runtime demand: connect begin initialize=True\r\n');
   fs.writeFileSync(path.join(installer, 'winui-dev-20380119.log'),
     '00:00:00.000 [INFO ] Runtime Installer command starting action=list\r\n' +
     '00:00:02.000 [INFO ] Runtime Installer command starting action=switch reservation\r\n');
   fs.writeFileSync(path.join(empty, 'winui-dev-20380119.log'), '   \r\n');
-  const allowed = scanAppLog(benign);
+  const allowed = scanAppLog(benign, prepareAppLogForbiddenPrefixes);
   assert.equal(allowed.nonEmpty, true, 'benign case must count as non-empty');
   assert.deepEqual(allowed.hits, [], 'benign log must not be rejected');
-  const installerScan = scanAppLog(installer);
+  assert(Object.values(allowed.counts).every((count) => count === 1),
+    `benign startup demand counts must all be one: ${JSON.stringify(allowed.counts)}`);
+  const benignUnderZeroRules = scanAppLog(benign);
+  assert(benignUnderZeroRules.hits.some((hit) => hit.includes('Runtime demand: connect begin')),
+    'zero-prepare rules must still reject startup demand lines');
+  const duplicateScan = scanAppLog(duplicate, prepareAppLogForbiddenPrefixes);
+  assert.equal(duplicateScan.counts['Runtime demand: connect begin'], 2,
+    'duplicate case must expose the second demand line');
+  const installerScan = scanAppLog(installer, prepareAppLogForbiddenPrefixes);
   assert.equal(installerScan.nonEmpty, true, 'installer case must count as non-empty');
   assert(installerScan.hits.length >= 1 &&
     installerScan.hits.every((hit) => hit.includes('Runtime Installer command starting action=')),
   `read-only Installer command starts must be rejected: ${JSON.stringify(installerScan.hits)}`);
-  const emptyScan = scanAppLog(empty);
+  const emptyScan = scanAppLog(empty, prepareAppLogForbiddenPrefixes);
   assert.equal(emptyScan.nonEmpty, false, 'blank-only log must not count as non-empty');
   assert.deepEqual(emptyScan.hits, []);
-  const noFiles = scanAppLog(path.join(root, 'missing'));
+  const noFiles = scanAppLog(path.join(root, 'missing'), prepareAppLogForbiddenPrefixes);
   assert.equal(noFiles.nonEmpty, false, 'missing directory must not count as non-empty');
   console.log(JSON.stringify({ self_check: 'passed', root, cases: {
-    benign_allowed: allowed.hits.length === 0,
+    benign_startup_demand_allowed: allowed.hits.length === 0 &&
+      Object.values(allowed.counts).every((count) => count === 1),
+    zero_rules_still_reject_demand: benignUnderZeroRules.hits.length > 0,
+    duplicate_demand_detected: duplicateScan.counts['Runtime demand: connect begin'] === 2,
     installer_list_and_switch_reservation_rejected: installerScan.hits.length > 0,
     empty_rejected: !emptyScan.nonEmpty && !noFiles.nonEmpty,
   }, measurement_215: measurement }));
@@ -1039,7 +1111,8 @@ async function run(candidate, work) {
   const root = path.join(work, `rt214-tools-${randomUUID().slice(0, 8)}`);
   fs.mkdirSync(root, { recursive: true });
   const copy = path.join(root, 'candidate');
-  const record = { schema_version: 1, smoke: 'runtime-demand-tools', issue: '214 AC1',
+  const record = { schema_version: 1, smoke: 'runtime-demand-tools',
+    issue: '214 AC1 (retargeted: launch auto-prepare)',
     state: 'failed', root, app_pid: null,
     launch: { shell_only: false, args: ['--profile', 'production', '--install-root', '<copy>'],
       env_cleaned: ['VIBEOCR_SELF_TEST*', 'VIBEOCR_SOAK*'],
@@ -1051,7 +1124,7 @@ async function run(candidate, work) {
       'CIM 250ms snapshots are a lower bound (complete_start_trace=false); short-lived processes can be missed',
       'AppLog read from the current candidate state/logs path; final location per Owner landing',
       'environment surfaces checked semantically by presence only; no hashes by design',
-      'zero AppLog evidence requires a non-empty log plus no Installer command start (any action) and no runtime demand connect/initialize_default',
+      'AppLog evidence requires a non-empty log plus exactly one startup runtime demand set (connect begin/starting product Supervisor/ready), no Installer command start (any action), no initialize_default and no additional demand line',
     ] };
   const ctx = { child: null, browser: null, page: null, main: null,
     root, copy, fixture: null, fixtureCleanupErrors: [], collector: null };
@@ -1173,7 +1246,8 @@ async function run(candidate, work) {
       }
     }
     try {
-      record.zero_evidence = zeroEvidence(copy, root, record.app_pid);
+      record.zero_evidence = zeroEvidence(copy, root, record.app_pid,
+        { expectStartupPrepare: true });
       if (fs.existsSync(path.join(root, 'monitor-info.json')))
         record.monitor = JSON.parse(fs.readFileSync(path.join(root, 'monitor-info.json'), 'utf8'));
       else record.evidence_gaps.push('monitor-info.json missing');

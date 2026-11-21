@@ -1183,21 +1183,7 @@ select {
 .recognition-mode-settings > details[open] {
   flex-basis: 100%;
 }
-/* 本次模式行保持紧凑；低频项只在“高级选项”折叠区展开。 */
-.task-engine-advanced {
-  min-width: 0;
-}
-.task-engine-advanced > summary {
-  cursor: pointer;
-  user-select: none;
-  color: var(--colorNeutralForeground2);
-  font-size: 12px;
-}
-.task-engine-advanced-content {
-  display: grid;
-  gap: 8px;
-  padding: 6px 0 2px 14px;
-}
+/* 本次模式行保持紧凑；低频项只在“识别参数”折叠区展开。 */
 .pdf-advanced > summary {
   cursor: pointer;
   user-select: none;

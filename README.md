@@ -27,7 +27,7 @@ worker 仍在独立进程运行。
 ## 主要能力
 
 - 原生 WinUI 3 桌面识别工作流；
-- 随包 Runtime 定位、按需启动、ready 与 capability 协商；
+- 随包 Runtime 定位、启动后台自动准备、ready 与 capability 协商；
 - typed Protocol client 驱动的 job 提交、观察和控制；
 - React/TypeScript WebAssets 与 WebView2 高级 workbench；
 - 单实例、运行时前置检查和 Windows 打包交付。
