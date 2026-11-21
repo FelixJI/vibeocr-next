@@ -35,7 +35,7 @@ const evidence = { schema_version: 1, state: 'failed', sourceSha: identity.sourc
     'System light/dark theme transition and real high contrast need authorized system changes and are not exercised here; recorded independently in the af140-theme-receipt-root.txt and af140-contrast-once-root.txt evidence trees.',
     'Multiple DPI and multi-monitor layouts are human-exempted for this gate; this run asserts only the single desktop DPI it observes (recorded per window) and claims no other DPI coverage.',
     'Linger granularity across 100/200/500/1000 ms is recorded independently in af140-linger-current-root.txt; this script asserts only its persisted 1000 ms exit window.',
-    'Native toolbar commands have no disabled/busy state in production; no disabled visual state was manufactured.',
+    'Command pulses (pressed + tinted background, failure red flash) are code-reviewed and asserted structurally (click keeps foreground, exit hides); their transient pixel frames are not separately captured.',
     'Tray menu physical invocation and actual Alt+Tab switcher inspection are not exercised.',
     'Repository tests cover timer Stop and state transitions; event unsubscription/disposal is reviewed in code, while GUI observes window/process cleanup.',
   ] };
@@ -274,6 +274,20 @@ try {
   await delay(1200);
   assert((await windows(app.child.pid)).find((w) => w.Handle === bar.Handle).Visible, 'Pinned toolbar hid after drag.');
   evidence.drag = { cursor: drag, host: dragged, client: draggedClient };
+  // 真实左键点击工具栏按钮：windowed Popup 宿主已补 NOACTIVATE 防护，
+  // 点击瞬间不得把前台抢给工具栏（“焦点异常”回归锚点）；exit 命令的
+  // 完成反馈即工具栏隐藏。
+  const exitPoint = clientPoint(draggedClient, 0.93);
+  const clickForeground = await native('foreground', { AppPid: app.child.pid });
+  await native('toolbar-click', { AppPid: app.child.pid, ...exitPoint });
+  await delay(300);
+  const foregroundAfterClick = await native('foreground', { AppPid: app.child.pid });
+  assert.equal(foregroundAfterClick, clickForeground, 'Toolbar click stole the foreground via the popup host.');
+  assert(!(await windows(app.child.pid)).some((w) => w.Handle === bar.Handle && w.Visible),
+    'Exit click did not hide the toolbar.');
+  evidence.commandClick = { foregroundRetained: foregroundAfterClick === clickForeground, exitHidToolbar: true };
+  await show();
+  bar = await toolbar();
   await app.page.getByRole('button', { name: '隐藏', exact: true }).click();
   await toolbarStatus(app.page, '已主动隐藏（鼠标路过不恢复）');
   assert.equal(settings().hidden_by_user, true);

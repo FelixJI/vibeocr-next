@@ -48,6 +48,10 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private const uint SwpNoSize = 0x0001;
   private const uint SwpNoZOrder = 0x0004;
   private const uint SwpNoActivate = 0x0010;
+  private const int VkLButton = 0x01;
+  // 命令触发/失败脉冲时长：长于两轮轮询（100ms×2）保证视觉可感知，
+  // 短于 linger 收起窗口，不与截图避让的隐藏竞争。
+  private static readonly TimeSpan CommandPulseDuration = TimeSpan.FromMilliseconds(280);
 
   private readonly Window _window = new();
   private readonly ContentControl _gripIcon = ScreenshotToolbarIcons.CreateIcon("grip");
@@ -67,6 +71,10 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private readonly UISettings _uiSettings = new();
   private readonly ThemeSettings _themeSettings;
   private readonly WindowMessageService _messages;
+  // Windowed Popup 的内容宿主是独立 HWND：主窗口的 NOACTIVATE 样式
+  // 覆盖不到它，点击瞬间会把前台抢给 Popup 宿主。每次 Popup 打开后
+  // 枚举子窗口，为内容桥接 HWND 补同样样式（Popup HWND 可能重建）。
+  private readonly List<nint> _popupHosts = [];
   private readonly nint _handle;
   private Windows.Foundation.Point? _dragOrigin;
   private FloatingToolbarTheme _theme = FloatingToolbarTheme.System;
@@ -74,6 +82,13 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private bool _popupOpenPending;
   private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _pointerTimer;
   private bool? _pointerOver;
+  // 命令反馈：每按钮的脉冲截止时刻（Environment.TickCount64 基准），
+  // 期间轮询不得覆盖该按钮视觉；到期由轮询恢复常态并清理背景。
+  private readonly long[] _commandPulseUntil = new long[6];
+  private readonly bool[] _commandPulseFailure = new bool[6];
+  // 右键菜单保持：菜单模态期间不触发 PointerExited（防 linger 收起），
+  // 整栏边框强调；菜单关闭（本线程 hwndMenu 消失）后自动解除。
+  private bool _menuHold;
 
   public event EventHandler? PointerEntered;
 
@@ -233,7 +248,42 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     }
 
     _popup.IsOpen = true;
+    ApplyNoActivateToPopupHosts();
     return true;
+  }
+
+  /// <summary>
+  /// Popup 打开后枚举主窗口子窗口，只为 XAML 内容桥接 HWND 补
+  /// WS_EX_NOACTIVATE 样式：修复点击 Popup 承载的按钮瞬间桥接宿主被
+  /// 激活、前台被抢的焦点异常。样式足以让点击不激活；消息子类化会
+  /// 干扰桥接/输入路由窗口的合成路径（曾致首帧白屏与启动 fastfail），
+  /// 一律不做，输入路由窗口也绝不动。
+  /// </summary>
+  private void ApplyNoActivateToPopupHosts()
+  {
+    EnumChildWindows(_handle, (child, _) =>
+    {
+      if (child == _handle || _popupHosts.Contains(child)) return true;
+      if (!IsContentBridgeWindow(child)) return true;
+      const int GwlExStyle = -20;
+      const long WsExNoActivate = 0x08000000;
+      long style = GetWindowLongPtrW(child, GwlExStyle);
+      SetWindowLongPtrW(child, GwlExStyle, (nint)(style | WsExNoActivate));
+      _popupHosts.Add(child);
+      return true;
+    }, nint.Zero);
+  }
+
+  private static bool IsContentBridgeWindow(nint window)
+  {
+    // DllImport 不能 marshal Span<char>（EnumChildWindows 的 native 回调里
+    // 抛 MarshalDirectiveException 会 fastfail 整个进程），用 char[]。
+    char[] buffer = new char[128];
+    int length = GetClassName(window, buffer, buffer.Length);
+    if (length <= 0) return false;
+    string name = new(buffer, 0, length);
+    return name is "Microsoft.UI.Content.DesktopChildSiteBridge"
+        or "Windows.UI.Composition.DesktopWindowContentBridge";
   }
 
   private void OnHostLoadedOpenPopup(object sender, RoutedEventArgs args)
@@ -265,11 +315,16 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     ObjectDisposedException.ThrowIf(_disposed, this);
     _pointerTimer.Stop();
     _pointerOver = null;
-    // 隐藏瞬间按钮可能停在 PointerOver/Pressed：popup 关闭会丢弃待发的
-    // 指针事件，避让重开后残留冻结态；这里显式归位 Normal。
-    foreach (Button button in _commandButtons)
+    SetMenuHold(false);
+    // 隐藏瞬间按钮可能停在 PointerOver/Pressed 或命令脉冲：popup 关闭会
+    // 丢弃待发的指针事件，避让重开后残留冻结态；这里显式归位并清脉冲。
+    for (int index = 0; index < _commandButtons.Count; index++)
     {
-      VisualStateManager.GoToState(button, "Normal", useTransitions: false);
+      _commandPulseUntil[index] = 0;
+      _commandPulseFailure[index] = false;
+      _commandButtons[index].Background = new SolidColorBrush(
+          Windows.UI.Color.FromArgb(0, 0, 0, 0));
+      VisualStateManager.GoToState(_commandButtons[index], "Normal", useTransitions: false);
     }
     CancelPendingPopupOpen();
     _popup.IsOpen = false;
@@ -391,6 +446,7 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     _root.ActualThemeChanged -= OnRootActualThemeChanged;
     _messages.MessageHandled -= OnMessageHandled;
     _messages.Dispose();
+    _popupHosts.Clear();
     _popup.Child = null;
     _window.Close();
   }
@@ -437,10 +493,13 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     _root.Children.Add(bar);
 
     // 右键 = 截图模式菜单入口（#236）；不拦截按钮/把手的左键语义。
+    // 菜单保持先于事件：整栏立即进入强调态，菜单模态期间不因鼠标离开
+    // 触发 linger 收起，菜单关闭后由轮询解除并恢复正常停留计时。
     _root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
     {
       if (args.GetCurrentPoint(_root).Properties.IsRightButtonPressed)
       {
+        SetMenuHold(true);
         ModeMenuRequested?.Invoke(this, EventArgs.Empty);
         args.Handled = true;
       }
@@ -472,7 +531,13 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
     };
     AutomationProperties.SetName(button, tooltip);
     ToolTipService.SetToolTip(button, tooltip);
-    button.Click += (_, _) => CommandInvoked?.Invoke(this, command);
+    // 点击即时反馈先于命令分派：按钮立即进入“已触发”脉冲，命令成败
+    // 之后由装配层补成功/失败视觉；不等外部窗口出现才可感知。
+    button.Click += (_, _) =>
+    {
+      PulseCommand(command);
+      CommandInvoked?.Invoke(this, command);
+    };
     _commandButtons.Add(button);
     return button;
   }
@@ -489,9 +554,10 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   }
 
   /// <summary>
-  /// 轮询驱动的按钮悬停视觉：windowed Popup 承载内容 + NOACTIVATE 窗口
-  /// 组合下 XAML 的 PointerOver 状态更新不可靠（悬停无高亮、避让重开后
-  /// 残留按下态），以真实光标坐标为权威，按按钮强制切换 CommonStates。
+  /// 轮询驱动的按钮视觉：windowed Popup 承载内容 + NOACTIVATE 窗口
+  /// 组合下 XAML 的 PointerOver/Pressed 状态更新不可靠（悬停无高亮、
+  /// 按下无反馈、避让重开后残留按下态），以真实光标坐标与左键状态为
+  /// 权威，按按钮强制切换 CommonStates；命令脉冲期间的按钮不被覆盖。
   /// </summary>
   private void UpdateButtonHoverStates()
   {
@@ -509,13 +575,93 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
             new Windows.Foundation.Rect(0, 0, button.ActualWidth, button.ActualHeight)))
         .ToArray();
     int hovered = HitTestButton(rects, x, y);
+    bool pressed = (GetAsyncKeyState(VkLButton) & 0x8000) != 0;
+    long now = Environment.TickCount64;
     for (int index = 0; index < _commandButtons.Count; index++)
     {
+      if (index < _commandPulseUntil.Length && now < _commandPulseUntil[index]) continue;
+      if (index < _commandPulseUntil.Length && _commandPulseUntil[index] != 0)
+      {
+        // 脉冲到期（成功或失败）：清背景回透明并复位标记，再进入常规判定。
+        _commandPulseUntil[index] = 0;
+        _commandPulseFailure[index] = false;
+        _commandButtons[index].Background = new SolidColorBrush(
+            Windows.UI.Color.FromArgb(0, 0, 0, 0));
+      }
       VisualStateManager.GoToState(
           _commandButtons[index],
-          index == hovered ? "PointerOver" : "Normal",
+          pressed && index == hovered ? "Pressed"
+          : index == hovered ? "PointerOver"
+          : "Normal",
           useTransitions: true);
     }
+  }
+
+  /// <summary>
+  /// 命令触发脉冲：按钮立即进入按下态并短暂着前景色淡底（成功语义的
+  /// “已触发”反馈），脉冲期内轮询不覆盖、重复触发顺延；截图类命令随
+  /// 后由避让隐藏接管，其余命令到期由轮询恢复常态。
+  /// </summary>
+  internal void PulseCommand(FloatingToolbarCommand command)
+  {
+    if (_disposed) return;
+    int index = CommandIndex(command);
+    if (index < 0 || index >= _commandButtons.Count) return;
+    _commandPulseFailure[index] = false;
+    _commandPulseUntil[index] = Environment.TickCount64 +
+        (long)CommandPulseDuration.TotalMilliseconds;
+    _commandButtons[index].Background = new SolidColorBrush(
+        Windows.UI.Color.FromArgb(52, CurrentForeground().R, CurrentForeground().G, CurrentForeground().B));
+    VisualStateManager.GoToState(_commandButtons[index], "Pressed", useTransitions: true);
+  }
+
+  /// <summary>命令失败脉冲：按钮短暂失败红底（异常已由装配层记录）。</summary>
+  internal void FlashCommandFailure(FloatingToolbarCommand command)
+  {
+    if (_disposed) return;
+    int index = CommandIndex(command);
+    if (index < 0 || index >= _commandButtons.Count) return;
+    _commandPulseFailure[index] = true;
+    _commandPulseUntil[index] = Environment.TickCount64 +
+        (long)CommandPulseDuration.TotalMilliseconds;
+    _commandButtons[index].Background = new SolidColorBrush(
+        Windows.UI.Color.FromArgb(150, 196, 43, 28));
+    VisualStateManager.GoToState(_commandButtons[index], "Pressed", useTransitions: true);
+  }
+
+  private Windows.UI.Color CurrentForeground()
+  {
+    if (_gripIcon.Foreground is SolidColorBrush gripBrush) return gripBrush.Color;
+    return Windows.UI.Color.FromArgb(255, 36, 36, 36);
+  }
+
+  /// <summary>命令到按钮下标的固定映射（BuildContent 添加顺序）：命令
+  /// 脉冲/失败反馈按下标定位按钮，顺序契约由 HoverTests 锁定。</summary>
+  internal static int CommandIndex(FloatingToolbarCommand command) => command switch
+  {
+    FloatingToolbarCommand.CaptureScreenshot => 0,
+    FloatingToolbarCommand.ScreenshotEdit => 1,
+    FloatingToolbarCommand.ClipboardRecognize => 2,
+    FloatingToolbarCommand.ShowMainWindow => 3,
+    FloatingToolbarCommand.OpenSettings => 4,
+    FloatingToolbarCommand.DismissToolbar => 5,
+    _ => -1,
+  };
+
+  /// <summary>
+  /// 右键菜单保持视觉：整栏描边强调（菜单已展开的即时反馈），解除时
+  /// 恢复无边框；与主题重涂互不冲突（仅动边框，不动背景/前景）。
+  /// </summary>
+  private void SetMenuHold(bool hold)
+  {
+    if (_menuHold == hold) return;
+    _menuHold = hold;
+    Windows.UI.Color accent = CurrentForeground();
+    _root.BorderThickness = hold ? new Thickness(1) : default;
+    _root.BorderBrush = hold
+        ? new SolidColorBrush(Windows.UI.Color.FromArgb(200, accent.R, accent.G, accent.B))
+        : null;
+    _root.CornerRadius = hold ? new CornerRadius(6) : new CornerRadius(0);
   }
 
   /// <summary>按钮矩形命中判定（纯函数供测试）：返回命中下标，未命中为 -1。</summary>
@@ -536,11 +682,24 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   private void UpdatePointerPresence()
   {
     if (_disposed || !IsVisible) return;
+    if (_menuHold)
+    {
+      // 菜单模态期间视为持续停留：不触发 PointerExited，防 linger 收起；
+      // 本线程菜单窗口消失即菜单关闭，解除保持并回到真实光标判定。
+      if (ThreadHasOpenMenu()) return;
+      SetMenuHold(false);
+    }
     bool over = IsPointerOver;
     if (_pointerOver == over) return;
     _pointerOver = over;
     if (over) PointerEntered?.Invoke(this, EventArgs.Empty);
     else PointerExited?.Invoke(this, EventArgs.Empty);
+  }
+
+  private static bool ThreadHasOpenMenu()
+  {
+    var info = GuiThreadInfo.Default;
+    return GetGUIThreadInfo(0 /* 当前线程 */, ref info) && info.hwndMenuOwner != 0;
   }
 
   private void OnGripPointerPressed(object sender, PointerRoutedEventArgs args)
@@ -664,6 +823,41 @@ internal sealed class FloatingToolbarWindow : IFloatingToolbarView
   [DllImport("user32.dll")]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool GetCursorPos(out PointL point);
+
+  [DllImport("user32.dll")]
+  private static extern short GetAsyncKeyState(int virtualKey);
+
+  private delegate bool EnumChildWindowsProc(nint window, nint lParam);
+
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool EnumChildWindows(
+      nint window, EnumChildWindowsProc callback, nint lParam);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(nint window, [Out] char[] className, int maxCount);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct GuiThreadInfo
+  {
+    public int cbSize;
+    public uint flags;
+    public nint hwndActive;
+    public nint hwndFocus;
+    public nint hwndCapture;
+    public nint hwndMenuOwner;
+    public nint hwndMoveSize;
+    public nint hwndCaret;
+    public int caretLeft;
+    public int caretTop;
+    public int caretRight;
+    public int caretBottom;
+    public static GuiThreadInfo Default => new() { cbSize = Marshal.SizeOf<GuiThreadInfo>() };
+  }
 
   [StructLayout(LayoutKind.Sequential)]
   private struct RectL

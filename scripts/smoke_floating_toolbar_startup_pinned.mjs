@@ -74,6 +74,20 @@ try {
   assert(bar.ExtendedStyle & 0x80, 'Native toolbar must use WS_EX_TOOLWINDOW.');
   assert(!(bar.ExtendedStyle & 0x40000), 'Native toolbar must not use WS_EX_APPWINDOW.');
   assert(bar.ExtendedStyle & 0x08000000, 'Native toolbar must carry WS_EX_NOACTIVATE.');
+  // Windowed Popup 的内容桥接子窗口承接全部指针输入：内容桥接
+  // （DesktopChildSiteBridge/DesktopWindowContentBridge）必须携带
+  // WS_EX_NOACTIVATE，否则点击瞬间前台被抢给 Popup 宿主；输入路由窗口
+  // （InputNonClientPointerSource/InputSiteWindowClass）不做约束。
+  const childStyles = JSON.parse(await native('toolbar-child-styles', { Handle: bar.Handle }));
+  evidence.popupHostChildren = childStyles;
+  const bridges = childStyles.filter((child) =>
+    child.ClassName === 'Microsoft.UI.Content.DesktopChildSiteBridge' ||
+    child.ClassName === 'Windows.UI.Composition.DesktopWindowContentBridge');
+  assert(bridges.length > 0, 'Pinned toolbar exposes no popup content bridge to assert.');
+  for (const child of bridges) {
+    assert(child.ExtendedStyle & 0x08000000,
+      `Popup content bridge ${child.Handle} (${child.ClassName}) must carry WS_EX_NOACTIVATE.`);
+  }
   // The cold-start Workbench must stay reachable after the first popup open.
   await openSettings(app.page);
   await app.page.waitForURL('https://app.vibeocr/index.html#/settings');
