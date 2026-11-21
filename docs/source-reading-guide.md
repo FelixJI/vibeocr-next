@@ -57,7 +57,7 @@ Python 旧生成/解码路由仍有内部契约消费者，本次保留为兼容
 1. 读 `global.json`，确认 SDK 锁定策略。
 2. 找到 Bootstrapper 的 `.csproj` 与入口，理解它与 WinUI App 的职责分界；正式包的 .NET/Windows App Runtime 随包、Bootstrapper 与诊断检查随包载荷；WebView2 使用系统 Evergreen（注册表检测，缺失时报修引导安装）。
 3. 读 `src/dotnet/VibeOCR.App/App.xaml.cs` 的 `OnLaunched`，注意 `Web/WebView2ProductEnvironment.cs` 如何在首个 WebView 创建前绑定产品私有 WebView2 运行库目录与便携 userData 根（未打包 dev/test 允许系统 Evergreen，随包缺失则明确失败不回退）。
-4. 读 `Inference/RuntimeDemandCoordinator` 与 `ManagedRuntimeConnection`，查看按需准备、共享等待、维护归属与唯一活动连接；再搜索 `InferenceSupervisorProcess` 的 ready envelope 与 shutdown。
+4. 读 `Inference/RuntimeDemandCoordinator` 与 `ManagedRuntimeConnection`，查看首窗后台自动准备、按需共享等待、维护归属与唯一活动连接；再搜索 `InferenceSupervisorProcess` 的 ready envelope 与 shutdown。
 5. 搜索 capability 的消费位置，确认功能如何协商。
 6. 对照 `VibeOCR.Platform.Tests` 与 `VibeOCR.App.Tests` 的启动/失败测试。
 
@@ -66,16 +66,18 @@ flowchart TD
     A["Bootstrapper"] --> B["App.OnLaunched"]
     B --> C["单实例 / 前置检查"]
     C --> D["创建主窗口"]
-    D --> P["本地工具 / 通用设置：无需计算进程"]
+    D --> S["首窗就绪：后台自动准备识别服务"]
+    D --> P["本地工具 / 通用设置：不等待计算进程"]
     D --> Q["显式 OCR / batch / PDF / Runtime 配置需求"]
-    Q --> R["RuntimeDemandCoordinator：prepare + attach + catalog"]
+    S --> R["RuntimeDemandCoordinator：prepare + attach + catalog"]
+    Q --> R
     R --> E["ManagedRuntimeConnection / InferenceSupervisorProcess"]
     E --> F["Backend ready envelope"]
     F --> G["Capabilities + typed client"]
     G --> H["ViewModels 可提交任务"]
 ```
 
-主窗口可交互不依赖计算服务。首次计算先取得就绪实例的权威目录和默认模式，随后构造任务；ready 仍不表示模型已经加载。恢复绑定产品服务实例，维护结束只恢复先前启用的连接。
+主窗口可交互不依赖计算服务；首窗就绪后后台自动准备识别服务，首次显式计算与后台准备共享同一就绪结果。计算先取得就绪实例的权威目录和默认模式，随后构造任务；ready 仍不表示模型已经加载。恢复绑定产品服务实例，维护结束只恢复先前启用的连接。
 
 ## 第一条纵向链：提交识别
 
