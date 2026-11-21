@@ -245,7 +245,7 @@ public sealed partial class MainWindow
     await File.WriteAllBytesAsync(initialImage, png);
     await application.ExecuteAsync(new(Guid.NewGuid(), new OpenDroppedImageEditFileCommand(initialImage)), CancellationToken.None);
     await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
-      "document.body.textContent.includes('原图 64×32') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
+      "document.body.textContent.includes('原图 64×32') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
       "Main image editor did not load the source.");
     await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"屏蔽\"]').click()");
     await WorkbenchWebView.ExecuteScriptAsync("""
@@ -263,9 +263,9 @@ public sealed partial class MainWindow
       {
         for (int attempt = 0; attempt < 2; attempt++)
         {
-          await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
+          await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"钉图\"]').click()");
           await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
-            "document.body.textContent.includes('贴图未创建') && !document.querySelector('button[aria-label=\"贴图\"]')?.disabled") == "true",
+            "document.body.textContent.includes('钉图未创建') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
             "Failed first pin did not return a recoverable receipt.");
           await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
           if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
@@ -274,7 +274,7 @@ public sealed partial class MainWindow
       finally { File.Delete(pinRoot); }
       await VerifyRecoveryBeforeCleanupAsync(png);
     }
-    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"贴图\"]').click()");
+    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"钉图\"]').click()");
     await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 1), "JPEG selection prevented first pin creation.");
     if (pinSnapshotStore!.ReadSnapshotPng(pinnedImages[0].PinId) is not { Width: 64, Height: 32 })
       throw new InvalidOperationException("First pin was not a decodable owned PNG.");
@@ -371,7 +371,7 @@ public sealed partial class MainWindow
       try
       {
         if (await first.SmokeEditorEvaluateAsync(
-          "(()=>{const b=Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='完成贴图');if(!b||b.disabled)return false;b.click();return true})()") != "true")
+          "(()=>{const b=Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='完成钉图');if(!b||b.disabled)return false;b.click();return true})()") != "true")
           throw new InvalidOperationException("Real pin completion button was unavailable.");
         await buttonReceiptEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await WaitForPinCheckAsync(async () => await first.SmokeEditorEvaluateAsync(
@@ -414,7 +414,7 @@ public sealed partial class MainWindow
       await WaitForPinCheckAsync(() => Task.FromResult(!second.Editing), "Switch target did not discard.");
 
       // A13-02：提交后 renderer 重置且回执丢失：已落盘提交为权威结果，槽幂等
-      // 收尾不重做保存；同窗重开新代后旧回调不得拆新编辑器；再开新贴图后旧会
+      // 收尾不重做保存；同窗重开新代后旧回调不得拆新编辑器；再开新钉图后旧会
       // 迟到确认不得清除新槽；单次提交由真实提交事件计数验证。
       CaptureUiSmokeTrace.Stage("pins.committed-receipt-loss");
       int appliedBefore = SmokePinSnapshotAppliedCount;
@@ -502,7 +502,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Recovered commit blocked window close or application exit.");
       CancelPinsExitPreparation();
       CaptureUiSmokeTrace.Stage("pins.native-inflight-reset-committed-once");
-      // 新贴图新槽：旧会话迟到确认不得清除新槽。
+      // 新钉图新槽：旧会话迟到确认不得清除新槽。
       await EnterPinEditAsync(second);
       await WaitForPinEditorAsync(second);
       await oldConfirmed();
@@ -570,7 +570,7 @@ public sealed partial class MainWindow
 
   private async Task VerifyPinsLifecycleSelfCheckAsync(PinnedImageWindow first, PinnedImageWindow second)
   {
-    // 生命周期必须从真实编辑并保存的贴图开始，保留原长场景的工程/屏蔽前置。
+    // 生命周期必须从真实编辑并保存的钉图开始，保留原长场景的工程/屏蔽前置。
     foreach (PinnedImageWindow pin in new[] { first, second })
     {
       await EnterPinEditAsync(pin);
@@ -756,7 +756,7 @@ public sealed partial class MainWindow
     await VerifySmokePinTextAsync(first);
 
     // 拓扑变更回归：自身窗口的屏外恢复记录，用当前工作区验证 image 与
-    // typed 贴图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
+    // typed 钉图至少顶部可拖 band 可见，且位置不再停在屏外记录上。
     CaptureUiSmokeTrace.Stage("pins.offscreen-recovery");
     var typed = CreateTypedPin(Features.Pins.TypedPinWindow.ContentKind.Text);
     typed.SetText("offscreen-restore");

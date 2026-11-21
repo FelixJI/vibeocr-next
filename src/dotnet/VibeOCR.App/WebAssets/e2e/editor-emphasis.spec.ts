@@ -1,4 +1,5 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
+import { activateToolbarTool } from "./toolSelection";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -103,7 +104,8 @@ async function drag(
 }
 
 async function action(page: Page, name: string) {
-  await page.getByRole("button", { name, exact: true }).click();
+  // 家族分组的工具经族内菜单激活；非工具按钮（添加区域等）仍直点。
+  await activateToolbarTool(page, name);
 }
 
 async function save(
@@ -1653,8 +1655,8 @@ test("H3b recognition/pin uploads carry magnifier leak exclusion boxes; text lay
   await drag(page, 445, 245, 555, 355);
   await action(page, "放大镜");
   await drag(page, 400, 200, 600, 400);
-  // 贴图：pinScreenshotImage 同样携带基础屏蔽 + 镜内泄露区两个排除框。
-  await action(page, "贴图");
+  // 钉图：pinScreenshotImage 同样携带基础屏蔽 + 镜内泄露区两个排除框。
+  await action(page, "钉图");
   const pinHandle = await page.waitForFunction(() =>
     (
       window as unknown as {
@@ -2187,8 +2189,8 @@ test("H7 exclusion box budget: over-budget lens projections reject recognition/p
       (command) => command.action === "recognizeScreenshotImage",
     ),
   ).toBe(false);
-  // 贴图入口同样拒绝且不发送命令。
-  await action(page, "贴图");
+  // 钉图入口同样拒绝且不发送命令。
+  await action(page, "钉图");
   expect(uploads.count()).toBe(initialUploads);
   const commandsAfterPin = await page.evaluate(
     () =>

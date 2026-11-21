@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -130,7 +131,7 @@ describe("image canvas editor system import", () => {
       width: 900,
       height: 600,
     } as DOMRect);
-    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    await activateToolbarTool("模糊");
     fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
       target: { value: "brush" },
     });
@@ -226,10 +227,8 @@ describe("image canvas editor system import", () => {
         width: 900,
         height: 600,
       } as DOMRect);
-      fireEvent.click(
-        screen.getByRole("button", {
-          name: draft === "duplicate-draft" ? "重复匹配" : "去水印",
-        }),
+      await activateToolbarTool(
+        draft === "duplicate-draft" ? "重复匹配" : "去水印",
       );
       if (draft !== "duplicate-draft")
         fireEvent.change(screen.getByLabelText("修补掩膜绘制方式"), {
@@ -812,7 +811,7 @@ it.each(["finished-duplicate", "finish-during-decode"] as const)(
       width: 900,
       height: 600,
     } as DOMRect);
-    fireEvent.click(screen.getByRole("button", { name: "重复匹配" }));
+    await activateToolbarTool("重复匹配");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 200, clientY: 200 });
     const finishSelection = () =>
       fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 280, clientY: 260 });

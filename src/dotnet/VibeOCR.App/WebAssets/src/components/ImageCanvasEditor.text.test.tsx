@@ -6,6 +6,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -246,7 +247,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+    await activateToolbarTool("屏蔽");
     await dragDraw(canvas, harness, { x: 80, y: 80 }, { x: 150, y: 130 });
     fireEvent.click(screen.getByRole("button", { name: "文字" }));
     fireEvent.change(screen.getByLabelText("标注文字"), {
@@ -307,7 +308,7 @@ describe("文字、序号和说明对象", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: label }));
+      await activateToolbarTool(label);
       fireEvent.change(screen.getByLabelText("标注文字"), {
         target: { value: "取色测试" },
       });
@@ -600,7 +601,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     fireEvent.change(screen.getByLabelText("序号起点"), {
       target: { value: "25" },
     });
@@ -615,7 +616,7 @@ describe("文字、序号和说明对象", () => {
       target: { value: "1" },
     });
     fireEvent.keyDown(canvas, { key: "Delete" });
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     await dragDraw(canvas, harness, { x: 500, y: 200 }, { x: 500, y: 200 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     fireEvent.change(screen.getByLabelText("选择标注对象"), {
@@ -629,7 +630,7 @@ describe("文字、序号和说明对象", () => {
       target: { value: "51" },
     });
     fireEvent.blur(screen.getByLabelText("序号值"));
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     await dragDraw(canvas, harness, { x: 600, y: 200 }, { x: 600, y: 200 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     fireEvent.change(screen.getByLabelText("选择标注对象"), {
@@ -651,7 +652,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     fireEvent.change(screen.getByLabelText("序号格式"), {
       target: { value: "upper" },
     });
@@ -697,7 +698,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "说明" }));
+    await activateToolbarTool("说明");
     fireEvent.change(screen.getByLabelText("标注文字"), {
       target: { value: "abcdefghij\nabcdefghij\nabcdefghij\nabcdefghij" },
     });
@@ -720,7 +721,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     fireEvent.change(screen.getByLabelText("序号起点"), {
       target: { value: "5" },
     });
@@ -779,7 +780,7 @@ describe("文字、序号和说明对象", () => {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "说明" }));
+    await activateToolbarTool("说明");
     fireEvent.change(screen.getByLabelText("标注文字"), {
       target: { value: "说明内容" },
     });
@@ -843,7 +844,7 @@ for (const tool of ["文字", "序号", "说明"] as const) {
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: tool }));
+    await activateToolbarTool(tool);
     const font = screen.getByLabelText("文字字体");
     font.focus();
     for (const value of ["", "m", "mono", "mono:", "monospace"]) {

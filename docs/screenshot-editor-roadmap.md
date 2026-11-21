@@ -1,6 +1,6 @@
 # 截图与编辑能力对齐清单
 
-核对日期：2026-10-15。目标是分阶段对齐 PixPin / ShareX 的截图、编辑、贴图与输出体验。P0 已完成本地实现与相关验证，尚未远端合并；P1–P6 为范围基线，实施状态与依赖以文末 AI Flow Issues 为准。本轮仅创建规划，不启动远期实现。
+核对日期：2026-10-15。目标是分阶段对齐 PixPin / ShareX 的截图、编辑、钉图与输出体验。P0 已完成本地实现与相关验证，尚未远端合并；P1–P6 为范围基线，实施状态与依赖以文末 AI Flow Issues 为准。本轮仅创建规划，不启动远期实现。
 
 ## 已确认的交互原则
 
@@ -9,7 +9,7 @@
 - 表格、公式、马赛克等工具不能因“简洁”而消失；没有运行能力时说明原因，不伪装成成功。
 - 图标以真实使用语义为准。用户已否决“应用四格/水滴”和“九宫格/扩散圆点”，确认 IconPark 交错色块 Mosaic 与本项目真实虚化效果缩略图；全部 44 项已完成 Tabler / IconPark 对比。用户定稿 A：其余保留 Tabler，仅重新框选（selected-focus）和手形平移（hand-drag）改用 IconPark。
 - 原生框选、现场编辑、独立编辑共用语义与资产；纯编辑不启动 OCR 或安装模型。
-- 原图保留。预览、复制、保存、贴图、识别消费一致的最终像素；识别排除区继续遵守单独契约。
+- 原图保留。预览、复制、保存、钉图、识别消费一致的最终像素；识别排除区继续遵守单独契约。
 
 ## 图标来源核实
 
@@ -40,8 +40,8 @@
 | 强调工具 | 已有荧光笔和序号 | 缺聚光灯、画面内放大镜、气泡标注；现有截图取色放大镜不等于导出到图片的放大镜标注 |
 | OCR/校对 | 已有文字、表格、公式及图片选字；左侧原图 bbox 校对 | 需统一编辑后的模式选择与结果操作，避免只有入口而模式不一致 |
 | 长截图 | 已有向下纵向拼接及失败/超限保护 | 尚非双向/横向/自动滚动；固定区域、动画与重复纹理仍受限 |
-| 桌面贴图 | 已有置顶、移动、缩放、透明度、复制、保存、选字；最多四张 | 缺贴图内完整编辑、多图编组、折叠、穿透、持久恢复及更多内容类型 |
-| 输出 | 已有复制、保存、贴图、显式识别，PNG/JPEG 编码与输出尺寸 | 缺编辑对象工程、图像插入/粘贴、丰富背景排版及批量输出预设 |
+| 桌面钉图 | 已有置顶、移动、缩放、透明度、复制、保存、选字；最多四张 | 缺钉图内完整编辑、多图编组、折叠、穿透、持久恢复及更多内容类型 |
+| 输出 | 已有复制、保存、钉图、显式识别，PNG/JPEG 编码与输出尺寸 | 缺编辑对象工程、图像插入/粘贴、丰富背景排版及批量输出预设 |
 | 录屏与自动化 | 本次检查未发现完整录屏/工作流产品入口 | 作为独立阶段，不通过截图编辑器堆出第二套宿主/IPC |
 
 本地证据：`ImageCanvasEditor.tsx`、`annotationGeometry.ts`、`ScreenRegionPicker.cs`、`PinnedImageWindow.cs`、`ScrollCaptureSession.cs` 与 `docs/screenshot-tool.md`。本地 UI 提交 `598458d`：Web 单测 354 通过、Playwright 69 通过、App 测试 1065 通过，原生 publish/smoke 通过。早期质量入口曾因布局和视觉用例失败，修正后相关完整 Web 套件已通过；不将这些分项结果写成最终 required 或完整发布包通过。独立审阅、远端门禁及真实混合 DPI 验收仍待后续交付。
@@ -92,18 +92,18 @@
 
 参考：[PixPin 遮挡与修补](https://pixpin.cn/docs/mark/mosaic)、[聚光灯](https://pixpin.cn/docs/mark/highlight)、[放大镜](https://pixpin.cn/docs/mark/magnifier)。
 
-### P4：截图、长截图与贴图（依赖稳定的编辑输出接口）
+### P4：截图、长截图与钉图（依赖稳定的编辑输出接口）
 
 - 统一全屏、活动窗口、指定显示器、固定区域、上次区域、延时截图入口与快捷键。
 - 捕获光标、阴影与窗口边框选项；窗口智能候选、跨屏与混合 DPI 的可预测行为。
 - 长截图自动滚动、反向/横向、固定栏处理、拼接预览与手工纠偏；逐项明确支持边界。
-- 贴图内编辑/裁剪/旋转、鼠标穿透、折叠、编组、同步移动、退出恢复。
-- 贴图内容扩展到文字、颜色、公式、文件预览；与原图 OCR 绑定保持独立。
+- 钉图内编辑/裁剪/旋转、鼠标穿透、折叠、编组、同步移动、退出恢复。
+- 钉图内容扩展到文字、颜色、公式、文件预览；与原图 OCR 绑定保持独立。
 - 截图历史检索、重开编辑、容量限制、单项删除与清空入口。
 
-验收：取消后宿主窗口状态恢复；多屏坐标准确；长截图失败不会输出伪完整结果；贴图编辑互不污染。
+验收：取消后宿主窗口状态恢复；多屏坐标准确；长截图失败不会输出伪完整结果；钉图编辑互不污染。
 
-参考：[PixPin 贴图](https://pixpin.cn/docs/pin/base-use)、[ShareX 捕获概览](https://github.com/ShareX/ShareX#screenshot-and-screen-recording-features)。
+参考：[PixPin 钉图](https://pixpin.cn/docs/pin/base-use)、[ShareX 捕获概览](https://github.com/ShareX/ShareX#screenshot-and-screen-recording-features)。
 
 ### P5：排版、OCR 与输出工作流（依赖 P2/P4）
 
@@ -149,7 +149,7 @@
 | P3 | [#235 增加聚光灯、局部放大及水印标注](https://github.com/FelixJI/vibeocr-next/issues/235) | #229, #230 |
 | P4 | [#236 统一捕获入口、快捷键与多屏坐标](https://github.com/FelixJI/vibeocr-next/issues/236) | #228 |
 | P4 | [#237 扩展长截图方向、滚动与拼接纠偏](https://github.com/FelixJI/vibeocr-next/issues/237) | #236 |
-| P4 | [#238 完善贴图编辑、编组与截图历史](https://github.com/FelixJI/vibeocr-next/issues/238) | #231, #233, #236 |
+| P4 | [#238 完善钉图编辑、编组与截图历史](https://github.com/FelixJI/vibeocr-next/issues/238) | #231, #233, #236 |
 | P5 | [#239 完善排版、输出预设与工具栏定制](https://github.com/FelixJI/vibeocr-next/issues/239) | #231, #232, #233 |
 | P5 | [#240 统一编辑后 OCR、校对与结果输出](https://github.com/FelixJI/vibeocr-next/issues/240) | #228, #231 |
 | P6 | [#241 设计并实现独立录屏与录制结果处理](https://github.com/FelixJI/vibeocr-next/issues/241) | #236, #239 |

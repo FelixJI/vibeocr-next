@@ -1,4 +1,10 @@
 import { EditorColorPicker } from "./EditorColorPicker";
+import {
+  TOOL_FAMILIES,
+  familyMenuLabel,
+  type ToolFamily,
+} from "./toolFamilies";
+import { TOOL_LABELS } from "./toolLabels";
 import { editorTextBox } from "./editorTextLayerGeometry";
 import { compositionExclusions } from "./compositionExclusions";
 import { CanvasCompositionPanel } from "./CanvasCompositionPanel";
@@ -37,6 +43,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import type { AppAction, AppActions } from "../app/types";
@@ -216,7 +223,7 @@ export interface ScreenshotTextLayerState {
     | null;
 }
 
-type Tool =
+export type Tool =
   | "select"
   | "hand"
   | "textSelect"
@@ -246,32 +253,6 @@ const DEFAULT_COLOR = "#e02020";
 
 // 沿用标注手势的8px阈值；聚光灯孔洞的两个维度都须有效。
 const MIN_DRAW_DISTANCE = 8;
-const TOOL_LABELS: Readonly<Record<Tool, string>> = {
-  select: "选择",
-  hand: "手形",
-  textSelect: "取字",
-  rectangle: "矩形",
-  ellipse: "椭圆",
-  arrow: "箭头",
-  line: "直线",
-  polyline: "折线",
-  text: "文字",
-  callout: "说明",
-  mosaic: "马赛克",
-  blur: "模糊",
-  pen: "画笔",
-  highlighter: "荧光笔",
-  numbering: "序号",
-  image: "图片",
-  exclude: "屏蔽",
-  solid: "遮挡",
-  spotlight: "聚光灯",
-  magnifier: "放大镜",
-  objectEraser: "橡皮擦",
-  crop: "裁剪",
-  inpaint: "去水印",
-  dupmatch: "重复匹配",
-};
 const TOOL_HINTS: Readonly<Partial<Record<Tool, string>>> = {
   select: "选择和编辑标注对象；拖选图片中的文字可复制",
   hand: "平移画布（也可按住空格拖动），不移动标注对象",
@@ -662,7 +643,7 @@ const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
       rejectImport: "imageEdit.rejectImport",
       releaseAssets: "imageEdit.releaseAssets",
     },
-    // #238 贴图内编辑：宿主只实现真实消费者动作（C6）；映射保持全量
+    // #238 钉图内编辑：宿主只实现真实消费者动作（C6）；映射保持全量
     // 类型形状，未消费动作在 pin 模式 UI 不可达且宿主 fail-closed 拒绝。
     pinEdit: {
       notifyScreenshotRevision: "pinEdit.notifyScreenshotRevision",
@@ -755,9 +736,9 @@ interface ImageCanvasEditorProps {
    * 去水印/旋转/屏蔽三类处理工具。 */
   readonly toolset?: EditorToolset;
   /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit；
-   * 贴图内编辑传 pinEdit。 */
+   * 钉图内编辑传 pinEdit。 */
   readonly commandScope?: EditorCommandScope;
-  /** #238 贴图内编辑模式：主排以“完成贴图”取代“保存工程”，隐藏
+  /** #238 钉图内编辑模式：主排以“完成钉图”取代“保存工程”，隐藏
    * 钉图/识别入口；会话命令走 pinEdit.*。 */
   readonly pinSnapshotApply?: boolean;
   /** 左侧校对面数据：冻结参考图（宿主 state.resultImage，绝不用会话基准
@@ -5168,7 +5149,7 @@ export function ImageCanvasEditor({
       // fail-closed 拒绝的命令；其余两通道沿用可选绑定兼容契约。
       if (commandScope === "pinEdit" && !frozen.sessionId) {
         await discardAnnotatedImage(resourceUri);
-        setOperationMessage("贴图会话已失效，本次预设输出未发送，请重试。");
+        setOperationMessage("钉图会话已失效，本次预设输出未发送，请重试。");
         return;
       }
       const command: AppAction = {
@@ -5252,7 +5233,7 @@ export function ImageCanvasEditor({
   }
 
   /** #233/#238 共享：已应用补丁的预算前置 + 逐块 PNG 编码。失败以既有
-   * 文案抛出（保存工程与完成贴图同一套边界）。 */
+   * 文案抛出（保存工程与完成钉图同一套边界）。 */
   async function encodeAppliedProjectPatches(): Promise<
     {
       id: number;
@@ -5412,7 +5393,7 @@ export function ImageCanvasEditor({
     }
   }
 
-  /** #238 完成贴图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
+  /** #238 完成钉图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
    * 合成 PNG（换装显示）一次上传，宿主原子写入 owned 快照后才回 ack；
    * 会话已变化/超限时保留编辑现场可重试。 */
   const pinSavePromiseRef = useRef<
@@ -5488,7 +5469,7 @@ export function ImageCanvasEditor({
       return false;
     }
     if (!initialExclusionsReady()) {
-      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成贴图。");
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成钉图。");
       return false;
     }
     const image = imageRef.current;
@@ -5504,13 +5485,13 @@ export function ImageCanvasEditor({
       const boxes = hostExclusionBoxes();
       if (!boxes) {
         setOperationMessage(
-          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成贴图。",
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成钉图。",
         );
         return false;
       }
-      setOperationMessage("正在采集贴图内容……");
+      setOperationMessage("正在采集钉图内容……");
       const payload = await buildProjectContributionPayload();
-      setOperationMessage("正在上传贴图内容……");
+      setOperationMessage("正在上传钉图内容……");
       const contributeId = await uploadProjectContribution(payload);
       // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核；与首贴
       // 同源同一预算检查，未烘焙遮罩的最终像素由宿主 owned 快照接续。
@@ -5533,13 +5514,13 @@ export function ImageCanvasEditor({
       });
       setOperationMessage(
         applied
-          ? "已完成贴图编辑；贴图已更新。"
+          ? "已完成钉图编辑；钉图已更新。"
           : "完成未生效：会话已失效或格式/预算不符，请查看提示后重试。",
       );
       return applied;
     } catch (error) {
       setOperationMessage(
-        error instanceof Error ? error.message : "完成贴图失败，请重试。",
+        error instanceof Error ? error.message : "完成钉图失败，请重试。",
       );
       return false;
     } finally {
@@ -5569,9 +5550,9 @@ export function ImageCanvasEditor({
       // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
       // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
       const boxes = hostExclusionBoxes();
-      // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
+      // 钉图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
-      // 首次贴图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
+      // 首次钉图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
       const exported = await exportFinalImageIfUnchanged(false, true, true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
@@ -5579,16 +5560,16 @@ export function ImageCanvasEditor({
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
-        // 归一化排除矩形：宿主对贴图文字层执行同一正面积相交丢弃策略，
+        // 归一化排除矩形：宿主对钉图文字层执行同一正面积相交丢弃策略，
         // 保持与原位行过滠除跨边界行以外的一致。
         excludeBoxes: boxes,
       });
       setOperationMessage(
-        pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
+        pinned ? "已创建桌面钉图。" : "钉图未创建，请查看页面提示。",
       );
     } catch (error) {
       setOperationMessage(
-        error instanceof Error ? error.message : "无法创建贴图，请重试。",
+        error instanceof Error ? error.message : "无法创建钉图，请重试。",
       );
     } finally {
       exportInProgressRef.current = false;
@@ -6239,7 +6220,7 @@ export function ImageCanvasEditor({
   const textLayerHint = textLayerStatusLabel(textLayer);
 
   function closeSession(): Promise<boolean> {
-    if (pinSnapshotApply && !window.confirm("放弃当前更改并恢复上次贴图？"))
+    if (pinSnapshotApply && !window.confirm("放弃当前更改并恢复上次钉图？"))
       return Promise.resolve(false);
     return actions.run({ type: commands.closeScreenshotSession });
   }
@@ -6363,42 +6344,132 @@ export function ImageCanvasEditor({
   // 过宽靠容器内水平滚动保持单行可达；下排仅当前工具属性，可换行收纳。
   // 普通页仍是单条工具栏+底部 footer，两种布局共用片段，可访问名称与
   // 命令不随布局变化。
+  // 工具按家族视觉分组：仅分组不改子工具 id——mark 模型、快捷键与偏好
+  // order/hidden/shortcuts 仍按原工具寻址。族主按钮展示族内"当前子工具"
+  // （可访问名=子工具名），▾ 展开族内全部可见工具；只剩一个可见子工具的
+  // 家族退化为普通按钮，行为与旧工具条一致。
   const orderedTools = preferences.order.filter((value) =>
     TOOLSETS[toolset].includes(value),
   );
   // 按钮上下文可用性：pinEdit 现场不提供取字（文字层由宿主 owned 快照
-  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪）。快捷键
-  // 与隐藏菜单复用同一判断，不让隐藏入口绕过上下文限制。
+  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪），手形
+  // 收进「更多操作」（空格平移仍可用）。快捷键与隐藏菜单复用同一判断，
+  // 不让隐藏入口绕过上下文限制。
   const toolAvailable = (value: string) =>
-    value !== "textSelect" && !(captureStyle && value === "crop");
+    value !== "textSelect" &&
+    !(captureStyle && (value === "crop" || value === "hand"));
   const hiddenTools = orderedTools.filter(
     (value) => preferences.hidden.includes(value) && toolAvailable(value),
   );
-  const toolButtons = orderedTools
+  const visibleTools: readonly string[] = orderedTools
     .filter((value) => !preferences.hidden.includes(value))
-    .filter(toolAvailable)
-    .map((value) => {
-      // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
-      const icon = TOOL_ICONS[value];
-      return (
-        <ToolbarButton
-          appearance={tool === value ? "primary" : "subtle"}
-          aria-label={TOOL_LABELS[value]}
-          title={TOOL_HINTS[value] ?? TOOL_LABELS[value]}
-          icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
-          aria-pressed={tool === value}
-          key={value}
-          onClick={() => {
-            cancelDrawing();
-            setTool(value);
-          }}
-        >
-          {/* 截图现场按用户要求全部以简短中文文字呈现，不渲染图标；
-              普通页保持图标+文字。 */}
-          {TOOL_LABELS[value]}
-        </ToolbarButton>
-      );
+    .filter(toolAvailable);
+  const orderIndex = new Map<string, number>(
+    orderedTools.map((value, index) => [value as string, index]),
+  );
+  // 族内最近使用（当前工具离开该族后仍记住上次选择）：只在 tool 变化
+  // 引发的渲染间隙写入 ref，读取方消费的渲染都由 tool/偏好状态驱动，
+  // 不在 effect 里 setState 造成级联渲染。
+  const familyLastTool = useRef<Partial<Record<string, string>>>({});
+  useEffect(() => {
+    const family = TOOL_FAMILIES.find((entry) => entry.tools.includes(tool));
+    if (family) familyLastTool.current[family.id] = tool;
+  }, [tool]);
+  const familyMembers = (family: ToolFamily) =>
+    family.tools
+      .filter((member) => visibleTools.includes(member))
+      .sort((a, b) => (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0));
+  const familyCurrent = (family: ToolFamily, members: readonly string[]) => {
+    if (family.tools.includes(tool)) return tool;
+    const remembered = familyLastTool.current[family.id];
+    if (remembered && members.includes(remembered)) return remembered;
+    return members[0];
+  };
+  const activateTool = (value: string) => {
+    cancelDrawing();
+    setTool(value as Tool);
+  };
+  const renderToolButton = (value: string, key: string) => {
+    // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
+    const icon = TOOL_ICONS[value as Tool];
+    return (
+      <ToolbarButton
+        appearance={tool === value ? "primary" : "subtle"}
+        aria-label={TOOL_LABELS[value as Tool]}
+        title={TOOL_HINTS[value as Tool] ?? TOOL_LABELS[value as Tool]}
+        icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
+        aria-pressed={tool === value}
+        key={key}
+        onClick={() => activateTool(value)}
+      >
+        {/* 截图现场按用户要求全部以简短中文文字呈现，不渲染图标；
+            普通页保持图标+文字。 */}
+        {TOOL_LABELS[value as Tool]}
+      </ToolbarButton>
+    );
+  };
+  // 行模型：独立工具与家族都按"首个可见成员在偏好顺序中的位置"排序，
+  // 自定义 order 依旧决定工具区（含族间）顺序。
+  const toolRowEntries: {
+    key: string;
+    sortIndex: number;
+    node: ReactNode;
+  }[] = [];
+  const familyClaimed = new Set<string>();
+  for (const family of TOOL_FAMILIES) {
+    const members = familyMembers(family);
+    if (members.length === 0) continue;
+    members.forEach((member) => familyClaimed.add(member));
+    if (members.length === 1) {
+      toolRowEntries.push({
+        key: family.id,
+        sortIndex: orderIndex.get(members[0]!) ?? 0,
+        node: renderToolButton(members[0]!, family.id),
+      });
+      continue;
+    }
+    const current = familyCurrent(family, members)!;
+    toolRowEntries.push({
+      key: family.id,
+      sortIndex: orderIndex.get(members[0]!) ?? 0,
+      node: (
+        <span className="editor-tool-family" key={family.id}>
+          {renderToolButton(current, `${family.id}-${current}`)}
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <ToolbarButton
+                aria-label={familyMenuLabel(family)}
+                aria-haspopup="menu"
+                className="editor-tool-family-toggle"
+                title={`${family.label}：展开族内其他工具`}
+              >
+                ▾
+              </ToolbarButton>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                {members.map((member) => (
+                  <MenuItem key={member} onClick={() => activateTool(member)}>
+                    {TOOL_LABELS[member as Tool]}
+                  </MenuItem>
+                ))}
+              </MenuList>
+            </MenuPopover>
+          </Menu>
+        </span>
+      ),
     });
+  }
+  for (const value of visibleTools) {
+    if (familyClaimed.has(value)) continue;
+    toolRowEntries.push({
+      key: value,
+      sortIndex: orderIndex.get(value) ?? 0,
+      node: renderToolButton(value, value),
+    });
+  }
+  toolRowEntries.sort((a, b) => a.sortIndex - b.sortIndex);
+  const toolButtons = toolRowEntries.map((entry) => entry.node);
 
   // 选区派生态（工具栏/列表共用）：含锁判定驱动修改类动作禁用。
   const selectionCount = selectedIds.size;
@@ -7587,26 +7658,26 @@ export function ImageCanvasEditor({
   );
   const applyPinSnapshotButton = session && pinSnapshotApply && (
     <Button
-      title="完成贴图"
-      aria-label="完成贴图"
+      title="完成钉图"
+      aria-label="完成钉图"
       appearance="primary"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void applyPinSnapshot()}
     >
-      完成贴图
+      完成钉图
     </Button>
   );
   const pinButton = session && !pinSnapshotApply && (
     <Button
-      title="贴图"
+      title="钉图"
       icon={captureStyle ? undefined : <ToolbarIcon name="pin" />}
-      aria-label="贴图"
+      aria-label="钉图"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void pinCurrentImage()}
     >
-      贴图
+      钉图
     </Button>
   );
   const imageModes: readonly ImageRecognitionMode[] = recognitionModes?.length
@@ -7738,6 +7809,14 @@ export function ImageCanvasEditor({
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
+          {/* 截图现场手形不入主排（空格平移可用），经此入口补位。 */}
+          {captureStyle &&
+            TOOLSETS[toolset].includes("hand") &&
+            !preferences.hidden.includes("hand") && (
+              <MenuItem onClick={() => activateTool("hand")}>
+                {TOOL_LABELS.hand}
+              </MenuItem>
+            )}
           {hiddenTools.map((value) => (
             <MenuItem
               key={value}
@@ -8342,11 +8421,11 @@ export function ImageCanvasEditor({
         )}
         {state.composition && (
           <p className="editor-guidance">
-            排版会应用于复制、保存、贴图和识别/取字。复用图片对象与屏蔽区相交时，该图片在拼接/背景中的整幅复用区域也会从识别与取字排除；普通副本保留像素。排版最终尺寸见排版输出预览。
+            排版会应用于复制、保存、钉图和识别/取字。复用图片对象与屏蔽区相交时，该图片在拼接/背景中的整幅复用区域也会从识别与取字排除；普通副本保留像素。排版最终尺寸见排版输出预览。
           </p>
         )}
         <p className="editor-guidance">
-          屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与贴图画面保留原图内容，贴图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
+          屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与钉图画面保留原图内容，钉图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
         </p>
         <p className="editor-guidance">
           {toolset === "full"
@@ -8725,7 +8804,7 @@ function textLayerStatusLabel(
       if (layer.reason === "textlayer.ortUnavailable")
         return "当前档位和设备的本地模型尚未就绪或服务不可用；自动选字不会下载模型，请先用普通识别完成准备。";
       return layer.reason === "textlayer.serviceUnavailable"
-        ? "本地识别服务尚未就绪；截图和贴图仍可用，连接恢复后可重新准备文字层。"
+        ? "本地识别服务尚未就绪；截图和钉图仍可用，连接恢复后可重新准备文字层。"
         : layer.reason === "textlayer.modeNotReady"
           ? "本地轻量文字引擎未就绪；自动取字不会安装依赖，可先在设置中完成准备。"
           : "无可用本地轻量文字引擎；自动取字不会安装依赖或使用远程。";
@@ -9292,7 +9371,7 @@ function draw(
           Math.ceil(area.y + area.height) - y,
         );
       }
-      // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/贴图像素。
+      // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/钉图像素。
     } else if (mark.tool === "solid") {
       // 纯色不透明遮挡：预览与导出同像素，写入普通导出与识别输入；
       // 与 exclude（仅识别语义、不改导出像素）明确分离。

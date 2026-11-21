@@ -2273,7 +2273,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       using var broker = new WorkbenchResourceBroker(root);
       using var annotationStore = new WorkbenchAnnotationStore(root);
       // Supervisor 在 handler 创建前已 ready：拆分前构造函数即捕获基线，
-      // 首次 Settings 通知不得把同一实例误判为更换而清空贴图取字。
+      // 首次 Settings 通知不得把同一实例误判为更换而清空钉图取字。
       string serviceInstance = "sup-initial";
       await using var handler = CreateHandler(
         recognition, root, broker, annotationStore, settings,
@@ -2319,7 +2319,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       int invalidated = 0;
       handler.PinnedTextEnvironmentChanged += () => invalidated++;
 
-      // 真实后续实例更换（切换/维护停止/崩溃恢复）仍须失效贴图取字。
+      // 真实后续实例更换（切换/维护停止/崩溃恢复）仍须失效钉图取字。
       serviceInstance = "sup-next";
       handler.Settings.OnSettingsChanged();
 
@@ -2625,7 +2625,7 @@ public sealed class ScreenshotSessionWorkbenchTests
       PinnedTextPreparationException error = await Assert.ThrowsAsync<PinnedTextPreparationException>(
         () => handler.PreparePinnedTextLayerAsync(
           sessionId, 0, imagePath, TestContext.Current.CancellationToken));
-      Assert.Equal("贴图中没有可选择的文字。", error.Message);
+      Assert.Equal("钉图中没有可选择的文字。", error.Message);
     }
     finally { Directory.Delete(root, recursive: true); }
   }
@@ -4408,7 +4408,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         await closed.Task;
       }
 
-      // 本地输出复用既有 PNG、剪贴板、保存与贴图平台，不提交识别或打开现场。
+      // 本地输出复用既有 PNG、剪贴板、保存与钉图平台，不提交识别或打开现场。
       Assert.Equal(0, inference.SubmitCalls);
       Assert.Equal(0, runtimeReadyCalls);
       Assert.Equal(0, sessionReady);
@@ -4756,7 +4756,7 @@ public sealed class ScreenshotSessionWorkbenchTests
         pinScreenshot: (image, _, _, _, _) =>
         {
           image.Dispose();
-          throw new InvalidOperationException("最多同时打开四张贴图。");
+          throw new InvalidOperationException("最多同时打开四张钉图。");
         });
       int terminalShown = 0;
       handler.ScreenshotSelectionRecognized += () => terminalShown++;

@@ -7,6 +7,10 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import {
+  activateToolbarTool,
+  expectToolbarToolAvailable,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -238,7 +242,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).toBeInTheDocument();
   });
 
-  it("截图现场裁剪快捷键不激活被过滤的裁剪工具", () => {
+  it("截图现场裁剪快捷键不激活被过滤的裁剪工具", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -267,7 +271,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     expect(rectangle.getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("正常上下文隐藏工具仍可经快捷键激活（快捷键机制对照）", () => {
+  it("正常上下文隐藏工具仍可经快捷键激活（快捷键机制对照）", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -404,7 +408,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     await act(async () => {});
   });
 
-  it("new tools respect custom order, hidden menu and local shortcuts", () => {
+  it("new tools respect custom order, hidden menu and local shortcuts", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -449,7 +453,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).toBeInTheDocument();
   });
 
-  it("主排承载全部工具与操作；下排仅当前工具属性，无属性时收起", () => {
+  it("主排承载全部工具与操作；下排仅当前工具属性，无属性时收起", async () => {
     const actions = createActions();
     render(
       <ImageCanvasEditor
@@ -463,33 +467,38 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       />,
     );
     expect(document.querySelector(".editor-toolbar-stack")).not.toBeNull();
-    // 主排（图片编辑工具）：全部绘图工具与操作同排，不把工具挪去下排。
+    // 主排（图片编辑工具）：全部工具家族与操作同排，不把工具挪去下排；
+    // 族主按钮展示当前子工具，其余成员经族内菜单可达。
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
     for (const name of [
       "选择",
-      "手形",
       "矩形",
-      "椭圆",
-      "箭头",
       "画笔",
-      "屏蔽",
-      "遮挡",
+      "文字",
+      "马赛克",
       "聚光灯",
-      "放大镜",
       "橡皮擦",
       "去水印",
-      "重复匹配",
+      "形状工具选项",
+      "画笔工具选项",
+      "文字工具选项",
+      "遮挡工具选项",
+      "强调工具选项",
+      "修补工具选项",
       "旋转 90°",
       "撤销",
       "重做",
       "复制标注图",
       "保存标注图",
       "识别文字",
-      "贴图",
+      "钉图",
       "结束会话",
       "更多操作",
     ]) {
       expect(main.getByRole("button", { name })).toBeInTheDocument();
+    }
+    for (const name of ["椭圆", "箭头", "屏蔽", "遮挡", "放大镜", "重复匹配"]) {
+      await expectToolbarToolAvailable(name);
     }
     // 选择工具无属性：下排收起，主排无样式控件。
     expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
@@ -504,8 +513,9 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).toBeInTheDocument();
     expect(settings.getByLabelText("线条宽度")).toBeInTheDocument();
     expect(main.queryByLabelText("线条宽度")).toBeNull();
-    // 手形无属性：下排整体收起。
-    fireEvent.click(main.getByRole("button", { name: "手形" }));
+    // 手形无属性：下排整体收起（截图现场手形经「更多操作」进入）。
+    fireEvent.click(main.getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "手形" }));
     expect(screen.queryByRole("toolbar", { name: "当前工具设置" })).toBeNull();
     // 去水印：修补操作（预览）在主排且未选区时禁用；掩膜绘制方式属于
     // 当前工具属性，出现在下排而不是主排。
@@ -520,7 +530,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     expect(main.queryByLabelText("修补掩膜绘制方式")).toBeNull();
   });
 
-  it("截图现场主排为纯中文文字（无 SVG 图标）；更多菜单按可用状态收纳低频操作", () => {
+  it("截图现场主排为纯中文文字（无 SVG 图标）；更多菜单按可用状态收纳低频操作", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -539,20 +549,25 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
       "选择",
       "矩形",
       "画笔",
-      "屏蔽",
       "旋转 90°",
       "撤销",
       "重做",
       "复制标注图",
       "保存标注图",
       "识别文字",
-      "贴图",
+      "钉图",
       "结束会话",
       "更多操作",
     ]) {
       const button = main.getByRole("button", { name });
       expect(button.querySelector("svg"), name).toBeNull();
       expect(button.textContent?.trim(), name).toBe(name);
+    }
+    // 族 ▾ 展开钮同样纯文字（“▾”），不渲染图标。
+    for (const name of ["形状工具选项", "遮挡工具选项"]) {
+      const button = main.getByRole("button", { name });
+      expect(button.querySelector("svg"), name).toBeNull();
+      expect(button.textContent?.trim(), name).toBe("▾");
     }
     // 打开更多菜单：无屏蔽/无编辑时清空屏蔽与清除编辑禁用，屏蔽副本不出现。
     fireEvent.click(main.getByRole("button", { name: "更多操作" }));
@@ -617,7 +632,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     unmount();
   });
 
-  it("默认准备文字层，工具栏不再提供取字工具或自动取字开关", () => {
+  it("默认准备文字层，工具栏不再提供取字工具或自动取字开关", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -674,7 +689,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
     ).toHaveLength(1);
   });
 
-  it("两排中的所有按钮均有可访问名称（图标按钮不裸露）", () => {
+  it("两排中的所有按钮均有可访问名称（图标按钮不裸露）", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -738,7 +753,7 @@ describe("截图现场主排（全部工具+操作）与属性下排", () => {
 });
 
 describe("普通编辑页同构：工具+操作上排、属性下排", () => {
-  it("导出操作并入主排，footer 不再承载按钮；属性排按工具收起", () => {
+  it("导出操作并入主排，footer 不再承载按钮；属性排按工具收起", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -764,7 +779,7 @@ describe("普通编辑页同构：工具+操作上排、属性下排", () => {
       "重做",
       "复制标注图",
       "保存标注图",
-      "贴图",
+      "钉图",
       "识别文字",
       "结束会话",
       "清除编辑",
@@ -795,7 +810,7 @@ describe("普通编辑页同构：工具+操作上排、属性下排", () => {
 });
 
 describe("形状边框/填充属性排（按工具 gating，保留全工具主排）", () => {
-  it("边框不透明度随描边工具；填充开关仅矩形/椭圆；透明度 0% 为有效档位", () => {
+  it("边框不透明度随描边工具；填充开关仅矩形/椭圆；透明度 0% 为有效档位", async () => {
     render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -807,18 +822,13 @@ describe("形状边框/填充属性排（按工具 gating，保留全工具主�
       />,
     );
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    // 主排仍承载全部工具：新增属性只进下排，不挤占主排。
-    for (const name of [
-      "选择",
-      "矩形",
-      "椭圆",
-      "箭头",
-      "文字",
-      "画笔",
-      "荧光笔",
-      "裁剪",
-    ]) {
+    // 主排仍承载全部工具：新增属性只进下排，不挤占主排；家族分组的
+    // 非当前子工具经族内菜单可达。
+    for (const name of ["选择", "矩形", "文字", "画笔", "裁剪"]) {
       expect(main.getByRole("button", { name })).toBeInTheDocument();
+    }
+    for (const name of ["椭圆", "箭头", "荧光笔"]) {
+      await expectToolbarToolAvailable(name);
     }
 
     fireEvent.click(main.getByRole("button", { name: "矩形" }));
@@ -852,14 +862,14 @@ describe("形状边框/填充属性排（按工具 gating，保留全工具主�
     expect(settings.getByLabelText("填充不透明度")).toHaveValue(50);
 
     // 椭圆同构：独立边框不透明度 + 填充三件套。
-    fireEvent.click(main.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     settings = within(screen.getByRole("toolbar", { name: "当前工具设置" }));
     expect(settings.getByLabelText("边框不透明度")).toBeInTheDocument();
     expect(settings.getByLabelText("填充")).toBeInTheDocument();
 
     // 箭头/画笔/荧光笔复用边框不透明度但不提供填充；文字无描边属性。
     for (const name of ["箭头", "画笔", "荧光笔"]) {
-      fireEvent.click(main.getByRole("button", { name }));
+      await activateToolbarTool(name);
       settings = within(screen.getByRole("toolbar", { name: "当前工具设置" }));
       expect(settings.getByLabelText("边框不透明度")).toBeInTheDocument();
       expect(settings.queryByLabelText("填充")).toBeNull();

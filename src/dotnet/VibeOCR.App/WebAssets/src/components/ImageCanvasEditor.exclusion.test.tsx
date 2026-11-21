@@ -6,6 +6,10 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import {
+  activateToolbarTool,
+  expectToolbarToolAvailable,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -167,12 +171,12 @@ describe("image editor exclusion regions", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
       // 无排除区：行为与旧流程一致，不出现屏蔽副本入口。
-      expect(screen.getByRole("button", { name: "屏蔽" })).toBeEnabled();
+      await expectToolbarToolAvailable("屏蔽");
       expect(screen.getByRole("button", { name: "清空屏蔽" })).toBeDisabled();
       expect(screen.queryByRole("button", { name: "复制屏蔽副本" })).toBeNull();
       expect(screen.queryByRole("button", { name: "保存屏蔽副本" })).toBeNull();
 
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
       expect(actions.run).toHaveBeenCalledWith({
         type: "recognition.notifyScreenshotRevision",
@@ -205,7 +209,7 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
       // 普通矩形标注与排除区共存。
       fireEvent.click(screen.getByRole("button", { name: "矩形" }));
@@ -258,7 +262,7 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 0, y: 0 }, { x: 900, y: 300 });
 
       await act(async () => {
@@ -337,7 +341,7 @@ describe("image editor exclusion regions", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
       // 先建立上半区排除区。
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 0, y: 0 }, { x: 900, y: 300 });
       expect(actions.run).toHaveBeenLastCalledWith({
         type: "recognition.notifyScreenshotRevision",
@@ -390,11 +394,11 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       // (0,0)-(450,300) 恒等映射 → 归一化 [0,0,500,500]。
       await drawOnCanvas({ x: 0, y: 0 }, { x: 450, y: 300 });
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "贴图" }));
+        fireEvent.click(screen.getByRole("button", { name: "钉图" }));
       });
       await waitFor(() =>
         expect(actions.run).toHaveBeenCalledWith(
@@ -444,7 +448,7 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 0, y: 0 }, { x: 100, y: 100 });
       await act(async () => {
         fireEvent.click(screen.getByRole("button", { name: "识别文字" }));
@@ -517,7 +521,7 @@ describe("image editor exclusion regions", () => {
       expect(await screen.findByText("旧图文字")).toBeInTheDocument();
 
       // 排除区变更推进修订：旧层立即失效，行文本从 DOM 移除。
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
       fireEvent.click(screen.getByRole("button", { name: "选择" }));
       await act(async () => {
@@ -564,7 +568,7 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       for (let index = 0; index < 64; index += 1) {
         await drawOnCanvas(
           { x: (index % 8) * 40 + 10, y: Math.floor(index / 8) * 40 + 10 },
@@ -633,7 +637,7 @@ describe("image editor exclusion regions", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
       });
-      fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+      await activateToolbarTool("屏蔽");
       await drawOnCanvas({ x: 100, y: 100 }, { x: 300, y: 200 });
       fireEvent.click(screen.getByRole("button", { name: "选择" }));
       await act(async () => {
