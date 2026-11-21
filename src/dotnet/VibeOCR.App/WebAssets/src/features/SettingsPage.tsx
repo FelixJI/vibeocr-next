@@ -346,7 +346,9 @@ function WorkerIdleEditor({
             加载空闲策略
           </Button>
         </div>
-        <p className="form-note">加载时会按需启动识别服务。</p>
+        <p className="form-note">
+          识别服务随应用启动自动准备；加载即连接现有服务。
+        </p>
       </>
     );
   }

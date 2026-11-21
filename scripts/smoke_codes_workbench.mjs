@@ -655,7 +655,7 @@ async function main() {
   const stage2Root = path.join(smokeRoot, 'stage2');
   const evidence = { schema_version: 2, state: 'failed', smokeRoot, cases: [],
     stage1: { state: 'failed' }, stage2: { state: 'not-run' },
-    desktopRuntime: 'stage1 shell-only local decode; stage2 on-demand bundled Supervisor (decode stays local)',
+    desktopRuntime: 'stage1 shell-only local decode; stage2 startup-prepared bundled Supervisor, explicit check reuses it (decode stays local)',
     decoder: 'stage1+stage2 local C# decoder (BitmapDecoder+ZXing.Net); source Runtime pyzbar used as independent cross-check',
     commonWindowsAppPaste: 'not covered by this script' };
   try {
@@ -687,26 +687,38 @@ async function main() {
       evidence.stage2.appPid = app.child.pid;
       await foreground(app);
       const page = app.page;
-      const childrenBeforeDemand = await ownedChildren(app.child.pid);
-      assert(!hasPythonChild(childrenBeforeDemand), 'Normal startup launched Python before service demand.');
-      assert(!readTrace(trace).some((record) => record.state === 'Ready'), 'Normal startup attached a Supervisor.');
-      await page.getByRole('link', { name: '设置', exact: true }).click();
-      await page.getByRole('button', { name: '检查识别服务', exact: true }).click();
+      // 启动即后台准备：无需任何入口点击，等 Supervisor 就绪并验证随包树归属。
       const ready = await waitForTrace(trace,
         (record) => record.state === 'Ready' && Number(record.process_id) > 0 && !!record.instance_id,
-        supervisorReadyTimeoutMs, 'initial Ready');
+        supervisorReadyTimeoutMs, 'startup background Ready');
       const initialReady = ready[ready.length - 1];
-      const supervisor = (await ownedChildren(app.child.pid))
+      const childrenAtStartup = await ownedChildren(app.child.pid);
+      assert(hasPythonChild(childrenAtStartup), 'Normal startup did not prepare the bundled Supervisor.');
+      const supervisor = childrenAtStartup
         .find((child) => Number(child.ProcessId) === Number(initialReady.process_id));
-      assert(supervisor?.ExecutablePath, 'Ready Supervisor must be a child of the candidate desktop.');
+      assert(supervisor?.ExecutablePath, 'Startup Supervisor must be a child of the candidate desktop.');
       assert.equal(fs.realpathSync(supervisor.ExecutablePath).toLowerCase(),
-        fs.realpathSync(layout.runtimePython).toLowerCase(), 'Ready Supervisor used a different Python.');
+        fs.realpathSync(layout.runtimePython).toLowerCase(), 'Startup Supervisor used a different Python.');
       const portable = readJson(path.join(candidate2, 'portable-layout.json'));
       assert.equal(portable.schema_version, 1);
       assert.equal(Object.keys(portable.products ?? {}).length, 1);
       assert(fs.statSync(path.join(candidate2, 'state')).isDirectory());
       evidence.stage2.supervisor = { readyInstanceId: initialReady.instance_id,
-        readyProcessId: Number(initialReady.process_id), python: supervisor.ExecutablePath, childrenBeforeDemand };
+        readyProcessId: Number(initialReady.process_id), python: supervisor.ExecutablePath, childrenAtStartup };
+      // 显式“检查识别服务”必须复用启动准备：同 instance、无第二个 python 子进程。
+      // 就绪后的显式检查秒级完成；若有第二个拉起会立即出现并留存于 trace/子进程，
+      // 因此有界观察窗口即足以 fail closed。
+      await page.getByRole('link', { name: '设置', exact: true }).click();
+      await page.getByRole('button', { name: '检查识别服务', exact: true }).click();
+      await delay(5000);
+      const readyAfterCheck = readTrace(trace)
+        .filter((record) => record.state === 'Ready' && !!record.instance_id);
+      assert(readyAfterCheck.every((record) => record.instance_id === initialReady.instance_id),
+        'Explicit service check spawned another Supervisor.');
+      const pythonAfterCheck = (await ownedChildren(app.child.pid))
+        .filter((child) => /python/i.test(String(child.Name ?? '')));
+      assert.equal(pythonAfterCheck.length, 1,
+        `Explicit service check must reuse the startup Supervisor: ${JSON.stringify(pythonAfterCheck)}`);
       await page.getByRole('link', { name: '二维码与条码', exact: true }).click();
       await page.getByRole('heading', { name: '二维码与条码', exact: true }).waitFor();
 

@@ -47,7 +47,7 @@ receipt/error response 与 PDF preview flush 走独立关联通道；reset 完�
 仅该启动事务允许与控制帧相同的真实 checkpoint。缺 ready 的十秒期限、未知/重复 scope、单帧超限和旧 session 均不提交部分状态。
 这里的 ready 是状态快照提交。截图覆盖层另有 `captureScene`：C# 提供冻结桌面的物理几何、surface、截图会话、输入资源/内容 revision，以及 document/bootstrap generation；小响应与 snapshot 控制都携带同一 typed 元数据，TS 在完整快照提交后才经 runtime/viewState/props 使用。
 
-普通产品启动只创建原生壳与既有 deferred Runtime 入口，不后台初始化或启动 Python；首次显式 OCR/计算仍经同一 `RuntimeDemandCoordinator` 完成准备、目录获取、失败与取消，不复制第二套能力真值。
+普通产品启动创建原生壳并在首窗就绪后，经同一 `RuntimeDemandCoordinator` 在后台自动准备识别服务（恰一次 prepare/attach）；显式 OCR/计算需求与该后台准备共享唯一 Attempt，完成准备、目录获取、失败与取消，不复制第二套能力真值。本地工具与通用设置不等待该准备过程。
 
 原生选区从同一次 GDI 冻结画面创建一个背景 BMP，WinUI 解码展示后把同一数组交给 `ScreenshotCaptureScene`，编辑宿主经 `TakeBackground()` 最多领取一次；确认编辑不再重新编码整屏。选区裁剪输入仍单独形成当前修订，快速复制/保存/贴图不创建截图编辑 WebView，取消和替换沿用既有 scene 关闭与 owner 恢复归属。隐藏宿主后的 180ms 等待保留：当前合成场景测量不足以证明所有 DWM/真实宿主可见性条件，不能据此移除等待。
 

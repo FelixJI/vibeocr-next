@@ -253,7 +253,7 @@ public sealed partial class App : Application
             runtimeConnection.DisconnectAsync, _productMaintenance, _applicationShutdown.Token, runtimeConnection,
             shellOnly: options.ShellOnly);
         diagnostics.UpdateSupervisor(new SupervisorHealth(
-            SupervisorHealthState.NotReady, null, null, "识别服务尚未启用；首次计算时准备运行环境。"));
+            SupervisorHealthState.NotReady, null, null, "识别服务正在后台准备；就绪前计算会自动等待。"));
 
         _windowLayoutStore = new WindowLayoutStore(
             Path.Combine(layout.DataRoot, "winui-layout.json"));
@@ -376,6 +376,14 @@ public sealed partial class App : Application
                      Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE")) || CodesIsolatedStateSelfTestRequested())
         {
             // T6 probes intentionally include the real first connection.
+            _ = StartBackgroundRuntimeAsync();
+        }
+        else if (ShouldAutoPrepareRuntimeOnLaunch(
+                     Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_SMOKE"),
+                     Environment.GetEnvironmentVariable("VIBEOCR_SELF_TEST_VELOPACK_UPDATE") is not null))
+        {
+            // 生产启动：首窗就绪后即后台准备识别服务，首次计算不再冷等；
+            // 显式计算需求与该后台准备经 RuntimeDemandCoordinator 共享同一尝试。
             _ = StartBackgroundRuntimeAsync();
         }
 
@@ -962,6 +970,14 @@ public sealed partial class App : Application
 
     internal static bool ShouldStartBackgroundRuntime(string? selfTestSmoke) =>
         selfTestSmoke == "t6";
+
+    // 生产启动在首窗就绪后后台自动准备识别服务。冒烟/自检模式（设置了
+    // VIBEOCR_SELF_TEST_SMOKE，含空串）保持各自显式时序；Velopack 更新自测
+    // 链路只设 VIBEOCR_SELF_TEST_VELOPACK_UPDATE，不得与更新应用并发拉起
+    // Runtime（python.exe 会锁 current 目录导致更新失败）。
+    internal static bool ShouldAutoPrepareRuntimeOnLaunch(
+        string? selfTestSmoke, bool velopackUpdateSelfTest) =>
+        selfTestSmoke is null && !velopackUpdateSelfTest;
 
     private async Task StartBackgroundRuntimeAsync()
     {
