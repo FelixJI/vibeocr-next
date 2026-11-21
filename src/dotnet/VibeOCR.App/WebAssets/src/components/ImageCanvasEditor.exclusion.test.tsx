@@ -394,7 +394,7 @@ describe("image editor exclusion regions", () => {
       // (0,0)-(450,300) 恒等映射 → 归一化 [0,0,500,500]。
       await drawOnCanvas({ x: 0, y: 0 }, { x: 450, y: 300 });
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "贴图" }));
+        fireEvent.click(screen.getByRole("button", { name: "钉图" }));
       });
       await waitFor(() =>
         expect(actions.run).toHaveBeenCalledWith(

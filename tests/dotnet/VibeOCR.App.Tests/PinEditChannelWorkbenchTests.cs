@@ -16,7 +16,7 @@ using Xunit;
 namespace VibeOCR.App.Tests;
 
 /// <summary>
-/// #238 pinEdit 通道契约（C1/C2/C4）：贴图编辑会话只发布 pinEdit scope，
+/// #238 pinEdit 通道契约（C1/C2/C4）：钉图编辑会话只发布 pinEdit scope，
 /// 不产出任何 recognition/imageEdit envelope；快照应用先落盘后 ack/事件；
 /// 迟到会话拒绝且不写盘；编辑会话关闭不清历史投影；成功截图（含未钉图
 /// 本地输出）按一次成功一条录入历史（默认关闭）。
@@ -260,7 +260,7 @@ public sealed class PinEditChannelWorkbenchTests
   public async Task PinEditPresetSaveBindsCurrentSessionAndProjectsPinEditScope()
   {
     // #239×#238 连接契约：pinEdit.savePresetImage 走 pinEdit 通道——预设
-    // 输出必须绑定当前贴图会话/修订，返回 pinEdit 投影；缺失/过期绑定
+    // 输出必须绑定当前钉图会话/修订，返回 pinEdit 投影；缺失/过期绑定
     // fail closed 且不消耗上传租约，成功保存租约仅一次消费。
     string outputRoot = Path.Combine(
       Path.GetTempPath(), $"vibeocr-pin-preset-{Guid.NewGuid():N}");

@@ -518,7 +518,7 @@ function commandProblemLabel(messageKey: string): string {
       "本次导入被拒绝；已有画布保持不变，请调整内容后重试。",
     "workbench.error.imageImportUnavailable":
       "当前环境暂不支持读取系统内容导入。",
-    "workbench.error.pinLimitReached": "最多同时打开四张贴图，请先关闭一张。",
+    "workbench.error.pinLimitReached": "最多同时打开四张钉图，请先关闭一张。",
     "workbench.error.updateSourceBusy": "更新操作进行中，请稍后再切换更新源。",
     "workbench.error.updateSourceInvalid":
       "更新源设置无效，请检查地址格式后重试。",

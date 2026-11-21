@@ -66,7 +66,7 @@ export function PinHistoryPanel({
         disabled={!connected}
         onClick={() => void actions.run({ type: "pinEdit.showManager" })}
       >
-        贴图管理
+        钉图管理
       </Button>
       <details>
         <summary aria-label="截图历史" title="截图历史">

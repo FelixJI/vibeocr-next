@@ -1100,7 +1100,7 @@ test("先拼接后图像背景同步拼接列表，换背景资产互换且离�
   await expect.poll(width).toBe(150);
 });
 
-test("排版最终像素在复制、贴图、OCR与取字一致，复用图片屏蔽传播且文字层过滤同坐标", async ({
+test("排版最终像素在复制、钉图、OCR与取字一致，复用图片屏蔽传播且文字层过滤同坐标", async ({
   page,
 }) => {
   const { uploads, state, imported } = await setup(page);
@@ -1164,7 +1164,7 @@ test("排版最终像素在复制、贴图、OCR与取字一致，复用图片�
   expect([normal.width, normal.height]).toEqual([80, 60]);
   expect(at(normal, 25, 30)).toEqual([255, 0, 0, 255]);
   expect(at(normal, 65, 30)).toEqual([0, 255, 0, 255]);
-  await page.getByRole("button", { name: "贴图", exact: true }).click();
+  await page.getByRole("button", { name: "钉图", exact: true }).click();
   const pinUpload = await uploads.submitted("pinScreenshotImage");
   expect(pinUpload.body).toEqual(ordinaryUpload.body);
   const pin = (await commands(page)).find(
@@ -1308,7 +1308,7 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     )
     .toBe(60);
   const ordinary: Buffer[] = [];
-  for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
+  for (const [index, name] of ["复制标注图", "保存标注图", "钉图"].entries()) {
     await page.getByRole("button", { name, exact: true }).click();
     const upload = await uploads.submitted(
       ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
@@ -1407,7 +1407,7 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
 }) => {
   const { uploads } = await setup(page, {}, { width: 20000, height: 100 });
   const ordinary: Buffer[] = [];
-  for (const [index, name] of ["复制标注图", "保存标注图", "贴图"].entries()) {
+  for (const [index, name] of ["复制标注图", "保存标注图", "钉图"].entries()) {
     await page.getByRole("button", { name, exact: true }).click();
     const upload = await uploads.submitted(
       ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
