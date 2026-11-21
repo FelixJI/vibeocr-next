@@ -20,6 +20,19 @@ type Options = Partial<Record<BooleanOption, boolean>> & {
   device?: string;
 };
 
+// 模型档位的唯一标签映射：任务级选择、跟随默认括号与保存回显共用，
+// 不再向用户暴露裸英文枚举。
+const MODEL_PRESET_LABELS: Record<string, string> = {
+  tiny: "轻量",
+  small: "均衡",
+  medium: "高精度",
+};
+
+function modelPresetLabel(preset: string | null | undefined): string {
+  if (!preset) return "均衡";
+  return MODEL_PRESET_LABELS[preset] ?? preset;
+}
+
 function readOptions(value: unknown): Options {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const source = value as Record<string, unknown>;
@@ -35,13 +48,27 @@ function readOptions(value: unknown): Options {
 
 export function PaddleOptionsEditor({
   modeId,
+  scope = "recognition",
   supportedOptions,
   values,
+  // 任务级档位：null/undefined 表示“跟随默认”；选择立即经
+  // {scope}.setTaskModelPreset 生效，不进入未保存编辑状态。
+  taskModelPreset,
+  defaultModelPreset,
+  enabled = true,
+  reasonCode,
+  lifecycleNote,
   actions,
 }: {
   readonly modeId: string;
+  readonly scope?: "recognition" | "batch" | "pdf";
   readonly supportedOptions: readonly string[];
   readonly values: unknown;
+  readonly taskModelPreset?: string | null;
+  readonly defaultModelPreset?: string | null;
+  readonly enabled?: boolean;
+  readonly reasonCode?: string | null;
+  readonly lifecycleNote?: string | null;
   readonly actions: AppActions;
 }) {
   const [options, setOptions] = useState(() => readOptions(values));
@@ -56,11 +83,18 @@ export function PaddleOptionsEditor({
   } else if (!dirty && localKey !== incomingKey) {
     setOptions(readOptions(values));
   }
+  // 保存语义：当前任务档位（若已显式选择）固化为持久默认；跟随默认时
+  // 沿用已保存默认，未保存过则省略该字段，不伪造引擎默认。
+  const savedPreset = taskModelPreset ?? options.model_preset;
+  const savePayload = readOptions(options);
+  if (savedPreset !== undefined) {
+    savePayload.model_preset = savedPreset;
+  }
   return (
     <details className="recognition-options">
       <summary>识别参数</summary>
       <p className="form-note">
-        默认值由当前环境提供；保存后用于新任务，运行中的任务保持原配置。
+        档位与参数立即影响后续提交，运行中的任务保持原配置；保存后写入默认值。
         {modeId === "paddle_structure" &&
           "结构模式保留普通公式与图表区域，不提供公式、图表或印章专用识别。"}
       </p>
@@ -69,19 +103,27 @@ export function PaddleOptionsEditor({
           <label htmlFor={`${modeId}-model-preset`}>模型档位</label>
           <Select
             id={`${modeId}-model-preset`}
-            value={options.model_preset ?? "small"}
-            onChange={(_, data) => {
-              setDirty(true);
-              setOptions((current) => ({
-                ...current,
-                model_preset: data.value,
-              }));
-            }}
+            value={taskModelPreset ?? ""}
+            disabled={!enabled}
+            onChange={(_, data) =>
+              actions.run({
+                type: `${scope}.setTaskModelPreset`,
+                ...(data.value === "" ? {} : { preset: String(data.value) }),
+              })
+            }
           >
-            <option value="tiny">轻量</option>
-            <option value="small">均衡（默认）</option>
-            <option value="medium">高精度</option>
+            <option value="">
+              {`跟随默认（${modelPresetLabel(
+                defaultModelPreset ?? options.model_preset,
+              )}）`}
+            </option>
+            <option value="tiny">{modelPresetLabel("tiny")}</option>
+            <option value="small">{modelPresetLabel("small")}</option>
+            <option value="medium">{modelPresetLabel("medium")}</option>
           </Select>
+          <p className="form-note">
+            选择具体档位立即生效于后续提交；“保存参数”会把当前档位固化为默认。
+          </p>
         </div>
       )}
       {supportedOptions.includes("device") && (
@@ -90,6 +132,7 @@ export function PaddleOptionsEditor({
           <Select
             id={`${modeId}-provider`}
             value={options.device ?? "auto"}
+            disabled={!enabled}
             onChange={(_, data) => {
               setDirty(true);
               setOptions((current) => ({ ...current, device: data.value }));
@@ -114,6 +157,7 @@ export function PaddleOptionsEditor({
               value={
                 options[key] === undefined ? "default" : String(options[key])
               }
+              disabled={!enabled}
               onChange={(_, data) => {
                 setDirty(true);
                 setOptions((current) => {
@@ -130,29 +174,40 @@ export function PaddleOptionsEditor({
             </Select>
           </div>
         ))}
-      <Button
-        disabled={saving}
-        onClick={async () => {
-          setSaving(true);
-          try {
-            const saved = await actions.run({
-              type: "recognition.setOptions",
-              modeId,
-              options,
-            });
-            setMessage(
-              saved
-                ? "参数已保存，下一次识别生效。"
-                : "参数未保存，请检查当前环境和参数范围。",
-            );
-          } finally {
-            setSaving(false);
-          }
-        }}
-      >
-        保存参数
-      </Button>
+      <div className="button-row">
+        <Button
+          disabled={saving || !enabled}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              const saved = await actions.run({
+                type: "recognition.setOptions",
+                modeId,
+                options: savePayload,
+              });
+              setMessage(
+                saved
+                  ? "参数已保存（含当前档位），新任务起作为默认值。"
+                  : "参数未保存，请检查当前环境和参数范围。",
+              );
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          保存参数
+        </Button>
+        <Button
+          appearance="secondary"
+          disabled={!enabled}
+          onClick={() => actions.navigate("settings")}
+        >
+          修改默认识别类型
+        </Button>
+      </div>
       <output aria-live="polite">{message}</output>
+      {reasonCode ? <p className="form-note">当前环境：{reasonCode}</p> : null}
+      {lifecycleNote ? <p className="form-note">{lifecycleNote}</p> : null}
     </details>
   );
 }

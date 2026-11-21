@@ -10,6 +10,8 @@ import type { RecognitionEngineState } from "./TaskEngineValues";
 
 // 设备选项由 PaddleOptionsEditor 的 device 编辑器承载；Rapid 系模式的
 // 独立设备持久化链已随 RapidOCR/RapidTable 退役移除。
+// 模型档位整合在“识别参数”内：任务级选择（跟随默认/轻量/均衡/高精度）
+// 与“保存参数”固化默认共用同一入口，不再保留并列的“高级选项”折叠区。
 
 function lifecycleHint(
   engine: RecognitionEngineState | undefined,
@@ -52,13 +54,11 @@ export function TaskEngineSelector({
           : `，${modeAvailabilityLabel(defaultMode.availability, defaultMode.reasonCode)}`
       }）`
     : "跟随默认（未读取）";
-  const activeSupportsModelPreset =
-    active?.supportedOptions?.includes("model_preset") === true;
   const activeIsPaddle =
     (active?.engine.startsWith("paddle_") ?? false) &&
     Array.isArray(active?.supportedOptions);
-  // 本次模式是任务提交入口，常驻可见；档位/引擎参数/默认入口与生命周期
-  // 技术提示属于低频诊断，收进折叠区，键盘可展开且语义不变。
+  // 本次模式是任务提交入口，常驻可见；引擎参数/档位/默认入口与环境、
+  // 生命周期技术提示收进“识别参数”折叠区，键盘可展开且语义不变。
   return (
     <div className="recognition-mode-settings">
       <div className="setting-row recognition-mode-row">
@@ -104,8 +104,9 @@ export function TaskEngineSelector({
           })}
         </Select>
       </div>
-      {/* 低频项保留就近短入口：引擎参数由 PaddleOptionsEditor 自带的
-         “识别参数”折叠区承载，不再套第二层折叠。 */}
+      {!active?.isTaskOverride ? (
+        <p className="form-note">本次选择仅覆盖当前任务，不会改写默认。</p>
+      ) : null}
       {activeIsPaddle && active && (
         // key 只绑定模式：保存成功后宿主会回显新的 active.options，若把它混入
         // key，保存瞬间会重挂编辑器并丢失保存提示与展开状态；宿主值同步由
@@ -113,47 +114,30 @@ export function TaskEngineSelector({
         <PaddleOptionsEditor
           key={active.engine}
           modeId={active.engine}
+          scope={scope}
           supportedOptions={active.supportedOptions}
           values={active.options}
+          taskModelPreset={active.taskModelPreset}
+          defaultModelPreset={active.defaultModelPreset}
+          enabled={enabled}
+          reasonCode={active.reasonCode}
+          lifecycleNote={lifecycleHint(active)}
           actions={actions}
         />
       )}
-      <details className="task-engine-advanced">
-        <summary>高级选项</summary>
-        <div className="task-engine-advanced-content">
-          {activeSupportsModelPreset && active && (
-            <div className="setting-row">
-              <label htmlFor={`${scope}-task-model-preset`}>本次模型档位</label>
-              <Select
-                id={`${scope}-task-model-preset`}
-                value={active.taskModelPreset ?? ""}
-                disabled={!enabled}
-                onChange={(_, data) =>
-                  actions.run({
-                    type: `${scope}.setTaskModelPreset`,
-                    ...(data.value === ""
-                      ? {}
-                      : { preset: String(data.value) }),
-                  })
-                }
-              >
-                <option value="">{`跟随默认（${active.defaultModelPreset ?? "small"}）`}</option>
-                <option value="tiny">tiny</option>
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-              </Select>
-              <p className="form-note">
-                仅影响后续提交，不改写已保存的默认档位。
-              </p>
-            </div>
-          )}
-          {active?.reasonCode && (
+      {!activeIsPaddle && active && (
+        // 非 Paddle 模式的参数由运行环境或服务端管理：同一“识别参数”折叠
+        // 区只承载环境、生命周期提示与默认模式入口，保持单一折叠语义。
+        <details className="recognition-options">
+          <summary>识别参数</summary>
+          <p className="form-note">该模式的参数由运行环境或服务端管理。</p>
+          {active.reasonCode ? (
             <p className="form-note">当前环境：{active.reasonCode}</p>
-          )}
-          {!active?.isTaskOverride ? (
-            <p className="form-note">本次选择仅覆盖当前任务，不会改写默认。</p>
           ) : null}
-          <div className="setting-row">
+          {lifecycleHint(active) ? (
+            <p className="form-note">{lifecycleHint(active)}</p>
+          ) : null}
+          <div className="button-row">
             <Button
               appearance="secondary"
               disabled={!enabled}
@@ -162,11 +146,8 @@ export function TaskEngineSelector({
               修改默认识别类型
             </Button>
           </div>
-          {lifecycleHint(active) ? (
-            <p className="form-note">{lifecycleHint(active)}</p>
-          ) : null}
-        </div>
-      </details>
+        </details>
+      )}
     </div>
   );
 }
