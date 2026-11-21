@@ -49,7 +49,7 @@ receipt/error response 与 PDF preview flush 走独立关联通道；reset 完�
 
 普通产品启动创建原生壳并在首窗就绪后，经同一 `RuntimeDemandCoordinator` 在后台自动准备识别服务（恰一次 prepare/attach）；显式 OCR/计算需求与该后台准备共享唯一 Attempt，完成准备、目录获取、失败与取消，不复制第二套能力真值。本地工具与通用设置不等待该准备过程。
 
-原生选区从同一次 GDI 冻结画面创建一个背景 BMP，WinUI 解码展示后把同一数组交给 `ScreenshotCaptureScene`，编辑宿主经 `TakeBackground()` 最多领取一次；确认编辑不再重新编码整屏。选区裁剪输入仍单独形成当前修订，快速复制/保存/贴图不创建截图编辑 WebView，取消和替换沿用既有 scene 关闭与 owner 恢复归属。隐藏宿主后的 180ms 等待保留：当前合成场景测量不足以证明所有 DWM/真实宿主可见性条件，不能据此移除等待。
+原生选区从同一次 GDI 冻结画面创建一个背景 BMP，WinUI 解码展示后把同一数组交给 `ScreenshotCaptureScene`，编辑宿主经 `TakeBackground()` 最多领取一次；确认编辑不再重新编码整屏。选区裁剪输入仍单独形成当前修订，快速复制/保存/钉图不创建截图编辑 WebView，取消和替换沿用既有 scene 关闭与 owner 恢复归属。隐藏宿主后的 180ms 等待保留：当前合成场景测量不足以证明所有 DWM/真实宿主可见性条件，不能据此移除等待。
 
 截图编辑器不再注入 `window` 几何或由宿主轮询 DOM。前端确认对应输入的实际解码尺寸，完成源图画布绘制与冻结背景解码，再在后续 rAF 通过既有 bridge 发送一次 `capture.pixelReady`；解码/绘制失败只发送有界 `capture.pixelFailed` reason。宿主必须匹配当前 bridge session、document/bootstrap generation、surface、截图会话、输入资源和内容 revision，才原生设置 Opacity 揭示。旧、重复、导航后和关闭后的回报不生效。普通主窗 bootstrap-ready 保持原语义；截图只在匹配像素 ready 后重置一次自动恢复预算，十秒首帧期限和 renderer 失败最多自动 reload 一次，再显示可退出的原生恢复入口。导航、替换 bootstrap 和 dispose 撤销旧期限；command receipt 与 PDF preview flush 仍是独立契约。
 

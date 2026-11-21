@@ -96,7 +96,7 @@ async function pinEditor(
   );
   await expect(
     page.getByRole("button", {
-      name: ordinaryEditor ? "贴图" : "完成贴图",
+      name: ordinaryEditor ? "钉图" : "完成钉图",
       exact: true,
     }),
   ).toBeEnabled();
@@ -116,7 +116,7 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
     page.getByRole("button", { name: "取字", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "贴图", exact: true }),
+    page.getByRole("button", { name: "钉图", exact: true }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "旋转 90°", exact: true }).click();
   await deferCommand(page, "applySnapshot");
@@ -124,7 +124,7 @@ test("pin editor saves one owned snapshot and acknowledges only after the comman
   await expect
     .poll(async () =>
       (await page.evaluate(() => document.body.textContent))?.includes(
-        "正在上传贴图内容",
+        "正在上传钉图内容",
       ),
     )
     .toBe(true);
@@ -167,7 +167,7 @@ test("a native request joins a button save and receives its own result ID", asyn
 }) => {
   const { projects, uploads } = await pinEditor(page);
   await deferCommand(page, "applySnapshot");
-  await page.getByRole("button", { name: "完成贴图", exact: true }).click();
+  await page.getByRole("button", { name: "完成钉图", exact: true }).click();
   await expectCommand(page, {
     scope: "pinEdit",
     action: "applySnapshot",
@@ -196,7 +196,7 @@ test("button completion still reports after committed state unmounts the editor"
 }) => {
   const { projects, uploads } = await pinEditor(page);
   await deferCommand(page, "applySnapshot", true);
-  await page.getByRole("button", { name: "完成贴图", exact: true }).click();
+  await page.getByRole("button", { name: "完成钉图", exact: true }).click();
   await expect(page.getByText("等待图片", { exact: true })).toBeVisible();
   await expect(
     page.locator(".canvas-editor[data-screenshot-session]"),
@@ -216,7 +216,7 @@ test("failed save preserves the editor and a late request for another pin is ign
   await pinEditor(page);
   await requestPinSnapshot(page, "d".repeat(32));
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", { name: "完成钉图", exact: true }),
   ).toBeEnabled();
   await rejectNextCommand(page);
   const failedRequestId = await requestPinSnapshot(page, sourceSession);
@@ -229,7 +229,7 @@ test("failed save preserves the editor and a late request for another pin is ign
     )
     .toBe(true);
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", { name: "完成钉图", exact: true }),
   ).toBeEnabled();
   const retryRequestId = await requestPinSnapshot(page, sourceSession);
   expect(retryRequestId).not.toBe(failedRequestId);
@@ -260,7 +260,7 @@ test("pin keyboard save uses the owned transaction and cancel keeps a dirty pin"
     ),
   );
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", { name: "完成钉图", exact: true }),
   ).toBeEnabled();
   await page.evaluate(() =>
     window.dispatchEvent(
@@ -822,7 +822,7 @@ test("history is manageable without a session while recording is off", async ({
     action: "reopenHistoryEntry",
     arguments: { entryId: "a".repeat(32) },
   });
-  await page.getByRole("button", { name: "贴图管理", exact: true }).click();
+  await page.getByRole("button", { name: "钉图管理", exact: true }).click();
   await expectCommand(page, {
     scope: "pinEdit",
     action: "showManager",
@@ -869,7 +869,7 @@ test("first pin is PNG while ordinary save and copy retain JPEG selection", asyn
   await page.getByRole("button", { name: "复制标注图", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(2);
   expect([...uploads[1]!.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
-  await page.getByRole("button", { name: "贴图", exact: true }).click();
+  await page.getByRole("button", { name: "钉图", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(3);
   expect([...uploads[2]!.subarray(0, 8)]).toEqual([
     137, 80, 78, 71, 13, 10, 26, 10,
@@ -956,11 +956,11 @@ for (const failure of ["fetch", "validate"] as const) {
       arguments: { pendingId: pending, sessionId: session, revision: 0 },
     });
     await expect(
-      page.getByRole("button", { name: "完成贴图", exact: true }),
+      page.getByRole("button", { name: "完成钉图", exact: true }),
     ).toBeDisabled();
     await sendState(page, "pinEdit", restoredPinState(session, pending));
     await expect(
-      page.getByRole("button", { name: "完成贴图", exact: true }),
+      page.getByRole("button", { name: "完成钉图", exact: true }),
     ).toBeEnabled();
     await expect(
       page.getByText("工程恢复失败", { exact: false }),
@@ -1044,7 +1044,7 @@ test("pending pin project restore blocks native snapshot save and keeps project"
     },
   });
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", { name: "完成钉图", exact: true }),
   ).toBeDisabled();
   // 恢复挂起期间原生 requestSnapshot：必须完成失败 ack，不上传、不写入，
   // 不得用未安装的扁平画布截断用户已保存工程。
@@ -1122,12 +1122,12 @@ for (const late of ["fetch", "receipt"] as const) {
     releaseA();
     if (late === "receipt") await releaseCommand(page);
     await expect(
-      page.getByRole("button", { name: "完成贴图", exact: true }),
+      page.getByRole("button", { name: "完成钉图", exact: true }),
     ).toBeDisabled();
     releaseB();
     await expect(page.getByText("工程已恢复", { exact: false })).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "完成贴图", exact: true }),
+      page.getByRole("button", { name: "完成钉图", exact: true }),
     ).toBeEnabled();
     await requestPinSnapshot(page, sessionB);
     await expect
@@ -1155,7 +1155,7 @@ test("pin restore rejection failure remains locked with an explicit discard exit
   );
   await expect(page.getByText("回退未确认", { exact: false })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "完成贴图", exact: true }),
+    page.getByRole("button", { name: "完成钉图", exact: true }),
   ).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "放弃更改", exact: true }),
