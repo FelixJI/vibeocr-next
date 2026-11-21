@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import { activateToolbarTool } from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 /** 几何标注新能力的真实浏览器像素契约（预览画布与导出同源 draw）：
@@ -253,7 +254,7 @@ test("直线虚线与箭头实心双向端头写入预览与导出像素", async
   const canvas = page.getByLabel("图片检查画布");
 
   // 直线：蓝 8px 虚线 [12,8]，(150,200)→(750,200) 水平。
-  await page.getByRole("button", { name: "直线", exact: true }).click();
+  await activateToolbarTool(page, "直线");
   await configureTool(page, {
     color: "#1f6feb",
     width: "8",
@@ -285,7 +286,7 @@ test("直线虚线与箭头实心双向端头写入预览与导出像素", async
     .toBe(true);
 
   // 箭头：本工具重新显式设置属性（独立记忆不继承直线工具），实心双向。
-  await page.getByRole("button", { name: "箭头", exact: true }).click();
+  await activateToolbarTool(page, "箭头");
   await configureTool(page, {
     color: "#1f6feb",
     width: "8",
@@ -342,7 +343,7 @@ test("矩形圆角留空角落；Shift 正圆与 Alt 中心绘制写入预览像
   // Shift 椭圆：拖 (500,120)→(650,220)（dx150/dy100）约束为正圆
   // r=75、圆心 (575,195)：底点 (575,270) 落笔；未约束时的底点
   // (575,220) 位于正圆内部，保持底色。
-  await page.getByRole("button", { name: "椭圆", exact: true }).click();
+  await activateToolbarTool(page, "椭圆");
   await configureTool(page, { color: "#1f6feb", width: "8" });
   await dragOnCanvas(
     page,
@@ -403,7 +404,7 @@ test("折线双击提交；0% 不透明对象经对象选择入口恢复，撤�
   const canvas = page.getByLabel("图片检查画布");
 
   // 折线：本工具显式设置属性；三个单击点 + 双击提交（恰好一条历史）。
-  await page.getByRole("button", { name: "折线", exact: true }).click();
+  await activateToolbarTool(page, "折线");
   await configureTool(page, {
     color: "#1f6feb",
     width: "8",
@@ -555,7 +556,7 @@ test("拖动中滚轮调整保留当前预览与导出线宽，下一笔使用�
 }) => {
   const { uploads } = await setupGeometryHost(page);
   const canvas = page.getByLabel("图片检查画布");
-  await page.getByRole("button", { name: "直线", exact: true }).click();
+  await activateToolbarTool(page, "直线");
   await configureTool(page, { color: "#1f6feb", width: "3" });
   const start = await canvasClient(page, 150, 200);
   await page.mouse.move(start.x, start.y);

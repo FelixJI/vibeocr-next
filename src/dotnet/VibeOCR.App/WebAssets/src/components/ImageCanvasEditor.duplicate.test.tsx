@@ -4,8 +4,8 @@ import {
   fireEvent,
   render,
   screen,
-  waitFor,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -153,9 +153,7 @@ async function renderEditor(
   const canvas = screen.getByLabelText("图片检查画布");
   canvas.getBoundingClientRect = () =>
     ({ left: 0, top: 0, width: 900, height: 600 }) as DOMRect;
-  await waitFor(() => {
-    fireEvent.click(screen.getByRole("button", { name: "重复匹配" }));
-  });
+  await activateToolbarTool("重复匹配");
   return { actions, ...view, canvas };
 }
 

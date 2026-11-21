@@ -8,6 +8,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -317,7 +318,7 @@ describe("editor export pixels and previews", () => {
       width: 900,
       height: 600,
     } as DOMRect);
-    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    await activateToolbarTool("模糊");
     fireEvent.pointerDown(canvas, { clientX: 100, clientY: 100 });
     fireEvent.pointerUp(canvas, { clientX: 300, clientY: 300 });
     flush();
@@ -645,7 +646,7 @@ describe("editor export pixels and previews", () => {
         right: canvas.width,
         bottom: canvas.height,
       }) as DOMRect;
-    fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+    await activateToolbarTool("屏蔽");
     // 图像显示区约在 y∈[75,525]（64×32 等比居中）；拖拽须落在图像内。
     fireEvent.pointerDown(canvas, { pointerId: 9, clientX: 100, clientY: 200 });
     fireEvent.pointerUp(canvas, { pointerId: 9, clientX: 300, clientY: 400 });

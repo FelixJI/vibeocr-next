@@ -7,6 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -214,7 +215,7 @@ describe("截图现场工具栏与裁剪交互", () => {
     const { rerender, unmount } = await renderEditor(props);
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 150 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
@@ -321,7 +322,7 @@ describe("截图现场工具栏与裁剪交互", () => {
     await waitFor(() => expect(uploads).toBe(1));
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 150 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
     await act(async () => {
@@ -457,7 +458,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     // 默认色即红色：色板首项按下，无需先选色。
     expect(
       screen.getByRole("button", { name: "常用颜色 #e02020" }),
@@ -483,7 +484,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     harness.flush();
 
     // 颜色/取色属于当前工具属性：先切到颜色工具，属性排才出现色板。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.click(screen.getByRole("button", { name: "常用颜色 #12a150" }));
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
@@ -515,7 +516,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
 
     // 先切颜色工具，自定义颜色输入才在属性排出现；AC3 起各工具记忆
     // 各自属性：在椭圆工具下设置的颜色供椭圆绘制使用。
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     fireEvent.change(screen.getByLabelText("自定义颜色"), {
       target: { value: "#00c8ff" },
     });
@@ -530,8 +531,8 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
       .map((call) => call.args[0]);
     expect(styles).toContain("#00c8ff");
     // 切回椭圆工具：颜色记忆保留（输入框仍显示上次取值）。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("矩形");
+    await activateToolbarTool("椭圆");
     expect(screen.getByLabelText("自定义颜色")).toHaveValue("#00c8ff");
     unmount();
   });
@@ -548,7 +549,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     );
     const { unmount } = await renderEditor();
     // 屏幕取色入口随颜色工具的属性排出现。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     expect(
       screen.getByRole("button", { name: "屏幕取色" }),
     ).toBeInTheDocument();
@@ -590,7 +591,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     harness.flush();
 
     // 取色入口随颜色工具的属性排出现。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     const pick = screen.getByRole("button", { name: "屏幕取色" });
     expect(pick).toHaveAttribute("title", "取色：点击后在画布上取样颜色");
     fireEvent.click(pick);
@@ -612,7 +613,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
         entry.calls.some((call) => call.op === "getImageData"),
     );
     expect(sampled).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 400, clientY: 300 });
     harness.flush();
@@ -635,7 +636,7 @@ describe("颜色工具：常用色、自定义与屏幕取色", () => {
     harness.flush();
 
     // 取色入口随颜色工具的属性排出现。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.click(screen.getByRole("button", { name: "屏幕取色" }));
     fireEvent.keyDown(canvas, { key: "Escape" });
     expect(
@@ -658,7 +659,7 @@ async function waitForStroke(
 ) {
   const canvas = getEditorCanvas();
   mockCanvasBox(canvas, 900, 600);
-  fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+  await activateToolbarTool("矩形");
   fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
   fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 400, clientY: 300 });
   harness.flush();
@@ -822,7 +823,7 @@ describe("马赛克与模糊强度", () => {
       harness.flush();
     };
 
-    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    await activateToolbarTool("模糊");
     fireEvent.change(screen.getByLabelText("马赛克与模糊强度"), {
       target: { value: "1" },
     });
@@ -853,7 +854,7 @@ describe("切换编辑按钮的绘制合并回归", () => {
     harness.flush();
 
     // 先提交一个模糊标记：产生一次 filter 通过。
-    fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+    await activateToolbarTool("模糊");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 50 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
     harness.flush();
@@ -868,8 +869,8 @@ describe("切换编辑按钮的绘制合并回归", () => {
       entry.calls.length = 0;
     });
     // 连续切换 4 个工具按钮：不得逐帧重绘/重采样。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("矩形");
+    await activateToolbarTool("箭头");
     fireEvent.click(screen.getByRole("button", { name: "文字" }));
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     expect(harness.frames.size).toBe(1);
@@ -966,7 +967,7 @@ describe("截图现场无标注首帧的前缀缓存分配", () => {
     harness.flush();
 
     // 提交一个矩形标注后，缓存前缀应当包含该标注。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 50 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 250 });
     harness.flush();
@@ -978,7 +979,7 @@ describe("截图现场无标注首帧的前缀缓存分配", () => {
     });
     // 连续切换工具只合并为单帧，且帧内不得重绘源图（无直接 drawImage 源图），
     // 只回贴缓存前缀：有实际标注时前缀缓存语义保持不变。
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("箭头");
     fireEvent.click(screen.getByRole("button", { name: "文字" }));
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     expect(harness.frames.size).toBe(1);
@@ -1163,7 +1164,7 @@ describe("形状边框/填充不透明度（canvas 调用契约）", () => {
     harness.flush();
     clearCalls();
 
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     await drawRectangle(harness, canvas);
 
     // 旧对象/默认样式：不产生任何 fillRect，globalAlpha 全为 1。
@@ -1188,7 +1189,7 @@ describe("形状边框/填充不透明度（canvas 调用契约）", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.click(screen.getByLabelText("填充"));
     fireEvent.change(screen.getByLabelText("填充颜色"), {
       target: { value: "#ff0000" },
@@ -1241,7 +1242,7 @@ describe("形状边框/填充不透明度（canvas 调用契约）", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "荧光笔" }));
+    await activateToolbarTool("荧光笔");
     // 旧默认（100%）：保持 0.35 不变。
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 150 });
@@ -1283,7 +1284,7 @@ describe("形状边框/填充不透明度（canvas 调用契约）", () => {
     harness.flush();
 
     // 先创建一个默认空心矩形。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     await drawRectangle(harness, canvas);
     expect(actions.run).toHaveBeenCalledTimes(1);
 
@@ -1404,7 +1405,7 @@ describe("不透明度数值输入契约", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     const opacity = screen.getByLabelText("边框不透明度");
     expect(opacity).toHaveValue(100);
     // 清空后 blur：不意外写 0，显示回退已提交值 100，也不产生修订。
@@ -1445,7 +1446,7 @@ describe("OBJ-03 对象比例装饰", () => {
     const { unmount } = await renderEditor();
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "荧光笔" }));
+    await activateToolbarTool("荧光笔");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 200, clientY: 100 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 100 });
@@ -1482,7 +1483,7 @@ describe("OBJ-03 对象比例装饰", () => {
       const { unmount } = await renderEditor();
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
-      fireEvent.click(screen.getByRole("button", { name: "直线" }));
+      await activateToolbarTool("直线");
       fireEvent.change(screen.getByLabelText("线型"), {
         target: { value: lineStyle },
       });
@@ -1523,7 +1524,7 @@ describe("PR249 不透明度草稿提交", () => {
     const rendered = await renderEditor();
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.click(screen.getByLabelText("填充"));
     const drawBox = (x: number) => {
       fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: 100 });
@@ -1610,7 +1611,7 @@ describe("PR249 不透明度草稿提交", () => {
       });
       if (action === "删除") fireEvent.keyDown(canvas, { key: "Delete" });
       else fireEvent.click(screen.getByRole("button", { name: "锁定" }));
-      fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+      await activateToolbarTool("矩形");
       fireEvent.blur(screen.getByLabelText("填充不透明度"));
       expect(screen.getByLabelText("填充不透明度")).toHaveValue(80);
       if (action === "锁定") {
@@ -1632,7 +1633,7 @@ describe("PR249 第二轮对象交互", () => {
     const rendered = await renderEditor();
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     for (const x of [100, 300]) {
       fireEvent.pointerDown(canvas, { pointerId: 1, clientX: x, clientY: 100 });
       fireEvent.pointerUp(canvas, {
@@ -1660,7 +1661,7 @@ describe("PR249 第二轮对象交互", () => {
     async (tool) => {
       const { actions, canvas, unmount } = await prepareSelection();
       fireEvent.keyDown(canvas, { key: "c", ctrlKey: true });
-      fireEvent.click(screen.getByRole("button", { name: tool }));
+      await activateToolbarTool(tool);
       fireEvent.pointerDown(canvas, {
         pointerId: 1,
         clientX: 500,
@@ -1735,7 +1736,7 @@ describe("PR249 主对象恢复与连续样式", () => {
     const rendered = await renderEditor();
     const canvas = getEditorCanvas();
     mockCanvasBox(canvas, 900, 600);
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.change(screen.getByLabelText("矩形圆角"), {
       target: { value: "6" },
     });
@@ -1847,7 +1848,7 @@ describe("effect brush stamps", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: label }));
+      await activateToolbarTool(label);
       fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
         target: { value: "brush" },
       });
@@ -1873,7 +1874,7 @@ it("rejects a natural-pixel oversized effect before history commit", async () =>
   const canvas = getEditorCanvas();
   mockCanvasBox(canvas, 900, 600);
   harness.flush();
-  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  await activateToolbarTool("模糊");
   fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
     target: { value: "brush" },
   });
@@ -1896,7 +1897,7 @@ it("R15 rejected intensity preserves the error, selected mark and history", asyn
   const canvas = getEditorCanvas();
   mockCanvasBox(canvas, 900, 600);
   harness.flush();
-  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  await activateToolbarTool("模糊");
   fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
     target: { value: "brush" },
   });
@@ -1929,7 +1930,7 @@ it("R15 rejected enlargement keeps selection, revision and one undo entry", asyn
   const canvas = getEditorCanvas();
   mockCanvasBox(canvas, 900, 600);
   harness.flush();
-  fireEvent.click(screen.getByRole("button", { name: "模糊" }));
+  await activateToolbarTool("模糊");
   fireEvent.change(screen.getByLabelText("马赛克与模糊绘制方式"), {
     target: { value: "brush" },
   });

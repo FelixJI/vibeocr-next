@@ -1,4 +1,10 @@
 import { EditorColorPicker } from "./EditorColorPicker";
+import {
+  TOOL_FAMILIES,
+  familyMenuLabel,
+  type ToolFamily,
+} from "./toolFamilies";
+import { TOOL_LABELS } from "./toolLabels";
 import { editorTextBox } from "./editorTextLayerGeometry";
 import { compositionExclusions } from "./compositionExclusions";
 import { CanvasCompositionPanel } from "./CanvasCompositionPanel";
@@ -37,6 +43,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { createPortal, flushSync } from "react-dom";
 import type { AppAction, AppActions } from "../app/types";
@@ -216,7 +223,7 @@ export interface ScreenshotTextLayerState {
     | null;
 }
 
-type Tool =
+export type Tool =
   | "select"
   | "hand"
   | "textSelect"
@@ -246,32 +253,6 @@ const DEFAULT_COLOR = "#e02020";
 
 // 沿用标注手势的8px阈值；聚光灯孔洞的两个维度都须有效。
 const MIN_DRAW_DISTANCE = 8;
-const TOOL_LABELS: Readonly<Record<Tool, string>> = {
-  select: "选择",
-  hand: "手形",
-  textSelect: "取字",
-  rectangle: "矩形",
-  ellipse: "椭圆",
-  arrow: "箭头",
-  line: "直线",
-  polyline: "折线",
-  text: "文字",
-  callout: "说明",
-  mosaic: "马赛克",
-  blur: "模糊",
-  pen: "画笔",
-  highlighter: "荧光笔",
-  numbering: "序号",
-  image: "图片",
-  exclude: "屏蔽",
-  solid: "遮挡",
-  spotlight: "聚光灯",
-  magnifier: "放大镜",
-  objectEraser: "橡皮擦",
-  crop: "裁剪",
-  inpaint: "去水印",
-  dupmatch: "重复匹配",
-};
 const TOOL_HINTS: Readonly<Partial<Record<Tool, string>>> = {
   select: "选择和编辑标注对象；拖选图片中的文字可复制",
   hand: "平移画布（也可按住空格拖动），不移动标注对象",
@@ -6363,42 +6344,132 @@ export function ImageCanvasEditor({
   // 过宽靠容器内水平滚动保持单行可达；下排仅当前工具属性，可换行收纳。
   // 普通页仍是单条工具栏+底部 footer，两种布局共用片段，可访问名称与
   // 命令不随布局变化。
+  // 工具按家族视觉分组：仅分组不改子工具 id——mark 模型、快捷键与偏好
+  // order/hidden/shortcuts 仍按原工具寻址。族主按钮展示族内"当前子工具"
+  // （可访问名=子工具名），▾ 展开族内全部可见工具；只剩一个可见子工具的
+  // 家族退化为普通按钮，行为与旧工具条一致。
   const orderedTools = preferences.order.filter((value) =>
     TOOLSETS[toolset].includes(value),
   );
   // 按钮上下文可用性：pinEdit 现场不提供取字（文字层由宿主 owned 快照
-  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪）。快捷键
-  // 与隐藏菜单复用同一判断，不让隐藏入口绕过上下文限制。
+  // 供给）；截图现场无裁剪按钮（选区四边/四角拖拽直接调整裁剪），手形
+  // 收进「更多操作」（空格平移仍可用）。快捷键与隐藏菜单复用同一判断，
+  // 不让隐藏入口绕过上下文限制。
   const toolAvailable = (value: string) =>
-    value !== "textSelect" && !(captureStyle && value === "crop");
+    value !== "textSelect" &&
+    !(captureStyle && (value === "crop" || value === "hand"));
   const hiddenTools = orderedTools.filter(
     (value) => preferences.hidden.includes(value) && toolAvailable(value),
   );
-  const toolButtons = orderedTools
+  const visibleTools: readonly string[] = orderedTools
     .filter((value) => !preferences.hidden.includes(value))
-    .filter(toolAvailable)
-    .map((value) => {
-      // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
-      const icon = TOOL_ICONS[value];
-      return (
-        <ToolbarButton
-          appearance={tool === value ? "primary" : "subtle"}
-          aria-label={TOOL_LABELS[value]}
-          title={TOOL_HINTS[value] ?? TOOL_LABELS[value]}
-          icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
-          aria-pressed={tool === value}
-          key={value}
-          onClick={() => {
-            cancelDrawing();
-            setTool(value);
-          }}
-        >
-          {/* 截图现场按用户要求全部以简短中文文字呈现，不渲染图标；
-              普通页保持图标+文字。 */}
-          {TOOL_LABELS[value]}
-        </ToolbarButton>
-      );
+    .filter(toolAvailable);
+  const orderIndex = new Map<string, number>(
+    orderedTools.map((value, index) => [value as string, index]),
+  );
+  // 族内最近使用（当前工具离开该族后仍记住上次选择）：只在 tool 变化
+  // 引发的渲染间隙写入 ref，读取方消费的渲染都由 tool/偏好状态驱动，
+  // 不在 effect 里 setState 造成级联渲染。
+  const familyLastTool = useRef<Partial<Record<string, string>>>({});
+  useEffect(() => {
+    const family = TOOL_FAMILIES.find((entry) => entry.tools.includes(tool));
+    if (family) familyLastTool.current[family.id] = tool;
+  }, [tool]);
+  const familyMembers = (family: ToolFamily) =>
+    family.tools
+      .filter((member) => visibleTools.includes(member))
+      .sort((a, b) => (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0));
+  const familyCurrent = (family: ToolFamily, members: readonly string[]) => {
+    if (family.tools.includes(tool)) return tool;
+    const remembered = familyLastTool.current[family.id];
+    if (remembered && members.includes(remembered)) return remembered;
+    return members[0];
+  };
+  const activateTool = (value: string) => {
+    cancelDrawing();
+    setTool(value as Tool);
+  };
+  const renderToolButton = (value: string, key: string) => {
+    // 新增工具（直线/折线）无已确认图标：始终显示清晰文字，不放空按钮。
+    const icon = TOOL_ICONS[value as Tool];
+    return (
+      <ToolbarButton
+        appearance={tool === value ? "primary" : "subtle"}
+        aria-label={TOOL_LABELS[value as Tool]}
+        title={TOOL_HINTS[value as Tool] ?? TOOL_LABELS[value as Tool]}
+        icon={captureStyle || !icon ? undefined : <ToolbarIcon name={icon} />}
+        aria-pressed={tool === value}
+        key={key}
+        onClick={() => activateTool(value)}
+      >
+        {/* 截图现场按用户要求全部以简短中文文字呈现，不渲染图标；
+            普通页保持图标+文字。 */}
+        {TOOL_LABELS[value as Tool]}
+      </ToolbarButton>
+    );
+  };
+  // 行模型：独立工具与家族都按"首个可见成员在偏好顺序中的位置"排序，
+  // 自定义 order 依旧决定工具区（含族间）顺序。
+  const toolRowEntries: {
+    key: string;
+    sortIndex: number;
+    node: ReactNode;
+  }[] = [];
+  const familyClaimed = new Set<string>();
+  for (const family of TOOL_FAMILIES) {
+    const members = familyMembers(family);
+    if (members.length === 0) continue;
+    members.forEach((member) => familyClaimed.add(member));
+    if (members.length === 1) {
+      toolRowEntries.push({
+        key: family.id,
+        sortIndex: orderIndex.get(members[0]!) ?? 0,
+        node: renderToolButton(members[0]!, family.id),
+      });
+      continue;
+    }
+    const current = familyCurrent(family, members)!;
+    toolRowEntries.push({
+      key: family.id,
+      sortIndex: orderIndex.get(members[0]!) ?? 0,
+      node: (
+        <span className="editor-tool-family" key={family.id}>
+          {renderToolButton(current, `${family.id}-${current}`)}
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <ToolbarButton
+                aria-label={familyMenuLabel(family)}
+                aria-haspopup="menu"
+                className="editor-tool-family-toggle"
+                title={`${family.label}：展开族内其他工具`}
+              >
+                ▾
+              </ToolbarButton>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                {members.map((member) => (
+                  <MenuItem key={member} onClick={() => activateTool(member)}>
+                    {TOOL_LABELS[member as Tool]}
+                  </MenuItem>
+                ))}
+              </MenuList>
+            </MenuPopover>
+          </Menu>
+        </span>
+      ),
     });
+  }
+  for (const value of visibleTools) {
+    if (familyClaimed.has(value)) continue;
+    toolRowEntries.push({
+      key: value,
+      sortIndex: orderIndex.get(value) ?? 0,
+      node: renderToolButton(value, value),
+    });
+  }
+  toolRowEntries.sort((a, b) => a.sortIndex - b.sortIndex);
+  const toolButtons = toolRowEntries.map((entry) => entry.node);
 
   // 选区派生态（工具栏/列表共用）：含锁判定驱动修改类动作禁用。
   const selectionCount = selectedIds.size;
@@ -7738,6 +7809,14 @@ export function ImageCanvasEditor({
       </MenuTrigger>
       <MenuPopover>
         <MenuList>
+          {/* 截图现场手形不入主排（空格平移可用），经此入口补位。 */}
+          {captureStyle &&
+            TOOLSETS[toolset].includes("hand") &&
+            !preferences.hidden.includes("hand") && (
+              <MenuItem onClick={() => activateTool("hand")}>
+                {TOOL_LABELS.hand}
+              </MenuItem>
+            )}
           {hiddenTools.map((value) => (
             <MenuItem
               key={value}

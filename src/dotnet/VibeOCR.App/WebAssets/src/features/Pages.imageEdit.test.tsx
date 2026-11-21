@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { expectToolbarToolAvailable } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions, AppViewState } from "../app/types";
@@ -127,7 +128,7 @@ describe("retained screenshot recognition actions", () => {
 });
 
 describe("ImageEditPage result isolation", () => {
-  it("renders the edit canvas from the imageEdit feature without projecting a shared recognition result", () => {
+  it("renders the edit canvas from the imageEdit feature without projecting a shared recognition result", async () => {
     // 独立状态接线：编辑页输入来自 imageEdit feature；共享 recognition
     // 的旧结果绝不投影到纯编辑页（AC1 回归 + 状态分离契约）。
     window.location.hash = "#/imageEdit";
@@ -153,7 +154,7 @@ describe("ImageEditPage result isolation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps the single recognition page as the result host", () => {
+  it("keeps the single recognition page as the result host", async () => {
     // 对照：识别承载面仍渲染结果面板（由 RecognitionPage 负责）。
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("识别文本")));
     const { unmount } = render(
@@ -174,7 +175,7 @@ describe("ImageEditPage result isolation", () => {
 });
 
 describe("ImageEditPage keeps the full tool palette", () => {
-  it("still offers the complete annotation tool set", () => {
+  it("still offers the complete annotation tool set", async () => {
     window.location.hash = "#/imageEdit";
     const { unmount } = render(
       <ImageEditPage
@@ -202,10 +203,8 @@ describe("ImageEditPage keeps the full tool palette", () => {
       "裁剪",
       "去水印",
     ]) {
-      expect(
-        screen.getByRole("button", { name: tool }),
-        `工具 ${tool} 应保留在完整编辑页`,
-      ).toBeInTheDocument();
+      // 家族分组成员（椭圆/箭头/模糊/荧光笔/序号/屏蔽）经族内菜单可达。
+      await expectToolbarToolAvailable(tool);
     }
     unmount();
   });
@@ -275,7 +274,7 @@ describe("editor command scope wiring", () => {
 });
 
 describe("RecognitionPage lean editor", () => {
-  it("keeps only the inpaint, rotate and exclude processing tools", () => {
+  it("keeps only the inpaint, rotate and exclude processing tools", async () => {
     // 用户项2：单次识别只保留去水印、旋转、屏蔽三类图片处理工具；
     // 其余绘制/遮盖/裁剪工具不进入识别面（选择/取字是必要的交互与
     // 结果复制入口，不是图片处理工具）。
@@ -327,7 +326,7 @@ describe("RecognitionPage lean editor", () => {
     unmount();
   });
 
-  it("dispatches recognition-scoped edit entry commands", () => {
+  it("dispatches recognition-scoped edit entry commands", async () => {
     // 移除单次识别对 imageEdit.selectImage/readClipboard 的耦合：
     // 编辑入口改发 recognition scope 专用命令（宿主命令约定分离）。
     const run = vi.fn().mockResolvedValue(true);
@@ -378,7 +377,7 @@ describe("Windows document commands (Ctrl+O / Ctrl+C)", () => {
     document.getSelection()?.removeAllRanges();
   });
 
-  it("imageEdit opens an image with the same entry and skips the capture scene window", () => {
+  it("imageEdit opens an image with the same entry and skips the capture scene window", async () => {
     focusDocument(true);
     const run = vi.fn().mockResolvedValue(true);
     const actions = { run, navigate: vi.fn(), setTheme: vi.fn() };
@@ -412,7 +411,7 @@ describe("Windows document commands (Ctrl+O / Ctrl+C)", () => {
     sceneView.unmount();
   });
 
-  it("recognition Ctrl+C yields when no result exists (copy toolbar mirror)", () => {
+  it("recognition Ctrl+C yields when no result exists (copy toolbar mirror)", async () => {
     // 回归：旧代码只看 capability，无结果时 Ctrl+C 仍发 recognition.copy，
     // 宿主端无果可复制只能走异常恢复；镜像工具栏渲染条件后不再接管。
     focusDocument(true);
@@ -436,7 +435,7 @@ describe("Windows document commands (Ctrl+O / Ctrl+C)", () => {
     view.unmount();
   });
 
-  it("recognition copies text without a selection and yields to real text selections or editable targets", () => {
+  it("recognition copies text without a selection and yields to real text selections or editable targets", async () => {
     focusDocument(true);
     const run = vi.fn().mockResolvedValue(true);
     const view = render(

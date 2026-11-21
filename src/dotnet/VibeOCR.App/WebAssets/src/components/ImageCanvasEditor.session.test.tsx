@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -26,7 +27,7 @@ function createActions(): AppActions & { run: ReturnType<typeof vi.fn> } {
 }
 
 describe("screenshot session editor wiring", () => {
-  it("describes an empty local text result without offering retry", () => {
+  it("describes an empty local text result without offering retry", async () => {
     const { unmount } = render(
       <ImageCanvasEditor
         actions={createActions()}
@@ -46,7 +47,7 @@ describe("screenshot session editor wiring", () => {
     expect(screen.queryByRole("button", { name: "重新准备文字层" })).toBeNull();
     unmount();
   });
-  it("keeps hand and Space panning separate from content edits", () => {
+  it("keeps hand and Space panning separate from content edits", async () => {
     const actions = createActions();
     const { unmount } = render(
       <ImageCanvasEditor
@@ -83,7 +84,7 @@ describe("screenshot session editor wiring", () => {
     unmount();
   });
 
-  it("notifies the host with increasing content revisions and resets per session", () => {
+  it("notifies the host with increasing content revisions and resets per session", async () => {
     const actions = createActions();
     const { rerender, unmount } = render(
       <ImageCanvasEditor
@@ -122,7 +123,7 @@ describe("screenshot session editor wiring", () => {
         session={{ sessionId: "session-b", revision: 0 }}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "序号" }));
+    await activateToolbarTool("序号");
     const freshCanvas = screen.getByLabelText("图片检查画布");
     fireEvent.pointerDown(freshCanvas, {
       pointerId: 2,
@@ -149,7 +150,7 @@ describe("screenshot session editor wiring", () => {
     unmount();
   });
 
-  it("exposes session-only explicit recognition and close actions", () => {
+  it("exposes session-only explicit recognition and close actions", async () => {
     const actions = createActions();
     const { unmount } = render(
       <ImageCanvasEditor

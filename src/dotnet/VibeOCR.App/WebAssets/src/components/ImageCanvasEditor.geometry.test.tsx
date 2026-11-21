@@ -6,6 +6,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
+import { activateToolbarTool } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -308,7 +309,7 @@ describe("AC1 矩形/椭圆八点缩放与拖拽约束", () => {
     // dx=300、dy=200 → 取较大边 300：正方形 300×300。
     expect(drawnRects()).toContainEqual([100, 100, 300, 300]);
 
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     await dragDraw(
       canvas,
       harness,
@@ -340,7 +341,7 @@ describe("AC1 矩形/椭圆八点缩放与拖拽约束", () => {
     harness.flush();
 
     // 直线：Shift 从 (100,100) 拖到 (400,300) → 吸附 45°。
-    fireEvent.click(screen.getByRole("button", { name: "直线" }));
+    await activateToolbarTool("直线");
     await dragDraw(
       canvas,
       harness,
@@ -363,7 +364,7 @@ describe("AC1 矩形/椭圆八点缩放与拖拽约束", () => {
     ).toBe(true);
 
     // 箭头：绘制后选中，拖 end 端点到 (500,200)。
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("箭头");
     await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 400, y: 300 });
     expect(revisions(actions)).toEqual([1, 2]);
     await clickSelect(canvas, harness, { x: 250, y: 200 });
@@ -471,7 +472,7 @@ describe("AC2 直线/折线、线型、圆角与箭头端头", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+      await activateToolbarTool("箭头");
       fireEvent.change(screen.getByLabelText("线条宽度"), {
         target: { value: "8" },
       });
@@ -514,7 +515,7 @@ describe("AC2 直线/折线、线型、圆角与箭头端头", () => {
     harness.flush();
 
     // 实心双向：端头三角填充，两端各一个。
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("箭头");
     fireEvent.change(screen.getByLabelText("箭头样式"), {
       target: { value: "solid" },
     });
@@ -551,7 +552,7 @@ describe("AC2 直线/折线、线型、圆角与箭头端头", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     // 第一点。
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
@@ -605,14 +606,14 @@ describe("AC3 工具属性记忆、滚轮线宽与快捷键边界", () => {
       target: { value: "dashed" },
     });
     // 折线/椭圆独立：不受矩形工具记忆影响。
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     const settings = within(
       screen.getByRole("toolbar", { name: "当前工具设置" }),
     );
     expect(settings.getByLabelText("线条宽度")).toHaveValue("3");
     expect(settings.getByLabelText("线型")).toHaveValue("solid");
     // 切回矩形：记忆保留；重置回到默认。
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     expect(screen.getByLabelText("线条宽度")).toHaveValue("8");
     expect(screen.getByLabelText("线型")).toHaveValue("dashed");
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
@@ -626,7 +627,7 @@ describe("AC3 工具属性记忆、滚轮线宽与快捷键边界", () => {
     // 下排只显示当前工具属性：箭头不出现圆角，矩形不出现箭头样式。
     expect(screen.queryByLabelText("矩形圆角")).toBeInTheDocument();
     expect(screen.queryByLabelText("箭头样式")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("箭头");
     expect(screen.queryByLabelText("矩形圆角")).toBeNull();
     expect(screen.queryByLabelText("箭头样式")).toBeInTheDocument();
     // 文字工具：无描边属性，仅字号。
@@ -675,7 +676,7 @@ describe("AC3 工具属性记忆、滚轮线宽与快捷键边界", () => {
     ).toBe(true);
 
     // 折线草稿打开时，输入框内 Enter/Escape 不提交/不取消草稿。
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 120 });
@@ -886,7 +887,7 @@ describe("短线段端点命中（C1 回归）", () => {
     harness.flush();
 
     // 直线 (300,200)→(310,204)：长度≈10.8 < 2×12，两端命中圈重叠。
-    fireEvent.click(screen.getByRole("button", { name: "直线" }));
+    await activateToolbarTool("直线");
     await dragDraw(canvas, harness, { x: 300, y: 200 }, { x: 310, y: 204 });
     await clickSelect(canvas, harness, { x: 305, y: 202 });
     // 按在 end 附近 (311,205)：距 end≈1.4、距 start≈11.2 → 应命中 end。
@@ -906,7 +907,7 @@ describe("短线段端点命中（C1 回归）", () => {
 
     // 箭头短线同构：共享同一 endpointHandle。前一个直线仍处于选中态，
     // 用对象下拉直接选中箭头，避免旧选择的手柄抢先命中。
-    fireEvent.click(screen.getByRole("button", { name: "箭头" }));
+    await activateToolbarTool("箭头");
     await dragDraw(canvas, harness, { x: 300, y: 200 }, { x: 308, y: 203 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     fireEvent.change(screen.getByLabelText("选择标注对象"), {
@@ -936,7 +937,7 @@ describe("折线活动段预览（C2 回归）", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     // 1) 拖拽中的活动段：pointerup 之前画布已绘制到当前拖拽点。
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 300, clientY: 150 });
@@ -969,7 +970,7 @@ describe("折线活动段预览（C2 回归）", () => {
     //    提交恰好一条历史。
     fireEvent.keyDown(canvas, { key: "Escape" });
     harness.flush();
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
     fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 100, clientY: 100 });
     fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 300, clientY: 150 });
@@ -1098,7 +1099,7 @@ describe("选中对象填充恢复（C3 回归）", () => {
     harness.flush();
 
     // rect0：椭圆 #12a150/70；rect1：矩形工具记忆填充后改为 #ff0000。
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     fireEvent.click(screen.getByLabelText("填充"));
     fireEvent.change(screen.getByLabelText("填充颜色"), {
       target: { value: "#12a150" },
@@ -1107,7 +1108,7 @@ describe("选中对象填充恢复（C3 回归）", () => {
     fireEvent.change(ellipseOpacity, { target: { value: "70" } });
     fireEvent.blur(ellipseOpacity);
     await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 300, y: 260 });
-    fireEvent.click(screen.getByRole("button", { name: "矩形" }));
+    await activateToolbarTool("矩形");
     fireEvent.click(screen.getByLabelText("填充"));
     await dragDraw(canvas, harness, { x: 350, y: 100 }, { x: 550, y: 260 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
@@ -1176,7 +1177,7 @@ describe("小矩形八点手柄最近命中（D1 回归）", () => {
     harness.flush();
 
     // 椭圆：拖 se 后包围盒 (400,200)-(500,300) → 中心 (450,250) r50。
-    fireEvent.click(screen.getByRole("button", { name: "椭圆" }));
+    await activateToolbarTool("椭圆");
     await dragDraw(canvas, harness, { x: 400, y: 200 }, { x: 408, y: 208 });
     await clickSelect(canvas, harness, { x: 404, y: 204 });
     fireEvent.pointerDown(canvas, { pointerId: 3, clientX: 408, clientY: 208 });
@@ -1192,7 +1193,7 @@ describe("小矩形八点手柄最近命中（D1 回归）", () => {
 
     // 屏蔽小矩形：八点手柄同样最近命中。旧选择（椭圆）的手柄会抢先
     // 命中点击，先点空白取消选择再选中屏蔽。
-    fireEvent.click(screen.getByRole("button", { name: "屏蔽" }));
+    await activateToolbarTool("屏蔽");
     await dragDraw(canvas, harness, { x: 400, y: 200 }, { x: 408, y: 208 });
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 700, clientY: 450 });
@@ -1348,7 +1349,7 @@ describe("整体状态操作放弃进行中草稿（D3 回归）", () => {
     // 先提交一个矩形使“清除编辑”可用，再开始折线草稿。
     fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 260, y: 180 });
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
@@ -1383,7 +1384,7 @@ describe("整体状态操作放弃进行中草稿（D3 回归）", () => {
     mockCanvasBox(canvas, 900, 600);
     harness.flush();
 
-    fireEvent.click(screen.getByRole("button", { name: "折线" }));
+    await activateToolbarTool("折线");
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 300 });
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 350 });
@@ -1419,7 +1420,7 @@ describe("E 轮手势边界回归", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await activateToolbarTool(toolName);
       await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 400, y: 200 });
       await clickSelect(canvas, harness, { x: 250, y: 150 });
       // Shift 原地点击非 45° 线的端点命中圈，也不能修改端点或入历史。
@@ -1514,7 +1515,7 @@ describe("E 轮手势边界回归", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await activateToolbarTool(toolName);
       await dragDraw(canvas, harness, { x: 100, y: 100 }, { x: 200, y: 200 });
       await clickSelect(canvas, harness, { x: 150, y: 150 });
       const edge = axis === "width" ? { x: 200, y: 150 } : { x: 150, y: 200 };
@@ -1560,7 +1561,7 @@ describe("E 轮手势边界回归", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await activateToolbarTool(toolName);
       fireEvent.pointerDown(canvas, {
         pointerId: 1,
         clientX: 100,
@@ -1672,7 +1673,7 @@ describe("G1 手柄零位移", () => {
       const canvas = getEditorCanvas();
       mockCanvasBox(canvas, 900, 600);
       harness.flush();
-      fireEvent.click(screen.getByRole("button", { name: toolName }));
+      await activateToolbarTool(toolName);
       await dragDraw(canvas, harness, from, to);
       fireEvent.click(screen.getByRole("button", { name: "选择" }));
       fireEvent.change(screen.getByLabelText("选择标注对象"), {
