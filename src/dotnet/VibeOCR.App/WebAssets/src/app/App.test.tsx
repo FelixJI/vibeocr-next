@@ -1785,8 +1785,8 @@ describe("AppShell", () => {
         }}
       />,
     );
-    // 生命周期技术提示收纳在“高级选项”折叠区：展开后仍完整可读。
-    fireEvent.click(screen.getByText("高级选项"));
+    // 生命周期技术提示收纳在“识别参数”折叠区：展开后仍完整可读。
+    fireEvent.click(screen.getByText("识别参数"));
     expect(
       screen.getByText(
         "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。",
@@ -1893,7 +1893,7 @@ describe("AppShell", () => {
       (option) => (option as HTMLOptionElement).value,
     );
     expect(grouped).toEqual(["paddle_table"]);
-    fireEvent.click(screen.getByText("高级选项"));
+    fireEvent.click(screen.getByText("识别参数"));
     expect(
       screen.getByText(
         "空闲后释放进程资源，可在设置中调整或设为持久；远程 MinerU 由服务端管理。",
@@ -1964,8 +1964,8 @@ describe("AppShell", () => {
         name: "跟随默认（Windows OCR（系统内置））",
       }),
     ).toBeInTheDocument();
-    // 可点击入口直达设置页的默认识别模式区（收纳在高级选项内）。
-    await user.click(screen.getByText("高级选项"));
+    // 可点击入口直达设置页的默认识别模式区（收纳在“识别参数”内）。
+    await user.click(screen.getByText("识别参数"));
     await user.click(screen.getByRole("button", { name: "修改默认识别类型" }));
     expect(actions.navigate).toHaveBeenCalledWith("settings");
     unmount();
