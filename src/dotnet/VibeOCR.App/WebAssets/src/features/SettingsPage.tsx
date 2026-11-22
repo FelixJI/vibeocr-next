@@ -1,4 +1,5 @@
 import { EditorPreferencesPanel } from "../components/EditorPreferencesPanel";
+import { SelectionToolbarPanel } from "../components/SelectionToolbarPanel";
 import { editorPreferences } from "../components/editorPreferences";
 import {
   Button,
@@ -632,6 +633,16 @@ export function SettingsPage({ viewState, actions }: FeatureProps) {
         error={
           typeof state.editorPreferencesError === "string"
             ? state.editorPreferencesError
+            : undefined
+        }
+      />
+      <SelectionToolbarPanel
+        key={JSON.stringify(state.selectionToolbar)}
+        value={state.selectionToolbar}
+        actions={actions}
+        error={
+          typeof state.selectionToolbarError === "string"
+            ? state.selectionToolbarError
             : undefined
         }
       />

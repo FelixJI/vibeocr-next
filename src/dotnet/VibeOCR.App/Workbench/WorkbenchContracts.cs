@@ -657,6 +657,7 @@ public sealed record EndHotkeyRecordingCommand(Guid RecordingId) : WorkbenchComm
 /// toggle action.
 /// </summary>
 public sealed record SetEditorPreferencesCommand(EditorPreferences Preferences) : WorkbenchCommand;
+public sealed record SetSelectionToolbarCommand(IReadOnlyList<string> Tools) : WorkbenchCommand;
 public sealed record PickImageOutputDirectoryCommand : WorkbenchCommand;
 public sealed record ImageOutputBinding(ImageOutputPreset Preset, string Directory);
 public sealed record SavePresetImageCommand(string ResourceUri, string PresetId, string Scope, Guid? SessionId = null, long? Revision = null, ImageOutputBinding? PresetBinding = null) : WorkbenchCommand;
@@ -1042,6 +1043,7 @@ public sealed record SettingsWorkbenchState(
   IReadOnlyList<SettingsHotkeyActionState>? HotkeyActions = null,
   SettingsFloatingToolbarState? FloatingToolbar = null,
   EditorPreferences? EditorPreferences = null, string? ImageOutputDirectory = null, string? EditorPreferencesError = null,
+  IReadOnlyList<string>? SelectionToolbar = null, string? SelectionToolbarError = null,
   bool MinimizeToTray = false, string ShellSettingsError = "",
   // null 表示尚未从真实设置读取；不得当作 600 占位编辑。
   int? PaddleIdleSeconds = null, int? MineruIdleSeconds = null,

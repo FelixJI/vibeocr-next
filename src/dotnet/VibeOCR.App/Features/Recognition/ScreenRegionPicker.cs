@@ -95,7 +95,8 @@ public sealed record ScreenshotRecognitionModeEntry(
 /// </summary>
 public sealed record ScreenshotSelectionActions(
     IReadOnlyList<ScreenshotRecognitionModeEntry> Modes,
-    WorkbenchTheme Theme = WorkbenchTheme.System);
+    WorkbenchTheme Theme = WorkbenchTheme.System,
+    IReadOnlyList<string>? Tools = null);
 
 /// <summary>持有本次截图窗口，供现场编辑或选区保存使用。</summary>
 internal sealed class ScreenshotCaptureScene : IDisposable
@@ -1052,10 +1053,14 @@ public sealed class ScreenRegionPicker(
     List<Button> selectionActionButtons = [];
     if (ordinary)
     {
-      foreach (string toolId in DefaultSelectionTools)
+      // 宿主配置的有序子集优先（设置项驱动）；未配置回默认高频序列。
+      IEnumerable<string> toolbarTools = selectionActions?.Tools is { Count: > 0 } configured
+        ? configured : DefaultSelectionTools;
+      foreach (string toolId in toolbarTools)
       {
         (string label, string tool, string tip) = SelectionEditToolRow
-          .Single(row => row.Tool == toolId);
+          .SingleOrDefault(row => row.Tool == toolId);
+        if (tool is null) continue; // 未知 id 静默跳过（词汇表契约保护）。
         selectionActionButtons.Add(
           AddButton(label, () => { initialTool = tool; Finish(true); }, toolbarRowMain, tip));
       }
