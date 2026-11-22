@@ -222,25 +222,37 @@ public sealed partial class MainWindow
     string triggerAria, string itemText, Microsoft.UI.Xaml.Controls.WebView2? surface = null)
   {
     Microsoft.UI.Xaml.Controls.WebView2 target = surface ?? SmokeEditorWebView;
+    // 注意必须是 IIFE：ExecuteScriptAsync 求值的是表达式，裸箭头函数会
+    // 返回函数对象（JSON 序列化为 {}）而不执行。
     string script =
-      "() => { const t = document.querySelector('button[aria-label=\"" + triggerAria + "\"]');" +
+      "(() => { const t = document.querySelector('button[aria-label=\"" + triggerAria + "\"]');" +
       " if (!t) return 'no-trigger';" +
       " const item = Array.from(document.querySelectorAll('[role=\"menuitem\"]'))" +
       ".find(e => e.textContent.trim() === " + JsonSerializer.Serialize(itemText) + ");" +
-      " if (!item) { t.click(); return 'retry'; }" +
+      " if (!item) { t.click(); return 'retry:items=' + document.querySelectorAll('[role=\"menuitem\"]').length" +
+      " + ',triggerDisabled=' + t.disabled + ',ariaDisabled=' + t.getAttribute('aria-disabled'); }" +
       " if (item.getAttribute('aria-disabled') === 'true') return 'disabled';" +
-      " item.click(); return 'ok'; }";
+      " item.click(); return 'ok'; })()";
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    string last = "none";
     while (true)
     {
       string result = await target.CoreWebView2.ExecuteScriptAsync(script);
       if (result == "\"ok\"") return;
+      last = result;
       if (result == "\"no-trigger\"")
         throw new InvalidOperationException($"Smoke menu trigger unavailable: {triggerAria}");
       if (result == "\"disabled\"")
         throw new InvalidOperationException($"Smoke menuitem disabled: {itemText}");
-      cancellation.Token.ThrowIfCancellationRequested();
-      await Task.Delay(100, cancellation.Token);
+      try
+      {
+        await Task.Delay(100, cancellation.Token);
+      }
+      catch (OperationCanceledException)
+      {
+        throw new InvalidOperationException(
+          $"Smoke menu never resolved: {triggerAria}/{itemText}, last={last}");
+      }
     }
   }
   private async Task<RecognitionWorkbenchState> WaitForScreenshotStateAsync(

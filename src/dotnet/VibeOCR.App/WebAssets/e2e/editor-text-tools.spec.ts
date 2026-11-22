@@ -168,13 +168,7 @@ test("文字双击编辑、IME、字体回退和多行样式在预览与导出�
   page,
 }, testInfo) => {
   const { uploads } = await setupTextHost(page);
-<<<<<<< HEAD
-  await activateToolbarTool(page, "文字");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-  await page.getByRole("button", { name: "文字", exact: true }).click();
-=======
   await clickToolbarControl(page, "文字");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
   await page.getByLabel("标注文字").fill("旧文字");
   await drag(page, 150, 180, 550, 180);
   await doubleClick(page, 190, 172);
@@ -289,13 +283,7 @@ test("字母序号形状与重新编号、说明内容及指向可编辑并写�
 
 test("裁剪旋转后的文字可命中续编，取消保持导出和历史", async ({ page }) => {
   const { uploads } = await setupTextHost(page);
-<<<<<<< HEAD
-  await activateToolbarTool(page, "文字");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-  await page.getByRole("button", { name: "文字", exact: true }).click();
-=======
   await clickToolbarControl(page, "文字");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
   await page.getByLabel("标注文字").fill("定位文字");
   await page.getByLabel("自定义颜色").fill("#1f6feb");
   await drag(page, 200, 200, 400, 200);
@@ -326,13 +314,7 @@ test("非1:1原图的多行字号背景在导出中按自然比例缩放", async
   page,
 }, testInfo) => {
   const { uploads } = await setupTextHost(page, { width: 300, height: 200 });
-<<<<<<< HEAD
-  await activateToolbarTool(page, "文字");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-  await page.getByRole("button", { name: "文字", exact: true }).click();
-=======
   await clickToolbarControl(page, "文字");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
   await page.getByLabel("标注文字").fill("Scale\nNext");
   await page.getByLabel("文字字号").selectOption("32");
   await page.getByLabel("文字字体").fill("monospace");
@@ -380,13 +362,7 @@ for (const label of ["文字", "说明"]) {
         }),
       );
       const { uploads } = await setupTextHost(page);
-<<<<<<< HEAD
-      await activateToolbarTool(page, label);
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-      await page.getByRole("button", { name: label, exact: true }).click();
-=======
       await clickToolbarControl(page, label);
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
       await page.getByLabel("标注文字").fill("取色测试");
       await page.getByLabel("自定义颜色").fill("#1f6feb");
       await page.getByLabel("文字背景", { exact: true }).check();
@@ -465,22 +441,10 @@ test("清空前置屏蔽取消文字草稿并保留原文字、矩形和可撤�
   const { uploads } = await setupTextHost(page);
   await activateToolbarTool(page, "屏蔽");
   await drag(page, 80, 80, 150, 130);
-<<<<<<< HEAD
-  await activateToolbarTool(page, "文字");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-  await page.getByRole("button", { name: "文字", exact: true }).click();
-=======
   await clickToolbarControl(page, "文字");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
   await page.getByLabel("标注文字").fill("A原文字");
   await drag(page, 200, 220, 360, 220);
-<<<<<<< HEAD
-  await activateToolbarTool(page, "矩形");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-  await page.getByRole("button", { name: "矩形", exact: true }).click();
-=======
   await clickToolbarControl(page, "矩形");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
   await page.getByLabel("自定义颜色").fill("#1f6feb");
   await page.getByLabel("线条宽度").selectOption("8");
   await drag(page, 500, 300, 700, 450);
@@ -606,13 +570,7 @@ for (const tool of ["文字", "序号", "说明"] as const) {
     page,
   }, testInfo) => {
     const { uploads } = await setupTextHost(page);
-<<<<<<< HEAD
-    await activateToolbarTool(page, tool);
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-    await page.getByRole("button", { name: tool, exact: true }).click();
-=======
     await clickToolbarControl(page, tool);
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
     if (tool !== "序号") await page.getByLabel("标注文字").fill("iiiiiiiiiiii");
     else await page.getByLabel("序号形状").selectOption("none");
     await page.getByLabel("文字字号").selectOption("48");
@@ -656,13 +614,7 @@ for (const alignment of ["center", "right"] as const) {
     page,
   }, testInfo) => {
     const { uploads } = await setupTextHost(page, { width: 300, height: 200 });
-<<<<<<< HEAD
-    await activateToolbarTool(page, "文字");
-||||||| parent of 282a30f5 (feat(web): 动作区重组并规范两排分工)
-    await page.getByRole("button", { name: "文字", exact: true }).click();
-=======
     await clickToolbarControl(page, "文字");
->>>>>>> 282a30f5 (feat(web): 动作区重组并规范两排分工)
     await page.getByLabel("标注文字").fill("X");
     await page.getByLabel("文字字体").fill("monospace");
     await page.getByLabel("文字字号").selectOption("48");
