@@ -3853,8 +3853,17 @@ public sealed class ScreenshotSessionWorkbenchTests
       Assert.False(string.IsNullOrWhiteSpace(entry.Label));
       Assert.False(string.IsNullOrWhiteSpace(entry.Tip));
     });
-    // 上排固定动作（识别两类/长截图/复制/保存/钉图/设置/重选/退出/放大镜）
-    // 与直接入口（确认/撤销/重做）在 picker 内以中文文字内联创建，无图标键。
+    // 动作栏默认仅展示高频子集，其余工具（画笔/模糊/屏蔽/去水印）经
+    // 编辑现场族菜单可达；默认序列必须是词汇表的无重有序子集。
+    Assert.Equal(
+      ScreenRegionPicker.DefaultSelectionTools.Distinct().Count(),
+      ScreenRegionPicker.DefaultSelectionTools.Length);
+    Assert.All(ScreenRegionPicker.DefaultSelectionTools, toolId =>
+      Assert.Contains(ScreenRegionPicker.SelectionEditToolRow, entry => entry.Tool == toolId));
+    // 上排固定动作（识别两类/长截图/复制/保存/钉图）与直接入口
+    // （确认/撤销/重做）在 picker 内以中文文字内联创建，无图标键。
+    // 重选/退出/放大镜开关已移除按钮：右键重选、Esc 退出、M 切换放大镜
+    // 保留，可发现性由四角快捷键角标承接。
   }
 
   [Theory]
