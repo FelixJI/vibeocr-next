@@ -247,7 +247,8 @@ public sealed partial class MainWindow
     await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
       "document.body.textContent.includes('原图 64×32') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
       "Main image editor did not load the source.");
-    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"屏蔽\"]').click()");
+    // 屏蔽工具在「遮挡 ▾」族菜单内（家族分组后无直出按钮）。
+    await ClickSmokeMenuitemAsync("遮挡工具选项", "屏蔽", WorkbenchWebView);
     await WorkbenchWebView.ExecuteScriptAsync("""
       (()=>{const c=document.querySelector('canvas[aria-label="图片检查画布"]');const r=c.getBoundingClientRect();
       const e=(type,x,y,buttons)=>c.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,buttons,clientX:r.left+r.width*x/900,clientY:r.top+r.height*y/600}));
@@ -268,7 +269,7 @@ public sealed partial class MainWindow
             "document.body.textContent.includes('钉图未创建') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
             "Failed first pin did not return a recoverable receipt.");
           await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
-          if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
+          if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed pin was registered.");
         }
       }
       finally { File.Delete(pinRoot); }

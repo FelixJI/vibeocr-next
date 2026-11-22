@@ -2,6 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
+import { activateToolbarTool } from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
@@ -160,7 +161,7 @@ test("exclusion regions bake opaque white pixels into the recognition upload onl
   });
 
   // 框选左半（敏感文字区）为排除区。
-  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await activateToolbarTool(page, "屏蔽");
   await canvas.scrollIntoViewIfNeeded();
   const start = await naturalToClient(canvas, 0, 0);
   const end = await naturalToClient(canvas, 80, 80);

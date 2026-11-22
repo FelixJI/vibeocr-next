@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { activateToolbarTool } from "./toolSelection";
 import {
   mountHost,
   snapshot,
@@ -370,7 +371,7 @@ test("pin owned save and restore retain spotlight and magnifier geometry and pix
     endX: number,
     endY: number,
   ) {
-    await page.getByRole("button", { name: tool, exact: true }).click();
+    await activateToolbarTool(page, tool);
     const canvas = page.getByLabel("图片检查画布");
     await canvas.scrollIntoViewIfNeeded();
     const bounds = (await canvas.boundingBox())!;

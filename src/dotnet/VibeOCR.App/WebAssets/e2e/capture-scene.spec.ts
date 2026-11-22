@@ -200,7 +200,8 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   const pressedBackground = await rectangle.evaluate(
     (element) => getComputedStyle(element).backgroundColor,
   );
-  const ellipse = page.getByRole("button", { name: "椭圆", exact: true });
+  // 家族分组后用另一个未按下的直接按钮（画笔）做空闲态对照。
+  const ellipse = page.getByRole("button", { name: "画笔", exact: true });
   const idleBackground = await ellipse.evaluate(
     (element) => getComputedStyle(element).backgroundColor,
   );

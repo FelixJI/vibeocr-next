@@ -2,6 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
+import { activateToolbarTool } from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
@@ -230,7 +231,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   // 修补与屏蔽共存：屏蔽副本文件与识别管线使用同一像素（不再依赖
   // 已移除的常驻预览图）。
   await page.getByRole("button", { name: "重做", exact: true }).click();
-  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await activateToolbarTool(page, "屏蔽");
   await dragOnCanvas(page, { x: 10, y: 84 }, { x: 140, y: 160 });
   await page.getByRole("button", { name: "保存屏蔽副本", exact: true }).click();
   await expect.poll(() => uploads.length).toBe(4);

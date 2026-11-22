@@ -1310,6 +1310,24 @@ select {
   flex-shrink: 0;
   white-space: nowrap;
 }
+/* 工具家族：主按钮（当前子工具）+ 窄 ▾ 展开钮视觉连体，仅分组不改
+   子工具语义。 */
+.editor-tool-family {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0;
+}
+.editor-tool-family > button:first-child {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+.editor-tool-family > .editor-tool-family-toggle {
+  /* 24px 与主排布局契约的最小按钮宽度对齐（editor-main-row-layout）。 */
+  min-width: 24px;
+  padding-inline: 4px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+}
 /* 现场工具栏与原生 ScreenRegionPicker 单横排对齐：主排 = 可滚动的
    工具+次要动作区（flex:1/min-width:0/overflow-x:auto）+ 固定的核心
    动作区（输出开关/格式/识别/完成/更多），核心不随滚动离开可视区，

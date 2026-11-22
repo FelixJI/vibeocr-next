@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { activateToolbarTool } from "./toolSelection";
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
 
 interface DecodedImage {
@@ -301,7 +302,7 @@ for (const tool of ["模糊", "马赛克"]) {
       '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#e02020" fill-opacity="0.5"/></svg>',
     );
     const canvas = page.getByLabel("图片检查画布");
-    await page.getByRole("button", { name: tool, exact: true }).click();
+    await activateToolbarTool(page, tool);
     await canvas.scrollIntoViewIfNeeded();
     const box = (await canvas.boundingBox())!;
     await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.3);

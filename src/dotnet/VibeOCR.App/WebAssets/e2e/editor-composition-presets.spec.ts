@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
+import { activateToolbarTool } from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 import {
   deferCommand,
@@ -1127,7 +1128,7 @@ test("排版最终像素在复制、钉图、OCR与取字一致，复用图片�
     action: "ackImport",
     arguments: { sessionId: SESSION, revision: 0, requestId: "mask-import" },
   });
-  await page.getByRole("button", { name: "屏蔽", exact: true }).click();
+  await activateToolbarTool(page, "屏蔽");
   const canvas = page.getByLabel("图片检查画布", { exact: true });
   await canvas.scrollIntoViewIfNeeded();
   const box = await canvas.boundingBox();
@@ -1278,7 +1279,7 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     right: number,
     bottom: number,
   ) => {
-    await page.getByRole("button", { name: tool, exact: true }).click();
+    await activateToolbarTool(page, tool);
     await canvas.scrollIntoViewIfNeeded();
     const box = await canvas.boundingBox();
     if (!box) throw new Error("missing canvas");
