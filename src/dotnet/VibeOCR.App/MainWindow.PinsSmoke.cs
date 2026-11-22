@@ -269,7 +269,7 @@ public sealed partial class MainWindow
             "document.body.textContent.includes('钉图未创建') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
             "Failed first pin did not return a recoverable receipt.");
           await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
-          if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed first pin was registered.");
+          if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed pin was registered.");
         }
       }
       finally { File.Delete(pinRoot); }

@@ -557,14 +557,19 @@ internal sealed class PinnedImageWindow : IDisposable
           $"{geometry}, fg=0x{(long)GetForegroundWindow():X}, dragOrigin={dragOrigin}.");
       if (!SetCursorPos(x + dx, y + dy))
         throw new Win32Exception(Marshal.GetLastWin32Error());
+      // 等到窗口到达精确目标位移再松开鼠标：移动循环按 光标-按下点 增量
+      // 推进窗口，光标停在目标后消息排空即收敛到 (dx,dy)。刚出现 1px 移动
+      // 就 mouse-up 会把剩余位移截断（或读到滞后帧），实测出现 (37,26)/
+      // (40,37) 这类偏差；按目标位置轮询消除该竞态。
       for (int attempt = 0; ; attempt++)
       {
         if (!GetWindowRect(handle, out RectL moved))
           throw new Win32Exception(Marshal.GetLastWin32Error());
-        if (moved.Left != bounds.Left || moved.Top != bounds.Top) break;
+        if (moved.Left == bounds.Left + dx && moved.Top == bounds.Top + dy) break;
         if (attempt >= 200)
-          throw new InvalidOperationException($"Pin did not follow the drag: {geometry}, " +
-            $"cursor=({x + dx},{y + dy}), now=({moved.Left},{moved.Top}).");
+          throw new InvalidOperationException($"Pin did not reach the exact drag delta: {geometry}, " +
+            $"cursor=({x + dx},{y + dy}), now=({moved.Left},{moved.Top}), " +
+            $"expected=({bounds.Left + dx},{bounds.Top + dy}).");
         await Task.Delay(25);
       }
     }
