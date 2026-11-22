@@ -1,6 +1,11 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
-import { activateToolbarTool } from "./toolSelection";
 import { readyImageRecognitionModes } from "./workbench-host";
+import {
+  activateRecognitionMode,
+  activateToolbarTool,
+  clickToolbarAction,
+  clickToolbarControl,
+} from "./toolSelection";
 import { expect, test, type Page } from "@playwright/test";
 
 import {
@@ -140,7 +145,7 @@ for (const [label, modeId] of [
       { steps: 4 },
     );
     await page.mouse.up();
-    await activateToolbarTool(page, "屏蔽");
+    await clickToolbarControl(page, "屏蔽");
     const second = await box();
     await page.mouse.move(
       second.x + second.width * 0.4,
@@ -155,13 +160,14 @@ for (const [label, modeId] of [
     await page.mouse.up();
     await expect(page.getByRole("button", { name: "清空屏蔽" })).toBeEnabled();
 
-    await page.getByRole("button", { name: label }).scrollIntoViewIfNeeded();
+    // 识别模式：文字直出按钮，表格识别经「识别模式」菜单。
+    // scrollIntoView 仅对直出按钮需要；菜单路径自带等待。
     await page.screenshot({
       path: testInfo.outputPath("completed-image-modes.png"),
       fullPage: true,
     });
     // 显式识别：上传未烘焙普通最终像素 + 归一化排除框。
-    await page.getByRole("button", { name: label }).click();
+    await activateRecognitionMode(page, label);
     const recognizedUpload = await uploads.submitted(
       "recognizeScreenshotImage",
     );
@@ -227,7 +233,7 @@ for (const [label, modeId] of [
     await expect(page.getByText(/已清空全部屏蔽区/)).toBeVisible();
 
     // 导出普通图：内容/方向/尺寸与冻结基准一致（清空遮罩不改变像素）。
-    await page.getByRole("button", { name: "保存标注图" }).click();
+    await clickToolbarAction(page, "保存标注图");
     const savedUpload = await uploads.submitted(
       "saveScreenshotImage",
       0,

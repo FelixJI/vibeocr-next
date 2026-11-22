@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+import { clickToolbarAction, clickToolbarControl } from "./toolSelection";
+
 import {
   expectCommand,
   deferCommand,
@@ -67,7 +69,8 @@ async function makePng(
 }
 
 async function action(page: Page, name: string) {
-  await page.getByRole("button", { name, exact: true }).click();
+  // 工具直点；动作（保存/工程/预设）经动作菜单，家族工具经族菜单。
+  await clickToolbarControl(page, name);
 }
 
 async function proxyProductionAssets(page: Page) {
@@ -588,11 +591,8 @@ test("recognition: 截图会话通道保存工程可见文字并发 recognition.
     "https://app.vibeocr/#/imageEdit?scene=1",
   );
   await expect(page.getByText("原图 900×600", { exact: false })).toBeAttached();
-  // 所有场景显示可见文字“保存工程”（scene 不再是空占位）。
-  const button = page.getByRole("button", { name: "保存工程", exact: true });
-  await expect(button).toBeVisible();
-  await expect(button).toHaveText("保存工程");
-  await button.click();
+  // 保存工程经「输出 ▾」菜单直达（scene 不再是空占位）。
+  await clickToolbarAction(page, "保存工程");
   await expect.poll(() => uploads.length).toBe(1);
   await expectCommand(page, {
     scope: "recognition",

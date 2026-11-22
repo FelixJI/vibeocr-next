@@ -1,6 +1,12 @@
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import { activateToolbarTool } from "./toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarAction,
+  clickToolbarControl,
+  expectToolbarActionDisabled,
+  expectToolbarActionEnabled,
+} from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 async function setupTextHost(
@@ -150,7 +156,7 @@ async function scan(
 }
 async function save(page: Page, uploads: { body: Buffer }[]) {
   const count = uploads.length;
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(count + 1);
   return uploads[count]!.body;
 }
@@ -162,7 +168,7 @@ test("文字双击编辑、IME、字体回退和多行样式在预览与导出�
   page,
 }, testInfo) => {
   const { uploads } = await setupTextHost(page);
-  await activateToolbarTool(page, "文字");
+  await clickToolbarControl(page, "文字");
   await page.getByLabel("标注文字").fill("旧文字");
   await drag(page, 150, 180, 550, 180);
   await doubleClick(page, 190, 172);
@@ -189,9 +195,7 @@ test("文字双击编辑、IME、字体回退和多行样式在预览与导出�
     await page.getByLabel(name, { exact: true }).check();
   await page.getByLabel("文字对齐").selectOption("center");
   await page.getByLabel("自定义颜色").fill("#1f6feb");
-  await expect(
-    page.getByRole("button", { name: "保存标注图", exact: true }),
-  ).toBeDisabled();
+  await expectToolbarActionDisabled(page, "保存标注图");
   await page.screenshot({
     path: testInfo.outputPath("text-edit-controls.png"),
   });
@@ -279,7 +283,7 @@ test("字母序号形状与重新编号、说明内容及指向可编辑并写�
 
 test("裁剪旋转后的文字可命中续编，取消保持导出和历史", async ({ page }) => {
   const { uploads } = await setupTextHost(page);
-  await activateToolbarTool(page, "文字");
+  await clickToolbarControl(page, "文字");
   await page.getByLabel("标注文字").fill("定位文字");
   await page.getByLabel("自定义颜色").fill("#1f6feb");
   await drag(page, 200, 200, 400, 200);
@@ -310,7 +314,7 @@ test("非1:1原图的多行字号背景在导出中按自然比例缩放", async
   page,
 }, testInfo) => {
   const { uploads } = await setupTextHost(page, { width: 300, height: 200 });
-  await activateToolbarTool(page, "文字");
+  await clickToolbarControl(page, "文字");
   await page.getByLabel("标注文字").fill("Scale\nNext");
   await page.getByLabel("文字字号").selectOption("32");
   await page.getByLabel("文字字体").fill("monospace");
@@ -358,7 +362,7 @@ for (const label of ["文字", "说明"]) {
         }),
       );
       const { uploads } = await setupTextHost(page);
-      await activateToolbarTool(page, label);
+      await clickToolbarControl(page, label);
       await page.getByLabel("标注文字").fill("取色测试");
       await page.getByLabel("自定义颜色").fill("#1f6feb");
       await page.getByLabel("文字背景", { exact: true }).check();
@@ -437,10 +441,10 @@ test("清空前置屏蔽取消文字草稿并保留原文字、矩形和可撤�
   const { uploads } = await setupTextHost(page);
   await activateToolbarTool(page, "屏蔽");
   await drag(page, 80, 80, 150, 130);
-  await activateToolbarTool(page, "文字");
+  await clickToolbarControl(page, "文字");
   await page.getByLabel("标注文字").fill("A原文字");
   await drag(page, 200, 220, 360, 220);
-  await activateToolbarTool(page, "矩形");
+  await clickToolbarControl(page, "矩形");
   await page.getByLabel("自定义颜色").fill("#1f6feb");
   await page.getByLabel("线条宽度").selectOption("8");
   await drag(page, 500, 300, 700, 450);
@@ -566,7 +570,7 @@ for (const tool of ["文字", "序号", "说明"] as const) {
     page,
   }, testInfo) => {
     const { uploads } = await setupTextHost(page);
-    await activateToolbarTool(page, tool);
+    await clickToolbarControl(page, tool);
     if (tool !== "序号") await page.getByLabel("标注文字").fill("iiiiiiiiiiii");
     else await page.getByLabel("序号形状").selectOption("none");
     await page.getByLabel("文字字号").selectOption("48");
@@ -610,7 +614,7 @@ for (const alignment of ["center", "right"] as const) {
     page,
   }, testInfo) => {
     const { uploads } = await setupTextHost(page, { width: 300, height: 200 });
-    await activateToolbarTool(page, "文字");
+    await clickToolbarControl(page, "文字");
     await page.getByLabel("标注文字").fill("X");
     await page.getByLabel("文字字体").fill("monospace");
     await page.getByLabel("文字字号").selectOption("48");

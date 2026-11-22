@@ -5,9 +5,12 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import {
   activateToolbarTool,
+  clickToolbarMenuItem,
+  openToolbarMenu,
   expectToolbarToolAvailable,
 } from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -185,7 +188,9 @@ describe("image editor exclusion regions", () => {
       });
       expect(screen.getByRole("button", { name: "清空屏蔽" })).toBeEnabled();
       expect(
-        screen.getByRole("button", { name: "复制屏蔽副本" }),
+        within(await openToolbarMenu("输出操作")).getByRole("menuitem", {
+          name: "复制屏蔽副本",
+        }),
       ).toBeInTheDocument();
     } finally {
       unmount();
@@ -398,7 +403,7 @@ describe("image editor exclusion regions", () => {
       // (0,0)-(450,300) 恒等映射 → 归一化 [0,0,500,500]。
       await drawOnCanvas({ x: 0, y: 0 }, { x: 450, y: 300 });
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "钉图" }));
+        await clickToolbarMenuItem("输出操作", "钉图");
       });
       await waitFor(() =>
         expect(actions.run).toHaveBeenCalledWith(

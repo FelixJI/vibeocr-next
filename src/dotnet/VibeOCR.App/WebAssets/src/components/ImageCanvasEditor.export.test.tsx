@@ -4,11 +4,17 @@ import {
   act,
   cleanup,
   fireEvent,
+  within,
   render,
   screen,
   waitFor,
 } from "@testing-library/react";
-import { activateToolbarTool } from "../test/toolSelection";
+import {
+  activateToolbarTool,
+  activateRecognitionMode,
+  clickToolbarMenuItem,
+  openToolbarMenu,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -467,7 +473,7 @@ describe("editor export pixels and previews", () => {
           {...{ recognitionModes: modes }}
         />,
       );
-      fireEvent.click(await screen.findByRole("button", { name: label }));
+      await activateRecognitionMode(label);
       await waitFor(() =>
         expect(actions.run).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -507,7 +513,7 @@ describe("editor export pixels and previews", () => {
     const { rerender, unmount } = render(
       <ImageCanvasEditor {...props} recognitionModes={modes} />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "表格识别" }));
+    await clickToolbarMenuItem("识别模式", "表格识别");
     await waitFor(() => expect(uploading).toHaveBeenCalledTimes(1));
     rerender(<ImageCanvasEditor {...props} recognitionModes={[]} />);
     finishUpload(
@@ -560,9 +566,8 @@ describe("editor export pixels and previews", () => {
           recognitionModes={modes}
         />,
       );
-      const button = await screen.findByRole("button", { name: label });
-      expect(button).toBeEnabled();
-      fireEvent.click(button);
+      // 文字模式为直出按钮，表格识别经「识别模式」菜单；找不到即抛错。
+      await activateRecognitionMode(label);
       await waitFor(() =>
         expect(actions.run).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -593,8 +598,14 @@ describe("editor export pixels and previews", () => {
         {...{ recognitionModes: [] }}
       />,
     );
-    for (const label of ["识别文字", "表格识别"])
-      expect(await screen.findByRole("button", { name: label })).toBeDisabled();
+    expect(
+      await screen.findByRole("button", { name: "识别文字" }),
+    ).toBeDisabled();
+    expect(
+      within(await openToolbarMenu("识别模式")).getByRole("menuitem", {
+        name: "表格识别",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.queryByRole("button", { name: "公式识别" }),
     ).not.toBeInTheDocument();
@@ -893,7 +904,7 @@ describe("preset upload ownership after host acknowledgement", () => {
       await waitFor(() =>
         expect(screen.getByText(/原图 64×32/)).toBeInTheDocument(),
       );
-      fireEvent.click(screen.getByRole("button", { name: "按常用预设保存" }));
+      await clickToolbarMenuItem("输出操作", "按常用预设保存");
       if (receipt !== "fallback") {
         await waitFor(() => expect(runWithReceipt).toHaveBeenCalledOnce());
         expect(
@@ -972,7 +983,7 @@ describe("restored project export lifecycle", () => {
         strict ? <StrictMode>{editor}</StrictMode> : editor,
       );
       await waitFor(() => expect(screen.getByText(/工程已恢复/)).toBeVisible());
-      fireEvent.click(screen.getByRole("button", { name: "按常用预设保存" }));
+      await clickToolbarMenuItem("输出操作", "按常用预设保存");
       await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
       unmount();
       await act(async () => {

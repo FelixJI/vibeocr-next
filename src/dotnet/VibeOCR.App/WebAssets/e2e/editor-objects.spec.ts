@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
-import { activateToolbarTool } from "./toolSelection";
+import { clickToolbarControl } from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 async function setup(page: Page, natural = { width: 900, height: 600 }) {
@@ -89,7 +89,7 @@ async function click(
 }
 async function action(page: Page, name: string) {
   // 家族分组的工具经族内菜单激活；非工具按钮仍直点。
-  await activateToolbarTool(page, name);
+  await clickToolbarControl(page, name);
 }
 async function rectangle(page: Page, x: number, y: number, color = "#e02020") {
   await action(page, "矩形");
@@ -242,9 +242,11 @@ test("框选、组合、复制与键盘批量编辑一次撤销，副本样式�
   await action(page, "组合");
   await list.selectOption("");
   await click(page, 150, 150);
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "解组", exact: true }),
+    page.getByRole("menuitem", { name: "解组", exact: true }),
   ).toBeVisible();
+  await page.keyboard.press("Escape");
   await action(page, "重复对象");
   await expect(list.locator("option")).toHaveCount(5);
   await canvas.focus();
@@ -292,7 +294,7 @@ test("修饰键多选与层级、对齐、等距保持输出顺序", async ({ pa
   ).toEqual([224, 32, 32]);
   await click(page, 120, 150);
   await click(page, 220, 160, "Shift");
-  await action(page, "对齐与等距");
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await page.getByRole("menuitem", { name: "顶对齐", exact: true }).click();
   await list.selectOption("");
   expect(
@@ -302,7 +304,7 @@ test("修饰键多选与层级、对齐、等距保持输出顺序", async ({ pa
   await rectangle(page, 650, 300, "#ffffff");
   await action(page, "选择");
   await action(page, "全选对象");
-  await action(page, "对齐与等距");
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await page.getByRole("menuitem", { name: /水平等距/ }).click();
   await list.selectOption("");
   expect(
@@ -840,26 +842,34 @@ test("PR249 第二轮菜单按组逻辑单元启用且锁定一致", async ({ pa
   await canvas.focus();
   await canvas.press("Control+a");
   await action(page, "组合");
-  await expect(page.getByRole("button", { name: "对齐与等距" })).toHaveCount(0);
+  // 单一组合（<2 单元）时对齐/等距菜单项不出现。
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /水平等距/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   await rectangle(page, 500, 140);
   await action(page, "选择");
   await canvas.focus();
   await canvas.press("Control+a");
-  await action(page, "对齐与等距");
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: /水平等距/ })).toBeDisabled();
   await page.keyboard.press("Escape");
   await rectangle(page, 700, 180);
   await action(page, "选择");
   await canvas.focus();
   await canvas.press("Control+a");
-  await action(page, "对齐与等距");
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: /水平等距/ })).toBeEnabled();
   await page.keyboard.press("Escape");
   await action(page, "锁定");
-  await expect(page.getByRole("button", { name: "对齐与等距" })).toBeDisabled();
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /水平等距/ })).toBeDisabled();
+  await page.keyboard.press("Escape");
   await list.selectOption("0");
   await action(page, "解锁");
-  await expect(page.getByRole("button", { name: "对齐与等距" })).toHaveCount(0);
+  // 解锁单个对象（<2 单元）时对齐/等距菜单项不出现。
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /水平等距/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
 });
 
 test("PR249 第二轮绘制工具对象快捷键不丢折线草稿，合法撤销重做仍可用", async ({
@@ -1001,9 +1011,11 @@ test("PR249 第二轮重复组合不增加撤销步骤，重选后检查原组�
   await action(page, "组合");
   await action(page, "撤销");
   await list.selectOption("0");
+  await page.getByRole("button", { name: "对象操作", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "解组", exact: true }),
+    page.getByRole("menuitem", { name: "解组", exact: true }),
   ).toHaveCount(0);
+  await page.keyboard.press("Escape");
 });
 
 for (const arrowStyle of ["open", "hollow", "solid"]) {

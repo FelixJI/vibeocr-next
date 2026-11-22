@@ -1,6 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { activateToolbarTool } from "./toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarAction,
+  expectToolbarActionEnabled,
+} from "./toolSelection";
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
 
 interface DecodedImage {
@@ -135,7 +139,7 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   await page.getByRole("button", { name: "应用尺寸" }).click();
   await expect(page.getByText(/输出 40×20/)).toBeVisible();
 
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/jpeg");
   const jpegBytes = uploads[0]!.body;
@@ -177,7 +181,7 @@ test("JPEG and PNG outputs encode real decodable pixels with declared sizes", as
   await expect
     .poll(() => page.locator(".editor-operation-status").textContent())
     .toContain("文件大小：image/png · 实际");
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(2);
   expect(uploads[1]!.contentType).toBe("image/png");
   const pngBytes = uploads[1]!.body;
@@ -203,7 +207,7 @@ test("undo restores original output size with matching PNG headers", async ({
   await page.getByLabel("输出高度").fill("20");
   await page.getByRole("button", { name: "应用尺寸" }).click();
   await expect(page.getByText(/输出 40×20/)).toBeVisible();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/png");
   expect(uploads[0]!.body.readUInt32BE(16)).toBe(40);
@@ -212,7 +216,7 @@ test("undo restores original output size with matching PNG headers", async ({
   // 撤销尺寸：回到原始输出尺寸，PNG 头部与声明一致。
   await page.getByRole("button", { name: "撤销" }).click();
   await expect(page.getByText(/输出 80×40/)).toBeVisible();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(2);
   expect(uploads[1]!.body.readUInt32BE(16)).toBe(80);
   expect(uploads[1]!.body.readUInt32BE(20)).toBe(40);
@@ -252,7 +256,7 @@ test("failed output preview preserves editing and reports failure without stayin
   ).toBeEnabled();
   await page.getByRole("button", { name: "检查文件大小" }).click();
   await expect(page.getByText("文件大小检查失败；可稍后重试。")).toBeVisible();
-  await expect(page.getByRole("button", { name: "保存标注图" })).toBeEnabled();
+  await expectToolbarActionEnabled(page, "保存标注图");
   await expect(page.getByLabel("图片检查画布")).toBeVisible();
   // 失败可恢复：不再点击也保持可编辑，不遗留忙碌状态。
   await expect(
@@ -282,11 +286,11 @@ test.describe("高 DPI 编辑画布", () => {
     await page.mouse.down();
     await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.45);
     await page.mouse.up();
-    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await clickToolbarAction(page, "保存标注图");
     await expect.poll(() => uploads.length).toBe(1);
     const before = await decodeUpload(page, uploads[0]!.body, "image/png");
     await page.getByLabel("显示缩放", { exact: true }).selectOption("0.5");
-    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await clickToolbarAction(page, "保存标注图");
     await expect.poll(() => uploads.length).toBe(2);
     const after = await decodeUpload(page, uploads[1]!.body, "image/png");
     expect(before.width).toBe(80);
@@ -324,7 +328,7 @@ for (const tool of ["模糊", "马赛克"]) {
         ),
       )
       .toBe(128);
-    await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+    await clickToolbarAction(page, "保存标注图");
     await expect.poll(() => uploads.length).toBe(1);
     const output = await decodeUpload(page, uploads[0]!.body, "image/png");
     expect(output.pixels[(20 * 80 + 40) * 4 + 3]).toBe(128);

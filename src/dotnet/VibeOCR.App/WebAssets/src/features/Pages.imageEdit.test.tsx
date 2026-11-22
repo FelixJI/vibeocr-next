@@ -4,8 +4,12 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
-import { expectToolbarToolAvailable } from "../test/toolSelection";
+import {
+  expectToolbarToolAvailable,
+  openToolbarMenu,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions, AppViewState } from "../app/types";
@@ -89,7 +93,7 @@ const editorCapabilities = [
 describe("retained screenshot recognition actions", () => {
   it.each(["imageEdit", "recognition"] as const)(
     "%s enables both actions from the host's two-entry projection",
-    (featureName) => {
+    async (featureName) => {
       window.location.hash = `#/${featureName}`;
       const Page =
         featureName === "imageEdit" ? ImageEditPage : RecognitionPage;
@@ -121,7 +125,11 @@ describe("retained screenshot recognition actions", () => {
         />,
       );
       expect(screen.getByRole("button", { name: "识别文字" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: "表格识别" })).toBeEnabled();
+      expect(
+        within(await openToolbarMenu("识别模式")).getByRole("menuitem", {
+          name: "表格识别",
+        }),
+      ).not.toHaveAttribute("aria-disabled", "true");
       expect(screen.queryByRole("button", { name: "公式识别" })).toBeNull();
     },
   );
@@ -319,8 +327,12 @@ describe("RecognitionPage lean editor", () => {
     // 必要的识别面功能保留：显示缩放（不改像素）与显式识别入口。
     expect(screen.getByLabelText("显示缩放")).toBeInTheDocument();
     // #270：独立公式识别已退役，不再提供公式入口。
-    for (const name of ["识别文字", "表格识别"])
-      expect(screen.getByRole("button", { name })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "识别文字" })).toBeDisabled();
+    expect(
+      within(await openToolbarMenu("识别模式")).getByRole("menuitem", {
+        name: "表格识别",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
     expect(screen.queryByRole("button", { name: "公式识别" })).toBeNull();
     expect(screen.getByText(/识别目录未就绪/)).toBeInTheDocument();
     unmount();

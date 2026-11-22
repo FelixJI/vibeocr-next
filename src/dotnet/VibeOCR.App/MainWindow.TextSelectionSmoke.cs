@@ -48,7 +48,7 @@ public sealed partial class MainWindow
         throw new InvalidOperationException("Capture submitted OCR or started installation.");
       await WaitForEditorSessionAsync(captured.ScreenshotSession!.SessionId);
       await WaitForCanvasAsync();
-      await ClickSmokeButtonAsync("钉图");
+      await ClickSmokeMenuitemAsync("输出操作", "钉图");
       await WaitForPinCountAsync(1);
       PinnedImageWindow purePin = pinnedImages.Single();
       string purePath = purePin.SmokeImagePath;
@@ -144,9 +144,9 @@ public sealed partial class MainWindow
       if (string.IsNullOrWhiteSpace(latin) || string.IsNullOrWhiteSpace(chinese))
         throw new InvalidOperationException("Partial Latin/Chinese selection was empty.");
 
-      await ClickSmokeButtonAsync("钉图");
+      await ClickSmokeMenuitemAsync("输出操作", "钉图");
       await WaitForPinCountAsync(1);
-      await ClickSmokeButtonAsync("钉图");
+      await ClickSmokeMenuitemAsync("输出操作", "钉图");
       await WaitForPinCountAsync(2);
       PinnedImageWindow[] oldPins = pinnedImages.ToArray();
       string[] pinnedPaths = oldPins.Select(pin => pin.SmokeImagePath).ToArray();

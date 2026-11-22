@@ -245,16 +245,22 @@ public sealed partial class MainWindow
     await File.WriteAllBytesAsync(initialImage, png);
     await application.ExecuteAsync(new(Guid.NewGuid(), new OpenDroppedImageEditFileCommand(initialImage)), CancellationToken.None);
     await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
-      "document.body.textContent.includes('原图 64×32') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
+      "document.body.textContent.includes('原图 64×32')") == "true",
       "Main image editor did not load the source.");
     // 屏蔽工具在「遮挡 ▾」族菜单内（家族分组后无直出按钮）。
     await ClickSmokeMenuitemAsync("遮挡工具选项", "屏蔽", WorkbenchWebView);
     await WorkbenchWebView.ExecuteScriptAsync("""
       (()=>{const c=document.querySelector('canvas[aria-label="图片检查画布"]');const r=c.getBoundingClientRect();
       const e=(type,x,y,buttons)=>c.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:1,pointerType:'mouse',isPrimary:true,button:0,buttons,clientX:r.left+r.width*x/900,clientY:r.top+r.height*y/600}));
-      e('pointerdown',1,76,1);e('pointermove',224,524,1);e('pointerup',224,524,0);
-      const select=document.querySelector('select[aria-label="输出格式"]');select.value='image/jpeg';select.dispatchEvent(new Event('change',{bubbles:true}));})()
+      e('pointerdown',1,76,1);e('pointermove',224,524,1);e('pointerup',224,524,0);})()
       """);
+    // 输出格式经输出设置面板的 Select 选择 JPEG（主排内联 Select 已随
+    // 动作区重组移除；面板 Select 的 aria-label 不变）。
+    await WorkbenchWebView.ExecuteScriptAsync(
+      """(() => { const s = document.querySelector('select[aria-label="输出格式"]'); s.value = 'image/jpeg'; s.dispatchEvent(new Event('change', { bubbles: true })); })()""");
+    await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
+      "document.querySelector('select[aria-label=\"输出格式\"]').value === 'image/jpeg'") == "true",
+      "JPEG output format selection did not apply.");
     string pinRoot = PinSnapshotStore.RootFor(layout.DataRoot);
     if (!lifecycle)
     {
@@ -264,10 +270,22 @@ public sealed partial class MainWindow
       {
         for (int attempt = 0; attempt < 2; attempt++)
         {
-          await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"钉图\"]').click()");
-          await WaitForPinCheckAsync(async () => await WorkbenchWebView.ExecuteScriptAsync(
-            "document.body.textContent.includes('钉图未创建') && !document.querySelector('button[aria-label=\"钉图\"]')?.disabled") == "true",
-            "Failed first pin did not return a recoverable receipt.");
+          // 阻断器失败路径改由宿主侧直接触发：与 web 命令共用同一
+          // PinScreenshot 持久化失败边界。动作区重组后 web 钉图入口经
+          // 「输出 ▾」菜单，没有直出按钮 disabled 翻转那类确定性完成
+          // 信号可供冒烟轮询（web 失败回执路径由 e2e pins 套件覆盖）。
+          WorkbenchAnnotationLease blockedLease =
+            await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
+          bool blocked = false;
+          try
+          {
+            PinScreenshot(annotationStore.Take(blockedLease.ResourceUri), Guid.NewGuid(), 0, null, []);
+          }
+          catch (IOException)
+          {
+            blocked = true;
+          }
+          if (!blocked) throw new InvalidOperationException("Blocked pin unexpectedly succeeded.");
           await WaitForPinCheckAsync(() => Task.FromResult(CountSmokeAppWindows() == windowCount), "Failed pin leaked an unregistered native window.");
           if (pinnedImages.Count != 0) throw new InvalidOperationException("Failed pin was registered.");
         }
@@ -275,11 +293,12 @@ public sealed partial class MainWindow
       finally { File.Delete(pinRoot); }
       await VerifyRecoveryBeforeCleanupAsync(png);
     }
-    await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('button[aria-label=\"钉图\"]').click()");
+    await ClickSmokeMenuitemAsync("输出操作", "钉图", WorkbenchWebView);
     await WaitForPinCheckAsync(() => Task.FromResult(pinnedImages.Count == 1), "JPEG selection prevented first pin creation.");
     if (pinSnapshotStore!.ReadSnapshotPng(pinnedImages[0].PinId) is not { Width: 64, Height: 32 })
       throw new InvalidOperationException("First pin was not a decodable owned PNG.");
-    if (await WorkbenchWebView.ExecuteScriptAsync("document.querySelector('select[aria-label=\"输出格式\"]').value === 'image/jpeg'") != "true")
+    if (await WorkbenchWebView.ExecuteScriptAsync(
+      "document.querySelector('select[aria-label=\"输出格式\"]').value === 'image/jpeg'") != "true")
       throw new InvalidOperationException("First pin changed the ordinary output format.");
     WorkbenchAnnotationLease secondLease = await annotationStore.UploadPngAsync(new MemoryStream(png), CancellationToken.None);
     PinScreenshot(annotationStore.Take(secondLease.ResourceUri), Guid.NewGuid(), 0, null, []);

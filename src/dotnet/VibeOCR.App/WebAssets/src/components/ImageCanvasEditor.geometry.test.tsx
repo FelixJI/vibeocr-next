@@ -617,8 +617,12 @@ describe("AC3 工具属性记忆、滚轮线宽与快捷键边界", () => {
     expect(screen.getByLabelText("线条宽度")).toHaveValue("8");
     expect(screen.getByLabelText("线型")).toHaveValue("dashed");
     const main = within(screen.getByRole("toolbar", { name: "图片编辑工具" }));
-    expect(settings.queryByRole("button", { name: "重置属性" })).toBeNull();
-    fireEvent.click(main.getByRole("button", { name: "重置属性" }));
+    // 重置属性属当前工具上下文：在属性排，不在主排。
+    expect(
+      settings.getByRole("button", { name: "重置属性" }),
+    ).toBeInTheDocument();
+    expect(main.queryByRole("button", { name: "重置属性" })).toBeNull();
+    fireEvent.click(settings.getByRole("button", { name: "重置属性" }));
     expect(screen.getByLabelText("线条宽度")).toHaveValue("3");
     expect(screen.getByLabelText("线型")).toHaveValue("solid");
     expect(

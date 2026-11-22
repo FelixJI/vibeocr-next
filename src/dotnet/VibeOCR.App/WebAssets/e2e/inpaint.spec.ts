@@ -2,7 +2,7 @@ import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
 import { expectCommand, mountHost, snapshot } from "./workbench-host";
-import { activateToolbarTool } from "./toolSelection";
+import { activateToolbarTool, clickToolbarAction } from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 
 interface DecodedImage {
@@ -163,7 +163,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await expect(page.getByText(/原图 96×48/)).toBeAttached();
 
   // 基线：未修补导出的真实 PNG。
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   expect(uploads[0]!.contentType).toBe("image/png");
   const baseline = await decodeUpload(page, uploads[0]!.body, "image/png");
@@ -192,7 +192,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   // 明确应用：恰好一次 commit；导出 PNG 解码验证修补像素与选区外一致性。
   await page.getByRole("button", { name: "应用修补" }).click();
   await expect(page.getByText(/已应用修补/)).toBeVisible();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(2);
   const applied = await decodeUpload(page, uploads[1]!.body, "image/png");
   // 选区中心被真实修补为背景绿，而不是原水印或纯遮罩。
@@ -223,7 +223,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
   await page.getByRole("button", { name: "撤销" }).click();
   await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(3);
   const undone = await decodeUpload(page, uploads[2]!.body, "image/png");
   expect(undone.pixels).toEqual(baseline.pixels);
@@ -233,7 +233,7 @@ test("inpaint preview applies real CPU worker pixels to export and keeps outside
   await page.getByRole("button", { name: "重做", exact: true }).click();
   await activateToolbarTool(page, "屏蔽");
   await dragOnCanvas(page, { x: 10, y: 84 }, { x: 140, y: 160 });
-  await page.getByRole("button", { name: "保存屏蔽副本", exact: true }).click();
+  await clickToolbarAction(page, "保存屏蔽副本");
   await expect.poll(() => uploads.length).toBe(4);
   const masked = await decodeUpload(page, uploads[3]!.body, "image/png");
   expect(masked.width).toBe(96);
@@ -340,7 +340,7 @@ test("cancel and re-edit during processing terminate the worker so late results 
   await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
   await page.getByRole("button", { name: "撤销" }).click();
   await expect(page.getByRole("button", { name: "撤销" })).toBeDisabled();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   const afterLate = await decodeUpload(page, uploads[0]!.body, "image/png");
   const watermark = pixelAt(afterLate, 48, 20);
@@ -455,7 +455,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   // 覆盖裁剪与指定尺寸的组合需要裁剪工具：挂在保留完整工具集的图片编辑页。
   await mountWithUploadCapture(page, uploads, "inpaint-alpha.svg", "imageEdit");
   await expect(page.locator('canvas[aria-label="图片检查画布"]')).toBeVisible();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(1);
   const baseline = await decodeUpload(page, uploads[0]!.body, "image/png");
   // 基线：半透明洋红水印直接保留（alpha 128），不与深底合成。
@@ -477,7 +477,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
 
   // 第一次应用：导出像素 = 补丁绿原色（alpha 128 保留），旧实现会保留
   // 原水印鬼影（补丁透出旧水印）而在此失败。
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(2);
   const firstApplied = await decodeUpload(page, uploads[1]!.body, "image/png");
   expectPixelNear(firstApplied, 48, 20, TRANSPARENT_PATCHED);
@@ -490,7 +490,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
 
   // 第二次在同一区域修补：基线合成也是替换式，结果不叠加、不漂移。
   await applyInpaintOnce();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(3);
   const secondApplied = await decodeUpload(page, uploads[2]!.body, "image/png");
   expectPixelNear(secondApplied, 48, 20, TRANSPARENT_PATCHED);
@@ -503,7 +503,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
 
   // 旋转 90°：输出 48×96，修补中心 (48,20) → 输出 (28,48)。
   await page.getByRole("button", { name: "旋转 90°" }).click();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(4);
   const rotated = await decodeUpload(page, uploads[3]!.body, "image/png");
   expect(rotated.width).toBe(48);
@@ -516,7 +516,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   await dragOnCanvas(page, { x: 150, y: 75 }, { x: 750, y: 562 });
   await expect(page.getByRole("button", { name: "撤销" })).toBeEnabled();
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(5);
   const cropped = await decodeUpload(page, uploads[4]!.body, "image/png");
   expect(cropped.width).toBe(64);
@@ -531,7 +531,7 @@ test("semi-transparent patches replace pixels (no ghost/alpha stacking) across o
   await page.getByText("使用帮助与图像信息").click();
   await expect(page.getByText(/输出 48×24/)).toBeVisible();
   await page.getByText("使用帮助与图像信息").click();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(6);
   const resized = await decodeUpload(page, uploads[5]!.body, "image/png");
   expect(resized.width).toBe(48);

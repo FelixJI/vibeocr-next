@@ -1,4 +1,5 @@
 import { readyImageRecognitionModes } from "./workbench-host";
+import { activateToolbarTool, clickToolbarAction } from "./toolSelection";
 import { expect, test, type Page } from "@playwright/test";
 import { expectCommand, mountHost } from "./workbench-host";
 import { recordAnnotationUploads } from "./annotation-uploads";
@@ -259,7 +260,7 @@ test("框选覆盖层在原位置编辑并保留保存和识别能力", async ({
   await uploads.waitForDiscard(editedText.resourceUri);
   const editedImage = await decodeUpload(page, editedText.body);
   expect(pixelAt(editedImage, 600, 150)).toEqual([224, 32, 32]);
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const saved = await uploads.submitted("saveScreenshotImage");
   await expectCommand(page, {
     scope: "recognition",
@@ -397,7 +398,7 @@ test("拖动选区边角调整裁剪并写入真实导出", async ({ page }) => 
   await page.mouse.down();
   await page.mouse.move(547, 200);
   await page.mouse.up();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const saved = await uploads.submitted("saveScreenshotImage");
   expect(saved.body.readUInt32BE(16)).toBe(800);
   expect(saved.body.readUInt32BE(20)).toBe(400);
@@ -415,7 +416,7 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   };
 
   // 基线：无效果导出。
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const original = await uploads.submitted("saveScreenshotImage");
 
   // 马赛克弱/强：同一区域不同强度必须产生不同的真实导出字节。
@@ -427,13 +428,13 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   await page.getByLabel("马赛克与模糊强度").press("ArrowLeft");
   await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("1");
   await mosaicRegion();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const weak = await uploads.submitted("saveScreenshotImage", 1);
   await page.getByRole("button", { name: "撤销" }).click();
   await page.getByLabel("马赛克与模糊强度").press("End");
   await expect(page.getByLabel("马赛克与模糊强度")).toHaveValue("3");
   await mosaicRegion();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const strong = await uploads.submitted("saveScreenshotImage", 2);
 
   expect(original.body.readUInt32BE(16)).toBe(900);
@@ -452,7 +453,7 @@ test("马赛克强度与常用色影响真实导出", async ({ page }) => {
   await page.mouse.down();
   await page.mouse.move(560, 240, { steps: 3 });
   await page.mouse.up();
-  await page.getByRole("button", { name: "保存标注图" }).click();
+  await clickToolbarAction(page, "保存标注图");
   const colored = await uploads.submitted("saveScreenshotImage", 3);
   const decoded = await decodeUpload(page, colored.body);
   expect(decoded.width).toBe(900);

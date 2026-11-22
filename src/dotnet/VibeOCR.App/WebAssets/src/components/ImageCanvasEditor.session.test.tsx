@@ -6,7 +6,10 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { activateToolbarTool } from "../test/toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarMenuItem,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -770,7 +773,7 @@ describe("screenshot session editor wiring", () => {
 
       // 阶段二：几何编辑（无会话）同样拒绝迟到导出。
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+        await clickToolbarMenuItem("输出操作", "保存标注图");
       });
       await waitFor(() => expect(pendingUploads.length).toBe(2));
       fireEvent.click(screen.getByRole("button", { name: "矩形" }));
@@ -795,7 +798,7 @@ describe("screenshot session editor wiring", () => {
 
       // 无变更的干净重试可以发出。
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "保存标注图" }));
+        await clickToolbarMenuItem("输出操作", "保存标注图");
       });
       await waitFor(() => expect(pendingUploads.length).toBe(3));
       await act(async () => {

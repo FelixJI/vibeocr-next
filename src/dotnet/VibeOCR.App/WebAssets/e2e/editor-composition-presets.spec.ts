@@ -1,6 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DEFAULT_EDITOR_PREFERENCES } from "../src/components/editorPreferences";
-import { activateToolbarTool } from "./toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarAction,
+  expectToolbarActionEnabled,
+} from "./toolSelection";
 import { recordAnnotationUploads } from "./annotation-uploads";
 import {
   deferCommand,
@@ -223,7 +227,7 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
   expect(at(expected, 1, 1)).toEqual([17, 34, 51, 255]);
   expect(at(expected, 15, 20)).toEqual([255, 0, 0, 255]);
   expect(at(expected, 45, 20)).toEqual([0, 0, 255, 255]);
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   const savedUpload = await uploads.submitted("saveScreenshotImage");
   const exported = await pixels(
     page,
@@ -242,7 +246,7 @@ test("排版：中段裁除、背景、边距、圆角、比例、横纵拼接�
       preview.evaluate((image: HTMLImageElement) => image.naturalWidth),
     )
     .toBe(60);
-  await page.getByRole("button", { name: "保存工程", exact: true }).click();
+  await clickToolbarAction(page, "保存工程");
   await expect.poll(() => projects.length).toBe(1);
   const saved = projects[0]!.state as {
     composition: { margin: number; cut: unknown };
@@ -378,12 +382,12 @@ test("离开图像背景解除绑定：旧背景资产可拼接且删除对象�
   // 删除该图片对象：solid 背景不得被重置为 transparent，导出同源。
   // （画布排版是开关，面板在删除前后始终打开。）
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await page.getByRole("button", { name: "全选对象", exact: true }).click();
+  await clickToolbarAction(page, "全选对象");
   await page.getByRole("button", { name: "删除对象", exact: true }).click();
   await expect.poll(width).toBe(100);
   const expected = await previewPixels(preview());
   expect(at(expected, 5, 5)).toEqual([17, 34, 51, 255]);
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   const savedUpload = await uploads.submitted("saveScreenshotImage");
   const exported = await pixels(
     page,
@@ -424,34 +428,30 @@ test("常用预设绑定语义快照，复制失败不关闭，成功 ack 后关
   await canvas.focus();
   await page.keyboard.press("p");
   await expect(page.getByLabel("线条宽度", { exact: true })).toBeVisible();
-  const presetSave = toolbar.getByRole("button", {
-    name: "按常用预设保存",
+  // 预设保存经「输出 ▾」菜单（主排触发钮），输出设置面板与属性行都不承载。
+  const outputTrigger = toolbar.getByRole("button", {
+    name: "输出操作",
     exact: true,
   });
-  await expect(presetSave).toBeEnabled();
-  await expect(
-    page
-      .getByRole("toolbar", { name: "输出设置", exact: true })
-      .getByRole("button", { name: "按常用预设保存", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page
-      .getByRole("toolbar", { name: "当前工具设置", exact: true })
-      .getByRole("button", { name: "按常用预设保存", exact: true }),
-  ).toHaveCount(0);
-  await presetSave.scrollIntoViewIfNeeded();
+  await expect(outputTrigger).toBeEnabled();
   expect(
-    await presetSave.evaluate((element) =>
+    await outputTrigger.evaluate((element) =>
       element
         .closest('[role="toolbar"]')
         ?.classList.contains("editor-toolbar-main"),
     ),
   ).toBe(true);
+  await page.getByRole("button", { name: "输出操作", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "按常用预设保存", exact: true }),
+  ).toBeEnabled();
   await page.screenshot({
     path: info.outputPath("preset-primary-row.png"),
     fullPage: true,
   });
-  await presetSave.click();
+  await page
+    .getByRole("menuitem", { name: "按常用预设保存", exact: true })
+    .click();
   const presetUpload = await uploads.submitted("savePresetImage");
   expect(presetUpload.contentType).toBe("image/jpeg");
   const image = await pixels(
@@ -1165,7 +1165,7 @@ test("排版最终像素在复制、钉图、OCR与取字一致，复用图片�
   expect([normal.width, normal.height]).toEqual([80, 60]);
   expect(at(normal, 25, 30)).toEqual([255, 0, 0, 255]);
   expect(at(normal, 65, 30)).toEqual([0, 255, 0, 255]);
-  await page.getByRole("button", { name: "钉图", exact: true }).click();
+  await clickToolbarAction(page, "钉图");
   const pinUpload = await uploads.submitted("pinScreenshotImage");
   expect(pinUpload.body).toEqual(ordinaryUpload.body);
   const pin = (await commands(page)).find(
@@ -1310,7 +1310,7 @@ test("235×239：被中段裁除的屏蔽源仍屏蔽放大镜泄露，全部普
     .toBe(60);
   const ordinary: Buffer[] = [];
   for (const [index, name] of ["复制标注图", "保存标注图", "钉图"].entries()) {
-    await page.getByRole("button", { name, exact: true }).click();
+    await clickToolbarAction(page, name);
     const upload = await uploads.submitted(
       ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
         index
@@ -1409,7 +1409,7 @@ test("F239-01：无排版20000px图片保留普通输出，真实排版仍拒绝
   const { uploads } = await setup(page, {}, { width: 20000, height: 100 });
   const ordinary: Buffer[] = [];
   for (const [index, name] of ["复制标注图", "保存标注图", "钉图"].entries()) {
-    await page.getByRole("button", { name, exact: true }).click();
+    await clickToolbarAction(page, name);
     const upload = await uploads.submitted(
       ["copyScreenshotImage", "saveScreenshotImage", "pinScreenshotImage"][
         index
@@ -1529,9 +1529,9 @@ test("复制的图片对象逐份拼接，撤销与删除一份保持出现次�
     preview.evaluate((image: HTMLImageElement) => image.naturalWidth);
   await expect.poll(width).toBe(100);
   await page.getByRole("button", { name: "选择", exact: true }).click();
-  await page.getByRole("button", { name: "全选对象", exact: true }).click();
-  await page.getByRole("button", { name: "复制对象", exact: true }).click();
-  await page.getByRole("button", { name: "粘贴对象", exact: true }).click();
+  await clickToolbarAction(page, "全选对象");
+  await clickToolbarAction(page, "复制对象");
+  await clickToolbarAction(page, "粘贴对象");
   await expect.poll(width).toBe(120);
   await page.getByRole("button", { name: "撤销", exact: true }).click();
   await expect.poll(width).toBe(100);
@@ -1550,7 +1550,7 @@ test("复制的图片对象逐份拼接，撤销与删除一份保持出现次�
   await expect.poll(width).toBe(100);
   await page.getByRole("button", { name: "撤销", exact: true }).click();
   await expect.poll(width).toBe(120);
-  await page.getByRole("button", { name: "保存工程", exact: true }).click();
+  await clickToolbarAction(page, "保存工程");
   await expect.poll(() => projects.length).toBe(1);
   const saved = projects[0] as {
     state: { marks: { tool: string; assetId?: string }[] };
@@ -1560,7 +1560,7 @@ test("复制的图片对象逐份拼接，撤销与删除一份保持出现次�
       (mark) => mark.tool === "image" && mark.assetId === ASSET,
     ),
   ).toHaveLength(2);
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   const savedUpload = await uploads.submitted("saveScreenshotImage");
   expect(
     (
@@ -1592,9 +1592,7 @@ test("预设上传期间锁住设置和目录，并发送开始时的语义快�
       body: JSON.stringify({ resourceUri: annotation }),
     });
   });
-  await page
-    .getByRole("button", { name: "按常用预设保存", exact: true })
-    .click();
+  await clickToolbarAction(page, "按常用预设保存");
   await expect.poll(() => started).toBe(true);
   await page.getByText("输出预设与工具栏定制", { exact: true }).click();
   await expect(
@@ -1701,7 +1699,7 @@ test("删除背景之前的拼接成员会同步索引，撤销与保存保留�
   await page.getByRole("button", { name: "选择", exact: true }).click();
   await page.getByLabel("选择标注对象", { exact: true }).selectOption("0");
   await page.getByRole("button", { name: "删除对象", exact: true }).click();
-  await page.getByRole("button", { name: "保存工程", exact: true }).click();
+  await clickToolbarAction(page, "保存工程");
   await expect.poll(() => projects.length).toBe(1);
   expect(
     (projects[0] as { state: { composition: unknown } }).state.composition,
@@ -1763,18 +1761,14 @@ test("预设明确失败回执逐次释放租约，成功回执不抢先丢弃",
     discarded.push(path);
     await route.fulfill({ status: 204 });
   });
-  const save = page.getByRole("button", {
-    name: "按常用预设保存",
-    exact: true,
-  });
   for (let index = 0; index < 10; index++) {
     await rejectNextCommand(page);
-    await save.click();
+    await clickToolbarAction(page, "按常用预设保存");
     await expect.poll(() => discarded.length).toBe(index + 1);
-    await expect(save).toBeEnabled();
+    await expectToolbarActionEnabled(page, "按常用预设保存");
     expect(active.size).toBe(0);
   }
-  await save.click();
+  await clickToolbarAction(page, "按常用预设保存");
   await expect(
     page.getByText("已按常用预设保存副本；已有文件不会被覆盖。", {
       exact: true,

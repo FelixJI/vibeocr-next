@@ -210,12 +210,13 @@ public sealed partial class MainWindow
   }
 
   /// <summary>
-  /// 工具栏家族分组后部分工具/动作收进 ▾ 菜单（如 屏蔽 在「遮挡 ▾」族
-  /// 菜单内）：先点触发钮展开（触发钮是开关，菜单渲染可能晚一拍），再
-  /// 点同名 menuitem。轮询重试覆盖菜单异步挂载与开关态翻转。
+  /// 动作区重组后，保存/钉图类动作与表格识别收进「输出 ▾」「识别 ▾」
+  /// 菜单：先点触发钮展开（触发钮是开关，菜单渲染可能晚一拍），再点
+  /// 同名 menuitem。轮询重试覆盖菜单异步挂载与开关态翻转。默认面与
+  /// <see cref="ClickSmokeButtonAsync"/> 的非截图分支一致（编辑器面）。
   /// </summary>
-  /// <param name="triggerAria">菜单触发按钮 aria-label（如 遮挡工具选项）。</param>
-  /// <param name="itemText">菜单项可见文字（如 屏蔽）。</param>
+  /// <param name="triggerAria">菜单触发按钮 aria-label（输出操作/识别模式）。</param>
+  /// <param name="itemText">菜单项可见文字（钉图/表格识别等）。</param>
   /// <param name="surface">目标 WebView；缺省为主编辑器面。</param>
   private async Task ClickSmokeMenuitemAsync(
     string triggerAria, string itemText, Microsoft.UI.Xaml.Controls.WebView2? surface = null)
@@ -227,15 +228,18 @@ public sealed partial class MainWindow
       "(() => { const t = document.querySelector('button[aria-label=\"" + triggerAria + "\"]');" +
       " if (!t) return 'no-trigger';" +
       " const item = Array.from(document.querySelectorAll('[role=\"menuitem\"]'))" +
-      ".find(e => e.textContent.trim() === " + System.Text.Json.JsonSerializer.Serialize(itemText) + ");" +
-      " if (!item) { t.click(); return 'retry'; }" +
+      ".find(e => e.textContent.trim() === " + JsonSerializer.Serialize(itemText) + ");" +
+      " if (!item) { t.click(); return 'retry:items=' + document.querySelectorAll('[role=\"menuitem\"]').length" +
+      " + ',triggerDisabled=' + t.disabled + ',ariaDisabled=' + t.getAttribute('aria-disabled'); }" +
       " if (item.getAttribute('aria-disabled') === 'true') return 'disabled';" +
       " item.click(); return 'ok'; })()";
     using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    string last = "none";
     while (true)
     {
       string result = await target.CoreWebView2.ExecuteScriptAsync(script);
       if (result == "\"ok\"") return;
+      last = result;
       if (result == "\"no-trigger\"")
         throw new InvalidOperationException($"Smoke menu trigger unavailable: {triggerAria}");
       if (result == "\"disabled\"")
@@ -247,7 +251,7 @@ public sealed partial class MainWindow
       catch (OperationCanceledException)
       {
         throw new InvalidOperationException(
-          $"Smoke menu never resolved: {triggerAria}/{itemText}, last={result}");
+          $"Smoke menu never resolved: {triggerAria}/{itemText}, last={last}");
       }
     }
   }

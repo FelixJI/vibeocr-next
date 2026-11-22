@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { activateToolbarTool } from "./toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarAction,
+  clickToolbarControl,
+  expectToolbarActionEnabled,
+} from "./toolSelection";
 import { mountHost, snapshot } from "./workbench-host";
 
 /**
@@ -189,11 +194,9 @@ async function saveAndDecode(
   region?: PixelRegion,
 ): Promise<DecodedImage> {
   const index = uploads.length;
-  await page.getByRole("button", { name: "保存标注图", exact: true }).click();
+  await clickToolbarAction(page, "保存标注图");
   await expect.poll(() => uploads.length).toBe(index + 1);
-  await expect(
-    page.getByRole("button", { name: "保存标注图", exact: true }),
-  ).toBeEnabled();
+  await expectToolbarActionEnabled(page, "保存标注图");
   expect(uploads[index]!.contentType).toBe("image/png");
   return decodeUpload(page, uploads[index]!.body, "image/png", region);
 }
@@ -400,7 +403,7 @@ test("solid occlusion bakes opaque pixels into normal export while exclusion doe
 
   // 屏蔽副本：排除区写入不透明白；遮挡区保持黑色真实像素。
   const index = uploads.length;
-  await page.getByRole("button", { name: "保存屏蔽副本", exact: true }).click();
+  await clickToolbarAction(page, "保存屏蔽副本");
   await expect.poll(() => uploads.length).toBe(index + 1);
   const masked = await decodeUpload(page, uploads[index]!.body, "image/png");
   expect(pixelAt(masked, 180, 50)).toEqual([255, 255, 255, 255]);
@@ -668,7 +671,7 @@ test("R2 non-1:1 rectangle mosaic preserves the legacy 1/2/3 cell anchors in rea
     [2, 28],
     [3, 52],
   ] as const) {
-    await activateToolbarTool(page, "马赛克");
+    await clickToolbarControl(page, "马赛克");
     await setRangeValue(page, "马赛克与模糊强度", String(intensity));
     await pointerStroke(page, [
       map({ x: 0, y: 300 }),
@@ -727,7 +730,7 @@ test("R7 a full-image mask with a known hole previews and applies real worker pi
   await expect(page.getByText(/原图 64×48/)).toBeVisible();
   const baseline = await saveAndDecode(page, uploads);
   const map = makeCanvasMapper(64, 48);
-  await activateToolbarTool(page, "去水印");
+  await clickToolbarControl(page, "去水印");
   await pointerStroke(page, [
     map({ x: 0.01, y: 0.01 }),
     map({ x: 63.99, y: 47.99 }),
@@ -772,7 +775,7 @@ test("R9 the first remove stroke keeps export bytes and history unchanged", asyn
   await mountWithUploadCapture(page, uploads, "masks-remove-first.svg");
   await expect(page.getByText(/原图 96×48/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
-  await activateToolbarTool(page, "去水印");
+  await clickToolbarControl(page, "去水印");
   await page.getByLabel("修补掩膜绘制方式").selectOption("rect-remove");
   const map = makeCanvasMapper(96, 48);
   await pointerStroke(page, [
@@ -988,7 +991,7 @@ for (const tool of ["马赛克", "模糊"]) {
         await mountWithUploadCapture(page, uploads, "fractional-sliver.svg");
         await expect(page.getByText(/原图 900×600/)).toBeAttached();
         const baseline = await saveAndDecode(page, uploads);
-        await activateToolbarTool(page, tool);
+        await clickToolbarControl(page, tool);
         await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
         await exactFractionalStroke(page, points);
         await expect(page.getByText(/width or height of 0/)).toHaveCount(0);
@@ -1027,7 +1030,7 @@ test("fractional mosaic uses one unfragmented grid across the 512px black-white 
   await mountWithUploadCapture(page, uploads, "fractional-mosaic-grid.svg");
   await expect(page.getByText(/原图 900×600/)).toBeAttached();
   const baseline = await saveAndDecode(page, uploads);
-  await activateToolbarTool(page, "马赛克");
+  await clickToolbarControl(page, "马赛克");
   await page.getByLabel("马赛克与模糊绘制方式").selectOption("brush");
   await exactFractionalStroke(page, [
     { x: 13.3, y: 300 },

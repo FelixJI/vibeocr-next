@@ -1,5 +1,5 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
-import { activateToolbarTool } from "./toolSelection";
+import { clickToolbarControl } from "./toolSelection";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import type { HostCommand } from "../src/bridge/client";
@@ -18,13 +18,7 @@ async function commands(page: Page): Promise<HostCommand[]> {
   );
 }
 async function action(page: Page, name: string) {
-  // 家族分组的非当前子工具经族菜单激活；动作按钮仍直点。
-  const direct = page.getByRole("button", { name, exact: true });
-  if ((await direct.count()) > 0) {
-    await direct.click();
-    return;
-  }
-  await activateToolbarTool(page, name);
+  await clickToolbarControl(page, name);
 }
 async function pngPixels(page: Page, png: Buffer, points: [number, number][]) {
   return page.evaluate(

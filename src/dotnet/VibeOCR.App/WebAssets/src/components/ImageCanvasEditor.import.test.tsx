@@ -6,7 +6,10 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { activateToolbarTool } from "../test/toolSelection";
+import {
+  activateToolbarTool,
+  clickToolbarMenuItem,
+} from "../test/toolSelection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppActions } from "../app/types";
@@ -492,7 +495,7 @@ describe("image canvas editor system import", () => {
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
-    fireEvent.click(screen.getByRole("button", { name: "复制对象" }));
+    await clickToolbarMenuItem("对象操作", "复制对象");
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
     fireEvent.click(screen.getByRole("button", { name: "矩形" }));
     const canvas = screen.getByLabelText("图片检查画布");
@@ -506,7 +509,7 @@ describe("image canvas editor system import", () => {
     ).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "选择" }));
     targets.length = 0;
-    fireEvent.click(screen.getByRole("button", { name: "粘贴对象" }));
+    await clickToolbarMenuItem("对象操作", "粘贴对象");
     await waitFor(() =>
       expect(targets.some((target) => images.includes(target))).toBe(true),
     );

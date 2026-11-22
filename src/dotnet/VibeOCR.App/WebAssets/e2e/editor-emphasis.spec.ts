@@ -1,5 +1,5 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
-import { activateToolbarTool } from "./toolSelection";
+import { activateToolbarTool, clickToolbarControl } from "./toolSelection";
 import { writeFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -105,7 +105,7 @@ async function drag(
 
 async function action(page: Page, name: string) {
   // 家族分组的工具经族内菜单激活；非工具按钮（添加区域等）仍直点。
-  await activateToolbarTool(page, name);
+  await clickToolbarControl(page, name);
 }
 
 async function save(
@@ -226,13 +226,14 @@ test("spotlight pixels: overlap equals single hole and letterbox stays transpare
   await drag(page, 200, 100, 360, 220);
   await action(page, "选择");
   await drag(page, 280, 160, 281, 161);
-  // “添加区域”是操作入口：必须位于上排工具栏（图片编辑工具），不在下排。
+  // “添加区域”是聚光灯族的上下文动作：位于属性排（当前工具设置），
+  // 与强调工具属性同区呈现。
   const toolbarName = await page
     .getByRole("button", { name: "添加区域", exact: true })
     .evaluate((button) =>
       button.closest('[role="toolbar"]')?.getAttribute("aria-label"),
     );
-  expect(toolbarName).toBe("图片编辑工具");
+  expect(toolbarName).toBe("当前工具设置");
   await action(page, "添加区域");
   await drag(page, 320, 140, 480, 260);
   // 预览画布：遮罩只覆盖底图显示矩形（50..850），letterbox（<50）保持透明。
