@@ -8,7 +8,7 @@ namespace VibeOCR.App.Workbench;
 
 /// <summary>
 /// #238 pin owned 快照写入器（Features/Pins 实现）：宿主完成贡献校验与
-/// manifest 组装后，由写入器把 .vibp 工程与最终合成 PNG 原子落盘到该贴图
+/// manifest 组装后，由写入器把 .vibp 工程与最终合成 PNG 原子落盘到该钉图
 /// 独立 owned 目录。写入器不得触碰 pins 目录之外的任何路径。
 /// </summary>
 internal interface IPinSnapshotWriter
@@ -22,16 +22,16 @@ internal interface IPinSnapshotWriter
     CancellationToken cancellationToken,
     IReadOnlyList<WorkbenchExclusionBox>? excludeBoxes = null);
 
-  /// <summary>该贴图当前快照 PNG 的 owned 路径；从未编辑过为 null。</summary>
+  /// <summary>该钉图当前快照 PNG 的 owned 路径；从未编辑过为 null。</summary>
   string? GetSnapshotPngPath(Guid pinId);
 
   string? GetSnapshotProjectPath(Guid pinId) => null;
 
-  /// <summary>删除该贴图 owned 快照目录；仅清本应用拥有的固定子目录。</summary>
+  /// <summary>删除该钉图 owned 快照目录；仅清本应用拥有的固定子目录。</summary>
   void DeleteSnapshot(Guid pinId);
 }
 
-/// <summary>历史条目图像读取结果：重开贴图所需的字节与显示尺寸。</summary>
+/// <summary>历史条目图像读取结果：重开钉图所需的字节与显示尺寸。</summary>
 internal sealed record PinHistoryImage(byte[] Png, int Width, int Height);
 
 /// <summary>
@@ -70,7 +70,7 @@ internal interface IPinHistoryRecorder
 }
 
 /// <summary>
-/// #238 贴图内编辑（WorkbenchImageOwner 分部）：独立 pinEdit 通道的会话
+/// #238 钉图内编辑（WorkbenchImageOwner 分部）：独立 pinEdit 通道的会话
 /// 建立/快照应用/历史管理。与 recognition/imageEdit 通道完全隔离：本分部
 /// 发布的状态全部为 pinEdit scope，保存成功 ack 前必须已落盘。
 /// </summary>
@@ -80,7 +80,7 @@ internal sealed partial class WorkbenchImageOwner
   private int pinSnapshotInFlight;
   internal Func<VibpProjectManifest, byte[], Task>? SmokeBeforePinSnapshotCommit { get; set; }
 
-  /// <summary>当前 pinEdit 会话绑定的贴图 id；无会话为 null。</summary>
+  /// <summary>当前 pinEdit 会话绑定的钉图 id；无会话为 null。</summary>
   private Guid? pinEditPinId;
   private WorkbenchProjectOpenState? pinProjectRestore;
   private WorkbenchResourceReference? pinFlatInput;
@@ -88,20 +88,20 @@ internal sealed partial class WorkbenchImageOwner
   private int pinOpenInFlight;
 
   /// <summary>快照成功应用：sessionId/revision 绑定 + pin owned 快照已落盘。
-  /// 宿主（MainWindow 协调器）据此换装贴图静态内容并失效其旧文字层。</summary>
+  /// 宿主（MainWindow 协调器）据此换装钉图静态内容并失效其旧文字层。</summary>
   internal event Action<Guid, long, Guid>? PinSnapshotApplied;
 
-  /// <summary>历史条目重开请求：宿主负责贴图创建（含 4 张上限预检）。</summary>
+  /// <summary>历史条目重开请求：宿主负责钉图创建（含 4 张上限预检）。</summary>
   internal event Func<PinHistoryImage, Task>? PinHistoryReopenRequested;
   internal event Action? PinManagerRequested;
 
   private WorkbenchState ShowPinManager()
   { PinManagerRequested?.Invoke(); return CurrentPinEditState(); }
 
-  /// <summary>贴图编辑会话被关闭（放弃路径）：宿主恢复静态现场并释放槽。</summary>
+  /// <summary>钉图编辑会话被关闭（放弃路径）：宿主恢复静态现场并释放槽。</summary>
   internal event Action<Guid>? PinEditSessionClosed;
 
-  /// <summary>进入单编辑槽：为贴图当前 PNG 建立独立 pinEdit 会话。</summary>
+  /// <summary>进入单编辑槽：为钉图当前 PNG 建立独立 pinEdit 会话。</summary>
   internal async Task<Guid?> TryOpenPinEditSessionAsync(
     Guid pinId,
     byte[] png,
@@ -272,7 +272,7 @@ internal sealed partial class WorkbenchImageOwner
   }
 
   /// <summary>
-  /// 贴图编辑完成：消费 /__project 贡献与最终 PNG annotation，复用工程
+  /// 钉图编辑完成：消费 /__project 贡献与最终 PNG annotation，复用工程
   /// 序列化校验后原子写入 pin owned 快照；成功 ack 前已落盘，随后事件通知
   /// 协调器换装并结束槽内会话。任一失败保留编辑现场（会话与贡献外状态
   /// 不变，可重试）。迟到会话/修订拒绝（现场仍由当前会话持有）。
@@ -381,7 +381,7 @@ internal sealed partial class WorkbenchImageOwner
     {
       throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
     }
-    // 会话身份由协调器在 UI 线程创建贴图时分配；此处仅回读事件。
+    // 会话身份由协调器在 UI 线程创建钉图时分配；此处仅回读事件。
     if (PinHistoryReopenRequested is not { } reopen)
       throw new ImageImportRefusedException("workbench.error.imageImportUnavailable");
     cancellationToken.ThrowIfCancellationRequested();

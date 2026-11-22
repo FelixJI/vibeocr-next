@@ -350,7 +350,7 @@ public sealed class DesktopWorkbenchCommandHandler :
     }
     catch (PinLimitReachedException)
     {
-      // #238 C6：4 张贴图上限专属回执文案（宿主仍防竞态，预检只是前置 UX）。
+      // #238 C6：4 张钉图上限专属回执文案（宿主仍防竞态，预检只是前置 UX）。
       return new WorkbenchCommandOutcome(
         [],
         new WorkbenchProblem(
@@ -540,8 +540,8 @@ public sealed class DesktopWorkbenchCommandHandler :
 
 internal sealed class PinnedTextPreparationException(string message) : Exception(message);
 
-/// <summary>#238 4 张贴图同时上限：专属 problem（C6 用户可见文案）。</summary>
+/// <summary>#238 4 张钉图同时上限：专属 problem（C6 用户可见文案）。</summary>
 internal sealed class PinLimitReachedException : InvalidOperationException
 {
-  public PinLimitReachedException() : base("最多同时打开四张贴图，请先关闭一张。") { }
+  public PinLimitReachedException() : base("最多同时打开四张钉图，请先关闭一张。") { }
 }

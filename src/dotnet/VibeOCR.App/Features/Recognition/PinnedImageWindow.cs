@@ -91,7 +91,7 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>#238 折叠：收起为只剩顶部把手条；展开恢复折叠前客户区。</summary>
   private bool collapsed;
   private Windows.Graphics.SizeInt32? expandedClientSize;
-  /// <summary>#238 穿透：点击穿过贴图；恢复仅经管理入口。</summary>
+  /// <summary>#238 穿透：点击穿过钉图；恢复仅经管理入口。</summary>
   private bool passThrough;
   private const long WsExTransparent = 0x00000020;
   private readonly TextBlock status = new()
@@ -142,7 +142,7 @@ internal sealed class PinnedImageWindow : IDisposable
   /// <summary>apply/重开后的 owned 存储路径；非空时显示源为该文件且关闭不删除。</summary>
   private string? ownedImagePath;
   private RecognitionTextLayerState? layer;
-  /// <summary>#238 贴图身份：编辑槽/快照目录/编组的稳定键。</summary>
+  /// <summary>#238 钉图身份：编辑槽/快照目录/编组的稳定键。</summary>
   internal Guid PinId { get; }
   internal nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(window);
   internal event Func<PinnedImageWindow, Guid, Task>? SnapshotConfirmed;
@@ -175,7 +175,7 @@ internal sealed class PinnedImageWindow : IDisposable
     (Math.Clamp(imageWidth, 1, Math.Max(1, maxWidth)),
       Math.Clamp(imageHeight, 1, Math.Max(1, maxHeight)));
 
-  /// <summary>贴图缩放范围：与既有 缩小/放大 步进一致。</summary>
+  /// <summary>钉图缩放范围：与既有 缩小/放大 步进一致。</summary>
   internal static double ClampZoom(double zoom) => Math.Clamp(zoom, 0.25, 4);
 
   private bool loaded;
@@ -210,7 +210,7 @@ internal sealed class PinnedImageWindow : IDisposable
   private Windows.Foundation.Point? dragOrigin;
 
   public event Action<PinnedImageWindow>? Closed;
-  /// <summary>#238 请求进入贴图编辑（单槽仲裁由 MainWindow 协调器负责）。</summary>
+  /// <summary>#238 请求进入钉图编辑（单槽仲裁由 MainWindow 协调器负责）。</summary>
   internal event Func<PinnedImageWindow, Task>? EditRequested;
   /// <summary>#238 请求放弃编辑并退出（宿主关闭 pinEdit 会话后回调 ExitEditMode）。</summary>
   internal event Func<PinnedImageWindow, Task>? ExitEditRequested;
@@ -640,7 +640,7 @@ internal sealed class PinnedImageWindow : IDisposable
     imageUrl = "https://pin.vibeocr/image" + Path.GetExtension(image.Path);
     this.sessionId = sessionId;
     this.revision = revision;
-    // 冻结的排除矩形：贴图重取字（含会话失效后的冻结路径）返回的行
+    // 冻结的排除矩形：钉图重取字（含会话失效后的冻结路径）返回的行
     // 也按同一正面积相交策略过滤，不因重新识别找回跨边界行。
     this.excludeBoxes = excludeBoxes;
     this.layer = FilterExcludedLines(layer, excludeBoxes);
@@ -677,7 +677,7 @@ internal sealed class PinnedImageWindow : IDisposable
     root.Children.Add(band);
     root.Children.Add(statusChip);
     window.Content = root;
-    window.Title = "VibeOCR 贴图";
+    window.Title = "VibeOCR 钉图";
     presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
     presenter.IsAlwaysOnTop = true;
     window.AppWindow.SetPresenter(presenter);
@@ -729,7 +729,7 @@ internal sealed class PinnedImageWindow : IDisposable
       Activate();
       var dialog = new ContentDialog
       {
-        Title = "保存贴图编辑？",
+        Title = "保存钉图编辑？",
         Content = editorHost?.PinSnapshotInFlight == true
           ? "保存已开始，将等待结果；失败会保留编辑现场。" : "保存成功后再退出；放弃将恢复上次静态内容。",
         PrimaryButtonText = "保存", SecondaryButtonText = "放弃更改", CloseButtonText = "取消",
@@ -819,10 +819,10 @@ internal sealed class PinnedImageWindow : IDisposable
       Margin = new Thickness(0, 0, 2, 0),
       Spacing = 2,
     };
-    // #238 贴图内编辑入口：静态时进入编辑槽，编辑时确认放弃退出。
+    // #238 钉图内编辑入口：静态时进入编辑槽，编辑时确认放弃退出。
     Button editState = AddBandButton(buttons,
       new TextBlock { Text = "编辑", FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
-      "编辑贴图", () =>
+      "编辑钉图", () =>
     {
       if (editing)
       {
@@ -830,7 +830,7 @@ internal sealed class PinnedImageWindow : IDisposable
         return Task.CompletedTask;
       }
       if (EditRequested is { } request) return request(this);
-      status.Text = "贴图编辑不可用";
+      status.Text = "钉图编辑不可用";
       return Task.CompletedTask;
     });
     editButton = editState;
@@ -917,7 +917,7 @@ internal sealed class PinnedImageWindow : IDisposable
     secondary.Children.Add(opacity);
     panel.Children.Add(primary);
     panel.Children.Add(secondary);
-    // #238 交互行：折叠/穿透/编组 + 始终可达的贴图管理入口（穿透恢复）。
+    // #238 交互行：折叠/穿透/编组 + 始终可达的钉图管理入口（穿透恢复）。
     var tertiary = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
     collapseButton = AddButton(tertiary, "折叠", () =>
     {
@@ -934,7 +934,7 @@ internal sealed class PinnedImageWindow : IDisposable
       GroupToggleRequested?.Invoke(this);
       return Task.CompletedTask;
     });
-    AddButton(tertiary, "贴图管理", () =>
+    AddButton(tertiary, "钉图管理", () =>
     {
       PinManagerRequested?.Invoke();
       return Task.CompletedTask;
@@ -990,7 +990,7 @@ internal sealed class PinnedImageWindow : IDisposable
       target.Height + outer.Bottom - outer.Top - client.Bottom + client.Top));
   }
 
-  /// <summary>穿透：点击穿过贴图；恢复仅经管理入口或其他贴图菜单。</summary>
+  /// <summary>穿透：点击穿过钉图；恢复仅经管理入口或其他钉图菜单。</summary>
   internal void SetPassThrough(bool value)
   {
     if (disposed || exitFrozen || passThrough == value) return;
@@ -1000,7 +1000,7 @@ internal sealed class PinnedImageWindow : IDisposable
     _ = SetWindowLongPtrW(handle, GwlExStyle, (nint)target);
     passThrough = value;
     status.Text = value
-      ? "已穿透：点击穿过贴图；可从其他贴图的“贴图管理”或托盘恢复"
+      ? "已穿透：点击穿过钉图；可从其他钉图的“钉图管理”或托盘恢复"
       : "已恢复可点击";
     SyncInteractionButtons();
   }
@@ -1161,7 +1161,7 @@ internal sealed class PinnedImageWindow : IDisposable
   internal event Action<PinnedImageWindow>? PassThroughToggleRequested;
   internal event Action<PinnedImageWindow>? CollapseToggleRequested;
   internal event Action<PinnedImageWindow>? GroupToggleRequested;
-  /// <summary>#238 打开贴图管理入口（始终可达的穿透恢复路径）。</summary>
+  /// <summary>#238 打开钉图管理入口（始终可达的穿透恢复路径）。</summary>
   internal event Action? PinManagerRequested;
 
   private void OnBandPointerReleased(object sender, PointerRoutedEventArgs args)
@@ -1215,7 +1215,7 @@ internal sealed class PinnedImageWindow : IDisposable
     Render();
   }
 
-  // ---- #238 贴图内编辑：独立授权 WebView 覆盖层 + 单槽生命周期。 ----
+  // ---- #238 钉图内编辑：独立授权 WebView 覆盖层 + 单槽生命周期。 ----
 
   /// <summary>进入编辑态：宿主已建立 pinEdit 会话后由协调器调用。</summary>
   internal async Task EnterEditModeAsync(
@@ -1268,7 +1268,7 @@ internal sealed class PinnedImageWindow : IDisposable
       {
         if (!disposed && IsEditingSession(editSessionId))
         {
-          status.Text = "贴图编辑器暂不可用；已保留当前贴图内容。";
+          status.Text = "钉图编辑器暂不可用；已保留当前钉图内容。";
         }
       };
       host.PinSnapshotReceiptLost += sourceSession =>
@@ -1293,7 +1293,7 @@ internal sealed class PinnedImageWindow : IDisposable
       // #321：随包 WebView2 可恢复初始化失败显示固定产品报修文案。
       status.Text = error is VibeOCR.App.Web.WebView2StartupException startup
         ? startup.Message
-        : "贴图编辑器启动失败，请重试";
+        : "钉图编辑器启动失败，请重试";
       throw;
     }
   }
@@ -1365,7 +1365,7 @@ internal sealed class PinnedImageWindow : IDisposable
 
   internal void ReportSnapshotDisplayFailure()
   {
-    if (!disposed) status.Text = "贴图已保存，但显示更新失败；可重新进入编辑或关闭后重新打开。";
+    if (!disposed) status.Text = "钉图已保存，但显示更新失败；可重新进入编辑或关闭后重新打开。";
   }
 
   private void RebuildStageScaleScript()
@@ -1414,9 +1414,9 @@ internal sealed class PinnedImageWindow : IDisposable
     {
       label.Text = editing ? "退出编辑" : "编辑";
     }
-    string name = editing ? "退出编辑" : "编辑贴图";
+    string name = editing ? "退出编辑" : "编辑钉图";
     AutomationProperties.SetName(button, name);
-    ToolTipService.SetToolTip(button, editing ? "放弃更改并退出编辑" : "编辑贴图");
+    ToolTipService.SetToolTip(button, editing ? "放弃更改并退出编辑" : "编辑钉图");
   }
 
   private static void OnNewWindowRequested(CoreWebView2 sender,
@@ -1444,7 +1444,7 @@ internal sealed class PinnedImageWindow : IDisposable
     if (disposed || args.NavigationId != activeNavigation) return;
     if (!args.IsSuccess)
     {
-      status.Text = "贴图加载失败，请关闭后重新打开";
+      status.Text = "钉图加载失败，请关闭后重新打开";
       AppLog.Warn($"Pinned image navigation failed: {args.WebErrorStatus}");
       return;
     }
@@ -1471,7 +1471,7 @@ internal sealed class PinnedImageWindow : IDisposable
     if (disposed) return;
     if (next is not null && (next.Binding?.SessionId != sessionId.ToString("N") ||
         next.Binding.Revision != revision)) return;
-    // 重取字结果与初始层同一过滤策略：正面积相交的行不进入贴图。
+    // 重取字结果与初始层同一过滤策略：正面积相交的行不进入钉图。
     next = FilterExcludedLines(next, excludeBoxes);
     RecognitionTextLayerState? valid = next is { Status: "textlayer.ready" } &&
       next.Binding?.SessionId == sessionId.ToString("N") &&
@@ -1483,14 +1483,14 @@ internal sealed class PinnedImageWindow : IDisposable
     }
     if (ReferenceEquals(layer, valid))
     {
-      if (valid is null) status.Text = "旧快照：文字层已失效，可按贴图原图重新取字";
+      if (valid is null) status.Text = "旧快照：文字层已失效，可按钉图原图重新取字";
       return;
     }
     layer = valid;
     status.Text = valid is null
-      ? "旧快照：文字层已失效，可按贴图原图重新取字"
+      ? "旧快照：文字层已失效，可按钉图原图重新取字"
       : detached || oldSnapshot
-        ? "旧快照：可在贴图上选字复制"
+        ? "旧快照：可在钉图上选字复制"
         : string.Empty;
     if (loaded) Render();
   }
@@ -1500,8 +1500,8 @@ internal sealed class PinnedImageWindow : IDisposable
     if (disposed) return;
     oldSnapshot = true;
     status.Text = layer is null
-      ? "旧快照：可按贴图原图取字"
-      : "旧快照：可在贴图上选字复制";
+      ? "旧快照：可按钉图原图取字"
+      : "旧快照：可在钉图上选字复制";
   }
 
   private async void OnImageRequested(CoreWebView2 sender,
@@ -1564,7 +1564,7 @@ internal sealed class PinnedImageWindow : IDisposable
       .Append("<style>body{margin:0;background:#202020;overflow:auto}#stage{position:relative;width:100%;aspect-ratio:")
       .Append(imageWidth).Append('/').Append(imageHeight)
       .Append(";container-type:inline-size}img{width:100%;display:block}.line{position:absolute;overflow:hidden;color:transparent;white-space:pre;line-height:1;user-select:text;cursor:text}.line span{display:inline-block;transform-origin:left top}.line::selection{background:#1f6feb70}</style></head><body><div id='stage'><img src='")
-      .Append(imageUrl).Append("' alt='贴图'>");
+      .Append(imageUrl).Append("' alt='钉图'>");
     foreach (RecognitionTextLayerLine line in layer?.Lines ?? [])
     {
       double fontCqw = (line.Y2 - line.Y1) / 10 * imageHeight / imageWidth;

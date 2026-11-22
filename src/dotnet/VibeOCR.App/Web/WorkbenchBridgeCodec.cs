@@ -393,7 +393,7 @@ public static class WorkbenchBridgeCodec
         return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", scope!,
           boundPreset ? ParseGuidArgument(arguments, "sessionId") : null, boundPreset ? ParseContentRevision(arguments) : null, ReadPresetBinding(arguments));
       // pinEdit 预设输出与会话强绑定：必须携带 sessionId/revision，
-      // 宿主侧拒绝缺失或过期绑定，防止过期贴图快照被写入默认输出。
+      // 宿主侧拒绝缺失或过期绑定，防止过期钉图快照被写入默认输出。
       case ("pinEdit", "savePresetImage"):
         EnsureObjectWithFields(arguments, new HashSet<string>(["resourceUri", "presetId", "presetBinding", "sessionId", "revision"]), "command arguments");
         return new SavePresetImageCommand(ReadAnnotationResourceUri(arguments), arguments.GetProperty("presetId").GetString() ?? "", "pinEdit",

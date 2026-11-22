@@ -9,7 +9,7 @@ using Windows.Graphics;
 namespace VibeOCR.App.Features.Pins;
 
 /// <summary>
-/// #238 pin owned 快照存储：每张贴图一个独立固定子目录
+/// #238 pin owned 快照存储：每张钉图一个独立固定子目录
 /// <c>&lt;DataRoot&gt;/pins/&lt;pinId&gt;</c>，内含编辑工程的 .vibp 与最终
 /// 合成 PNG。两份文件都经既有原子写入能力落盘；目录名严格为 Guid(N)，
 /// 清理只删除本应用拥有的该子目录，绝不递归触碰其他路径。
@@ -329,7 +329,7 @@ internal sealed class PinSnapshotStore(string dataRoot) : IPinSnapshotWriter
   {
     List<Recovery> result = [];
     // 根检查/枚举的存储异常（ACL、瞬时 I/O、reparse 防护）不从 Loaded 启动
-    // 路径逸出：降级为空/部分恢复集，仅跳过不可恢复的贴图。
+    // 路径逸出：降级为空/部分恢复集，仅跳过不可恢复的钉图。
     try
     {
       // 测试接缝优先于存在性检查（真实根不可读场景的启动链注入）。

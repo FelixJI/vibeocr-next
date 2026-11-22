@@ -62,7 +62,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
   private readonly WorkbenchRoute? fixedRoute;
   private static readonly IReadOnlySet<string> SceneScopes = new HashSet<string>(StringComparer.Ordinal)
   { "shell", "recognition", "settings" };
-  /// <summary>#238 pinEdit 投影集：贴图编辑窗只接收 shell/pinEdit/settings。</summary>
+  /// <summary>#238 pinEdit 投影集：钉图编辑窗只接收 shell/pinEdit/settings。</summary>
   private static readonly IReadOnlySet<string> PinScopes = new HashSet<string>(StringComparer.Ordinal)
   { "shell", "pinEdit", "settings" };
   private readonly IReadOnlySet<string> projectionScopes;
@@ -708,7 +708,7 @@ public sealed class WebWorkbenchHost : IAsyncDisposable
       {
         // 真实保存命令异常（磁盘/权限等未建模失败）：错误完整记录日志，宿主
         // 在途状态复位，并回有界失败终态回执——Web 保存 Promise 可完成并可
-        // 重试；不进入全局恢复（避免导航重置丢贴图编辑现场）。
+        // 重试；不进入全局恢复（避免导航重置丢钉图编辑现场）。
         VibeOCR.App.Services.AppLog.Error("Pin snapshot apply command failed", error);
         StateChanged?.Invoke($"bridge-command-failed:{error.GetType().Name}");
         receipt = new WorkbenchCommandReceipt(envelope.Id, 0,

@@ -6,10 +6,10 @@ using VibeOCR.App.Workbench;
 namespace VibeOCR.App.Features.Recognition;
 
 /// <summary>
-/// 贴图取字的临时遮罩输入：按 [0,1000] 归一化排除矩形把不透明白色像素
+/// 钉图取字的临时遮罩输入：按 [0,1000] 归一化排除矩形把不透明白色像素
 /// 烘焙进解码后的 BGRA8 像素（左上 floor、右下 ceil 外扩取整，与前端
 /// exclusionNaturalRects 同语义，边缘不残留原文像素）。产物仅供 OCR
-/// 消费；贴图显示、复制与保存始终使用未烘焙原图。
+/// 消费；钉图显示、复制与保存始终使用未烘焙原图。
 /// </summary>
 internal static class PinnedTextMask
 {
@@ -17,7 +17,7 @@ internal static class PinnedTextMask
 
   /// <summary>
   /// 扫描线压缩判定排除矩形并集是否完整覆盖 [0,1000]² 图像（无采样误差）。
-  /// 覆盖即拒绝取字，贴图本身不受影响。
+  /// 覆盖即拒绝取字，钉图本身不受影响。
   /// </summary>
   internal static bool CoversEntireImage(IReadOnlyList<WorkbenchExclusionBox> boxes)
   {
@@ -92,7 +92,7 @@ internal static class PinnedTextMask
 
   /// <summary>
   /// 生成遮罩 PNG 字节（内存中）：OCR 输入用；无临时文件。
-  /// 解码遵循 EXIF 方向，与贴图显示一致；输出固定为 PNG。
+  /// 解码遵循 EXIF 方向，与钉图显示一致；输出固定为 PNG。
   /// </summary>
   internal static async Task<byte[]> CreateMaskedPngBytesAsync(
     string sourcePath,
