@@ -240,7 +240,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
 
   private readonly ImageSessionChannel recognitionChannel = new();
   private readonly ImageSessionChannel imageEditChannel = new();
-  /// <summary>#238 pinEdit 通道：贴图内编辑单槽会话；与另两通道完全隔离。</summary>
+  /// <summary>#238 pinEdit 通道：钉图内编辑单槽会话；与另两通道完全隔离。</summary>
   private readonly ImageSessionChannel pinEditChannel = new();
   private ResultActions? resultActions;
   /// <summary>当前结果最近发布的结构化资源 URL；与新发布/失效同步维护。</summary>
@@ -365,8 +365,8 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     ImageSessionChannel channel = command.Scope == "imageEdit" ? imageEditChannel
       : command.Scope == "pinEdit" ? pinEditChannel
       : recognitionChannel;
-    // pinEdit 预设输出必须绑定当前贴图会话：拒绝缺失或过期会话，
-    // 避免把排版后的贴图快照落到已关闭会话的默认名输出。
+    // pinEdit 预设输出必须绑定当前钉图会话：拒绝缺失或过期会话，
+    // 避免把排版后的钉图快照落到已关闭会话的默认名输出。
     if (command.Scope == "pinEdit")
     {
       if (command.SessionId is not { } pinSessionId)
@@ -507,7 +507,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     RecognitionModes: BuildEditorModeEntries(),
     ProjectOpen: ProjectOpenProjection());
 
-  /// <summary>pinEdit 通道状态（#238）：仅贴图编辑会话/导入/历史投影；
+  /// <summary>pinEdit 通道状态（#238）：仅钉图编辑会话/导入/历史投影；
   /// 不携带识别模式、文字层或工程打开字段。</summary>
   internal PinEditWorkbenchState PinEditState(
     bool isBusy,
@@ -630,7 +630,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
   private readonly ImportChannelState recognitionImport = new();
   /// <summary>#238 pinEdit 通道的导入状态（文件预览内容收编）。</summary>
   private readonly ImportChannelState pinEditImport = new();
-  /// <summary>#238 pin owned 快照写入器与截图历史记录器（无则贴图编辑/历史不可用）。</summary>
+  /// <summary>#238 pin owned 快照写入器与截图历史记录器（无则钉图编辑/历史不可用）。</summary>
   private readonly IPinSnapshotWriter? pinSnapshotWriter = pinSnapshotWriter;
   private readonly IPinHistoryRecorder? pinHistory = pinHistory;
 
@@ -1682,7 +1682,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
           if (pinScreenshot is null)
             throw new InvalidOperationException("Desktop pinning is unavailable.");
           pinScreenshot(annotation, outputSession, 0, null, []);
-          annotation = null; // 贴图窗口接管文件。
+          annotation = null; // 钉图窗口接管文件。
           break;
       }
       cancellationToken.ThrowIfCancellationRequested();
@@ -1713,7 +1713,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     WorkbenchState state = succeeded
       ? CloseScreenshotSession(recognitionChannel)
       : ScreenshotCaptureState(false, statusCode);
-    // 直接钉图沿用独立快照提示，供用户按贴图原图重新取字。
+    // 直接钉图沿用独立快照提示，供用户按钉图原图重新取字。
     if (succeeded && action == ScreenshotSelectionAction.Pin)
       ScreenshotSessionDetached?.Invoke(outputSession, 0);
     ReleaseCaptureGuard();
@@ -1802,7 +1802,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     WorkbenchAnnotationFile image = TakeScreenshotAnnotation(command.ResourceUri);
     try
     {
-      // 与原位行同一正面积相交策略：跨边界的行不进入贴图可选层；
+      // 与原位行同一正面积相交策略：跨边界的行不进入钉图可选层；
       // 被完全屏蔽的文字因输入像素已覆盖本就不在层内。
       RecognitionTextLayerState? layer =
         channel.TextLayer is { Status: "textlayer.ready" } ready &&
@@ -2402,7 +2402,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
     Guid sessionId, long revision, string imagePath,
     CancellationToken cancellationToken = default)
   {
-    // 贴图会话可能属于任一通道：按 sessionId 路由到持有它的通道。
+    // 钉图会话可能属于任一通道：按 sessionId 路由到持有它的通道。
     ImageSessionChannel channel =
       recognitionChannel.SessionId == sessionId ? recognitionChannel :
       imageEditChannel.SessionId == sessionId ? imageEditChannel :
@@ -2414,7 +2414,7 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         binding.SessionId == sessionId.ToString("N") &&
         binding.Revision == revision &&
         channel.TextLayer.Status is "textlayer.preparing" or "textlayer.ready") return null;
-      // 贴图菜单是显式用户动作，保留准备 Runtime 的既有行为。
+      // 钉图菜单是显式用户动作，保留准备 Runtime 的既有行为。
       if (!await selectionPolicy.EnsureSelectionLoadedForSubmitAsync(cancellationToken))
         throw new PinnedTextPreparationException("本地识别服务尚未就绪。");
       byte[] activePng = await File.ReadAllBytesAsync(imagePath, cancellationToken);
@@ -2447,13 +2447,13 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
         FindReadyLocalTextMode(out _)?.Id != mode.Id || !TextLayerSelectionMatches(frozen))
       throw new PinnedTextPreparationException("本地识别服务或引擎已变化，请重新取字。");
     if (viewModel.Result is null)
-      throw new PinnedTextPreparationException("贴图取字未完成，请重试。");
+      throw new PinnedTextPreparationException("钉图取字未完成，请重试。");
     IReadOnlyList<RecognitionTextLayerLine>? lines =
       ProjectTextLayerLines(viewModel.Result.RawBlocks, out string? lineError);
     if (lines is null)
       throw new PinnedTextPreparationException(lineError == "textlayer.tooLarge"
-        ? "文字内容过大，无法安全显示为贴图文字层。"
-        : "贴图中没有可选择的文字。");
+        ? "文字内容过大，无法安全显示为钉图文字层。"
+        : "钉图中没有可选择的文字。");
     return new RecognitionTextLayerState(
       "textlayer.ready", null,
       new RecognitionScreenshotSessionState(sessionId.ToString("N"), revision),

@@ -91,7 +91,7 @@ public sealed partial class MainWindow : Window
   internal Guid? SceneSessionId => imageEditor?.SessionId;
   private Microsoft.UI.Xaml.Controls.WebView2 SmokeEditorWebView => SceneWebView ?? WorkbenchWebView;
   private readonly List<PinnedImageWindow> pinnedImages = [];
-  /// <summary>#238 类型化贴图（文字/颜色/文件预览）；与图片贴图共用 4 张上限。</summary>
+  /// <summary>#238 类型化钉图（文字/颜色/文件预览）；与图片钉图共用 4 张上限。</summary>
   private readonly List<Features.Pins.TypedPinWindow> typedPins = [];
   private readonly Dictionary<(Guid SessionId, long Revision),
     (Task<RecognitionTextLayerState?> Task, CancellationTokenSource Cancellation)> pinTextTasks = [];
@@ -1149,7 +1149,7 @@ public sealed partial class MainWindow : Window
     }
   }
 
-  /// <summary>贴图窗口统一接线：编辑槽事件、交互事件、关闭清理与注册。</summary>
+  /// <summary>钉图窗口统一接线：编辑槽事件、交互事件、关闭清理与注册。</summary>
   private void WirePinWindow(PinnedImageWindow pinned)
   {
     pinned.EditRequested += EnterPinEditAsync;
@@ -1214,8 +1214,8 @@ public sealed partial class MainWindow : Window
     pin.SetGrouped(true);
   }
 
-  /// <summary>始终可达的贴图管理入口（穿透恢复）。</summary>
-  /// <summary>始终可达的贴图管理入口（穿透恢复；托盘同入口）。</summary>
+  /// <summary>始终可达的钉图管理入口（穿透恢复）。</summary>
+  /// <summary>始终可达的钉图管理入口（穿透恢复；托盘同入口）。</summary>
   internal void ShowPinManagerFromTray()
   {
     if (shuttingDown) return;
@@ -1223,7 +1223,7 @@ public sealed partial class MainWindow : Window
     else DispatcherQueue.TryEnqueue(ShowPinManager);
   }
 
-  /// <summary>#238 新建类型化贴图：默认文字（AC“新入口默认文字”）。
+  /// <summary>#238 新建类型化钉图：默认文字（AC“新入口默认文字”）。
   /// 文件预览经原生 picker 授权，仅图片/有界纯文本，未知格式拒绝。</summary>
   internal async void CreateTypedPinFromTray(Features.Pins.TypedPinWindow.ContentKind kind)
   {
@@ -1233,7 +1233,7 @@ public sealed partial class MainWindow : Window
       if (shuttingDown || pinsExitReview) return;
       if (pinnedImages.Count + typedPins.Count >= 4)
       {
-        _ = ShowPinMessageAsync("最多同时打开四张贴图，请先关闭一张。");
+        _ = ShowPinMessageAsync("最多同时打开四张钉图，请先关闭一张。");
         return;
       }
       var pin = CreateTypedPin(kind);
@@ -1383,7 +1383,7 @@ public sealed partial class MainWindow : Window
   private readonly Dictionary<PinnedImageWindow, Guid> pinGroups = [];
   private Features.Pins.PinManagerWindow? pinManager;
 
-  /// <summary>进入贴图编辑（单槽）：另一张在编辑时激活它，不抢占（C3）。</summary>
+  /// <summary>进入钉图编辑（单槽）：另一张在编辑时激活它，不抢占（C3）。</summary>
   private bool pinTransitionInFlight;
   private bool pinsExitReview;
   private TaskCompletionSource? pinTransitionComplete;
@@ -1601,7 +1601,7 @@ public sealed partial class MainWindow : Window
     catch (Exception error)
     {
       AppLog.Error("Pin exit recovery persistence failed", error);
-      await ShowPinMessageAsync("贴图恢复内容保存失败，请重试后退出。");
+      await ShowPinMessageAsync("钉图恢复内容保存失败，请重试后退出。");
       return false;
     }
     finally { if (!prepared) CancelPinsExitPreparation(); }
@@ -1617,7 +1617,7 @@ public sealed partial class MainWindow : Window
   private async Task ShowPinMessageAsync(string message)
   {
     Activate();
-    await new ContentDialog { Title = "贴图", Content = message, CloseButtonText = "确定",
+    await new ContentDialog { Title = "钉图", Content = message, CloseButtonText = "确定",
       XamlRoot = WorkbenchWebView.XamlRoot }.ShowAsync();
   }
 
@@ -1690,8 +1690,8 @@ public sealed partial class MainWindow : Window
   }
 
   /// <summary>
-  /// 贴图取字输入按需烘焙：临时副本只含白色遮罩像素，识别结束即删除；
-  /// 贴图自身的显示/复制/保存像素不受影响。整图被遮罩时拒绝取字而非拒绝贴图。
+  /// 钉图取字输入按需烘焙：临时副本只含白色遮罩像素，识别结束即删除；
+  /// 钉图自身的显示/复制/保存像素不受影响。整图被遮罩时拒绝取字而非拒绝钉图。
   /// </summary>
   private async Task<RecognitionTextLayerState?> PrepareMaskedPinTextAsync(
     Guid sessionId, long revision, string imagePath,
@@ -1703,7 +1703,7 @@ public sealed partial class MainWindow : Window
         sessionId, revision, imagePath, cancellationToken);
     if (PinnedTextMask.CoversEntireImage(excludeBoxes))
       throw new PinnedTextPreparationException(
-        "整张图都在屏蔽区内：没有可取文字；贴图本身保持不变。");
+        "整张图都在屏蔽区内：没有可取文字；钉图本身保持不变。");
     string masked = await PinnedTextMask.CreateMaskedPngAsync(
       imagePath, resourceRoot, excludeBoxes, cancellationToken);
     try

@@ -85,7 +85,7 @@ public sealed partial class App : Application
     private const int TrayMenuCommandBase = 1000;
     private const int TrayMenuToggleToolbar = 1004;
     private const int TrayMenuQuit = 1005;
-    /// <summary>#238 贴图管理入口：穿透贴图恢复的始终可达路径。</summary>
+    /// <summary>#238 钉图管理入口：穿透钉图恢复的始终可达路径。</summary>
     private const int TrayMenuPinManager = 1007;
     private const int TrayMenuNewTextPin = 1008;
     private const int TrayMenuNewColorPin = 1009;
@@ -586,23 +586,23 @@ public sealed partial class App : Application
                 menu,
                 MenuFlagString,
                 (nuint)TrayMenuPinManager,
-                "贴图管理…");
+                "钉图管理…");
             AppendMenuW(
                 menu,
                 MenuFlagString,
                 (nuint)TrayMenuNewTextPin,
-                "新建文字贴图…");
+                "新建文字钉图…");
             AppendMenuW(
                 menu,
                 MenuFlagString,
                 (nuint)TrayMenuNewColorPin,
-                "新建颜色贴图…");
+                "新建颜色钉图…");
             AppendMenuW(
                 menu,
                 MenuFlagString,
                 (nuint)TrayMenuNewFilePin,
-                "文件预览贴图…");
-            AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuNewFormulaPin, "新建公式贴图…");
+                "文件预览钉图…");
+            AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuNewFormulaPin, "新建公式钉图…");
             AppendMenuW(menu, MenuFlagSeparator, 0, null);
             AppendMenuW(menu, MenuFlagString, (nuint)TrayMenuQuit, "退出 VibeOCR");
 

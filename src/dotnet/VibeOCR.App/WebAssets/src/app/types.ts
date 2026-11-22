@@ -61,7 +61,7 @@ export type AppActionType =
   | "imageEdit.openProject"
   | "imageEdit.ackProjectOpen"
   | "imageEdit.rejectProjectOpen"
-  // #238 贴图内编辑（pinEdit）：仅真实消费者的动作子集。
+  // #238 钉图内编辑（pinEdit）：仅真实消费者的动作子集。
   | "pinEdit.notifyScreenshotRevision"
   | "pinEdit.closeScreenshotSession"
   | "pinEdit.copyScreenshotImage"

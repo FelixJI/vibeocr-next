@@ -662,7 +662,7 @@ const EDITOR_COMMANDS: Readonly<Record<EditorCommandScope, EditorCommandMap>> =
       rejectImport: "imageEdit.rejectImport",
       releaseAssets: "imageEdit.releaseAssets",
     },
-    // #238 贴图内编辑：宿主只实现真实消费者动作（C6）；映射保持全量
+    // #238 钉图内编辑：宿主只实现真实消费者动作（C6）；映射保持全量
     // 类型形状，未消费动作在 pin 模式 UI 不可达且宿主 fail-closed 拒绝。
     pinEdit: {
       notifyScreenshotRevision: "pinEdit.notifyScreenshotRevision",
@@ -755,9 +755,9 @@ interface ImageCanvasEditorProps {
    * 去水印/旋转/屏蔽三类处理工具。 */
   readonly toolset?: EditorToolset;
   /** 会话命令 scope：默认 recognition；非 scene 图片编辑页传 imageEdit；
-   * 贴图内编辑传 pinEdit。 */
+   * 钉图内编辑传 pinEdit。 */
   readonly commandScope?: EditorCommandScope;
-  /** #238 贴图内编辑模式：主排以“完成贴图”取代“保存工程”，隐藏
+  /** #238 钉图内编辑模式：主排以“完成钉图”取代“保存工程”，隐藏
    * 钉图/识别入口；会话命令走 pinEdit.*。 */
   readonly pinSnapshotApply?: boolean;
   /** 左侧校对面数据：冻结参考图（宿主 state.resultImage，绝不用会话基准
@@ -5168,7 +5168,7 @@ export function ImageCanvasEditor({
       // fail-closed 拒绝的命令；其余两通道沿用可选绑定兼容契约。
       if (commandScope === "pinEdit" && !frozen.sessionId) {
         await discardAnnotatedImage(resourceUri);
-        setOperationMessage("贴图会话已失效，本次预设输出未发送，请重试。");
+        setOperationMessage("钉图会话已失效，本次预设输出未发送，请重试。");
         return;
       }
       const command: AppAction = {
@@ -5252,7 +5252,7 @@ export function ImageCanvasEditor({
   }
 
   /** #233/#238 共享：已应用补丁的预算前置 + 逐块 PNG 编码。失败以既有
-   * 文案抛出（保存工程与完成贴图同一套边界）。 */
+   * 文案抛出（保存工程与完成钉图同一套边界）。 */
   async function encodeAppliedProjectPatches(): Promise<
     {
       id: number;
@@ -5412,7 +5412,7 @@ export function ImageCanvasEditor({
     }
   }
 
-  /** #238 完成贴图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
+  /** #238 完成钉图编辑：/__project 贡献（工程可恢复）+ /__annotation 最终
    * 合成 PNG（换装显示）一次上传，宿主原子写入 owned 快照后才回 ack；
    * 会话已变化/超限时保留编辑现场可重试。 */
   const pinSavePromiseRef = useRef<
@@ -5488,7 +5488,7 @@ export function ImageCanvasEditor({
       return false;
     }
     if (!initialExclusionsReady()) {
-      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成贴图。");
+      setOperationMessage("正在恢复原有屏蔽区，请稍后重试完成钉图。");
       return false;
     }
     const image = imageRef.current;
@@ -5504,13 +5504,13 @@ export function ImageCanvasEditor({
       const boxes = hostExclusionBoxes();
       if (!boxes) {
         setOperationMessage(
-          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成贴图。",
+          "排除框数量超过宿主上限（64）：请减少屏蔽区或放大镜后重试完成钉图。",
         );
         return false;
       }
-      setOperationMessage("正在采集贴图内容……");
+      setOperationMessage("正在采集钉图内容……");
       const payload = await buildProjectContributionPayload();
-      setOperationMessage("正在上传贴图内容……");
+      setOperationMessage("正在上传钉图内容……");
       const contributeId = await uploadProjectContribution(payload);
       // 最终合成 PNG：与贡献同一次冻结上下文，导出后逐项复核；与首贴
       // 同源同一预算检查，未烘焙遮罩的最终像素由宿主 owned 快照接续。
@@ -5533,13 +5533,13 @@ export function ImageCanvasEditor({
       });
       setOperationMessage(
         applied
-          ? "已完成贴图编辑；贴图已更新。"
+          ? "已完成钉图编辑；钉图已更新。"
           : "完成未生效：会话已失效或格式/预算不符，请查看提示后重试。",
       );
       return applied;
     } catch (error) {
       setOperationMessage(
-        error instanceof Error ? error.message : "完成贴图失败，请重试。",
+        error instanceof Error ? error.message : "完成钉图失败，请重试。",
       );
       return false;
     } finally {
@@ -5569,9 +5569,9 @@ export function ImageCanvasEditor({
       // 预算检查在上传前：超限时明确拒绝且不消耗上传租约/配额；排除框
       // 与随后导出使用同一冻结会话/修订，一次计算，await 后不换源重算。
       const boxes = hostExclusionBoxes();
-      // 贴图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
+      // 钉图显示/复制/保存使用未烘焙遮罩的原图像素（AC5）；宿主在取字时
       // 按冻结的 excludeBoxes 生成临时遮罩输入，并沿用行过滤拒绝被屏文字。
-      // 首次贴图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
+      // 首次钉图与 owned 快照同用 PNG；普通复制/保存继续尊重输出格式。
       const exported = await exportFinalImageIfUnchanged(false, true, true);
       if (!exported?.sessionId) return;
       const pinned = await actions.run({
@@ -5579,16 +5579,16 @@ export function ImageCanvasEditor({
         resourceUri: exported.resourceUri,
         sessionId: exported.sessionId,
         revision: exported.revision,
-        // 归一化排除矩形：宿主对贴图文字层执行同一正面积相交丢弃策略，
+        // 归一化排除矩形：宿主对钉图文字层执行同一正面积相交丢弃策略，
         // 保持与原位行过滠除跨边界行以外的一致。
         excludeBoxes: boxes,
       });
       setOperationMessage(
-        pinned ? "已创建桌面贴图。" : "贴图未创建，请查看页面提示。",
+        pinned ? "已创建桌面钉图。" : "钉图未创建，请查看页面提示。",
       );
     } catch (error) {
       setOperationMessage(
-        error instanceof Error ? error.message : "无法创建贴图，请重试。",
+        error instanceof Error ? error.message : "无法创建钉图，请重试。",
       );
     } finally {
       exportInProgressRef.current = false;
@@ -6239,7 +6239,7 @@ export function ImageCanvasEditor({
   const textLayerHint = textLayerStatusLabel(textLayer);
 
   function closeSession(): Promise<boolean> {
-    if (pinSnapshotApply && !window.confirm("放弃当前更改并恢复上次贴图？"))
+    if (pinSnapshotApply && !window.confirm("放弃当前更改并恢复上次钉图？"))
       return Promise.resolve(false);
     return actions.run({ type: commands.closeScreenshotSession });
   }
@@ -7587,26 +7587,26 @@ export function ImageCanvasEditor({
   );
   const applyPinSnapshotButton = session && pinSnapshotApply && (
     <Button
-      title="完成贴图"
-      aria-label="完成贴图"
+      title="完成钉图"
+      aria-label="完成钉图"
       appearance="primary"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void applyPinSnapshot()}
     >
-      完成贴图
+      完成钉图
     </Button>
   );
   const pinButton = session && !pinSnapshotApply && (
     <Button
-      title="贴图"
+      title="钉图"
       icon={captureStyle ? undefined : <ToolbarIcon name="pin" />}
-      aria-label="贴图"
+      aria-label="钉图"
       size="small"
       disabled={!canExport || isExporting || !!textEdit}
       onClick={() => void pinCurrentImage()}
     >
-      贴图
+      钉图
     </Button>
   );
   const imageModes: readonly ImageRecognitionMode[] = recognitionModes?.length
@@ -8342,11 +8342,11 @@ export function ImageCanvasEditor({
         )}
         {state.composition && (
           <p className="editor-guidance">
-            排版会应用于复制、保存、贴图和识别/取字。复用图片对象与屏蔽区相交时，该图片在拼接/背景中的整幅复用区域也会从识别与取字排除；普通副本保留像素。排版最终尺寸见排版输出预览。
+            排版会应用于复制、保存、钉图和识别/取字。复用图片对象与屏蔽区相交时，该图片在拼接/背景中的整幅复用区域也会从识别与取字排除；普通副本保留像素。排版最终尺寸见排版输出预览。
           </p>
         )}
         <p className="editor-guidance">
-          屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与贴图画面保留原图内容，贴图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
+          屏蔽区只用于识别输入及显式屏蔽副本；普通复制/保存与钉图画面保留原图内容，钉图取字仍会忽略被屏蔽文字。整图被屏蔽时无法识别。
         </p>
         <p className="editor-guidance">
           {toolset === "full"
@@ -8725,7 +8725,7 @@ function textLayerStatusLabel(
       if (layer.reason === "textlayer.ortUnavailable")
         return "当前档位和设备的本地模型尚未就绪或服务不可用；自动选字不会下载模型，请先用普通识别完成准备。";
       return layer.reason === "textlayer.serviceUnavailable"
-        ? "本地识别服务尚未就绪；截图和贴图仍可用，连接恢复后可重新准备文字层。"
+        ? "本地识别服务尚未就绪；截图和钉图仍可用，连接恢复后可重新准备文字层。"
         : layer.reason === "textlayer.modeNotReady"
           ? "本地轻量文字引擎未就绪；自动取字不会安装依赖，可先在设置中完成准备。"
           : "无可用本地轻量文字引擎；自动取字不会安装依赖或使用远程。";
@@ -9292,7 +9292,7 @@ function draw(
           Math.ceil(area.y + area.height) - y,
         );
       }
-      // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/贴图像素。
+      // 普通导出（bake=false）完全跳过：屏蔽不改变复制/保存/钉图像素。
     } else if (mark.tool === "solid") {
       // 纯色不透明遮挡：预览与导出同像素，写入普通导出与识别输入；
       // 与 exclude（仅识别语义、不改导出像素）明确分离。

@@ -153,7 +153,7 @@ public sealed record WorkbenchExclusionBox(
 
   /// <summary>
   /// 行框与排除矩形是否正面积相交（仅贴边不算）：同一判定供原位层与
-  /// 贴图层消费，避免两份语义漂移。
+  /// 钉图层消费，避免两份语义漂移。
   /// </summary>
   public static bool LineIntersectsBox(
     RecognitionTextLayerLine line, WorkbenchExclusionBox box) =>
@@ -312,10 +312,10 @@ public sealed record ReleaseScreenshotAssetsCommand(
     Guid SessionId,
     IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
 
-// ---- pinEdit scope：贴图内编辑会话命令（#238）。会话由宿主在进入
+// ---- pinEdit scope：钉图内编辑会话命令（#238）。会话由宿主在进入
 // 单编辑槽时建立（非桥命令）；命令族与 recognition/imageEdit 同形，
 // 但只实现有真实消费者的动作：修订通知/关闭/基准复制保存/标注复制
-// 保存/导入收编/快照应用。识别、钉图、文字层不进入贴图编辑。 ----
+// 保存/导入收编/快照应用。识别、钉图、文字层不进入钉图编辑。 ----
 
 public sealed record NotifyPinEditRevisionCommand(
     Guid SessionId,
@@ -352,9 +352,9 @@ public sealed record ReleasePinEditAssetsCommand(
     IReadOnlyList<string> ResourceUris) : WorkbenchCommand;
 
 /// <summary>
-/// 贴图编辑完成（#238）：一次性消费 /__project 贡献（canvas+state+补丁）
+/// 钉图编辑完成（#238）：一次性消费 /__project 贡献（canvas+state+补丁）
 /// 与 /__annotation 上传的最终合成 PNG，复用既有工程序列化校验后原子
-/// 写入 pin owned 快照目录；成功 ack 前必须已落盘，随后宿主换装贴图静态
+/// 写入 pin owned 快照目录；成功 ack 前必须已落盘，随后宿主换装钉图静态
 /// 内容并失效其旧文字层。迟到/过期会话被拒绝，现场保留。
 /// </summary>
 public sealed record ApplyPinEditSnapshotCommand(
@@ -375,7 +375,7 @@ public sealed record SetPinHistoryEnabledCommand(bool Enabled) : WorkbenchComman
 /// <summary>检索/列表投影请求：宿主发布最新历史列表到 pinEdit scope。</summary>
 public sealed record ListPinHistoryCommand(string? Query) : WorkbenchCommand;
 
-/// <summary>重开一条历史条目为贴图（回到屏幕，可再进入编辑）。</summary>
+/// <summary>重开一条历史条目为钉图（回到屏幕，可再进入编辑）。</summary>
 public sealed record ReopenPinHistoryEntryCommand(string EntryId) : WorkbenchCommand;
 
 /// <summary>删除单条历史条目（仅本应用 owned 目录内资源）。</summary>
@@ -855,7 +855,7 @@ public sealed record ImageEditWorkbenchState(
 }
 
 /// <summary>
-/// 贴图内编辑会话的宿主状态（scope "pinEdit"，#238）：与 recognition/
+/// 钉图内编辑会话的宿主状态（scope "pinEdit"，#238）：与 recognition/
 /// imageEdit 完全隔离；单编辑槽由宿主持有，会话仅在槽内存在。字段命名
 /// 与 imageEdit 会话投影同形，供同一套前端解析器消费；无识别模式与
 /// 工程打开投影。History 为截图历史管理投影，无编辑会话时也可用，

@@ -11,9 +11,9 @@ using VibeOCR.App.Web;
 namespace VibeOCR.App.Features.Pins;
 
 /// <summary>
-/// #238 类型化贴图窗：文字（默认）/颜色/文件预览（仅授权图片与有界纯
+/// #238 类型化钉图窗：文字（默认）/颜色/文件预览（仅授权图片与有界纯
 /// 文本；未知格式明确拒绝）。内容类型显式建模，与任何截图 OCR 绑定无关。
-/// 原生轻量承载（与贴图同为原生窗口 chrome），不引新 bridge/依赖。
+/// 原生轻量承载（与钉图同为原生窗口 chrome），不引新 bridge/依赖。
 /// </summary>
 internal sealed class TypedPinWindow : IDisposable
 {
@@ -56,7 +56,7 @@ internal sealed class TypedPinWindow : IDisposable
   private bool previousWindowEnabled;
   private bool restoringFormula;
 
-  /// <summary>贴图身份（4 张上限计数与编组共用）。</summary>
+  /// <summary>钉图身份（4 张上限计数与编组共用）。</summary>
   internal Guid PinId { get; }
   internal ContentKind Kind => kind;
   internal bool Disposed => disposed;
@@ -96,11 +96,11 @@ internal sealed class TypedPinWindow : IDisposable
     window.Content = root;
     window.Title = kind switch
     {
-      ContentKind.Text => "VibeOCR 文字贴图",
-      ContentKind.Color => "VibeOCR 颜色贴图",
-      ContentKind.Formula => "VibeOCR 公式贴图",
-      ContentKind.FileImage or ContentKind.FilePreview => "VibeOCR 图片贴图",
-      _ => "VibeOCR 文本文件贴图",
+      ContentKind.Text => "VibeOCR 文字钉图",
+      ContentKind.Color => "VibeOCR 颜色钉图",
+      ContentKind.Formula => "VibeOCR 公式钉图",
+      ContentKind.FileImage or ContentKind.FilePreview => "VibeOCR 图片钉图",
+      _ => "VibeOCR 文本文件钉图",
     };
     presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
     presenter.IsAlwaysOnTop = true;
@@ -121,7 +121,7 @@ internal sealed class TypedPinWindow : IDisposable
       case ContentKind.Text:
         editor.AcceptsReturn = true;
         editor.TextWrapping = TextWrapping.Wrap;
-        editor.PlaceholderText = "输入文字内容；默认文字贴图";
+        editor.PlaceholderText = "输入文字内容；默认文字钉图";
         editor.FontSize = 16;
         host.Children.Add(editor);
         break;

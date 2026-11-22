@@ -57,7 +57,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
   };
 
   private int deviceChanging;
-  // 保留已就绪实例的基线，避免首次设置通知误清贴图取字。
+  // 保留已就绪实例的基线，避免首次设置通知误清钉图取字。
   private string pinnedServiceInstance = supervisorInstanceId() ?? string.Empty;
   private SettingsViewModel? settings;
   internal SettingsViewModel? CurrentModel => settings;

@@ -64,7 +64,7 @@ public enum ScreenshotSelectionAction
     /// <summary>保存选区像素（复用既有会话本地输出）。</summary>
     Save,
 
-    /// <summary>把选区像素钉到桌面贴图（复用既有会话本地输出）。</summary>
+    /// <summary>把选区像素钉到桌面钉图（复用既有会话本地输出）。</summary>
     Pin,
 
     /// <summary>放弃本次截图并显式进入现有设置页。</summary>

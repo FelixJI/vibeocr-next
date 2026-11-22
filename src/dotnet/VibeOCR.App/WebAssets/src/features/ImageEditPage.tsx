@@ -65,7 +65,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   const captureScene = viewState.captureScene ?? undefined;
   const scene =
     captureScene !== undefined || window.location.hash.includes("?scene=1");
-  // #238 贴图内编辑窗：fragment 参数 ?pin=1，固定 pinEdit 投影。
+  // #238 钉图内编辑窗：fragment 参数 ?pin=1，固定 pinEdit 投影。
   const pin = !scene && window.location.hash.includes("?pin=1");
   useEffect(() => {
     if (!captureScene) return;
@@ -212,7 +212,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
         if (controller.signal.aborted) return;
         if (pin) {
           transferred = true;
-          setProjectMessage("工程恢复失败；正在回退到已保存的贴图……");
+          setProjectMessage("工程恢复失败；正在回退到已保存的钉图……");
           const accepted = await actions
             .run({
               type: "pinEdit.rejectProjectRestore",
@@ -228,7 +228,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
             return;
           setProjectMessage(
             accepted
-              ? "工程恢复失败，已回退到已保存的贴图，可继续编辑；原工程仍保留。"
+              ? "工程恢复失败，已回退到已保存的钉图，可继续编辑；原工程仍保留。"
               : "工程恢复失败，回退未确认；请取消编辑后重试，原工程仍保留。",
           );
           return;
@@ -337,7 +337,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
   }, [openImage, viewState.connected, busy, scene, pin]);
   return (
     <Workspace
-      title={scene ? "截图现场编辑" : pin ? "贴图编辑" : "图片编辑"}
+      title={scene ? "截图现场编辑" : pin ? "钉图编辑" : "图片编辑"}
       actions={
         <>
           {!scene && !pin && (
@@ -388,7 +388,7 @@ export function ImageEditPage({ viewState, actions }: FeatureProps) {
       <StatusLine>
         {pin
           ? (projectMessage ??
-            "贴图内编辑：编辑后点击“完成贴图”应用；放弃更改则保持原贴图。")
+            "钉图内编辑：编辑后点击“完成钉图”应用；放弃更改则保持原钉图。")
           : state.statusCode === "imageEdit.projectOpenTimeout"
             ? "工程打开超时；当前画布与历史保持不变。"
             : state.statusCode === "imageEdit.projectOpenCancelled"
