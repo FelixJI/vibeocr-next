@@ -1,4 +1,5 @@
 import { recordAnnotationUploads } from "./annotation-uploads";
+import { activateToolbarTool } from "./toolSelection";
 import { readyImageRecognitionModes } from "./workbench-host";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -139,10 +140,7 @@ for (const [label, modeId] of [
       { steps: 4 },
     );
     await page.mouse.up();
-    await page
-      .getByRole("toolbar", { name: "图片编辑工具" })
-      .getByRole("button", { name: "屏蔽", exact: true })
-      .click();
+    await activateToolbarTool(page, "屏蔽");
     const second = await box();
     await page.mouse.move(
       second.x + second.width * 0.4,

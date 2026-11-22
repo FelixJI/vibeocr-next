@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mountHost, snapshot } from "./workbench-host";
+import { activateToolbarTool } from "./toolSelection";
 
 /** 形状半透明合成的真实像素契约（矩形/椭圆参数化同一测试）：
  *  1) 预览画布：填充 40% 与边框 70% 独立合成（红色填充叠绿底、蓝色描边
@@ -133,7 +134,7 @@ for (const shapeTool of ["矩形", "椭圆"] as const) {
     const { uploads } = await setupShapeHost(page);
     const canvas = page.getByLabel("图片检查画布");
 
-    await page.getByRole("button", { name: shapeTool, exact: true }).click();
+    await activateToolbarTool(page, shapeTool);
     // 边框色设为蓝色 #1f6feb（默认橙色），线宽取最宽 8px：采样点远离
     // 填充边界与亚像素栅格化影响，验证准确 70% 合成。
     await page.getByLabel("自定义颜色").fill("#1f6feb");

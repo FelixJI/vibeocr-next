@@ -333,7 +333,7 @@ test("矩形圆角留空角落；Shift 正圆与 Alt 中心绘制写入预览像
   const canvas = page.getByLabel("图片检查画布");
 
   // 圆角 12px：原直角描边覆盖的外角留空，左边描边带仍落笔。
-  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await activateToolbarTool(page, "矩形");
   await configureTool(page, { color: "#1f6feb", width: "8" });
   await page.getByLabel("矩形圆角").selectOption("12");
   await dragOnCanvas(page, { x: 150, y: 120 }, { x: 450, y: 420 });
@@ -357,7 +357,7 @@ test("矩形圆角留空角落；Shift 正圆与 Alt 中心绘制写入预览像
   // Alt 矩形（本工具显式重设属性 + 红色填充做大面积对照）：从 (400,500)
   // 中心拖到 (500,560) → 矩形 (300,440)-(500,560)，中心 (400,500) 为填充
   // 色；非 Alt 时该点在矩形外，为源图底色。
-  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await activateToolbarTool(page, "矩形");
   await configureTool(page, {
     color: "#1f6feb",
     width: "8",
@@ -425,7 +425,7 @@ test("折线双击提交；0% 不透明对象经对象选择入口恢复，撤�
   await expectCanvasPixel(canvas, 400, 375, STROKE_BLUE, 40);
 
   // 0% 边框不透明矩形：输出像素完全不可见。
-  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await activateToolbarTool(page, "矩形");
   await configureTool(page, { color: "#1f6feb", width: "8" });
   const opacity = page.getByLabel("边框不透明度");
   await opacity.fill("0");
@@ -479,7 +479,7 @@ test("非1:1尺寸下圆角先缩放再夹取，预览与小图导出保留相�
     height: 200,
   });
   const canvas = page.getByLabel("图片检查画布");
-  await page.getByRole("button", { name: "矩形", exact: true }).click();
+  await activateToolbarTool(page, "矩形");
   await configureTool(page, { fill: true, fillColor: "#e02020" });
   await page.getByLabel("填充不透明度").fill("100");
   await page.getByLabel("填充不透明度").blur();
@@ -517,7 +517,7 @@ test.describe("缩放后的标注控制点", () => {
   }) => {
     const { uploads } = await setupGeometryHost(page);
     const canvas = page.getByLabel("图片检查画布");
-    await page.getByRole("button", { name: "矩形", exact: true }).click();
+    await activateToolbarTool(page, "矩形");
     await configureTool(page, { color: "#1f6feb", width: "8" });
     await dragOnCanvas(page, { x: 150, y: 150 }, { x: 450, y: 350 });
     await page.getByRole("button", { name: "选择", exact: true }).click();
