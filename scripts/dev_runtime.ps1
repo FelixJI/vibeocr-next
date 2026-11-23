@@ -11,7 +11,7 @@ runtime 树（runtime\env\runtime-env\python.exe）承载。
 
 步骤：
 
-1. WebAssets dist 增量重建：WebAssets/src（含根配置）比 dist/index.html
+1. WebAssets dist 增量重建：WebAssets/src、入口 index.html 或根配置比 dist/index.html
    新时 npm run build（-ForceRebuild 强制）；
 2. dotnet publish App（默认 Release，locked restore）增量输出到候选
    app\（metadata/runtime 等非 publish 产物不动，布局保持）；
@@ -44,6 +44,7 @@ if (-not $ProductRoot) {
 # --- 1. WebAssets dist 增量重建 -------------------------------------------
 $distMarker = Join-Path $webAssets 'dist/index.html'
 $sourceFiles = @(
+    Get-Item -LiteralPath (Join-Path $webAssets 'index.html')
     Get-ChildItem -Recurse -File (Join-Path $webAssets 'src')
     Get-ChildItem -File (Join-Path $webAssets '*.json')
     Get-ChildItem -File (Join-Path $webAssets '*.config.*') -ErrorAction SilentlyContinue
