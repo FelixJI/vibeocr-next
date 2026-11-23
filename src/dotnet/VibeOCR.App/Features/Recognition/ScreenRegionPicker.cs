@@ -229,10 +229,10 @@ public sealed class ScreenRegionPicker(
       };
 
     /// <summary>
-    /// 普通入口动作栏：编辑工具按钮（label、进入现场编辑的 initialTool、
-    /// tooltip）。tool 取值与 Web ImageCanvasEditor 的工具 id 跨语言
-    /// 契约一致，不得随意改名（未知 id 会被 Web 静默回退到选择工具）。
-    /// 动作栏按钮全部以简短中文文字呈现，不渲染图标。
+    /// 普通入口动作栏：编辑工具按钮全集（label、进入现场编辑的
+    /// initialTool、tooltip）。tool 取值与 Web ImageCanvasEditor 的工具
+    /// id 跨语言契约一致，不得随意改名（未知 id 会被 Web 静默回退到
+    /// 选择工具）。动作栏按钮全部以简短中文文字呈现，不渲染图标。
     /// </summary>
     internal static readonly (string Label, string Tool, string Tip)[] SelectionEditToolRow =
     [
@@ -247,6 +247,23 @@ public sealed class ScreenRegionPicker(
       ("模糊", "blur", "模糊：高斯模糊遮挡"),
       ("屏蔽", "exclude", "屏蔽：白块遮挡敏感区域（不进识别）"),
       ("去水印", "inpaint", "去水印：框选后智能修补"),
+    ];
+
+    /// <summary>
+    /// 动作栏默认展示的编辑工具（矩形/椭圆/荧光笔/箭头/文字/马赛克/
+    /// 序号）：完整全集见 <see cref="SelectionEditToolRow"/>，其余工具
+    /// （画笔/模糊/屏蔽/去水印）经编辑现场族菜单可达。全集合的可配置
+    /// 显隐与排序由后续设置项提供；当前为固定默认序列。
+    /// </summary>
+    internal static readonly string[] DefaultSelectionTools =
+    [
+      "rectangle",
+      "ellipse",
+      "highlighter",
+      "arrow",
+      "text",
+      "mosaic",
+      "numbering",
     ];
 
     private const long MaximumCaptureBytes = 256L << 20;
@@ -991,14 +1008,54 @@ public sealed class ScreenRegionPicker(
     bool showMagnifier = true;
     string? colorHex = null;
     Windows.Foundation.Point? lastPoint = null;
+    // —— 四角快捷键提示角标（PixPin 式）——
+    // 重选/退出/放大镜按钮移除后，Esc/右键/M 等按键的可发现性由常驻
+    // 深色半透明芯片承接：优先贴画布四角（避开选区），完全避不开时退到
+    // 选区对应角内侧。挂 canvas，随编辑/保存交接自动剥离。必须在工具
+    // 栏构造前声明并构建：按钮 Click→Render 捕获链要求此处已完成赋值。
+    (string Text, string AutomationName)[] shortcutHintCatalogue =
+    [
+      ("Esc 退出", "快捷键提示 Esc 退出"),
+      ("Enter 编辑", "快捷键提示 Enter 编辑"),
+      ("Tab 智能候选 · M 放大镜", "快捷键提示 Tab 与放大镜"),
+      ("方向键微调 · 右键重选", "快捷键提示 方向键与右键重选"),
+    ];
+    System.Collections.Generic.List<Border> shortcutHints = [];
+    void BuildShortcutHintChips()
+    {
+      byte[] tint = root.ActualTheme == ElementTheme.Dark
+        ? new byte[] { 190, 24, 24, 24 } : new byte[] { 200, 24, 24, 24 };
+      for (int i = 0; i < shortcutHintCatalogue.Length; i++)
+      {
+        (string text, string name) = shortcutHintCatalogue[i];
+        var chip = new Border
+        {
+          Background = new SolidColorBrush(Windows.UI.Color.FromArgb(
+            tint[0], tint[1], tint[2], tint[3])),
+          CornerRadius = new CornerRadius(6),
+          Padding = new Thickness(8, 3, 8, 3),
+          Child = new TextBlock { Text = text, FontSize = 12 },
+          IsHitTestVisible = false,
+          Tag = i,
+        };
+        AutomationProperties.SetName(chip, name);
+        shortcutHints.Add(chip);
+        canvas.Children.Add(chip);
+      }
+    }
+    BuildShortcutHintChips();
     // 编辑工具和宿主提供的识别模式直接展示，选择工具后原位进入对应编辑状态。
     // 按钮一律以简短中文文字区分语义并携带 tooltip 补充说明；
     // 复制/保存/钉图复用既有本地输出。直接入口保持旧工具条。
+    // 动作栏默认仅展示 DefaultSelectionTools（高频子集）；画笔/模糊/
+    // 屏蔽/去水印经编辑现场的族菜单可达，不占框选动作栏宽度。
     List<Button> selectionActionButtons = [];
     if (ordinary)
     {
-      foreach ((string label, string tool, string tip) in SelectionEditToolRow)
+      foreach (string toolId in DefaultSelectionTools)
       {
+        (string label, string tool, string tip) = SelectionEditToolRow
+          .Single(row => row.Tool == toolId);
         selectionActionButtons.Add(
           AddButton(label, () => { initialTool = tool; Finish(true); }, toolbarRowMain, tip));
       }
@@ -1049,20 +1106,9 @@ public sealed class ScreenRegionPicker(
       undo = AddButton("撤销", session.Undo, toolbarRowMain);
       redo = AddButton("重做", session.Redo, toolbarRowMain);
     }
-    StackPanel sessionRow = toolbarRowMain;
-    AddSeparator(sessionRow);
-    AddButton("重选", () => { if (session.ActiveSelection is not null || session.IsPointerActive) Back(); },
-      sessionRow, "重选：重新框选区域");
-    AddButton("退出", () => Finish(false), sessionRow, "退出：取消本次截图（Esc）");
-    var magnifierToggle = new Microsoft.UI.Xaml.Controls.Primitives.ToggleButton
-    {
-      Content = new TextBlock { Text = "放大镜" },
-      Height = 32, Padding = new Thickness(8, 0, 8, 0), IsChecked = true,
-    };
-    AutomationProperties.SetName(magnifierToggle, "放大镜");
-    ToolTipService.SetToolTip(magnifierToggle, "放大镜（M）");
-    magnifierToggle.Click += (_, _) => { showMagnifier = magnifierToggle.IsChecked == true; Render(); };
-    sessionRow.Children.Add(magnifierToggle);
+    // 会话尾部：重选/退出/放大镜开关已移除按钮——右键重选、Esc 退出、
+    // M 键切换放大镜均保留，可发现性由四角快捷键角标（BuildShortcutHintChips）
+    // 承接，动作栏收敛到 编辑工具+识别+输出。
     foreach (Button button in toolbarRowMain.Children.OfType<Button>())
       button.Click += (_, _) => Render();
 
@@ -1108,6 +1154,50 @@ public sealed class ScreenRegionPicker(
     {
       Canvas.SetLeft(rectangle, x); Canvas.SetTop(rectangle, y);
       rectangle.Width = Math.Max(0, w); rectangle.Height = Math.Max(0, h);
+    }
+    void PositionShortcutHints(double w, double h, PhysicalRectangle? rect)
+    {
+      // 芯片自身尺寸先量出（不依赖布局 pass 的期望尺寸）。
+      foreach (Border chip in shortcutHints) chip.Measure(new Windows.Foundation.Size(w, h));
+      if (rect is { } selectionRect)
+      {
+        double sx = w / Math.Max(1, desktop.Width), sy = h / Math.Max(1, desktop.Height);
+        double left = selectionRect.X * sx, top = selectionRect.Y * sy;
+        double right = selectionRect.Right * sx, bottom = selectionRect.Bottom * sy;
+        (double, double)[] corners =
+        [
+          (0, 0), (w, 0), (0, h), (w, h),
+        ];
+        // 四角芯片：外角避不开选区时贴选区同号角内侧。
+        for (int i = 0; i < shortcutHints.Count; i++)
+        {
+          Border chip = shortcutHints[i];
+          double cw = chip.DesiredSize.Width, ch = chip.DesiredSize.Height;
+          (double cx, double cy) = corners[i];
+          double x = cx == 0 ? 8 : w - cw - 8;
+          double y = cy == 0 ? 8 : h - ch - 8;
+          bool overlaps = x < right + 8 && x + cw > left - 8 && y < bottom + 8 && y + ch > top - 8;
+          if (overlaps)
+          {
+            // 贴选区内侧：对应角向内偏移 12px。
+            x = cx == 0 ? left + 12 : right - cw - 12;
+            y = cy == 0 ? top + 12 : bottom - ch - 12;
+          }
+          Canvas.SetLeft(chip, Math.Clamp(x, 0, Math.Max(0, w - cw)));
+          Canvas.SetTop(chip, Math.Clamp(y, 0, Math.Max(0, h - ch)));
+        }
+        return;
+      }
+      // 无选区：默认贴画布四角（画布即整个虚拟桌面）。
+      for (int i = 0; i < shortcutHints.Count; i++)
+      {
+        Border chip = shortcutHints[i];
+        double cw = chip.DesiredSize.Width, ch = chip.DesiredSize.Height;
+        double x = (i % 2 == 0) ? 8 : w - cw - 8;
+        double y = (i < 2) ? 8 : h - ch - 8;
+        Canvas.SetLeft(chip, Math.Clamp(x, 0, Math.Max(0, w - cw)));
+        Canvas.SetTop(chip, Math.Clamp(y, 0, Math.Max(0, h - ch)));
+      }
     }
     void Render()
     {
@@ -1164,6 +1254,7 @@ public sealed class ScreenRegionPicker(
       Canvas.SetLeft(sizeLabel, Math.Max(0, left));
       Canvas.SetTop(sizeLabel, Math.Max(0, top - 24));
       panelBorder.Visibility = session.IsDragging ? Visibility.Collapsed : Visibility.Visible;
+      PositionShortcutHints(w, h, rect is { } r2 ? r2 : null);
       if (lastPoint is { } point) UpdateMagnifier(point);
     }
     void UpdateGesture(Windows.Foundation.Point point)
@@ -1284,7 +1375,7 @@ public sealed class ScreenRegionPicker(
             case VirtualKey.Up: session.Adjust(0, -step, control); break;
             case VirtualKey.Down: session.Adjust(0, step, control); break;
             case VirtualKey.M when !control:
-              showMagnifier = !showMagnifier; magnifierToggle.IsChecked = showMagnifier;
+              showMagnifier = !showMagnifier;
               if (lastPoint is { } point) UpdateMagnifier(point);
               break;
             case VirtualKey.C when control && colorHex is not null:
