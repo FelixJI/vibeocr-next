@@ -1427,7 +1427,9 @@ internal sealed partial class WorkbenchImageOwner(IAnnotatedImagePlatform annota
       settingsOwner.EnsureModel().RecognitionSelection is null && ensureRuntimeReady is not null
         ? BuildSelectionModeEntries(null).Select((entry, index) => entry with
         { Intent = (ScreenshotRecognitionIntent)index, Hint = "点击后准备运行环境并识别" }).ToArray()
-        : BuildSelectionModeEntries(settingsOwner.EnsureModel().RecognitionSelection), settingsOwner.Theme);
+        : BuildSelectionModeEntries(settingsOwner.EnsureModel().RecognitionSelection),
+      settingsOwner.Theme,
+      settingsOwner.SelectionToolbarTools);
   }
 
   /// <summary>

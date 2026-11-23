@@ -30,6 +30,7 @@ export interface AppViewState {
 
 export type AppActionType =
   | "settings.setEditorPreferences"
+  | "settings.setSelectionToolbar"
   | "settings.pickImageOutputDirectory"
   | "imageEdit.savePresetImage"
   | "recognition.savePresetImage"
