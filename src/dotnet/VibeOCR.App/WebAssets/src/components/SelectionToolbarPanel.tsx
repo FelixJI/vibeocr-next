@@ -57,8 +57,12 @@ export function SelectionToolbarPanel({
   // 状态变化由 SettingsPage 的 key={JSON.stringify(value)} 重挂载承接，
   // 不在 effect 里同步草稿（避免级联渲染）。
   const [draft, setDraft] = useState<string[]>(() => parseTools(value));
-  const [saved, setSaved] = useState<string[] | null>(null);
-  const dirty = JSON.stringify(draft) !== JSON.stringify(parseTools(value));
+  const [saving, setSaving] = useState(false);
+  const [commandFailed, setCommandFailed] = useState(false);
+  const tools = draft.length > 0 ? draft : [...DEFAULT_SELECTION_TOOLS];
+  const dirty = JSON.stringify(tools) !== JSON.stringify(parseTools(value));
+  const saveError =
+    error || (commandFailed ? "工具配置未保存，请重试。" : null);
   const move = (index: number, offset: -1 | 1) => {
     const next = [...draft];
     const target = index + offset;
@@ -142,22 +146,31 @@ export function SelectionToolbarPanel({
         </tbody>
       </table>
       <button
-        disabled={!dirty || saved !== null}
-        onClick={() => {
-          void actions
-            .run({
+        disabled={!dirty || saving}
+        onClick={async () => {
+          setSaving(true);
+          setCommandFailed(false);
+          try {
+            const accepted = await actions.run({
               type: "settings.setSelectionToolbar",
-              tools: draft.length > 0 ? draft : [...DEFAULT_SELECTION_TOOLS],
-            })
-            .then(() => setSaved(draft));
+              tools,
+            });
+            setCommandFailed(!accepted);
+          } finally {
+            setSaving(false);
+          }
         }}
         type="button"
       >
         保存框选动作栏工具
       </button>
-      {error ? <p className="form-note">{error}</p> : null}
-      {saved ? (
-        <p className="form-note">已保存；下次截图动作栏即按新序列展示。</p>
+      {draft.length === 0 ? (
+        <p className="form-note">未选择工具时使用默认工具。</p>
+      ) : null}
+      {saveError ? (
+        <p className="form-note" role="alert">
+          {saveError}
+        </p>
       ) : null}
     </details>
   );
