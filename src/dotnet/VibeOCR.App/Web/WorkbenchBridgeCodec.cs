@@ -385,6 +385,9 @@ public static class WorkbenchBridgeCodec
       case ("settings", "pickImageOutputDirectory"):
         EnsureObjectWithFields(arguments, EmptyFields, "command arguments");
         return new PickImageOutputDirectoryCommand();
+      case ("settings", "setSelectionToolbar"):
+        EnsureObjectWithFields(arguments, new HashSet<string>(["tools"]), "command arguments");
+        return new SetSelectionToolbarCommand(ParseSelectionToolbarTools(arguments));
       case ("imageEdit", "savePresetImage"):
       case ("recognition", "savePresetImage"):
         bool boundPreset = arguments.TryGetProperty("sessionId", out _);
@@ -1890,6 +1893,8 @@ public static class WorkbenchBridgeCodec
         settings.FloatingToolbar.Error,
       },
       settings.EditorPreferences, settings.ImageOutputDirectory, settings.EditorPreferencesError,
+      SelectionToolbar = settings.SelectionToolbar ?? [],
+      SelectionToolbarError = settings.SelectionToolbarError,
       settings.StatusMessage,
       settings.PaddleIdleSeconds,
       settings.MineruIdleSeconds,
@@ -1985,6 +1990,23 @@ public static class WorkbenchBridgeCodec
         $"Workbench {name} is invalid.");
     }
     return value;
+  }
+
+  /// <summary>框选动作栏工具序列：字符串数组，元素非字符串或为空即协议失败；
+  /// 词汇表过滤与去重由存储层钳制（未知 id 静默丢弃，非协议错误）。</summary>
+  private static IReadOnlyList<string> ParseSelectionToolbarTools(JsonElement arguments)
+  {
+    if (arguments.GetProperty("tools") is not { ValueKind: JsonValueKind.Array } array)
+      throw new WorkbenchBridgeProtocolException("Workbench tools must be an array.");
+    List<string> tools = [];
+    foreach (JsonElement entry in array.EnumerateArray())
+    {
+      string? tool = entry.ValueKind == JsonValueKind.String ? entry.GetString() : null;
+      if (string.IsNullOrEmpty(tool))
+        throw new WorkbenchBridgeProtocolException("Workbench tools entries must be strings.");
+      tools.Add(tool);
+    }
+    return tools;
   }
 
   /// <summary>/__project 保存贡献令牌：严格 32 位小写十六进制（宿主生成）。</summary>

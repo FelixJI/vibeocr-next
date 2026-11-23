@@ -15,12 +15,13 @@ namespace VibeOCR.App.Workbench;
 internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensureRuntimeReady, Func<bool>? inferenceAttached, Func<SettingsViewModel> settingsFactory, RecoverableLazy<ShellViewModel> shell, ShellActionDispatcher? shellActions, Func<string?> supervisorInstanceId, WorkbenchOperations operations, Func<CancellationToken, Task> refreshFeatureStates, PortableLayout? optionsLayout = null, Func<nint>? windowHandle = null)
 {
   public event Action? PinnedTextEnvironmentChanged;
-  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or SetRecognitionDeviceCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
+  internal bool Handles(WorkbenchCommand command) => command is SetWorkerIdleCommand or SetEditorPreferencesCommand or SetSelectionToolbarCommand or PickImageOutputDirectoryCommand or RefreshRuntimeCommand or SetRecognitionDeviceCommand or SetThemeCommand or SetStartupCommand or SetMinimizeToTrayCommand or BeginHotkeyRecordingCommand or EndHotkeyRecordingCommand or SetActionHotkeyCommand or ResetActionHotkeyCommand or SetFloatingToolbarEnabledCommand or SetFloatingToolbarLayoutCommand or SetFloatingToolbarPreferencesCommand or ShowFloatingToolbarCommand or HideFloatingToolbarCommand or SetDownloadSourceCommand or SetMineruConnectionCommand or SetMineruRecognitionCommand or SetDefaultRecognitionModeCommand or PrepareMineruConnectionCommand;
 
   internal async ValueTask<WorkbenchState?> ExecuteAsync(WorkbenchCommand command, CancellationToken cancellationToken) => command switch
   {
     SetWorkerIdleCommand idle => await SetWorkerIdleAsync(idle, cancellationToken),
     SetEditorPreferencesCommand editor => SetEditorPreferences(editor.Preferences),
+    SetSelectionToolbarCommand selectionToolbar => SetSelectionToolbar(selectionToolbar.Tools),
     PickImageOutputDirectoryCommand => await PickImageOutputDirectoryAsync(),
     RefreshRuntimeCommand => await RefreshRuntimeAsync(cancellationToken),
     SetRecognitionDeviceCommand choice => await SetDeviceAsync(choice.Device, cancellationToken),
@@ -482,6 +483,7 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     HotkeyActions: HotkeyActionStates(),
     FloatingToolbar: ToolbarProjection(toolbarError),
     EditorPreferences: EditorSettings.Preferences, ImageOutputDirectory: ValidOutputDirectory(), EditorPreferencesError: editorPreferencesError,
+    SelectionToolbar: SelectionToolbarTools, SelectionToolbarError: selectionToolbarError,
     PaddleIdleSeconds: viewModel.PaddleIdleSeconds,
     MineruIdleSeconds: viewModel.MineruIdleSeconds,
     Workers: [.. viewModel.ResidencyEntries],
@@ -544,6 +546,33 @@ internal sealed class WorkbenchSettingsOwner(Func<CancellationToken, Task>? ensu
     catch (Exception error) when (error is System.Text.Json.JsonException or IOException or InvalidDataException or UnauthorizedAccessException)
     { editorPreferencesError = "保存失败，原设置已保留：" + error.Message; }
     return CurrentState();
+  }
+
+  private SettingsWorkbenchState SetSelectionToolbar(IReadOnlyList<string> tools)
+  {
+    if (optionsLayout is null) return CurrentState();
+    try
+    {
+      SelectionToolbarSettings.Save(optionsLayout, tools);
+      selectionToolbarTools = null; // 下次读取重新 Load。
+      selectionToolbarError = null;
+    }
+    catch (Exception error) when (error is System.Text.Json.JsonException or IOException or UnauthorizedAccessException)
+    { selectionToolbarError = "截图工具栏设置保存失败，原设置已保留：" + error.Message; }
+    return CurrentState();
+  }
+
+  private IReadOnlyList<string>? selectionToolbarTools;
+  private string? selectionToolbarError;
+  internal IReadOnlyList<string> SelectionToolbarTools
+  {
+    get
+    {
+      selectionToolbarTools ??= optionsLayout is null
+        ? VibeOCR.App.Features.Configuration.SelectionToolbarSettings.DefaultTools
+        : VibeOCR.App.Features.Configuration.SelectionToolbarSettings.Load(optionsLayout);
+      return selectionToolbarTools;
+    }
   }
 
   private async Task<SettingsWorkbenchState> PickImageOutputDirectoryAsync()
