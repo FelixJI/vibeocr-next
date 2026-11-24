@@ -61,15 +61,16 @@ jobs:
         with:
           global-json-file: global.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: hashFiles('**/package-lock.json') != ''
-        with:
+        if: hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        with: &node_setup
           node-version-file: .node-version
           cache: npm
-          cache-dependency-path: '**/package-lock.json'
+          cache-dependency-path: 'src/dotnet/VibeOCR.App/WebAssets/package-lock.json'
       - name: Install declared npm version
-        if: hashFiles('**/package-lock.json') != ''
-        run: |
+        if: hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        run: &install_npm |
           $manager = (Get-Content src/dotnet/VibeOCR.App/WebAssets/package.json -Raw | ConvertFrom-Json).packageManager
+          if ("npm@$(npm --version)" -ceq $manager) { exit 0 }
           npm install --global $manager
           if ($LASTEXITCODE -ne 0) { throw 'Declared npm installation failed' }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -118,17 +119,11 @@ jobs:
         with:
           global-json-file: global.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: matrix.node == true && hashFiles('**/package-lock.json') != ''
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: '**/package-lock.json'
+        if: matrix.node == true && hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        with: *node_setup
       - name: Install declared npm version
-        if: matrix.node == true && hashFiles('**/package-lock.json') != ''
-        run: |
-          $manager = (Get-Content src/dotnet/VibeOCR.App/WebAssets/package.json -Raw | ConvertFrom-Json).packageManager
-          npm install --global $manager
-          if ($LASTEXITCODE -ne 0) { throw 'Declared npm installation failed' }
+        if: matrix.node == true && hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        run: *install_npm
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: matrix.go == true && hashFiles('sidecar/go.mod') != ''
         with:
@@ -197,17 +192,11 @@ jobs:
         with:
           global-json-file: global.json
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: needs.plan.outputs.sharded != 'true' && hashFiles('**/package-lock.json') != ''
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: '**/package-lock.json'
+        if: needs.plan.outputs.sharded != 'true' && hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        with: *node_setup
       - name: Install declared npm version
-        if: needs.plan.outputs.sharded != 'true' && hashFiles('**/package-lock.json') != ''
-        run: |
-          $manager = (Get-Content src/dotnet/VibeOCR.App/WebAssets/package.json -Raw | ConvertFrom-Json).packageManager
-          npm install --global $manager
-          if ($LASTEXITCODE -ne 0) { throw 'Declared npm installation failed' }
+        if: needs.plan.outputs.sharded != 'true' && hashFiles('src/dotnet/VibeOCR.App/WebAssets/package-lock.json') != ''
+        run: *install_npm
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: needs.plan.outputs.sharded != 'true' && hashFiles('sidecar/go.mod') != ''
         with:
@@ -249,6 +238,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate
+          compression-level: 0 # ZIP 和 nupkg 已压缩
           path: build/automation/release-candidate
           if-no-files-found: error
           retention-days: 14
