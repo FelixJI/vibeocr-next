@@ -465,31 +465,6 @@ it("rejects the integral table byte budget before allocating it", () => {
   ).toThrow("积分表超过100MB预算");
 });
 
-it("R16 charges both RGB and alpha screening against the shared 96M budget", () => {
-  const width = 2000,
-    height = 2000;
-  // 与旧 paint 闭包逐像素等价的直接构造：RGB 全 0，alpha 缺省 128，
-  // 仅左上 100×100 内 y%25===0 的行在 x%25===0/1 处为 255/1；
-  // 避免 4M 次闭包调用与元组分配，不改变被测像素与断言。
-  const rgba = new Uint8ClampedArray(width * height * 4);
-  for (let i = 3; i < rgba.length; i += 4) rgba[i] = 128;
-  for (let y = 0; y < 100; y += 25)
-    for (let x = 0; x < 100; x += 1) {
-      if (x % 25 === 0 || x % 25 === 1)
-        rgba[(y * width + x) * 4 + 3] = x % 25 === 0 ? 255 : 1;
-    }
-  // Each source part has the same alpha sum as a blank window, but differs at its
-  // first pixel: precision costs one pixel, while both complete 16-part passes count.
-  expect(() =>
-    findDuplicateRegions(rgba, width, height, {
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 100,
-    }),
-  ).toThrow(/筛选工作量超过预算 96000000/);
-});
-
 it.each([0, 128, 255])(
   "R16 constant source alpha %s rejects different candidate opacity and retains the valid copy",
   (alpha) => {

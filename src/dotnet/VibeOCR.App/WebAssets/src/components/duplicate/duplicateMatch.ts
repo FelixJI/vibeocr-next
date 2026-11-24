@@ -34,6 +34,16 @@
  * 检查，响应只携带最多 8 个候选坐标。
  */
 
+import {
+  DUPLICATE_PRECISE_BUDGET,
+  DUPLICATE_WORK_BUDGET,
+} from "./duplicateWorkBudget";
+
+export {
+  DUPLICATE_PRECISE_BUDGET,
+  DUPLICATE_WORK_BUDGET,
+} from "./duplicateWorkBudget";
+
 export interface DuplicateRect {
   readonly x: number;
   readonly y: number;
@@ -63,10 +73,6 @@ export const DUPLICATE_MAX_MATCH_WINDOWS = 4096;
 export const DUPLICATE_MATCH_TOLERANCE = 6;
 /** RGB 平均方差与 alpha 方差的较大值下限：低于它的近纯色块直接拒绝。 */
 export const DUPLICATE_LOW_TEXTURE_VARIANCE = 16;
-/** 筛选检查总预算：RGB 分块/样本与额外 alpha 分块检查合计 ≤96M。 */
-export const DUPLICATE_WORK_BUDGET = 96_000_000;
-/** 精比阶段逐像素比较总量 ≤ 32M：相似位置过多时显式拒绝。 */
-export const DUPLICATE_PRECISE_BUDGET = 32_000_000;
 /** 固定 4×4 采样点：确定性位置（块内等分网格中心），不依赖随机数。 */
 const DUPLICATE_SCREEN_SAMPLES: readonly { x: number; y: number }[] = [
   { x: 1, y: 1 },
